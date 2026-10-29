@@ -482,7 +482,7 @@ describe('artifacts', () => {
     it('opens for the owner with everything they may do', async () => {
       const made = await makeApp();
       const res = await call(open, { viewer: viewer(person('owner'), false) }, { id: made.artifact.id, ...asGame });
-      expect(res.body.you).toEqual({ owner: true, change: true, manage: true, copy: true });
+      expect(res.body.you).toEqual({ owner: true, change: true, manage: true, copy: true, inChat: false });
       expect(res.body.version.number).toBe(1);
     });
 
@@ -490,7 +490,7 @@ describe('artifacts', () => {
       const made = await makeApp();
       const res = await call(open, { viewer: viewer(person('friend')) }, { id: made.artifact.id, ...asGame });
       expect(res.status).toBe(200);
-      expect(res.body.you).toEqual({ owner: false, change: false, manage: false, copy: true });
+      expect(res.body.you).toEqual({ owner: false, change: false, manage: false, copy: true, inChat: true });
     });
 
     it('opens for a guest who is in the chat, who cannot make a copy', async () => {
@@ -546,6 +546,15 @@ describe('artifacts', () => {
       expect((await opening(made.artifact.id, person('owner'), true, OTHER_BUBBLE)).status).toBe(200);
     });
 
+    it('tells the owner whether they are in the chat it was made in right now, only for that chat', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      expect((await opening(id, person('owner'), true, NEARBY)).body.you.inChat).toBe(true);
+      expect((await opening(id, person('owner'), true, OTHER_BUBBLE)).body.you.inChat).toBe(false);
+      expect((await opening(id, person('owner'), false, NEARBY)).body.you.inChat).toBe(false);
+      expect((await opening(id, person('owner'), false, null)).body.you.inChat).toBe(false);
+    });
+
     it('opens for a person who is in the chat it was made in, and for nobody who is only in another chat', async () => {
       const made = await makeApp();
       expect((await opening(made.artifact.id, person('friend'), true, NEARBY)).status).toBe(200);
@@ -571,7 +580,7 @@ describe('artifacts', () => {
       expect((await call(copy, wrong, { id, ...asGame })).status).toBe(404);
       expect((await opening(id, person('friend'), true, OTHER_BUBBLE)).status).toBe(404);
       const right = await opening(id, person('friend'), true, NEARBY);
-      expect(right.body.you).toEqual({ owner: false, change: false, manage: false, copy: true });
+      expect(right.body.you).toEqual({ owner: false, change: false, manage: false, copy: true, inChat: true });
     });
 
     it('keeps a direct message artifact to its owner, whoever else is in some chat', async () => {

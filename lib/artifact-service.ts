@@ -186,6 +186,8 @@ export interface Rights {
   manage: boolean;
   /** Make a copy: needs an account. */
   copy: boolean;
+  /** In the chat it was made in right now, as the game vouches: the owner's Share menu offers "People in this chat". */
+  inChat: boolean;
 }
 
 function rightsOf(artifact: ArtifactRow, who: Who, now: Date): Rights {
@@ -195,6 +197,7 @@ function rightsOf(artifact: ArtifactRow, who: Who, now: Date): Rights {
     change: canAskForChange(artifact, who, who.inChat, now),
     manage: owner,
     copy: who.userId !== null,
+    inChat: who.inChat,
   };
 }
 
