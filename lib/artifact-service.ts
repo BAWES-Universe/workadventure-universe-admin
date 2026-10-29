@@ -197,7 +197,8 @@ function rightsOf(artifact: ArtifactRow, who: Who, now: Date): Rights {
     change: canAskForChange(artifact, who, who.inChat, now),
     manage: owner,
     copy: who.userId !== null,
-    inChat: who.inChat,
+    // A copy is in no chat, whichever chat it was copied from
+    inChat: who.inChat && artifact.chatRef !== null,
   };
 }
 

@@ -768,6 +768,13 @@ describe('artifacts', () => {
       expect(db.artifacts).toHaveLength(1);
     });
 
+    it('is in no chat, even when copied from inside the chat the original was made in', async () => {
+      const made = await makeApp();
+      const copied = await call(copy, { viewer: viewer(person('friend')) }, { id: made.artifact.id, ...asGame });
+      expect(copied.body.artifact.chatKind).toBeNull();
+      expect(copied.body.you.inChat).toBe(false);
+    });
+
     it('is the copier\'s to change with any bot they talk to, and the original is untouched', async () => {
       const made = await makeApp();
       const copied = await call(copy, { viewer: viewer(person('friend')) }, { id: made.artifact.id, ...asGame });
