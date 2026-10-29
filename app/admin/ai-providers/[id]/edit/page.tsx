@@ -35,6 +35,8 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [providerId, setProviderId] = useState<string>('');
+  // The type the provider is saved with: a legacy voice type stays on the list until it is saved over, even after another type is picked
+  const [savedType, setSavedType] = useState<string>('');
 
   const [formData, setFormData] = useState({
     providerId: '',
@@ -82,6 +84,7 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
       }
 
       const provider = await response.json();
+      setSavedType(provider.type);
       setFormData({
         providerId: provider.providerId,
         name: provider.name,
@@ -226,7 +229,7 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {providerTypeOptions(formData.type).map((type) => (
+                  {providerTypeOptions(savedType).map((type) => (
                     <SelectItem key={type.value} value={type.value}>
                       {type.label}
                     </SelectItem>

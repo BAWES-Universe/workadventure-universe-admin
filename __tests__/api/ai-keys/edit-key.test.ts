@@ -142,6 +142,14 @@ describe('editSavedKey', () => {
     expect(db.botsAiProvider.updateMany).not.toHaveBeenCalled();
   });
 
+  it('answers with the plain request failure when it fails for its own reason after a tool refusal', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue(openai);
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'o4-mini'], facts: {} });
+    (probeChat as jest.Mock).mockResolvedValueOnce({ ok: false, reason: 'request', message: 'max_tokens is too small (400).' }).mockResolvedValueOnce({ ok: false, reason: 'rejected', message: 'The key was refused (401).' });
+    expect(await editSavedKey('maker', 'key-2', { model: 'o4-mini' })).toEqual({ ok: false, status: 400, message: 'The key was refused (401).' });
+    expect(db.botsAiProvider.updateMany).not.toHaveBeenCalled();
+  });
+
   it('still saves a picked listed model that refuses only the tiny request, with the tool and without it', async () => {
     db.botsAiProvider.findFirst.mockResolvedValue(openai);
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'o4-mini'], facts: {} });

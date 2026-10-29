@@ -129,6 +129,8 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
   if (picked && !chat.ok && chat.reason === 'request') {
     const plain = await probeChat({ kind: info.kind, address, apiKey, model, ...(probed.ok ? {} : { noList: true }) });
     if (plain.ok) return { ok: false, status: 400, message: noToolsWords(model) };
+    // The plain request fails for a reason of its own (a bad key, a model that is gone): that is the answer, not a refused tiny request
+    if (plain.reason !== 'request') return { ok: false, status: 400, message: plain.message };
   }
   if (!chat.ok) {
     // The new address can't give the saved model (not on its list, or it says it has none): the person picks one it has
