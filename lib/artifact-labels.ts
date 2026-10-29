@@ -13,3 +13,17 @@ export function artifactKindLabel(kind: ArtifactKind): { badge: string; color: s
       return { badge: 'SVG', color: '#be185d' };
   }
 }
+
+/** "Mini app", "Page"...: what the game's card says the artifact is, in the same words. */
+export function artifactKindName(kind: ArtifactKind): string {
+  switch (kind) {
+    case 'app':
+      return 'Mini app';
+    case 'page':
+      return 'Page';
+    case 'markdown':
+      return 'Document';
+    case 'svg':
+      return 'Drawing';
+  }
+}
