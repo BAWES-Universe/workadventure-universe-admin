@@ -198,6 +198,8 @@ export const mineSchema = z.object({ person: personSchema }).strict();
 /** Where a page of a list starts: 0 for the first, then the `next` the previous page gave. */
 export const listOffset = z.number().int().min(0).max(1_000_000);
 
+export const ownedListSchema = z.object({ person: personSchema, offset: listOffset.optional() }).strict();
+
 export const chatListSchema = z.object({ viewer: viewerSchema.refine((viewer) => viewer.chat !== undefined, { message: 'Name the chat', path: ['chat'] }), offset: listOffset.optional() }).strict();
 
 /** A version number from the address, or a 404: there is no version "abc". */

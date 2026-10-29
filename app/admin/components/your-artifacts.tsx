@@ -4,14 +4,14 @@ import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { AppWindow, History, Link2 } from 'lucide-react';
 import { authenticatedFetch } from '@/lib/client-auth';
-import { openArtifactInGame, useGameCapability } from './orbit-bridge';
+import { openArtifactInGame, openArtifactsListInGame, useGameCapability } from './orbit-bridge';
 import styles from './passport.module.css';
 import dsStyles from './ds/ds.module.css';
 
 /**
  * Your artifacts (game #1474): every artifact you own, from all your chats with bots, newest first. On You the newest
  * few with View all; on its own page all of them, a page at a time as you scroll. A tap opens it in the game's window,
- * or on its own page here.
+ * or on its own page here. In a game that can, View all opens the whole list in the game's window too (game #1609).
  */
 
 export interface OwnedArtifact {
@@ -164,6 +164,7 @@ function NoArtifactsYet() {
 /** Your artifacts on You: the newest few and View all, or what artifacts are when there are none yet. */
 export function ArtifactsSection({ limit }: { limit: number }) {
   const inGame = useGameCapability('open-artifact');
+  const listInGame = useGameCapability('open-artifacts-list');
   const [page, setPage] = useState<Page | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -187,11 +188,21 @@ export function ArtifactsSection({ limit }: { limit: number }) {
           <h2 id="artifacts-heading" className="orbit-display">
             Your artifacts
           </h2>
-          {page.total > limit && (
-            <Link href="/admin/you/artifacts" className={`orbit-press ${dsStyles.sectionAction}`} data-testid="artifacts-all">
-              View all
-            </Link>
-          )}
+          {page.total > limit &&
+            (listInGame ? (
+              <button
+                type="button"
+                className={`orbit-press ${dsStyles.sectionAction}`}
+                onClick={() => openArtifactsListInGame()}
+                data-testid="artifacts-all"
+              >
+                View all
+              </button>
+            ) : (
+              <Link href="/admin/you/artifacts" className={`orbit-press ${dsStyles.sectionAction}`} data-testid="artifacts-all">
+                View all
+              </Link>
+            ))}
         </div>
       </div>
       {page.artifacts.length === 0 ? (
