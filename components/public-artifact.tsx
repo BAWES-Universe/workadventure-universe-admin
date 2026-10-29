@@ -16,12 +16,21 @@ function Emblem() {
   );
 }
 
-/** The one piece of branding: a small quiet pill in the corner that opens Universe. */
-function MadeWithUniverse({ href }: { href: string }) {
+/**
+ * The one piece of branding: a small quiet pill that opens Universe. On the shared page it floats over the artifact in the
+ * bottom right corner and opens Universe in a new tab, so the artifact stays where it was.
+ */
+function MadeWithUniverse({ href, floating = false }: { href: string; floating?: boolean }) {
   return (
     <a
       href={href}
-      className="inline-flex h-7 items-center gap-[7px] rounded-full border border-white/12 bg-white/6 pl-[9px] pr-[11px] text-[11.5px] font-semibold leading-none text-[#b3acc7] no-underline hover:bg-white/10 hover:text-[#f3f1fa]"
+      {...(floating ? { target: '_blank', rel: 'noopener' } : {})}
+      data-testid="madeWithUniverse"
+      className={`inline-flex h-7 items-center gap-[7px] rounded-full border border-white/12 pl-[9px] pr-[11px] text-[11.5px] font-semibold leading-none text-[#b3acc7] no-underline hover:text-[#f3f1fa] [font-family:var(--font-inter),system-ui,sans-serif] ${
+        floating
+          ? 'fixed bottom-[max(0.75rem,env(safe-area-inset-bottom))] right-[max(0.75rem,env(safe-area-inset-right))] z-10 bg-[#0A0814]/72 shadow-[0_4px_14px_rgba(0,0,0,.35)] backdrop-blur-[6px] hover:bg-[#0A0814]/90'
+          : 'bg-white/6 hover:bg-white/10'
+      }`}
     >
       <Emblem />
       Made with Universe
@@ -35,6 +44,21 @@ function Frame({ children, footer }: { children: React.ReactNode; footer: React.
       {children}
       <footer className="flex justify-end">{footer}</footer>
     </main>
+  );
+}
+
+/** The artifact itself in its locked frame, view only: a document drawn from its text, anything else from its own address. */
+function ArtifactFrame({ view, className }: { view: PublicView; className: string }) {
+  return view.content !== null ? (
+    <iframe
+      title={view.title}
+      sandbox="allow-popups allow-popups-to-escape-sandbox"
+      srcDoc={markdownDocument(view.content)}
+      referrerPolicy="no-referrer"
+      className={className}
+    />
+  ) : (
+    <iframe title={view.title} sandbox="allow-scripts allow-forms" src={view.url} referrerPolicy="no-referrer" className={className} />
   );
 }
 
@@ -55,34 +79,22 @@ export function ArtifactBox({ view }: { view: PublicView }) {
         </div>
       </header>
       <div className="min-h-[60dvh] flex-1 overflow-hidden rounded-2xl border border-[#2a2638] bg-[#15121f]">
-        {view.content !== null ? (
-          <iframe
-            title={view.title}
-            sandbox="allow-popups allow-popups-to-escape-sandbox"
-            srcDoc={markdownDocument(view.content)}
-            referrerPolicy="no-referrer"
-            className="block size-full min-h-[60dvh] border-0"
-          />
-        ) : (
-          <iframe
-            title={view.title}
-            sandbox="allow-scripts allow-forms"
-            src={view.url}
-            referrerPolicy="no-referrer"
-            className="block size-full min-h-[60dvh] border-0"
-          />
-        )}
+        <ArtifactFrame view={view} className="block size-full min-h-[60dvh] border-0" />
       </div>
     </>
   );
 }
 
-/** What anyone with the link sees: the artifact in the same locked box as the game, view only. */
+/**
+ * What anyone with the link sees (Orbit #711): just the artifact, filling the window, with only the small "Made with Universe"
+ * badge floating in the bottom right corner. The name, maker and version header stays in the game's window.
+ */
 export function PublicArtifact({ view, universeUrl }: { view: PublicView; universeUrl: string }) {
   return (
-    <Frame footer={<MadeWithUniverse href={universeUrl} />}>
-      <ArtifactBox view={view} />
-    </Frame>
+    <main className="fixed inset-0 bg-[#0A0814]" data-testid="publicArtifact">
+      <ArtifactFrame view={view} className="block size-full border-0" />
+      <MadeWithUniverse href={universeUrl} floating />
+    </main>
   );
 }
 
