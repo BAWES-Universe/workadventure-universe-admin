@@ -843,3 +843,10 @@ export async function listChatArtifacts(viewer: Viewer, offset = 0, ctx: Context
 export async function listOwned(userId: string, offset = 0): Promise<ArtifactPage> {
   return pageOf({ ownerId: userId }, offset);
 }
+
+/** The same list for the game's window (game #1609), named by the game's server. A guest owns none. */
+export async function listOwnedBy(person: Person, offset = 0): Promise<ArtifactPage> {
+  const who = await resolvePerson(person, false);
+  if (!who.userId) return { artifacts: [], total: 0, next: null };
+  return listOwned(who.userId, offset);
+}
