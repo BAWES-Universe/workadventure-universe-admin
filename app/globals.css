@@ -193,6 +193,12 @@ body {
   min-height: 100dvh;
 }
 
+/* The shared artifact page (/a/:id) is ink behind the artifact too: phone browsers show a strip of the page below a
+   fixed frame (above Discord's and Safari's bottom bar), and it must not be the light page colour. */
+body:has([data-shared-page]) {
+  background: #0A0814;
+}
+
 /* Every interactive control answers a press at once. */
 button,
 [role="button"],

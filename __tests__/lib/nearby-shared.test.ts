@@ -26,7 +26,9 @@ describe('an item shared in a nearby chat', () => {
       size: 19035,
       isVideo: false,
       senderName: 'Sara',
+      senderChatId: null,
       mine: false,
+      withChatIds: [],
       sentAt: new Date('2026-10-26T09:49:00.000Z'),
     });
   });
@@ -128,5 +130,30 @@ describe('an item shared in a nearby chat', () => {
     expect(parseNearbySharedItem({ ...file, sentAt: 1761472140000 }, now)).toBeNull();
     expect(parseNearbySharedItem({ ...file, sentAt: '2026-10-26T11:00:00.000Z' }, now)).toBeNull();
     expect(parseNearbySharedItem({ ...file, sentAt: '2026-10-26T10:04:00.000Z' }, now)).not.toBeNull();
+  });
+
+  it('keeps who it was shared with, once each, never the sender (game #1615)', () => {
+    const parsed = parseNearbySharedItem(
+      {
+        ...file,
+        senderChatId: '@sara:chat.bawes.net',
+        withChatIds: ['@bot_12:chat.bawes.net', '@bot_12:chat.bawes.net', '@sara:chat.bawes.net', '@khalid:chat.bawes.net'],
+      },
+      now,
+    );
+    expect(parsed?.senderChatId).toBe('@sara:chat.bawes.net');
+    expect(parsed?.withChatIds).toEqual(['@bot_12:chat.bawes.net', '@khalid:chat.bawes.net']);
+    expect(parseNearbySharedItem({ ...file, senderChatId: '' }, now)?.senderChatId).toBeNull();
+  });
+
+  it('turns down a chat account that is not one, or too many people', () => {
+    expect(parseNearbySharedItem({ ...file, senderChatId: 'sara' }, now)).toBeNull();
+    expect(parseNearbySharedItem({ ...file, senderChatId: '@sara\u0000:chat.bawes.net' }, now)).toBeNull();
+    expect(parseNearbySharedItem({ ...file, withChatIds: ['@sara:chat.bawes.net\u0007'] }, now)).toBeNull();
+    expect(parseNearbySharedItem({ ...file, withChatIds: '@sara:chat.bawes.net' }, now)).toBeNull();
+    expect(parseNearbySharedItem({ ...file, withChatIds: ['@sara:chat.bawes.net', 42] }, now)).toBeNull();
+    const crowd = Array.from({ length: 51 }, (_, index) => `@p${index}:chat.bawes.net`);
+    expect(parseNearbySharedItem({ ...file, withChatIds: crowd }, now)).toBeNull();
+    expect(parseNearbySharedItem({ ...file, withChatIds: crowd.slice(0, 50) }, now)?.withChatIds).toHaveLength(50);
   });
 });
