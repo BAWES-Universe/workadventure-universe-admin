@@ -7,6 +7,7 @@ import { StatLine, count } from '../components/ds';
 import { AiKeysCard } from '../components/ai-keys-card';
 import { ActivitySection, PassportSection } from '../components/passport';
 import { ProfileCard } from '../components/profile-card';
+import { ArtifactsSection } from '../components/your-artifacts';
 import styles from './you.module.css';
 
 /** Your latest activity on You; View all opens the rest. */
@@ -54,6 +55,7 @@ function You() {
         }
       />
       <AiKeysCard />
+      <ArtifactsSection limit={3} />
       <PassportSection small />
       <ActivitySection limit={ACTIVITY_SHOWN} />
     </div>
