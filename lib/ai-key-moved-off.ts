@@ -22,18 +22,28 @@ export async function tellKeyOwnerMovedOff(input: {
     if (!from?.ownerId || from.ownerId === actorId) return;
     const [actor, to, place] = await Promise.all([
       prisma.user.findUnique({ where: { id: actorId }, select: { name: true } }),
-      toRef && toRef !== UNIVERSE_AI_REF ? prisma.botsAiProvider.findUnique({ where: { providerId: toRef }, select: { settings: true } }) : null,
+      toRef && toRef !== UNIVERSE_AI_REF ? prisma.botsAiProvider.findUnique({ where: { providerId: toRef }, select: { name: true, ownerId: true, settings: true } }) : null,
       prisma.bot.findUnique({ where: { id: bot.id }, select: { room: { select: { world: { select: { universe: { select: { name: true } } } } } } } }),
     ]);
     const who = actor?.name ?? 'Someone';
-    const target = to ? `${who}’s ${kindInfo((to.settings as { kind?: unknown } | null)?.kind)?.label ?? 'AI key'}` : 'Universe AI';
+    // A personal key is named by its owner and kind, never its own name; a server provider by its name. With no ref the
+    // bot has no provider at all, so the notice says only who moved it.
+    const target = !toRef
+      ? null
+      : toRef === UNIVERSE_AI_REF
+        ? 'Universe AI'
+        : !to
+          ? null
+          : to.ownerId
+            ? `${who}’s ${kindInfo((to.settings as { kind?: unknown } | null)?.kind)?.label ?? 'AI key'}`
+            : to.name;
     const universe = place?.room.world.universe.name;
     await addNotice({
       userId: from.ownerId,
       kind: 'ai-key-moved',
       dedupeKey: `moved-off:${fromRef}:${bot.id}:${new Date().toISOString()}`,
       title: `${bot.name} moved off your key`,
-      body: `${who} moved it to ${target}${universe ? ` in ${universe}` : ''}. To move it back, open ${bot.name} and pick ${from.name}.`,
+      body: `${who} moved it${target ? ` to ${target}` : ''}${universe ? ` in ${universe}` : ''}. To move it back, open ${bot.name} and pick ${from.name}.`,
       href: '/admin/you/ai-keys',
     });
   } catch (error) {

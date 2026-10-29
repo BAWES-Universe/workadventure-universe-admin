@@ -14,7 +14,11 @@ const move = (over: object = {}) => tellKeyOwnerMovedOff({ bot, fromRef: 'sara-k
 beforeEach(() => {
   jest.resetAllMocks();
   keys.mockImplementation(async ({ where }: { where: { providerId: string } }) =>
-    where.providerId === 'sara-key' ? { name: 'My DeepSeek', ownerId: 'sara' } : { settings: { kind: 'claude' } },
+    where.providerId === 'sara-key'
+      ? { name: 'My DeepSeek', ownerId: 'sara' }
+      : where.providerId === 'server-1'
+        ? { name: 'Team OpenRouter', ownerId: null, settings: { kind: 'openrouter' } }
+        : { name: 'Work Claude', ownerId: 'khalid', settings: { kind: 'claude' } },
   );
   (prisma.user.findUnique as jest.Mock).mockResolvedValue({ name: 'Khalid' });
   (prisma.bot.findUnique as jest.Mock).mockResolvedValue({ room: { world: { universe: { name: 'BAWES Universe' } } } });
@@ -36,6 +40,18 @@ describe('telling a key’s owner their key lost a bot (#709)', () => {
   it('names Universe AI when it went there', async () => {
     await move({ toRef: 'universe-ai' });
     expect((addNotice as jest.Mock).mock.calls[0][0].body).toBe('Khalid moved it to Universe AI in BAWES Universe. To move it back, open Linear SH and pick My DeepSeek.');
+  });
+
+  it('names a server provider by its name, and says no destination when the bot was left with no provider', async () => {
+    await move({ toRef: 'server-1' });
+    await move({ toRef: null });
+    await move({ toRef: '' });
+    const bodies = (addNotice as jest.Mock).mock.calls.map((call) => call[0].body);
+    expect(bodies).toEqual([
+      'Khalid moved it to Team OpenRouter in BAWES Universe. To move it back, open Linear SH and pick My DeepSeek.',
+      'Khalid moved it in BAWES Universe. To move it back, open Linear SH and pick My DeepSeek.',
+      'Khalid moved it in BAWES Universe. To move it back, open Linear SH and pick My DeepSeek.',
+    ]);
   });
 
   it('tells nobody when the mover owns the key, or the bot was not on a person’s key', async () => {
