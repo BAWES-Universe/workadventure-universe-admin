@@ -10,7 +10,8 @@ import dsStyles from './ds/ds.module.css';
 
 /**
  * Your artifacts (game #1474): every artifact you own, from all your chats with bots, newest first. On You the newest
- * few with View all; on its own page all of them, a page at a time as you scroll. A tap opens it in the game's window.
+ * few with View all; on its own page all of them, a page at a time as you scroll. A tap opens it in the game's window,
+ * or on its own page here.
  */
 
 export interface OwnedArtifact {
@@ -97,8 +98,8 @@ function Row({ artifact, inGame }: { artifact: OwnedArtifact; inGame: boolean })
       </span>
     </>
   );
-  // In the game it opens in the game's window. In a browser tab, one shared by link opens its page there; the others
-  // open only in the game, so the row is just a line.
+  // In a game that opens it in its window, it opens there; anywhere else (the game before it could, a browser tab), on
+  // its own page here. Every row is one of yours, so every row opens.
   if (inGame) {
     return (
       <li>
@@ -108,20 +109,11 @@ function Row({ artifact, inGame }: { artifact: OwnedArtifact; inGame: boolean })
       </li>
     );
   }
-  if (artifact.openScope === 'link') {
-    return (
-      <li>
-        <a href={`/a/${artifact.id}`} target="_blank" rel="noopener" className={styles.artifactRow} data-testid="my-artifact">
-          {body}
-        </a>
-      </li>
-    );
-  }
   return (
     <li>
-      <div className={styles.artifactRow} data-testid="my-artifact">
+      <Link href={`/admin/you/artifacts/${encodeURIComponent(artifact.id)}`} className={styles.artifactRow} data-testid="my-artifact">
         {body}
-      </div>
+      </Link>
     </li>
   );
 }

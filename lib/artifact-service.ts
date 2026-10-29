@@ -684,6 +684,21 @@ export async function openByLink(id: string, ctx: Context = defaultContext()): P
   pruneSometimes(ctx);
   const artifact = await loadArtifact(id, now);
   if (artifact.openScope !== 'link') throw new ArtifactError('not_found', 404, 'No such artifact.');
+  return latestView(artifact, files);
+}
+
+/**
+ * Opens one of your own artifacts on You in Orbit, however it is shared (game #1474): its owner may open it from
+ * anywhere, as in the game. Anyone else's, or one that is gone, gets the same answer as one that was never there.
+ */
+export async function openOwned(id: string, userId: string, ctx: Context = defaultContext()): Promise<PublicView> {
+  const { files, now } = ctx;
+  const artifact = await loadArtifact(id, now);
+  if (artifact.ownerId !== userId) throw new ArtifactError('not_found', 404, 'No such artifact.');
+  return latestView(artifact, files);
+}
+
+async function latestView(artifact: ArtifactRow, files: Context['files']): Promise<PublicView> {
   const row = await findVersion(artifact, artifact.latestVersion);
   const kind = artifact.kind as ArtifactKind;
   return {
