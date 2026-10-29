@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { POST as make } from '@/app/api/artifacts/route';
 import { POST as chatList } from '@/app/api/artifacts/chat/route';
+import { POST as ownedList } from '@/app/api/artifacts/owned/route';
 import { PUT as share } from '@/app/api/artifacts/[id]/share/route';
 import { GET as mine } from '@/app/api/me/artifacts/route';
 import { GET as mineOne } from '@/app/api/me/artifacts/[id]/route';
@@ -183,6 +184,35 @@ describe('artifact lists for people (#1474)', () => {
       expect((await mineFor(null)).status).toBe(401);
       expect((await mineFor('owner', 'abc')).status).toBe(400);
       expect((await mineFor('owner', '-5')).status).toBe(400);
+    });
+  });
+
+  describe("all yours, in the game's window (#1609)", () => {
+    it('lists every artifact the person the game names owns, from every chat, and nobody else\'s', async () => {
+      await makeOne(person('owner'), DM, 'Direct');
+      await makeOne(person('owner'), NEARBY, 'Bubble');
+      await makeOne(person('friend'), NEARBY, "Friend's");
+      const res = await call(ownedList, { person: person('owner') });
+      expect(res.status).toBe(200);
+      expect(titles(res).sort()).toEqual(['Bubble', 'Direct']);
+      expect(res.body).toMatchObject({ total: 2, next: null });
+    });
+
+    it('pages like Your artifacts in Orbit', async () => {
+      for (let i = 0; i < ARTIFACT_PAGE_SIZE + 1; i++) await makeOne(person('owner'), DM, `A${i}`);
+      const first = await call(ownedList, { person: person('owner') });
+      expect(first.body).toMatchObject({ total: ARTIFACT_PAGE_SIZE + 1, next: ARTIFACT_PAGE_SIZE });
+      const last = await call(ownedList, { person: person('owner'), offset: first.body.next });
+      expect(last.body.artifacts).toHaveLength(1);
+      expect(last.body.next).toBeNull();
+    });
+
+    it('gives a guest none, and is for the game only', async () => {
+      await makeOne(guest, NEARBY, "Guest's");
+      expect((await call(ownedList, { person: guest })).body).toEqual({ artifacts: [], total: 0, next: null });
+      expect((await call(ownedList, { person: person('owner') }, BOT_TOKEN)).status).toBe(401);
+      expect((await call(ownedList, { person: person('owner') }, null)).status).toBe(401);
+      expect((await call(ownedList, { person: person('owner'), offset: -1 })).status).toBe(400);
     });
   });
 });

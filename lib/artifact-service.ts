@@ -186,6 +186,8 @@ export interface Rights {
   manage: boolean;
   /** Make a copy: needs an account. */
   copy: boolean;
+  /** In the chat it was made in right now, as the game vouches: the owner's Share menu offers "People in this chat". */
+  inChat: boolean;
 }
 
 function rightsOf(artifact: ArtifactRow, who: Who, now: Date): Rights {
@@ -195,6 +197,8 @@ function rightsOf(artifact: ArtifactRow, who: Who, now: Date): Rights {
     change: canAskForChange(artifact, who, who.inChat, now),
     manage: owner,
     copy: who.userId !== null,
+    // A copy is in no chat, whichever chat it was copied from
+    inChat: who.inChat && artifact.chatRef !== null,
   };
 }
 
@@ -838,4 +842,11 @@ export async function listChatArtifacts(viewer: Viewer, offset = 0, ctx: Context
 /** Every artifact this account owns, from every chat and bot, copies too, a page at a time (Your artifacts in Orbit). */
 export async function listOwned(userId: string, offset = 0): Promise<ArtifactPage> {
   return pageOf({ ownerId: userId }, offset);
+}
+
+/** The same list for the game's window (game #1609), named by the game's server. A guest owns none. */
+export async function listOwnedBy(person: Person, offset = 0): Promise<ArtifactPage> {
+  const who = await resolvePerson(person, false);
+  if (!who.userId) return { artifacts: [], total: 0, next: null };
+  return listOwned(who.userId, offset);
 }

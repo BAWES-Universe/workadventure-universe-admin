@@ -170,6 +170,16 @@ export interface OrbitOpenArtifact {
 }
 
 /**
+ * Ask the game to open Your artifacts, every artifact this person owns, in its window, in front of Orbit (needs
+ * "open-artifacts-list"; game #1609). Each one the person taps there opens as a tab beside the list.
+ */
+export interface OrbitOpenArtifactsList {
+  type: 'orbit-open-artifacts-list';
+  version: typeof ORBIT_BRIDGE_VERSION;
+  roomRevision: string;
+}
+
+/**
  * How many steps Orbit's pages have added to the tab's history above the game's own (needs "history"), so closing
  * Orbit walks back over exactly those. Sent whenever it changes; never more than the real number (lib/orbit-history.ts).
  */
