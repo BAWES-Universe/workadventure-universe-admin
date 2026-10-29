@@ -29,8 +29,10 @@ function decodeCursor(cursor: string): { sentAt: Date; id: string } | null {
 }
 
 /**
- * GET /api/me/nearby-shared[?cursor=<next>&limit=<n>] - what was shared in the nearby chats the caller was in, newest
- * first. `next` is set while an older page exists: ask again with it as `cursor`.
+ * GET /api/me/nearby-shared[?cursor=<next>&limit=<n>][&with=<chat id>[&name=<their name>]] - what was shared in the
+ * nearby chats the caller was in, newest first. `next` is set while an older page exists: ask again with it as
+ * `cursor`. With `with`, only what that person sent the caller and what the caller sent while they were there (a
+ * person's profile, game #1615); `name` also finds what they sent before items named their chat account.
  */
 export async function GET(request: NextRequest) {
   if (!meOriginAllowed(request)) return respond(request, { error: 'Origin not allowed' }, 403);
@@ -46,13 +48,34 @@ export async function GET(request: NextRequest) {
     return respond(request, { error: `limit must be 1 to ${NEARBY_SHARED_PAGE_MAX}` }, 400);
   }
 
+  const withParam = request.nextUrl.searchParams.get('with');
+  const nameParam = request.nextUrl.searchParams.get('name');
+  if (withParam !== null && (withParam.length === 0 || withParam.length > 255)) {
+    return respond(request, { error: 'Invalid with' }, 400);
+  }
+  if (nameParam !== null && (withParam === null || nameParam.trim() === '' || nameParam.length > 100)) {
+    return respond(request, { error: 'Invalid name' }, 400);
+  }
+  const name = nameParam?.trim();
+
   try {
     const rows = await prisma.nearbySharedItem.findMany({
       where: {
         userId: user.id,
-        ...(cursor
-          ? { OR: [{ sentAt: { lt: cursor.sentAt } }, { sentAt: cursor.sentAt, id: { lt: cursor.id } }] }
-          : {}),
+        AND: [
+          cursor
+            ? { OR: [{ sentAt: { lt: cursor.sentAt } }, { sentAt: cursor.sentAt, id: { lt: cursor.id } }] }
+            : {},
+          withParam !== null
+            ? {
+                OR: [
+                  { mine: false, senderChatId: withParam },
+                  { mine: true, withChatIds: { has: withParam } },
+                  ...(name ? [{ mine: false, senderChatId: null, senderName: name }] : []),
+                ],
+              }
+            : {},
+        ],
       },
       orderBy: [{ sentAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
@@ -67,6 +90,7 @@ export async function GET(request: NextRequest) {
         size: true,
         isVideo: true,
         senderName: true,
+        senderChatId: true,
         mine: true,
         sentAt: true,
       },
@@ -83,6 +107,7 @@ export async function GET(request: NextRequest) {
         size: row.size,
         isVideo: row.isVideo,
         senderName: row.senderName,
+        senderChatId: row.senderChatId,
         mine: row.mine,
         sentAt: row.sentAt.toISOString(),
       })),

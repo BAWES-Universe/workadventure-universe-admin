@@ -7,19 +7,23 @@ type Row = Record<string, unknown> & { id: string; userId: string; itemKey: stri
 const rows: Row[] = [];
 let nextId = 0;
 
-type Where = {
-  userId: string;
-  OR?: Array<{ sentAt: Date | { lt: Date }; id?: { lt: string } }>;
-};
+type Clause = Record<string, unknown> & { OR?: Clause[]; AND?: Clause[] };
+type Where = Clause & { userId: string };
 
-function matches(row: Row, where: Where): boolean {
-  if (row.userId !== where.userId) return false;
-  if (!where.OR) return true;
-  return where.OR.some((clause) =>
-    clause.sentAt instanceof Date
-      ? row.sentAt.getTime() === clause.sentAt.getTime() && clause.id !== undefined && row.id < clause.id.lt
-      : row.sentAt < clause.sentAt.lt,
-  );
+// Enough of Prisma's where for this route: equality, lt, has, and nested AND / OR.
+function matches(row: Row, where: Clause): boolean {
+  return Object.entries(where).every(([field, condition]) => {
+    if (field === 'AND') return (condition as Clause[]).every((clause) => matches(row, clause));
+    if (field === 'OR') return (condition as Clause[]).some((clause) => matches(row, clause));
+    const value = row[field];
+    if (condition instanceof Date) return value instanceof Date && value.getTime() === condition.getTime();
+    if (condition !== null && typeof condition === 'object') {
+      const test = condition as { lt?: Date | string; has?: string };
+      if ('lt' in test) return value !== undefined && value !== null && (value as Date | string) < (test.lt as Date | string);
+      if ('has' in test) return Array.isArray(value) && value.includes(test.has);
+    }
+    return (value ?? null) === condition;
+  });
 }
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -141,5 +145,39 @@ describe('/api/me/nearby-shared', () => {
     expect((await post({ items: [] })).status).toBe(400);
     const many = Array.from({ length: 51 }, (_, index) => link(String(index), '2026-10-26T09:00:00.000Z'));
     expect((await post({ items: many })).status).toBe(413);
+  });
+
+  describe('one person (game #1615)', () => {
+    const GITHUB = '@bot_12:chat.bawes.net';
+    const SARA = '@sara:chat.bawes.net';
+    const item = (key: string, extra: Record<string, unknown>) => ({ ...link(key, '2026-10-29T20:19:00.000Z'), ...extra });
+
+    it('lists what they sent and what you sent while they were there, nothing else', async () => {
+      await post({
+        items: [
+          item('mine-with-github', { mine: true, senderName: 'Khalid', withChatIds: [GITHUB, SARA] }),
+          item('from-github', { senderName: 'GitHub [StudentHub]', senderChatId: GITHUB, withChatIds: [SARA] }),
+          item('from-sara', { senderName: 'Sara', senderChatId: SARA, withChatIds: [GITHUB] }),
+          item('mine-with-sara', { mine: true, senderName: 'Khalid', withChatIds: [SARA] }),
+        ],
+      });
+      const body = await (await get(`?with=${encodeURIComponent(GITHUB)}`)).json();
+      expect(body.items.map((one: { itemKey: string }) => one.itemKey).sort()).toEqual(['from-github', 'mine-with-github']);
+      expect(body.items.find((one: { itemKey: string }) => one.itemKey === 'from-github').senderChatId).toBe(GITHUB);
+    });
+
+    it('finds what they sent before items named a chat account by their name, only when asked', async () => {
+      await post({ items: [item('old', { senderName: 'GitHub [StudentHub]' }), item('old-mine', { mine: true, senderName: 'GitHub [StudentHub]' })] });
+      const without = await (await get(`?with=${encodeURIComponent(GITHUB)}`)).json();
+      expect(without.items).toEqual([]);
+      const named = await (await get(`?with=${encodeURIComponent(GITHUB)}&name=${encodeURIComponent('GitHub [StudentHub]')}`)).json();
+      expect(named.items.map((one: { itemKey: string }) => one.itemKey)).toEqual(['old']);
+    });
+
+    it('turns down a bad person request', async () => {
+      expect((await get('?with=')).status).toBe(400);
+      expect((await get('?name=Sara')).status).toBe(400);
+      expect((await get(`?with=${encodeURIComponent(SARA)}&name=%20`)).status).toBe(400);
+    });
   });
 });
