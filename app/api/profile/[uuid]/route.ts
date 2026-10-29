@@ -5,6 +5,7 @@ import { CARD_STAMPS, visibleStamps, type Stamp } from '@/lib/passport';
 import { universeColour } from '@/lib/universe-colour';
 import { stampNameLength } from '@/lib/stamps';
 import { PLAY_ORIGIN } from '@/lib/play-origin';
+import { meOriginAllowed, meRespond } from '@/lib/me-route';
 
 export const dynamic = 'force-dynamic';
 
@@ -222,6 +223,28 @@ function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: s
 </html>`;
 }
 
+/**
+ * The card as data, for the game, which draws it itself and keeps it while the player is in the game (game #1585):
+ * each stamp comes with its colour and how long its name is, so the game never works those out on its own. Asked with
+ * the player's sign-in, so a friends-only passport shows to their friends.
+ */
+function cardData(data: NonNullable<Awaited<ReturnType<typeof getProfileData>>>) {
+  return {
+    ...data,
+    stamps: data.stamps.map((stamp) => ({
+      ...stamp,
+      colour: universeColour(stamp.universe.id),
+      long: stampNameLength(stamp.world) ?? null,
+    })),
+  };
+}
+
+const jsonRespond = (request: NextRequest, body: unknown, status = 200) => meRespond(request, body, status, 'GET, OPTIONS');
+
+export async function OPTIONS(request: NextRequest) {
+  return jsonRespond(request, {}, request.headers.get('origin') && meOriginAllowed(request) ? 204 : 403);
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ uuid: string }> }
@@ -240,7 +263,7 @@ export async function GET(
         { status: 404, headers: { 'Content-Type': 'text/html' } }
       );
     }
-    return NextResponse.json({ error: 'Visit card not found' }, { status: 404 });
+    return jsonRespond(request, { error: 'Visit card not found' }, 404);
   }
   
   // Check if client wants HTML (browser request) or JSON (API request)
@@ -265,5 +288,5 @@ export async function GET(
   }
   
   // Otherwise serve JSON
-  return NextResponse.json(data);
+  return jsonRespond(request, cardData(data));
 }

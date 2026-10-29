@@ -19,7 +19,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
-import { GET } from '@/app/api/profile/[uuid]/route';
+import { GET, OPTIONS } from '@/app/api/profile/[uuid]/route';
 
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>> & { $queryRaw: jest.Mock };
 const session = getSessionUser as jest.Mock;
@@ -33,6 +33,17 @@ async function html(card: { bio: string | null; links: Array<{ label: string; ur
     params: Promise.resolve({ uuid: 'abc' }),
   });
   return res.text();
+}
+
+const GAME = 'http://play.workadventure.localhost';
+
+async function json(card: { bio: string | null; links: Array<{ label: string; url: string }> } | null, origin = GAME) {
+  db.user.findUnique.mockResolvedValue({ id: 'u1', name: 'Khalid' });
+  db.visitCard.findUnique.mockResolvedValue(card);
+  const url = new URL('http://localhost:3333/api/profile/abc?embed=true');
+  return GET(new NextRequest(url, { headers: { Accept: 'application/json', Origin: origin } }), {
+    params: Promise.resolve({ uuid: 'abc' }),
+  });
 }
 
 describe('profile card', () => {
@@ -185,6 +196,69 @@ describe('profile card', () => {
       const page = await html({ bio: 'Hi', links: [] }, true);
       expect(page).not.toContain('<img src=x');
       expect(page).toContain('&lt;img src=x');
+    });
+  });
+
+  describe('as data, for the game to draw and keep (#1585)', () => {
+    beforeEach(() => {
+      db.roomAccess.groupBy.mockResolvedValue([
+        { worldId: 'hq', _count: { _all: 212 }, _min: { accessedAt: new Date('2026-01-12T10:00:00Z') } },
+        { worldId: 'shop', _count: { _all: 3 }, _min: { accessedAt: new Date('2026-02-12T10:00:00Z') } },
+      ]);
+      db.world.findMany.mockResolvedValue([
+        { id: 'hq', name: 'HQ', isPublic: true, universe: { id: 'u-hq', name: 'Main', isPublic: true } },
+        { id: 'shop', name: 'Shopfront', isPublic: true, universe: { id: 'u-shop', name: 'Shops', isPublic: true } },
+      ]);
+    });
+
+    it('gives the bio, web links and stamps, each stamp with its colour and name length', async () => {
+      const res = await json({
+        bio: 'Builds worlds',
+        links: [
+          { label: 'Site', url: 'https://bawes.net' },
+          { label: 'Bad', url: 'javascript:alert(1)' },
+        ],
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.bio).toBe('Builds worlds');
+      expect(body.links).toEqual([{ label: 'Site', url: 'https://bawes.net' }]);
+      expect(body.stamps.map((stamp: { world: string }) => stamp.world)).toEqual(['HQ', 'Shopfront']);
+      expect(body.stamps[0].colour).toMatch(/^#|^rgb/);
+      expect(body.stamps[0].long).toBeNull();
+      expect(body.stamps[1].long).toBe('long');
+    });
+
+    it('lets the game read it, is never kept by the browser, and gives no other site a grant', async () => {
+      const res = await json({ bio: 'Hi', links: [] });
+      expect(res.headers.get('Access-Control-Allow-Origin')).toBe(GAME);
+      expect(res.headers.get('Cache-Control')).toBe('no-store');
+      const other = await json({ bio: 'Hi', links: [] }, 'https://evil.example');
+      expect(other.headers.get('Access-Control-Allow-Origin')).toBeNull();
+    });
+
+    it('says the game may ask with its sign-in, and no other site', async () => {
+      const ask = (origin: string) =>
+        OPTIONS(new NextRequest('http://localhost:3333/api/profile/abc', { method: 'OPTIONS', headers: { Origin: origin } }));
+      const game = await ask(GAME);
+      expect(game.status).toBe(204);
+      expect(game.headers.get('Access-Control-Allow-Headers')).toContain('Authorization');
+      expect((await ask('https://evil.example')).status).toBe(403);
+    });
+
+    it('tells the game someone has no profile, so it can keep that too', async () => {
+      db.roomAccess.groupBy.mockResolvedValue([]);
+      const res = await json(null);
+      expect(res.status).toBe(404);
+      expect(res.headers.get('Access-Control-Allow-Origin')).toBe(GAME);
+    });
+
+    it("shows a friends-only passport to a friend asking from the game with their sign-in", async () => {
+      db.userPreference.findMany.mockResolvedValue([{ key: 'people.sharePassport', value: 'friends' }]);
+      session.mockResolvedValue({ id: 'friend', uuid: 'f' });
+      db.friendship.findFirst.mockResolvedValue({ id: 'f1' });
+      const body = await (await json({ bio: 'Hi', links: [] })).json();
+      expect(body.stamps.map((stamp: { world: string }) => stamp.world)).toEqual(['HQ', 'Shopfront']);
     });
   });
 });
