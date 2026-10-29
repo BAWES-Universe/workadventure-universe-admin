@@ -153,6 +153,23 @@ export interface OrbitOpenLink {
 }
 
 /**
+ * Ask the game to open one of your artifacts in its window, in front of Orbit (needs "open-artifact"; game #1474). The
+ * game opens it the way a chat card does, so its own server checks again that this person may open it.
+ */
+export interface OrbitOpenArtifact {
+  type: 'orbit-open-artifact';
+  version: typeof ORBIT_BRIDGE_VERSION;
+  roomRevision: string;
+  id: string;
+  title: string;
+  kind: string;
+  /** The version the list shows (its latest). */
+  artifactVersion: number;
+  /** The bot that made it, for the window's "By {bot}" line. */
+  maker: string;
+}
+
+/**
  * How many steps Orbit's pages have added to the tab's history above the game's own (needs "history"), so closing
  * Orbit walks back over exactly those. Sent whenever it changes; never more than the real number (lib/orbit-history.ts).
  */

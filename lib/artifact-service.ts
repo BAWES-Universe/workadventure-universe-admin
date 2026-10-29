@@ -767,3 +767,50 @@ export async function listMine(person: Person): Promise<{ artifacts: ArtifactVie
   const rows = await prisma.artifact.findMany({ where: { ownerId: who.userId }, include: ARTIFACT_INCLUDE, orderBy: { updatedAt: 'desc' }, take: 200 });
   return { artifacts: rows.map(viewOf) };
 }
+
+// ---- Lists for people (#1474): a chat's artifacts in the game, and all yours on You in Orbit ----------------------
+
+/** How many artifacts a list hands over at once; the next ones come as the person scrolls. */
+export const ARTIFACT_PAGE_SIZE = 50;
+
+/** One page of a list: `total` is how many there are in all, `next` where the next page starts (null at the end). */
+export interface ArtifactPage {
+  artifacts: ArtifactView[];
+  total: number;
+  next: number | null;
+}
+
+/** The most recently changed first; the id keeps the order fixed between pages when two changed at the same moment. */
+const PAGE_ORDER = [{ updatedAt: 'desc' }, { id: 'desc' }] as const;
+
+async function pageOf(where: Prisma.ArtifactWhereInput, offset: number): Promise<ArtifactPage> {
+  const [total, rows] = await Promise.all([
+    prisma.artifact.count({ where }),
+    prisma.artifact.findMany({ where, include: ARTIFACT_INCLUDE, orderBy: [...PAGE_ORDER], skip: offset, take: ARTIFACT_PAGE_SIZE }),
+  ]);
+  const end = offset + rows.length;
+  return { artifacts: rows.map(viewOf), total, next: end < total && rows.length > 0 ? end : null };
+}
+
+const notExpiredAt = (now: Date): Prisma.ArtifactWhereInput => ({ OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] });
+
+/**
+ * The artifacts made in one chat that this person may open, for the chat's profile or details in the game: the same
+ * rule as opening one. Someone the game vouches is in a nearby chat sees what was made in it, as its cards open for
+ * them; anyone else sees only their own and those shared by link. Nothing they could not open is ever listed.
+ */
+export async function listChatArtifacts(viewer: Viewer, offset = 0, ctx: Context = defaultContext()): Promise<ArtifactPage> {
+  const { now } = ctx;
+  const chat = viewer.chat;
+  if (!chat) return { artifacts: [], total: 0, next: null };
+  pruneSometimes(ctx);
+  // Every artifact here was made in this chat, so the game's word counts for all of them (see viewerIsInChat)
+  const who = await resolvePerson(viewer.person, viewer.inChat);
+  const opens: Prisma.ArtifactWhereInput[] = who.inChat ? [] : [{ OR: [...(who.userId ? [{ ownerId: who.userId }] : []), { openScope: 'link' }] }];
+  return pageOf({ chatKind: chat.kind, chatRef: chat.ref, AND: [notExpiredAt(now), ...opens] }, offset);
+}
+
+/** Every artifact this account owns, from every chat and bot, copies too, a page at a time (Your artifacts in Orbit). */
+export async function listOwned(userId: string, offset = 0): Promise<ArtifactPage> {
+  return pageOf({ ownerId: userId }, offset);
+}

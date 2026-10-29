@@ -20,6 +20,7 @@ import {
   type OrbitInvitePerson,
   type OrbitLinks,
   type OrbitMessagePerson,
+  type OrbitOpenArtifact,
   type OrbitOpenLink,
   type OrbitProfileChanged,
   type OrbitView,
@@ -56,7 +57,7 @@ export function useGameCapability(capability: string): boolean {
 function postToGame(
   build: (
     roomRevision: string,
-  ) => OrbitInvitePerson | OrbitMessagePerson | OrbitCheckLinks | OrbitOpenLink | OrbitHistoryStep,
+  ) => OrbitInvitePerson | OrbitMessagePerson | OrbitCheckLinks | OrbitOpenLink | OrbitOpenArtifact | OrbitHistoryStep,
   capability: string,
 ): boolean {
   if (!gameVisit?.capabilities.includes(capability) || !isInsideFrame()) return false;
@@ -183,6 +184,26 @@ export function openLinkInGame(url: string): boolean {
   return postToGame(
     (roomRevision) => ({ type: 'orbit-open-link', version: ORBIT_BRIDGE_VERSION, roomRevision, url }),
     'open-link',
+  );
+}
+
+/**
+ * Asks the game to open one of your artifacts in its window, in front of Orbit (game #1474). False outside the game,
+ * or in a game that can't (nothing is sent).
+ */
+export function openArtifactInGame(artifact: { id: string; title: string; kind: string; version: number; makerName: string }): boolean {
+  return postToGame(
+    (roomRevision) => ({
+      type: 'orbit-open-artifact',
+      version: ORBIT_BRIDGE_VERSION,
+      roomRevision,
+      id: artifact.id,
+      title: artifact.title,
+      kind: artifact.kind,
+      artifactVersion: artifact.version,
+      maker: artifact.makerName,
+    }),
+    'open-artifact',
   );
 }
 

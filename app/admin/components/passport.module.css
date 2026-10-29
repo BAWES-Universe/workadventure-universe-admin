@@ -47,3 +47,29 @@
 .small .stamp strong[data-long='longer'] { font-size: 9px; letter-spacing: 0; }
 .small .stamp em { margin-top: 0; font-size: 11px; }
 .cardNote { margin: 0; font-size: 12px; color: hsl(var(--muted-foreground)); }
+
+/* Your artifacts (game #1474), with the same type tiles as the game's chat cards. */
+.artifactGroup { display: grid; gap: 6px; min-width: 0; }
+.artifactHeading { margin: 6px 0 0; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: hsl(var(--muted-foreground)); }
+.artifactList { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.artifactRow { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 56px; padding: 8px; border: 0; border-radius: 14px; background: transparent; color: inherit; font: inherit; text-align: start; text-decoration: none; }
+button.artifactRow, a.artifactRow { cursor: pointer; }
+button.artifactRow:hover, a.artifactRow:hover { background: hsl(var(--foreground) / 0.05); }
+.artifactMore { display: flex; justify-content: center; padding-top: 4px; }
+.artifactTile { display: grid; place-items: center; flex: none; width: 40px; height: 40px; border-radius: 10px; color: #fff; font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+.artifactText { display: grid; flex: 1; min-width: 0; }
+.artifactText b { font-size: 14px; font-weight: 600; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.artifactText span { font-size: 12px; color: hsl(var(--muted-foreground)); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+/* Your artifacts with none yet: what they are, what you can do, what to ask. */
+.artifactEmpty { display: grid; gap: 16px; padding: 18px; border: 1px dashed hsl(var(--foreground) / 0.18); border-radius: 18px; }
+.artifactEmptyIntro { display: grid; gap: 6px; }
+.artifactEmptyIntro strong { font-size: 15px; font-weight: 600; }
+.artifactEmptyIntro span { font-size: 13px; line-height: 1.55; color: hsl(var(--muted-foreground)); }
+.artifactSample { display: flex; align-items: center; gap: 12px; max-width: 300px; padding: 8px 14px 8px 8px; border-radius: 14px; background: hsl(var(--foreground) / 0.06); border: 1px solid hsl(var(--foreground) / 0.08); }
+.artifactCan { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; font-size: 13px; }
+.artifactCan li { display: flex; align-items: center; gap: 10px; }
+.artifactCan svg { flex: none; color: hsl(var(--muted-foreground)); }
+.artifactTry { display: grid; gap: 6px; padding-top: 14px; border-top: 1px solid hsl(var(--foreground) / 0.08); }
+.artifactTry span { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: hsl(var(--muted-foreground)); }
+.artifactTry q { justify-self: start; quotes: none; padding: 9px 14px; border-radius: 16px 16px 4px 16px; background: #3b5a85; color: #fff; font-size: 13px; line-height: 1.4; }
