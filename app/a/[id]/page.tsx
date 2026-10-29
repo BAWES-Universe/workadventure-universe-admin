@@ -14,6 +14,18 @@ export const runtime = 'nodejs';
 const PRIVATE: Pick<Metadata, 'robots' | 'referrer'> = { robots: { index: false, follow: false }, referrer: 'no-referrer' };
 
 /**
+ * The tab icon: the Universe mark the game's own tab shows (the same files as the room metatags), in place of Orbit's
+ * leftover default. An artifact has no picture of its own, so every shared page, available or not, shows this one.
+ */
+const ICONS: Pick<Metadata, 'icons'> = {
+  icons: {
+    icon: { url: '/assets/favicon-trans-512x512.png', sizes: '512x512', type: 'image/png' },
+    // iPhone and iPad paint a see-through icon on black, so this one is the mark on Universe ink
+    apple: { url: '/assets/apple-touch-icon-180x180.png', sizes: '180x180' },
+  },
+};
+
+/**
  * /a/:id — the page "Anyone with the link" opens (Orbit #650, #711). No sign-in: the latest version filling the window,
  * view only, and a small floating "Made with Universe" pill. Not shared by link, run out, deleted or never there: "This
  * link is not available".
@@ -38,12 +50,13 @@ const load = cache(async (id: string): Promise<PublicView | 'gone' | 'broken'> =
 export async function generateMetadata({ params }: { params: Promise<{ id: string }> }): Promise<Metadata> {
   const { id } = await params;
   const found = await load(id);
-  if (typeof found !== 'object') return { title: 'Universe', ...PRIVATE };
+  if (typeof found !== 'object') return { title: 'Universe', ...ICONS, ...PRIVATE };
   const description = `${artifactKindName(found.kind)} by ${found.makerName}`;
   return {
     title: found.title,
     description,
     openGraph: { title: found.title, description },
+    ...ICONS,
     ...PRIVATE,
   };
 }
