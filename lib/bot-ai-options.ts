@@ -3,7 +3,7 @@ import { canManageBots, canManageThisBot } from '@/lib/bot-permissions';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import { isIfDown } from '@/lib/ai-key-health';
 import { resolveUniverseAiProvider, UNIVERSE_AI_REF } from '@/lib/universe-ai';
-import { allowedModels, keyModels, lendModels, modelFactsOf, modelSupportsVision, servedModel } from '@/lib/ai-key-model-list';
+import { allowedModels, canCallTools, keyModels, lendModels, modelFactsOf, modelSupportsVision, servedModel } from '@/lib/ai-key-model-list';
 import { getServerLimits, keyReplyLimits } from '@/lib/bot-limits';
 import type { ReplyLimits } from '@/lib/bot-limit-values';
 import { keyVisionModels, readVisionPick, usableVisionKey, type AnotherProblem, type VisionPick } from '@/lib/bot-vision';
@@ -109,13 +109,14 @@ export async function botAiOptions(input: {
     getServerLimits(),
   ]);
 
-  // Each key's models, asked of its provider (kept a few minutes), then kept to what the lend here allows
+  // Each key's models, asked of its provider (kept a few minutes), then kept to what the lend here allows and to the ones
+  // that can call tools: every bot reply offers them, so a model the provider says calls none would never reply (#706)
   const keyLists = await Promise.all(
     ownKeys.map(async (key) => {
       const lend = lendModels(key.lends[0]?.models);
       const list = await keyModels(key).catch(() => ({ ok: false as const, message: 'Its models could not be loaded. Try again.' }));
       if (!list.ok) return { lend, models: null, problem: list.message };
-      return { lend, models: allowedModels(list.models, lend).map((id) => ({ id, ...modelFactsOf(key, id) })), problem: null };
+      return { lend, models: allowedModels(list.models, lend).map((id) => ({ id, ...modelFactsOf(key, id) })).filter(canCallTools), problem: null };
     }),
   );
   const currentLend = current ? lendModels(current.lends[0]?.models) : null;

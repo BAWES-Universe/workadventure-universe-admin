@@ -27,14 +27,7 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
-
-const PROVIDER_TYPES = [
-  { value: 'lmstudio', label: 'LMStudio' },
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'anthropic', label: 'Anthropic' },
-  { value: 'ultravox', label: 'Ultravox' },
-  { value: 'gpt-voice', label: 'GPT Voice' },
-];
+import { providerTypeOptions } from '../../components/provider-state';
 
 export default function EditProviderPage({ params }: { params: Promise<{ id: string }> }) {
   const replacePage = useReplacePage();
@@ -233,7 +226,7 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {PROVIDER_TYPES.map((type) => (
+                  {providerTypeOptions(formData.type).map((type) => (
                     <SelectItem key={type.value} value={type.value}>
                       {type.label}
                     </SelectItem>

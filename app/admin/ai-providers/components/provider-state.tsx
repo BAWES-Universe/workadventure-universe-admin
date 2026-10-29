@@ -22,3 +22,12 @@ export const PROVIDER_TYPE_LABEL: Record<string, string> = {
 export function providerTypeLabel(type: string): string {
   return PROVIDER_TYPE_LABEL[type] ?? type;
 }
+
+/** The types a new provider can be: the ones the bot server speaks. Ultravox and GPT Voice are left out until it does (#704). */
+export const PROVIDER_TYPES = ['lmstudio', 'openai', 'anthropic'].map((value) => ({ value, label: providerTypeLabel(value) }));
+
+/** The types on the edit page: a saved row of a type no longer offered keeps showing it, so it can still be edited or deleted. */
+export function providerTypeOptions(current?: string): { value: string; label: string }[] {
+  if (!current || PROVIDER_TYPES.some((type) => type.value === current)) return PROVIDER_TYPES;
+  return [...PROVIDER_TYPES, { value: current, label: providerTypeLabel(current) }];
+}

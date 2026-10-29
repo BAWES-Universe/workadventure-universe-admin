@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/db';
 import { KEY_FOR_BOT_TEXT, checkKeyForBot } from '@/lib/ai-key-pay';
-import { keyModels } from '@/lib/ai-key-model-list';
+import { canCallTools, keyModels, modelFactsOf, noToolsWords } from '@/lib/ai-key-model-list';
 import { UNIVERSE_AI_MISSING, UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 
 export interface BotContext {
@@ -59,7 +59,7 @@ export async function checkAiProviderRef(
  * A bot's own model on a person's key (#575), checked when a bot is saved with `aiModel`. Leaving it out, null (the key's
  * check model) and the model the bot already has on the same key are fine. Otherwise the bot must be on a person's key,
  * the person saving must own that key (the same rule as putting the bot on the key), and the model
- * must be one the key's provider lists and the lend to the bot's universe allows.
+ * must be one the key's provider lists, says can call tools, and the lend to the bot's universe allows.
  *
  * Returns an error message for the caller to send as a 400, or null when the model is acceptable.
  */
@@ -83,6 +83,8 @@ export async function checkBotModel(
   const list = await keyModels(key);
   if (!list.ok) return list.message;
   if (!list.models.includes(model)) return 'That model isn’t on this key’s list. Pick one it has.';
+  // Every bot reply offers tools, so a model the provider says calls none would never reply (#706)
+  if (!canCallTools(modelFactsOf(key, model))) return noToolsWords(model);
   return null;
 }
 

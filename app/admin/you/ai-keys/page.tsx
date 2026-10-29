@@ -740,7 +740,8 @@ const SHOWN = 30;
 
 type ModelList = { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'failed'; message: string } | { status: 'typed' };
 
-const NO_TOOLS = 'This model has no Tools. Bots on it can still chat.';
+/** A key saved before models with no tools were refused (#706): bots on its one model never reply. */
+const NO_TOOLS = 'This model can’t use tools, so bots on it don’t reply.';
 
 /**
  * Change a saved key's address (#374). The key stays the same key, so it stays lent and its bots stay on it: a free
@@ -919,11 +920,6 @@ function EditKeySheet({
                 ))}
                 {visible.length === 0 && <p className="text-[13px] text-muted-foreground">No model matches that.</p>}
               </div>
-              {model && models.facts[model]?.tools === false && (
-                <p className="text-sm text-[#F5C451]" data-testid="no-tools-warning">
-                  {NO_TOOLS}
-                </p>
-              )}
             </>
           )}
         </div>

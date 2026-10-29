@@ -139,6 +139,12 @@ describe('checkBotModel (#575)', () => {
     await expect(checkBotModel('claude-haiku-5-5', context)).resolves.toBe('That model isn’t allowed in this universe. Pick one the key allows here.');
   });
 
+  it('refuses a model the provider says calls no tools: every bot reply offers them (#706)', async () => {
+    findUnique.mockResolvedValue({ ...key, settings: { kind: 'claude', modelFacts: { 'claude-haiku-5-5': { tools: false } } } });
+    await expect(checkBotModel('claude-haiku-5-5', context)).resolves.toBe('claude-haiku-5-5 can’t use tools, which bots need.');
+    await expect(checkBotModel('claude-opus-5-5', context)).resolves.toBeNull();
+  });
+
   it('refuses anyone but the key’s owner, and the bot server’s token', async () => {
     await expect(checkBotModel('claude-haiku-5-5', { ...context, actorId: 'manager' })).resolves.toBe('Only the key’s owner can pick its model.');
     await expect(checkBotModel('claude-haiku-5-5', { ...context, actorId: null })).resolves.toBe('Only the key’s owner can pick its model.');
