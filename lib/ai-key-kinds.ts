@@ -368,7 +368,7 @@ export function chatPath(info: AiKeyKindInfo): string {
 const PROBE_TOOL = { name: 'noop', description: 'Does nothing.', schema: { type: 'object', properties: { note: { type: 'string', description: 'Not used.' } } } };
 
 /** The smallest chat call that gets one reply, in the provider's own format. */
-export function chatProbeBody(info: AiKeyKindInfo, model: string, options: { withTool?: boolean } = {}): Record<string, unknown> {
+export function chatProbeBody(info: Pick<AiKeyKindInfo, 'protocol' | 'tokenLimitField'>, model: string, options: { withTool?: boolean } = {}): Record<string, unknown> {
   if (info.protocol === 'anthropic') {
     return {
       model,
