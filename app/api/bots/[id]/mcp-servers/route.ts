@@ -239,6 +239,9 @@ export async function GET(
             oauthReconnectRequired: !!oauthReconnectReason,
             oauthReconnectReason,
             enabled: s.enabled,
+            // A server that existed before its tools were checked keeps working in text, and reads Not checked yet (#738)
+            notCheckedYet: s.legacyText === true,
+            policyRevision: s.policyRevision ?? 1,
             headers: s.headers,
             lastTestedAt: s.lastTestedAt,
             lastTestResult: s.lastTestResult,
