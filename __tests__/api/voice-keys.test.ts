@@ -15,11 +15,14 @@ import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { prisma } from '@/lib/db';
+import { BotSettingsError } from '@/lib/bot-access-settings';
 import { decryptApiKey } from '@/lib/encryption';
+import { effectiveBotVoice } from '@/lib/bot-voice';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: jest.fn() }));
+jest.mock('@/lib/bot-voice', () => ({ effectiveBotVoice: jest.fn() }));
 jest.mock('@/lib/ai-key-lend', () => ({ ...jest.requireActual('@/lib/ai-key-lend'), lendAccess: jest.fn() }));
 jest.mock('@/lib/db', () => ({
   prisma: {
@@ -267,5 +270,40 @@ describe('the server’s own voice providers', () => {
     expect((await getAdmin(new NextRequest('http://localhost:3333/api/x'), context)).status).toBe(404);
     const served = await credentials(new NextRequest('http://localhost:3333/api/x', { headers: { Authorization: 'Bearer service-secret' } }), context);
     expect(served.status).toBe(404);
+  });
+});
+
+describe('a lent key’s credentials', () => {
+  const ask = (query = '') =>
+    credentials(new NextRequest(`http://localhost:3333/api/voice/providers/k1/credentials${query}`, { headers: { Authorization: 'Bearer service-secret' } }), {
+      params: Promise.resolve({ id: 'k1' }),
+    });
+  const speaking = (providerId: string, speaks = true) =>
+    (effectiveBotVoice as jest.Mock).mockResolvedValue({
+      speaks,
+      reason: speaks ? null : 'provider',
+      profile: speaks ? { recognition: { providerId: 'ears', model: 'n' }, speech: { providerId, model: 'flash', voiceId: 'v' } } : null,
+    });
+
+  beforeEach(() => db.voiceProvider.findUnique.mockResolvedValue(key()));
+
+  it('go to the bot server for a bot that speaks with the key, still encrypted', async () => {
+    speaking('k1');
+    const response = await ask('?botId=bot-1');
+    expect(response.status).toBe(200);
+    expect(effectiveBotVoice).toHaveBeenCalledWith('bot-1');
+    const body = await response.json();
+    expect(body.apiKeyEncrypted).toBe('iv:tag:data');
+    expect(body).not.toHaveProperty('ownerId');
+  });
+
+  it.each([
+    ['no bot is named', '', () => speaking('k1')],
+    ['the bot speaks with another provider', '?botId=bot-1', () => speaking('other')],
+    ['the bot is resting in text', '?botId=bot-1', () => speaking('k1', false)],
+    ['the bot is not there', '?botId=gone', () => (effectiveBotVoice as jest.Mock).mockRejectedValue(new BotSettingsError(404, 'Bot not found'))],
+  ])('are not served when %s', async (_name, query, arrange) => {
+    arrange();
+    expect((await ask(query)).status).toBe(404);
   });
 });

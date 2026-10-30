@@ -4,8 +4,18 @@ A bot's voice: on or off, a draft voice profile, and published revisions of it. 
 (`VOICE_PROVIDERS_API.md`) and the universe's "Allow voice bots here" (`VOICE_API.md`). Nothing here calls a provider.
 
 Voice is **off** until a person with Manage bots turns it on. A bot speaks with the **revision** named in `bots.voice_revision`:
-publishing makes a new revision and rolling back names an earlier one, so a published revision never changes. Every provider
-is one a super admin runs, so Universe AI pays (`paidBy: "universe-ai"`); the person talking never does.
+publishing makes a new revision and rolling back names an earlier one, so a published revision never changes. A provider is
+one a super admin runs, so Universe AI pays, or a key the bot's maker lent to its universe (`VOICE_KEYS_API.md`, #749), so the
+maker pays; the person talking never does.
+
+**Who pays.** `paidBy` is `"universe-ai"`, `"owner"` (both parts on lent keys) or `"mixed"`, and `parts` says it for each
+part: `{ recognition, speech }`, each `"universe-ai"` or `"owner"`. It describes the revision the bot speaks with.
+
+**A lent key.** A profile may name a key only when the bot's maker owns it, has lent it to the bot's universe with the model
+(a lend can allow only some of the key's models), and still owns that universe or has Manage bots in it. Anything else reads
+as a provider that does not exist (409 on publish and roll back). The key is never used on anyone else's bot. When it stops
+being usable later (pulled, deleted, a model taken off, its owner no longer able to manage bots there) the bot carries on in
+text only: `speaks` is `false` and `reason` is `provider`, and it speaks again by itself when the key is back.
 
 A profile:
 
@@ -25,7 +35,7 @@ starts at `natural` and `language` at `follow`.
 
 | Route | What it does |
 | --- | --- |
-| `GET /api/bots/:id/voice` | `{ enabled, universeAllows, paidBy, revision, draft: { profile, updatedAt }, revisions: [{ number, profile, note, publishedById, publishedAt }] }`, revisions newest first |
+| `GET /api/bots/:id/voice` | `{ enabled, universeAllows, paidBy, parts, revision, draft: { profile, updatedAt }, revisions: [{ number, profile, note, publishedById, publishedAt }], lentKeys }`, revisions newest first. `lentKeys` are the keys the bot's maker lent to its universe that the profile may name: `[{ id, adapter, name, recognition, speech, last4, models }]`, `models` only the ones the lend allows, never the key |
 | `PUT /api/bots/:id/voice` `{ enabled }` | Voice on or off. On needs the universe to allow it and a published profile whose providers work now (409); off always works |
 | `PUT /api/bots/:id/voice/draft` | Saves the draft profile in place of the one there |
 | `POST /api/bots/:id/voice/publish` `{ note? }` | Publishes the draft as the next revision. 400 when it is not finished; 409 when a provider is off, has no key, does not do that job or does not list the model |
@@ -35,6 +45,9 @@ All answer with the same body as `GET`.
 
 ## Bot server (service token)
 
-`GET /api/bots/:id/voice/active` gives `{ speaks, reason, paidBy, revision, profile }`. `reason` is `null` when the bot speaks,
+`GET /api/bots/:id/voice/active` gives `{ speaks, reason, paidBy, parts, revision, profile }`. `reason` is `null` when the bot speaks,
 and otherwise `off`, `universe`, `no-profile` or `provider`. Read before each spoken turn: turning a provider or the universe's
 switch off stops the bot at once, and a session keeps the `revision` it started with.
+
+A lent key's credentials: `GET /api/voice/providers/:id/credentials?botId=…` (`VOICE_PROVIDERS_API.md`) serves the key, still
+encrypted, only while that bot speaks with it. Without `botId`, or for any other bot, it is a 404.
