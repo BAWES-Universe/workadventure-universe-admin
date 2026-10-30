@@ -7,6 +7,7 @@ import { isSuperAdmin } from '@/lib/super-admin';
 import { parsePlayUri } from '@/lib/utils';
 import { validateAccessToken } from '@/lib/oidc';
 import { resolveRoomIdFromPlayUri, transformBotToServerFormat } from '@/lib/bot-config-helpers';
+import { startWithToolCallsOn } from '@/lib/bot-tool-call-default';
 import { checkAiProviderRef } from '@/lib/ai-provider-ref';
 import { checkConfigVision, dropOthersVisionKey } from '@/lib/bot-vision';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
@@ -571,6 +572,7 @@ export async function POST(request: NextRequest) {
       bot = await prisma.bot.create({
         data: {
           ...data,
+          behaviorConfig: startWithToolCallsOn(data.behaviorConfig),
           createdById: userId ?? null,
         },
         include: {
