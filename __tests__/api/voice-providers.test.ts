@@ -46,6 +46,7 @@ const row = (changes: Record<string, unknown> = {}) => ({
   defaultRecognition: false,
   defaultSpeech: false,
   createdById: 'u-root',
+  ownerId: null,
   createdAt: new Date('2026-10-30T10:00:00Z'),
   updatedAt: new Date('2026-10-30T10:00:00Z'),
   ...changes,
@@ -190,7 +191,7 @@ describe('what the bot server reads', () => {
     db.findMany.mockResolvedValue([row({ defaultSpeech: true }), row({ id: 'p2', name: 'Deepgram', speech: false, defaultRecognition: true })]);
     const response = await listServed(new NextRequest('http://localhost:3333/api/x', { headers: asGame }));
     expect(response.status).toBe(200);
-    expect(db.findMany.mock.calls[0][0].where).toEqual({ enabled: true });
+    expect(db.findMany.mock.calls[0][0].where).toEqual({ enabled: true, ownerId: null });
     const body = await response.json();
     expect(body.defaults).toEqual({ recognition: 'p2', speech: 'p1' });
     expect(body.providers.map((p: { id: string }) => p.id)).toEqual(['p1', 'p2']);

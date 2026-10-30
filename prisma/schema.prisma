@@ -32,6 +32,7 @@ model User {
   reportsHandled    Report[]          @relation("ReportHandledBy")
   avatars           UserAvatar[]
   aiKeys            BotsAiProvider[]  @relation("AiKeyOwner")
+  voiceKeys         VoiceProvider[]   @relation("VoiceKeyOwner")
   outfits           UserOutfit[]
   favorites         Favorite[]
   followers         Follow[]          @relation("Follower")
@@ -272,6 +273,7 @@ model Universe {
   members    UniverseMember[]
   membershipInvitations MembershipInvitation[]
   aiKeyLends AiKeyLend[]
+  voiceKeyLends VoiceKeyLend[]
 
   @@map("universes")
 }
@@ -1601,11 +1603,36 @@ model VoiceProvider {
   defaultRecognition Boolean  @default(false) @map("default_recognition")
   defaultSpeech      Boolean  @default(false) @map("default_speech")
   createdById        String?  @map("created_by_id")
+  // Whose key this is (#749). Null = a provider the super admin runs for the whole server, which is every row there was before
+  // personal voice keys. Anything that lists or reads providers for the server must keep only ownerId = null.
+  ownerId            String?  @map("owner_id")
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 
+  owner User?           @relation("VoiceKeyOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  lends VoiceKeyLend[]
+
   @@index([enabled])
+  @@index([ownerId])
   @@map("voice_providers")
+}
+
+// A person's voice key lent to a universe (#749): bots made there by the key's owner may speak or listen with it, and nobody
+// else's may. Lending moves no bot; each bot is pointed at the key by its maker in its voice profile. `models` says which of
+// the key's models bots there may use, as "kind:id" (e.g. "speech:eleven_flash_v2_5"), or null for all of them.
+model VoiceKeyLend {
+  id         String   @id @default(uuid())
+  providerId String   @map("provider_id")
+  universeId String   @map("universe_id")
+  lentAt     DateTime @default(now()) @map("lent_at")
+  models     Json?
+
+  provider VoiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  universe Universe      @relation(fields: [universeId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, universeId])
+  @@index([universeId])
+  @@map("voice_key_lends")
 }
 
 // A bot's voice profile (#740). The draft is what a person is editing; a published revision never changes. A bot speaks with

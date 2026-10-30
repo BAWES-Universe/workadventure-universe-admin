@@ -16,7 +16,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   try {
     requireServiceToken(request);
     const row = await prisma.voiceProvider.findUnique({ where: { id: (await params).id } });
-    if (!row) return NextResponse.json({ error: 'Provider not found' }, { status: 404 });
+    // A key a person added (#749) is served only once a bot's voice is published with it
+    if (!row || row.ownerId !== null) return NextResponse.json({ error: 'Provider not found' }, { status: 404 });
     if (!row.enabled) return NextResponse.json({ error: 'Provider is not enabled' }, { status: 400 });
     if (!row.apiKeyEncrypted) return NextResponse.json({ error: 'Provider has no key' }, { status: 400 });
     return NextResponse.json(
