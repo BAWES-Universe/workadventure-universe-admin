@@ -798,6 +798,8 @@ model Bot {
   replyLimitHits BotReplyLimitHit[]
   files          BotFile[]
   fileCounter    BotFileCounter?
+  actionRequests BotActionRequest[]
+  actionGrants   BotActionGrant[]
 
   @@index([roomId])
   @@map("bots")
@@ -1401,4 +1403,121 @@ model AvatarSetAuditLog {
   @@index([actorId, createdAt])
   @@index([createdAt])
   @@map("avatar_set_audit_logs")
+}
+
+// A bot action that waits for a tap, kept so the tap runs it once, survives a restart and never runs twice (#739).
+// Redis may carry notices about it but is never the record. Status: waiting | approved | running | done | failed |
+// couldntConfirm | closed (with closedReason: declined | superseded | expired | stale | cancelled | revoked). Every change
+// is a conditional update on the status and revision the caller saw, so one tap wins. The tap names only this row's id and
+// revision, never new content: `arguments` is what was shown and what runs.
+model BotActionRequest {
+  id              String    @id @default(uuid())
+  botId           String    @map("bot_id")
+  // The bot server's own key for this request (its job, turn and tool call), so a retried save does not make a second card.
+  proposalKey     String    @map("proposal_key") @db.VarChar(200)
+  // Who asked, as the bot server authenticated them (the signed-in account, or the guest's server session), and which
+  // conversation (the bubble or the direct-message thread) the card is in. Only the asker's tap counts.
+  requesterKey    String    @map("requester_key") @db.VarChar(400)
+  conversationKey String    @map("conversation_key") @db.VarChar(400)
+  connectionRef   String?   @map("connection_ref") @db.VarChar(200)
+  toolName        String    @map("tool_name") @db.VarChar(255)
+  // makesNew | changesThings | deletesOrSends | looksUp: the heading the tool was confirmed under
+  heading         String    @db.VarChar(20)
+  toolFingerprint String    @map("tool_fingerprint") @db.VarChar(128)
+  policyRevision  Int       @map("policy_revision")
+  // The exact approved arguments as JSON, encrypted like a key, and a digest of them for comparing.
+  arguments       String    @db.Text
+  argumentsDigest String    @map("arguments_digest") @db.VarChar(64)
+  // What "allow more" would remember if tapped, fixed by the bot server when it makes the card; null = not offered.
+  rememberScope   Json?     @map("remember_scope")
+  status          String    @default("waiting") @db.VarChar(20)
+  closedReason    String?   @map("closed_reason") @db.VarChar(20)
+  // Goes up with every change; a tap carries the one it saw.
+  revision        Int       @default(1)
+  // The card stops waiting here (server clock).
+  reviewExpiresAt DateTime  @map("review_expires_at")
+  approvedAt      DateTime? @map("approved_at")
+  // An approved action must be claimed by here or it needs a fresh card.
+  startBy         DateTime? @map("start_by")
+  finishedAt      DateTime? @map("finished_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  bot       Bot                  @relation(fields: [botId], references: [id], onDelete: Cascade)
+  decisions BotActionDecision[]
+  attempts  BotActionAttempt[]
+
+  @@unique([botId, proposalKey])
+  @@index([botId, conversationKey, status])
+  @@index([status, reviewExpiresAt])
+  @@map("bot_action_requests")
+}
+
+// What happened to a request, in order: who decided what, and what closed or moved it. No card text.
+model BotActionDecision {
+  id           String   @id @default(uuid())
+  requestId    String   @map("request_id")
+  // approve | approveAndRemember | decline | supersede | expire | stale | cancel | revoke | claim | reconcile
+  event        String   @db.VarChar(24)
+  actorKey     String?  @map("actor_key") @db.VarChar(400)
+  fromRevision Int      @map("from_revision")
+  toRevision   Int      @map("to_revision")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  request BotActionRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId])
+  @@map("bot_action_decisions")
+}
+
+// One try to run an approved request. state: claimed | succeeded | failed | notSent | uncertain. At most one attempt per
+// request is claimed at a time (a unique index in the migration). An uncertain attempt is never sent again by itself.
+model BotActionAttempt {
+  id                String    @id @default(uuid())
+  requestId         String    @map("request_id")
+  attemptNo         Int       @map("attempt_no")
+  state             String    @default("claimed") @db.VarChar(16)
+  // The same for every attempt of a request, for destinations that deduplicate.
+  idempotencyKey    String    @map("idempotency_key") @db.VarChar(100)
+  providerRequestId String?   @map("provider_request_id") @db.VarChar(200)
+  // A short word for the result or error class, never the content.
+  outcomeClass      String?   @map("outcome_class") @db.VarChar(60)
+  claimedAt         DateTime  @default(now()) @map("claimed_at")
+  leaseExpiresAt    DateTime  @map("lease_expires_at")
+  finishedAt        DateTime? @map("finished_at")
+
+  request BotActionRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@unique([requestId, attemptNo])
+  @@map("bot_action_attempts")
+}
+
+// A remembered approval (#739): "Create, and allow more WEB issues in this chat". Bound to the asker, the bot, the
+// conversation, the connection, the reviewed tool and its policy revision, with the arguments that stay fixed and the
+// fields that may vary. Never for deletes or sends. It ends after idleMinutes without the asker's messages, absoluteMinutes
+// at most, or when revoked.
+model BotActionGrant {
+  id               String    @id @default(uuid())
+  botId            String    @map("bot_id")
+  requesterKey     String    @map("requester_key") @db.VarChar(400)
+  conversationKey  String    @map("conversation_key") @db.VarChar(400)
+  connectionRef    String?   @map("connection_ref") @db.VarChar(200)
+  toolName         String    @map("tool_name") @db.VarChar(255)
+  heading          String    @db.VarChar(20)
+  toolFingerprint  String    @map("tool_fingerprint") @db.VarChar(128)
+  policyRevision   Int       @map("policy_revision")
+  // { fixed: { field: value }, varies: [field] }
+  scope            Json
+  fromRequestId    String?   @map("from_request_id") @db.VarChar(100)
+  idleMinutes      Int       @map("idle_minutes")
+  idleExpiresAt    DateTime  @map("idle_expires_at")
+  absoluteExpiresAt DateTime @map("absolute_expires_at")
+  revokedAt        DateTime? @map("revoked_at")
+  revokedReason    String?   @map("revoked_reason") @db.VarChar(40)
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@index([botId, requesterKey, conversationKey])
+  @@map("bot_action_grants")
 }
