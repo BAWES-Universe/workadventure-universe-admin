@@ -10,6 +10,7 @@ import { checkAiProviderRef, checkBotModel } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { mayReadRoomBots } from '@/lib/bot-room-access';
 import { checkConfigVision } from '@/lib/bot-vision';
+import { startWithToolCallsOn } from '@/lib/bot-tool-call-default';
 import { corsHeaders } from '@/lib/cors';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
@@ -524,7 +525,7 @@ export async function POST(request: NextRequest) {
         characterTextureId: validatedData.characterTextureId ?? null,
         enabled: validatedData.enabled ?? true,
         behaviorType: validatedData.behaviorType,
-        behaviorConfig: validatedData.behaviorConfig ?? {},
+        behaviorConfig: startWithToolCallsOn(validatedData.behaviorConfig ?? {}),
         chatInstructions: validatedData.chatInstructions ?? null,
         movementInstructions: validatedData.movementInstructions ?? null,
         aiProviderRef: validatedData.aiProviderRef ?? null,
