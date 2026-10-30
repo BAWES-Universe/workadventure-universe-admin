@@ -137,6 +137,40 @@ curl -X POST \
      30; default 10). GET also takes `ADMIN_API_TOKEN`.
    - Moving, confirming and every setting need Manage bots (403 without it, 401 when not signed in, 404 for no such bot).
 
+10. **Saved bot actions** (#739): a record for each action that waits for a tap
+    - For the bot server and the game only: every route takes `BOT_SERVICE_TOKEN` (the same as the access check). The
+      bot server authenticates the person (the signed-in account, or the guest's server session) and passes who it was as
+      `requesterKey` / `actorKey`; Orbit stores and compares those, it does not look people up.
+    - **POST /api/bots/:id/actions** saves a request: `{ proposalKey, requesterKey, conversationKey, connectionRef?,
+      toolName, heading, toolFingerprint, policyRevision, arguments, rememberScope?: { fixed, varies }, reviewMinutes? }`.
+      The arguments are stored once, encrypted, exactly as shown, and are what runs. The same `proposalKey` again returns
+      the request already saved (200); the same key with other content is a 409. `rememberScope` is what "allow more" would
+      remember and is refused for `deletesOrSends`. **GET .../actions/:actionId** reads it (a card past its time, or an
+      approval nobody started, is closed first).
+    - States: `waiting`, `approved`, `running`, `done`, `failed`, `couldntConfirm`, `closed` (with `closedReason`:
+      `declined`, `superseded`, `expired`, `stale`, `cancelled`, `revoked`). Every change is one conditional update on the
+      status and `revision` the caller saw, so one tap wins; each change goes in the decision log (no card text).
+    - **POST .../:actionId/decision** is the tap: `{ actorKey, revision, decision: "approve" | "approveAndRemember" |
+      "decline" }` and nothing else. Only the asker may decide (403 `not_requester`). 200 when this tap won; 409 with
+      `outcome: "already_decided" | "expired"` and the action as it is now when another tap, a replacement or the clock got
+      there first (a double tap, a second device). An approval must be claimed within 30 seconds (`startWithinSeconds`).
+    - **POST .../:actionId/claim** gives one dispatcher the one go at running an approved action (`{ claimed: true,
+      attemptId, idempotencyKey }`), or a 409 `{ claimed: false, reason }`: `stale` after the start window, or the state it
+      is already in. **POST .../finish** says how the attempt ended: `succeeded` (done), `failed` (failed), `notSent` (back
+      to approved while the window lasts) or `uncertain` (**couldn't confirm: never claimed again by itself**).
+      **POST .../reconcile** records what was found at the destination for a couldn't-confirm action (`succeeded` or
+      `failed`). **POST /api/bots/:id/actions/sweep** closes expired cards and stale approvals, and turns a run whose claim
+      ran out (its dispatcher died) into couldn't confirm.
+    - **POST /api/bots/:id/actions/supersede** closes the asker's waiting (or approved-not-started) actions in one
+      conversation when they send a replacement instruction.
+    - Remembered approvals: **POST /api/bots/:id/action-grants/find** (is this call covered: same asker, conversation,
+      connection, reviewed tool, policy revision and heading, inside the idle and absolute time, arguments fit; never for
+      deletes or sends), **/touch** (the asker's own message renews the idle time, never past the absolute end) and
+      **/revoke** (ask again, signed out, connection or policy changed, lost permission, left).
+    - Defaults, each passable per call: a card waits 10 minutes (a bot's "A card waits" setting, #738), start within 30
+      seconds, a claim lasts 120 seconds, a remembered approval ends after 60 minutes idle or 480 minutes at most.
+
+
 ### Files Created/Modified
 
 **New Files:**
