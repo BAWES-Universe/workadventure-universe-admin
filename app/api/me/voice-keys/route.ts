@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
-import { VOICE_KEY_COMPANIES, VoiceKeyRefused, createVoiceKey, createVoiceKeySchema, listVoiceKeys } from '@/lib/voice-keys';
+import { VoiceKeyRefused, createVoiceKey, createVoiceKeySchema, listVoiceKeys, voiceKeyCompanies } from '@/lib/voice-keys';
 
 export const runtime = 'nodejs';
 
@@ -13,14 +13,14 @@ export async function OPTIONS(request: NextRequest) {
 
 /**
  * GET /api/me/voice-keys - the caller's own voice keys (#749), never the key itself (only its last four characters), with
- * the universes each is lent to; and the speech companies a key can be added for.
+ * the universes each is lent to; and the speech companies a key can be added for: the adapters of the server's own voice providers that are on.
  */
 export async function GET(request: NextRequest) {
   if (!meOriginAllowed(request)) return respond(request, { error: 'Origin not allowed' }, 403);
   const user = await getSessionUser(request);
   if (!user) return respond(request, { error: 'Unauthorized' }, 401);
   try {
-    return respond(request, { keys: await listVoiceKeys(user.id), companies: VOICE_KEY_COMPANIES });
+    return respond(request, { keys: await listVoiceKeys(user.id), companies: await voiceKeyCompanies() });
   } catch (error) {
     console.error('[VoiceKeys] Could not list the keys:', error instanceof Error ? error.message : 'unknown');
     return respond(request, { error: 'Internal server error' }, 500);

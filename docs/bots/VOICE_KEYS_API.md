@@ -18,8 +18,8 @@ A key someone owns is on from the start, is never a default, and is deleted with
 
 | Route | What it does |
 | --- | --- |
-| `GET /api/me/voice-keys` | `{ keys, companies }`: the caller's keys, and the speech companies a key can be added for (`[{ adapter, label }]`) |
-| `POST /api/me/voice-keys` | `{ adapter, name?, recognition?, speech?, apiKey, models? }`. The key listens, speaks or both. 201 with `{ key }` |
+| `GET /api/me/voice-keys` | `{ keys, companies }`: the caller's keys, and the speech companies a key can be added for (`[{ adapter, label, recognition, speech }]`): the adapters of the server's own voice providers that are on, so a super admin decides what Universe supports |
+| `POST /api/me/voice-keys` | `{ adapter, name?, recognition?, speech?, apiKey, models? }`. `adapter` is one of `companies`, and the key can only do what that company does. The key listens, speaks or both. 201 with `{ key }` |
 | `PATCH /api/me/voice-keys/:id` | Changes only what is named: `name`, `apiKey` (replaces the saved one), `models`. A model taken off the key is taken off every lend that named it; a lend left with none goes back to all of the key's |
 | `DELETE /api/me/voice-keys/:id` | Takes the key away with every lend of it |
 | `POST /api/me/voice-keys/:id/lend` | `{ universeId, models? }`. Needs the universe's owner, or Manage bots in it (the universes come from `GET /api/me/ai-keys/universes`). `models`: `null` = all of the key's, a list of `"kind:id"` = only these (each on the key's list), left out = as it is (all, for a new lend). Lending again is fine |

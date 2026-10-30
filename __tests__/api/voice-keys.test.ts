@@ -64,6 +64,13 @@ const key = (changes: Record<string, unknown> = {}) => ({
   lends: [] as unknown[],
   ...changes,
 });
+// The server's own providers that are on: what companies a key can be added for
+const serverProviders = [
+  { adapter: 'elevenlabs', name: 'ElevenLabs', recognition: true, speech: true },
+  { adapter: 'deepgram', name: 'Deepgram', recognition: true, speech: false },
+];
+const withProviders = (keys: unknown[] = []) =>
+  db.voiceProvider.findMany.mockImplementation(async ({ where }: { where: { ownerId: unknown } }) => (where.ownerId === null ? serverProviders : keys));
 const lent = (models: string[] | null = null) => ({ models, universe: { id: 'uni1', name: 'Sales', ownerId: 'u-ana' } });
 
 beforeEach(() => {
@@ -73,6 +80,7 @@ beforeEach(() => {
   (isSuperAdmin as jest.Mock).mockImplementation((email?: string | null) => email === 'root@example.com');
   db.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(prisma));
   session.mockResolvedValue(ana);
+  withProviders();
 });
 
 describe('voice keys are for signed-in people', () => {
@@ -94,6 +102,7 @@ describe('voice keys are for signed-in people', () => {
 
 describe('adding a key', () => {
   it('saves it encrypted for its owner, on, and never a default', async () => {
+    withProviders();
     db.voiceProvider.create.mockImplementation(async ({ data }) => key({ ...data, id: 'k1', createdAt: new Date('2026-10-31T10:00:00Z'), lends: [] }));
     const response = await call(create, 'POST', {
       adapter: 'elevenlabs',
@@ -114,27 +123,32 @@ describe('adding a key', () => {
 
   it.each([
     ['a company that isn’t on the list', { adapter: 'unknown-co', speech: true, apiKey: 'sk-secret-key-9f2a' }],
+    ['a job the company doesn’t do', { adapter: 'deepgram', speech: true, apiKey: 'sk-secret-key-9f2a' }],
     ['a key that does nothing', { adapter: 'elevenlabs', apiKey: 'sk-secret-key-9f2a' }],
     ['a key that is too short', { adapter: 'elevenlabs', speech: true, apiKey: 'short' }],
     ['a model for a job the key doesn’t do', { adapter: 'elevenlabs', speech: true, apiKey: 'sk-secret-key-9f2a', models: [{ id: 'a', kind: 'recognition' }] }],
     ['a field it doesn’t know (an endpoint, a default)', { adapter: 'elevenlabs', speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://x.example.com' }],
     ['a default', { adapter: 'elevenlabs', speech: true, apiKey: 'sk-secret-key-9f2a', defaultSpeech: true }],
   ])('refuses %s', async (_name, body) => {
+    withProviders();
     expect((await call(create, 'POST', body)).status).toBe(400);
     expect(db.voiceProvider.create).not.toHaveBeenCalled();
   });
 });
 
 describe('the list', () => {
-  it('is the caller’s own keys with where each is lent, and the companies', async () => {
-    db.voiceProvider.findMany.mockResolvedValue([key({ lends: [lent(['speech:flash'])] })]);
+  it('is the caller’s own keys with where each is lent, and the companies the server’s providers cover', async () => {
+    withProviders([key({ lends: [lent(['speech:flash'])] })]);
     const response = await list(new NextRequest('http://localhost:3333/api/x'));
-    expect(db.voiceProvider.findMany.mock.calls[0][0].where).toEqual({ ownerId: 'u-ana' });
+    expect(db.voiceProvider.findMany.mock.calls.map(([arg]) => arg.where)).toContainEqual({ ownerId: 'u-ana' });
     const body = await response.json();
     expect(body.keys).toEqual([
       expect.objectContaining({ id: 'k1', company: 'ElevenLabs', last4: '9f2a', lentTo: [{ universeId: 'uni1', universeName: 'Sales', ownedByYou: true, models: ['speech:flash'] }] }),
     ]);
-    expect(body.companies.map((c: { adapter: string }) => c.adapter)).toEqual(['elevenlabs', 'deepgram', 'cartesia']);
+    expect(body.companies).toEqual([
+      { adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: false },
+      { adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true },
+    ]);
     expect(JSON.stringify(body)).not.toContain('apiKeyEncrypted');
   });
 });
