@@ -292,7 +292,11 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
   if (profileProblem(parsed.data, providers, lent)) return result('provider', revision.number);
   if (!options.ignoreKeyHealth) {
     const ids = [...new Set([parsed.data.recognition.providerId, parsed.data.speech.providerId])];
-    const down = ids.map((id) => providers.get(id)).filter((row): row is VoiceProvider => Boolean(row?.ownerId !== null && row?.downSince));
+    // A key that went Down on one job holds back only a bot that uses it for that job
+    const usedFor = (id: string) => (['recognition', 'speech'] as const).filter((part) => parsed.data[part].providerId === id);
+    const down = ids
+      .map((id) => providers.get(id))
+      .filter((row): row is VoiceProvider => Boolean(row && row.ownerId !== null && row.downSince && (!row.downPart || usedFor(row.id).includes(row.downPart as 'recognition' | 'speech'))));
     if (down.length > 0) {
       // Each Down key gets one try per wait. Nothing is claimed unless every Down key can be tried, so a key whose wait
       // is not over does not use up the wait of the other
