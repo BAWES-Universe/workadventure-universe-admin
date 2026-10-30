@@ -794,6 +794,10 @@ model Bot {
   askBeforeMaking     Int?     @default(5) @map("ask_before_making")
   askWhichWay         String   @default("rarely") @map("ask_which_way") @db.VarChar(20)
   cardWaitMinutes     Int      @default(10) @map("card_wait_minutes")
+  // Voice (#740): off until a person with Manage bots turns it on. voiceRevision is the published voice profile the bot
+  // speaks with (BotVoiceRevision.number); null until one is published.
+  voiceEnabled        Boolean  @default(false) @map("voice_enabled")
+  voiceRevision       Int?     @map("voice_revision")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")
@@ -809,6 +813,8 @@ model Bot {
   fileCounter    BotFileCounter?
   actionRequests BotActionRequest[]
   actionGrants   BotActionGrant[]
+  voiceDraft     BotVoiceDraft?
+  voiceRevisions BotVoiceRevision[]
 
   @@index([roomId])
   @@map("bots")
@@ -1600,4 +1606,33 @@ model VoiceProvider {
 
   @@index([enabled])
   @@map("voice_providers")
+}
+
+// A bot's voice profile (#740). The draft is what a person is editing; a published revision never changes. A bot speaks with
+// the revision named in bots.voice_revision, so publishing and rolling back only move that number.
+model BotVoiceDraft {
+  botId       String   @id @map("bot_id")
+  profile     Json     @default("{}")
+  updatedById String?  @map("updated_by_id")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@map("bot_voice_drafts")
+}
+
+model BotVoiceRevision {
+  id            String   @id @default(uuid())
+  botId         String   @map("bot_id")
+  // 1, 2, 3 ... for this bot
+  number        Int
+  profile       Json
+  note          String?  @db.VarChar(500)
+  publishedById String?  @map("published_by_id")
+  publishedAt   DateTime @default(now()) @map("published_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@unique([botId, number])
+  @@map("bot_voice_revisions")
 }
