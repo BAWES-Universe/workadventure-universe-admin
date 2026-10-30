@@ -83,7 +83,8 @@ curl -X POST \
      (bit 17) and Have bots delete or send (bit 18) in the same Bots group, read in the bot's world, then the person's
      and roles' rows as below. Defaults: Admin and Editor both, Member change only, Everyone and custom roles neither.
      Private bot does not apply to them (it decides who may use the bot at all), and the bot's creator, the owner of its
-     universe, super admins and Admin always pass.
+     universe, super admins and Admin always pass. A no for them carries `code: "not_allowed"` and `reason: null`: there is
+     no line to show as it is, the bot words its own refusal.
    - Decided by the permissions Chat with bots nearby, DM bots and Summon bots (Roles & permissions, Bots group),
      read in the bot's world. Everyone has all three, so by default every bot works as it always has, guests included.
      A private chat also needs sign-in and a room the person may see. The bot's creator, the owner of its universe,

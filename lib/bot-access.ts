@@ -10,7 +10,8 @@ import { bansCoveringWorld } from '@/lib/moderation';
 /**
  * Can this person do this with this bot? (#426) What people do with a bot: chat in its bubble on the map, send it
  * direct messages, or summon it; and (#737) having it change things, or delete or send. The bot server and the game ask
- * this with the service token before they let it happen, and show `reason` when the answer is no.
+ * this with the service token before they let it happen, and show `reason` when the answer is no (null for having a bot
+ * change things, or delete or send: the code says no, and the caller words it).
  *
  * The answer comes from the role permissions in the bot's world (the same number the game gets, see permissionsForWorld),
  * then the bot's own rules (#427), in this order: its creator, the universe owner, super admins and Admin always pass;
@@ -48,7 +49,7 @@ export type BotAccessCode =
 export interface BotAccessAnswer {
   allowed: boolean;
   code: BotAccessCode;
-  /** A line the game can show as it is. Null when allowed. */
+  /** A line the game can show as it is. Null when allowed, and for a refused change, delete or send. */
   reason: string | null;
   /** The owner's own line for people who may not chat with the bot, only on a refused chat when the owner wrote one. */
   reply?: string;
@@ -69,8 +70,8 @@ function refusal(
 ): BotAccessAnswer {
   if (code === 'sign_in_required') return { allowed: false, code, reason: `Sign in to message ${botName}.` };
   if (action === 'summon') return { allowed: false, code, reason: `${botName}'s owner limits who can summon it.` };
-  if (action === 'change') return { allowed: false, code, reason: `You can't have ${botName} change things here.` };
-  if (action === 'deleteOrSend') return { allowed: false, code, reason: `You can't have ${botName} delete or send things here.` };
+  // Having a bot change things, or delete or send, has no line of its own: the caller (the bot) words its own refusal
+  if (action === 'change' || action === 'deleteOrSend') return { allowed: false, code, reason: null };
   if (action === 'chat') {
     const reason = `${botName}'s owner limits who can chat with it.`;
     return fixedReply ? { allowed: false, code, reason, reply: fixedReply } : { allowed: false, code, reason };

@@ -412,13 +412,8 @@ describe('having a bot change things, or delete or send (#737)', () => {
     for (const action of both) expect((await ask(action, signedIn(USERS.sara)))!.allowed).toBe(false);
   });
 
-  it('refuses each with its own line', async () => {
-    expect(await ask('change', GUEST)).toEqual({ allowed: false, code: 'not_allowed', reason: "You can't have Nora change things here." });
-    expect(await ask('deleteOrSend', GUEST)).toEqual({
-      allowed: false,
-      code: 'not_allowed',
-      reason: "You can't have Nora delete or send things here.",
-    });
+  it('refuses with the code only: it has no line of its own for the caller to show', async () => {
+    for (const action of both) expect(await ask(action, GUEST)).toEqual({ allowed: false, code: 'not_allowed', reason: null });
   });
 
   it('the bot’s creator, the universe owner and a super admin always pass', async () => {
