@@ -257,6 +257,8 @@ model Universe {
   // Hide bot conversations (#435): Orbit shows no transcript or bot memory text for any bot here, and the bot server
   // sends none to PostHog or Sentry. Bots still remember people either way. Off by default.
   hideBotConversations Boolean @default(false) @map("hide_bot_conversations")
+  // Allow voice bots here (#740): a bot can only speak and listen in this universe while it is on.
+  allowVoiceBots Boolean @default(true) @map("allow_voice_bots")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
