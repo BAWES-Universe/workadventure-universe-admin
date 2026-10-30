@@ -10,7 +10,8 @@ export async function OPTIONS(request: NextRequest) {
   return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
-const rollbackSchema = z.object({ number: z.number().int().min(1) }).strict();
+// Revision numbers are whole numbers that fit the database's 32-bit column
+const rollbackSchema = z.object({ number: z.number().int().min(1).max(2_147_483_647) }).strict();
 
 /**
  * POST /api/bots/:id/voice/rollback { number }
@@ -25,7 +26,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const auth = await authorizeToolsRequest(request, id, { adminToken: 'none' });
     if (auth.response) return auth.response;
     const parsed = rollbackSchema.safeParse(await request.json().catch(() => null));
-    if (!parsed.success) return json(request, { error: 'number must be a whole number from 1' }, 400);
+    if (!parsed.success) return json(request, { error: 'number must be a whole number from 1 to 2,147,483,647' }, 400);
     return json(request, await rollBackVoice(id, parsed.data.number));
   } catch (error) {
     return toolsFailure(request, error, 'going back to an earlier voice profile');

@@ -283,6 +283,8 @@ describe('rolling back', () => {
     await saveAndPublish();
     expect((await call(rollback, 'POST', { number: 9 })).status).toBe(404);
     expect((await call(rollback, 'POST', { number: 0 })).status).toBe(400);
+    expect((await call(rollback, 'POST', { number: 2_147_483_648 })).status).toBe(400);
+    expect((await call(rollback, 'POST', { number: 1.5 })).status).toBe(400);
     providers[0].enabled = false;
     const response = await call(rollback, 'POST', { number: 1 });
     expect(response.status).toBe(409);
