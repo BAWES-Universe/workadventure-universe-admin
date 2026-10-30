@@ -26,4 +26,6 @@ must listen, speak, or both. `endpoint` starts with `https://`.
 ## Bot server (service token)
 
 - `GET /api/voice/providers` gives `{ providers: [{ id, adapter, name, recognition, speech, endpoint, region, models, hasKey }], defaults: { recognition: id | null, speech: id | null } }`: the providers that are on, without keys.
-- `GET /api/voice/providers/:id/credentials` gives one provider that is on and has a key, with `apiKeyEncrypted` still encrypted for the bot server to decrypt with `ENCRYPTION_KEY`, as for the text providers.
+- `GET /api/voice/providers/:id/credentials[?botId=…]` gives one provider that is on and has a key, with `apiKeyEncrypted` still encrypted for the bot server to decrypt with `ENCRYPTION_KEY`, as for the text providers.
+
+A key a person lent (`VOICE_KEYS_API.md`) is never in `GET /api/voice/providers`. Its credentials are served only with `botId`, and only while that bot speaks with it (404 otherwise).

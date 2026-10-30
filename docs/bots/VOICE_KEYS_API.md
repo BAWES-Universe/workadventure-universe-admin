@@ -5,7 +5,7 @@ listen or speak on their key instead of Universe AI's. The key's owner pays; nob
 `voice_providers` row with an `owner_id`: the rows with none are the server's own providers
 ([VOICE_PROVIDERS_API.md](VOICE_PROVIDERS_API.md)), which the routes below never touch, and those routes never list a person's key.
 
-This first part is the key and the lend. Publishing a bot's voice with a lent key, and a key that stops working, come next.
+Publishing a bot's voice with a lent key is in `VOICE_BOT_API.md`. A key that stops working for another reason (out of credit, refused) is next.
 Nothing in Orbit calls a provider: no key is tested here and the models a key lists are the ones its owner names.
 
 A key: `{ id, adapter, company, name, recognition, speech, last4, models, lentTo, createdAt }`. `models` is
