@@ -46,6 +46,8 @@ model User {
   botsCreated       Bot[] @relation("BotCreatedBy")
   botsUpdated       Bot[] @relation("BotUpdatedBy")
   botAccessRules    BotAccessRule[]
+  botToolsConfirmed BotMcpTool[] @relation("BotToolConfirmedBy")
+  botToolsMoved     BotMcpTool[] @relation("BotToolMovedBy")
   botConversations BotsConversation[]
   botMemories      BotsMemory[]
   avatarGrants     UserAvatarGrant[]
@@ -785,6 +787,11 @@ model Bot {
   // Hide bot conversations (#435) for this bot alone. null = follow the universe (default), true = Private, false = Normal.
   // A universe that hides them wins: a bot cannot be loosened below it.
   hideConversations   Boolean? @map("hide_conversations")
+  // When a bot asks before a tool runs (#738): before making more than this many things in one request (null = no limit),
+  // how often it asks which way to go (rarely | beforeBiggerJobs | never), and how long a card waits for an answer.
+  askBeforeMaking     Int?     @default(5) @map("ask_before_making")
+  askWhichWay         String   @default("rarely") @map("ask_which_way") @db.VarChar(20)
+  cardWaitMinutes     Int      @default(10) @map("card_wait_minutes")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")
@@ -842,13 +849,55 @@ model BotMcpServer {
   enabled     Boolean  @default(true)
   lastTestedAt   DateTime?  @map("last_tested_at")
   lastTestResult Json?      @map("last_test_result")
+  // Servers that existed before tools were checked (#738) keep working as they do in text, shown as "Not checked yet",
+  // until their tools are confirmed.
+  legacyText     Boolean    @default(false) @map("legacy_text")
+  // What a bot does with a tool under each heading: rightAway | asksFirst | off.
+  lookUpSetting      String @default("rightAway") @map("look_up_setting") @db.VarChar(20)
+  makeSetting        String @default("rightAway") @map("make_setting") @db.VarChar(20)
+  changeSetting      String @default("asksFirst") @map("change_setting") @db.VarChar(20)
+  deleteSendSetting  String @default("asksFirst") @map("delete_send_setting") @db.VarChar(20)
+  // Goes up whenever a heading setting, a tool's heading or a tool's confirmation changes, so a card or a remembered
+  // approval made under an older policy can be told apart.
+  policyRevision     Int    @default(1) @map("policy_revision")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+  bot   Bot           @relation(fields: [botId], references: [id], onDelete: Cascade)
+  tools BotMcpTool[]
 
   @@index([botId])
   @@map("bot_mcp_servers")
+}
+
+// One tool of a bot's MCP server (#738): what the server says it is, what we suggest it does, and what a person with
+// Manage bots chose and confirmed. A suggestion never lets a tool run: only a confirmed heading does.
+model BotMcpTool {
+  id              String    @id @default(uuid())
+  serverId        String    @map("server_id")
+  name            String    @db.VarChar(255)
+  title           String?   @db.VarChar(255)
+  description     String?   @db.Text
+  // A fingerprint of the tool's inputs, labels, server address and account, made by the bot server. A different one means
+  // the tool changed and goes back to not confirmed yet.
+  fingerprint     String    @db.VarChar(128)
+  // looksUp | makesNew | changesThings | deletesOrSends; where it came from: server | description | builtIn
+  suggestedHeading String?  @map("suggested_heading") @db.VarChar(20)
+  suggestionSource String?  @map("suggestion_source") @db.VarChar(20)
+  // The heading a person chose (or accepted from the suggestion), set when confirmed or moved.
+  heading         String?   @db.VarChar(20)
+  movedById       String?   @map("moved_by_id")
+  confirmedById   String?   @map("confirmed_by_id")
+  confirmedAt     DateTime? @map("confirmed_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  server      BotMcpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  movedBy     User?        @relation("BotToolMovedBy", fields: [movedById], references: [id], onDelete: SetNull)
+  confirmedBy User?        @relation("BotToolConfirmedBy", fields: [confirmedById], references: [id], onDelete: SetNull)
+
+  @@unique([serverId, name])
+  @@map("bot_mcp_tools")
 }
 
 // AI Providers

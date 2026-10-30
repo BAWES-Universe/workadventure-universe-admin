@@ -117,6 +117,26 @@ curl -X POST \
      person who does not exist or may not be named here (404, the same answer for both: only people of this universe, its owner, the bot's creator and people findable by name can be named, so a rule can never be used to find out whether some email has an account), more than 200 rows (400), two people saving the same row at once (409, try again).
    - DELETE takes the row off, so they follow the roles again; 404 when there was no such row.
 
+9. **Tool settings** (#738): what each tool of a bot's MCP server is, and what the bot does with it
+   - **GET /api/bots/:id/mcp-servers/:serverId/tools** returns the server's tools (`name`, `title`, `description`,
+     `fingerprint`, `suggestedHeading`, `suggestionSource`, `heading`, who confirmed or moved it), the setting under each
+     heading (`settings`), `policyRevision` and `state`: `"notCheckedYet"` for a server that existed before tools were
+     checked (it keeps working in text), `"notConfirmedYet"` while a tool waits, `"confirmed"` when every tool is.
+     Takes Manage bots, or the bot server's `ADMIN_API_TOKEN`.
+   - **PUT /api/bots/:id/mcp-servers/:serverId/tools** (`ADMIN_API_TOKEN` only; a person gets 403): the bot server saves
+     the full tool list it just read. A new tool waits to be confirmed; a tool whose `fingerprint` changed goes back to
+     not confirmed; one the server no longer offers is removed. A suggestion never lets a tool run.
+   - **PATCH .../tools/:toolId** moves one tool to another heading (`looksUp`, `makesNew`, `changesThings`,
+     `deletesOrSends`); **POST .../tools/confirm** confirms all tools, or `{ toolIds }`. A tool takes the heading
+     someone chose or, if none, the suggested one; a tool with neither is not confirmed (400 naming it).
+   - **PUT .../policy** sets what the bot does under each heading: any of `looksUp`, `makesNew`, `changesThings`,
+     `deletesOrSends` as `"rightAway" | "asksFirst" | "off"`. `policyRevision` goes up when one changes. A new server
+     starts with looksUp and makesNew on `rightAway`, the others on `asksFirst`.
+   - **GET/PUT /api/bots/:id/tool-settings**: the bot's own limits `askBeforeMaking` (3, 5, 10 or null for no limit;
+     default 5), `askWhichWay` (`rarely`, `beforeBiggerJobs`, `never`; default `rarely`) and `cardWaitMinutes` (5, 10,
+     30; default 10). GET also takes `ADMIN_API_TOKEN`.
+   - Moving, confirming and every setting need Manage bots (403 without it, 401 when not signed in, 404 for no such bot).
+
 10. **Saved bot actions** (#739): a record for each action that waits for a tap
     - For the bot server and the game only: every route takes `BOT_SERVICE_TOKEN` (the same as the access check). The
       bot server authenticates the person (the signed-in account, or the guest's server session) and passes who it was as
@@ -149,6 +169,7 @@ curl -X POST \
       **/revoke** (ask again, signed out, connection or policy changed, lost permission, left).
     - Defaults, each passable per call: a card waits 10 minutes (a bot's "A card waits" setting, #738), start within 30
       seconds, a claim lasts 120 seconds, a remembered approval ends after 60 minutes idle or 480 minutes at most.
+
 
 ### Files Created/Modified
 
