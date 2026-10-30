@@ -24,8 +24,8 @@ await db.exec(`
 `);
 await run(TARGET);
 
-const health = (await db.query(`SELECT id, down_since, down_reason, failed_calls, health_checked_at FROM voice_providers ORDER BY id`)).rows;
-await db.exec(`UPDATE voice_providers SET down_since = now(), down_reason = 'credit', failed_calls = 2, health_checked_at = now() WHERE id = 'mine'`);
-const down = (await db.query(`SELECT down_reason, failed_calls FROM voice_providers WHERE id = 'mine'`)).rows[0];
+const health = (await db.query(`SELECT id, down_since, down_reason, down_part, failed_recognition, failed_speech, health_checked_at FROM voice_providers ORDER BY id`)).rows;
+await db.exec(`UPDATE voice_providers SET down_since = now(), down_reason = 'errors', down_part = 'speech', failed_speech = 2, health_checked_at = now() WHERE id = 'mine'`);
+const down = (await db.query(`SELECT down_reason, down_part, failed_speech FROM voice_providers WHERE id = 'mine'`)).rows[0];
 
 console.log(JSON.stringify({ health, down }));

@@ -430,7 +430,7 @@ describe('a bot whose key stopped working', () => {
 
   it('replies in text, with since when and why, and keeps voice turned on', async () => {
     expect(await active()).toMatchObject({ speaks: true, down: null });
-    await report('mouth', { ok: false, status: 402 });
+    await report('mouth', { part: 'speech', ok: false, status: 402 });
     expect(await active()).toMatchObject({ speaks: false, reason: 'key-down', profile: null, down: { since: NOW.toISOString(), reason: 'credit' } });
     expect(bot.voiceEnabled).toBe(true);
     expect(bot.voiceRevision).toBe(1);
@@ -448,11 +448,11 @@ describe('a bot whose key stopped working', () => {
   it('is told the way back the moment the try works, and stays in text when the try fails', async () => {
     Object.assign(providers[1], down(undefined, new Date('2026-10-30T10:50:00Z')));
     expect(await active()).toMatchObject({ speaks: true });
-    await report('mouth', { ok: false, status: 402 });
+    await report('mouth', { part: 'speech', ok: false, status: 402 });
     expect(await active()).toMatchObject({ speaks: false, reason: 'key-down' });
     providers[1].healthCheckedAt = null;
     expect(await active()).toMatchObject({ speaks: true });
-    await report('mouth', { ok: true });
+    await report('mouth', { part: 'speech', ok: true });
     expect(await active()).toMatchObject({ speaks: true, reason: null, down: null });
     expect(providers[1].downSince).toBeNull();
   });

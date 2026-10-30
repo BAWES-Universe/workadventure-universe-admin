@@ -31,10 +31,11 @@ Someone else's key, and a server provider, are 404. Lending moves no bot. A new 
 ## When a key stops working
 
 Orbit calls no provider, so the bot server tells it how each call went (service token): `POST /api/voice/providers/:id/health`
-`{ ok: true }` or `{ ok: false, status?, rejected? }` (`VOICE_PROVIDERS_API.md`). The rules are a text key's
+`{ part, ok: true }` or `{ part, ok: false, status?, rejected? }` (`part` is `recognition` or `speech`, the job the call was for) (`VOICE_PROVIDERS_API.md`). The rules are a text key's
 (`lib/ai-key-health.ts`): a `401`, `403` or `rejected` is Down (`rejected`), a `402` is Down (`credit`), a `404` is Down (`model`),
-two other failures in a row (a timeout, a `5xx`, a `429`) are Down (`errors`), a request the provider found wrong (other `4xx`)
-is not counted, and a call that works marks the key Working again. The bot server sends `status` only for what the provider
+two other failures in a row of the same job (a timeout, a `5xx`, a `429`) are Down (`errors`), a request the provider found wrong
+(other `4xx`) is not counted, and a call that works marks the key Working again. Each job is counted on its own, so listening
+that works does not hide speaking that keeps failing; a key that went Down on one job is Working again when that job works. The bot server sends `status` only for what the provider
 said about the key, not for a voice or setting that bot's profile named wrongly.
 
 While a key in a bot's profile is Down, `GET /api/bots/:id/voice/active` says `speaks: false, reason: "key-down"` with

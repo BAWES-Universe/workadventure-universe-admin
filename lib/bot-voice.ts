@@ -5,7 +5,7 @@ import { BotSettingsError } from '@/lib/bot-access-settings';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels } from '@/lib/voice-providers';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
-import { claimVoiceKeyTry, healthOf } from '@/lib/voice-key-health';
+import { claimVoiceKeyTry, healthOf, tryIsDue } from '@/lib/voice-key-health';
 
 /**
  * A bot's voice (#740): on or off (off until a person with Manage bots turns it on), a draft voice profile, and published
@@ -294,8 +294,9 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
     const ids = [...new Set([parsed.data.recognition.providerId, parsed.data.speech.providerId])];
     const down = ids.map((id) => providers.get(id)).filter((row): row is VoiceProvider => Boolean(row?.ownerId !== null && row?.downSince));
     if (down.length > 0) {
-      // Each Down key gets one try per wait, so the first that can't have one keeps the bot in text
-      let mayTry = options.recheck === true;
+      // Each Down key gets one try per wait. Nothing is claimed unless every Down key can be tried, so a key whose wait
+      // is not over does not use up the wait of the other
+      let mayTry = options.recheck === true && down.every((row) => tryIsDue(row));
       for (const row of down) {
         if (!mayTry) break;
         mayTry = await claimVoiceKeyTry(row.id);

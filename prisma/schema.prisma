@@ -1607,11 +1607,15 @@ model VoiceProvider {
   // personal voice keys. Anything that lists or reads providers for the server must keep only ownerId = null.
   ownerId            String?  @map("owner_id")
   // Health of a person's key (#749). downSince is set while the key is Down (null = Working); downReason is why ("credit",
-  // "rejected", "errors", "model", "stopped"). failedCalls counts calls that failed in a row; two mark it Down. A Down key is
+  // "rejected", "errors", "model", "stopped"). failedRecognition and failedSpeech count the calls of each job that failed in a row (a call that works for one job
+  // does not clear the other's); two mark the key Down, and downPart says which job ("recognition", "speech"; null when the
+  // provider turned the whole key away). A Down key is
   // tried again at most every 5 minutes: healthCheckedAt is when it last was. Server providers have none of this.
   downSince          DateTime? @map("down_since")
   downReason         String?  @map("down_reason") @db.VarChar(20)
-  failedCalls        Int      @default(0) @map("failed_calls")
+  downPart           String?  @map("down_part") @db.VarChar(12)
+  failedRecognition  Int      @default(0) @map("failed_recognition")
+  failedSpeech       Int      @default(0) @map("failed_speech")
   healthCheckedAt    DateTime? @map("health_checked_at")
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")

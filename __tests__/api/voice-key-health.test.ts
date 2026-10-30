@@ -33,13 +33,17 @@ const row = (changes: ProviderRow = {}): ProviderRow => ({
   createdAt: new Date('2026-10-30T10:00:00Z'),
   downSince: null,
   downReason: null,
-  failedCalls: 0,
+  downPart: null,
+  failedRecognition: 0,
+  failedSpeech: 0,
   healthCheckedAt: null,
   lends: [],
   ...changes,
 });
 
 const asGame = { Authorization: 'Bearer service-secret' };
+/** What the bot server reports for a call: speaking, unless a test says otherwise. */
+const call = (outcome: Record<string, unknown>, part: 'speech' | 'recognition' = 'speech', id = 'k1') => send(report, { part, ...outcome }, asGame, id);
 const send = (route: typeof report | typeof check, body?: unknown, headers: Record<string, string> = asGame, id = 'k1') =>
   route(new NextRequest('http://localhost:3333/api/x', { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: body === undefined ? undefined : JSON.stringify(body) }), {
     params: Promise.resolve({ id }),
@@ -61,16 +65,16 @@ afterEach(() => jest.restoreAllMocks());
 
 describe('what the bot server reports', () => {
   it('is for the bot server only, and well formed', async () => {
-    expect((await send(report, { ok: true }, {})).status).toBe(401);
-    expect((await send(report, { ok: true }, { Authorization: 'Bearer wrong' })).status).toBe(401);
-    for (const body of [undefined, {}, { ok: 'yes' }, { ok: false, status: 99 }, { ok: true, status: 200 }, { ok: false, extra: 1 }]) {
+    expect((await send(report, { part: 'speech', ok: true }, {})).status).toBe(401);
+    expect((await send(report, { part: 'speech', ok: true }, { Authorization: 'Bearer wrong' })).status).toBe(401);
+    for (const body of [undefined, {}, { ok: true }, { part: 'music', ok: true }, { part: 'speech', ok: 'yes' }, { part: 'speech', ok: false, status: 99 }, { part: 'speech', ok: true, status: 200 }, { part: 'speech', ok: false, extra: 1 }]) {
       expect((await send(report, body)).status).toBe(400);
     }
   });
 
   it('says "not found" for a server provider and for a key that isn\'t there', async () => {
-    expect((await send(report, { ok: false, status: 402 }, asGame, 'server')).status).toBe(404);
-    expect((await send(report, { ok: false, status: 402 }, asGame, 'nope')).status).toBe(404);
+    expect((await call({ ok: false, status: 402 }, 'speech', 'server')).status).toBe(404);
+    expect((await call({ ok: false, status: 402 }, 'speech', 'nope')).status).toBe(404);
     expect(rows[1].downSince).toBeNull();
   });
 
@@ -80,42 +84,61 @@ describe('what the bot server reports', () => {
     [403, 'rejected'],
     [404, 'model'],
   ])('marks a key Down at once for a %s, with the reason', async (status, reason) => {
-    const response = await send(report, { ok: false, status });
+    const response = await call({ ok: false, status });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ status: 'down', downReason: reason });
+    expect(rows[0]).toMatchObject({ downPart: null });
     expect(rows[0].downSince).toBeInstanceOf(Date);
   });
 
   it('marks a key Down when the provider refuses the key itself', async () => {
-    expect(await (await send(report, { ok: false, rejected: true })).json()).toMatchObject({ status: 'down', downReason: 'rejected' });
+    expect(await (await call({ ok: false, rejected: true })).json()).toMatchObject({ status: 'down', downReason: 'rejected' });
   });
 
   it('counts other failures and marks the key Down on the second in a row, and a call that works starts the count again', async () => {
-    expect(await (await send(report, { ok: false, status: 503 })).json()).toMatchObject({ status: 'working' });
-    expect(await (await send(report, { ok: true })).json()).toMatchObject({ status: 'working' });
-    expect(rows[0].failedCalls).toBe(0);
-    await send(report, { ok: false });
-    expect(await (await send(report, { ok: false, status: 500 })).json()).toMatchObject({ status: 'down', downReason: 'errors' });
+    expect(await (await call({ ok: false, status: 503 })).json()).toMatchObject({ status: 'working' });
+    expect(await (await call({ ok: true })).json()).toMatchObject({ status: 'working' });
+    expect(rows[0].failedSpeech).toBe(0);
+    await call({ ok: false });
+    expect(await (await call({ ok: false, status: 500 })).json()).toMatchObject({ status: 'down', downReason: 'errors' });
+    expect(rows[0].downPart).toBe('speech');
+  });
+
+  it('counts each job on its own: listening that works does not hide speaking that keeps failing', async () => {
+    rows[0] = row({ recognition: true });
+    await call({ ok: false, status: 503 }, 'speech');
+    await call({ ok: true }, 'recognition');
+    expect(rows[0].failedSpeech).toBe(1);
+    expect(await (await call({ ok: false, status: 503 }, 'speech')).json()).toMatchObject({ status: 'down', downReason: 'errors' });
+    expect(rows[0].downPart).toBe('speech');
+  });
+
+  it('is Working again when the job that failed works, not when only the other job does', async () => {
+    rows[0] = row({ recognition: true, downSince: THEN, downReason: 'errors', downPart: 'speech', healthCheckedAt: THEN });
+    expect(await (await call({ ok: true }, 'recognition')).json()).toMatchObject({ status: 'down' });
+    expect(rows[0].healthCheckedAt).toEqual(THEN);
+    expect(await (await call({ ok: true }, 'speech')).json()).toEqual({ status: 'working', downSince: null, downReason: null });
+    expect(rows[0]).toMatchObject({ downPart: null, failedSpeech: 0, failedRecognition: 0 });
   });
 
   it('doesn\'t count a request the provider found wrong (a 400 or 422), a slow-down is counted', async () => {
-    await send(report, { ok: false, status: 400 });
-    await send(report, { ok: false, status: 422 });
-    expect(rows[0].failedCalls).toBe(0);
-    await send(report, { ok: false, status: 429 });
-    expect(rows[0].failedCalls).toBe(1);
+    await call({ ok: false, status: 400 });
+    await call({ ok: false, status: 422 });
+    expect(rows[0].failedSpeech).toBe(0);
+    await call({ ok: false, status: 429 });
+    expect(rows[0].failedSpeech).toBe(1);
   });
 
-  it('marks a Down key Working again as soon as a call works', async () => {
+  it('marks a key the provider turned away whole Working again as soon as any call works', async () => {
     rows[0] = row({ downSince: THEN, downReason: 'credit', healthCheckedAt: THEN });
-    expect(await (await send(report, { ok: true })).json()).toEqual({ status: 'working', downSince: null, downReason: null });
-    expect(rows[0]).toMatchObject({ downSince: null, downReason: null, failedCalls: 0 });
+    expect(await (await call({ ok: true }, 'recognition')).json()).toEqual({ status: 'working', downSince: null, downReason: null });
+    expect(rows[0]).toMatchObject({ downSince: null, downReason: null, failedSpeech: 0 });
   });
 
   it('keeps the first moment a key went Down, and updates the reason a failed try shows', async () => {
-    rows[0] = row({ downSince: THEN, downReason: 'errors', healthCheckedAt: THEN });
-    await reportVoiceKeyCall('k1', { ok: false, status: 402 }, at(10));
-    expect(rows[0]).toMatchObject({ downSince: THEN, downReason: 'credit', healthCheckedAt: at(10) });
+    rows[0] = row({ downSince: THEN, downReason: 'errors', downPart: 'speech', healthCheckedAt: THEN });
+    await reportVoiceKeyCall('k1', 'speech', { ok: false, status: 402 }, at(10));
+    expect(rows[0]).toMatchObject({ downSince: THEN, downReason: 'credit', downPart: null, healthCheckedAt: at(10) });
   });
 });
 

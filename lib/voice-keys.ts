@@ -182,7 +182,7 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
         ...(input.name !== undefined ? { name: input.name } : {}),
         // A new key starts clean: it is tried at once, not after the old one's wait
         ...(input.apiKey !== undefined
-          ? { apiKeyEncrypted: encryptApiKey(input.apiKey), apiKeyLast4: input.apiKey.slice(-4), downSince: null, downReason: null, failedCalls: 0, healthCheckedAt: null }
+          ? { apiKeyEncrypted: encryptApiKey(input.apiKey), apiKeyLast4: input.apiKey.slice(-4), downSince: null, downReason: null, downPart: null, failedRecognition: 0, failedSpeech: 0, healthCheckedAt: null }
           : {}),
         ...(input.models !== undefined ? { models: input.models as Prisma.InputJsonValue } : {}),
       },

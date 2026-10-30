@@ -187,7 +187,7 @@ describe('changing a key', () => {
   it('starts a new key clean: a Down key that gets a new key is tried at once', async () => {
     db.voiceProvider.findFirst.mockResolvedValue(key({ downSince: new Date(), downReason: 'credit' }));
     await call(patch, 'PATCH', { apiKey: 'sk-new-key-abcd' });
-    expect(db.voiceProvider.update.mock.calls[0][0].data).toMatchObject({ downSince: null, downReason: null, failedCalls: 0, healthCheckedAt: null });
+    expect(db.voiceProvider.update.mock.calls[0][0].data).toMatchObject({ downSince: null, downReason: null, downPart: null, failedRecognition: 0, failedSpeech: 0, healthCheckedAt: null });
     await call(patch, 'PATCH', { name: 'Only a name' });
     expect(db.voiceProvider.update.mock.calls[1][0].data).not.toHaveProperty('downSince');
   });
