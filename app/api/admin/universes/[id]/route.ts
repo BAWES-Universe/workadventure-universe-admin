@@ -19,6 +19,7 @@ const updateUniverseSchema = z.object({
   thumbnailUrl: z.string().url().nullable().optional(),
   // Hide bot conversations (#435). Like the rest of this route, only the owner and super admins can change it.
   hideBotConversations: z.boolean().optional(),
+  allowVoiceBots: z.boolean().optional(),
 });
 
 // GET /api/admin/universes/[id] - Get a single universe
@@ -270,6 +271,7 @@ export async function PATCH(
     if (data.isPublic !== undefined) updateData.isPublic = data.isPublic;
     if (data.featured !== undefined) updateData.featured = data.featured;
     if (data.hideBotConversations !== undefined) updateData.hideBotConversations = data.hideBotConversations;
+    if (data.allowVoiceBots !== undefined) updateData.allowVoiceBots = data.allowVoiceBots;
     if (data.thumbnailUrl !== undefined) {
       updateData.thumbnailUrl = data.thumbnailUrl || null;
     }
