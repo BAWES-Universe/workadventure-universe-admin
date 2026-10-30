@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import { encryptApiKey } from '@/lib/encryption';
 import { lendAccess, parseLendModels } from '@/lib/ai-key-lend';
 import { readModels, voiceProviderProblem, type VoiceModel } from '@/lib/voice-providers';
+import { healthOf, askForVoiceKeyTry, type VoiceKeyHealth } from '@/lib/voice-key-health';
 
 /**
  * Personal voice keys (#749). A key is a VoiceProvider row with an `ownerId`; the rows with none are the server's own
@@ -97,6 +98,8 @@ export interface VoiceKeySummary {
   /** The universes it is lent to, and which of its models bots there may use ("kind:id", null for all of them). */
   lentTo: { universeId: string; universeName: string; ownedByYou: boolean; models: string[] | null }[];
   createdAt: string;
+  /** Whether the key works: Down once its provider turned it away (out of credit, rejected, repeated errors). Bots on it reply in text meanwhile. */
+  health: VoiceKeyHealth;
 }
 
 type KeyRow = VoiceProvider & { lends: { models: Prisma.JsonValue; universe: { id: string; name: string; ownerId: string } }[] };
@@ -117,6 +120,7 @@ const summary = (row: KeyRow, ownerId: string, labels: Map<string, string>): Voi
     models: readLendModels(lend.models),
   })),
   createdAt: row.createdAt.toISOString(),
+  health: healthOf(row),
 });
 
 /** How each company is named: the server's own providers' names, else the adapter as it is. */
@@ -176,7 +180,10 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
       where: { id },
       data: {
         ...(input.name !== undefined ? { name: input.name } : {}),
-        ...(input.apiKey !== undefined ? { apiKeyEncrypted: encryptApiKey(input.apiKey), apiKeyLast4: input.apiKey.slice(-4) } : {}),
+        // A new key starts clean: it is tried at once, not after the old one's wait
+        ...(input.apiKey !== undefined
+          ? { apiKeyEncrypted: encryptApiKey(input.apiKey), apiKeyLast4: input.apiKey.slice(-4), downSince: null, downReason: null, failedCalls: 0, healthCheckedAt: null }
+          : {}),
         ...(input.models !== undefined ? { models: input.models as Prisma.InputJsonValue } : {}),
       },
     });
@@ -239,4 +246,17 @@ export async function lendVoiceKey(ownerId: string, id: string, universeId: stri
 export async function pullVoiceKey(ownerId: string, id: string, universeId: string): Promise<void> {
   const removed = await prisma.voiceKeyLend.deleteMany({ where: { providerId: id, universeId, provider: { ownerId } } });
   if (removed.count === 0) throw new VoiceKeyRefused('Not lent to that universe', 404);
+}
+
+/**
+ * "Check now" on a Down key: the next bot that needs it is let through to try, without waiting out the 5 minutes. Orbit calls no
+ * provider; the key goes back to Working when that try works. A key that isn't Down has nothing to check.
+ */
+export async function checkVoiceKey(ownerId: string, id: string): Promise<VoiceKeySummary> {
+  const row = await owned(id, ownerId);
+  if (!row) throw new VoiceKeyRefused('Key not found', 404);
+  if (row.downSince) await askForVoiceKeyTry(ownerId, id);
+  const fresh = await owned(id, ownerId);
+  if (!fresh) throw new VoiceKeyRefused('Key not found', 404);
+  return summary(fresh, ownerId, await labelsOf());
 }

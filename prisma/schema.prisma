@@ -1606,6 +1606,13 @@ model VoiceProvider {
   // Whose key this is (#749). Null = a provider the super admin runs for the whole server, which is every row there was before
   // personal voice keys. Anything that lists or reads providers for the server must keep only ownerId = null.
   ownerId            String?  @map("owner_id")
+  // Health of a person's key (#749). downSince is set while the key is Down (null = Working); downReason is why ("credit",
+  // "rejected", "errors", "model", "stopped"). failedCalls counts calls that failed in a row; two mark it Down. A Down key is
+  // tried again at most every 5 minutes: healthCheckedAt is when it last was. Server providers have none of this.
+  downSince          DateTime? @map("down_since")
+  downReason         String?  @map("down_reason") @db.VarChar(20)
+  failedCalls        Int      @default(0) @map("failed_calls")
+  healthCheckedAt    DateTime? @map("health_checked_at")
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 

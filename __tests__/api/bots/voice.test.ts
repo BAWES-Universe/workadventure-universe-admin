@@ -13,6 +13,9 @@ import { getSessionUser } from '@/lib/auth-session';
 import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { prisma } from '@/lib/db';
+import { POST as reportKeyCall } from '@/app/api/voice/providers/[id]/health/route';
+import { GET as getCredentials } from '@/app/api/voice/providers/[id]/credentials/route';
+import { matches, applyData } from '../../helpers/voice-provider-rows';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -58,6 +61,13 @@ const fakeDb = () => {
       },
     },
     voiceProvider: {
+      findFirst: async ({ where }: { where: Row }) => providers.find((p) => matches({ ownerId: null, ...p }, where)) ?? null,
+      findUnique: async ({ where }: { where: { id: string } }) => providers.find((p) => p.id === where.id) ?? null,
+      updateMany: async ({ where, data }: { where: Row; data: Row }) => {
+        const hit = providers.filter((p) => matches({ ownerId: null, ...p }, where));
+        for (const p of hit) applyData(p, data);
+        return { count: hit.length };
+      },
       findMany: async ({ where }: { where: { id?: { in: string[] }; ownerId?: string } }) =>
         providers
           .filter((p) => (where.id ? where.id.in.includes(p.id) : p.ownerId === where.ownerId))
@@ -156,7 +166,7 @@ describe('a bot that has never had voice', () => {
   });
 
   it('does not speak, because voice is off', async () => {
-    expect(await (await call(getActive, 'GET', undefined, asGame)).json()).toEqual({ speaks: false, reason: 'off', paidBy: 'universe-ai', parts: { recognition: 'universe-ai', speech: 'universe-ai' }, revision: null, profile: null });
+    expect(await (await call(getActive, 'GET', undefined, asGame)).json()).toEqual({ speaks: false, reason: 'off', paidBy: 'universe-ai', parts: { recognition: 'universe-ai', speech: 'universe-ai' }, revision: null, profile: null, down: null });
   });
 
   it('can\'t be switched on until a profile is published', async () => {
@@ -250,7 +260,7 @@ describe('turning voice on and off', () => {
     const on = await call(putVoice, 'PUT', { enabled: true });
     expect(on.status).toBe(200);
     expect((await on.json()).enabled).toBe(true);
-    expect(await (await call(getActive, 'GET', undefined, asGame)).json()).toEqual({ speaks: true, reason: null, paidBy: 'universe-ai', parts: { recognition: 'universe-ai', speech: 'universe-ai' }, revision: 1, profile: FINISHED });
+    expect(await (await call(getActive, 'GET', undefined, asGame)).json()).toEqual({ speaks: true, reason: null, paidBy: 'universe-ai', parts: { recognition: 'universe-ai', speech: 'universe-ai' }, revision: 1, profile: FINISHED, down: null });
   });
 
   it('is refused when the universe doesn\'t allow voice bots, and off always works', async () => {
@@ -397,5 +407,75 @@ describe('a bot that speaks on a key its maker lent', () => {
     expect(JSON.stringify(body)).not.toContain('iv:tag:data');
     (lendAccess as jest.Mock).mockResolvedValue(null);
     expect((await (await call(getVoice, 'GET')).json()).lentKeys).toEqual([]);
+  });
+});
+
+describe('a bot whose key stopped working', () => {
+  const lent = (changes: Row = {}): Row => voice({ ownerId: 'u-maker', ...changes });
+  const lend = (): Row => ({ providerId: 'mouth', universeId: 'uni-1', models: null });
+  const NOW = new Date('2026-10-30T11:00:00Z');
+  const down = (since = new Date('2026-10-30T10:30:00Z'), checked: Date | null = since): Row => ({ downSince: since, downReason: 'credit', healthCheckedAt: checked });
+  const active = async () => (await call(getActive, 'GET', undefined, asGame)).json();
+  const report = (id: string, body: unknown) =>
+    reportKeyCall(new NextRequest('http://localhost:3333/x', { method: 'POST', headers: { 'Content-Type': 'application/json', ...asGame }, body: JSON.stringify(body) }), { params: Promise.resolve({ id }) });
+
+  beforeEach(async () => {
+    jest.useFakeTimers({ now: NOW, doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'queueMicrotask'] });
+    providers = [provider(), lent()];
+    lends = [lend()];
+    await saveAndPublish();
+    await call(putVoice, 'PUT', { enabled: true });
+  });
+  afterEach(() => jest.useRealTimers());
+
+  it('replies in text, with since when and why, and keeps voice turned on', async () => {
+    expect(await active()).toMatchObject({ speaks: true, down: null });
+    await report('mouth', { ok: false, status: 402 });
+    expect(await active()).toMatchObject({ speaks: false, reason: 'key-down', profile: null, down: { since: NOW.toISOString(), reason: 'credit' } });
+    expect(bot.voiceEnabled).toBe(true);
+    expect(bot.voiceRevision).toBe(1);
+  });
+
+  it('lets one turn through to try the key every 5 minutes, and the others stay in text', async () => {
+    Object.assign(providers[1], down(new Date('2026-10-30T10:30:00Z'), new Date('2026-10-30T10:58:00Z')));
+    expect(await active()).toMatchObject({ speaks: false, reason: 'key-down' });
+    providers[1].healthCheckedAt = new Date('2026-10-30T10:54:00Z');
+    expect(await active()).toMatchObject({ speaks: true, reason: null });
+    expect(providers[1].healthCheckedAt).toEqual(NOW);
+    expect(await active()).toMatchObject({ speaks: false, reason: 'key-down' });
+  });
+
+  it('is told the way back the moment the try works, and stays in text when the try fails', async () => {
+    Object.assign(providers[1], down(undefined, new Date('2026-10-30T10:50:00Z')));
+    expect(await active()).toMatchObject({ speaks: true });
+    await report('mouth', { ok: false, status: 402 });
+    expect(await active()).toMatchObject({ speaks: false, reason: 'key-down' });
+    providers[1].healthCheckedAt = null;
+    expect(await active()).toMatchObject({ speaks: true });
+    await report('mouth', { ok: true });
+    expect(await active()).toMatchObject({ speaks: true, reason: null, down: null });
+    expect(providers[1].downSince).toBeNull();
+  });
+
+  it('serves the key to the turn that was let through, and to nobody for a bot that isn\'t using it', async () => {
+    Object.assign(providers[1], down(undefined, new Date('2026-10-30T10:50:00Z')));
+    expect(await active()).toMatchObject({ speaks: true });
+    const fetchKey = (botId?: string) =>
+      getCredentials(new NextRequest(`http://localhost:3333/x${botId ? `?botId=${botId}` : ''}`, { headers: asGame }), { params: Promise.resolve({ id: 'mouth' }) });
+    expect((await fetchKey('bot-1')).status).toBe(200);
+    expect((await fetchKey()).status).toBe(404);
+  });
+
+  it('can still be turned on while the key is down', async () => {
+    await call(putVoice, 'PUT', { enabled: false });
+    Object.assign(providers[1], down());
+    const response = await call(putVoice, 'PUT', { enabled: true });
+    expect(response.status).toBe(200);
+    expect(bot.voiceEnabled).toBe(true);
+  });
+
+  it('is not held by a server provider\'s health, which has none', async () => {
+    providers = [provider({ downSince: NOW }), lent()];
+    expect(await active()).toMatchObject({ speaks: true });
   });
 });
