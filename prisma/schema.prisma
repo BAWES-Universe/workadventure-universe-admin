@@ -1572,3 +1572,32 @@ model BotActionGrant {
   @@index([botId, requesterKey, conversationKey])
   @@map("bot_action_grants")
 }
+
+// Voice providers (#740): the speech companies a super admin has set up for the whole server, for listening (recognition),
+// for speaking (speech), or both. Which adapter runs one is the bot server's business; Orbit keeps what to call, where to
+// reach and with which key. The key is encrypted and never sent to a browser. At most one provider is the default for each of
+// the two jobs (set in one transaction); a bot on Universe AI follows them.
+model VoiceProvider {
+  id                 String   @id @default(uuid())
+  // The adapter the bot server runs this with: a short name such as "elevenlabs"
+  adapter            String   @db.VarChar(50)
+  name               String   @db.VarChar(255)
+  recognition        Boolean  @default(false)
+  speech             Boolean  @default(false)
+  enabled            Boolean  @default(false)
+  endpoint           String?  @db.Text
+  region             String?  @db.VarChar(50)
+  apiKeyEncrypted    String?  @map("api_key_encrypted") @db.Text
+  // The last four characters of the key, kept so a super admin can recognise it
+  apiKeyLast4        String?  @map("api_key_last4") @db.VarChar(4)
+  // The models it can be used with: [{ id, label, kind: "recognition" | "speech" }]
+  models             Json     @default("[]")
+  defaultRecognition Boolean  @default(false) @map("default_recognition")
+  defaultSpeech      Boolean  @default(false) @map("default_speech")
+  createdById        String?  @map("created_by_id")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@index([enabled])
+  @@map("voice_providers")
+}
