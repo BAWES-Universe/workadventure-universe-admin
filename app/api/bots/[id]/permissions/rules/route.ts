@@ -13,8 +13,8 @@ export async function OPTIONS(request: NextRequest) {
 /**
  * PUT /api/bots/:id/permissions/rules
  * Set a role's or a person's No / Default / Yes for this bot.
- * Body: one of { roleId } | { userId } | { identifier }, and any of { chat, dm, summon, manage }, each "yes" | "no" |
- * "default". Only the actions sent change; a row that does not exist yet is added.
+ * Body: one of { roleId } | { userId } | { identifier }, and any of { chat, dm, summon, manage, change, deleteOrSend },
+ * each "yes" | "no" | "default". Only the actions sent change; a row that does not exist yet is added.
  * Response: the row.
  *
  * Auth: whoever manages the bot.

@@ -9,22 +9,24 @@ import { bansCoveringWorld } from '@/lib/moderation';
 
 /**
  * Can this person do this with this bot? (#426) What people do with a bot: chat in its bubble on the map, send it
- * direct messages, or summon it. The bot server and the game ask this with the service token before they let it happen,
- * and show `reason` when the answer is no.
+ * direct messages, or summon it; and (#737) having it change things, or delete or send. The bot server and the game ask
+ * this with the service token before they let it happen, and show `reason` when the answer is no.
  *
  * The answer comes from the role permissions in the bot's world (the same number the game gets, see permissionsForWorld),
  * then the bot's own rules (#427), in this order: its creator, the universe owner, super admins and Admin always pass;
  * then the person's own row; then the rows of their roles; then Private bot, which shuts out everyone a row does not
  * say Yes to; then the role permissions. Guests have no account, so they get Everyone's and Everyone's rows.
  */
-export type BotAction = 'chat' | 'dm' | 'summon';
+export type BotAction = 'chat' | 'dm' | 'summon' | 'change' | 'deleteOrSend';
 
-export const BOT_ACTIONS: readonly BotAction[] = ['chat', 'dm', 'summon'];
+export const BOT_ACTIONS: readonly BotAction[] = ['chat', 'dm', 'summon', 'change', 'deleteOrSend'];
 
 const ACTION_PERMISSION: Record<BotAction, PermissionKey> = {
   chat: 'CHAT_BOTS_NEARBY',
   dm: 'DM_BOTS',
   summon: 'SUMMON_BOTS',
+  change: 'BOTS_CHANGE_THINGS',
+  deleteOrSend: 'BOTS_DELETE_OR_SEND',
 };
 
 export type BotAccessCode =
@@ -67,6 +69,8 @@ function refusal(
 ): BotAccessAnswer {
   if (code === 'sign_in_required') return { allowed: false, code, reason: `Sign in to message ${botName}.` };
   if (action === 'summon') return { allowed: false, code, reason: `${botName}'s owner limits who can summon it.` };
+  if (action === 'change') return { allowed: false, code, reason: `You can't have ${botName} change things here.` };
+  if (action === 'deleteOrSend') return { allowed: false, code, reason: `You can't have ${botName} delete or send things here.` };
   if (action === 'chat') {
     const reason = `${botName}'s owner limits who can chat with it.`;
     return fixedReply ? { allowed: false, code, reason, reply: fixedReply } : { allowed: false, code, reason };
@@ -103,7 +107,9 @@ export function decideBotAccess(input: {
   if (!input.isAdmin) {
     const verdict = verdictFor(action, input.personRule ?? null, input.roleRules ?? []);
     if (verdict === 'no') return refusal('not_allowed', action, botName, input.fixedReply);
-    if (verdict === 'none' && (input.privateBot || !has(input.permissions, ACTION_PERMISSION[action]))) {
+    // Private bot decides who may use the bot at all; changing, deleting and sending are the roles' to decide
+    const shutOut = input.privateBot && (action === 'chat' || action === 'dm' || action === 'summon');
+    if (verdict === 'none' && (shutOut || !has(input.permissions, ACTION_PERMISSION[action]))) {
       return refusal('not_allowed', action, botName, input.fixedReply);
     }
   }

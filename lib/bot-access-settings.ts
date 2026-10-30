@@ -47,6 +47,8 @@ export const ruleSchema = z
     dm: valueSchema.optional(),
     summon: valueSchema.optional(),
     manage: valueSchema.optional(),
+    change: valueSchema.optional(),
+    deleteOrSend: valueSchema.optional(),
   })
   .strict()
   .refine((body) => [body.roleId, body.userId, body.identifier].filter(Boolean).length === 1, {
@@ -65,6 +67,9 @@ export class BotSettingsError extends Error {
 
 type Values = Record<RuleAction, RuleValue>;
 
+/** The actions the bot's creator always passes, so a rule for them would do nothing. */
+const CREATOR_ALWAYS_PASSES: readonly RuleAction[] = ['chat', 'dm', 'summon', 'change', 'deleteOrSend'];
+
 export interface RuleJson extends Values {
   id: string;
   roleId: string | null;
@@ -80,6 +85,8 @@ const valuesOf = (rule: { allow: bigint; deny: bigint }): Values => ({
   dm: ruleValue(rule, 'dm'),
   summon: ruleValue(rule, 'summon'),
   manage: ruleValue(rule, 'manage'),
+  change: ruleValue(rule, 'change'),
+  deleteOrSend: ruleValue(rule, 'deleteOrSend'),
 });
 
 const RULE_SELECT = {
@@ -180,7 +187,14 @@ export async function readBotSettings(botId: string) {
         color: role.color,
         builtIn: role.builtIn,
         /** What the role gives on its own, which is what Default means for it. */
-        defaults: { chat: given('chat'), dm: given('dm'), summon: given('summon'), manage: given('manage') },
+        defaults: {
+          chat: given('chat'),
+          dm: given('dm'),
+          summon: given('summon'),
+          manage: given('manage'),
+          change: given('change'),
+          deleteOrSend: given('deleteOrSend'),
+        },
       };
     }),
   };
@@ -252,10 +266,16 @@ async function resolveSubject(
   if (user.id === place.universeOwnerId) {
     throw new BotSettingsError(400, "The bot's owner always passes, so a rule for them would do nothing");
   }
-  // The creator always chats with, messages and calls over their own bot, but manages it only while they hold Manage
-  // bots, so Manage this bot is the one thing a rule can still change for them
-  if (user.id === place.createdById && ['chat', 'dm', 'summon'].some((action) => body[action as RuleAction] && body[action as RuleAction] !== 'default')) {
-    throw new BotSettingsError(400, 'The bot\'s creator always chats with it, messages it and summons it. Only "Manage this bot" can be set for them');
+  // The creator always chats with, messages and calls over their own bot, and has it change, delete and send, but manages
+  // it only while they hold Manage bots, so Manage this bot is the one thing a rule can still change for them
+  if (
+    user.id === place.createdById &&
+    CREATOR_ALWAYS_PASSES.some((action) => body[action] && body[action] !== 'default')
+  ) {
+    throw new BotSettingsError(
+      400,
+      'The bot\'s creator always chats with it, messages it, summons it, and has it change things, delete and send. Only "Manage this bot" can be set for them',
+    );
   }
   return { userId: user.id };
 }

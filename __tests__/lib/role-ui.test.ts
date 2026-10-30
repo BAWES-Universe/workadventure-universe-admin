@@ -90,9 +90,9 @@ describe('which switches are locked, and why', () => {
 });
 
 describe('counting and summaries', () => {
-  it('counts the 17 everyday permissions, Administrator standing for all of them', () => {
+  it('counts the 19 everyday permissions, Administrator standing for all of them', () => {
     expect(countOn(fromKeys(['GO_LIVE']))).toBe(1);
-    expect(countOn(fromKeys(['ADMINISTRATOR']))).toBe(17);
+    expect(countOn(fromKeys(['ADMINISTRATOR']))).toBe(19);
     expect(changedCount(fromKeys(['GO_LIVE']), fromKeys(['GO_LIVE', 'EDIT_MAPS']))).toBe(1);
   });
 

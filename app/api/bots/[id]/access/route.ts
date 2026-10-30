@@ -32,7 +32,7 @@ export async function OPTIONS(request: NextRequest) {
  * Can this person do this with this bot? (#426)
  *
  * Auth: BOT_SERVICE_TOKEN
- * Body: { action: "chat" | "dm" | "summon", person: { signedIn: boolean, identifier?: string, chatId?: string } }
+ * Body: { action: "chat" | "dm" | "summon" | "change" | "deleteOrSend", person: { signedIn: boolean, identifier?: string, chatId?: string } }
  * Response: { allowed: boolean, code: "allowed" | "sign_in_required" | "not_allowed" | "no_room_access" | "unknown_person"
  *   | "shared_chat_id" | "banned", reason: string | null, person?: { uuid: string, name: string | null } }
  *
