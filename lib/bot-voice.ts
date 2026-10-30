@@ -56,9 +56,10 @@ export function profileProblem(profile: VoiceProfile, providers: Map<string, Voi
   return null;
 }
 
+// Only the server's own providers for now: a key a person lent (#749) joins when a bot can be published with one
 async function providersFor(profile: VoiceProfile): Promise<Map<string, VoiceProvider>> {
   const ids = [...new Set([profile.recognition.providerId, profile.speech.providerId])];
-  const rows = await prisma.voiceProvider.findMany({ where: { id: { in: ids } } });
+  const rows = await prisma.voiceProvider.findMany({ where: { id: { in: ids }, ownerId: null } });
   return new Map(rows.map((row) => [row.id, row]));
 }
 

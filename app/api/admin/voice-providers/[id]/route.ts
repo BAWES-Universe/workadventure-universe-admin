@@ -26,7 +26,7 @@ export async function GET(request: NextRequest, { params }: Context) {
   if (!user || !isSuperAdmin(user.email)) return denied();
   try {
     const row = await prisma.voiceProvider.findUnique({ where: { id: (await params).id } });
-    if (!row) return NextResponse.json({ error: 'Voice provider not found' }, { status: 404 });
+    if (!row || row.ownerId !== null) return NextResponse.json({ error: 'Voice provider not found' }, { status: 404 });
     return NextResponse.json({ provider: voiceProviderView(row) });
   } catch (error) {
     return failure(error, 'read the provider');
