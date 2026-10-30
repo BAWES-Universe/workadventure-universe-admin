@@ -117,7 +117,8 @@ export function voiceProviderProblem(draft: Draft): string | null {
   return null;
 }
 
-export const listVoiceProviders = () => prisma.voiceProvider.findMany({ orderBy: [{ name: 'asc' }, { id: 'asc' }] });
+/** The server's own providers only: a key a person added (#749) is theirs, never a super admin's to list, change or default. */
+export const listVoiceProviders = () => prisma.voiceProvider.findMany({ where: { ownerId: null }, orderBy: [{ name: 'asc' }, { id: 'asc' }] });
 
 export async function createVoiceProvider(input: z.infer<typeof createVoiceProviderSchema>, userId: string): Promise<VoiceProvider> {
   const problem = voiceProviderProblem({ ...input, defaultRecognition: false, defaultSpeech: false, hasKey: Boolean(input.apiKey) });
@@ -142,7 +143,7 @@ export async function createVoiceProvider(input: z.infer<typeof createVoiceProvi
 export async function updateVoiceProvider(id: string, input: z.infer<typeof updateVoiceProviderSchema>): Promise<VoiceProvider> {
   return prisma.$transaction(async (tx) => {
     const row = await tx.voiceProvider.findUnique({ where: { id } });
-    if (!row) throw new VoiceProviderRefused('Voice provider not found', 404);
+    if (!row || row.ownerId !== null) throw new VoiceProviderRefused('Voice provider not found', 404);
     const next = {
       recognition: input.recognition ?? row.recognition,
       speech: input.speech ?? row.speech,
@@ -178,14 +179,14 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
 /** A default can't be deleted: another is made the default first. */
 export async function deleteVoiceProvider(id: string): Promise<void> {
   const row = await prisma.voiceProvider.findUnique({ where: { id } });
-  if (!row) throw new VoiceProviderRefused('Voice provider not found', 404);
+  if (!row || row.ownerId !== null) throw new VoiceProviderRefused('Voice provider not found', 404);
   if (row.defaultRecognition || row.defaultSpeech) throw new VoiceProviderRefused('Make another provider the default for what this one does first', 409);
   await prisma.voiceProvider.delete({ where: { id } });
 }
 
 /** What the bot server reads: the providers that are on, without their keys, and which are the defaults. */
 export async function servedVoiceProviders() {
-  const rows = await prisma.voiceProvider.findMany({ where: { enabled: true }, orderBy: [{ name: 'asc' }, { id: 'asc' }] });
+  const rows = await prisma.voiceProvider.findMany({ where: { enabled: true, ownerId: null }, orderBy: [{ name: 'asc' }, { id: 'asc' }] });
   const view = (row: VoiceProvider) => {
     const { id, adapter, name, recognition, speech, endpoint, region, models } = voiceProviderView(row);
     return { id, adapter, name, recognition, speech, endpoint, region, models, hasKey: Boolean(row.apiKeyEncrypted) };
