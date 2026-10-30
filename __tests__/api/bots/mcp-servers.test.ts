@@ -160,6 +160,20 @@ describe('/api/bots/[id]/mcp-servers', () => {
       expect(data[0].authConfig).toBeUndefined();
     });
 
+    it('says Not checked yet for a server that existed before its tools were checked (#738)', async () => {
+      const base = { botId: MOCK_BOT_ID, serverUrl: 'https://example.com/mcp', authType: 'none', enabled: true, createdAt: new Date('2025-01-01'), updatedAt: new Date('2025-01-01') };
+      (prisma.botMcpServer.findMany as jest.Mock).mockResolvedValue([
+        { ...base, id: 'old', name: 'Old', legacyText: true, policyRevision: 1 },
+        { ...base, id: 'new', name: 'New', legacyText: false, policyRevision: 3 },
+      ]);
+      const response = await GET(new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`), { params: Promise.resolve({ id: MOCK_BOT_ID }) });
+      const data = await response.json();
+      expect(data.map((row: { id: string; notCheckedYet: boolean; policyRevision: number }) => [row.id, row.notCheckedYet, row.policyRevision])).toEqual([
+        ['old', true, 1],
+        ['new', false, 3],
+      ]);
+    });
+
     it('reports a non-refreshable expired token as needing reconnection, with no stored marker', async () => {
       // A panel read never refreshes, so nothing has written the marker yet. Deriving state
       // from the stored marker alone showed this connection as "Connected" and hid the
