@@ -2,15 +2,20 @@ import type { Prisma, VoiceProvider } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { BotSettingsError } from '@/lib/bot-access-settings';
+import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels } from '@/lib/voice-providers';
+import { lendModelId, readLendModels } from '@/lib/voice-keys';
 
 /**
  * A bot's voice (#740): on or off (off until a person with Manage bots turns it on), a draft voice profile, and published
  * revisions of it. A bot speaks with the revision named in `bots.voice_revision`: publishing makes a new revision and rolling
  * back names an earlier one, so a revision never changes once it is published.
  *
- * The profile names the providers by id (lib/voice-providers.ts) with an exact model for each, and the voice. Every provider
- * today is one a super admin runs, so Universe AI pays; the person talking never does. Nothing here calls a provider.
+ * The profile names the providers by id (lib/voice-providers.ts) with an exact model for each, and the voice. A provider is
+ * one a super admin runs, so Universe AI pays, or a key (lib/voice-keys.ts) that the bot's maker lent to its universe, so the
+ * maker pays; the person talking never does. A bot never speaks on anyone else's key, and when the key stops being usable
+ * (pulled, deleted, a model taken off it, its owner no longer able to manage bots there) the bot carries on in text.
+ * Nothing here calls a provider.
  */
 
 const text = (max: number) => z.string().trim().min(1).max(max);
@@ -41,8 +46,11 @@ const readDraft = (value: unknown) => {
   return parsed.success ? parsed.data : {};
 };
 
+/** For a key that is lent: the models the lend allows (as "kind:id"), or null for all of them. */
+type Lends = Map<string, string[] | null>;
+
 /** The first reason a finished profile can't be used with the providers as they are now, or null. */
-export function profileProblem(profile: VoiceProfile, providers: Map<string, VoiceProvider>): string | null {
+export function profileProblem(profile: VoiceProfile, providers: Map<string, VoiceProvider>, lent: Lends = new Map()): string | null {
   for (const part of ['recognition', 'speech'] as const) {
     const choice = profile[part];
     const provider = providers.get(choice.providerId);
@@ -52,15 +60,60 @@ export function profileProblem(profile: VoiceProfile, providers: Map<string, Voi
     if (!provider[part]) return `${provider.name} doesn't do ${job}`;
     if (!provider.apiKeyEncrypted) return `${provider.name} has no key`;
     if (!readModels(provider.models).some((model) => model.kind === part && model.id === choice.model)) return `${provider.name} doesn't list the model ${choice.model} for ${job}`;
+    const allowed = lent.get(provider.id);
+    if (allowed && !allowed.includes(lendModelId({ kind: part, id: choice.model }))) return `${provider.name} isn't lent to this universe for the model ${choice.model}`;
   }
   return null;
 }
 
-// Only the server's own providers for now: a key a person lent (#749) joins when a bot can be published with one
-async function providersFor(profile: VoiceProfile): Promise<Map<string, VoiceProvider>> {
+/** Where a bot lives and who made it: what decides whose keys it may speak on. */
+interface Home {
+  createdById: string | null;
+  universeId: string;
+}
+
+async function homeOf(botId: string): Promise<Home> {
+  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { createdById: true, room: { select: { world: { select: { universeId: true } } } } } });
+  if (!bot) throw new BotSettingsError(404, 'Bot not found');
+  return { createdById: bot.createdById, universeId: bot.room.world.universeId };
+}
+
+/**
+ * The providers a profile may use for this bot: the server's own, and a key only when the bot's maker owns it, lent it to
+ * this universe, and still owns the universe or has Manage bots in it (the same rules as a text key). Anything else is left
+ * out, so the profile reads as naming a provider that doesn't exist.
+ */
+async function providersFor(profile: VoiceProfile, home: Home): Promise<{ providers: Map<string, VoiceProvider>; lent: Lends }> {
   const ids = [...new Set([profile.recognition.providerId, profile.speech.providerId])];
-  const rows = await prisma.voiceProvider.findMany({ where: { id: { in: ids }, ownerId: null } });
-  return new Map(rows.map((row) => [row.id, row]));
+  const rows = await prisma.voiceProvider.findMany({
+    where: { id: { in: ids } },
+    include: { lends: { where: { universeId: home.universeId }, select: { models: true } } },
+  });
+  const providers = new Map<string, VoiceProvider>();
+  const lent: Lends = new Map();
+  for (const { lends, ...row } of rows) {
+    if (row.ownerId === null) {
+      providers.set(row.id, row);
+    } else if (row.ownerId === home.createdById && lends.length > 0 && (await lendAccess(row.ownerId, home.universeId))) {
+      providers.set(row.id, row);
+      lent.set(row.id, readLendModels(lends[0].models));
+    }
+  }
+  return { providers, lent };
+}
+
+/** Who pays for each part of a voice: Universe AI for a server provider, the key's owner for a key someone lent. */
+async function payersOf(profile: VoiceProfile | null) {
+  const universeAi = { recognition: 'universe-ai' as const, speech: 'universe-ai' as const };
+  if (!profile) return { paidBy: 'universe-ai' as const, parts: universeAi };
+  const rows = await prisma.voiceProvider.findMany({ where: { id: { in: [profile.recognition.providerId, profile.speech.providerId] } }, select: { id: true, ownerId: true } });
+  const owned = new Set(rows.filter((row) => row.ownerId !== null).map((row) => row.id));
+  const parts = {
+    recognition: owned.has(profile.recognition.providerId) ? ('owner' as const) : ('universe-ai' as const),
+    speech: owned.has(profile.speech.providerId) ? ('owner' as const) : ('universe-ai' as const),
+  };
+  const paidBy = parts.recognition === parts.speech ? parts.speech : ('mixed' as const);
+  return { paidBy, parts };
 }
 
 const revisionView = (row: { number: number; profile: Prisma.JsonValue; note: string | null; publishedById: string | null; publishedAt: Date }) => ({
@@ -78,21 +131,50 @@ export async function readBotVoice(botId: string) {
     select: {
       voiceEnabled: true,
       voiceRevision: true,
+      createdById: true,
       voiceDraft: { select: { profile: true, updatedAt: true } },
       voiceRevisions: { orderBy: { number: 'desc' }, select: { number: true, profile: true, note: true, publishedById: true, publishedAt: true } },
-      room: { select: { world: { select: { universe: { select: { allowVoiceBots: true } } } } } },
+      room: { select: { world: { select: { universeId: true, universe: { select: { allowVoiceBots: true } } } } } },
     },
   });
   if (!bot) throw new BotSettingsError(404, 'Bot not found');
   const revisions = bot.voiceRevisions.map(revisionView);
+  const speaking = bot.voiceRevision === null ? undefined : bot.voiceRevisions.find((revision) => revision.number === bot.voiceRevision);
+  const parsed = speaking ? voiceProfileSchema.safeParse(speaking.profile) : null;
   return {
     enabled: bot.voiceEnabled,
     universeAllows: bot.room.world.universe.allowVoiceBots,
-    paidBy: 'universe-ai' as const,
+    ...(await payersOf(parsed?.success ? parsed.data : null)),
     revision: bot.voiceRevision,
     draft: { profile: readDraft(bot.voiceDraft?.profile), updatedAt: bot.voiceDraft?.updatedAt ?? null },
     revisions,
+    lentKeys: await lentKeysFor({ createdById: bot.createdById, universeId: bot.room.world.universeId }),
   };
+}
+
+/**
+ * The keys this bot's profile may name besides the server's providers: the ones its maker lent to its universe, with only the
+ * models the lend allows. Never the key itself.
+ */
+async function lentKeysFor(home: Home) {
+  if (!home.createdById || !(await lendAccess(home.createdById, home.universeId))) return [];
+  const rows = await prisma.voiceProvider.findMany({
+    where: { ownerId: home.createdById, lends: { some: { universeId: home.universeId } } },
+    orderBy: { createdAt: 'asc' },
+    include: { lends: { where: { universeId: home.universeId }, select: { models: true } } },
+  });
+  return rows.map((row) => {
+    const allowed = readLendModels(row.lends[0]?.models);
+    return {
+      id: row.id,
+      adapter: row.adapter,
+      name: row.name,
+      recognition: row.recognition,
+      speech: row.speech,
+      last4: row.apiKeyLast4,
+      models: readModels(row.models).filter((model) => !allowed || allowed.includes(lendModelId(model))),
+    };
+  });
 }
 
 /** Saves the draft in place of the one there. It only has to be well formed: finishing it is for publishing. */
@@ -114,8 +196,8 @@ export async function publishVoiceDraft(botId: string, note: string | null, user
       const issue = parsed.error.issues[0];
       throw new BotSettingsError(400, `The voice profile isn't finished: ${issue?.path.join('.') || 'profile'} is ${issue?.code === 'invalid_type' ? 'missing' : 'not valid'}`);
     }
-    const providers = await providersFor(parsed.data);
-    const problem = profileProblem(parsed.data, providers);
+    const { providers, lent } = await providersFor(parsed.data, await homeOf(botId));
+    const problem = profileProblem(parsed.data, providers, lent);
     if (problem) throw new BotSettingsError(409, problem);
     const last = await tx.botVoiceRevision.findFirst({ where: { botId }, orderBy: { number: 'desc' }, select: { number: true } });
     const number = (last?.number ?? 0) + 1;
@@ -132,7 +214,8 @@ export async function rollBackVoice(botId: string, number: number) {
     if (!revision) throw new BotSettingsError(404, 'That revision doesn\'t exist');
     const parsed = voiceProfileSchema.safeParse(revision.profile);
     if (!parsed.success) throw new BotSettingsError(409, 'That revision can\'t be read');
-    const problem = profileProblem(parsed.data, await providersFor(parsed.data));
+    const { providers, lent } = await providersFor(parsed.data, await homeOf(botId));
+    const problem = profileProblem(parsed.data, providers, lent);
     if (problem) throw new BotSettingsError(409, problem);
     await tx.bot.update({ where: { id: botId }, data: { voiceRevision: number } });
   });
@@ -172,14 +255,15 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
     select: {
       voiceEnabled: true,
       voiceRevision: true,
-      room: { select: { world: { select: { universe: { select: { allowVoiceBots: true } } } } } },
+      createdById: true,
+      room: { select: { world: { select: { universeId: true, universe: { select: { allowVoiceBots: true } } } } } },
     },
   });
   if (!bot) throw new BotSettingsError(404, 'Bot not found');
-  const result = (reason: VoiceOffReason | null, revision: number | null = null, profile: VoiceProfile | null = null) => ({
+  const result = async (reason: VoiceOffReason | null, revision: number | null = null, profile: VoiceProfile | null = null) => ({
     speaks: reason === null,
     reason,
-    paidBy: 'universe-ai' as const,
+    ...(await payersOf(profile)),
     revision,
     profile,
   });
@@ -189,6 +273,7 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
   const revision = await prisma.botVoiceRevision.findUnique({ where: { botId_number: { botId, number: bot.voiceRevision } } });
   const parsed = revision ? voiceProfileSchema.safeParse(revision.profile) : null;
   if (!revision || !parsed?.success) return result('no-profile');
-  if (profileProblem(parsed.data, await providersFor(parsed.data))) return result('provider', revision.number);
+  const { providers, lent } = await providersFor(parsed.data, { createdById: bot.createdById, universeId: bot.room.world.universeId });
+  if (profileProblem(parsed.data, providers, lent)) return result('provider', revision.number);
   return result(null, revision.number, parsed.data);
 }

@@ -11,11 +11,13 @@ import { POST as rollback } from '@/app/api/bots/[id]/voice/rollback/route';
 import { GET as getActive } from '@/app/api/bots/[id]/voice/active/route';
 import { getSessionUser } from '@/lib/auth-session';
 import { canManageBotMcpServers } from '@/lib/bot-permissions';
+import { lendAccess } from '@/lib/ai-key-lend';
 import { prisma } from '@/lib/db';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/bot-permissions', () => ({ canManageBotMcpServers: jest.fn() }));
+jest.mock('@/lib/ai-key-lend', () => ({ lendAccess: jest.fn() }));
 jest.mock('@/lib/db', () => ({ prisma: {} }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -25,6 +27,7 @@ let universe: Row;
 let draft: Row | null;
 let revisions: Row[];
 let providers: Row[];
+let lends: Row[];
 
 const fakeDb = () => {
   const db = {
@@ -34,7 +37,7 @@ const fakeDb = () => {
         if (where.id !== bot.id) return null;
         return {
           ...bot,
-          room: { world: { universe } },
+          room: { world: { universeId: 'uni-1', universe } },
           voiceDraft: draft,
           voiceRevisions: [...revisions].sort((a, b) => b.number - a.number),
           ...(select ? {} : {}),
@@ -54,7 +57,12 @@ const fakeDb = () => {
         revisions.push({ ...data, note: data.note ?? null, publishedAt: new Date('2026-10-30T12:00:00Z') });
       },
     },
-    voiceProvider: { findMany: async ({ where }: { where: { id: { in: string[] } } }) => providers.filter((p) => where.id.in.includes(p.id)) },
+    voiceProvider: {
+      findMany: async ({ where }: { where: { id?: { in: string[] }; ownerId?: string } }) =>
+        providers
+          .filter((p) => (where.id ? where.id.in.includes(p.id) : p.ownerId === where.ownerId))
+          .map((p) => ({ ownerId: null, createdAt: new Date('2026-10-30T10:00:00Z'), adapter: 'x', apiKeyLast4: null, ...p, lends: lends.filter((l) => l.providerId === p.id && l.universeId === 'uni-1') })),
+    },
   };
   Object.assign(prisma, db);
 };
@@ -99,9 +107,11 @@ beforeEach(() => {
   draft = null;
   revisions = [];
   providers = [provider(), voice()];
+  lends = [];
   fakeDb();
   (getSessionUser as jest.Mock).mockReset().mockResolvedValue({ id: 'u-sara', email: 'sara@example.com' });
   (canManageBotMcpServers as jest.Mock).mockReset().mockResolvedValue(true);
+  (lendAccess as jest.Mock).mockReset().mockResolvedValue('manage');
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
 });
 afterEach(() => jest.restoreAllMocks());
@@ -133,11 +143,20 @@ describe('who may', () => {
 describe('a bot that has never had voice', () => {
   it('has it off, no draft and no revision, and the universe\'s answer', async () => {
     const body = await (await call(getVoice, 'GET')).json();
-    expect(body).toEqual({ enabled: false, universeAllows: true, paidBy: 'universe-ai', revision: null, draft: { profile: {}, updatedAt: null }, revisions: [] });
+    expect(body).toEqual({
+      enabled: false,
+      universeAllows: true,
+      paidBy: 'universe-ai',
+      parts: { recognition: 'universe-ai', speech: 'universe-ai' },
+      revision: null,
+      draft: { profile: {}, updatedAt: null },
+      revisions: [],
+      lentKeys: [],
+    });
   });
 
   it('does not speak, because voice is off', async () => {
-    expect(await (await call(getActive, 'GET', undefined, asGame)).json()).toEqual({ speaks: false, reason: 'off', paidBy: 'universe-ai', revision: null, profile: null });
+    expect(await (await call(getActive, 'GET', undefined, asGame)).json()).toEqual({ speaks: false, reason: 'off', paidBy: 'universe-ai', parts: { recognition: 'universe-ai', speech: 'universe-ai' }, revision: null, profile: null });
   });
 
   it('can\'t be switched on until a profile is published', async () => {
@@ -231,7 +250,7 @@ describe('turning voice on and off', () => {
     const on = await call(putVoice, 'PUT', { enabled: true });
     expect(on.status).toBe(200);
     expect((await on.json()).enabled).toBe(true);
-    expect(await (await call(getActive, 'GET', undefined, asGame)).json()).toEqual({ speaks: true, reason: null, paidBy: 'universe-ai', revision: 1, profile: FINISHED });
+    expect(await (await call(getActive, 'GET', undefined, asGame)).json()).toEqual({ speaks: true, reason: null, paidBy: 'universe-ai', parts: { recognition: 'universe-ai', speech: 'universe-ai' }, revision: 1, profile: FINISHED });
   });
 
   it('is refused when the universe doesn\'t allow voice bots, and off always works', async () => {
@@ -296,5 +315,87 @@ describe('a bot that isn\'t there', () => {
   it('is a 404 for the bot server', async () => {
     const response = await getActive(new NextRequest('http://localhost:3333/x', { headers: asGame }), { params: Promise.resolve({ id: 'nope' }) });
     expect(response.status).toBe(404);
+  });
+});
+
+describe('a bot that speaks on a key its maker lent', () => {
+  const key = (changes: Row = {}): Row => voice({ ownerId: 'u-maker', ...changes });
+  const lend = (models: string[] | null = null): Row => ({ providerId: 'mouth', universeId: 'uni-1', models });
+  const lentVoice = () => {
+    providers = [provider(), key()];
+    lends = [lend()];
+  };
+
+  it('publishes, speaks, and says the key\'s owner pays for the speaking', async () => {
+    lentVoice();
+    expect((await saveAndPublish()).status).toBe(200);
+    await call(putVoice, 'PUT', { enabled: true });
+    expect(await (await call(getActive, 'GET', undefined, asGame)).json()).toMatchObject({
+      speaks: true,
+      reason: null,
+      paidBy: 'mixed',
+      parts: { recognition: 'universe-ai', speech: 'owner' },
+    });
+    expect((await (await call(getVoice, 'GET')).json()).paidBy).toBe('mixed');
+  });
+
+  it('says the owner pays for both when both parts are on lent keys', async () => {
+    providers = [provider({ ownerId: 'u-maker' }), key()];
+    lends = [{ providerId: 'ears', universeId: 'uni-1', models: null }, lend()];
+    await saveAndPublish();
+    await call(putVoice, 'PUT', { enabled: true });
+    expect(await (await call(getActive, 'GET', undefined, asGame)).json()).toMatchObject({ paidBy: 'owner', parts: { recognition: 'owner', speech: 'owner' } });
+  });
+
+  it.each([
+    ['isn\'t lent to this universe', () => { lends = []; }],
+    ['was lent to another universe', () => { lends = [{ providerId: 'mouth', universeId: 'uni-2', models: null }]; }],
+    ['belongs to someone who didn\'t make the bot', () => { providers = [provider(), key({ ownerId: 'u-other' })]; }],
+    ['belongs to a bot with no maker', () => { bot.createdById = null; }],
+    ['is lent by a maker who can no longer manage bots there', () => { (lendAccess as jest.Mock).mockResolvedValue(null); }],
+    ['is lent without the model the profile names', () => { lends = [lend(['speech:other'])]; }],
+  ])('refuses to publish with a key that %s', async (_name, arrange) => {
+    lentVoice();
+    arrange();
+    const response = await saveAndPublish();
+    expect(response.status).toBe(409);
+    expect(revisions).toHaveLength(0);
+    expect(bot.voiceRevision).toBeNull();
+  });
+
+  it('publishes with a model the lend names', async () => {
+    lentVoice();
+    lends = [lend(['speech:v4'])];
+    expect((await saveAndPublish()).status).toBe(200);
+  });
+
+  it('carries on in text the moment the key is pulled, deleted, or its model taken off, and speaks again when it is back', async () => {
+    lentVoice();
+    await saveAndPublish();
+    await call(putVoice, 'PUT', { enabled: true });
+    const active = async () => (await call(getActive, 'GET', undefined, asGame)).json();
+    expect(await active()).toMatchObject({ speaks: true });
+    const kept = lends;
+    lends = [];
+    expect(await active()).toMatchObject({ speaks: false, reason: 'provider', profile: null });
+    lends = kept;
+    providers = [provider()];
+    expect(await active()).toMatchObject({ speaks: false, reason: 'provider' });
+    providers = [provider(), key()];
+    lends = [lend(['speech:other'])];
+    expect(await active()).toMatchObject({ speaks: false, reason: 'provider' });
+    lends = kept;
+    expect(await active()).toMatchObject({ speaks: true });
+    expect(bot.voiceEnabled).toBe(true);
+  });
+
+  it('lists to the bot\'s managers only the keys its maker lent here, with only the models the lend allows', async () => {
+    providers = [provider(), key({ models: [{ id: 'v4', kind: 'speech' }, { id: 'v5', kind: 'speech' }], apiKeyLast4: '9f2a' }), key({ id: 'elsewhere', ownerId: 'u-other' })];
+    lends = [lend(['speech:v4']), { providerId: 'elsewhere', universeId: 'uni-1', models: null }];
+    const body = await (await call(getVoice, 'GET')).json();
+    expect(body.lentKeys).toEqual([{ id: 'mouth', adapter: 'x', name: 'ElevenLabs', recognition: false, speech: true, last4: '9f2a', models: [{ id: 'v4', kind: 'speech' }] }]);
+    expect(JSON.stringify(body)).not.toContain('iv:tag:data');
+    (lendAccess as jest.Mock).mockResolvedValue(null);
+    expect((await (await call(getVoice, 'GET')).json()).lentKeys).toEqual([]);
   });
 });
