@@ -30,9 +30,9 @@ describe('roles', () => {
     expect(position.everyone).toBeLessThan(position.member);
   });
 
-  it('gives the built-in Editor exactly what the editor tag allows today', () => {
+  it('gives the built-in Editor what the editor tag allowed, plus both bot permissions (#737)', () => {
     expect(EDITOR_DEFAULT_PERMISSIONS).toBe(
-      flag('MANAGE_WORLDS') | flag('MANAGE_ROOMS') | flag('EDIT_MAPS') | flag('MANAGE_BOTS'),
+      flag('MANAGE_WORLDS') | flag('MANAGE_ROOMS') | flag('EDIT_MAPS') | flag('MANAGE_BOTS') | flag('BOTS_CHANGE_THINGS') | flag('BOTS_DELETE_OR_SEND'),
     );
     expect(permissionsFromTags(['editor'])).toBe(EDITOR_DEFAULT_PERMISSIONS);
     expect(permissionsFromTags(['member', 'finance'])).toBe(BigInt(0));

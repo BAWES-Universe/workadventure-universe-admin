@@ -242,6 +242,8 @@ const SHORT: Record<PermissionKey, string> = {
   CHAT_BOTS_NEARBY: 'chat with bots nearby',
   DM_BOTS: 'DM bots',
   SUMMON_BOTS: 'summon bots',
+  BOTS_CHANGE_THINGS: 'have bots change things',
+  BOTS_DELETE_OR_SEND: 'have bots delete or send',
   ADMINISTRATOR: 'administrator',
 };
 

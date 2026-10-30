@@ -17,9 +17,9 @@ const ZERO = BigInt(0);
 const rule = (values: Parameters<typeof withValues>[1]): RuleBits => withValues(NO_RULE, values);
 
 describe('the bits a rule can hold', () => {
-  it('are exactly Manage bots, Chat nearby, DM and Summon', () => {
-    expect(RULE_MASK).toBe(BigInt(8192 + 16384 + 32768 + 65536));
-    expect(RULE_ACTIONS).toEqual(['chat', 'dm', 'summon', 'manage']);
+  it('are exactly Manage bots, Chat nearby, DM, Summon, and having a bot change things or delete or send', () => {
+    expect(RULE_MASK).toBe(BigInt(8192 + 16384 + 32768 + 65536 + 131072 + 262144));
+    expect(RULE_ACTIONS).toEqual(['chat', 'dm', 'summon', 'manage', 'change', 'deleteOrSend']);
   });
 
   it('reads Default for a row with nothing set', () => {
@@ -55,7 +55,7 @@ describe('withValues', () => {
     expect(ruleValue(current, 'summon')).toBe('no');
   });
 
-  it('sets nothing when no action is named, and keeps no bit outside the four', () => {
+  it('sets nothing when no action is named, and keeps no bit outside the six', () => {
     expect(withValues(NO_RULE, {})).toEqual(NO_RULE);
     const stray = withValues({ allow: flag('GO_LIVE') | flag('CHAT_BOTS_NEARBY'), deny: ZERO }, { dm: 'yes' });
     expect(stray.allow & flag('GO_LIVE')).toBe(ZERO);
@@ -85,6 +85,16 @@ describe('verdictFor: which rule wins', () => {
   it('among roles, a Yes from any one beats a No from another, as in Discord', () => {
     expect(verdictFor('chat', null, [rule({ chat: 'no' }), rule({ chat: 'yes' })])).toBe('yes');
     expect(verdictFor('chat', null, [rule({ chat: 'no' }), rule({ chat: 'no' })])).toBe('no');
+  });
+
+  it('keeps the two bot-effect actions apart from the rest', () => {
+    const changed = rule({ change: 'yes', deleteOrSend: 'no' });
+    expect(ruleValue(changed, 'change')).toBe('yes');
+    expect(ruleValue(changed, 'deleteOrSend')).toBe('no');
+    expect(ruleValue(changed, 'chat')).toBe('default');
+    expect(changed.allow & flag('BOTS_CHANGE_THINGS')).not.toBe(ZERO);
+    expect(changed.deny & flag('BOTS_DELETE_OR_SEND')).not.toBe(ZERO);
+    expect(verdictFor('deleteOrSend', rule({ change: 'yes' }), [])).toBe('none');
   });
 
   it('keeps each action apart', () => {
