@@ -54,16 +54,24 @@ const withPeople = (tool: ToolRow) => ({
 jest.mock('@/lib/db', () => {
   const db: Record<string, unknown> = {
     botMcpServer: {
-      findUnique: jest.fn(async ({ where }: { where: { id: string } }) => state.servers.find((s) => s.id === where.id) ?? null),
+      findUnique: jest.fn(async ({ where }: { where: { id: string } }) => {
+        const found = state.servers.find((s) => s.id === where.id);
+        return found ? { ...found } : null;
+      }),
       findUniqueOrThrow: jest.fn(async ({ where }: { where: { id: string } }) => {
         const found = state.servers.find((s) => s.id === where.id);
         if (!found) throw new Error('not found');
-        return found;
+        return { ...found };
       }),
       update: jest.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
         const found = state.servers.find((s) => s.id === where.id)!;
         applyData(found, data);
         return found;
+      }),
+      updateMany: jest.fn(async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        const found = state.servers.filter((s) => Object.entries(where).every(([key, value]) => (s as Record<string, unknown>)[key] === value));
+        for (const server of found) applyData(server, data);
+        return { count: found.length };
       }),
     },
     botMcpTool: {
@@ -95,8 +103,8 @@ jest.mock('@/lib/db', () => {
         applyData(found, data);
         return found;
       }),
-      updateMany: jest.fn(async ({ where, data }: { where: { id: string; fingerprint?: string }; data: Record<string, unknown> }) => {
-        const found = state.tools.filter((t) => t.id === where.id && (where.fingerprint === undefined || t.fingerprint === where.fingerprint));
+      updateMany: jest.fn(async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        const found = state.tools.filter((t) => Object.entries(where).every(([key, value]) => (t as Record<string, unknown>)[key] === value));
         for (const tool of found) applyData(tool, data);
         return { count: found.length };
       }),
@@ -381,6 +389,19 @@ describe('a tool that changes while someone is looking at it', () => {
     await expect(confirmTools('bot-1', 'srv-1', 'u-sara')).rejects.toMatchObject({ status: 409, message: 'This tool changed, review it again' });
     const a = state.tools.find((t) => t.name === 'a')!;
     expect(a).toMatchObject({ fingerprint: 'fp-a-2', heading: null, confirmedAt: null, confirmedById: null, suggestedHeading: 'deletesOrSends' });
+  });
+
+  it('is not confirmed with a suggestion that the sync replaced after it was read', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a', { suggestedHeading: 'looksUp' })));
+    syncAfterNextRead(tool('a', { suggestedHeading: 'deletesOrSends', suggestionSource: 'description' }));
+    await expect(confirmTools('bot-1', 'srv-1', 'u-sara')).rejects.toMatchObject({ status: 409, message: 'This tool changed, review it again' });
+    expect(state.tools[0]).toMatchObject({ confirmedAt: null, heading: null, suggestedHeading: 'deletesOrSends' });
+  });
+
+  it('is not confirmed when the sync added a tool after the list was read', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    syncAfterNextRead(tool('a'), tool('b'));
+    await expect(confirmTools('bot-1', 'srv-1', 'u-sara')).rejects.toMatchObject({ status: 409, message: 'This tool changed, review it again' });
   });
 
   it('keeps a heading someone chose for the old tool from being confirmed on the new one', async () => {

@@ -345,7 +345,7 @@ export async function confirmTools(
       // Only the tool as it was read: a sync that changed it in between has cleared its heading and confirmation, and
       // this must not confirm the old heading on a tool nobody has seen. Nothing is confirmed when one has changed.
       const confirmed = await tx.botMcpTool.updateMany({
-        where: { id: tool.id, fingerprint: tool.fingerprint },
+        where: { id: tool.id, fingerprint: tool.fingerprint, heading: tool.heading, suggestedHeading: tool.suggestedHeading, confirmedAt: null },
         data: { heading: tool.heading ?? tool.suggestedHeading, confirmedById: personId, confirmedAt: now },
       });
       if (confirmed.count === 0) throw new BotSettingsError(409, TOOL_CHANGED);
@@ -353,7 +353,13 @@ export async function confirmTools(
     const allConfirmed = all.every((tool) => tool.confirmedAt || todo.includes(tool));
     const checked = server.legacyText && allConfirmed;
     if (todo.length > 0 || checked) {
-      await tx.botMcpServer.update({ where: { id: serverId }, data: { ...bump, ...(checked ? { legacyText: false } : {}) } });
+      // The list this confirmed is the one the server still has: a sync that landed after the reads above (a tool added, a
+      // suggestion changed) has moved the revision, and then nothing is confirmed
+      const settled = await tx.botMcpServer.updateMany({
+        where: { id: serverId, policyRevision: server.policyRevision },
+        data: { ...bump, ...(checked ? { legacyText: false } : {}) },
+      });
+      if (settled.count === 0) throw new BotSettingsError(409, TOOL_CHANGED);
     }
     return describe(tx, serverId);
   });
