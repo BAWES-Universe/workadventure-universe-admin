@@ -32,6 +32,7 @@ model User {
   reportsHandled    Report[]          @relation("ReportHandledBy")
   avatars           UserAvatar[]
   aiKeys            BotsAiProvider[]  @relation("AiKeyOwner")
+  voiceKeys         VoiceProvider[]   @relation("VoiceKeyOwner")
   outfits           UserOutfit[]
   favorites         Favorite[]
   followers         Follow[]          @relation("Follower")
@@ -257,6 +258,8 @@ model Universe {
   // Hide bot conversations (#435): Orbit shows no transcript or bot memory text for any bot here, and the bot server
   // sends none to PostHog or Sentry. Bots still remember people either way. Off by default.
   hideBotConversations Boolean @default(false) @map("hide_bot_conversations")
+  // Allow voice bots here (#740): a bot can only speak and listen in this universe while it is on.
+  allowVoiceBots Boolean @default(true) @map("allow_voice_bots")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -270,6 +273,7 @@ model Universe {
   members    UniverseMember[]
   membershipInvitations MembershipInvitation[]
   aiKeyLends AiKeyLend[]
+  voiceKeyLends VoiceKeyLend[]
 
   @@map("universes")
 }
@@ -792,6 +796,10 @@ model Bot {
   askBeforeMaking     Int?     @default(5) @map("ask_before_making")
   askWhichWay         String   @default("rarely") @map("ask_which_way") @db.VarChar(20)
   cardWaitMinutes     Int      @default(10) @map("card_wait_minutes")
+  // Voice (#740): off until a person with Manage bots turns it on. voiceRevision is the published voice profile the bot
+  // speaks with (BotVoiceRevision.number); null until one is published.
+  voiceEnabled        Boolean  @default(false) @map("voice_enabled")
+  voiceRevision       Int?     @map("voice_revision")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")
@@ -807,6 +815,8 @@ model Bot {
   fileCounter    BotFileCounter?
   actionRequests BotActionRequest[]
   actionGrants   BotActionGrant[]
+  voiceDraft     BotVoiceDraft?
+  voiceRevisions BotVoiceRevision[]
 
   @@index([roomId])
   @@map("bots")
@@ -1569,4 +1579,98 @@ model BotActionGrant {
 
   @@index([botId, requesterKey, conversationKey])
   @@map("bot_action_grants")
+}
+
+// Voice providers (#740): the speech companies a super admin has set up for the whole server, for listening (recognition),
+// for speaking (speech), or both. Which adapter runs one is the bot server's business; Orbit keeps what to call, where to
+// reach and with which key. The key is encrypted and never sent to a browser. At most one provider is the default for each of
+// the two jobs (set in one transaction); a bot on Universe AI follows them.
+model VoiceProvider {
+  id                 String   @id @default(uuid())
+  // The adapter the bot server runs this with: a short name such as "elevenlabs"
+  adapter            String   @db.VarChar(50)
+  name               String   @db.VarChar(255)
+  recognition        Boolean  @default(false)
+  speech             Boolean  @default(false)
+  enabled            Boolean  @default(false)
+  endpoint           String?  @db.Text
+  region             String?  @db.VarChar(50)
+  apiKeyEncrypted    String?  @map("api_key_encrypted") @db.Text
+  // The last four characters of the key, kept so a super admin can recognise it
+  apiKeyLast4        String?  @map("api_key_last4") @db.VarChar(4)
+  // The models it can be used with: [{ id, label, kind: "recognition" | "speech" }]
+  models             Json     @default("[]")
+  defaultRecognition Boolean  @default(false) @map("default_recognition")
+  defaultSpeech      Boolean  @default(false) @map("default_speech")
+  createdById        String?  @map("created_by_id")
+  // Whose key this is (#749). Null = a provider the super admin runs for the whole server, which is every row there was before
+  // personal voice keys. Anything that lists or reads providers for the server must keep only ownerId = null.
+  ownerId            String?  @map("owner_id")
+  // Health of a person's key (#749). downSince is set while the key is Down (null = Working); downReason is why ("credit",
+  // "rejected", "errors", "model", "stopped"). failedRecognition and failedSpeech count the calls of each job that failed in a row (a call that works for one job
+  // does not clear the other's); two mark the key Down, and downPart says which job ("recognition", "speech"; null when the
+  // provider turned the whole key away). A Down key is
+  // tried again at most every 5 minutes: healthCheckedAt is when it last was. Server providers have none of this.
+  downSince          DateTime? @map("down_since")
+  downReason         String?  @map("down_reason") @db.VarChar(20)
+  downPart           String?  @map("down_part") @db.VarChar(12)
+  failedRecognition  Int      @default(0) @map("failed_recognition")
+  failedSpeech       Int      @default(0) @map("failed_speech")
+  healthCheckedAt    DateTime? @map("health_checked_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  owner User?           @relation("VoiceKeyOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  lends VoiceKeyLend[]
+
+  @@index([enabled])
+  @@index([ownerId])
+  @@map("voice_providers")
+}
+
+// A person's voice key lent to a universe (#749): bots made there by the key's owner may speak or listen with it, and nobody
+// else's may. Lending moves no bot; each bot is pointed at the key by its maker in its voice profile. `models` says which of
+// the key's models bots there may use, as "kind:id" (e.g. "speech:eleven_flash_v2_5"), or null for all of them.
+model VoiceKeyLend {
+  id         String   @id @default(uuid())
+  providerId String   @map("provider_id")
+  universeId String   @map("universe_id")
+  lentAt     DateTime @default(now()) @map("lent_at")
+  models     Json?
+
+  provider VoiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  universe Universe      @relation(fields: [universeId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, universeId])
+  @@index([universeId])
+  @@map("voice_key_lends")
+}
+
+// A bot's voice profile (#740). The draft is what a person is editing; a published revision never changes. A bot speaks with
+// the revision named in bots.voice_revision, so publishing and rolling back only move that number.
+model BotVoiceDraft {
+  botId       String   @id @map("bot_id")
+  profile     Json     @default("{}")
+  updatedById String?  @map("updated_by_id")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@map("bot_voice_drafts")
+}
+
+model BotVoiceRevision {
+  id            String   @id @default(uuid())
+  botId         String   @map("bot_id")
+  // 1, 2, 3 ... for this bot
+  number        Int
+  profile       Json
+  note          String?  @db.VarChar(500)
+  publishedById String?  @map("published_by_id")
+  publishedAt   DateTime @default(now()) @map("published_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@unique([botId, number])
+  @@map("bot_voice_revisions")
 }
