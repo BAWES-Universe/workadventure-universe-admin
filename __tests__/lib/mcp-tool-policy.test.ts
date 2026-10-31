@@ -422,6 +422,23 @@ describe('a tool that changes while someone is looking at it', () => {
     expect((await confirmTools('bot-1', 'srv-1', 'u-sara', undefined, state.servers[0].policyRevision)).state).toBe('confirmed');
   });
 
+  it('is not confirmed from a list that showed an older suggestion for an unconfirmed tool', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a', { suggestedHeading: 'looksUp' })));
+    const shown = state.servers[0].policyRevision;
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a', { suggestedHeading: 'deletesOrSends', suggestionSource: 'description' })));
+    expect(state.servers[0].policyRevision).toBe(shown + 1);
+    await expect(confirmTools('bot-1', 'srv-1', 'u-sara', undefined, shown)).rejects.toMatchObject({ status: 409 });
+    expect(state.tools[0]).toMatchObject({ confirmedAt: null });
+  });
+
+  it('a suggestion that did not change, or that nobody uses, does not move the revision', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a', { suggestedHeading: 'looksUp' }), tool('b')));
+    await moveTool('bot-1', 'srv-1', state.tools[1].id, 'changesThings', 'u-omar');
+    const revision = state.servers[0].policyRevision;
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a', { suggestedHeading: 'looksUp' }), tool('b', { suggestedHeading: 'deletesOrSends' })));
+    expect(state.servers[0].policyRevision).toBe(revision);
+  });
+
   it('still confirms and moves a tool that did not change', async () => {
     await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
     syncAfterNextRead(tool('a'));

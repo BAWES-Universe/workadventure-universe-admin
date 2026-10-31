@@ -237,7 +237,7 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
     await loadServer(tx, botId, serverId);
     const existing = await tx.botMcpTool.findMany({
       where: { serverId },
-      select: { id: true, name: true, fingerprint: true, confirmedAt: true, heading: true },
+      select: { id: true, name: true, fingerprint: true, confirmedAt: true, heading: true, suggestedHeading: true, suggestionSource: true },
     });
     const byName = new Map(existing.map((tool) => [tool.name, tool]));
     const added: string[] = [];
@@ -264,7 +264,11 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
         if (before.confirmedAt || before.heading) changed.push(tool.name);
       } else {
         // Same tool: its words may be shown a little differently, but nothing a person decided moves. A suggestion only
-        // follows the server while nobody has confirmed the tool.
+        // follows the server while nobody has confirmed the tool; when it is what Confirm would use (no heading chosen), a
+        // page that showed the old one is out of date
+        if (!before.confirmedAt && !before.heading && (before.suggestedHeading !== suggestion.suggestedHeading || before.suggestionSource !== suggestion.suggestionSource)) {
+          reworded = true;
+        }
         await tx.botMcpTool.update({ where: { id: before.id }, data: before.confirmedAt ? shown : { ...shown, ...suggestion } });
       }
     }
