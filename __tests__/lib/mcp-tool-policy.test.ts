@@ -95,6 +95,11 @@ jest.mock('@/lib/db', () => {
         applyData(found, data);
         return found;
       }),
+      updateMany: jest.fn(async ({ where, data }: { where: { id: string; fingerprint?: string }; data: Record<string, unknown> }) => {
+        const found = state.tools.filter((t) => t.id === where.id && (where.fingerprint === undefined || t.fingerprint === where.fingerprint));
+        for (const tool of found) applyData(tool, data);
+        return { count: found.length };
+      }),
       deleteMany: jest.fn(async ({ where }: { where: { id: { in: string[] } } }) => {
         state.tools = state.tools.filter((t) => !where.id.in.includes(t.id));
         return { count: where.id.in.length };
@@ -112,6 +117,7 @@ jest.mock('@/lib/db', () => {
   return { prisma: db };
 });
 
+import { prisma } from '@/lib/db';
 import {
   DEFAULT_SETTINGS,
   botToolSettingsSchema,
@@ -152,6 +158,14 @@ const tool = (name: string, over: Record<string, unknown> = {}) => ({
 });
 
 const catalog = (...tools: ReturnType<typeof tool>[]) => catalogSchema.parse({ tools });
+
+/** The bot server's next sync lands right after the tools are read: the person is acting on a list that is already old. */
+const syncAfterNextRead = (...tools: ReturnType<typeof tool>[]) =>
+  (prisma.botMcpTool.findMany as jest.Mock).mockImplementationOnce(async ({ where }: { where: { serverId: string } }) => {
+    const seen = state.tools.filter((t) => t.serverId === where.serverId).map(withPeople);
+    await syncCatalog('bot-1', 'srv-1', catalog(...tools));
+    return seen;
+  });
 
 beforeEach(() => {
   state.servers = [server()];
@@ -357,6 +371,53 @@ describe('confirming tools', () => {
     await confirmTools('bot-1', 'srv-1', 'u-sara');
     state.tools[0].confirmedById = null;
     expect((await readServerTools('bot-1', 'srv-1')).tools[0]).toMatchObject({ state: 'confirmed', confirmedBy: { name: null } });
+  });
+});
+
+describe('a tool that changes while someone is looking at it', () => {
+  it('is not confirmed with the heading they saw, and says so', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a'), tool('b')));
+    syncAfterNextRead(tool('a', { fingerprint: 'fp-a-2', suggestedHeading: 'deletesOrSends' }), tool('b'));
+    await expect(confirmTools('bot-1', 'srv-1', 'u-sara')).rejects.toMatchObject({ status: 409, message: 'This tool changed, review it again' });
+    const a = state.tools.find((t) => t.name === 'a')!;
+    expect(a).toMatchObject({ fingerprint: 'fp-a-2', heading: null, confirmedAt: null, confirmedById: null, suggestedHeading: 'deletesOrSends' });
+  });
+
+  it('keeps a heading someone chose for the old tool from being confirmed on the new one', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    await moveTool('bot-1', 'srv-1', state.tools[0].id, 'looksUp', 'u-omar');
+    syncAfterNextRead(tool('a', { fingerprint: 'fp-a-2', suggestedHeading: 'changesThings' }));
+    await expect(confirmTools('bot-1', 'srv-1', 'u-sara', [state.tools[0].id])).rejects.toMatchObject({ status: 409 });
+    expect(state.tools[0]).toMatchObject({ heading: null, confirmedAt: null });
+  });
+
+  it('is not moved under the heading they picked, and a confirmed one does not stay confirmed', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    await confirmTools('bot-1', 'srv-1', 'u-sara');
+    const id = state.tools[0].id;
+    const revision = state.servers[0].policyRevision;
+    (prisma.botMcpTool.findUnique as jest.Mock).mockImplementationOnce(async () => {
+      const seen = { ...state.tools[0] };
+      await syncCatalog('bot-1', 'srv-1', catalog(tool('a', { fingerprint: 'fp-a-2' })));
+      return seen;
+    });
+    await expect(moveTool('bot-1', 'srv-1', id, 'deletesOrSends', 'u-omar')).rejects.toMatchObject({ status: 409, message: 'This tool changed, review it again' });
+    expect(state.tools[0]).toMatchObject({ fingerprint: 'fp-a-2', heading: null, confirmedAt: null, confirmedById: null, movedById: null });
+    expect(state.servers[0].policyRevision).toBe(revision + 1);
+  });
+
+  it('is not confirmed when the sync removed it', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a'), tool('b')));
+    syncAfterNextRead(tool('b'));
+    await expect(confirmTools('bot-1', 'srv-1', 'u-sara')).rejects.toMatchObject({ status: 409 });
+    expect(state.tools.map((t) => t.name)).toEqual(['b']);
+  });
+
+  it('still confirms and moves a tool that did not change', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    syncAfterNextRead(tool('a'));
+    expect((await confirmTools('bot-1', 'srv-1', 'u-sara')).state).toBe('confirmed');
+    expect((await moveTool('bot-1', 'srv-1', state.tools[0].id, 'makesNew', 'u-omar')).tools[0]).toMatchObject({ heading: 'makesNew', state: 'confirmed' });
   });
 });
 
