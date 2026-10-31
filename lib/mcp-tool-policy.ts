@@ -298,9 +298,9 @@ export async function moveTool(botId: string, serverId: string, toolId: string, 
     if (!tool || tool.serverId !== serverId) throw new BotSettingsError(404, 'Tool not found');
     if (tool.heading !== heading) {
       // Only the tool as it was read: a sync that changed it in between has cleared its heading and confirmation, and
-      // this must not put the old ones back
+      // this must not put the old ones back; nor must it overwrite a confirm or another move that landed in between
       const moved = await tx.botMcpTool.updateMany({
-        where: { id: toolId, fingerprint: tool.fingerprint },
+        where: { id: toolId, fingerprint: tool.fingerprint, heading: tool.heading, confirmedAt: tool.confirmedAt },
         data: { heading, movedById: personId, ...(tool.confirmedAt ? { confirmedById: personId, confirmedAt: new Date() } : {}) },
       });
       if (moved.count === 0) throw new BotSettingsError(409, TOOL_CHANGED);
