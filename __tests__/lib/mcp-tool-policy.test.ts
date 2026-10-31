@@ -54,16 +54,24 @@ const withPeople = (tool: ToolRow) => ({
 jest.mock('@/lib/db', () => {
   const db: Record<string, unknown> = {
     botMcpServer: {
-      findUnique: jest.fn(async ({ where }: { where: { id: string } }) => state.servers.find((s) => s.id === where.id) ?? null),
+      findUnique: jest.fn(async ({ where }: { where: { id: string } }) => {
+        const found = state.servers.find((s) => s.id === where.id);
+        return found ? { ...found } : null;
+      }),
       findUniqueOrThrow: jest.fn(async ({ where }: { where: { id: string } }) => {
         const found = state.servers.find((s) => s.id === where.id);
         if (!found) throw new Error('not found');
-        return found;
+        return { ...found };
       }),
       update: jest.fn(async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
         const found = state.servers.find((s) => s.id === where.id)!;
         applyData(found, data);
         return found;
+      }),
+      updateMany: jest.fn(async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        const found = state.servers.filter((s) => Object.entries(where).every(([key, value]) => (s as Record<string, unknown>)[key] === value));
+        for (const server of found) applyData(server, data);
+        return { count: found.length };
       }),
     },
     botMcpTool: {
@@ -95,8 +103,8 @@ jest.mock('@/lib/db', () => {
         applyData(found, data);
         return found;
       }),
-      updateMany: jest.fn(async ({ where, data }: { where: { id: string; fingerprint?: string }; data: Record<string, unknown> }) => {
-        const found = state.tools.filter((t) => t.id === where.id && (where.fingerprint === undefined || t.fingerprint === where.fingerprint));
+      updateMany: jest.fn(async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        const found = state.tools.filter((t) => Object.entries(where).every(([key, value]) => (t as Record<string, unknown>)[key] === value));
         for (const tool of found) applyData(tool, data);
         return { count: found.length };
       }),
@@ -383,6 +391,19 @@ describe('a tool that changes while someone is looking at it', () => {
     expect(a).toMatchObject({ fingerprint: 'fp-a-2', heading: null, confirmedAt: null, confirmedById: null, suggestedHeading: 'deletesOrSends' });
   });
 
+  it('is not confirmed with a suggestion that the sync replaced after it was read', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a', { suggestedHeading: 'looksUp' })));
+    syncAfterNextRead(tool('a', { suggestedHeading: 'deletesOrSends', suggestionSource: 'description' }));
+    await expect(confirmTools('bot-1', 'srv-1', 'u-sara')).rejects.toMatchObject({ status: 409, message: 'This tool changed, review it again' });
+    expect(state.tools[0]).toMatchObject({ confirmedAt: null, heading: null, suggestedHeading: 'deletesOrSends' });
+  });
+
+  it('is not confirmed when the sync added a tool after the list was read', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    syncAfterNextRead(tool('a'), tool('b'));
+    await expect(confirmTools('bot-1', 'srv-1', 'u-sara')).rejects.toMatchObject({ status: 409, message: 'This tool changed, review it again' });
+  });
+
   it('keeps a heading someone chose for the old tool from being confirmed on the new one', async () => {
     await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
     await moveTool('bot-1', 'srv-1', state.tools[0].id, 'looksUp', 'u-omar');
@@ -411,6 +432,32 @@ describe('a tool that changes while someone is looking at it', () => {
     syncAfterNextRead(tool('b'));
     await expect(confirmTools('bot-1', 'srv-1', 'u-sara')).rejects.toMatchObject({ status: 409 });
     expect(state.tools.map((t) => t.name)).toEqual(['b']);
+  });
+
+  it('is not confirmed from a list that was already old when the request came', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    const shown = state.servers[0].policyRevision;
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a', { fingerprint: 'fp-a-2' })));
+    await expect(confirmTools('bot-1', 'srv-1', 'u-sara', undefined, shown)).rejects.toMatchObject({ status: 409, message: 'This tool changed, review it again' });
+    expect(state.tools[0]).toMatchObject({ confirmedAt: null, heading: null });
+    expect((await confirmTools('bot-1', 'srv-1', 'u-sara', undefined, state.servers[0].policyRevision)).state).toBe('confirmed');
+  });
+
+  it('is not confirmed from a list that showed an older suggestion for an unconfirmed tool', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a', { suggestedHeading: 'looksUp' })));
+    const shown = state.servers[0].policyRevision;
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a', { suggestedHeading: 'deletesOrSends', suggestionSource: 'description' })));
+    expect(state.servers[0].policyRevision).toBe(shown + 1);
+    await expect(confirmTools('bot-1', 'srv-1', 'u-sara', undefined, shown)).rejects.toMatchObject({ status: 409 });
+    expect(state.tools[0]).toMatchObject({ confirmedAt: null });
+  });
+
+  it('a suggestion that did not change, or that nobody uses, does not move the revision', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a', { suggestedHeading: 'looksUp' }), tool('b')));
+    await moveTool('bot-1', 'srv-1', state.tools[1].id, 'changesThings', 'u-omar');
+    const revision = state.servers[0].policyRevision;
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a', { suggestedHeading: 'looksUp' }), tool('b', { suggestedHeading: 'deletesOrSends' })));
+    expect(state.servers[0].policyRevision).toBe(revision);
   });
 
   it('still confirms and moves a tool that did not change', async () => {
