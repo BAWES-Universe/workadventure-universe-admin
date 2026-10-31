@@ -8,7 +8,7 @@ export const runtime = 'nodejs';
 
 /**
  * GET /api/bots/:id/voice/active
- * Whether the bot speaks right now and with what (#740): { speaks, reason, paidBy: "universe-ai", revision, profile }. `reason`
+ * Whether the bot speaks right now and with what (#740): { speaks, reason, paidBy, parts, revision, profile, down }. `reason`
  * is null when it speaks, and otherwise one of "off" (voice is off for the bot), "universe" (its universe doesn't allow voice
  * bots), "no-profile" (nothing published), "provider" (a provider in the profile is off, has no key, doesn't do that job or
  * no longer lists the model) or "key-down" (a person's key in the profile failed at its provider: the bot replies in text, and
