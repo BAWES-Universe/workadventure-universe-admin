@@ -412,6 +412,30 @@ describe('a tool that changes while someone is looking at it', () => {
     expect(state.tools[0]).toMatchObject({ heading: null, confirmedAt: null });
   });
 
+  it('is not moved over a confirm that landed between the read and the write', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    const id = state.tools[0].id;
+    (prisma.botMcpTool.findUnique as jest.Mock).mockImplementationOnce(async () => {
+      const seen = { ...state.tools[0] };
+      await confirmTools('bot-1', 'srv-1', 'u-sara');
+      return seen;
+    });
+    await expect(moveTool('bot-1', 'srv-1', id, 'deletesOrSends', 'u-omar')).rejects.toMatchObject({ status: 409, message: 'This tool changed, review it again' });
+    expect(state.tools[0]).toMatchObject({ heading: 'looksUp', confirmedById: 'u-sara', movedById: null });
+  });
+
+  it('is not moved over another move that landed between the read and the write', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    const id = state.tools[0].id;
+    (prisma.botMcpTool.findUnique as jest.Mock).mockImplementationOnce(async () => {
+      const seen = { ...state.tools[0] };
+      await moveTool('bot-1', 'srv-1', id, 'changesThings', 'u-ana');
+      return seen;
+    });
+    await expect(moveTool('bot-1', 'srv-1', id, 'deletesOrSends', 'u-omar')).rejects.toMatchObject({ status: 409 });
+    expect(state.tools[0]).toMatchObject({ heading: 'changesThings', movedById: 'u-ana' });
+  });
+
   it('is not moved under the heading they picked, and a confirmed one does not stay confirmed', async () => {
     await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
     await confirmTools('bot-1', 'srv-1', 'u-sara');
