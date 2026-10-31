@@ -259,9 +259,15 @@ export async function worldAccessFor(
     include: { roles: { include: { role: { select: { id: true, key: true, position: true, permissions: true } } } } },
   });
   if (!membership) {
+    // The tag gives the permissions of its built-in role, so that role's rules apply too (a per-bot No for Editor)
+    const tagged = await Promise.all(
+      [ADMIN_KEY, EDITOR_KEY]
+        .filter((key) => worldTags.includes(key))
+        .map(async (key) => named(await db.role.findUnique({ where: { universeId_key: { universeId, key } } }), key)),
+    );
     return {
       permissions: permissionsInWorld(worldId, everyonePermissions | permissionsFromTags(worldTags), null, []),
-      roles: named(everyone, EVERYONE_KEY),
+      roles: [...named(everyone, EVERYONE_KEY), ...tagged.flat()],
     };
   }
 
