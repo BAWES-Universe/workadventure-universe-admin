@@ -24,7 +24,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (!row) return NextResponse.json({ error: 'Provider not found' }, { status: 404 });
     if (row.ownerId !== null) {
       const botId = request.nextUrl.searchParams.get('botId');
-      const voice = botId ? await effectiveBotVoice(botId) : null;
+      // The turn that was let through to try a Down key (voice/active) asks for it here, so health is left out of this check
+      const voice = botId ? await effectiveBotVoice(botId, { ignoreKeyHealth: true }) : null;
       const usedBy = voice?.speaks && voice.profile ? [voice.profile.recognition.providerId, voice.profile.speech.providerId] : [];
       if (!usedBy.includes(row.id)) return NextResponse.json({ error: 'Provider not found' }, { status: 404 });
     }
