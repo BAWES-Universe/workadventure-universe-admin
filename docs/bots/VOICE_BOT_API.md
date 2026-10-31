@@ -45,8 +45,8 @@ All answer with the same body as `GET`.
 
 ## Bot server (service token)
 
-`GET /api/bots/:id/voice/active` gives `{ speaks, reason, paidBy, parts, revision, profile }`. `reason` is `null` when the bot speaks,
-and otherwise `off`, `universe`, `no-profile` or `provider`. Read before each spoken turn: turning a provider or the universe's
+`GET /api/bots/:id/voice/active` gives `{ speaks, reason, paidBy, parts, revision, profile, down }`. `reason` is `null` when the bot speaks,
+and otherwise `off`, `universe`, `no-profile`, `provider` or `key-down` (a person's key in the profile is Down: the bot replies in text, `down` is `{ since, reason }`, and one read every 5 minutes is let through to try it; see `VOICE_KEYS_API.md`). Read before each spoken turn: turning a provider or the universe's
 switch off stops the bot at once, and a session keeps the `revision` it started with.
 
 A lent key's credentials: `GET /api/voice/providers/:id/credentials?botId=…` (`VOICE_PROVIDERS_API.md`) serves the key, still

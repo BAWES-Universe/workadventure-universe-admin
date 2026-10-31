@@ -154,6 +154,15 @@ describe('the list', () => {
     ]);
     expect(JSON.stringify(body)).not.toContain('apiKeyEncrypted');
   });
+
+  it('says whether each key works, and since when and why when it does not', async () => {
+    withProviders([key(), key({ id: 'k2', downSince: new Date('2026-10-30T11:14:00Z'), downReason: 'credit' })]);
+    const body = await (await list(new NextRequest('http://localhost:3333/api/x'))).json();
+    expect(body.keys.map((entry: { health: unknown }) => entry.health)).toEqual([
+      { status: 'working', downSince: null, downReason: null },
+      { status: 'down', downSince: '2026-10-30T11:14:00.000Z', downReason: 'credit' },
+    ]);
+  });
 });
 
 describe('changing a key', () => {
@@ -173,6 +182,14 @@ describe('changing a key', () => {
     expect(data).toMatchObject({ name: 'Studio', apiKeyLast4: 'abcd' });
     expect(decryptApiKey(data.apiKeyEncrypted)).toBe('sk-new-key-abcd');
     expect(db.voiceKeyLend.findMany).not.toHaveBeenCalled();
+  });
+
+  it('starts a new key clean: a Down key that gets a new key is tried at once', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(key({ downSince: new Date(), downReason: 'credit' }));
+    await call(patch, 'PATCH', { apiKey: 'sk-new-key-abcd' });
+    expect(db.voiceProvider.update.mock.calls[0][0].data).toMatchObject({ downSince: null, downReason: null, downPart: null, failedRecognition: 0, failedSpeech: 0, healthCheckedAt: null });
+    await call(patch, 'PATCH', { name: 'Only a name' });
+    expect(db.voiceProvider.update.mock.calls[1][0].data).not.toHaveProperty('downSince');
   });
 
   it('takes a model off every lend that named it, and a lend left with none goes back to all', async () => {
@@ -291,7 +308,7 @@ describe('a lent key’s credentials', () => {
     speaking('k1');
     const response = await ask('?botId=bot-1');
     expect(response.status).toBe(200);
-    expect(effectiveBotVoice).toHaveBeenCalledWith('bot-1');
+    expect(effectiveBotVoice).toHaveBeenCalledWith('bot-1', { ignoreKeyHealth: true });
     const body = await response.json();
     expect(body.apiKeyEncrypted).toBe('iv:tag:data');
     expect(body).not.toHaveProperty('ownerId');

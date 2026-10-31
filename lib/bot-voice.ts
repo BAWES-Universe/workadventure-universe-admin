@@ -5,6 +5,7 @@ import { BotSettingsError } from '@/lib/bot-access-settings';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels } from '@/lib/voice-providers';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
+import { claimVoiceKeyTry, healthOf, tryIsDue } from '@/lib/voice-key-health';
 
 /**
  * A bot's voice (#740): on or off (off until a person with Manage bots turns it on), a draft voice profile, and published
@@ -225,16 +226,18 @@ export async function rollBackVoice(botId: string, number: number) {
 /** Turns voice on or off. On needs the universe to allow it and a published profile that works now; off always works. */
 export async function setBotVoiceEnabled(botId: string, enabled: boolean) {
   if (enabled) {
-    const state = await effectiveBotVoice(botId, { ignoreSwitch: true });
-    if (state.reason) throw new BotSettingsError(409, voiceReasonLine(state.reason));
+    // A key that is Down for now doesn't stop voice being turned on: the bot replies in text until the key answers again
+    const state = await effectiveBotVoice(botId, { ignoreSwitch: true, ignoreKeyHealth: true });
+    if (state.reason && state.reason !== 'key-down') throw new BotSettingsError(409, voiceReasonLine(state.reason));
   }
   await prisma.bot.update({ where: { id: botId }, data: { voiceEnabled: enabled }, select: { id: true } });
   return readBotVoice(botId);
 }
 
-export type VoiceOffReason = 'off' | 'universe' | 'no-profile' | 'provider';
+export type VoiceOffReason = 'off' | 'universe' | 'no-profile' | 'provider' | 'key-down';
 
-const REASON_LINES: Record<VoiceOffReason, string> = {
+// "key-down" has no line: it never stops voice being turned on, it only keeps the bot in text for now
+const REASON_LINES: Record<Exclude<VoiceOffReason, 'key-down'>, string> = {
   off: 'Voice is off for this bot',
   universe: 'This universe doesn\'t allow voice bots',
   'no-profile': 'Publish a voice profile first',
@@ -242,14 +245,19 @@ const REASON_LINES: Record<VoiceOffReason, string> = {
 };
 
 /** The line a person is told when voice can't be turned on. */
-export const voiceReasonLine = (reason: VoiceOffReason) => REASON_LINES[reason];
+export const voiceReasonLine = (reason: Exclude<VoiceOffReason, 'key-down'>) => REASON_LINES[reason];
 
 /**
  * Whether the bot speaks right now and with what: voice is on for it, its universe allows voice bots, it has a published
  * profile and the providers in it still work. `reason` says which of those is not so. The bot server reads this before it
  * speaks, so a super admin turning a provider off, or a universe turning voice bots off, stops it at once.
+ *
+ * A person's key that is Down (lib/voice-key-health.ts) reads as "key-down": the bot replies in text. `recheck` is the bot
+ * server asking whether it may try the key again: it may once every 5 minutes (or when the owner asked), and then `speaks`
+ * is true for that one turn; the bot server reports how the call went. `ignoreKeyHealth` leaves key health out (turning voice
+ * on, serving the key to a turn that was allowed to try it).
  */
-export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?: boolean } = {}) {
+export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?: boolean; recheck?: boolean; ignoreKeyHealth?: boolean } = {}) {
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
     select: {
@@ -260,12 +268,19 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
     },
   });
   if (!bot) throw new BotSettingsError(404, 'Bot not found');
-  const result = async (reason: VoiceOffReason | null, revision: number | null = null, profile: VoiceProfile | null = null) => ({
+  const result = async (
+    reason: VoiceOffReason | null,
+    revision: number | null = null,
+    profile: VoiceProfile | null = null,
+    down: ReturnType<typeof healthOf> | null = null,
+  ) => ({
     speaks: reason === null,
     reason,
     ...(await payersOf(profile)),
     revision,
     profile,
+    // Only for "key-down": since when and why the key is down, for the line a person reads
+    down: down ? { since: down.downSince, reason: down.downReason } : null,
   });
   if (!bot.voiceEnabled && !options.ignoreSwitch) return result('off');
   if (!bot.room.world.universe.allowVoiceBots) return result('universe');
@@ -275,5 +290,23 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
   if (!revision || !parsed?.success) return result('no-profile');
   const { providers, lent } = await providersFor(parsed.data, { createdById: bot.createdById, universeId: bot.room.world.universeId });
   if (profileProblem(parsed.data, providers, lent)) return result('provider', revision.number);
+  if (!options.ignoreKeyHealth) {
+    const ids = [...new Set([parsed.data.recognition.providerId, parsed.data.speech.providerId])];
+    // A key that went Down on one job holds back only a bot that uses it for that job
+    const usedFor = (id: string) => (['recognition', 'speech'] as const).filter((part) => parsed.data[part].providerId === id);
+    const down = ids
+      .map((id) => providers.get(id))
+      .filter((row): row is VoiceProvider => Boolean(row && row.ownerId !== null && row.downSince && (!row.downPart || usedFor(row.id).includes(row.downPart as 'recognition' | 'speech'))));
+    if (down.length > 0) {
+      // Each Down key gets one try per wait. Nothing is claimed unless every Down key can be tried, so a key whose wait
+      // is not over does not use up the wait of the other
+      let mayTry = options.recheck === true && down.every((row) => tryIsDue(row));
+      for (const row of down) {
+        if (!mayTry) break;
+        mayTry = await claimVoiceKeyTry(row.id);
+      }
+      if (!mayTry) return result('key-down', revision.number, null, healthOf([...down].sort((a, b) => a.downSince!.getTime() - b.downSince!.getTime())[0]));
+    }
+  }
   return result(null, revision.number, parsed.data);
 }

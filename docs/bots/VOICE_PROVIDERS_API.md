@@ -28,4 +28,6 @@ must listen, speak, or both. `endpoint` starts with `https://`.
 - `GET /api/voice/providers` gives `{ providers: [{ id, adapter, name, recognition, speech, endpoint, region, models, hasKey }], defaults: { recognition: id | null, speech: id | null } }`: the providers that are on, without keys.
 - `GET /api/voice/providers/:id/credentials[?botId=…]` gives one provider that is on and has a key, with `apiKeyEncrypted` still encrypted for the bot server to decrypt with `ENCRYPTION_KEY`, as for the text providers.
 
-A key a person lent (`VOICE_KEYS_API.md`) is never in `GET /api/voice/providers`. Its credentials are served only with `botId`, and only while that bot speaks with it (404 otherwise).
+- `POST /api/voice/providers/:id/health` `{ part: "recognition" | "speech", ok: true }` or `{ part, ok: false, status?, rejected? }` tells Orbit how a call with a person's key went (`VOICE_KEYS_API.md`, "When a key stops working"). Answers `{ status, downSince, downReason }`. A server provider, which has no owner and no health, and a key that is not there are 404.
+
+A key a person lent (`VOICE_KEYS_API.md`) is never in `GET /api/voice/providers`. Its credentials are served only with `botId`, and only while that bot speaks with it (404 otherwise); a bot let through to try a Down key is still served it.
