@@ -137,11 +137,34 @@ describe('what each one does', () => {
 
   it('confirms all tools, or the ones listed, as the person who asked', async () => {
     await call(CONFIRM as Handler, 'POST', {});
-    expect(lib.confirmTools).toHaveBeenLastCalledWith('bot-1', 'srv-1', 'u-sara', undefined);
+    expect(lib.confirmTools).toHaveBeenLastCalledWith('bot-1', 'srv-1', 'u-sara', undefined, undefined);
     await call(CONFIRM as Handler, 'POST', { toolIds: ['t1'] });
-    expect(lib.confirmTools).toHaveBeenLastCalledWith('bot-1', 'srv-1', 'u-sara', ['t1']);
+    expect(lib.confirmTools).toHaveBeenLastCalledWith('bot-1', 'srv-1', 'u-sara', ['t1'], undefined);
     await call(CONFIRM as Handler, 'POST');
+    expect(lib.confirmTools).toHaveBeenLastCalledWith('bot-1', 'srv-1', 'u-sara', undefined, undefined);
     expect(lib.confirmTools).toHaveBeenCalledTimes(3);
+  });
+
+  it('confirms against the policy revision the page showed, when it names one', async () => {
+    await call(CONFIRM as Handler, 'POST', { policyRevision: 4 });
+    expect(lib.confirmTools).toHaveBeenLastCalledWith('bot-1', 'srv-1', 'u-sara', undefined, 4);
+    expect((await call(CONFIRM as Handler, 'POST', { policyRevision: -1 })).status).toBe(400);
+    expect((await call(CONFIRM as Handler, 'POST', { policyRevision: 1.5 })).status).toBe(400);
+    expect(lib.confirmTools).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers 409 when the tools moved since the page showed them', async () => {
+    lib.confirmTools.mockRejectedValue(new BotSettingsError(409, 'This tool changed, review it again'));
+    const response = await call(CONFIRM as Handler, 'POST', { policyRevision: 1 });
+    expect(response.status).toBe(409);
+    expect((await response.json()).error).toBe('This tool changed, review it again');
+  });
+
+  it('never reads a body that is cut off, garbled or not an object as "all tools"', async () => {
+    for (const body of ['{"toolIds":["t1"', '{', 'null', '[]', '"all"', '{"toolIds": []}']) {
+      expect((await call(CONFIRM as Handler, 'POST', body)).status).toBe(400);
+    }
+    expect(lib.confirmTools).not.toHaveBeenCalled();
   });
 
   it('saves settings and a bot’s limits', async () => {

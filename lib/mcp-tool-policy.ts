@@ -75,7 +75,13 @@ export const catalogSchema = z
 
 export const moveSchema = z.object({ heading: headingSchema }).strict();
 
-export const confirmSchema = z.object({ toolIds: z.array(z.string().min(1).max(100)).min(1).max(MAX_TOOLS_PER_SERVER).optional() }).strict();
+export const confirmSchema = z
+  .object({
+    toolIds: z.array(z.string().min(1).max(100)).min(1).max(MAX_TOOLS_PER_SERVER).optional(),
+    /** The policy revision the page showed: if the tools moved since, nothing is confirmed. */
+    policyRevision: z.number().int().min(0).optional(),
+  })
+  .strict();
 
 export const serverSettingsSchema = z
   .object({
@@ -236,6 +242,8 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
     const byName = new Map(existing.map((tool) => [tool.name, tool]));
     const added: string[] = [];
     const changed: string[] = [];
+    // Any tool whose fingerprint is different, confirmed or not: a list a person opened before it changed is out of date
+    let reworded = false;
 
     for (const tool of body.tools) {
       const shown = {
@@ -252,6 +260,7 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
           where: { id: before.id },
           data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, heading: null, movedById: null, confirmedById: null, confirmedAt: null },
         });
+        reworded = true;
         if (before.confirmedAt || before.heading) changed.push(tool.name);
       } else {
         // Same tool: its words may be shown a little differently, but nothing a person decided moves. A suggestion only
@@ -264,7 +273,7 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
     const removed = existing.filter((tool) => !offered.has(tool.name));
     if (removed.length > 0) await tx.botMcpTool.deleteMany({ where: { id: { in: removed.map((tool) => tool.id) } } });
 
-    if (added.length > 0 || changed.length > 0 || removed.length > 0) {
+    if (added.length > 0 || changed.length > 0 || removed.length > 0 || reworded) {
       await tx.botMcpServer.update({ where: { id: serverId }, data: bump });
     }
     return { ...(await describe(tx, serverId)), added, changed, removed: removed.map((tool) => tool.name) };
@@ -300,11 +309,20 @@ export async function moveTool(botId: string, serverId: string, toolId: string, 
 /**
  * Confirm tools: all of the server's, or the ones listed. Each takes the heading someone chose, or else the one that
  * was suggested. A tool with neither can't be confirmed, and then nothing is. When every tool is confirmed, a server
- * that was Not checked yet is checked.
+ * that was Not checked yet is checked. When the caller names the policy revision its page showed and the server's has
+ * moved, nothing is confirmed (409).
  */
-export async function confirmTools(botId: string, serverId: string, personId: string, toolIds?: string[]): Promise<ServerToolsJson> {
+export async function confirmTools(
+  botId: string,
+  serverId: string,
+  personId: string,
+  toolIds?: string[],
+  seenRevision?: number,
+): Promise<ServerToolsJson> {
   return prisma.$transaction(async (tx) => {
     const server = await loadServer(tx, botId, serverId);
+    // The page names the list it showed: a sync or another person's change since then means it is not the list to confirm
+    if (seenRevision !== undefined && seenRevision !== server.policyRevision) throw new BotSettingsError(409, TOOL_CHANGED);
     const all = await tx.botMcpTool.findMany({
       where: { serverId },
       select: { id: true, name: true, fingerprint: true, heading: true, suggestedHeading: true, confirmedAt: true },
