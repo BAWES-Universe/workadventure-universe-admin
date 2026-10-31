@@ -12,8 +12,9 @@ export async function OPTIONS(request: NextRequest) {
 
 /**
  * GET /api/bots/:id/voice
- * A bot's voice (#740): { enabled, universeAllows, paidBy: "universe-ai", revision (the one it speaks with, or null),
- * draft: { profile, updatedAt }, revisions: [{ number, profile, note, publishedById, publishedAt }] newest first }.
+ * A bot's voice (#740): { enabled, universeAllows, paidBy: "universe-ai" | "owner" | "mixed", parts: { recognition, speech },
+ * revision (the one it speaks with, or null), draft: { profile, updatedAt },
+ * revisions: [{ number, profile, note, publishedById, publishedAt }] newest first, lentKeys }.
  *
  * Auth: Manage bots for this bot (403 without it).
  */
