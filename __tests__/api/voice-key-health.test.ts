@@ -121,6 +121,22 @@ describe('what the bot server reports', () => {
     expect(rows[0]).toMatchObject({ downPart: null, failedSpeech: 0, failedRecognition: 0 });
   });
 
+  it('restarts the wait for a failing try of the job the key is Down for, not for the other job', async () => {
+    rows[0] = row({ recognition: true, downSince: THEN, downReason: 'errors', downPart: 'speech', healthCheckedAt: THEN });
+    await reportVoiceKeyCall('k1', 'recognition', { ok: false, status: 503 }, at(10));
+    expect(rows[0]).toMatchObject({ downPart: 'speech', healthCheckedAt: THEN });
+    await reportVoiceKeyCall('k1', 'speech', { ok: false, status: 503 }, at(12));
+    expect(rows[0]).toMatchObject({ downPart: 'speech', healthCheckedAt: at(12) });
+  });
+
+  it('restarts the wait of a key turned away whole whichever job failed', async () => {
+    rows[0] = row({ recognition: true, downSince: THEN, downReason: 'credit', downPart: null, healthCheckedAt: THEN });
+    await reportVoiceKeyCall('k1', 'recognition', { ok: false, status: 503 }, at(10));
+    expect(rows[0].healthCheckedAt).toEqual(at(10));
+    await reportVoiceKeyCall('k1', 'speech', { ok: false, status: 402 }, at(20));
+    expect(rows[0]).toMatchObject({ downReason: 'credit', healthCheckedAt: at(20) });
+  });
+
   it('doesn\'t count a request the provider found wrong (a 400 or 422), a slow-down is counted', async () => {
     await call({ ok: false, status: 400 });
     await call({ ok: false, status: 422 });

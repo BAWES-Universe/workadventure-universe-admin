@@ -70,7 +70,12 @@ export async function reportVoiceKeyCall(id: string, part: VoicePart, outcome: V
       // Already Down: a failed try starts the wait again, and a clearer reason replaces a vaguer one
       await prisma.voiceProvider.updateMany({ where: { ...personal(id), downSince: { not: null } }, data: { downReason: verdict.down, downPart: null, healthCheckedAt: now } });
     } else if (verdict.counts) {
-      await prisma.voiceProvider.updateMany({ where: { ...personal(id), downSince: { not: null } }, data: { healthCheckedAt: now } });
+      // A failed try restarts the wait only for the job the key is Down for (or a key turned away whole): the other job
+      // failing now and then does not push that job's next try back
+      await prisma.voiceProvider.updateMany({
+        where: { ...personal(id), downSince: { not: null }, OR: [{ downPart: null }, { downPart: part }] },
+        data: { healthCheckedAt: now },
+      });
       await prisma.voiceProvider.updateMany({ where: { ...personal(id), downSince: null }, data: { [counter(part)]: { increment: 1 } } });
       const after = await prisma.voiceProvider.findUnique({ where: { id }, select: { failedRecognition: true, failedSpeech: true, downSince: true } });
       const failed = after ? (part === 'recognition' ? after.failedRecognition : after.failedSpeech) : 0;
