@@ -413,6 +413,15 @@ describe('a tool that changes while someone is looking at it', () => {
     expect(state.tools.map((t) => t.name)).toEqual(['b']);
   });
 
+  it('is not confirmed from a list that was already old when the request came', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    const shown = state.servers[0].policyRevision;
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a', { fingerprint: 'fp-a-2' })));
+    await expect(confirmTools('bot-1', 'srv-1', 'u-sara', undefined, shown)).rejects.toMatchObject({ status: 409, message: 'This tool changed, review it again' });
+    expect(state.tools[0]).toMatchObject({ confirmedAt: null, heading: null });
+    expect((await confirmTools('bot-1', 'srv-1', 'u-sara', undefined, state.servers[0].policyRevision)).state).toBe('confirmed');
+  });
+
   it('still confirms and moves a tool that did not change', async () => {
     await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
     syncAfterNextRead(tool('a'));
