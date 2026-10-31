@@ -82,13 +82,21 @@ describe('what the bot server reports', () => {
     [402, 'credit'],
     [401, 'rejected'],
     [403, 'rejected'],
-    [404, 'model'],
   ])('marks a key Down at once for a %s, with the reason', async (status, reason) => {
     const response = await call({ ok: false, status });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ status: 'down', downReason: reason });
     expect(rows[0]).toMatchObject({ downPart: null });
     expect(rows[0].downSince).toBeInstanceOf(Date);
+  });
+
+  it('marks a key Down for a 404 on listening (its model is gone), but not for a 404 on speaking (the voice that bot named)', async () => {
+    rows[0] = row({ recognition: true });
+    expect(await (await call({ ok: false, status: 404 }, 'speech')).json()).toMatchObject({ status: 'working' });
+    expect(rows[0]).toMatchObject({ failedSpeech: 0, failedRecognition: 0, downSince: null });
+    expect(await (await call({ ok: false, status: 404 }, 'speech')).json()).toMatchObject({ status: 'working' });
+    expect(await (await call({ ok: false, status: 404 }, 'recognition')).json()).toMatchObject({ status: 'down', downReason: 'model' });
+    expect(rows[0]).toMatchObject({ downPart: null });
   });
 
   it('marks a key Down when the provider refuses the key itself', async () => {
