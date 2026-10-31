@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db';
-import { FAILED_REPLIES_TO_DOWN, RECHECK_MS, judgeFailedReply, type DownReason } from '@/lib/ai-key-health';
+import { FAILED_REPLIES_TO_DOWN, RECHECK_MS, judgeFailedReply, type DownReason, type ReplyVerdict } from '@/lib/ai-key-health';
 
 /**
  * Is a person's voice key working (#749), and what do its bots do while it isn't: they carry on in text until it is back (the
@@ -64,7 +64,8 @@ export async function reportVoiceKeyCall(id: string, part: VoicePart, outcome: V
       await prisma.voiceProvider.updateMany({ where: { ...personal(id), downSince: null, [counter(part)]: { gt: 0 } }, data: { [counter(part)]: 0 } });
     }
   } else {
-    const verdict = judgeFailedReply(outcome.status, outcome.rejected);
+    // A speech call's 404 is the voice that bot named (the voice is chosen per bot), not the key: it never takes the key Down
+    const verdict: ReplyVerdict = part === 'speech' && outcome.status === 404 && !outcome.rejected ? { counts: false } : judgeFailedReply(outcome.status, outcome.rejected);
     if (verdict.counts && verdict.down) {
       await markDown(id, verdict.down, null, now);
       // Already Down: a failed try starts the wait again, and a clearer reason replaces a vaguer one

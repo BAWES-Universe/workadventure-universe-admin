@@ -32,7 +32,7 @@ Someone else's key, and a server provider, are 404. Lending moves no bot. A new 
 
 Orbit calls no provider, so the bot server tells it how each call went (service token): `POST /api/voice/providers/:id/health`
 `{ part, ok: true }` or `{ part, ok: false, status?, rejected? }` (`part` is `recognition` or `speech`, the job the call was for) (`VOICE_PROVIDERS_API.md`). The rules are a text key's
-(`lib/ai-key-health.ts`): a `401`, `403` or `rejected` is Down (`rejected`), a `402` is Down (`credit`), a `404` is Down (`model`),
+(`lib/ai-key-health.ts`): a `401`, `403` or `rejected` is Down (`rejected`), a `402` is Down (`credit`), a `404` on listening (`recognition`) is Down (`model`), a `404` on speaking (`speech`) is not counted (the voice is each bot's own choice, so a missing voice never takes the key down),
 two other failures in a row of the same job (a timeout, a `5xx`, a `429`) are Down (`errors`), a request the provider found wrong
 (other `4xx`) is not counted, and a call that works marks the key Working again. Each job is counted on its own, so listening
 that works does not hide speaking that keeps failing; a key that went Down on one job is Working again when that job works. The bot server sends `status` only for what the provider

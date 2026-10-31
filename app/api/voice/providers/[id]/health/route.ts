@@ -16,7 +16,7 @@ const outcomeSchema = z.union([
  * POST /api/voice/providers/:id/health { part, ok: true } | { part, ok: false, status?, rejected? }
  * What the bot server saw when it used a person's voice key for one job, `part` "recognition" or "speech" (#749): it worked, or it failed with the HTTP status the provider
  * answered (`status` left out for a dropped connection or a timeout; `rejected` when the provider refused the key itself).
- * A key out of credit, rejected or without its model is Down at once; two other failures in a row of the same job mark it Down
+ * A key out of credit, rejected or (on listening) without its model is Down at once; a 404 on speaking is a voice that bot named, never the key; two other failures in a row of the same job mark it Down
  * (a call that works for the other job does not clear them); a call that works marks it Working again (for the job that failed,
  * when only that job did). Answers with { status: "working" | "down", downSince, downReason }. A server provider, which
  * has no owner and no health, and a key that doesn't exist are "not found".
