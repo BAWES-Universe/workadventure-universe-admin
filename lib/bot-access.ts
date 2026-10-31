@@ -162,6 +162,8 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
   const { world } = bot.room;
 
   let user: { id: string; uuid: string; email: string | null; name: string | null; isGuest: boolean } | null;
+  // Whose ban to look up. Only the ban: a guest account has no roles or membership, so `user` stays null for it
+  let banUserId: string | null = null;
   let signedIn = person.signedIn;
   let named: BotAccessAnswer['person'];
   if (person.chatId) {
@@ -171,19 +173,21 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
     if (owners.length === 0) return refusal('unknown_person', action, bot.name);
     if (owners.length > 1) return refusal('shared_chat_id', action, bot.name);
     user = owners[0].isGuest ? null : owners[0];
+    banUserId = owners[0].id;
     signedIn = !owners[0].isGuest;
     named = { uuid: owners[0].uuid, name: owners[0].name };
   } else {
     // An account that signed in; a guest, or a signed-in person Orbit has no account for, has only what Everyone has
     user = person.signedIn && person.identifier ? await findUserByIdentifier(person.identifier) : null;
+    banUserId = user?.id ?? null;
   }
 
   // A direct message can come from anywhere, so a ban from the bot's world keeps it out too, and so does having the bot
   // change things, or delete or send, which can be asked in a direct message. Chatting nearby and summoning need the
   // person in the room, which a ban already stops.
-  if ((action === 'dm' || action === 'change' || action === 'deleteOrSend') && user) {
+  if ((action === 'dm' || action === 'change' || action === 'deleteOrSend') && banUserId) {
     const ban = await prisma.ban.findFirst({
-      where: { AND: [bansCoveringWorld({ id: world.id, universeId: world.universeId }), { userId: user.id }] },
+      where: { AND: [bansCoveringWorld({ id: world.id, universeId: world.universeId }), { userId: banUserId }] },
       select: { id: true },
     });
     if (ban) return refusal('banned', action, bot.name);
