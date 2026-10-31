@@ -271,6 +271,9 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
   });
 }
 
+/** A tool the server changed while a person was looking at it: what they saw is not what is there now. */
+const TOOL_CHANGED = 'This tool changed, review it again';
+
 /**
  * Move one tool under another heading. If it was confirmed it stays confirmed, now by the person who moved it; if not,
  * it still waits to be confirmed.
@@ -278,13 +281,16 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
 export async function moveTool(botId: string, serverId: string, toolId: string, heading: Heading, personId: string): Promise<ServerToolsJson> {
   return prisma.$transaction(async (tx) => {
     await loadServer(tx, botId, serverId);
-    const tool = await tx.botMcpTool.findUnique({ where: { id: toolId }, select: { id: true, serverId: true, heading: true, confirmedAt: true } });
+    const tool = await tx.botMcpTool.findUnique({ where: { id: toolId }, select: { id: true, serverId: true, fingerprint: true, heading: true, confirmedAt: true } });
     if (!tool || tool.serverId !== serverId) throw new BotSettingsError(404, 'Tool not found');
     if (tool.heading !== heading) {
-      await tx.botMcpTool.update({
-        where: { id: toolId },
+      // Only the tool as it was read: a sync that changed it in between has cleared its heading and confirmation, and
+      // this must not put the old ones back
+      const moved = await tx.botMcpTool.updateMany({
+        where: { id: toolId, fingerprint: tool.fingerprint },
         data: { heading, movedById: personId, ...(tool.confirmedAt ? { confirmedById: personId, confirmedAt: new Date() } : {}) },
       });
+      if (moved.count === 0) throw new BotSettingsError(409, TOOL_CHANGED);
       await tx.botMcpServer.update({ where: { id: serverId }, data: bump });
     }
     return describe(tx, serverId);
@@ -301,7 +307,7 @@ export async function confirmTools(botId: string, serverId: string, personId: st
     const server = await loadServer(tx, botId, serverId);
     const all = await tx.botMcpTool.findMany({
       where: { serverId },
-      select: { id: true, name: true, heading: true, suggestedHeading: true, confirmedAt: true },
+      select: { id: true, name: true, fingerprint: true, heading: true, suggestedHeading: true, confirmedAt: true },
     });
     if (all.length === 0) throw new BotSettingsError(409, 'This server has no tools to confirm yet. Test the server first');
     const wanted = toolIds ? new Set(toolIds) : null;
@@ -314,10 +320,13 @@ export async function confirmTools(botId: string, serverId: string, personId: st
     }
     const now = new Date();
     for (const tool of todo) {
-      await tx.botMcpTool.update({
-        where: { id: tool.id },
+      // Only the tool as it was read: a sync that changed it in between has cleared its heading and confirmation, and
+      // this must not confirm the old heading on a tool nobody has seen. Nothing is confirmed when one has changed.
+      const confirmed = await tx.botMcpTool.updateMany({
+        where: { id: tool.id, fingerprint: tool.fingerprint },
         data: { heading: tool.heading ?? tool.suggestedHeading, confirmedById: personId, confirmedAt: now },
       });
+      if (confirmed.count === 0) throw new BotSettingsError(409, TOOL_CHANGED);
     }
     const allConfirmed = all.every((tool) => tool.confirmedAt || todo.includes(tool));
     const checked = server.legacyText && allConfirmed;
