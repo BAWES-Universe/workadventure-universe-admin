@@ -43,7 +43,7 @@ export type BotAccessCode =
   | 'unknown_person'
   /** A direct message from a chat account two Orbit accounts claim: Orbit can't tell whose it is. */
   | 'shared_chat_id'
-  /** A direct message from someone banned from the bot's world. */
+  /** A direct message, or having the bot change things or delete or send, from someone banned from the bot's world. */
   | 'banned';
 
 export interface BotAccessAnswer {
@@ -178,9 +178,10 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
     user = person.signedIn && person.identifier ? await findUserByIdentifier(person.identifier) : null;
   }
 
-  // A direct message can come from anywhere, so a ban from the bot's world keeps it out too. Chatting nearby and
-  // summoning need the person in the room, which a ban already stops.
-  if (action === 'dm' && user) {
+  // A direct message can come from anywhere, so a ban from the bot's world keeps it out too, and so does having the bot
+  // change things, or delete or send, which can be asked in a direct message. Chatting nearby and summoning need the
+  // person in the room, which a ban already stops.
+  if ((action === 'dm' || action === 'change' || action === 'deleteOrSend') && user) {
     const ban = await prisma.ban.findFirst({
       where: { AND: [bansCoveringWorld({ id: world.id, universeId: world.universeId }), { userId: user.id }] },
       select: { id: true },
