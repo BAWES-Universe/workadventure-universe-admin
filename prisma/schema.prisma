@@ -32,6 +32,7 @@ model User {
   reportsHandled    Report[]          @relation("ReportHandledBy")
   avatars           UserAvatar[]
   aiKeys            BotsAiProvider[]  @relation("AiKeyOwner")
+  voiceKeys         VoiceProvider[]   @relation("VoiceKeyOwner")
   outfits           UserOutfit[]
   favorites         Favorite[]
   followers         Follow[]          @relation("Follower")
@@ -46,6 +47,8 @@ model User {
   botsCreated       Bot[] @relation("BotCreatedBy")
   botsUpdated       Bot[] @relation("BotUpdatedBy")
   botAccessRules    BotAccessRule[]
+  botToolsConfirmed BotMcpTool[] @relation("BotToolConfirmedBy")
+  botToolsMoved     BotMcpTool[] @relation("BotToolMovedBy")
   botConversations BotsConversation[]
   botMemories      BotsMemory[]
   avatarGrants     UserAvatarGrant[]
@@ -255,6 +258,8 @@ model Universe {
   // Hide bot conversations (#435): Orbit shows no transcript or bot memory text for any bot here, and the bot server
   // sends none to PostHog or Sentry. Bots still remember people either way. Off by default.
   hideBotConversations Boolean @default(false) @map("hide_bot_conversations")
+  // Allow voice bots here (#740): a bot can only speak and listen in this universe while it is on.
+  allowVoiceBots Boolean @default(true) @map("allow_voice_bots")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -268,6 +273,7 @@ model Universe {
   members    UniverseMember[]
   membershipInvitations MembershipInvitation[]
   aiKeyLends AiKeyLend[]
+  voiceKeyLends VoiceKeyLend[]
 
   @@map("universes")
 }
@@ -785,6 +791,15 @@ model Bot {
   // Hide bot conversations (#435) for this bot alone. null = follow the universe (default), true = Private, false = Normal.
   // A universe that hides them wins: a bot cannot be loosened below it.
   hideConversations   Boolean? @map("hide_conversations")
+  // When a bot asks before a tool runs (#738): before making more than this many things in one request (null = no limit),
+  // how often it asks which way to go (rarely | beforeBiggerJobs | never), and how long a card waits for an answer.
+  askBeforeMaking     Int?     @default(5) @map("ask_before_making")
+  askWhichWay         String   @default("rarely") @map("ask_which_way") @db.VarChar(20)
+  cardWaitMinutes     Int      @default(10) @map("card_wait_minutes")
+  // Voice (#740): off until a person with Manage bots turns it on. voiceRevision is the published voice profile the bot
+  // speaks with (BotVoiceRevision.number); null until one is published.
+  voiceEnabled        Boolean  @default(false) @map("voice_enabled")
+  voiceRevision       Int?     @map("voice_revision")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")
@@ -798,6 +813,10 @@ model Bot {
   replyLimitHits BotReplyLimitHit[]
   files          BotFile[]
   fileCounter    BotFileCounter?
+  actionRequests BotActionRequest[]
+  actionGrants   BotActionGrant[]
+  voiceDraft     BotVoiceDraft?
+  voiceRevisions BotVoiceRevision[]
 
   @@index([roomId])
   @@map("bots")
@@ -840,13 +859,55 @@ model BotMcpServer {
   enabled     Boolean  @default(true)
   lastTestedAt   DateTime?  @map("last_tested_at")
   lastTestResult Json?      @map("last_test_result")
+  // Servers that existed before tools were checked (#738) keep working as they do in text, shown as "Not checked yet",
+  // until their tools are confirmed.
+  legacyText     Boolean    @default(false) @map("legacy_text")
+  // What a bot does with a tool under each heading: rightAway | asksFirst | off.
+  lookUpSetting      String @default("rightAway") @map("look_up_setting") @db.VarChar(20)
+  makeSetting        String @default("rightAway") @map("make_setting") @db.VarChar(20)
+  changeSetting      String @default("asksFirst") @map("change_setting") @db.VarChar(20)
+  deleteSendSetting  String @default("asksFirst") @map("delete_send_setting") @db.VarChar(20)
+  // Goes up whenever a heading setting, a tool's heading or a tool's confirmation changes, so a card or a remembered
+  // approval made under an older policy can be told apart.
+  policyRevision     Int    @default(1) @map("policy_revision")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+  bot   Bot           @relation(fields: [botId], references: [id], onDelete: Cascade)
+  tools BotMcpTool[]
 
   @@index([botId])
   @@map("bot_mcp_servers")
+}
+
+// One tool of a bot's MCP server (#738): what the server says it is, what we suggest it does, and what a person with
+// Manage bots chose and confirmed. A suggestion never lets a tool run: only a confirmed heading does.
+model BotMcpTool {
+  id              String    @id @default(uuid())
+  serverId        String    @map("server_id")
+  name            String    @db.VarChar(255)
+  title           String?   @db.VarChar(255)
+  description     String?   @db.Text
+  // A fingerprint of the tool's inputs, labels, server address and account, made by the bot server. A different one means
+  // the tool changed and goes back to not confirmed yet.
+  fingerprint     String    @db.VarChar(128)
+  // looksUp | makesNew | changesThings | deletesOrSends; where it came from: server | description | builtIn
+  suggestedHeading String?  @map("suggested_heading") @db.VarChar(20)
+  suggestionSource String?  @map("suggestion_source") @db.VarChar(20)
+  // The heading a person chose (or accepted from the suggestion), set when confirmed or moved.
+  heading         String?   @db.VarChar(20)
+  movedById       String?   @map("moved_by_id")
+  confirmedById   String?   @map("confirmed_by_id")
+  confirmedAt     DateTime? @map("confirmed_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  server      BotMcpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  movedBy     User?        @relation("BotToolMovedBy", fields: [movedById], references: [id], onDelete: SetNull)
+  confirmedBy User?        @relation("BotToolConfirmedBy", fields: [confirmedById], references: [id], onDelete: SetNull)
+
+  @@unique([serverId, name])
+  @@map("bot_mcp_tools")
 }
 
 // AI Providers
@@ -1401,4 +1462,215 @@ model AvatarSetAuditLog {
   @@index([actorId, createdAt])
   @@index([createdAt])
   @@map("avatar_set_audit_logs")
+}
+
+// A bot action that waits for a tap, kept so the tap runs it once, survives a restart and never runs twice (#739).
+// Redis may carry notices about it but is never the record. Status: waiting | approved | running | done | failed |
+// couldntConfirm | closed (with closedReason: declined | superseded | expired | stale | cancelled | revoked). Every change
+// is a conditional update on the status and revision the caller saw, so one tap wins. The tap names only this row's id and
+// revision, never new content: `arguments` is what was shown and what runs.
+model BotActionRequest {
+  id              String    @id @default(uuid())
+  botId           String    @map("bot_id")
+  // The bot server's own key for this request (its job, turn and tool call), so a retried save does not make a second card.
+  proposalKey     String    @map("proposal_key") @db.VarChar(200)
+  // Who asked, as the bot server authenticated them (the signed-in account, or the guest's server session), and which
+  // conversation (the bubble or the direct-message thread) the card is in. Only the asker's tap counts.
+  requesterKey    String    @map("requester_key") @db.VarChar(400)
+  conversationKey String    @map("conversation_key") @db.VarChar(400)
+  connectionRef   String?   @map("connection_ref") @db.VarChar(200)
+  toolName        String    @map("tool_name") @db.VarChar(255)
+  // makesNew | changesThings | deletesOrSends | looksUp: the heading the tool was confirmed under
+  heading         String    @db.VarChar(20)
+  toolFingerprint String    @map("tool_fingerprint") @db.VarChar(128)
+  policyRevision  Int       @map("policy_revision")
+  // The exact approved arguments as JSON, encrypted like a key, and a digest of them for comparing.
+  arguments       String    @db.Text
+  argumentsDigest String    @map("arguments_digest") @db.VarChar(64)
+  // What "allow more" would remember if tapped, fixed by the bot server when it makes the card; null = not offered.
+  rememberScope   Json?     @map("remember_scope")
+  status          String    @default("waiting") @db.VarChar(20)
+  closedReason    String?   @map("closed_reason") @db.VarChar(20)
+  // Goes up with every change; a tap carries the one it saw.
+  revision        Int       @default(1)
+  // The card stops waiting here (server clock).
+  reviewExpiresAt DateTime  @map("review_expires_at")
+  approvedAt      DateTime? @map("approved_at")
+  // An approved action must be claimed by here or it needs a fresh card.
+  startBy         DateTime? @map("start_by")
+  finishedAt      DateTime? @map("finished_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  bot       Bot                  @relation(fields: [botId], references: [id], onDelete: Cascade)
+  decisions BotActionDecision[]
+  attempts  BotActionAttempt[]
+
+  @@unique([botId, proposalKey])
+  @@index([botId, conversationKey, status])
+  @@index([status, reviewExpiresAt])
+  @@map("bot_action_requests")
+}
+
+// What happened to a request, in order: who decided what, and what closed or moved it. No card text.
+model BotActionDecision {
+  id           String   @id @default(uuid())
+  requestId    String   @map("request_id")
+  // approve | approveAndRemember | decline | supersede | expire | stale | cancel | revoke | claim | reconcile
+  event        String   @db.VarChar(24)
+  actorKey     String?  @map("actor_key") @db.VarChar(400)
+  fromRevision Int      @map("from_revision")
+  toRevision   Int      @map("to_revision")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  request BotActionRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId])
+  @@map("bot_action_decisions")
+}
+
+// One try to run an approved request. state: claimed | succeeded | failed | notSent | uncertain. At most one attempt per
+// request is claimed at a time (a unique index in the migration). An uncertain attempt is never sent again by itself.
+model BotActionAttempt {
+  id                String    @id @default(uuid())
+  requestId         String    @map("request_id")
+  attemptNo         Int       @map("attempt_no")
+  state             String    @default("claimed") @db.VarChar(16)
+  // The same for every attempt of a request, for destinations that deduplicate.
+  idempotencyKey    String    @map("idempotency_key") @db.VarChar(100)
+  providerRequestId String?   @map("provider_request_id") @db.VarChar(200)
+  // A short word for the result or error class, never the content.
+  outcomeClass      String?   @map("outcome_class") @db.VarChar(60)
+  claimedAt         DateTime  @default(now()) @map("claimed_at")
+  leaseExpiresAt    DateTime  @map("lease_expires_at")
+  finishedAt        DateTime? @map("finished_at")
+
+  request BotActionRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@unique([requestId, attemptNo])
+  @@map("bot_action_attempts")
+}
+
+// A remembered approval (#739): "Create, and allow more WEB issues in this chat". Bound to the asker, the bot, the
+// conversation, the connection, the reviewed tool and its policy revision, with the arguments that stay fixed and the
+// fields that may vary. Never for deletes or sends. It ends after idleMinutes without the asker's messages, absoluteMinutes
+// at most, or when revoked.
+model BotActionGrant {
+  id               String    @id @default(uuid())
+  botId            String    @map("bot_id")
+  requesterKey     String    @map("requester_key") @db.VarChar(400)
+  conversationKey  String    @map("conversation_key") @db.VarChar(400)
+  connectionRef    String?   @map("connection_ref") @db.VarChar(200)
+  toolName         String    @map("tool_name") @db.VarChar(255)
+  heading          String    @db.VarChar(20)
+  toolFingerprint  String    @map("tool_fingerprint") @db.VarChar(128)
+  policyRevision   Int       @map("policy_revision")
+  // { fixed: { field: value }, varies: [field] }
+  scope            Json
+  fromRequestId    String?   @map("from_request_id") @db.VarChar(100)
+  idleMinutes      Int       @map("idle_minutes")
+  idleExpiresAt    DateTime  @map("idle_expires_at")
+  absoluteExpiresAt DateTime @map("absolute_expires_at")
+  revokedAt        DateTime? @map("revoked_at")
+  revokedReason    String?   @map("revoked_reason") @db.VarChar(40)
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@index([botId, requesterKey, conversationKey])
+  @@map("bot_action_grants")
+}
+
+// Voice providers (#740): the speech companies a super admin has set up for the whole server, for listening (recognition),
+// for speaking (speech), or both. Which adapter runs one is the bot server's business; Orbit keeps what to call, where to
+// reach and with which key. The key is encrypted and never sent to a browser. At most one provider is the default for each of
+// the two jobs (set in one transaction); a bot on Universe AI follows them.
+model VoiceProvider {
+  id                 String   @id @default(uuid())
+  // The adapter the bot server runs this with: a short name such as "elevenlabs"
+  adapter            String   @db.VarChar(50)
+  name               String   @db.VarChar(255)
+  recognition        Boolean  @default(false)
+  speech             Boolean  @default(false)
+  enabled            Boolean  @default(false)
+  endpoint           String?  @db.Text
+  region             String?  @db.VarChar(50)
+  apiKeyEncrypted    String?  @map("api_key_encrypted") @db.Text
+  // The last four characters of the key, kept so a super admin can recognise it
+  apiKeyLast4        String?  @map("api_key_last4") @db.VarChar(4)
+  // The models it can be used with: [{ id, label, kind: "recognition" | "speech" }]
+  models             Json     @default("[]")
+  defaultRecognition Boolean  @default(false) @map("default_recognition")
+  defaultSpeech      Boolean  @default(false) @map("default_speech")
+  createdById        String?  @map("created_by_id")
+  // Whose key this is (#749). Null = a provider the super admin runs for the whole server, which is every row there was before
+  // personal voice keys. Anything that lists or reads providers for the server must keep only ownerId = null.
+  ownerId            String?  @map("owner_id")
+  // Health of a person's key (#749). downSince is set while the key is Down (null = Working); downReason is why ("credit",
+  // "rejected", "errors", "model", "stopped"). failedRecognition and failedSpeech count the calls of each job that failed in a row (a call that works for one job
+  // does not clear the other's); two mark the key Down, and downPart says which job ("recognition", "speech"; null when the
+  // provider turned the whole key away). A Down key is
+  // tried again at most every 5 minutes: healthCheckedAt is when it last was. Server providers have none of this.
+  downSince          DateTime? @map("down_since")
+  downReason         String?  @map("down_reason") @db.VarChar(20)
+  downPart           String?  @map("down_part") @db.VarChar(12)
+  failedRecognition  Int      @default(0) @map("failed_recognition")
+  failedSpeech       Int      @default(0) @map("failed_speech")
+  healthCheckedAt    DateTime? @map("health_checked_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  owner User?           @relation("VoiceKeyOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  lends VoiceKeyLend[]
+
+  @@index([enabled])
+  @@index([ownerId])
+  @@map("voice_providers")
+}
+
+// A person's voice key lent to a universe (#749): bots made there by the key's owner may speak or listen with it, and nobody
+// else's may. Lending moves no bot; each bot is pointed at the key by its maker in its voice profile. `models` says which of
+// the key's models bots there may use, as "kind:id" (e.g. "speech:eleven_flash_v2_5"), or null for all of them.
+model VoiceKeyLend {
+  id         String   @id @default(uuid())
+  providerId String   @map("provider_id")
+  universeId String   @map("universe_id")
+  lentAt     DateTime @default(now()) @map("lent_at")
+  models     Json?
+
+  provider VoiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  universe Universe      @relation(fields: [universeId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, universeId])
+  @@index([universeId])
+  @@map("voice_key_lends")
+}
+
+// A bot's voice profile (#740). The draft is what a person is editing; a published revision never changes. A bot speaks with
+// the revision named in bots.voice_revision, so publishing and rolling back only move that number.
+model BotVoiceDraft {
+  botId       String   @id @map("bot_id")
+  profile     Json     @default("{}")
+  updatedById String?  @map("updated_by_id")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@map("bot_voice_drafts")
+}
+
+model BotVoiceRevision {
+  id            String   @id @default(uuid())
+  botId         String   @map("bot_id")
+  // 1, 2, 3 ... for this bot
+  number        Int
+  profile       Json
+  note          String?  @db.VarChar(500)
+  publishedById String?  @map("published_by_id")
+  publishedAt   DateTime @default(now()) @map("published_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@unique([botId, number])
+  @@map("bot_voice_revisions")
 }

@@ -112,7 +112,7 @@ describe('GET /api/room/access, permissions from roles', () => {
     db.worldMember.findUnique.mockResolvedValue({ id: 'm', tags: ['admin'] });
     db.universeMember.findUnique.mockResolvedValue(null);
     const body = await enter();
-    expect(body.permissions).toBe(String(131071 | 512));
+    expect(body.permissions).toBe(String(524287 | 512));
     expect(body.canEdit).toBe(true);
   });
 
@@ -121,7 +121,7 @@ describe('GET /api/room/access, permissions from roles', () => {
     db.role.findUnique.mockRejectedValue(new Error('database down'));
     const body = await enter();
     expect(body.status).toBe('ok');
-    expect(body.permissions).toBe('8416');
+    expect(body.permissions).toBe(String(8416 | 131072 | 262144));
     expect(body.canEdit).toBe(true);
   });
   it("records a signed-in person's visit as theirs, with their tags and without copying the outfit: their account has it", async () => {

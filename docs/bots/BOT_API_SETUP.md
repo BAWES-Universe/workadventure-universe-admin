@@ -72,12 +72,21 @@ curl -X POST \
 
 6. **POST /api/bots/:id/access** - Can this person do this with this bot? (#426)
    - Requires: `BOT_SERVICE_TOKEN` (the bot server and the game call it)
-   - Body: `{ "action": "chat" | "dm" | "summon", "person": { "signedIn": boolean, "identifier"?: string } }`.
+   - Body: `{ "action": "chat" | "dm" | "summon" | "change" | "deleteOrSend", "person": { "signedIn": boolean, "identifier"?: string } }`.
      `identifier` (their WorkAdventure identifier, an email when signed in) is required when `signedIn` is true and is
      never read for a guest, so a guest cannot borrow someone else's roles.
-   - Returns: `{ "allowed": boolean, "code": "allowed" | "sign_in_required" | "not_allowed" | "no_room_access", "reason": string | null }`.
+   - Returns: `{ "allowed": boolean, "code": "allowed" | "sign_in_required" | "not_allowed" | "no_room_access" | "banned", "reason": string | null }`.
      `reason` is a line the game can show as it is. A no is a 200. Anything that stops Orbit answering is an error
      status (401 bad token, 400 bad body, 404 no such bot, 500), so the caller can tell "no" from "could not check".
+   - `change` and `deleteOrSend` (#737) ask whether this person may have the bot change things, or delete things or send
+     email and messages outside Universe, with its tools. They are decided by the permissions Have bots change things
+     (bit 17) and Have bots delete or send (bit 18) in the same Bots group, read in the bot's world, then the person's
+     and roles' rows as below. Defaults: Admin and Editor both, Member change only, Everyone and custom roles neither.
+     Private bot does not apply to them (it decides who may use the bot at all), and the bot's creator, the owner of its
+     universe, super admins and Admin always pass, except that a person banned from the bot's world is refused first with
+     `code: "banned"` (checked before the creator and Admin pass, also for a guest account reaching the bot over chat).
+     Any other no for them carries `code: "not_allowed"`; both have `reason: null`: there is no line to show as it is,
+     the bot words its own refusal.
    - Decided by the permissions Chat with bots nearby, DM bots and Summon bots (Roles & permissions, Bots group),
      read in the bot's world. Everyone has all three, so by default every bot works as it always has, guests included.
      A private chat also needs sign-in and a room the person may see. The bot's creator, the owner of its universe,
@@ -93,7 +102,7 @@ curl -X POST \
      longer hold Manage bots they cannot change who may use the bot or its tools (#433). GET also takes the bot server's `ADMIN_API_TOKEN`.
      Anyone else gets 404, as if the bot did not exist.
    - GET returns `{ privateBot, refusalReply, dailyReplyCap, rules, roles }`: `rules` has one row per role or person with
-     `chat`, `dm`, `summon` and `manage` each `"yes" | "no" | "default"`; `roles` lists the roles a row can name (not
+     `chat`, `dm`, `summon`, `manage`, `change` and `deleteOrSend` each `"yes" | "no" | "default"`; `roles` lists the roles a row can name (not
      Admin, which always passes) with what each gives on its own (`defaults`), which is what Default means for it.
    - PUT takes any of `{ privateBot: boolean, refusalReply: string | null (up to 500 characters), dailyReplyCap: 1..10000 | null }`
      and returns the same as GET. `dailyReplyCap` is how many replies each person may get from this bot in a day;
@@ -103,12 +112,68 @@ curl -X POST \
 
 8. **PUT /api/bots/:id/permissions/rules** and **DELETE /api/bots/:id/permissions/rules?roleId=|userId=**
    - PUT body: one of `{ roleId }`, `{ userId }` or `{ identifier }` (a person's uuid or email), and any of `chat`, `dm`,
-     `summon`, `manage` as `"yes" | "no" | "default"`. Only the actions sent change. Returns the row. Refused with a line
+     `summon`, `manage`, `change`, `deleteOrSend` as `"yes" | "no" | "default"`. Only the actions sent change. Returns the row. Refused with a line
      saying why: a role of another universe (404), Admin or the universe owner (400, they always pass; a super admin
      is saved like anyone else, so a rule cannot show who is one),
-     chat, dm or summon for the bot's creator (400, they always use their own bot; only `manage` can be set for them), a
+     chat, dm, summon, change or deleteOrSend for the bot's creator (400, they always use their own bot; only `manage` can be set for them), a
      person who does not exist or may not be named here (404, the same answer for both: only people of this universe, its owner, the bot's creator and people findable by name can be named, so a rule can never be used to find out whether some email has an account), more than 200 rows (400), two people saving the same row at once (409, try again).
    - DELETE takes the row off, so they follow the roles again; 404 when there was no such row.
+
+9. **Tool settings** (#738): what each tool of a bot's MCP server is, and what the bot does with it
+   - **GET /api/bots/:id/mcp-servers/:serverId/tools** returns the server's tools (`name`, `title`, `description`,
+     `fingerprint`, `suggestedHeading`, `suggestionSource`, `heading`, who confirmed or moved it), the setting under each
+     heading (`settings`), `policyRevision` and `state`: `"notCheckedYet"` for a server that existed before tools were
+     checked (it keeps working in text), `"notConfirmedYet"` while a tool waits, `"confirmed"` when every tool is.
+     Takes Manage bots, or the bot server's `ADMIN_API_TOKEN`.
+   - **PUT /api/bots/:id/mcp-servers/:serverId/tools** (`ADMIN_API_TOKEN` only; a person gets 403): the bot server saves
+     the full tool list it just read. A new tool waits to be confirmed; a tool whose `fingerprint` changed goes back to
+     not confirmed; one the server no longer offers is removed. A tool whose `fingerprint` changed, confirmed or not, also raises `policyRevision`, and so does a new suggestion for a tool nobody has confirmed or chosen a heading for. A suggestion never lets a tool run.
+   - **PATCH .../tools/:toolId** moves one tool to another heading (`looksUp`, `makesNew`, `changesThings`,
+     `deletesOrSends`); **POST .../tools/confirm** confirms all tools (an empty body), or `{ toolIds }`. A body that is
+     not valid JSON is a 400, never "all". `{ policyRevision }` is the revision the page showed: if it has moved, or a tool
+     changed while the request ran, nothing is confirmed (409 "This tool changed, review it again"). A tool takes the heading
+     someone chose or, if none, the suggested one; a tool with neither is not confirmed (400 naming it).
+   - **PUT .../policy** sets what the bot does under each heading: any of `looksUp`, `makesNew`, `changesThings`,
+     `deletesOrSends` as `"rightAway" | "asksFirst" | "off"`. `policyRevision` goes up when one changes. A new server
+     starts with looksUp and makesNew on `rightAway`, the others on `asksFirst`.
+   - **GET/PUT /api/bots/:id/tool-settings**: the bot's own limits `askBeforeMaking` (3, 5, 10 or null for no limit;
+     default 5), `askWhichWay` (`rarely`, `beforeBiggerJobs`, `never`; default `rarely`) and `cardWaitMinutes` (5, 10,
+     30; default 10). GET also takes `ADMIN_API_TOKEN`.
+   - Moving, confirming and every setting need Manage bots (403 without it, 401 when not signed in, 404 for no such bot).
+
+10. **Saved bot actions** (#739): a record for each action that waits for a tap
+    - For the bot server and the game only: every route takes `BOT_SERVICE_TOKEN` (the same as the access check). The
+      bot server authenticates the person (the signed-in account, or the guest's server session) and passes who it was as
+      `requesterKey` / `actorKey`; Orbit stores and compares those, it does not look people up.
+    - **POST /api/bots/:id/actions** saves a request: `{ proposalKey, requesterKey, conversationKey, connectionRef?,
+      toolName, heading, toolFingerprint, policyRevision, arguments, rememberScope?: { fixed, varies }, reviewMinutes? }`.
+      The arguments are stored once, encrypted, exactly as shown, and are what runs. The same `proposalKey` again returns
+      the request already saved (200); the same key with other content is a 409. `rememberScope` is what "allow more" would
+      remember and is refused for `deletesOrSends`. **GET .../actions/:actionId** reads it (a card past its time, or an
+      approval nobody started, is closed first).
+    - States: `waiting`, `approved`, `running`, `done`, `failed`, `couldntConfirm`, `closed` (with `closedReason`:
+      `declined`, `superseded`, `expired`, `stale`, `cancelled`, `revoked`). Every change is one conditional update on the
+      status and `revision` the caller saw, so one tap wins; each change goes in the decision log (no card text).
+    - **POST .../:actionId/decision** is the tap: `{ actorKey, revision, decision: "approve" | "approveAndRemember" |
+      "decline" }` and nothing else. Only the asker may decide (403 `not_requester`). 200 when this tap won; 409 with
+      `outcome: "already_decided" | "expired"` and the action as it is now when another tap, a replacement or the clock got
+      there first (a double tap, a second device). An approval must be claimed within 30 seconds (`startWithinSeconds`).
+    - **POST .../:actionId/claim** gives one dispatcher the one go at running an approved action (`{ claimed: true,
+      attemptId, idempotencyKey }`), or a 409 `{ claimed: false, reason }`: `stale` after the start window, or the state it
+      is already in. **POST .../finish** says how the attempt ended: `succeeded` (done), `failed` (failed), `notSent` (back
+      to approved while the window lasts) or `uncertain` (**couldn't confirm: never claimed again by itself**).
+      **POST .../reconcile** records what was found at the destination for a couldn't-confirm action (`succeeded` or
+      `failed`). **POST /api/bots/:id/actions/sweep** closes expired cards and stale approvals, and turns a run whose claim
+      ran out (its dispatcher died) into couldn't confirm.
+    - **POST /api/bots/:id/actions/supersede** closes the asker's waiting (or approved-not-started) actions in one
+      conversation when they send a replacement instruction.
+    - Remembered approvals: **POST /api/bots/:id/action-grants/find** (is this call covered: same asker, conversation,
+      connection, reviewed tool, policy revision and heading, inside the idle and absolute time, arguments fit; never for
+      deletes or sends), **/touch** (the asker's own message renews the idle time, never past the absolute end) and
+      **/revoke** (ask again, signed out, connection or policy changed, lost permission, left).
+    - Defaults, each passable per call: a card waits 10 minutes (a bot's "A card waits" setting, #738), start within 30
+      seconds, a claim lasts 120 seconds, a remembered approval ends after 60 minutes idle or 480 minutes at most.
+
 
 ### Files Created/Modified
 
