@@ -342,6 +342,21 @@ describe('a direct message that reached the bot over chat', () => {
     expect(await ask('dm', signedIn(USERS.nora))).toMatchObject({ allowed: false, code: 'banned' });
   });
 
+  it('keeps out a banned guest account that reaches the bot over chat, but gives a guest no more than Everyone has', async () => {
+    chatOf(USERS.omar, '@guest-omar:chat.example', { isGuest: true });
+    expect(await byChat('@guest-omar:chat.example')).toMatchObject({ allowed: false, code: 'sign_in_required' });
+    state.bannedUserIds = [USERS.omar.id];
+    for (const action of ['dm', 'change', 'deleteOrSend'] as const) {
+      expect(await ask(action, { signedIn: true, chatId: '@guest-omar:chat.example' })).toMatchObject({ allowed: false, code: 'banned' });
+    }
+  });
+
+  it('a guest account that is not banned is unchanged by the ban lookup', async () => {
+    chatOf(USERS.omar, '@guest-omar:chat.example', { isGuest: true });
+    state.bannedUserIds = [USERS.sara.id];
+    expect(await byChat('@guest-omar:chat.example')).toMatchObject({ allowed: false, code: 'sign_in_required' });
+  });
+
   it('keeps out someone banned from the bot’s world from having it change things, or delete or send, which a direct message can ask', async () => {
     join(USERS.sara, [everywhere(EDITOR)]);
     expect(await ask('deleteOrSend', signedIn(USERS.sara))).toMatchObject({ allowed: true });

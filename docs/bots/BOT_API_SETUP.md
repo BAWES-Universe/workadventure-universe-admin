@@ -75,7 +75,7 @@ curl -X POST \
    - Body: `{ "action": "chat" | "dm" | "summon" | "change" | "deleteOrSend", "person": { "signedIn": boolean, "identifier"?: string } }`.
      `identifier` (their WorkAdventure identifier, an email when signed in) is required when `signedIn` is true and is
      never read for a guest, so a guest cannot borrow someone else's roles.
-   - Returns: `{ "allowed": boolean, "code": "allowed" | "sign_in_required" | "not_allowed" | "no_room_access", "reason": string | null }`.
+   - Returns: `{ "allowed": boolean, "code": "allowed" | "sign_in_required" | "not_allowed" | "no_room_access" | "banned", "reason": string | null }`.
      `reason` is a line the game can show as it is. A no is a 200. Anything that stops Orbit answering is an error
      status (401 bad token, 400 bad body, 404 no such bot, 500), so the caller can tell "no" from "could not check".
    - `change` and `deleteOrSend` (#737) ask whether this person may have the bot change things, or delete things or send
@@ -83,8 +83,10 @@ curl -X POST \
      (bit 17) and Have bots delete or send (bit 18) in the same Bots group, read in the bot's world, then the person's
      and roles' rows as below. Defaults: Admin and Editor both, Member change only, Everyone and custom roles neither.
      Private bot does not apply to them (it decides who may use the bot at all), and the bot's creator, the owner of its
-     universe, super admins and Admin always pass. A no for them carries `code: "not_allowed"` and `reason: null`: there is
-     no line to show as it is, the bot words its own refusal.
+     universe, super admins and Admin always pass, except that a person banned from the bot's world is refused first with
+     `code: "banned"` (checked before the creator and Admin pass, also for a guest account reaching the bot over chat).
+     Any other no for them carries `code: "not_allowed"`; both have `reason: null`: there is no line to show as it is,
+     the bot words its own refusal.
    - Decided by the permissions Chat with bots nearby, DM bots and Summon bots (Roles & permissions, Bots group),
      read in the bot's world. Everyone has all three, so by default every bot works as it always has, guests included.
      A private chat also needs sign-in and a room the person may see. The bot's creator, the owner of its universe,
