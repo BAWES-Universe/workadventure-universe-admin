@@ -60,6 +60,7 @@ jest.mock('@/lib/db', () => ({
         const key = where.universeId_key.key;
         if (key === 'everyone') return { id: 'r-everyone', permissions: state.everyone };
         if (key === 'member') return { id: 'r-member', permissions: state.member };
+        if (key === 'editor') return { id: 'r-editor', permissions: ZERO };
         return null;
       }),
     },
@@ -370,6 +371,19 @@ describe('row 15: the owner changes access', () => {
     expect(await allowed('chat', signedIn(USERS.sara))).toBe(true);
     state.bot!.privateBot = true;
     expect(await allowed('chat', signedIn(USERS.sara))).toBe(false);
+  });
+});
+
+describe('a world member with an old tag and no universe membership', () => {
+  const EDITOR_ROLE = role('editor');
+  const taggedEditor = (user: { id: string }) => state.worldMembers.push({ worldId: 'w1', userId: user.id, tags: ['editor'] });
+
+  it('has the Editor permissions from the tag, and the bot’s rules for the Editor role apply to them', async () => {
+    taggedEditor(USERS.sara);
+    expect(await allowed('deleteOrSend', signedIn(USERS.sara))).toBe(true);
+    rule({ roleId: EDITOR_ROLE.id }, { deleteOrSend: 'no' });
+    expect(await allowed('deleteOrSend', signedIn(USERS.sara))).toBe(false);
+    expect(await allowed('change', signedIn(USERS.sara))).toBe(true);
   });
 });
 

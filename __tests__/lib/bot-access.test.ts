@@ -342,6 +342,15 @@ describe('a direct message that reached the bot over chat', () => {
     expect(await ask('dm', signedIn(USERS.nora))).toMatchObject({ allowed: false, code: 'banned' });
   });
 
+  it('keeps out someone banned from the bot’s world from having it change things, or delete or send, which a direct message can ask', async () => {
+    join(USERS.sara, [everywhere(EDITOR)]);
+    expect(await ask('deleteOrSend', signedIn(USERS.sara))).toMatchObject({ allowed: true });
+    state.bannedUserIds = [USERS.sara.id];
+    for (const action of ['change', 'deleteOrSend'] as const) {
+      expect(await ask(action, signedIn(USERS.sara))).toEqual({ allowed: false, code: 'banned', reason: null });
+    }
+  });
+
   it('a ban changes nothing for chatting nearby or summoning: being in the room is already decided', async () => {
     join(USERS.sara);
     state.bannedUserIds = [USERS.sara.id];
