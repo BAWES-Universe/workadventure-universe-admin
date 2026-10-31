@@ -29,6 +29,8 @@ export type PermissionKey =
   | 'CHAT_BOTS_NEARBY'
   | 'DM_BOTS'
   | 'SUMMON_BOTS'
+  | 'BOTS_CHANGE_THINGS'
+  | 'BOTS_DELETE_OR_SEND'
   | 'ADMINISTRATOR';
 
 export type PermissionGroup = 'people' | 'places' | 'broadcast' | 'calls' | 'bots' | 'owner';
@@ -60,6 +62,8 @@ export const PERMISSIONS: readonly PermissionInfo[] = [
   { key: 'CHAT_BOTS_NEARBY', bit: 14, group: 'bots', label: 'Chat with bots nearby', description: 'Lets people walk up to a bot on the map and chat in its bubble. Everyone in the bubble sees it.' },
   { key: 'DM_BOTS', bit: 15, group: 'bots', label: 'DM bots', description: "Lets signed-in people who can see the bot's room send it direct messages, one to one, from anywhere. Only they and the bot see them." },
   { key: 'SUMMON_BOTS', bit: 16, group: 'bots', label: 'Summon bots', description: 'Lets people, including guests, summon a bot to them in its own room.' },
+  { key: 'BOTS_CHANGE_THINGS', bit: 17, group: 'bots', label: 'Have bots change things', description: 'Lets people have a bot create or edit things with its tools, like a Linear issue or a post. Each bot chooses whether it asks first.' },
+  { key: 'BOTS_DELETE_OR_SEND', bit: 18, group: 'bots', label: 'Have bots delete or send', description: 'Lets people have a bot delete things, or send email and messages outside Universe, with its tools.' },
   { key: 'ADMINISTRATOR', bit: 30, group: 'owner', label: 'Administrator', description: "Like owning {universe}: all permissions in every world, gets past every room and area rule, and can't be limited to some worlds." },
 ];
 

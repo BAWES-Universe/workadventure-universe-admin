@@ -78,7 +78,14 @@ jest.mock('@/lib/db', () => ({
 }));
 
 import { BOT_ACTIONS, checkBotAccess, decideBotAccess, type BotAction } from '@/lib/bot-access';
-import { ADMIN_KEY, BUILT_IN_ROLES, EDITOR_DEFAULT_PERMISSIONS, EVERYONE_DEFAULT_PERMISSIONS, EVERYONE_KEY } from '@/lib/roles';
+import {
+  ADMIN_KEY,
+  BUILT_IN_ROLES,
+  EDITOR_DEFAULT_PERMISSIONS,
+  EVERYONE_DEFAULT_PERMISSIONS,
+  EVERYONE_KEY,
+  MEMBER_DEFAULT_PERMISSIONS,
+} from '@/lib/roles';
 import { ALL_PERMISSIONS, combine, flag } from '@/lib/permissions';
 
 const ZERO = BigInt(0);
@@ -104,6 +111,9 @@ function join(user: { id: string }, given: Given[] = [], scope: { allWorlds: boo
   state.memberships.set(user.id, { ...scope, roles: given });
   state.worldMembers.push({ worldId: 'w1', userId: user.id, tags: ['member'] });
 }
+
+/** What people do with a bot before the permissions to have it change things, or delete or send (#737). */
+const USE_ACTIONS: readonly BotAction[] = BOT_ACTIONS.filter((action) => action === 'chat' || action === 'dm' || action === 'summon');
 
 const ask = (action: BotAction, person: { signedIn: boolean; identifier?: string | null; chatId?: string | null }) =>
   checkBotAccess({ botId: 'bot-1', action, person });
@@ -142,11 +152,11 @@ describe('what bots work like before anyone changes anything', () => {
 
   it('row 2 and 6: a member of the universe chats nearby, DMs and summons', async () => {
     join(USERS.sara);
-    for (const action of BOT_ACTIONS) expect(await ask(action, signedIn(USERS.sara))).toEqual({ allowed: true, code: 'allowed', reason: null });
+    for (const action of USE_ACTIONS) expect(await ask(action, signedIn(USERS.sara))).toEqual({ allowed: true, code: 'allowed', reason: null });
   });
 
   it('a signed-in person Orbit has no account for gets what Everyone has', async () => {
-    for (const action of BOT_ACTIONS) {
+    for (const action of USE_ACTIONS) {
       expect((await ask(action, { signedIn: true, identifier: 'stranger@example.com' }))!.allowed).toBe(true);
     }
   });
@@ -182,7 +192,7 @@ describe('a permission turned off', () => {
     for (const [key, action] of [['CHAT_BOTS_NEARBY', 'chat'], ['DM_BOTS', 'dm'], ['SUMMON_BOTS', 'summon']] as const) {
       state.everyone = flag(key);
       join(USERS.sara);
-      const answers = Object.fromEntries(await Promise.all(BOT_ACTIONS.map(async (a) => [a, (await ask(a, signedIn(USERS.sara)))!.allowed])));
+      const answers = Object.fromEntries(await Promise.all(USE_ACTIONS.map(async (a) => [a, (await ask(a, signedIn(USERS.sara)))!.allowed])));
       expect(answers).toEqual({ chat: action === 'chat', dm: action === 'dm', summon: action === 'summon' });
       state.memberships.clear();
       state.worldMembers = [];
@@ -214,7 +224,7 @@ describe('a permission turned off', () => {
   it('the built-in Admin always passes, and so does Administrator', async () => {
     join(USERS.sara, [everywhere(ADMIN)]);
     join(USERS.omar, [everywhere(role('boss', flag('ADMINISTRATOR')))]);
-    for (const action of BOT_ACTIONS) {
+    for (const action of USE_ACTIONS) {
       expect((await ask(action, signedIn(USERS.sara)))!.allowed).toBe(true);
       expect((await ask(action, signedIn(USERS.omar)))!.allowed).toBe(true);
     }
@@ -227,13 +237,13 @@ describe('a permission turned off', () => {
 
   it('a world member with no universe membership keeps what their admin tag gave them', async () => {
     state.worldMembers.push({ worldId: 'w1', userId: USERS.sara.id, tags: ['admin'] });
-    for (const action of BOT_ACTIONS) expect((await ask(action, signedIn(USERS.sara)))!.allowed).toBe(true);
+    for (const action of USE_ACTIONS) expect((await ask(action, signedIn(USERS.sara)))!.allowed).toBe(true);
   });
 
   it('the bot’s creator, the universe owner and a super admin always pass', async () => {
     process.env.SUPER_ADMINS = USERS.root.email!;
     for (const user of [USERS.nora, USERS.boss, USERS.root]) {
-      for (const action of BOT_ACTIONS) expect((await ask(action, signedIn(user)))!.allowed).toBe(true);
+      for (const action of USE_ACTIONS) expect((await ask(action, signedIn(user)))!.allowed).toBe(true);
     }
   });
 
@@ -332,6 +342,30 @@ describe('a direct message that reached the bot over chat', () => {
     expect(await ask('dm', signedIn(USERS.nora))).toMatchObject({ allowed: false, code: 'banned' });
   });
 
+  it('keeps out a banned guest account that reaches the bot over chat, but gives a guest no more than Everyone has', async () => {
+    chatOf(USERS.omar, '@guest-omar:chat.example', { isGuest: true });
+    expect(await byChat('@guest-omar:chat.example')).toMatchObject({ allowed: false, code: 'sign_in_required' });
+    state.bannedUserIds = [USERS.omar.id];
+    for (const action of ['dm', 'change', 'deleteOrSend'] as const) {
+      expect(await ask(action, { signedIn: true, chatId: '@guest-omar:chat.example' })).toMatchObject({ allowed: false, code: 'banned' });
+    }
+  });
+
+  it('a guest account that is not banned is unchanged by the ban lookup', async () => {
+    chatOf(USERS.omar, '@guest-omar:chat.example', { isGuest: true });
+    state.bannedUserIds = [USERS.sara.id];
+    expect(await byChat('@guest-omar:chat.example')).toMatchObject({ allowed: false, code: 'sign_in_required' });
+  });
+
+  it('keeps out someone banned from the bot’s world from having it change things, or delete or send, which a direct message can ask', async () => {
+    join(USERS.sara, [everywhere(EDITOR)]);
+    expect(await ask('deleteOrSend', signedIn(USERS.sara))).toMatchObject({ allowed: true });
+    state.bannedUserIds = [USERS.sara.id];
+    for (const action of ['change', 'deleteOrSend'] as const) {
+      expect(await ask(action, signedIn(USERS.sara))).toEqual({ allowed: false, code: 'banned', reason: null });
+    }
+  });
+
   it('a ban changes nothing for chatting nearby or summoning: being in the room is already decided', async () => {
     join(USERS.sara);
     state.bannedUserIds = [USERS.sara.id];
@@ -361,5 +395,60 @@ describe('decideBotAccess', () => {
     expect(decideBotAccess({ ...base, permissions: everyone, canSeeRoom: false }).allowed).toBe(true);
     expect(decideBotAccess({ ...base, action: 'summon', permissions: everyone, canSeeRoom: false }).allowed).toBe(true);
     expect(decideBotAccess({ ...base, action: 'dm', permissions: everyone, canSeeRoom: false }).allowed).toBe(false);
+  });
+});
+
+describe('having a bot change things, or delete or send (#737)', () => {
+  const MEMBER = role('member', MEMBER_DEFAULT_PERMISSIONS, 1);
+  const both = ['change', 'deleteOrSend'] as const;
+
+  it('starts Everyone, guests included, with neither', async () => {
+    for (const action of both) expect((await ask(action, GUEST))!.allowed).toBe(false);
+    join(USERS.sara);
+    for (const action of both) expect((await ask(action, signedIn(USERS.sara)))!.allowed).toBe(false);
+  });
+
+  it('starts Member with change things only, Editor and Admin with both', async () => {
+    state.member = MEMBER.permissions;
+    join(USERS.sara);
+    expect((await ask('change', signedIn(USERS.sara)))!.allowed).toBe(true);
+    expect((await ask('deleteOrSend', signedIn(USERS.sara)))!.allowed).toBe(false);
+
+    join(USERS.omar, [everywhere(EDITOR)]);
+    for (const action of both) expect((await ask(action, signedIn(USERS.omar)))!.allowed).toBe(true);
+
+    state.users.push({ id: 'u-adam', uuid: 'uuid-adam', email: 'adam@example.com' });
+    join({ id: 'u-adam' }, [everywhere(ADMIN)]);
+    for (const action of both) expect((await ask(action, signedIn({ email: 'adam@example.com' })))!.allowed).toBe(true);
+  });
+
+  it('each follows its own permission, and neither comes from chatting, DMing or Manage bots', async () => {
+    for (const [key, action] of [['BOTS_CHANGE_THINGS', 'change'], ['BOTS_DELETE_OR_SEND', 'deleteOrSend']] as const) {
+      state.everyone = flag(key);
+      join(USERS.sara);
+      const answers = Object.fromEntries(await Promise.all(both.map(async (a) => [a, (await ask(a, signedIn(USERS.sara)))!.allowed])));
+      expect(answers).toEqual({ change: action === 'change', deleteOrSend: action === 'deleteOrSend' });
+      state.memberships.clear();
+      state.worldMembers = [];
+    }
+    state.everyone = combine(flag('CHAT_BOTS_NEARBY'), flag('DM_BOTS'), flag('SUMMON_BOTS'), flag('MANAGE_BOTS'));
+    join(USERS.sara);
+    for (const action of both) expect((await ask(action, signedIn(USERS.sara)))!.allowed).toBe(false);
+  });
+
+  it('refuses with the code only: it has no line of its own for the caller to show', async () => {
+    for (const action of both) expect(await ask(action, GUEST)).toEqual({ allowed: false, code: 'not_allowed', reason: null });
+  });
+
+  it('the bot’s creator, the universe owner and a super admin always pass', async () => {
+    process.env.SUPER_ADMINS = USERS.root.email!;
+    for (const user of [USERS.nora, USERS.boss, USERS.root]) {
+      for (const action of both) expect((await ask(action, signedIn(user)))!.allowed).toBe(true);
+    }
+  });
+
+  it('a guest who sends an admin’s identifier is still a guest', async () => {
+    join(USERS.sara, [everywhere(ADMIN)]);
+    expect((await ask('deleteOrSend', { signedIn: false, identifier: USERS.sara.email }))!.allowed).toBe(false);
   });
 });

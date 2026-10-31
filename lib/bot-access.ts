@@ -9,22 +9,25 @@ import { bansCoveringWorld } from '@/lib/moderation';
 
 /**
  * Can this person do this with this bot? (#426) What people do with a bot: chat in its bubble on the map, send it
- * direct messages, or summon it. The bot server and the game ask this with the service token before they let it happen,
- * and show `reason` when the answer is no.
+ * direct messages, or summon it; and (#737) having it change things, or delete or send. The bot server and the game ask
+ * this with the service token before they let it happen, and show `reason` when the answer is no (null for having a bot
+ * change things, or delete or send: the code says no, and the caller words it).
  *
  * The answer comes from the role permissions in the bot's world (the same number the game gets, see permissionsForWorld),
  * then the bot's own rules (#427), in this order: its creator, the universe owner, super admins and Admin always pass;
  * then the person's own row; then the rows of their roles; then Private bot, which shuts out everyone a row does not
  * say Yes to; then the role permissions. Guests have no account, so they get Everyone's and Everyone's rows.
  */
-export type BotAction = 'chat' | 'dm' | 'summon';
+export type BotAction = 'chat' | 'dm' | 'summon' | 'change' | 'deleteOrSend';
 
-export const BOT_ACTIONS: readonly BotAction[] = ['chat', 'dm', 'summon'];
+export const BOT_ACTIONS: readonly BotAction[] = ['chat', 'dm', 'summon', 'change', 'deleteOrSend'];
 
 const ACTION_PERMISSION: Record<BotAction, PermissionKey> = {
   chat: 'CHAT_BOTS_NEARBY',
   dm: 'DM_BOTS',
   summon: 'SUMMON_BOTS',
+  change: 'BOTS_CHANGE_THINGS',
+  deleteOrSend: 'BOTS_DELETE_OR_SEND',
 };
 
 export type BotAccessCode =
@@ -40,13 +43,13 @@ export type BotAccessCode =
   | 'unknown_person'
   /** A direct message from a chat account two Orbit accounts claim: Orbit can't tell whose it is. */
   | 'shared_chat_id'
-  /** A direct message from someone banned from the bot's world. */
+  /** A direct message, or having the bot change things or delete or send, from someone banned from the bot's world. */
   | 'banned';
 
 export interface BotAccessAnswer {
   allowed: boolean;
   code: BotAccessCode;
-  /** A line the game can show as it is. Null when allowed. */
+  /** A line the game can show as it is. Null when allowed, and for a refused change, delete or send. */
   reason: string | null;
   /** The owner's own line for people who may not chat with the bot, only on a refused chat when the owner wrote one. */
   reply?: string;
@@ -67,6 +70,8 @@ function refusal(
 ): BotAccessAnswer {
   if (code === 'sign_in_required') return { allowed: false, code, reason: `Sign in to message ${botName}.` };
   if (action === 'summon') return { allowed: false, code, reason: `${botName}'s owner limits who can summon it.` };
+  // Having a bot change things, or delete or send, has no line of its own: the caller (the bot) words its own refusal
+  if (action === 'change' || action === 'deleteOrSend') return { allowed: false, code, reason: null };
   if (action === 'chat') {
     const reason = `${botName}'s owner limits who can chat with it.`;
     return fixedReply ? { allowed: false, code, reason, reply: fixedReply } : { allowed: false, code, reason };
@@ -103,7 +108,9 @@ export function decideBotAccess(input: {
   if (!input.isAdmin) {
     const verdict = verdictFor(action, input.personRule ?? null, input.roleRules ?? []);
     if (verdict === 'no') return refusal('not_allowed', action, botName, input.fixedReply);
-    if (verdict === 'none' && (input.privateBot || !has(input.permissions, ACTION_PERMISSION[action]))) {
+    // Private bot decides who may use the bot at all; changing, deleting and sending are the roles' to decide
+    const shutOut = input.privateBot && (action === 'chat' || action === 'dm' || action === 'summon');
+    if (verdict === 'none' && (shutOut || !has(input.permissions, ACTION_PERMISSION[action]))) {
       return refusal('not_allowed', action, botName, input.fixedReply);
     }
   }
@@ -155,6 +162,8 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
   const { world } = bot.room;
 
   let user: { id: string; uuid: string; email: string | null; name: string | null; isGuest: boolean } | null;
+  // Whose ban to look up. Only the ban: a guest account has no roles or membership, so `user` stays null for it
+  let banUserId: string | null = null;
   let signedIn = person.signedIn;
   let named: BotAccessAnswer['person'];
   if (person.chatId) {
@@ -164,18 +173,21 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
     if (owners.length === 0) return refusal('unknown_person', action, bot.name);
     if (owners.length > 1) return refusal('shared_chat_id', action, bot.name);
     user = owners[0].isGuest ? null : owners[0];
+    banUserId = owners[0].id;
     signedIn = !owners[0].isGuest;
     named = { uuid: owners[0].uuid, name: owners[0].name };
   } else {
     // An account that signed in; a guest, or a signed-in person Orbit has no account for, has only what Everyone has
     user = person.signedIn && person.identifier ? await findUserByIdentifier(person.identifier) : null;
+    banUserId = user?.id ?? null;
   }
 
-  // A direct message can come from anywhere, so a ban from the bot's world keeps it out too. Chatting nearby and
-  // summoning need the person in the room, which a ban already stops.
-  if (action === 'dm' && user) {
+  // A direct message can come from anywhere, so a ban from the bot's world keeps it out too, and so does having the bot
+  // change things, or delete or send, which can be asked in a direct message. Chatting nearby and summoning need the
+  // person in the room, which a ban already stops.
+  if ((action === 'dm' || action === 'change' || action === 'deleteOrSend') && banUserId) {
     const ban = await prisma.ban.findFirst({
-      where: { AND: [bansCoveringWorld({ id: world.id, universeId: world.universeId }), { userId: user.id }] },
+      where: { AND: [bansCoveringWorld({ id: world.id, universeId: world.universeId }), { userId: banUserId }] },
       select: { id: true },
     });
     if (ban) return refusal('banned', action, bot.name);

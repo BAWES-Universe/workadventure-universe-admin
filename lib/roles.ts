@@ -29,13 +29,21 @@ export const EDITOR_POSITION = 2;
 export const MEMBER_POSITION = 1;
 export const EVERYONE_POSITION = 0;
 
-/** What the built-in Editor starts with: exactly what the `editor` tag allows today (world, rooms, maps, bots). */
+/**
+ * What the built-in Editor starts with: what the `editor` tag allows today (world, rooms, maps, bots), plus both
+ * permissions to have bots change things and delete or send (#737), as Editors already manage bots.
+ */
 export const EDITOR_DEFAULT_PERMISSIONS = combine(
   flag('MANAGE_WORLDS'),
   flag('MANAGE_ROOMS'),
   flag('EDIT_MAPS'),
   flag('MANAGE_BOTS'),
+  flag('BOTS_CHANGE_THINGS'),
+  flag('BOTS_DELETE_OR_SEND'),
 );
+
+/** What the built-in Member starts with (#737): have bots change things, not delete or send. */
+export const MEMBER_DEFAULT_PERMISSIONS = flag('BOTS_CHANGE_THINGS');
 
 /**
  * What the built-in Everyone starts with (#426): chat with a bot nearby, DM it and summon it, exactly what everyone can do
@@ -55,7 +63,7 @@ export interface BuiltInRole {
 export const BUILT_IN_ROLES: readonly BuiltInRole[] = [
   { key: ADMIN_KEY, name: 'Admin', color: '#F87171', permissions: ALL_PERMISSIONS, position: ADMIN_POSITION },
   { key: EDITOR_KEY, name: 'Editor', color: '#60A5FA', permissions: EDITOR_DEFAULT_PERMISSIONS, position: EDITOR_POSITION },
-  { key: MEMBER_KEY, name: 'Member', color: '#A78BFA', permissions: BigInt(0), position: MEMBER_POSITION },
+  { key: MEMBER_KEY, name: 'Member', color: '#A78BFA', permissions: MEMBER_DEFAULT_PERMISSIONS, position: MEMBER_POSITION },
   { key: EVERYONE_KEY, name: 'Everyone', color: '#A3A3B5', permissions: EVERYONE_DEFAULT_PERMISSIONS, position: EVERYONE_POSITION },
 ];
 
@@ -251,9 +259,15 @@ export async function worldAccessFor(
     include: { roles: { include: { role: { select: { id: true, key: true, position: true, permissions: true } } } } },
   });
   if (!membership) {
+    // The tag gives the permissions of its built-in role, so that role's rules apply too (a per-bot No for Editor)
+    const tagged = await Promise.all(
+      [ADMIN_KEY, EDITOR_KEY]
+        .filter((key) => worldTags.includes(key))
+        .map(async (key) => named(await db.role.findUnique({ where: { universeId_key: { universeId, key } } }), key)),
+    );
     return {
       permissions: permissionsInWorld(worldId, everyonePermissions | permissionsFromTags(worldTags), null, []),
-      roles: named(everyone, EVERYONE_KEY),
+      roles: [...named(everyone, EVERYONE_KEY), ...tagged.flat()],
     };
   }
 

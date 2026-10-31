@@ -140,7 +140,7 @@ import { ALL_PERMISSIONS, flag } from '@/lib/permissions';
 import { EVERYONE_DEFAULT_PERMISSIONS } from '@/lib/roles';
 
 const place = { id: 'bot-1', createdById: 'u-maker', universeId: 'u1', universeOwnerId: 'u-owner' };
-const BIT = { chat: BigInt(16384), dm: BigInt(32768), summon: BigInt(65536), manage: BigInt(8192) };
+const BIT = { chat: BigInt(16384), dm: BigInt(32768), summon: BigInt(65536), manage: BigInt(8192), change: BigInt(131072), deleteOrSend: BigInt(262144) };
 
 const R = (id: string, key: string, permissions = BigInt(0), universeId = 'u1') => ({ id, key, name: key, color: '#99AAB5', builtIn: false, permissions, position: 10, universeId });
 
@@ -187,6 +187,8 @@ describe('what a request may say', () => {
     expect(ruleSchema.safeParse({ roleId: 'r-acc', chat: 'yes' }).success).toBe(true);
     expect(ruleSchema.safeParse({ userId: 'u-mishari', dm: 'no', manage: 'default' }).success).toBe(true);
     expect(ruleSchema.safeParse({ identifier: 'mishari@example.com' }).success).toBe(true);
+    expect(ruleSchema.safeParse({ roleId: 'r-acc', change: 'no', deleteOrSend: 'yes' }).success).toBe(true);
+    expect(ruleSchema.safeParse({ roleId: 'r-acc', change: 'maybe' }).success).toBe(false);
     for (const bad of [{ chat: 'yes' }, { roleId: 'a', userId: 'b' }, { roleId: 'a', chat: 'maybe' }, { roleId: 'a', talk: 'yes' }, { roleId: '' }, null]) {
       expect(ruleSchema.safeParse(bad).success).toBe(false);
     }
@@ -225,6 +227,15 @@ describe('saving a rule', () => {
     expect(saved).toMatchObject({ roleId: 'r-acc', userId: null, chat: 'yes', dm: 'yes', summon: 'yes', manage: 'default', role: { key: 'accountant' }, person: null });
     expect(state.rows).toHaveLength(1);
     expect(state.rows[0].allow).toBe(BIT.chat | BIT.dm | BIT.summon);
+  });
+
+  it('saves having a bot change things, or delete or send, next to the other four', async () => {
+    const saved = await saveBotRule(place, { roleId: 'r-acc', change: 'no', deleteOrSend: 'yes' });
+    expect(saved).toMatchObject({ change: 'no', deleteOrSend: 'yes', chat: 'default', manage: 'default' });
+    expect(state.rows[0].deny).toBe(BIT.change);
+    expect(state.rows[0].allow).toBe(BIT.deleteOrSend);
+    const again = await saveBotRule(place, { roleId: 'r-acc', change: 'default', chat: 'yes' });
+    expect(again).toMatchObject({ change: 'default', deleteOrSend: 'yes', chat: 'yes' });
   });
 
   it('adds a row for a person by id or by identifier, and never sends their email back', async () => {
@@ -356,7 +367,7 @@ describe('saving a rule', () => {
   });
 
   it('the creator always uses their own bot, so only Manage this bot can be set for them (#433)', async () => {
-    for (const body of [{ chat: 'no' }, { dm: 'no' }, { summon: 'yes' }, { chat: 'default', dm: 'no', manage: 'yes' }] as const) {
+    for (const body of [{ chat: 'no' }, { dm: 'no' }, { summon: 'yes' }, { change: 'no' }, { deleteOrSend: 'no' }, { chat: 'default', dm: 'no', manage: 'yes' }] as const) {
       await expect(saveBotRule(place, { userId: 'u-maker', ...body })).rejects.toMatchObject({
         status: 400,
         message: expect.stringContaining('Only "Manage this bot"'),
@@ -405,8 +416,8 @@ describe('reading a bot’s settings', () => {
     const settings = await readBotSettings('bot-1');
     expect(settings!.roles.map((role) => role.key)).toEqual(['everyone', 'accountant']);
     expect(settings!.roles.map((role) => role.id)).not.toContain('r-admin');
-    expect(settings!.roles[0].defaults).toEqual({ chat: true, dm: true, summon: true, manage: false });
-    expect(settings!.roles[1].defaults).toEqual({ chat: false, dm: false, summon: false, manage: false });
+    expect(settings!.roles[0].defaults).toEqual({ chat: true, dm: true, summon: true, manage: false, change: false, deleteOrSend: false });
+    expect(settings!.roles[1].defaults).toEqual({ chat: false, dm: false, summon: false, manage: false, change: false, deleteOrSend: false });
     state.roles.find((role) => role.id === 'r-acc')!.permissions = flag('MANAGE_BOTS');
     expect((await readBotSettings('bot-1'))!.roles[1].defaults.manage).toBe(true);
   });

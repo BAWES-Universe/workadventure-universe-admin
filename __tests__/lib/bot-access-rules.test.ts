@@ -60,6 +60,7 @@ jest.mock('@/lib/db', () => ({
         const key = where.universeId_key.key;
         if (key === 'everyone') return { id: 'r-everyone', permissions: state.everyone };
         if (key === 'member') return { id: 'r-member', permissions: state.member };
+        if (key === 'editor') return { id: 'r-editor', permissions: ZERO };
         return null;
       }),
     },
@@ -107,6 +108,9 @@ const rule = (subject: { roleId?: string; userId?: string }, values: Partial<Rec
   state.rules.push({ roleId: subject.roleId ?? null, userId: subject.userId ?? null, ...bits });
 };
 
+/** What people do with a bot before the permissions to have it change things, or delete or send (#737). */
+const USE_ACTIONS: readonly BotAction[] = BOT_ACTIONS.filter((action) => action === 'chat' || action === 'dm' || action === 'summon');
+
 const ask = (action: BotAction, person: { signedIn: boolean; identifier?: string | null }) =>
   checkBotAccess({ botId: 'bot-1', action, person });
 const allowed = async (action: BotAction, person: { signedIn: boolean; identifier?: string | null }) => (await ask(action, person))!.allowed;
@@ -129,7 +133,7 @@ describe('a bot with no rules and Private bot off answers exactly as before', ()
     expect(await ask('chat', GUEST)).toEqual({ allowed: true, code: 'allowed', reason: null });
     expect(await ask('summon', GUEST)).toEqual({ allowed: true, code: 'allowed', reason: null });
     expect((await ask('dm', GUEST))!.code).toBe('sign_in_required');
-    for (const action of BOT_ACTIONS) expect(await ask(action, signedIn(USERS.sara))).toEqual({ allowed: true, code: 'allowed', reason: null });
+    for (const action of USE_ACTIONS) expect(await ask(action, signedIn(USERS.sara))).toEqual({ allowed: true, code: 'allowed', reason: null });
   });
 
   it('a refusal has the same three fields as before, with no owner line in it', async () => {
@@ -141,9 +145,9 @@ describe('a bot with no rules and Private bot off answers exactly as before', ()
     join(USERS.sara, [everywhere(ACCOUNTANT)]);
     rule({ roleId: ACCOUNTANT.id }, {});
     rule({ userId: USERS.sara.id }, { chat: 'default', dm: 'default', summon: 'default' });
-    for (const action of BOT_ACTIONS) expect(await allowed(action, signedIn(USERS.sara))).toBe(true);
+    for (const action of USE_ACTIONS) expect(await allowed(action, signedIn(USERS.sara))).toBe(true);
     state.everyone = ZERO;
-    for (const action of BOT_ACTIONS) expect(await allowed(action, signedIn(USERS.sara))).toBe(false);
+    for (const action of USE_ACTIONS) expect(await allowed(action, signedIn(USERS.sara))).toBe(false);
   });
 });
 
@@ -156,7 +160,7 @@ describe('row 12: Private bot', () => {
     join(USERS.mishari);
     join(USERS.sara);
     rule({ userId: USERS.mishari.id }, { chat: 'yes', dm: 'yes', summon: 'yes' });
-    for (const action of BOT_ACTIONS) {
+    for (const action of USE_ACTIONS) {
       expect(await allowed(action, signedIn(USERS.mishari))).toBe(true);
       expect(await allowed(action, signedIn(USERS.sara))).toBe(false);
     }
@@ -172,7 +176,7 @@ describe('row 12: Private bot', () => {
     join(USERS.sara, [everywhere(ACCOUNTANT)]);
     join(USERS.omar, [everywhere(INTERN)]);
     rule({ roleId: ACCOUNTANT.id }, { chat: 'yes', dm: 'yes', summon: 'yes' });
-    for (const action of BOT_ACTIONS) {
+    for (const action of USE_ACTIONS) {
       expect(await allowed(action, signedIn(USERS.sara))).toBe(true);
       expect(await allowed(action, signedIn(USERS.omar))).toBe(false);
     }
@@ -196,21 +200,21 @@ describe('row 12: Private bot', () => {
     join(USERS.sara, [everywhere(ACCOUNTANT)]);
     rule({ userId: USERS.sara.id }, { chat: 'default', dm: 'default', summon: 'default' });
     rule({ roleId: ACCOUNTANT.id }, {});
-    for (const action of BOT_ACTIONS) expect(await allowed(action, signedIn(USERS.sara))).toBe(false);
+    for (const action of USE_ACTIONS) expect(await allowed(action, signedIn(USERS.sara))).toBe(false);
   });
 
   it('the bot’s creator, the universe owner, a super admin and Admin always pass', async () => {
     process.env.SUPER_ADMINS = USERS.root.email!;
     join(USERS.sara, [everywhere(ADMIN)]);
     for (const user of [USERS.nora, USERS.boss, USERS.root, USERS.sara]) {
-      for (const action of BOT_ACTIONS) expect(await allowed(action, signedIn(user))).toBe(true);
+      for (const action of USE_ACTIONS) expect(await allowed(action, signedIn(user))).toBe(true);
     }
   });
 
   it('Administrator and a world admin tag pass too', async () => {
     join(USERS.sara, [everywhere(role('boss', flag('ADMINISTRATOR')))]);
     state.worldMembers.push({ worldId: 'w1', userId: USERS.omar.id, tags: ['admin'] });
-    for (const action of BOT_ACTIONS) {
+    for (const action of USE_ACTIONS) {
       expect(await allowed(action, signedIn(USERS.sara))).toBe(true);
       expect(await allowed(action, signedIn(USERS.omar))).toBe(true);
     }
@@ -235,7 +239,7 @@ describe('row 13: a person’s row beats their role’s', () => {
     join(USERS.sara, [everywhere(ACCOUNTANT)]);
     rule({ roleId: ACCOUNTANT.id }, { chat: 'yes', dm: 'yes', summon: 'yes' });
     rule({ userId: USERS.sara.id }, { chat: 'no', dm: 'no', summon: 'no' });
-    for (const action of BOT_ACTIONS) expect(await allowed(action, signedIn(USERS.sara))).toBe(false);
+    for (const action of USE_ACTIONS) expect(await allowed(action, signedIn(USERS.sara))).toBe(false);
   });
 
   it('only the actions set to No are refused', async () => {
@@ -295,7 +299,7 @@ describe('row 13: a person’s row beats their role’s', () => {
     for (const user of [USERS.nora, USERS.boss, USERS.root, USERS.sara]) rule({ userId: user.id }, { chat: 'no', dm: 'no', summon: 'no' });
     rule({ roleId: ADMIN.id }, { chat: 'no' });
     for (const user of [USERS.nora, USERS.boss, USERS.root, USERS.sara]) {
-      for (const action of BOT_ACTIONS) expect(await allowed(action, signedIn(user))).toBe(true);
+      for (const action of USE_ACTIONS) expect(await allowed(action, signedIn(user))).toBe(true);
     }
   });
 });
@@ -367,5 +371,68 @@ describe('row 15: the owner changes access', () => {
     expect(await allowed('chat', signedIn(USERS.sara))).toBe(true);
     state.bot!.privateBot = true;
     expect(await allowed('chat', signedIn(USERS.sara))).toBe(false);
+  });
+});
+
+describe('a world member with an old tag and no universe membership', () => {
+  const EDITOR_ROLE = role('editor');
+  const taggedEditor = (user: { id: string }) => state.worldMembers.push({ worldId: 'w1', userId: user.id, tags: ['editor'] });
+
+  it('has the Editor permissions from the tag, and the bot’s rules for the Editor role apply to them', async () => {
+    taggedEditor(USERS.sara);
+    expect(await allowed('deleteOrSend', signedIn(USERS.sara))).toBe(true);
+    rule({ roleId: EDITOR_ROLE.id }, { deleteOrSend: 'no' });
+    expect(await allowed('deleteOrSend', signedIn(USERS.sara))).toBe(false);
+    expect(await allowed('change', signedIn(USERS.sara))).toBe(true);
+  });
+});
+
+describe('having a bot change things, or delete or send (#737)', () => {
+  const MEMBER_CAN_CHANGE = flag('BOTS_CHANGE_THINGS');
+
+  it('a person’s No beats the role permission, and a Yes opens what the roles keep shut', async () => {
+    state.member = MEMBER_CAN_CHANGE;
+    join(USERS.sara);
+    join(USERS.omar);
+    rule({ userId: USERS.sara.id }, { change: 'no', deleteOrSend: 'yes' });
+    expect(await allowed('change', signedIn(USERS.sara))).toBe(false);
+    expect(await allowed('deleteOrSend', signedIn(USERS.sara))).toBe(true);
+    expect(await allowed('change', signedIn(USERS.omar))).toBe(true);
+    expect(await allowed('deleteOrSend', signedIn(USERS.omar))).toBe(false);
+  });
+
+  it('a role’s row works for everyone who has the role, and a Yes beats a No among roles', async () => {
+    join(USERS.sara, [everywhere(ACCOUNTANT)]);
+    join(USERS.omar, [everywhere(ACCOUNTANT), everywhere(INTERN)]);
+    rule({ roleId: ACCOUNTANT.id }, { deleteOrSend: 'yes' });
+    rule({ roleId: INTERN.id }, { deleteOrSend: 'no' });
+    expect(await allowed('deleteOrSend', signedIn(USERS.sara))).toBe(true);
+    expect(await allowed('deleteOrSend', signedIn(USERS.omar))).toBe(true);
+  });
+
+  it('a row about these never changes chat, DM or summon, and the other way round', async () => {
+    join(USERS.sara);
+    rule({ userId: USERS.sara.id }, { change: 'yes', chat: 'no' });
+    expect(await allowed('chat', signedIn(USERS.sara))).toBe(false);
+    expect(await allowed('dm', signedIn(USERS.sara))).toBe(true);
+    expect(await allowed('change', signedIn(USERS.sara))).toBe(true);
+    expect(await allowed('deleteOrSend', signedIn(USERS.sara))).toBe(false);
+  });
+
+  it('Private bot decides who may use the bot, not who may have it change things', async () => {
+    state.bot!.privateBot = true;
+    state.member = MEMBER_CAN_CHANGE;
+    join(USERS.sara);
+    rule({ userId: USERS.sara.id }, { chat: 'yes' });
+    expect(await allowed('change', signedIn(USERS.sara))).toBe(true);
+    expect(await allowed('deleteOrSend', signedIn(USERS.sara))).toBe(false);
+  });
+
+  it('the bot’s creator, the owner and Admin pass whatever a row says', async () => {
+    join(USERS.sara, [everywhere(ADMIN)]);
+    rule({ userId: USERS.sara.id }, { change: 'no', deleteOrSend: 'no' });
+    expect(await allowed('change', signedIn(USERS.sara))).toBe(true);
+    expect(await allowed('deleteOrSend', signedIn(USERS.nora))).toBe(true);
+    expect(await allowed('deleteOrSend', signedIn(USERS.boss))).toBe(true);
   });
 });
