@@ -168,7 +168,7 @@ export async function createVoiceKey(ownerId: string, input: z.infer<typeof crea
   return summary(row, ownerId, await labelsOf());
 }
 
-/** Changes only what is named. A model taken off the key is taken off every lend that named it. */
+/** Changes only what is named. A model taken off the key is taken off every lend that named it; a lend left with none is pulled. */
 export async function updateVoiceKey(ownerId: string, id: string, input: z.infer<typeof updateVoiceKeySchema>): Promise<VoiceKeySummary> {
   await prisma.$transaction(async (tx) => {
     const row = await tx.voiceProvider.findFirst({ where: { id, ownerId } });
@@ -194,8 +194,11 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
         const allowed = readLendModels(lend.models);
         if (!allowed) continue;
         const left = allowed.filter((entry) => kept.has(entry));
-        // A lend that named only models the key no longer lists would allow nothing: it goes back to all of the key's
-        if (left.length !== allowed.length) await tx.voiceKeyLend.update({ where: { id: lend.id }, data: { models: left.length > 0 ? left : Prisma.DbNull } });
+        if (left.length === allowed.length) continue;
+        // A lend that named only models the key no longer lists would allow nothing: it is pulled from that universe, as if
+        // the owner had pulled the key (its bots carry on in text), never widened to all of the key's models
+        if (left.length === 0) await tx.voiceKeyLend.delete({ where: { id: lend.id } });
+        else await tx.voiceKeyLend.update({ where: { id: lend.id }, data: { models: left } });
       }
     }
   });

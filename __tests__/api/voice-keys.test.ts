@@ -28,7 +28,7 @@ jest.mock('@/lib/db', () => ({
   prisma: {
     $transaction: jest.fn(),
     voiceProvider: { findMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), deleteMany: jest.fn() },
-    voiceKeyLend: { findMany: jest.fn(), update: jest.fn(), upsert: jest.fn(), deleteMany: jest.fn() },
+    voiceKeyLend: { findMany: jest.fn(), update: jest.fn(), delete: jest.fn(), upsert: jest.fn(), deleteMany: jest.fn() },
   },
 }));
 
@@ -192,7 +192,7 @@ describe('changing a key', () => {
     expect(db.voiceProvider.update.mock.calls[1][0].data).not.toHaveProperty('downSince');
   });
 
-  it('takes a model off every lend that named it, and a lend left with none goes back to all', async () => {
+  it('takes a model off every lend that named it, and a lend left with none is pulled, not widened to all', async () => {
     db.voiceProvider.findFirst.mockResolvedValue(key());
     db.voiceKeyLend.findMany.mockResolvedValue([
       { id: 'l1', models: ['speech:flash', 'speech:turbo'] },
@@ -201,11 +201,19 @@ describe('changing a key', () => {
     ]);
     const response = await call(patch, 'PATCH', { models: [{ id: 'flash', kind: 'speech' }] });
     expect(response.status).toBe(200);
-    const updates = db.voiceKeyLend.update.mock.calls.map(([arg]) => [arg.where.id, arg.data.models]);
-    expect(updates).toEqual([
-      ['l1', ['speech:flash']],
-      ['l2', expect.anything()],
-    ]);
+    // l1 narrowed, l3 untouched, l2 (only a model that is gone) removed and never set to "all models"
+    expect(db.voiceKeyLend.update.mock.calls.map(([arg]) => [arg.where.id, arg.data.models])).toEqual([['l1', ['speech:flash']]]);
+    expect(db.voiceKeyLend.delete.mock.calls.map(([arg]) => arg.where.id)).toEqual(['l2']);
+  });
+
+  it('leaves a lend for all of the key’s models alone when a model is taken off', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(key());
+    db.voiceKeyLend.findMany.mockResolvedValue([]);
+    await call(patch, 'PATCH', { models: [{ id: 'flash', kind: 'speech' }] });
+    // Only lends that name models are looked at: a null (all) lend is not selected
+    expect(db.voiceKeyLend.findMany.mock.calls[0][0].where.models).toBeDefined();
+    expect(db.voiceKeyLend.delete).not.toHaveBeenCalled();
+    expect(db.voiceKeyLend.update).not.toHaveBeenCalled();
   });
 
   it('refuses a model for a job the key doesn’t do', async () => {
