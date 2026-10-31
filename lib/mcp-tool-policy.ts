@@ -75,7 +75,13 @@ export const catalogSchema = z
 
 export const moveSchema = z.object({ heading: headingSchema }).strict();
 
-export const confirmSchema = z.object({ toolIds: z.array(z.string().min(1).max(100)).min(1).max(MAX_TOOLS_PER_SERVER).optional() }).strict();
+export const confirmSchema = z
+  .object({
+    toolIds: z.array(z.string().min(1).max(100)).min(1).max(MAX_TOOLS_PER_SERVER).optional(),
+    /** The policy revision the page showed: if the tools moved since, nothing is confirmed. */
+    policyRevision: z.number().int().min(0).optional(),
+  })
+  .strict();
 
 export const serverSettingsSchema = z
   .object({
@@ -231,11 +237,13 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
     await loadServer(tx, botId, serverId);
     const existing = await tx.botMcpTool.findMany({
       where: { serverId },
-      select: { id: true, name: true, fingerprint: true, confirmedAt: true, heading: true },
+      select: { id: true, name: true, fingerprint: true, confirmedAt: true, heading: true, suggestedHeading: true, suggestionSource: true },
     });
     const byName = new Map(existing.map((tool) => [tool.name, tool]));
     const added: string[] = [];
     const changed: string[] = [];
+    // Any tool whose fingerprint is different, confirmed or not: a list a person opened before it changed is out of date
+    let reworded = false;
 
     for (const tool of body.tools) {
       const shown = {
@@ -252,10 +260,15 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
           where: { id: before.id },
           data: { fingerprint: tool.fingerprint, ...shown, ...suggestion, heading: null, movedById: null, confirmedById: null, confirmedAt: null },
         });
+        reworded = true;
         if (before.confirmedAt || before.heading) changed.push(tool.name);
       } else {
         // Same tool: its words may be shown a little differently, but nothing a person decided moves. A suggestion only
-        // follows the server while nobody has confirmed the tool.
+        // follows the server while nobody has confirmed the tool; when it is what Confirm would use (no heading chosen), a
+        // page that showed the old one is out of date
+        if (!before.confirmedAt && !before.heading && (before.suggestedHeading !== suggestion.suggestedHeading || before.suggestionSource !== suggestion.suggestionSource)) {
+          reworded = true;
+        }
         await tx.botMcpTool.update({ where: { id: before.id }, data: before.confirmedAt ? shown : { ...shown, ...suggestion } });
       }
     }
@@ -264,7 +277,7 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
     const removed = existing.filter((tool) => !offered.has(tool.name));
     if (removed.length > 0) await tx.botMcpTool.deleteMany({ where: { id: { in: removed.map((tool) => tool.id) } } });
 
-    if (added.length > 0 || changed.length > 0 || removed.length > 0) {
+    if (added.length > 0 || changed.length > 0 || removed.length > 0 || reworded) {
       await tx.botMcpServer.update({ where: { id: serverId }, data: bump });
     }
     return { ...(await describe(tx, serverId)), added, changed, removed: removed.map((tool) => tool.name) };
@@ -300,11 +313,20 @@ export async function moveTool(botId: string, serverId: string, toolId: string, 
 /**
  * Confirm tools: all of the server's, or the ones listed. Each takes the heading someone chose, or else the one that
  * was suggested. A tool with neither can't be confirmed, and then nothing is. When every tool is confirmed, a server
- * that was Not checked yet is checked.
+ * that was Not checked yet is checked. When the caller names the policy revision its page showed and the server's has
+ * moved, nothing is confirmed (409).
  */
-export async function confirmTools(botId: string, serverId: string, personId: string, toolIds?: string[]): Promise<ServerToolsJson> {
+export async function confirmTools(
+  botId: string,
+  serverId: string,
+  personId: string,
+  toolIds?: string[],
+  seenRevision?: number,
+): Promise<ServerToolsJson> {
   return prisma.$transaction(async (tx) => {
     const server = await loadServer(tx, botId, serverId);
+    // The page names the list it showed: a sync or another person's change since then means it is not the list to confirm
+    if (seenRevision !== undefined && seenRevision !== server.policyRevision) throw new BotSettingsError(409, TOOL_CHANGED);
     const all = await tx.botMcpTool.findMany({
       where: { serverId },
       select: { id: true, name: true, fingerprint: true, heading: true, suggestedHeading: true, confirmedAt: true },
@@ -323,7 +345,7 @@ export async function confirmTools(botId: string, serverId: string, personId: st
       // Only the tool as it was read: a sync that changed it in between has cleared its heading and confirmation, and
       // this must not confirm the old heading on a tool nobody has seen. Nothing is confirmed when one has changed.
       const confirmed = await tx.botMcpTool.updateMany({
-        where: { id: tool.id, fingerprint: tool.fingerprint },
+        where: { id: tool.id, fingerprint: tool.fingerprint, heading: tool.heading, suggestedHeading: tool.suggestedHeading, confirmedAt: null },
         data: { heading: tool.heading ?? tool.suggestedHeading, confirmedById: personId, confirmedAt: now },
       });
       if (confirmed.count === 0) throw new BotSettingsError(409, TOOL_CHANGED);
@@ -331,7 +353,13 @@ export async function confirmTools(botId: string, serverId: string, personId: st
     const allConfirmed = all.every((tool) => tool.confirmedAt || todo.includes(tool));
     const checked = server.legacyText && allConfirmed;
     if (todo.length > 0 || checked) {
-      await tx.botMcpServer.update({ where: { id: serverId }, data: { ...bump, ...(checked ? { legacyText: false } : {}) } });
+      // The list this confirmed is the one the server still has: a sync that landed after the reads above (a tool added, a
+      // suggestion changed) has moved the revision, and then nothing is confirmed
+      const settled = await tx.botMcpServer.updateMany({
+        where: { id: serverId, policyRevision: server.policyRevision },
+        data: { ...bump, ...(checked ? { legacyText: false } : {}) },
+      });
+      if (settled.count === 0) throw new BotSettingsError(409, TOOL_CHANGED);
     }
     return describe(tx, serverId);
   });

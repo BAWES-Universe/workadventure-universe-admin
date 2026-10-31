@@ -125,9 +125,11 @@ curl -X POST \
      Takes Manage bots, or the bot server's `ADMIN_API_TOKEN`.
    - **PUT /api/bots/:id/mcp-servers/:serverId/tools** (`ADMIN_API_TOKEN` only; a person gets 403): the bot server saves
      the full tool list it just read. A new tool waits to be confirmed; a tool whose `fingerprint` changed goes back to
-     not confirmed; one the server no longer offers is removed. A suggestion never lets a tool run.
+     not confirmed; one the server no longer offers is removed. A tool whose `fingerprint` changed, confirmed or not, also raises `policyRevision`, and so does a new suggestion for a tool nobody has confirmed or chosen a heading for. A suggestion never lets a tool run.
    - **PATCH .../tools/:toolId** moves one tool to another heading (`looksUp`, `makesNew`, `changesThings`,
-     `deletesOrSends`); **POST .../tools/confirm** confirms all tools, or `{ toolIds }`. A tool takes the heading
+     `deletesOrSends`); **POST .../tools/confirm** confirms all tools (an empty body), or `{ toolIds }`. A body that is
+     not valid JSON is a 400, never "all". `{ policyRevision }` is the revision the page showed: if it has moved, or a tool
+     changed while the request ran, nothing is confirmed (409 "This tool changed, review it again"). A tool takes the heading
      someone chose or, if none, the suggested one; a tool with neither is not confirmed (400 naming it).
    - **PUT .../policy** sets what the bot does under each heading: any of `looksUp`, `makesNew`, `changesThings`,
      `deletesOrSends` as `"rightAway" | "asksFirst" | "off"`. `policyRevision` goes up when one changes. A new server
