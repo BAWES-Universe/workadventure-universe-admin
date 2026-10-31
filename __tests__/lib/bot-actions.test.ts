@@ -148,6 +148,24 @@ describe('saving a request', () => {
     await failsWith(createRequest(BOT, input({ requesterKey: 'user:omar' }), T0), 409, 'proposal_key_reused');
   });
 
+  it('refuses the same key when the card changed: its heading, conversation, tool, policy or what may be remembered', async () => {
+    const first = await createRequest(BOT, input({ rememberScope: { fixed: { team: 'WEB' }, varies: ['title'] } }), T0);
+    const same: Partial<CreateRequestInput> = { rememberScope: { fixed: { team: 'WEB' }, varies: ['title'] } };
+    for (const changed of [
+      { heading: 'makesNew' as const },
+      { conversationKey: 'dm:omar:nora' },
+      { toolFingerprint: 'fp-2' },
+      { policyRevision: 4 },
+      { rememberScope: null },
+      { rememberScope: { fixed: { team: 'OPS' }, varies: ['title'] } },
+    ]) {
+      await failsWith(createRequest(BOT, input({ ...same, ...changed }), at(1)), 409, 'proposal_key_reused');
+    }
+    const again = await createRequest(BOT, input(same), at(2));
+    expect(again).toMatchObject({ created: false, action: { id: first.action.id } });
+    if (!REAL) expect(db.requests).toHaveLength(1);
+  });
+
   it('refuses a bot that is not there', async () => {
     await failsWith(createRequest('nope', input(), T0), 404, 'bot_not_found');
   });

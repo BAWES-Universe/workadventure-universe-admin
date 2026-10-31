@@ -215,8 +215,8 @@ export type CreateRequestInput = z.infer<typeof createRequestSchema>;
 
 /**
  * Save a request that waits for a tap. The same `proposalKey` again returns the request already saved (a bot server that
- * restarted between saving and showing the card must not make a second one); the same key with different content is
- * refused. Remembering is never offered for deleting or sending.
+ * restarted between saving and showing the card must not make a second one); the same key with different content (the
+ * arguments, requester, conversation, heading, tool fingerprint, policy revision or what may be remembered) is refused. Remembering is never offered for deleting or sending.
  */
 export async function createRequest(
   botId: string,
@@ -233,7 +233,16 @@ export async function createRequest(
 
   const existing = await prisma.botActionRequest.findUnique({ where: { botId_proposalKey: { botId, proposalKey: input.proposalKey } }, include: { attempts: true } });
   const again = (row: NonNullable<typeof existing>) => {
-    if (row.argumentsDigest !== digest || row.requesterKey !== input.requesterKey) {
+    // The same card: what is asked, by whom, in which conversation, under which heading and policy, and what may be remembered
+    const same =
+      row.argumentsDigest === digest &&
+      row.requesterKey === input.requesterKey &&
+      row.conversationKey === input.conversationKey &&
+      row.heading === input.heading &&
+      row.toolFingerprint === input.toolFingerprint &&
+      row.policyRevision === input.policyRevision &&
+      canonicalJson(row.rememberScope ?? null) === canonicalJson(input.rememberScope ?? null);
+    if (!same) {
       throw new BotActionError(409, 'proposal_key_reused', 'That key was used for a different action');
     }
     return { action: toView(row), created: false };
