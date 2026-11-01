@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db';
+import { startOfMonth } from '@/lib/ai-keys';
 import { FAILED_REPLIES_TO_DOWN, RECHECK_MS, judgeFailedReply, type DownReason, type ReplyVerdict } from '@/lib/ai-key-health';
 
 /**
@@ -11,8 +12,8 @@ import { FAILED_REPLIES_TO_DOWN, RECHECK_MS, judgeFailedReply, type DownReason, 
  */
 export type { DownReason };
 
-/** What the bot server saw when it used a key: it worked, or it failed with the HTTP status the provider answered (none: a dropped connection or a timeout). */
-export type VoiceCallOutcome = { ok: true } | { ok: false; status?: number; rejected?: boolean };
+/** What the bot server saw when it used a key: it worked (with the bot it spoke for, when it says), or it failed with the HTTP status the provider answered (none: a dropped connection or a timeout). */
+export type VoiceCallOutcome = { ok: true; botId?: string } | { ok: false; status?: number; rejected?: boolean };
 
 export interface VoiceKeyHealth {
   status: 'working' | 'down';
@@ -35,6 +36,23 @@ const personal = (id: string) => ({ id, ownerId: { not: null } });
 export type VoicePart = 'recognition' | 'speech';
 const counter = (part: VoicePart) => (part === 'recognition' ? 'failedRecognition' : 'failedSpeech');
 
+/**
+ * One voice reply a key paid for this month (UTC, the month a text key's usage uses), for the bot that spoke. A bot that is gone
+ * is not counted, and counting never fails the report that carries it.
+ */
+async function countVoiceReply(providerId: string, botId: string, now: Date) {
+  try {
+    await prisma.voiceKeyUsage.upsert({
+      where: { providerId_botId_month: { providerId, botId, month: startOfMonth(now) } },
+      create: { providerId, botId, month: startOfMonth(now), replies: 1 },
+      update: { replies: { increment: 1 } },
+    });
+  } catch (error) {
+    // A bot that doesn't exist (P2003) was never this key's to count
+    if ((error as { code?: unknown })?.code !== 'P2003') console.error('[VoiceKeys] Could not count the voice reply:', error instanceof Error ? error.message : 'unknown');
+  }
+}
+
 /** Marks a Working key Down, once. `part` is the job whose calls failed, null when the provider turned the whole key away. */
 async function markDown(id: string, reason: DownReason, part: VoicePart | null, now: Date) {
   await prisma.voiceProvider.updateMany({
@@ -51,6 +69,7 @@ export async function reportVoiceKeyCall(id: string, part: VoicePart, outcome: V
   const key = await prisma.voiceProvider.findFirst({ where: personal(id), select: { id: true, downSince: true, downPart: true } });
   if (!key) return null;
   if (outcome.ok) {
+    if (part === 'speech' && outcome.botId) await countVoiceReply(id, outcome.botId, now);
     if (key.downSince) {
       // A Down key is Working again when the job that failed works; a key the provider turned away whole, when any job does
       if (!key.downPart || key.downPart === part) {

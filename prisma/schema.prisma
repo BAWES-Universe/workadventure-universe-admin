@@ -817,6 +817,7 @@ model Bot {
   actionGrants   BotActionGrant[]
   voiceDraft     BotVoiceDraft?
   voiceRevisions BotVoiceRevision[]
+  voiceKeyUsage  VoiceKeyUsage[]
 
   @@index([roomId])
   @@map("bots")
@@ -1622,6 +1623,7 @@ model VoiceProvider {
 
   owner User?           @relation("VoiceKeyOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   lends VoiceKeyLend[]
+  usage VoiceKeyUsage[]
 
   @@index([enabled])
   @@index([ownerId])
@@ -1644,6 +1646,25 @@ model VoiceKeyLend {
   @@unique([providerId, universeId])
   @@index([universeId])
   @@map("voice_key_lends")
+}
+
+// How many voice replies a person's voice key paid for in one month (#749), per bot, for "This month" on the AI keys page. The
+// bot server counts one when it reports a speaking call that worked and names the bot (POST /api/voice/providers/:id/health).
+// `month` is the first day of the month, UTC, the same month as a text key's usage.
+model VoiceKeyUsage {
+  id         String   @id @default(uuid())
+  providerId String   @map("provider_id")
+  botId      String   @map("bot_id")
+  month      DateTime @db.Date
+  replies    Int      @default(0)
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  provider VoiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  bot      Bot           @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, botId, month])
+  @@index([providerId, month])
+  @@map("voice_key_usage")
 }
 
 // A bot's voice profile (#740). The draft is what a person is editing; a published revision never changes. A bot speaks with
