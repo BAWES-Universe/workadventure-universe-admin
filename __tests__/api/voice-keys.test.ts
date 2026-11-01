@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 /**
  * Personal voice keys (#749): a person adds a voice key, lends it to a universe where they manage bots, and nobody else sees
  * or changes it. The server's own voice providers never show a person's key. Nothing here calls a provider.
@@ -405,6 +406,18 @@ describe('lending', () => {
     db.voiceKeyLend.upsert.mockClear();
     const refused = await call(lend, 'POST', { universeId: 'uni1', models: ['speech:gone'] });
     expect(refused.status).toBe(400);
+    expect(db.voiceKeyLend.upsert).not.toHaveBeenCalled();
+  });
+
+  it('changes a lend only when it is there, and never lends again one pulled meanwhile', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(key({ lends: [lent(['speech:flash'])] }));
+    (lendAccess as jest.Mock).mockResolvedValue('owner');
+    expect((await call(lend, 'POST', { universeId: 'uni1', models: null, existing: true })).status).toBe(200);
+    expect(db.voiceKeyLend.update).toHaveBeenCalledWith({ where: { providerId_universeId: { providerId: 'k1', universeId: 'uni1' } }, data: { models: Prisma.DbNull } });
+    expect(db.voiceKeyLend.upsert).not.toHaveBeenCalled();
+    db.voiceKeyLend.update.mockRejectedValue(Object.assign(new Error('gone'), { code: 'P2025' }));
+    const gone = await call(lend, 'POST', { universeId: 'uni1', models: null, existing: true });
+    expect(gone.status).toBe(409);
     expect(db.voiceKeyLend.upsert).not.toHaveBeenCalled();
   });
 

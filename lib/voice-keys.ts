@@ -332,8 +332,9 @@ export async function deleteVoiceKey(ownerId: string, id: string): Promise<void>
 /**
  * Lends the key to a universe where the caller owns it or has Manage bots. `models` (undefined = as it is, all for a new lend;
  * null = all; a list of "kind:id") says which of the key's models bots there may use. Lending again changes nothing but the list.
+ * `existing` changes a lend only: when there is none (pulled meanwhile) nothing is lent and it is refused with a 409.
  */
-export async function lendVoiceKey(ownerId: string, id: string, universeId: string, rawModels: unknown): Promise<VoiceKeySummary> {
+export async function lendVoiceKey(ownerId: string, id: string, universeId: string, rawModels: unknown, existing = false): Promise<VoiceKeySummary> {
   const parsed = parseLendModels(rawModels);
   if (!parsed.ok) throw new VoiceKeyRefused(parsed.message);
   const key = await owned(id, ownerId);
@@ -350,10 +351,15 @@ export async function lendVoiceKey(ownerId: string, id: string, universeId: stri
   const where = { providerId_universeId: { providerId: id, universeId } };
   const update = models === undefined ? {} : { models: models ?? Prisma.DbNull };
   try {
-    await prisma.voiceKeyLend.upsert({ where, create: { providerId: id, universeId, ...(models ? { models } : {}) }, update });
+    // A change of a lend (`existing`) never lends again: one removed meanwhile, in another tab or by the universe, stays removed
+    if (existing) await prisma.voiceKeyLend.update({ where, data: update });
+    else await prisma.voiceKeyLend.upsert({ where, create: { providerId: id, universeId, ...(models ? { models } : {}) }, update });
   } catch (error) {
     // The key was deleted, or the universe, between the checks above and the save
     if ((error as { code?: unknown })?.code === 'P2003') throw new VoiceKeyRefused('Key or universe not found', 404);
+    if (existing && (error as { code?: unknown })?.code === 'P2025') {
+      throw new VoiceKeyRefused('This key isn’t lent to that universe any more. Reload the page to see where it’s lent.', 409);
+    }
     throw error;
   }
   const row = await owned(id, ownerId);

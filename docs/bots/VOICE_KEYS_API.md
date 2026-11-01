@@ -37,7 +37,7 @@ the key paid for this month, counted from the first of the month, UTC, as a text
 | `PATCH /api/me/voice-keys/:id` | Changes only what is named: `name`, `apiKey` (replaces the saved one), `models`, `limits` (below). A model taken off the key is taken off every lend that named it; a lend left with none is pulled from that universe, as if the key were pulled (its bots there carry on in text) |
 | `POST /api/me/voice-keys/:id/check` | "Check now" on a Down key: the next bot that needs it is let through to try, without waiting out the 5 minutes. Calls no provider. 200 with `{ key }`; a key that is not Down is left as it is |
 | `DELETE /api/me/voice-keys/:id` | Takes the key away with every lend of it |
-| `POST /api/me/voice-keys/:id/lend` | `{ universeId, models? }`. Needs the universe's owner, or Manage bots in it (the universes come from `GET /api/me/ai-keys/universes`). `models`: `null` = all of the key's, a list of `"kind:id"` = only these (each on the key's list), left out = as it is (all, for a new lend). Lending again is fine |
+| `POST /api/me/voice-keys/:id/lend` | `{ universeId, models?, existing? }`. Needs the universe's owner, or Manage bots in it (the universes come from `GET /api/me/ai-keys/universes`). `models`: `null` = all of the key's, a list of `"kind:id"` = only these (each on the key's list), left out = as it is (all, for a new lend). Lending again is fine. `existing: true` changes a lend only: a lend pulled meanwhile is not made again, the answer is a 409 |
 | `DELETE /api/me/voice-keys/:id/lend/:universeId` | Pulls the key from a universe. Always the key owner's to do |
 
 Someone else's key, and a server provider, are 404. Lending moves no bot. A new `apiKey` on a Down key starts it clean: it is tried at once.

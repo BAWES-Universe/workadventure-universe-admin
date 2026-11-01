@@ -291,7 +291,7 @@ describe('lending a voice key', () => {
     expect(within(dialog).getByRole('checkbox', { name: 'Eleven v3' }).getAttribute('aria-checked')).toBe('false');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
     await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith('/api/me/voice-keys/vk-1/lend', expect.objectContaining({ body: JSON.stringify({ universeId: 'u-1', models: ['speech:eleven_flash_v2_5', 'recognition:scribe_v1'] }) })),
+      expect(fetchMock).toHaveBeenCalledWith('/api/me/voice-keys/vk-1/lend', expect.objectContaining({ body: JSON.stringify({ universeId: 'u-1', models: ['speech:eleven_flash_v2_5', 'recognition:scribe_v1'], existing: true }) })),
     );
   });
 });
