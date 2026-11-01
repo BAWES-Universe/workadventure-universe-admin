@@ -33,8 +33,10 @@ async function ask(company: VoiceKeyCompanyInfo, apiKey: string): Promise<Verdic
     });
     if (response.status >= 200 && response.status < 300) return 'accepted';
     if (check.alsoAccepted && response.status === check.alsoAccepted.status) {
+      const wanted = check.alsoAccepted.includes;
+      if (wanted === undefined) return 'accepted';
       const text = (await response.text().catch(() => '')).slice(0, 2000);
-      if (text.includes(check.alsoAccepted.includes)) return 'accepted';
+      if (text.includes(wanted)) return 'accepted';
     }
     return response.status === 401 || response.status === 403 ? 'refused' : 'unreachable';
   } catch {
