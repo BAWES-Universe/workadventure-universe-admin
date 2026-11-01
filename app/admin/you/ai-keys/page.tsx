@@ -10,6 +10,8 @@ import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/toast';
 import { authenticatedFetch } from '@/lib/client-auth';
 import type { AiKeySummary } from '@/lib/ai-keys';
+import type { VoiceKeySummary } from '@/lib/voice-keys';
+import { lendModelId } from '@/lib/voice-lend-model';
 import { LoadError, LoadingRows, PageHeader, count } from '../../components/ds';
 import { FormSheet } from '../../components/form-sheet';
 import { Planet } from '../../components/ds/planet-icon';
@@ -20,6 +22,11 @@ import { kindInfo } from '@/lib/ai-key-kinds';
 import { PickCard, Radio, Segmented } from '@/components/ui/choice';
 import { AiKeyFailure, aiKeyError, aiKeyFailureText, useAiKeys } from '../../hooks/use-ai-keys';
 import { RenameButton, RenameKey } from './rename-key';
+import { DOWN_PHRASE, StatusPill, names, sinceText } from './key-text';
+import { VoiceKeyCard } from './voice-key-card';
+import { repliesInText, type VoiceLent } from './voice-key-text';
+import { VoiceModelPicker } from '../../components/ds/voice-model-picker';
+import { isVoiceKey, useVoiceKeys } from '../../hooks/use-voice-keys';
 
 /** 880000 -> "880k", 1200000 -> "1.2M": a token count that fits a phone. */
 function compact(value: number): string {
@@ -39,17 +46,23 @@ function describe(key: AiKeySummary): string {
 }
 
 type Lent = AiKeySummary['lentTo'][number];
+/** Any key on this page, and where it is lent: a text key, or a voice key (#749). */
+type AnyKey = AiKeySummary | VoiceKeySummary;
+type AnyLent = Lent | VoiceLent;
+
+/** The routes a key lives behind: text keys and voice keys have their own. */
+const routesOf = (key: AnyKey) => (isVoiceKey(key) ? '/api/me/voice-keys' : '/api/me/ai-keys');
 
 /** Bots running on a key, across the universes it is lent to. */
-const botsOn = (key: AiKeySummary) => key.lentTo.reduce((total, lent) => total + lent.bots.length, 0);
-
-/** The names of a few bots: "Sam", "Guide and Nora", "Guide, Nora and Sam". */
-function names(list: string[]): string {
-  return list.length <= 1 ? (list[0] ?? '') : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
-}
+const botsOn = (key: AnyKey) => key.lentTo.reduce((total, lent) => total + lent.bots.length, 0);
 
 /** What revoking does to the bots on a key, in the mock's words: who moves, who is told, that adding it again won't move them back. */
-function revokeEffect(key: AiKeySummary): string {
+function revokeEffect(key: AnyKey): string {
+  if (isVoiceKey(key)) {
+    const lines = key.lentTo.filter((lent) => lent.bots.length > 0).map((lent) => `${names(lent.bots.map((bot) => bot.name))} in ${lent.universeName} ${lent.bots.length === 1 ? 'replies' : 'reply'} in text.`);
+    const all = key.lentTo.flatMap((lent) => lent.bots.map((bot) => bot.name));
+    return lines.length === 0 ? '' : ` ${lines.join(' ')} Adding the key again later does not bring ${names(all)}’s voice back: pick it again under Voice.`;
+  }
   const lines = key.lentTo
     .filter((lent) => lent.bots.length > 0)
     .map((lent) => {
@@ -64,41 +77,12 @@ function revokeEffect(key: AiKeySummary): string {
 }
 
 /** The Danger zone's line under Revoke. */
-function dangerLine(key: AiKeySummary): string {
+function dangerLine(key: AnyKey): string {
   const bots = botsOn(key);
+  if (isVoiceKey(key)) return bots === 0 ? 'Deletes it everywhere. No bot uses it now.' : `Deletes it everywhere. ${bots === 1 ? 'Its bot replies' : `Its ${bots} bots reply`} in text.`;
   if (bots === 0) return 'Deletes it everywhere. No bot runs on it now.';
   const told = key.lentTo.some((lent) => lent.bots.length > 0 && !lent.ownedByYou);
   return `Deletes it everywhere. ${bots === 1 ? 'Its bot moves' : `Its ${bots} bots move`} to Universe AI${told ? ' and each universe owner is told' : ''}.`;
-}
-
-/** Working or Down, as a small pill (green dot, or amber for Down). */
-function StatusPill({ down }: { down: boolean }) {
-  return down ? (
-    <span className="inline-flex h-[22px] items-center gap-1.5 whitespace-nowrap rounded-full border border-[rgb(245_196_81/0.55)] px-2.5 text-[11px] font-semibold text-[#F5C451]" data-testid="ai-key-status">
-      <i aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-[#F5C451]" />
-      Down
-    </span>
-  ) : (
-    <span className="inline-flex h-[22px] items-center gap-1.5 whitespace-nowrap rounded-full border border-foreground/[.16] px-2.5 text-[11px] font-semibold" data-testid="ai-key-status">
-      <i aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-[#4ade80]" />
-      Working
-    </span>
-  );
-}
-
-const DOWN_PHRASE = {
-  stopped: 'stopped answering',
-  rejected: 'didn’t accept the key',
-  errors: 'kept failing',
-  credit: 'is out of credit',
-  model: 'no longer has the model',
-} as const;
-
-/** "2:14 PM", or "Oct 18, 2:14 PM" when it was not today. */
-function sinceText(iso: string, now = new Date()): string {
-  const at = new Date(iso);
-  const time = at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  return at.toDateString() === now.toDateString() ? time : `${at.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
 }
 
 /** The sentence under a Down key, in the mock's words: since when, why, what its bots do meanwhile, and the 5-minute recheck. */
@@ -130,29 +114,37 @@ function ifDownHelp(key: AiKeySummary): string {
  * itself is never shown, only its last four characters.
  */
 export default function AiKeysPage() {
-  const { result, retry, update } = useAiKeys();
+  const { result: textResult, retry: retryText, update } = useAiKeys();
+  const { result: voiceResult, retry: retryVoice, update: updateVoice } = useVoiceKeys();
+  const retry = () => {
+    retryText();
+    retryVoice();
+  };
+  // The page waits for both lists: one that failed is never shown as an empty one
+  const result = textResult.status === 'error' || voiceResult.status === 'error' ? ({ status: 'error' } as const) : textResult.status === 'loading' || voiceResult.status === 'loading' ? ({ status: 'loading' } as const) : ({ status: 'ready' } as const);
   // The key whose limits sheet is open (#666), by id, so the sheet shows its limits as just saved
   const [limitsFor, setLimitsFor] = useState<string | null>(null);
   const saveKeyLimit = useSaveKeyLimit();
   const { addToast } = useToast();
-  const [revoking, setRevoking] = useState<AiKeySummary | null>(null);
+  const [revoking, setRevoking] = useState<AnyKey | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const [lending, setLending] = useState<{ key: AiKeySummary; universeId?: string } | null>(null);
+  const [lending, setLending] = useState<{ key: AnyKey; universeId?: string } | null>(null);
   const [editing, setEditing] = useState<AiKeySummary | null>(null);
-  const [pulling, setPulling] = useState<{ key: AiKeySummary; lent: Lent } | null>(null);
+  const [pulling, setPulling] = useState<{ key: AnyKey; lent: AnyLent } | null>(null);
   const [checking, setChecking] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
 
-  async function revoke(key: AiKeySummary) {
+  async function revoke(key: AnyKey) {
     setBusy(true);
     setFailure(null);
     try {
-      const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(key.id)}`, { method: 'DELETE' });
+      const response = await authenticatedFetch(`${routesOf(key)}/${encodeURIComponent(key.id)}`, { method: 'DELETE' });
       // Already gone (revoked on another device): the list is right to drop it.
       if (!response.ok && response.status !== 404) throw new AiKeyFailure('That didn’t work. Try again.');
-      update((keys) => keys.filter((entry) => entry.id !== key.id));
+      if (isVoiceKey(key)) updateVoice((keys) => keys.filter((entry) => entry.id !== key.id));
+      else update((keys) => keys.filter((entry) => entry.id !== key.id));
       setRevoking(null);
       addToast({ description: `${key.name} revoked`, variant: 'success', duration: 2500 });
     } catch (error) {
@@ -162,11 +154,11 @@ export default function AiKeysPage() {
     }
   }
 
-  async function pull(key: AiKeySummary, lent: Lent) {
+  async function pull(key: AnyKey, lent: AnyLent) {
     setBusy(true);
     setFailure(null);
     try {
-      const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(key.id)}/lend/${encodeURIComponent(lent.universeId)}`, { method: 'DELETE' });
+      const response = await authenticatedFetch(`${routesOf(key)}/${encodeURIComponent(key.id)}/lend/${encodeURIComponent(lent.universeId)}`, { method: 'DELETE' });
       // Already pulled (on another device): the list is right to drop it.
       if (!response.ok && response.status !== 404) throw new AiKeyFailure('That didn’t work. Try again.');
       retry();
@@ -201,6 +193,22 @@ export default function AiKeysPage() {
     }
   }
 
+  /** "Check now" on a voice key: the next bot that needs it is let through to try, so it is Working again once that spoken reply works. */
+  async function checkVoiceNow(key: VoiceKeySummary) {
+    setChecking(key.id);
+    try {
+      const response = await authenticatedFetch(`/api/me/voice-keys/${encodeURIComponent(key.id)}/check`, { method: 'POST' });
+      const body = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (!response.ok) throw new AiKeyFailure(aiKeyError(response.status, body?.error));
+      retry();
+      addToast({ description: `${key.name} is tried again with the next voice reply`, variant: 'success', duration: 2500 });
+    } catch (error) {
+      addToast({ description: aiKeyFailureText(error), variant: 'error', duration: 4000 });
+    } finally {
+      setChecking(null);
+    }
+  }
+
   async function chooseIfDown(key: AiKeySummary, ifDown: AiKeySummary['ifDown']) {
     setSaving(key.id);
     const before = key.ifDown;
@@ -220,7 +228,10 @@ export default function AiKeysPage() {
     }
   }
 
-  const keys = result.status === 'ready' ? result.items : [];
+  const textKeys = textResult.status === 'ready' ? textResult.items : [];
+  const voiceKeys = voiceResult.status === 'ready' ? voiceResult.items : [];
+  // Text and voice keys in the order they were added
+  const keys: AnyKey[] = [...textKeys, ...voiceKeys].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
   return (
     <div className="grid gap-6" data-testid="ai-keys-page">
@@ -245,7 +256,30 @@ export default function AiKeysPage() {
         </p>
       )}
 
-      {keys.map((key) => (
+      {keys.map((key) => isVoiceKey(key) ? (
+        <VoiceKeyCard
+          key={key.id}
+          keyItem={key}
+          renaming={renaming === key.id}
+          checking={checking === key.id}
+          busy={busy}
+          onRename={() => setRenaming(key.id)}
+          onCancelRename={() => setRenaming(null)}
+          onRenamed={(name) => {
+            updateVoice((list) => list.map((entry) => (entry.id === key.id ? { ...entry, name } : entry)));
+            setRenaming((open) => (open === key.id ? null : open));
+            addToast({ description: `Renamed to ${name}`, variant: 'success', duration: 2500 });
+          }}
+          onCheck={() => void checkVoiceNow(key)}
+          onLend={() => setLending({ key })}
+          onEditModels={(universeId) => setLending({ key, universeId })}
+          onPull={(lent) => {
+            setFailure(null);
+            if (lent.bots.length > 0) setPulling({ key, lent });
+            else void pull(key, lent);
+          }}
+        />
+      ) : (
         <article
           key={key.id}
           className={`grid gap-4 rounded-2xl border bg-foreground/[.03] p-4 ${key.status === 'down' ? 'border-[rgb(245_196_81/0.55)]' : 'border-foreground/10'}`}
@@ -379,7 +413,7 @@ export default function AiKeysPage() {
       ))}
 
       {(() => {
-        const key = keys.find((entry) => entry.id === limitsFor) ?? null;
+        const key = textKeys.find((entry) => entry.id === limitsFor) ?? null;
         return (
           <FormSheet open={key !== null} onOpenChange={(open) => !open && setLimitsFor(null)} title={key ? `Limits for ${key.name}` : 'Limits'} description="For bots that run on this key. Each bot’s editors can lower them for that bot.">
             {key && (
@@ -465,9 +499,11 @@ export default function AiKeysPage() {
       >
         <p className="text-sm text-muted-foreground">
           {pulling &&
-            `${names(pulling.lent.bots.map((bot) => bot.name))} ${pulling.lent.bots.length === 1 ? 'moves' : 'move'} to Universe AI${
-              pulling.lent.ownedByYou ? '' : `, and the owner of ${pulling.lent.universeName} is told`
-            }. Lending it again later does not move ${pulling.lent.bots.length === 1 ? 'it' : 'them'} back.`}
+            (isVoiceKey(pulling.key)
+              ? `${repliesInText(pulling.lent.bots.map((bot) => bot.name)).replace('until it’s back.', `until the key is lent to ${pulling.lent.universeName} again.`)}`
+              : `${names(pulling.lent.bots.map((bot) => bot.name))} ${pulling.lent.bots.length === 1 ? 'moves' : 'move'} to Universe AI${
+                  pulling.lent.ownedByYou ? '' : `, and the owner of ${pulling.lent.universeName} is told`
+                }. Lending it again later does not move ${pulling.lent.bots.length === 1 ? 'it' : 'them'} back.`)}
         </p>
         {failure && (
           <p role="alert" className="text-sm text-[#fca5a5]">
@@ -524,11 +560,11 @@ function LendSheet({
   onClose,
   onLent,
 }: {
-  keyToLend: AiKeySummary | null;
+  keyToLend: AnyKey | null;
   /** The universe whose models are being changed; the universe list is left out. */
   editing?: string;
   onClose: () => void;
-  onLent: (key: AiKeySummary, universeName: string) => void;
+  onLent: (key: AnyKey, universeName: string) => void;
 }) {
   const [universes, setUniverses] = useState<LendableUniverse[] | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -540,7 +576,9 @@ function LendSheet({
   const [failure, setFailure] = useState<string | null>(null);
   const open = keyToLend !== null;
   const lentIds = new Set(keyToLend?.lentTo.map((lent) => lent.universeId));
-  const lent = keyToLend?.lentTo.find((entry) => entry.universeId === editing);
+  const lent: AnyLent | undefined = keyToLend?.lentTo.find((entry) => entry.universeId === editing);
+  /** A voice key lists its models itself: nothing is asked of its company, and a lend names them as "kind:id" (#749). */
+  const voice = keyToLend !== null && isVoiceKey(keyToLend) ? keyToLend : null;
 
   useEffect(() => {
     if (!open || !keyToLend) return;
@@ -568,6 +606,14 @@ function LendSheet({
         });
     }
     // The key's models, for "Only these"
+    if (voice) {
+      const listed = new Set(voice.models.map(lendModelId));
+      setModels({ status: 'ready', models: [], facts: {} });
+      setOnly((kept) => kept.filter((id) => listed.has(id)));
+      return () => {
+        cancelled = true;
+      };
+    }
     authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(keyToLend.id)}/models`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
       .then(async (response) => {
         const data = (await response.json().catch(() => ({}))) as { ok?: boolean; models?: string[]; facts?: Record<string, { tools?: boolean; vision?: boolean }>; message?: string; noList?: boolean };
@@ -601,7 +647,7 @@ function LendSheet({
     setBusy(true);
     setFailure(null);
     try {
-      const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(keyToLend.id)}/lend`, {
+      const response = await authenticatedFetch(`${routesOf(keyToLend)}/${encodeURIComponent(keyToLend.id)}/lend`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         // A new lend with All models sends none: all is what a new lend gets. A change of an existing lend always says which.
@@ -624,8 +670,8 @@ function LendSheet({
   // doesn't say calls no tools (a bot's replies always offer them), the same pick the save makes
   const kept = models.status === 'ready' ? models.models.filter((id) => only.includes(id)) : [];
   const firstKept = models.status === 'ready' ? (kept.find((id) => models.facts[id]?.tools !== false) ?? kept[0]) : undefined;
-  const moving = limited && firstKept && lent ? lent.bots.filter((bot) => bot.model !== null && !only.includes(bot.model)) : [];
-  const provider = keyToLend?.kindLabel ?? 'the provider';
+  const moving = limited && !voice && firstKept && lent ? lent.bots.filter((bot) => bot.model !== null && !only.includes(bot.model)) : [];
+  const provider = (keyToLend && isVoiceKey(keyToLend) ? keyToLend.company : keyToLend?.kindLabel) ?? 'the provider';
 
   return (
     <FormSheet
@@ -638,7 +684,9 @@ function LendSheet({
       {!editing && (
         <>
           <p className="text-sm text-muted-foreground">
-            Universes where you can manage bots. Lending moves no bot: in a bot you manage there, pick this key under Runs on.
+            {voice
+              ? 'Universes where you can manage bots. Lending moves no bot: in a bot you made there, pick this key under Voice.'
+              : 'Universes where you can manage bots. Lending moves no bot: in a bot you manage there, pick this key under Runs on.'}
           </p>
           {universes === null && !loadFailed && <p className="text-sm text-muted-foreground">Loading your universes…</p>}
           {loadFailed && (
@@ -695,11 +743,12 @@ function LendSheet({
               ? `Every model ${provider} has, including new ones it adds later. Each bot picks one on its page.`
               : `Bots there may only pick the models you tick. New ones ${provider} adds later are not added.`}
           </p>
-          {limit === 'only' && models.status === 'ready' && (
+          {limit === 'only' && voice && <VoiceModelPicker models={voice.models} mode="many" picked={only} onChange={setOnly} label="Models bots there may use" />}
+          {limit === 'only' && !voice && models.status === 'ready' && (
             <ModelPicker models={models.models} facts={models.facts} mode="many" picked={only} onChange={setOnly} label="Models bots there may use" />
           )}
-          {limit === 'only' && models.status === 'loading' && <p className="text-sm text-muted-foreground">Loading the models…</p>}
-          {limit === 'only' && models.status === 'failed' && (
+          {limit === 'only' && !voice && models.status === 'loading' && <p className="text-sm text-muted-foreground">Loading the models…</p>}
+          {limit === 'only' && !voice && models.status === 'failed' && (
             <p role="alert" className="text-sm text-[#fca5a5]">
               {models.message}
             </p>
@@ -712,9 +761,9 @@ function LendSheet({
           )}
         </section>
       )}
-      {!canLimit && editing && (
+      {!canLimit && editing && keyToLend && !isVoiceKey(keyToLend) && (
         <p className="text-sm text-muted-foreground" data-testid="lend-one-model">
-          {keyToLend?.kindLabel} doesn’t share a list of its models, so bots there use {keyToLend?.model ?? 'its one model'}. There is nothing to limit.
+          {keyToLend.kindLabel} doesn’t share a list of its models, so bots there use {keyToLend.model ?? 'its one model'}. There is nothing to limit.
         </p>
       )}
       {failure && (

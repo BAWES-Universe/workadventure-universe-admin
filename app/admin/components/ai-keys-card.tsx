@@ -5,7 +5,10 @@ import type { ReactNode } from 'react';
 import { ArrowUpRight, KeyRound } from 'lucide-react';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import type { AiKeySummary } from '@/lib/ai-keys';
+import type { VoiceKeySummary } from '@/lib/voice-keys';
+import { voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { useAiKeys } from '../hooks/use-ai-keys';
+import { useVoiceKeys } from '../hooks/use-voice-keys';
 import { ProviderLogo } from './ds/provider-logo';
 
 /** The providers the card shows someone with no key yet: what they can bring. */
@@ -36,17 +39,55 @@ function sinceText(iso: string, now = new Date()): string {
   return at.toDateString() === now.toDateString() ? time : `${at.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
 }
 
+/** A key as the card shows it: a text key or a voice key (#749), told apart only by what its bots do while it is down. */
+interface Row {
+  id: string;
+  name: string;
+  logo: Parameters<typeof ProviderLogo>[0]['info'];
+  down: boolean;
+  downSince: string | null;
+  downReason: keyof typeof DOWN_PHRASE | null;
+  lentTo: { universeName: string; bots: string[] }[];
+  /** What its bots do while it is down, as a sentence that starts with them. */
+  whileDown: (bots: string[]) => string;
+  /** Replies it paid for this month (voice replies for a voice key). */
+  replies: number;
+  createdAt: string;
+}
+
+const textRow = (key: AiKeySummary): Row => ({
+  id: key.id,
+  name: key.name,
+  logo: key.kind ? kindInfo(key.kind) : undefined,
+  down: key.status === 'down',
+  downSince: key.downSince,
+  downReason: key.downReason,
+  lentTo: key.lentTo.map((lent) => ({ universeName: lent.universeName, bots: lent.bots.map((bot) => bot.name) })),
+  whileDown: (bots) =>
+    key.ifDown === 'stop' ? `${names(bots)} ${bots.length === 1 ? 'rests' : 'rest'} until it’s back.` : `${names(bots)} ${bots.length === 1 ? 'replies' : 'reply'} on Universe AI until it’s back.`,
+  replies: key.month.replies,
+  createdAt: key.createdAt,
+});
+
+const voiceRow = (key: VoiceKeySummary): Row => ({
+  id: key.id,
+  name: key.name,
+  logo: { logo: voiceKeyCompanyInfo(key.adapter)?.logo },
+  down: key.health.status === 'down',
+  downSince: key.health.downSince,
+  downReason: key.health.downReason,
+  lentTo: key.lentTo.map((lent) => ({ universeName: lent.universeName, bots: lent.bots.map((bot) => bot.name) })),
+  // A voice key has no other voice to move to: bots carry on in text
+  whileDown: (bots) => `${names(bots)} ${bots.length === 1 ? 'replies' : 'reply'} in text until it’s back.`,
+  replies: key.month.voiceReplies,
+  createdAt: key.createdAt,
+});
+
 /** The line under a key: what happened and what its bots do meanwhile when it is down, else where it is lent. */
-function keyLine(key: AiKeySummary): string {
-  if (key.status === 'down') {
-    const bots = key.lentTo.flatMap((lent) => lent.bots.map((bot) => bot.name));
-    const one = bots.length === 1;
-    const meanwhile =
-      bots.length === 0
-        ? ''
-        : key.ifDown === 'stop'
-          ? ` ${names(bots)} ${one ? 'rests' : 'rest'} until it’s back.`
-          : ` ${names(bots)} ${one ? 'replies' : 'reply'} on Universe AI until it’s back.`;
+function keyLine(key: Row): string {
+  if (key.down) {
+    const bots = key.lentTo.flatMap((lent) => lent.bots);
+    const meanwhile = bots.length === 0 ? '' : ` ${key.whileDown(bots)}`;
     return `${DOWN_PHRASE[key.downReason ?? 'stopped']} since ${sinceText(key.downSince ?? new Date().toISOString())}.${meanwhile}`;
   }
   if (key.lentTo.length === 0) return 'Not lent to a universe yet';
@@ -94,9 +135,11 @@ function Shell({ down = false, title, status, children }: { down?: boolean; titl
  * can't be read, the card still leads there.
  */
 export function AiKeysCard() {
-  const { result } = useAiKeys();
-  if (result.status !== 'ready') return <Shell title="AI keys" />;
-  const keys = result.items;
+  const { result: text } = useAiKeys();
+  const { result: voice } = useVoiceKeys();
+  // Until both lists are read (or if either can't be) the card only leads to the page
+  if (text.status !== 'ready' || voice.status !== 'ready') return <Shell title="AI keys" />;
+  const keys: Row[] = [...text.items.map(textRow), ...voice.items.map(voiceRow)].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
   if (keys.length === 0) {
     return (
@@ -114,11 +157,11 @@ export function AiKeysCard() {
     );
   }
 
-  const down = keys.filter((key) => key.status === 'down').length;
-  const replies = keys.reduce((total, key) => total + key.month.replies, 0);
+  const down = keys.filter((key) => key.down).length;
+  const replies = keys.reduce((total, key) => total + key.replies, 0);
   const more = keys.length - MAX_SHOWN;
   // A down key is always among the ones listed, so the card never says "1 down" without showing which.
-  const shown = [...keys.filter((key) => key.status === 'down'), ...keys.filter((key) => key.status !== 'down')].slice(0, MAX_SHOWN);
+  const shown = [...keys.filter((key) => key.down), ...keys.filter((key) => !key.down)].slice(0, MAX_SHOWN);
   const footer = [more > 0 && `${more} more`, replies > 0 && `${replies.toLocaleString()} ${replies === 1 ? 'reply' : 'replies'} on your keys this month`].filter(Boolean);
   return (
     <Shell
@@ -139,9 +182,9 @@ export function AiKeysCard() {
         {shown.map((key) => (
           <li key={key.id} className="grid gap-1 border-t border-border py-3 first:border-t-0 first:pt-1 last:pb-0" data-testid="ai-keys-card-key">
             <div className="flex min-w-0 items-center gap-2.5">
-              <ProviderLogo info={key.kind ? kindInfo(key.kind) : undefined} size={22} slot={28} />
+              <ProviderLogo info={key.logo} size={22} slot={28} />
               <strong className="min-w-0 flex-1 truncate text-[15px] font-semibold">{key.name}</strong>
-              {key.status === 'down' && (
+              {key.down && (
                 <span className="inline-flex h-[22px] items-center gap-1.5 whitespace-nowrap rounded-full border border-[rgb(245_196_81/0.55)] px-2.5 text-[11px] font-semibold text-[#92400E] dark:text-[#F5C451]">
                   <Dot down />
                   Down

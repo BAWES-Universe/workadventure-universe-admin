@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { authenticatedFetch } from '@/lib/client-auth';
-import { kindInfo } from '@/lib/ai-key-kinds';
+import { kindInfo, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 import type { AiKeySummary } from '@/lib/ai-keys';
 import { ProviderLogo } from '../../components/ds/provider-logo';
 import { AiKeyFailure, aiKeyError, aiKeyFailureText } from '../../hooks/use-ai-keys';
@@ -33,7 +33,24 @@ export function RenameButton({ name, onClick }: { name: string; onClick: () => v
  * A key's name, open for editing in place (#633): the name field with its hint and count, Cancel and Save name. Only the
  * name changes: the key keeps its id, so its lends and the bots on it stay. `onRenamed` gets the saved name.
  */
-export function RenameKey({ keyItem, onRenamed, onCancel }: { keyItem: AiKeySummary; onRenamed: (name: string) => void; onCancel: () => void }) {
+export function RenameKey({
+  keyItem,
+  onRenamed,
+  onCancel,
+  logo,
+  base = '/api/me/ai-keys',
+  where = 'in Runs on',
+}: {
+  keyItem: { id: string; name: string; kind?: AiKeySummary['kind'] };
+  onRenamed: (name: string) => void;
+  onCancel: () => void;
+  /** A logo to draw in place of the key kind's (a voice key's company). */
+  logo?: Pick<AiKeyKindInfo, 'logo' | 'plainIcon'> | null;
+  /** The routes the key is renamed through: text keys by default, `/api/me/voice-keys` for a voice key. */
+  base?: string;
+  /** Where else the name shows, in the hint under the field. */
+  where?: string;
+}) {
   const [name, setName] = useState(keyItem.name);
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -54,7 +71,7 @@ export function RenameKey({ keyItem, onRenamed, onCancel }: { keyItem: AiKeySumm
     setSaving(true);
     setFailure(null);
     try {
-      const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(keyItem.id)}`, {
+      const response = await authenticatedFetch(`${base}/${encodeURIComponent(keyItem.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: trimmed }),
@@ -74,7 +91,7 @@ export function RenameKey({ keyItem, onRenamed, onCancel }: { keyItem: AiKeySumm
   return (
     <form onSubmit={save} className="grid min-w-0 flex-1 basis-full gap-1.5" data-testid="ai-key-rename-form">
       <div className="flex items-center gap-2">
-        <ProviderLogo info={keyItem.kind ? kindInfo(keyItem.kind) : undefined} />
+        <ProviderLogo info={logo ?? (keyItem.kind ? kindInfo(keyItem.kind) : undefined)} />
         <Label htmlFor={`ai-key-name-${keyItem.id}`} className="text-[13px] font-semibold text-muted-foreground">
           Key name
         </Label>
@@ -98,7 +115,7 @@ export function RenameKey({ keyItem, onRenamed, onCancel }: { keyItem: AiKeySumm
       />
       <div className="flex justify-between gap-2 text-[12px]" id={`ai-key-name-note-${keyItem.id}`}>
         <span role={problem ? 'alert' : undefined} className={problem ? 'font-semibold text-[#fb923c]' : 'text-muted-foreground'} data-testid="ai-key-rename-note">
-          {problem ?? 'Shown on this card, in Runs on and when you revoke it.'}
+          {problem ?? `Shown on this card, ${where} and when you revoke it.`}
         </span>
         <span className="shrink-0 tabular-nums text-muted-foreground">
           {name.length}/{KEY_NAME_MAX}

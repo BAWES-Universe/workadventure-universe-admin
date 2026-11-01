@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import { encryptApiKey } from '@/lib/encryption';
 import { lendAccess, parseLendModels } from '@/lib/ai-key-lend';
 import { readModels, voiceProviderProblem, type VoiceModel } from '@/lib/voice-providers';
+import { lendModelId } from '@/lib/voice-lend-model';
 import { VOICE_KEY_COMPANIES, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { startOfMonth } from '@/lib/ai-keys';
 import { healthOf, askForVoiceKeyTry, type VoiceKeyHealth } from '@/lib/voice-key-health';
@@ -88,8 +89,7 @@ export class VoiceKeyRefused extends Error {
   }
 }
 
-/** A model as a lend names it: its job and its id, so a listening and a speaking model with one id are told apart. */
-export const lendModelId = (model: Pick<VoiceModel, 'kind' | 'id'>) => `${model.kind}:${model.id}`;
+export { lendModelId };
 
 /** The models a lend allows: null for all of the key's, else the ids that are well formed. */
 export function readLendModels(value: unknown): string[] | null {
