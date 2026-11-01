@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 /**
  * Personal voice keys (#749): a person adds a voice key, lends it to a universe where they manage bots, and nobody else sees
  * or changes it. The server's own voice providers never show a person's key. Nothing here calls a provider.
@@ -29,11 +30,14 @@ jest.mock('@/lib/db', () => ({
     $transaction: jest.fn(),
     voiceProvider: { findMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), deleteMany: jest.fn() },
     voiceKeyLend: { findMany: jest.fn(), update: jest.fn(), delete: jest.fn(), upsert: jest.fn(), deleteMany: jest.fn() },
+    voiceKeyUsage: { findMany: jest.fn() },
+    bot: { findMany: jest.fn() },
+    botVoiceRevision: { findMany: jest.fn() },
   },
 }));
 
 type Mocks = Record<string, jest.Mock>;
-const db = prisma as unknown as { $transaction: jest.Mock; voiceProvider: Mocks; voiceKeyLend: Mocks };
+const db = prisma as unknown as { $transaction: jest.Mock; voiceProvider: Mocks; voiceKeyLend: Mocks; voiceKeyUsage: Mocks; bot: Mocks; botVoiceRevision: Mocks };
 const session = getSessionUser as jest.Mock;
 
 const ana = { id: 'u-ana', email: 'ana@example.com', name: 'Ana' };
@@ -84,6 +88,9 @@ beforeEach(() => {
   db.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(prisma));
   session.mockResolvedValue(ana);
   withProviders();
+  db.voiceKeyUsage.findMany.mockResolvedValue([]);
+  db.bot.findMany.mockResolvedValue([]);
+  db.botVoiceRevision.findMany.mockResolvedValue([]);
 });
 
 describe('voice keys are for signed-in people', () => {
@@ -146,12 +153,15 @@ describe('the list', () => {
     expect(db.voiceProvider.findMany.mock.calls.map(([arg]) => arg.where)).toContainEqual({ ownerId: 'u-ana' });
     const body = await response.json();
     expect(body.keys).toEqual([
-      expect.objectContaining({ id: 'k1', company: 'ElevenLabs', last4: '9f2a', lentTo: [{ universeId: 'uni1', universeName: 'Sales', ownedByYou: true, models: ['speech:flash'] }] }),
+      expect.objectContaining({ id: 'k1', company: 'ElevenLabs', last4: '9f2a', lentTo: [{ universeId: 'uni1', universeName: 'Sales', ownedByYou: true, models: ['speech:flash'], bots: [] }], month: { voiceReplies: 0 } }),
     ]);
+    // Named and described by the catalog, in its order, doing what the server's providers for each do
     expect(body.companies).toEqual([
-      { adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: false },
-      { adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true },
+      expect.objectContaining({ adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true, logo: 'elevenlabs', docs: 'https://elevenlabs.io/docs' }),
+      expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: false, logo: 'deepgram' }),
     ]);
+    // Its line says only the jobs Universe runs for it
+    expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual(['Listens and speaks, with thousands of voices.', 'Listens. Known for fast listening.']);
     expect(JSON.stringify(body)).not.toContain('apiKeyEncrypted');
   });
 
@@ -162,6 +172,47 @@ describe('the list', () => {
       { status: 'working', downSince: null, downReason: null },
       { status: 'down', downSince: '2026-10-30T11:14:00.000Z', downReason: 'credit' },
     ]);
+  });
+});
+
+describe('what a key paid for this month, and the bots on it', () => {
+  const models = [
+    { id: 'scribe', label: 'Scribe', kind: 'recognition' },
+    { id: 'flash', label: 'Flash', kind: 'speech' },
+  ];
+  const inSales = (id: string, name: string, voiceRevision: number) => ({ id, name, voiceRevision, room: { world: { universeId: 'uni1' } } });
+  const voice = (recognition: string, speech: string) => ({ recognition: { providerId: recognition, model: 'scribe' }, speech: { providerId: speech, model: 'flash' } });
+
+  it('counts the month in the key and for each bot whose published voice names it, with the speaking model first', async () => {
+    withProviders([key({ recognition: true, models, lends: [lent()] })]);
+    db.voiceKeyUsage.findMany.mockResolvedValue([
+      { providerId: 'k1', botId: 'b1', replies: 186 },
+      { providerId: 'k1', botId: 'b-other', replies: 4 },
+    ]);
+    db.bot.findMany.mockResolvedValue([inSales('b1', 'Sales Researcher', 2), inSales('b2', 'Listener', 1), inSales('b3', 'On Universe AI', 1)]);
+    db.botVoiceRevision.findMany.mockResolvedValue([
+      { botId: 'b1', profile: voice('k1', 'k1') },
+      { botId: 'b2', profile: voice('k1', 'server') },
+      { botId: 'b3', profile: voice('server', 'server') },
+    ]);
+    const [entry] = (await (await list(new NextRequest('http://localhost:3333/api/x'))).json()).keys;
+    expect(entry.month).toEqual({ voiceReplies: 190 });
+    expect(entry.lentTo[0].bots).toEqual([
+      { id: 'b1', name: 'Sales Researcher', model: 'Flash', voiceReplies: 186 },
+      { id: 'b2', name: 'Listener', model: 'Scribe', voiceReplies: 0 },
+    ]);
+    // Only this month's usage, and only the bots in the universes it is lent to whose published voice is on
+    expect(db.voiceKeyUsage.findMany.mock.calls[0][0].where).toMatchObject({ providerId: { in: ['k1'] }, month: expect.any(Date) });
+    expect(db.bot.findMany.mock.calls[0][0].where).toEqual({ voiceRevision: { not: null }, room: { world: { universeId: { in: ['uni1'] } } } });
+    expect(db.botVoiceRevision.findMany.mock.calls[0][0].where.OR).toContainEqual({ botId: 'b1', number: 2 });
+  });
+
+  it('is zero, with no bots, for a key that is lent nowhere', async () => {
+    withProviders([key()]);
+    const [entry] = (await (await list(new NextRequest('http://localhost:3333/api/x'))).json()).keys;
+    expect(entry.month).toEqual({ voiceReplies: 0 });
+    expect(entry.lentTo).toEqual([]);
+    expect(db.bot.findMany).not.toHaveBeenCalled();
   });
 });
 
@@ -250,7 +301,7 @@ describe('lending', () => {
       create: { providerId: 'k1', universeId: 'uni1' },
       update: {},
     });
-    expect((await response.json()).key.lentTo).toEqual([{ universeId: 'uni1', universeName: 'Sales', ownedByYou: true, models: null }]);
+    expect((await response.json()).key.lentTo).toEqual([{ universeId: 'uni1', universeName: 'Sales', ownedByYou: true, models: null, bots: [] }]);
   });
 
   it('keeps only the models named, in the key’s order, each of them on the key’s list', async () => {
@@ -261,6 +312,18 @@ describe('lending', () => {
     db.voiceKeyLend.upsert.mockClear();
     const refused = await call(lend, 'POST', { universeId: 'uni1', models: ['speech:gone'] });
     expect(refused.status).toBe(400);
+    expect(db.voiceKeyLend.upsert).not.toHaveBeenCalled();
+  });
+
+  it('changes a lend only when it is there, and never lends again one pulled meanwhile', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(key({ lends: [lent(['speech:flash'])] }));
+    (lendAccess as jest.Mock).mockResolvedValue('owner');
+    expect((await call(lend, 'POST', { universeId: 'uni1', models: null, existing: true })).status).toBe(200);
+    expect(db.voiceKeyLend.update).toHaveBeenCalledWith({ where: { providerId_universeId: { providerId: 'k1', universeId: 'uni1' } }, data: { models: Prisma.DbNull } });
+    expect(db.voiceKeyLend.upsert).not.toHaveBeenCalled();
+    db.voiceKeyLend.update.mockRejectedValue(Object.assign(new Error('gone'), { code: 'P2025' }));
+    const gone = await call(lend, 'POST', { universeId: 'uni1', models: null, existing: true });
+    expect(gone.status).toBe(409);
     expect(db.voiceKeyLend.upsert).not.toHaveBeenCalled();
   });
 

@@ -4,13 +4,15 @@ import { prisma } from '@/lib/db';
 import { encryptApiKey } from '@/lib/encryption';
 import { lendAccess, parseLendModels } from '@/lib/ai-key-lend';
 import { readModels, voiceProviderProblem, type VoiceModel } from '@/lib/voice-providers';
+import { VOICE_KEY_COMPANIES, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { startOfMonth } from '@/lib/ai-keys';
 import { healthOf, askForVoiceKeyTry, type VoiceKeyHealth } from '@/lib/voice-key-health';
 
 /**
  * Personal voice keys (#749). A key is a VoiceProvider row with an `ownerId`; the rows with none are the server's own
  * providers (lib/voice-providers.ts), which these functions never touch. A person adds a key, lends it to a universe where
  * they have Manage bots, and bots they made there may then listen or speak with it, paid by the key's owner. Lending moves no
- * bot. Nothing here calls a provider: the models a key lists are the ones its owner names.
+ * bot. Nothing here calls a provider (lib/voice-key-check.ts does, once, to check a pasted key): the models a key lists are the ones it is added with.
  */
 
 /** A speech company a person can add a key for, and what it can do. */
@@ -19,30 +21,40 @@ export interface VoiceKeyCompany {
   label: string;
   recognition: boolean;
   speech: boolean;
+  /** From the catalog (lib/voice-key-companies.ts): what the Add a key page shows for it. */
+  logo: string | null;
+  benefit: string;
+  step: string;
+  docs: string;
 }
 
 /**
- * The speech companies a person can add a key for: the adapters of the server's own providers that are on (lib/voice-providers.ts),
- * so a super admin decides what Universe supports and a company with no adapter behind it can't be added. One entry per
- * adapter, named as the first of its providers is, doing whatever any of them does.
+ * The speech companies a person can add a key for: the catalog's companies (lib/voice-key-companies.ts) that have at least one of the
+ * server's own providers on (lib/voice-providers.ts), so a super admin decides what Universe supports and a company with no
+ * adapter behind it can't be added. One entry per company, named and described as the catalog does, doing whatever any of its
+ * providers does.
  */
 export async function voiceKeyCompanies(): Promise<VoiceKeyCompany[]> {
   const rows = await prisma.voiceProvider.findMany({
     where: { enabled: true, ownerId: null },
-    orderBy: [{ name: 'asc' }, { id: 'asc' }],
-    select: { adapter: true, name: true, recognition: true, speech: true },
+    select: { adapter: true, recognition: true, speech: true },
   });
-  const companies = new Map<string, VoiceKeyCompany>();
+  const does = new Map<string, { recognition: boolean; speech: boolean }>();
   for (const row of rows) {
-    const known = companies.get(row.adapter);
-    if (known) {
-      known.recognition ||= row.recognition;
-      known.speech ||= row.speech;
-    } else {
-      companies.set(row.adapter, { adapter: row.adapter, label: row.name, recognition: row.recognition, speech: row.speech });
-    }
+    const known = does.get(row.adapter) ?? { recognition: false, speech: false };
+    known.recognition ||= row.recognition;
+    known.speech ||= row.speech;
+    does.set(row.adapter, known);
   }
-  return [...companies.values()].sort((a, b) => a.label.localeCompare(b.label));
+  return VOICE_KEY_COMPANIES.filter((info) => does.has(info.adapter)).map((info) => ({
+    adapter: info.adapter,
+    label: info.label,
+    ...does.get(info.adapter)!,
+    logo: info.logo ?? null,
+    benefit: info.benefit.replace('{does}', voiceDoesLine(does.get(info.adapter)!)),
+    step: info.step,
+    docs: info.docs,
+  }));
 }
 
 const modelSchema = z.object({
@@ -96,7 +108,19 @@ export interface VoiceKeySummary {
   last4: string | null;
   models: VoiceModel[];
   /** The universes it is lent to, and which of its models bots there may use ("kind:id", null for all of them). */
-  lentTo: { universeId: string; universeName: string; ownedByYou: boolean; models: string[] | null }[];
+  lentTo: {
+    universeId: string;
+    universeName: string;
+    ownedByYou: boolean;
+    models: string[] | null;
+    /**
+     * The bots there whose published voice names this key for listening or speaking, each with the model it uses on it (the
+     * speaking model if the key speaks for that bot, else the listening one) and its voice replies this month.
+     */
+    bots: { id: string; name: string; model: string | null; voiceReplies: number }[];
+  }[];
+  /** What the key paid for this month (UTC, as a text key's): voice replies, one for each spoken reply a bot's call reported working. */
+  month: { voiceReplies: number };
   createdAt: string;
   /** Whether the key works: Down once its provider turned it away (out of credit, rejected, repeated errors). Bots on it reply in text meanwhile. */
   health: VoiceKeyHealth;
@@ -104,35 +128,103 @@ export interface VoiceKeySummary {
 
 type KeyRow = VoiceProvider & { lends: { models: Prisma.JsonValue; universe: { id: string; name: string; ownerId: string } }[] };
 
-const summary = (row: KeyRow, ownerId: string, labels: Map<string, string>): VoiceKeySummary => ({
-  id: row.id,
-  adapter: row.adapter,
-  company: labels.get(row.adapter) ?? row.adapter,
-  name: row.name,
-  recognition: row.recognition,
-  speech: row.speech,
-  last4: row.apiKeyLast4,
-  models: readModels(row.models),
-  lentTo: row.lends.map((lend) => ({
-    universeId: lend.universe.id,
-    universeName: lend.universe.name,
-    ownedByYou: lend.universe.ownerId === ownerId,
-    models: readLendModels(lend.models),
-  })),
-  createdAt: row.createdAt.toISOString(),
-  health: healthOf(row),
-});
+/** How the key is named: its company's name from the catalog, else the adapter as it is. */
+const companyName = (adapter: string) => voiceKeyCompanyInfo(adapter)?.label ?? adapter;
 
-/** How each company is named: the server's own providers' names, else the adapter as it is. */
-const labelsOf = async () => new Map((await voiceKeyCompanies()).map((company) => [company.adapter, company.label]));
+/** Which provider a published voice names for each job. Read loosely: lib/bot-voice.ts owns the profile's shape and imports this file. */
+function namedProviders(profile: unknown): { part: 'recognition' | 'speech'; providerId: string; model: string }[] {
+  const named: { part: 'recognition' | 'speech'; providerId: string; model: string }[] = [];
+  if (typeof profile !== 'object' || profile === null) return named;
+  for (const part of ['recognition', 'speech'] as const) {
+    const choice = (profile as Record<string, unknown>)[part];
+    if (typeof choice !== 'object' || choice === null) continue;
+    const { providerId, model } = choice as { providerId?: unknown; model?: unknown };
+    if (typeof providerId === 'string' && typeof model === 'string') named.push({ part, providerId, model });
+  }
+  return named;
+}
+
+type BotOnKey = VoiceKeySummary['lentTo'][number]['bots'][number];
+
+/**
+ * What the AI keys page shows for these keys: each with what it paid for this month and the bots on it. A bot is on a key when
+ * its published voice (the revision named in `bots.voice_revision`) names the key, in a universe the key is lent to.
+ */
+async function summaries(rows: KeyRow[], ownerId: string): Promise<VoiceKeySummary[]> {
+  if (rows.length === 0) return [];
+  const ids = rows.map((row) => row.id);
+  const month = startOfMonth();
+  const universeIds = [...new Set(rows.flatMap((row) => row.lends.map((lend) => lend.universe.id)))];
+  const [usage, bots] = await Promise.all([
+    prisma.voiceKeyUsage.findMany({ where: { providerId: { in: ids }, month }, select: { providerId: true, botId: true, replies: true } }),
+    universeIds.length === 0
+      ? []
+      : prisma.bot.findMany({
+          where: { voiceRevision: { not: null }, room: { world: { universeId: { in: universeIds } } } },
+          orderBy: { name: 'asc' },
+          select: { id: true, name: true, voiceRevision: true, room: { select: { world: { select: { universeId: true } } } } },
+        }),
+  ]);
+  const revisions =
+    bots.length === 0
+      ? []
+      : await prisma.botVoiceRevision.findMany({
+          where: { OR: bots.map((bot) => ({ botId: bot.id, number: bot.voiceRevision as number })) },
+          select: { botId: true, profile: true },
+        });
+  const profileOf = new Map(revisions.map((revision) => [revision.botId, revision.profile]));
+  const spent = new Map<string, number>();
+  const repliesOf = new Map<string, number>();
+  for (const entry of usage) {
+    spent.set(entry.providerId, (spent.get(entry.providerId) ?? 0) + entry.replies);
+    repliesOf.set(`${entry.providerId}:${entry.botId}`, entry.replies);
+  }
+  return rows.map((row) => {
+    const models = readModels(row.models);
+    const label = (kind: 'recognition' | 'speech', id: string) => {
+      const found = models.find((model) => model.kind === kind && model.id === id);
+      return found ? found.label || found.id : id;
+    };
+    const botsIn = (universeId: string): BotOnKey[] =>
+      bots
+        .filter((bot) => bot.room.world.universeId === universeId)
+        .flatMap((bot) => {
+          const named = namedProviders(profileOf.get(bot.id)).filter((choice) => choice.providerId === row.id);
+          if (named.length === 0) return [];
+          const chosen = named.find((choice) => choice.part === 'speech') ?? named[0];
+          return [{ id: bot.id, name: bot.name, model: label(chosen.part, chosen.model), voiceReplies: repliesOf.get(`${row.id}:${bot.id}`) ?? 0 }];
+        });
+    return {
+      id: row.id,
+      adapter: row.adapter,
+      company: companyName(row.adapter),
+      name: row.name,
+      recognition: row.recognition,
+      speech: row.speech,
+      last4: row.apiKeyLast4,
+      models,
+      lentTo: row.lends.map((lend) => ({
+        universeId: lend.universe.id,
+        universeName: lend.universe.name,
+        ownedByYou: lend.universe.ownerId === ownerId,
+        models: readLendModels(lend.models),
+        bots: botsIn(lend.universe.id),
+      })),
+      month: { voiceReplies: spent.get(row.id) ?? 0 },
+      createdAt: row.createdAt.toISOString(),
+      health: healthOf(row),
+    };
+  });
+}
+
+const summary = async (row: KeyRow, ownerId: string): Promise<VoiceKeySummary> => (await summaries([row], ownerId))[0];
 
 const include = { lends: { orderBy: { lentAt: 'asc' as const }, select: { models: true, universe: { select: { id: true, name: true, ownerId: true } } } } };
 
 /** The caller's own voice keys, oldest first. */
 export async function listVoiceKeys(ownerId: string): Promise<VoiceKeySummary[]> {
   const rows = await prisma.voiceProvider.findMany({ where: { ownerId }, orderBy: { createdAt: 'asc' }, include });
-  const labels = await labelsOf();
-  return rows.map((row) => summary(row, ownerId, labels));
+  return summaries(rows, ownerId);
 }
 
 const owned = (id: string, ownerId: string) => prisma.voiceProvider.findFirst({ where: { id, ownerId }, include });
@@ -165,7 +257,7 @@ export async function createVoiceKey(ownerId: string, input: z.infer<typeof crea
     },
     include,
   });
-  return summary(row, ownerId, await labelsOf());
+  return summary(row, ownerId);
 }
 
 /** Changes only what is named. A model taken off the key is taken off every lend that named it; a lend left with none is pulled. */
@@ -204,7 +296,7 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
   });
   const row = await owned(id, ownerId);
   if (!row) throw new VoiceKeyRefused('Key not found', 404);
-  return summary(row, ownerId, await labelsOf());
+  return summary(row, ownerId);
 }
 
 /** Takes the key away, and with it every lend. Bots whose voice named it carry on in text (their voice no longer works). */
@@ -216,8 +308,9 @@ export async function deleteVoiceKey(ownerId: string, id: string): Promise<void>
 /**
  * Lends the key to a universe where the caller owns it or has Manage bots. `models` (undefined = as it is, all for a new lend;
  * null = all; a list of "kind:id") says which of the key's models bots there may use. Lending again changes nothing but the list.
+ * `existing` changes a lend only: when there is none (pulled meanwhile) nothing is lent and it is refused with a 409.
  */
-export async function lendVoiceKey(ownerId: string, id: string, universeId: string, rawModels: unknown): Promise<VoiceKeySummary> {
+export async function lendVoiceKey(ownerId: string, id: string, universeId: string, rawModels: unknown, existing = false): Promise<VoiceKeySummary> {
   const parsed = parseLendModels(rawModels);
   if (!parsed.ok) throw new VoiceKeyRefused(parsed.message);
   const key = await owned(id, ownerId);
@@ -234,15 +327,20 @@ export async function lendVoiceKey(ownerId: string, id: string, universeId: stri
   const where = { providerId_universeId: { providerId: id, universeId } };
   const update = models === undefined ? {} : { models: models ?? Prisma.DbNull };
   try {
-    await prisma.voiceKeyLend.upsert({ where, create: { providerId: id, universeId, ...(models ? { models } : {}) }, update });
+    // A change of a lend (`existing`) never lends again: one removed meanwhile, in another tab or by the universe, stays removed
+    if (existing) await prisma.voiceKeyLend.update({ where, data: update });
+    else await prisma.voiceKeyLend.upsert({ where, create: { providerId: id, universeId, ...(models ? { models } : {}) }, update });
   } catch (error) {
     // The key was deleted, or the universe, between the checks above and the save
     if ((error as { code?: unknown })?.code === 'P2003') throw new VoiceKeyRefused('Key or universe not found', 404);
+    if (existing && (error as { code?: unknown })?.code === 'P2025') {
+      throw new VoiceKeyRefused('This key isn’t lent to that universe any more. Reload the page to see where it’s lent.', 409);
+    }
     throw error;
   }
   const row = await owned(id, ownerId);
   if (!row) throw new VoiceKeyRefused('Key not found', 404);
-  return summary(row, ownerId, await labelsOf());
+  return summary(row, ownerId);
 }
 
 /** Pulls the key from a universe. Always the key owner's to do, whatever they can manage there now. */
@@ -261,5 +359,5 @@ export async function checkVoiceKey(ownerId: string, id: string): Promise<VoiceK
   if (row.downSince) await askForVoiceKeyTry(ownerId, id);
   const fresh = await owned(id, ownerId);
   if (!fresh) throw new VoiceKeyRefused('Key not found', 404);
-  return summary(fresh, ownerId, await labelsOf());
+  return summary(fresh, ownerId);
 }
