@@ -7,7 +7,12 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 
 const fetchMock = jest.fn();
 const push = jest.fn();
-jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (...args: unknown[]) => fetchMock(...args) }));
+// The speech companies the server offers for voice (#749): none unless a test sets them. Reading them is not one of the calls the tests count.
+let voiceCompanies: unknown[] = [];
+jest.mock('@/lib/client-auth', () => ({
+  authenticatedFetch: (url: string, ...rest: unknown[]) =>
+    url === '/api/me/voice-keys' && !(rest[0] as { method?: string } | undefined)?.method ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [], companies: voiceCompanies }) }) : fetchMock(url, ...rest),
+}));
 jest.mock('@/components/ui/toast', () => ({ useToast: () => ({ addToast: jest.fn() }) }));
 jest.mock('next/navigation', () => ({ useRouter: () => ({ push, back: jest.fn() }) }));
 let inGame = false;
@@ -29,6 +34,7 @@ const change = () => fireEvent.click(screen.getByRole('button', { name: 'Change'
 
 beforeEach(() => {
   fetchMock.mockReset();
+  voiceCompanies = [];
   push.mockReset();
   inGame = false;
   openLinkInGame.mockReset().mockReturnValue(true);
@@ -519,5 +525,132 @@ describe('Add a key: Claude', () => {
     fireEvent.click(addButton());
     await waitFor(() => expect(push).toHaveBeenCalled());
     expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ kind: 'claude', address: '', apiKey: 'sk-ant-api03-abcd', name: 'My Claude' });
+  });
+});
+
+describe('Add a key for voice', () => {
+  const company = (adapter: string, label: string, extra: Record<string, unknown> = {}) => ({
+    adapter,
+    label,
+    recognition: true,
+    speech: true,
+    logo: null,
+    benefit: `Listens and speaks. About ${label}.`,
+    step: `On ${adapter}.example.com, create a key.`,
+    docs: `https://${adapter}.example.com/docs`,
+    ...extra,
+  });
+  const models = [
+    { id: 'scribe_v1', label: 'Scribe v1', kind: 'recognition' },
+    { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' },
+    { id: 'eleven_v3', kind: 'speech' },
+  ];
+
+  it('lists the companies under their own heading below the hosted providers, with their logos, and the heading is hidden when there are none', async () => {
+    voiceCompanies = [company('elevenlabs', 'ElevenLabs', { logo: 'elevenlabs' }), company('cartesia', 'Cartesia')];
+    const { unmount } = render(<AddAiKeyPage />);
+    const group = await screen.findByTestId('kinds-voice');
+    expect(within(group).getByRole('heading', { name: 'For voice, with an API key' })).toBeTruthy();
+    expect(within(group).getAllByRole('radio').map((radio) => radio.textContent)).toEqual([
+      expect.stringContaining('ElevenLabs'),
+      expect.stringContaining('Cartesia'),
+    ]);
+    expect(within(group).getAllByTestId('provider-logo')).toHaveLength(2);
+    const hosted = screen.getByText('Hosted, with an API key');
+    expect(hosted.compareDocumentPosition(group) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    unmount();
+    voiceCompanies = [];
+    render(<AddAiKeyPage />);
+    await waitFor(() => expect(screen.queryByTestId('kinds-voice')).toBeNull());
+    expect(screen.queryByText('For voice, with an API key')).toBeNull();
+  });
+
+  it('sets a company up like a provider: get the key, paste it, load models, see what it listens and speaks, name it', async () => {
+    voiceCompanies = [company('elevenlabs', 'ElevenLabs')];
+    render(<AddAiKeyPage />);
+    fireEvent.click(await screen.findByRole('radio', { name: /^ElevenLabs/ }));
+    expect(screen.getByRole('heading', { name: 'Set up ElevenLabs' })).toBeTruthy();
+    ['Get your ElevenLabs key', 'Paste your key', 'Its models', 'Name it'].forEach((part, index) => {
+      expect(screen.getByRole('heading', { name: part }).textContent).toBe(`${index + 1}${part}`);
+    });
+    const card = screen.getByTestId('setup-card');
+    expect(card.textContent).toContain('On elevenlabs.example.com, create a key.');
+    expect(within(card).getByRole('link', { name: /Read about ElevenLabs/ }).getAttribute('href')).toBe('https://elevenlabs.example.com/docs');
+    // No address, no regions
+    expect(screen.queryByLabelText('Address')).toBeNull();
+    expect((screen.getByRole('button', { name: 'Load models' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-elevenlabs-key' } });
+    fetchMock.mockImplementation(() => json({ ok: true, models }));
+    fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
+    expect(await screen.findByText(/It answered\. ElevenLabs has 3 models\./)).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledWith('/api/me/voice-keys/check', expect.objectContaining({ method: 'POST', body: JSON.stringify({ adapter: 'elevenlabs', apiKey: 'sk-elevenlabs-key' }) }));
+    expect(fetchMock.mock.calls.some(([url]) => url === '/api/me/ai-keys/models')).toBe(false);
+    expect(screen.getByText(/Nothing to pick here\. Each bot picks one of these on its own page/)).toBeTruthy();
+    expect(within(screen.getByTestId('voice-models-recognition')).getByText('Scribe v1')).toBeTruthy();
+    // A model with no label is shown by its id
+    expect(within(screen.getByTestId('voice-models-speech')).getAllByTestId('model-row').map((row) => row.textContent)).toEqual(['Eleven Flash v2.5', 'eleven_v3']);
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('My ElevenLabs');
+    expect(screen.getByText('Shown here, and under Voice for the bots that use it.')).toBeTruthy();
+  });
+
+  it('adds a voice key with what it listens and speaks, then goes back to the AI keys page', async () => {
+    voiceCompanies = [company('elevenlabs', 'ElevenLabs')];
+    render(<AddAiKeyPage />);
+    fireEvent.click(await screen.findByRole('radio', { name: /^ElevenLabs/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-elevenlabs-key' } });
+    fetchMock.mockImplementation((url: string) => (url === '/api/me/voice-keys/check' ? json({ ok: true, models }) : json({ key: { id: 'vk-new' } })));
+    expect((addButton() as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
+    await screen.findByText(/It answered/);
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Studio voice' } });
+    fireEvent.click(addButton());
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/you/ai-keys'));
+    const [url, init] = fetchMock.mock.calls.at(-1)!;
+    expect(url).toBe('/api/me/voice-keys');
+    expect(JSON.parse(init.body)).toEqual({ adapter: 'elevenlabs', name: 'Studio voice', apiKey: 'sk-elevenlabs-key', recognition: true, speech: true, models });
+  });
+
+  it('sets only the job the models listed (a company that only listens)', async () => {
+    voiceCompanies = [company('soniox', 'Soniox', { speech: false })];
+    render(<AddAiKeyPage />);
+    fireEvent.click(await screen.findByRole('radio', { name: /^Soniox/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'soniox-key-12345' } });
+    fetchMock.mockImplementation((url: string) => (url === '/api/me/voice-keys/check' ? json({ ok: true, models: [models[0]] }) : json({ key: { id: 'vk-new' } })));
+    fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
+    expect(await screen.findByText(/It answered\. Soniox has 1 model\./)).toBeTruthy();
+    expect(screen.queryByTestId('voice-models-speech')).toBeNull();
+    fireEvent.click(addButton());
+    await waitFor(() => expect(push).toHaveBeenCalled());
+    expect(JSON.parse(fetchMock.mock.calls.at(-1)![1].body)).toMatchObject({ adapter: 'soniox', recognition: true, speech: false });
+  });
+
+  it('says plainly when the company refuses the key or can’t be reached, and keeps Add key off', async () => {
+    voiceCompanies = [company('deepgram', 'Deepgram')];
+    render(<AddAiKeyPage />);
+    fireEvent.click(await screen.findByRole('radio', { name: /^Deepgram/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'dg-key-123456' } });
+    fetchMock.mockImplementation(() => Promise.resolve({ ok: false, status: 422, json: () => Promise.resolve({ error: 'Deepgram didn’t accept that key. Check it and paste it again.' }) }));
+    fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('Deepgram didn’t accept that key. Check it and paste it again.');
+    fetchMock.mockImplementation(() => Promise.resolve({ ok: false, status: 502, json: () => Promise.resolve({ error: 'Couldn’t reach Deepgram. Try again in a moment.' }) }));
+    fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('Couldn’t reach Deepgram. Try again in a moment.'));
+    expect((addButton() as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('forgets the loaded models when the key changes, and never sends a key typed for another provider', async () => {
+    voiceCompanies = [company('elevenlabs', 'ElevenLabs')];
+    render(<AddAiKeyPage />);
+    fireEvent.click(await screen.findByRole('radio', { name: /^ElevenLabs/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-elevenlabs-key' } });
+    fetchMock.mockImplementation(() => json({ ok: true, models }));
+    fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
+    await screen.findByText(/It answered/);
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-another-key' } });
+    expect(screen.queryByText(/It answered/)).toBeNull();
+    expect(screen.queryByTestId('voice-models-speech')).toBeNull();
+    change();
+    fireEvent.click(screen.getByRole('radio', { name: /^Claude/ }));
+    expect((screen.getByLabelText('API key') as HTMLInputElement).value).toBe('');
   });
 });
