@@ -225,8 +225,9 @@ export interface FriendsList {
     /** When they last entered a room, or null when they hide where they are. */
     lastSeenAt: string | null;
   }[];
-  incoming: { uuid: string; name: string | null; sharedWorld: string | null; requestedAt: string }[];
-  outgoing: { uuid: string; name: string | null; sentAt: string }[];
+  /** `chatId` lets the game ask for their Woka, as it does for friends. */
+  incoming: { uuid: string; name: string | null; chatId: string | null; sharedWorld: string | null; requestedAt: string }[];
+  outgoing: { uuid: string; name: string | null; chatId: string | null; sentAt: string }[];
   blocked: { uuid: string; name: string | null }[];
 }
 
@@ -266,9 +267,15 @@ export async function listFriends(me: Account): Promise<FriendsList> {
         lastSeenAt: lastSeen.get(id)?.toISOString() ?? null,
       });
     } else if (relationship === 'request_received' && row.status === 'pending') {
-      list.incoming.push({ uuid: user.uuid, name: user.name, sharedWorld: shared.get(id) ?? null, requestedAt: row.createdAt.toISOString() });
+      list.incoming.push({
+        uuid: user.uuid,
+        name: user.name,
+        chatId: user.matrixChatId,
+        sharedWorld: shared.get(id) ?? null,
+        requestedAt: row.createdAt.toISOString(),
+      });
     } else if (relationship === 'request_sent') {
-      list.outgoing.push({ uuid: user.uuid, name: user.name, sentAt: row.createdAt.toISOString() });
+      list.outgoing.push({ uuid: user.uuid, name: user.name, chatId: user.matrixChatId, sentAt: row.createdAt.toISOString() });
     } else if (relationship === 'blocked_by_me') {
       list.blocked.push({ uuid: user.uuid, name: user.name });
     }

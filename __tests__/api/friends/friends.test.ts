@@ -83,8 +83,8 @@ describe('/api/friends', () => {
     expect(db.friendships).toHaveLength(1);
 
     const bilal = await friendsOf('b');
-    expect(bilal.incoming).toEqual([expect.objectContaining({ uuid: 'uuid-a', name: 'Alice', sharedWorld: 'Main Hall' })]);
-    expect((await friendsOf('a')).outgoing).toEqual([expect.objectContaining({ uuid: 'uuid-b' })]);
+    expect(bilal.incoming).toEqual([expect.objectContaining({ uuid: 'uuid-a', name: 'Alice', chatId: '@a:chat', sharedWorld: 'Main Hall' })]);
+    expect((await friendsOf('a')).outgoing).toEqual([expect.objectContaining({ uuid: 'uuid-b', chatId: '@b:chat' })]);
 
     expect((await action('b', 'a', 'accept')).body).toEqual({ relationship: 'friends' });
     await action('c', 'a', 'request');
