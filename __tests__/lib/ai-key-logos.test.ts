@@ -6,6 +6,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import snapshot from '@/lib/ai-key-snapshot.json';
 import { AI_KEY_KINDS, moreBenefit } from '@/lib/ai-key-kinds';
+import { VOICE_KEY_COMPANIES } from '@/lib/voice-key-companies';
 import { isPlainSvg } from '@/scripts/plain-svg.mjs';
 
 const FOLDER = join(process.cwd(), 'public', 'ai-providers');
@@ -50,8 +51,16 @@ describe('provider logos', () => {
     expect(isPlainSvg('<svg viewBox="0 0 8 8"><path fill="currentColor" d="M0 0h8v8z"/></svg>')).toBe(true);
   });
 
+  it('gives every voice company that names a logo a one-colour file', () => {
+    for (const entry of VOICE_KEY_COMPANIES.filter((company) => company.logo)) {
+      expect(existsSync(file(entry.logo!))).toBe(true);
+      expect(isPlainSvg(readFileSync(file(entry.logo!), 'utf8'))).toBe(true);
+    }
+  });
+
   it('keeps no logo file nothing uses', () => {
-    const used = new Set(AI_KEY_KINDS.map((entry) => entry.logo).filter(Boolean));
+    // A speech company for voice (#749) names its logo in its own catalog
+    const used = new Set([...AI_KEY_KINDS, ...VOICE_KEY_COMPANIES].map((entry) => entry.logo).filter(Boolean));
     const unused = readdirSync(FOLDER).filter((name) => !used.has(name.replace(/\.svg$/, '')));
     expect(unused).toEqual([]);
   });
