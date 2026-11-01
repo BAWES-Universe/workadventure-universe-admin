@@ -1618,6 +1618,9 @@ model VoiceProvider {
   failedRecognition  Int      @default(0) @map("failed_recognition")
   failedSpeech       Int      @default(0) @map("failed_speech")
   healthCheckedAt    DateTime? @map("health_checked_at")
+  // The limits its owner changed for bots that use their key (#783): only the values they set (turnSeconds, replyCharacters, replySeconds,
+  // listenMinutesPerDay); anything not there follows the server's voice limits. Null = none changed.
+  voiceLimits        Json?    @map("voice_limits")
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 

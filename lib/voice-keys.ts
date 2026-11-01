@@ -7,6 +7,8 @@ import { readModels, voiceProviderProblem, type VoiceModel } from '@/lib/voice-p
 import { lendModelId } from '@/lib/voice-lend-model';
 import { VOICE_KEY_COMPANIES, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { startOfMonth } from '@/lib/ai-keys';
+import { getVoiceLimits } from '@/lib/voice-limits';
+import { checkVoiceKeyLimits, readVoiceKeyLimits, savedVoiceKeyLimits, VOICE_KEY_LIMIT_NAMES, type VoiceKeyLimitValues } from '@/lib/voice-limit-values';
 import { healthOf, askForVoiceKeyTry, type VoiceKeyHealth } from '@/lib/voice-key-health';
 
 /**
@@ -80,7 +82,10 @@ export const createVoiceKeySchema = z
   })
   .strict();
 
-export const updateVoiceKeySchema = z.object({ name: fields.name, apiKey: fields.apiKey, models: fields.models }).partial().strict();
+export const updateVoiceKeySchema = z
+  .object({ name: fields.name, apiKey: fields.apiKey, models: fields.models, limits: z.record(z.string(), z.unknown()) })
+  .partial()
+  .strict();
 
 /** A key that can't be saved or lent as asked, with the line that says why (shown as it is). */
 export class VoiceKeyRefused extends Error {
@@ -119,6 +124,12 @@ export interface VoiceKeySummary {
      */
     bots: { id: string; name: string; model: string | null; voiceReplies: number }[];
   }[];
+  /**
+   * The limits of bots that use this key (#783): longest spoken turn (seconds), longest spoken reply (characters and seconds) and
+   * minutes a day one bot listens. Each is the value that applies, the server's current voice limit for it (the recommended one),
+   * and whether the owner changed it.
+   */
+  limits: VoiceKeyLimitValues;
   /** What the key paid for this month (UTC, as a text key's): voice replies, one for each spoken reply a bot's call reported working. */
   month: { voiceReplies: number };
   createdAt: string;
@@ -155,6 +166,7 @@ async function summaries(rows: KeyRow[], ownerId: string): Promise<VoiceKeySumma
   const ids = rows.map((row) => row.id);
   const month = startOfMonth();
   const universeIds = [...new Set(rows.flatMap((row) => row.lends.map((lend) => lend.universe.id)))];
+  const server = (await getVoiceLimits()).limits;
   const [usage, bots] = await Promise.all([
     prisma.voiceKeyUsage.findMany({ where: { providerId: { in: ids }, month }, select: { providerId: true, botId: true, replies: true } }),
     universeIds.length === 0
@@ -211,6 +223,7 @@ async function summaries(rows: KeyRow[], ownerId: string): Promise<VoiceKeySumma
         bots: botsIn(lend.universe.id),
       })),
       month: { voiceReplies: spent.get(row.id) ?? 0 },
+      limits: readVoiceKeyLimits(row.voiceLimits, server),
       createdAt: row.createdAt.toISOString(),
       health: healthOf(row),
     };
@@ -268,6 +281,16 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
     const models = input.models ?? readModels(row.models);
     const refused = problem({ recognition: row.recognition, speech: row.speech, models });
     if (refused) throw new VoiceKeyRefused(refused);
+    // Only what the owner changed is kept: a value picked that is the server's own now is dropped, so it follows the server from then on
+    let voiceLimits: Prisma.InputJsonValue | typeof Prisma.DbNull | undefined;
+    if (input.limits !== undefined) {
+      const checked = checkVoiceKeyLimits(input.limits);
+      if (!checked.ok) throw new VoiceKeyRefused(checked.error);
+      const server = (await getVoiceLimits()).limits;
+      const next: Record<string, number> = { ...savedVoiceKeyLimits(row.voiceLimits), ...checked.value } as Record<string, number>;
+      for (const name of VOICE_KEY_LIMIT_NAMES) if (next[name] === server[name]) delete next[name];
+      voiceLimits = Object.keys(next).length > 0 ? next : Prisma.DbNull;
+    }
     await tx.voiceProvider.update({
       where: { id },
       data: {
@@ -277,6 +300,7 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
           ? { apiKeyEncrypted: encryptApiKey(input.apiKey), apiKeyLast4: input.apiKey.slice(-4), downSince: null, downReason: null, downPart: null, failedRecognition: 0, failedSpeech: 0, healthCheckedAt: null }
           : {}),
         ...(input.models !== undefined ? { models: input.models as Prisma.InputJsonValue } : {}),
+        ...(voiceLimits !== undefined ? { voiceLimits } : {}),
       },
     });
     if (input.models !== undefined) {

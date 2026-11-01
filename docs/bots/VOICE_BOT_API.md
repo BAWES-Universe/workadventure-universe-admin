@@ -45,8 +45,8 @@ All answer with the same body as `GET`.
 
 ## Bot server (service token)
 
-`GET /api/bots/:id/voice/active` gives `{ speaks, reason, paidBy, parts, revision, profile, down }`. `reason` is `null` when the bot speaks,
-and otherwise `off`, `universe`, `no-profile`, `provider` or `key-down` (a person's key in the profile is Down: the bot replies in text, `down` is `{ since, reason }`, and one read every 5 minutes is let through to try it; see `VOICE_KEYS_API.md`). Read before each spoken turn: turning a provider or the universe's
+`GET /api/bots/:id/voice/active` gives `{ speaks, reason, paidBy, parts, revision, profile, down, limits }`. `reason` is `null` when the bot speaks,
+and otherwise `off`, `universe`, `no-profile`, `provider` or `key-down` (a person's key in the profile is Down: the bot replies in text, `down` is `{ since, reason }`, and one read every 5 minutes is let through to try it; see `VOICE_KEYS_API.md`). `limits` is the server's voice limits (the same as `GET /api/voice/limits`: `turnSeconds`, `replyCharacters`, `replySeconds`, `listenMinutesPerDay`, `followUpSeconds`, `textReserveShare`, `guestVoiceReplies`), except that a part that runs on a person's lent key takes the values its owner set on that key (`VOICE_KEYS_API.md`): `turnSeconds` and `listenMinutesPerDay` from the listening key, `replyCharacters` and `replySeconds` from the speaking key. Every other limit is the server's, and a value the owner never changed follows the server's. Read before each spoken turn: turning a provider or the universe's
 switch off stops the bot at once, and a session keeps the `revision` it started with.
 
 A lent key's credentials: `GET /api/voice/providers/:id/credentials?botId=…` (`VOICE_PROVIDERS_API.md`) serves the key, still

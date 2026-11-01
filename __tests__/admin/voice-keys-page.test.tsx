@@ -19,6 +19,12 @@ const models = [
   { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' },
   { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' },
 ];
+const limits = {
+  turnSeconds: { value: 180, recommended: 180, changed: false },
+  replyCharacters: { value: 600, recommended: 600, changed: false },
+  replySeconds: { value: 60, recommended: 60, changed: false },
+  listenMinutesPerDay: { value: 60, recommended: 60, changed: false },
+};
 const working = { status: 'working', downSince: null, downReason: null };
 const voiceKey = {
   id: 'vk-1',
@@ -39,6 +45,7 @@ const voiceKey = {
     },
   ],
   month: { voiceReplies: 186 },
+  limits,
   createdAt: '2026-10-30T10:00:00.000Z',
   health: working,
 };
@@ -88,8 +95,7 @@ describe('a voice key on the AI keys page', () => {
     expect(screen.getAllByText('186 voice replies').length).toBe(1);
     expect(screen.getByText('Sales Researcher · Eleven Flash v2.5 · 186 voice replies')).toBeTruthy();
     expect(screen.getByTestId('ai-key-status').textContent).toBe('Working');
-    // No Limits row, and "If this is down" is only a line: no picker
-    expect(screen.queryByTestId('ai-key-limits')).toBeNull();
+    // "If this is down" is only a line: no picker
     const ifDown = screen.getByTestId('ai-key-if-down');
     expect(ifDown.textContent).toContain('Bots reply in text until it’s back. No other voice is used.');
     expect(within(ifDown).queryByRole('radiogroup')).toBeNull();
@@ -108,8 +114,8 @@ describe('a voice key on the AI keys page', () => {
     render(<AiKeysPage />);
     await screen.findByText('My ElevenLabs', { selector: 'h2' });
     expect(screen.getAllByTestId('ai-key').map((card) => card.querySelector('h2')?.textContent)).toEqual(['My Claude', 'My ElevenLabs']);
-    // Only the text key has Limits
-    expect(screen.getAllByTestId('ai-key-limits')).toHaveLength(1);
+    // Each has its Limits row
+    expect(screen.getAllByTestId('ai-key-limits')).toHaveLength(2);
   });
 
   it('when down says since when, why, that its bots reply in text, and the wait from the shared setting', async () => {
@@ -176,6 +182,64 @@ describe('a voice key on the AI keys page', () => {
     render(<AiKeysPage />);
     expect(await screen.findByRole('alert')).toBeTruthy();
     expect(screen.queryByTestId('ai-keys-empty')).toBeNull();
+  });
+});
+
+describe('the limits of a voice key', () => {
+  const saved = { ...limits, turnSeconds: { value: 60, recommended: 180, changed: true } };
+  const patchOk = (answer: unknown) =>
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      const reply = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+      if (init?.method === 'PATCH') return reply({ key: { ...voiceKey, limits: answer } });
+      if (url === '/api/me/voice-keys') return reply({ keys: [voiceKey], companies: [] });
+      return reply({ keys: [] });
+    });
+
+  it('has a Limits row like a text key\'s: the heading, one line saying Recommended, and Change', async () => {
+    answer({ voice: [voiceKey] });
+    render(<AiKeysPage />);
+    const row = await screen.findByTestId('ai-key-limits');
+    expect(within(row).getByRole('heading', { name: 'Limits' })).toBeTruthy();
+    expect(row.textContent).toContain('Recommended: turns up to 3 minutes, replies up to 600 characters');
+    expect(within(row).getByRole('button', { name: 'Change' })).toBeTruthy();
+  });
+
+  it('says Yours once a limit differs from the server\'s', async () => {
+    answer({ voice: [{ ...voiceKey, limits: saved }] });
+    render(<AiKeysPage />);
+    expect((await screen.findByTestId('ai-key-limits')).textContent).toContain('Yours: turns up to 1 minute, replies up to 600 characters');
+  });
+
+  it('opens a sheet for bots that use the key, with the four limits and the server\'s value marked Recommended', async () => {
+    // The server's value for a limit is whatever a super admin set: here 240 seconds, which is not one of the steps
+    answer({ voice: [{ ...voiceKey, limits: { ...limits, turnSeconds: { value: 240, recommended: 240, changed: false } } }] });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByTestId('ai-key-limits-change'));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.textContent).toContain('Limits for My ElevenLabs');
+    expect(dialog.textContent).toContain('For bots that use this key.');
+    for (const id of ['turnSeconds', 'replyCharacters', 'replySeconds', 'listenMinutesPerDay']) expect(within(dialog).getByTestId(`limit-${id}`)).toBeTruthy();
+    expect(within(dialog).getAllByText('Recommended').length).toBeGreaterThanOrEqual(4);
+    fireEvent.click(within(dialog).getByTestId('limit-turnSeconds'));
+    const choices = await screen.findAllByRole('dialog');
+    const radios = within(choices[choices.length - 1]).getAllByRole('radio');
+    const recommended = radios.find((radio) => radio.textContent?.includes('Recommended'));
+    expect(recommended?.textContent).toContain('4 minutes');
+  });
+
+  it('saves one limit through the voice key route, then shows it as Yours on the card', async () => {
+    answer({ voice: [voiceKey] });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByTestId('ai-key-limits-change'));
+    const dialog = await screen.findByRole('dialog');
+    patchOk(saved);
+    fireEvent.click(within(dialog).getByTestId('limit-turnSeconds'));
+    const sheets = await screen.findAllByRole('dialog');
+    const choices = sheets[sheets.length - 1];
+    fireEvent.click(within(choices).getByRole('radio', { name: /^1 minute/ }));
+    fireEvent.click(within(choices).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/me/voice-keys/vk-1', expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ limits: { turnSeconds: 60 } }) })));
+    await waitFor(() => expect(screen.getByTestId('ai-key-limits').textContent).toContain('Yours: turns up to 1 minute'));
   });
 });
 

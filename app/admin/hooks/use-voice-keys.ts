@@ -14,6 +14,7 @@ export function isVoiceKey(value: unknown): value is VoiceKeySummary {
     Array.isArray(value.models) &&
     Array.isArray(value.lentTo) &&
     isRecord(value.month) &&
+    isRecord(value.limits) &&
     typeof value.month.voiceReplies === 'number' &&
     isRecord(value.health) &&
     (value.health.status === 'working' || value.health.status === 'down')
