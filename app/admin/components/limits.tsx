@@ -23,6 +23,7 @@ import {
   type ReplyLimits,
   type ServerLimits,
 } from '@/lib/bot-limit-values';
+import { VOICE_RANGES, type VoiceKeyLimitName, type VoiceKeyLimitValues } from '@/lib/voice-limit-values';
 
 /** One limit that shapes bot replies or artifacts (#666): what it is, its value, and the recommended one. */
 export interface LimitOption {
@@ -602,6 +603,94 @@ export function keyLimitsLine(values: ReplyLimits): string {
   return `${changed ? 'Yours' : 'Recommended'}: replies up to ${shown(rows[0])}, ${shown(rows[1])}`;
 }
 
+/** "30 seconds", "1 minute", "3 minutes"; a value that is not a whole minute stays in seconds. */
+function secondsLabel(value: number): string {
+  if (value >= 60 && value % 60 === 0) return `${value / 60} ${value === 60 ? 'minute' : 'minutes'}`;
+  return `${value.toLocaleString('en')} ${value === 1 ? 'second' : 'seconds'}`;
+}
+
+const charactersLabel = (value: number) => `${value.toLocaleString('en')} characters`;
+const minutesLabel = (value: number) => `${value.toLocaleString('en')} ${value === 1 ? 'minute' : 'minutes'}`;
+
+/**
+ * The steps offered for one voice limit, with the server's own value among them marked Recommended: it is whatever a super admin
+ * set, so it is added when it isn't one of the steps, never typed here.
+ */
+function voiceOptions(steps: LimitOption[], recommended: number, label: (value: number) => string): LimitOption[] {
+  const all = steps.some((step) => step.value === recommended) ? steps : [...steps, { value: recommended, label: label(recommended), meaning: 'What Universe suggests for every key.' }];
+  return [...all].sort((a, b) => a.value - b.value);
+}
+
+/** A voice key's limits (#783): how long a person may speak, how much a bot says, and how long it listens in a day. Each shows the server's own value as the recommended one. */
+export function voiceKeyLimits(values: VoiceKeyLimitValues): Limit[] {
+  const rows: (Omit<Limit, 'value' | 'recommended' | 'range' | 'options'> & { id: VoiceKeyLimitName; steps: LimitOption[]; name: (value: number) => string })[] = [
+    {
+      id: 'turnSeconds',
+      label: 'Longest turn',
+      hint: 'How long a person can speak to a bot in one go.',
+      unit: 'seconds',
+      name: secondsLabel,
+      steps: [
+        { value: 30, label: '30 seconds', meaning: 'A quick question.' },
+        { value: 60, label: '1 minute', meaning: 'A short message.' },
+        { value: 120, label: '2 minutes', meaning: 'A longer message.' },
+        { value: 300, label: '5 minutes', meaning: 'Long explanations. More audio for the key to listen to.' },
+      ],
+    },
+    {
+      id: 'replyCharacters',
+      label: 'Longest spoken reply',
+      hint: 'How much a bot says out loud in one reply.',
+      unit: 'characters',
+      name: charactersLabel,
+      steps: [
+        { value: 300, label: '300 characters', meaning: 'A few sentences.' },
+        { value: 1000, label: '1,000 characters', meaning: 'A long answer.' },
+        { value: 2000, label: '2,000 characters', meaning: 'About a page read aloud.' },
+      ],
+    },
+    {
+      id: 'replySeconds',
+      label: 'Longest reply in time',
+      hint: 'How long a spoken reply may run.',
+      unit: 'seconds',
+      name: secondsLabel,
+      steps: [
+        { value: 15, label: '15 seconds', meaning: 'Short answers.' },
+        { value: 30, label: '30 seconds', meaning: 'A few sentences.' },
+        { value: 120, label: '2 minutes', meaning: 'Long answers.' },
+      ],
+    },
+    {
+      id: 'listenMinutesPerDay',
+      label: 'Listening a day',
+      hint: 'Minutes a day one bot listens for its name, all the people near it together.',
+      unit: 'minutes',
+      name: minutesLabel,
+      steps: [
+        { value: 15, label: '15 minutes', meaning: 'Now and then.' },
+        { value: 30, label: '30 minutes', meaning: 'A quiet room.' },
+        { value: 120, label: '2 hours', meaning: 'A busy room.' },
+        { value: 240, label: '4 hours', meaning: 'Always on. The key listens the whole time.' },
+      ],
+    },
+  ];
+  return rows.map(({ steps, name, ...row }) => ({
+    ...row,
+    value: values[row.id].value,
+    recommended: values[row.id].recommended,
+    options: voiceOptions(steps, values[row.id].recommended, name),
+    range: { ...VOICE_RANGES[row.id], whole: true },
+  }));
+}
+
+/** The voice key card's one line: "Recommended: turns up to 3 minutes, replies up to 600 characters", or "Yours: …" once changed. */
+export function voiceKeyLimitsLine(values: VoiceKeyLimitValues): string {
+  const rows = voiceKeyLimits(values);
+  const changed = rows.some((row) => row.value !== row.recommended);
+  return `${changed ? 'Yours' : 'Recommended'}: turns up to ${shown(rows[0])}, replies up to ${shown(rows[1])}`;
+}
+
 async function sendLimits(url: string, body: unknown): Promise<{ ok: true; data: unknown } | { ok: false; error: string }> {
   try {
     const { authenticatedFetch } = await import('@/lib/client-auth');
@@ -625,6 +714,20 @@ export function useSaveKeyLimit() {
     }
     addToast({ description: 'Saved', variant: 'success', duration: 2000 });
     return (result.data as { limits: ReplyLimits }).limits;
+  };
+}
+
+/** Saves one of a voice key's limits (#783) and answers with all four as saved, or null when it was turned down (and says why). */
+export function useSaveVoiceKeyLimit() {
+  const { addToast } = useToast();
+  return async (keyId: string, id: string, value: number): Promise<VoiceKeyLimitValues | null> => {
+    const result = await sendLimits(`/api/me/voice-keys/${encodeURIComponent(keyId)}`, { limits: { [id]: value } });
+    if (!result.ok) {
+      addToast({ description: result.error, variant: 'error' });
+      return null;
+    }
+    addToast({ description: 'Saved', variant: 'success', duration: 2000 });
+    return (result.data as { key: { limits: VoiceKeyLimitValues } }).key.limits;
   };
 }
 

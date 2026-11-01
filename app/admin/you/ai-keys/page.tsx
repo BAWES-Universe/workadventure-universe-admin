@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Bot, Globe, KeyRound, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { LimitGroup, keyLimitsLine, modelCapOf, replyLimits, useSaveKeyLimit } from '../../components/limits';
+import { LimitGroup, keyLimitsLine, modelCapOf, replyLimits, useSaveKeyLimit, useSaveVoiceKeyLimit, voiceKeyLimits } from '../../components/limits';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/toast';
@@ -125,6 +125,9 @@ export default function AiKeysPage() {
   // The key whose limits sheet is open (#666), by id, so the sheet shows its limits as just saved
   const [limitsFor, setLimitsFor] = useState<string | null>(null);
   const saveKeyLimit = useSaveKeyLimit();
+  // The voice key whose limits sheet is open (#783)
+  const [voiceLimitsFor, setVoiceLimitsFor] = useState<string | null>(null);
+  const saveVoiceKeyLimit = useSaveVoiceKeyLimit();
   const { addToast } = useToast();
   const [revoking, setRevoking] = useState<AnyKey | null>(null);
   const [busy, setBusy] = useState(false);
@@ -273,6 +276,7 @@ export default function AiKeysPage() {
           onCheck={() => void checkVoiceNow(key)}
           onLend={() => setLending({ key })}
           onEditModels={(universeId) => setLending({ key, universeId })}
+          onLimits={() => setVoiceLimitsFor(key.id)}
           onPull={(lent) => {
             setFailure(null);
             if (lent.bots.length > 0) setPulling({ key, lent });
@@ -433,6 +437,30 @@ export default function AiKeysPage() {
             )}
             <div className="flex justify-end">
               <Button className="h-11 px-5" onClick={() => setLimitsFor(null)}>
+                Done
+              </Button>
+            </div>
+          </FormSheet>
+        );
+      })()}
+
+      {(() => {
+        const key = voiceKeys.find((entry) => entry.id === voiceLimitsFor) ?? null;
+        return (
+          <FormSheet open={key !== null} onOpenChange={(open) => !open && setVoiceLimitsFor(null)} title={key ? `Limits for ${key.name}` : 'Limits'} description="For bots that use this key.">
+            {key && (
+              <LimitGroup
+                title="Voice"
+                limits={voiceKeyLimits(key.limits)}
+                onChange={async (id, value) => {
+                  const saved = await saveVoiceKeyLimit(key.id, id, value);
+                  if (saved) updateVoice((all) => all.map((entry) => (entry.id === key.id ? { ...entry, limits: saved } : entry)));
+                  return saved !== null;
+                }}
+              />
+            )}
+            <div className="flex justify-end">
+              <Button className="h-11 px-5" onClick={() => setVoiceLimitsFor(null)}>
                 Done
               </Button>
             </div>

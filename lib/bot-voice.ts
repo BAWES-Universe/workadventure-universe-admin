@@ -6,6 +6,8 @@ import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels } from '@/lib/voice-providers';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
 import { claimVoiceKeyTry, healthOf, tryIsDue } from '@/lib/voice-key-health';
+import { getVoiceLimits } from '@/lib/voice-limits';
+import { LISTENING_KEY_LIMITS, SPEAKING_KEY_LIMITS, savedVoiceKeyLimits } from '@/lib/voice-limit-values';
 
 /**
  * A bot's voice (#740): on or off (off until a person with Manage bots turns it on), a draft voice profile, and published
@@ -101,6 +103,24 @@ async function providersFor(profile: VoiceProfile, home: Home): Promise<{ provid
     }
   }
   return { providers, lent };
+}
+
+/**
+ * The voice limits a spoken turn runs under (#783): the server's, except that a part that runs on a lent personal key takes that
+ * key's own values for what that job is limited by (how long a turn and a day of listening for the listening key, how long a
+ * reply for the speaking key), wherever its owner changed them. A key never changes any other limit.
+ */
+async function limitsFor(profile: VoiceProfile | null, providers: Map<string, VoiceProvider>) {
+  const { limits } = await getVoiceLimits();
+  if (!profile) return limits;
+  const ownedBy = (part: 'recognition' | 'speech') => {
+    const row = providers.get(profile[part].providerId);
+    return row && row.ownerId !== null ? savedVoiceKeyLimits(row.voiceLimits) : {};
+  };
+  const listening = ownedBy('recognition');
+  const speaking = ownedBy('speech');
+  const picked = (own: Partial<Record<string, number>>, names: readonly string[]) => Object.fromEntries(names.filter((name) => own[name] !== undefined).map((name) => [name, own[name]]));
+  return { ...limits, ...picked(listening, LISTENING_KEY_LIMITS), ...picked(speaking, SPEAKING_KEY_LIMITS) };
 }
 
 /** Who pays for each part of a voice: Universe AI for a server provider, the key's owner for a key someone lent. */
@@ -273,6 +293,7 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
     revision: number | null = null,
     profile: VoiceProfile | null = null,
     down: ReturnType<typeof healthOf> | null = null,
+    keys: Map<string, VoiceProvider> = new Map(),
   ) => ({
     speaks: reason === null,
     reason,
@@ -281,6 +302,8 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
     profile,
     // Only for "key-down": since when and why the key is down, for the line a person reads
     down: down ? { since: down.downSince, reason: down.downReason } : null,
+    // The voice limits this bot's turns run under: the server's, with a lent key's own for the job it does (#783)
+    limits: await limitsFor(profile, keys),
   });
   if (!bot.voiceEnabled && !options.ignoreSwitch) return result('off');
   if (!bot.room.world.universe.allowVoiceBots) return result('universe');
@@ -308,5 +331,5 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
       if (!mayTry) return result('key-down', revision.number, null, healthOf([...down].sort((a, b) => a.downSince!.getTime() - b.downSince!.getTime())[0]));
     }
   }
-  return result(null, revision.number, parsed.data);
+  return result(null, revision.number, parsed.data, null, providers);
 }

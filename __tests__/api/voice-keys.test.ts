@@ -29,6 +29,7 @@ jest.mock('@/lib/db', () => ({
     $transaction: jest.fn(),
     voiceProvider: { findMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), deleteMany: jest.fn() },
     voiceKeyLend: { findMany: jest.fn(), update: jest.fn(), delete: jest.fn(), upsert: jest.fn(), deleteMany: jest.fn() },
+    appSetting: { findUnique: jest.fn() },
     voiceKeyUsage: { findMany: jest.fn() },
     bot: { findMany: jest.fn() },
     botVoiceRevision: { findMany: jest.fn() },
@@ -36,7 +37,7 @@ jest.mock('@/lib/db', () => ({
 }));
 
 type Mocks = Record<string, jest.Mock>;
-const db = prisma as unknown as { $transaction: jest.Mock; voiceProvider: Mocks; voiceKeyLend: Mocks; voiceKeyUsage: Mocks; bot: Mocks; botVoiceRevision: Mocks };
+const db = prisma as unknown as { $transaction: jest.Mock; voiceProvider: Mocks; voiceKeyLend: Mocks; voiceKeyUsage: Mocks; appSetting: Mocks; bot: Mocks; botVoiceRevision: Mocks };
 const session = getSessionUser as jest.Mock;
 
 const ana = { id: 'u-ana', email: 'ana@example.com', name: 'Ana' };
@@ -88,6 +89,8 @@ beforeEach(() => {
   session.mockResolvedValue(ana);
   withProviders();
   db.voiceKeyUsage.findMany.mockResolvedValue([]);
+  // The server's voice limits as a super admin saved them: none, so the recommended ones
+  db.appSetting.findUnique.mockResolvedValue(null);
   db.bot.findMany.mockResolvedValue([]);
   db.botVoiceRevision.findMany.mockResolvedValue([]);
 });
@@ -152,7 +155,7 @@ describe('the list', () => {
     expect(db.voiceProvider.findMany.mock.calls.map(([arg]) => arg.where)).toContainEqual({ ownerId: 'u-ana' });
     const body = await response.json();
     expect(body.keys).toEqual([
-      expect.objectContaining({ id: 'k1', company: 'ElevenLabs', last4: '9f2a', lentTo: [{ universeId: 'uni1', universeName: 'Sales', ownedByYou: true, models: ['speech:flash'], bots: [] }], month: { voiceReplies: 0 } }),
+      expect.objectContaining({ id: 'k1', company: 'ElevenLabs', last4: '9f2a', lentTo: [{ universeId: 'uni1', universeName: 'Sales', ownedByYou: true, models: ['speech:flash'], bots: [] }], month: { voiceReplies: 0 }, limits: expect.any(Object) }),
     ]);
     // Named and described by the catalog, in its order, doing what the server's providers for each do
     expect(body.companies).toEqual([
@@ -212,6 +215,97 @@ describe('what a key paid for this month, and the bots on it', () => {
     expect(entry.month).toEqual({ voiceReplies: 0 });
     expect(entry.lentTo).toEqual([]);
     expect(db.bot.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('a key\'s limits', () => {
+  const RECOMMENDED = {
+    turnSeconds: { value: 180, recommended: 180, changed: false },
+    replyCharacters: { value: 600, recommended: 600, changed: false },
+    replySeconds: { value: 60, recommended: 60, changed: false },
+    listenMinutesPerDay: { value: 60, recommended: 60, changed: false },
+  };
+  const listed = async () => (await (await list(new NextRequest('http://localhost:3333/api/x'))).json()).keys[0].limits;
+
+  it('are all four, from the server\'s current voice limits when the owner changed none', async () => {
+    withProviders([key()]);
+    expect(await listed()).toEqual(RECOMMENDED);
+    // The recommended value is the server's saved one, never a number kept here
+    db.appSetting.findUnique.mockResolvedValue({ value: { revision: 3, limits: { turnSeconds: 90, replyCharacters: 450 } } });
+    expect(await listed()).toMatchObject({ turnSeconds: { value: 90, recommended: 90, changed: false }, replyCharacters: { value: 450, recommended: 450 }, replySeconds: { value: 60 } });
+  });
+
+  it('say what the owner changed, and that the server\'s value moved under a value they kept', async () => {
+    withProviders([key({ voiceLimits: { turnSeconds: 120, replySeconds: 30, replyCharacters: 'x', textReserveShare: 3 } })]);
+    expect(await listed()).toEqual({ ...RECOMMENDED, turnSeconds: { value: 120, recommended: 180, changed: true }, replySeconds: { value: 30, recommended: 60, changed: true } });
+    db.appSetting.findUnique.mockResolvedValue({ value: { limits: { turnSeconds: 120 } } });
+    expect((await listed()).turnSeconds).toEqual({ value: 120, recommended: 120, changed: false });
+  });
+
+  describe('changed through PATCH', () => {
+    const patchLimits = (limits: unknown) => call(patch, 'PATCH', { limits });
+    const saved = () => db.voiceProvider.update.mock.calls[0][0].data;
+
+    it('saves only what is named, on top of what the owner already changed, and answers with the key', async () => {
+      db.voiceProvider.findFirst.mockResolvedValue(key({ voiceLimits: { turnSeconds: 120 } }));
+      const response = await patchLimits({ replyCharacters: 900 });
+      expect(response.status).toBe(200);
+      expect(saved()).toEqual({ voiceLimits: { turnSeconds: 120, replyCharacters: 900 } });
+      expect(db.voiceKeyLend.findMany).not.toHaveBeenCalled();
+      expect((await response.json()).key.limits).toBeDefined();
+    });
+
+    it('drops a value that is the server\'s own, so it follows the server, and clears the column when none are left', async () => {
+      db.voiceProvider.findFirst.mockResolvedValue(key({ voiceLimits: { turnSeconds: 120, replySeconds: 30 } }));
+      await patchLimits({ turnSeconds: 180 });
+      expect(saved()).toEqual({ voiceLimits: { replySeconds: 30 } });
+      db.voiceProvider.update.mockClear();
+      db.voiceProvider.findFirst.mockResolvedValue(key({ voiceLimits: { turnSeconds: 120 } }));
+      await patchLimits({ turnSeconds: 180 });
+      expect(db.voiceProvider.update.mock.calls[0][0].data.voiceLimits).toBeDefined();
+      expect(JSON.stringify(db.voiceProvider.update.mock.calls[0][0].data.voiceLimits)).not.toContain('turnSeconds');
+    });
+
+    it('compares with the server\'s current value, not a number kept here', async () => {
+      db.appSetting.findUnique.mockResolvedValue({ value: { limits: { turnSeconds: 90 } } });
+      db.voiceProvider.findFirst.mockResolvedValue(key());
+      await patchLimits({ turnSeconds: 180 });
+      expect(saved()).toEqual({ voiceLimits: { turnSeconds: 180 } });
+    });
+
+    it.each([
+      ['a name that is not a limit', { fast: 5 }],
+      ['a server-wide limit a key does not have', { followUpSeconds: 20 }],
+      ['another server-wide limit', { guestVoiceReplies: 1 }],
+      ['a value below its range', { turnSeconds: 1 }],
+      ['a value above its range', { replyCharacters: 20_001 }],
+      ['a value that is not a whole number', { replySeconds: 30.5 }],
+      ['a value that is not a number', { listenMinutesPerDay: '60' }],
+    ])('turns down %s, saving nothing', async (_name, limits) => {
+      db.voiceProvider.findFirst.mockResolvedValue(key());
+      expect((await patchLimits(limits)).status).toBe(400);
+      expect(db.voiceProvider.update).not.toHaveBeenCalled();
+    });
+
+    it('says which limit and what range when a value is turned down', async () => {
+      db.voiceProvider.findFirst.mockResolvedValue(key());
+      expect((await (await patchLimits({ replySeconds: 601 })).json()).error).toBe('replySeconds must be a whole number from 5 to 600');
+      expect((await (await patchLimits({ followUpSeconds: 20 })).json()).error).toBe('followUpSeconds is set for all of Universe, not for a key');
+    });
+
+    it('is the owner\'s alone: someone else\'s key is not found', async () => {
+      db.voiceProvider.findFirst.mockResolvedValue(null);
+      expect((await patchLimits({ turnSeconds: 120 })).status).toBe(404);
+      expect(db.voiceProvider.update).not.toHaveBeenCalled();
+    });
+
+    it('takes limits with a name or models in one request, and a limits value that is not an object is refused', async () => {
+      db.voiceProvider.findFirst.mockResolvedValue(key());
+      expect((await call(patch, 'PATCH', { name: 'Studio', limits: { turnSeconds: 120 } })).status).toBe(200);
+      expect(saved()).toMatchObject({ name: 'Studio', voiceLimits: { turnSeconds: 120 } });
+      expect((await patchLimits(5)).status).toBe(400);
+      expect((await patchLimits([1])).status).toBe(400);
+    });
   });
 });
 

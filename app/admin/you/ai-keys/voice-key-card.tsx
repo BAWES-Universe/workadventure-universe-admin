@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import type { VoiceKeySummary } from '@/lib/voice-keys';
 import { voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { count } from '../../components/ds';
+import { voiceKeyLimitsLine } from '../../components/limits';
 import { Planet } from '../../components/ds/planet-icon';
 import { ProviderLogo } from '../../components/ds/provider-logo';
 import { RenameButton, RenameKey } from './rename-key';
@@ -13,7 +14,7 @@ import { VOICE_IF_DOWN, describeVoice, lentModelsLine, voiceBotLine, voiceDownTe
 
 /**
  * A voice key on the AI keys page (#749): the same card as a text key, for what a speech company's key is. What it paid for is
- * voice replies; it has no limits, and no other voice to move to when it is down (bots reply in text).
+ * voice replies, its limits are the voice ones, and there is no other voice to move to when it is down (bots reply in text).
  */
 export function VoiceKeyCard({
   keyItem: key,
@@ -27,6 +28,7 @@ export function VoiceKeyCard({
   onLend,
   onEditModels,
   onPull,
+  onLimits,
 }: {
   keyItem: VoiceKeySummary;
   renaming: boolean;
@@ -39,6 +41,7 @@ export function VoiceKeyCard({
   onLend: () => void;
   onEditModels: (universeId: string) => void;
   onPull: (lent: VoiceLent) => void;
+  onLimits: () => void;
 }) {
   const down = key.health.status === 'down';
   const logo = { logo: voiceKeyCompanyInfo(key.adapter)?.logo };
@@ -109,6 +112,15 @@ export function VoiceKeyCard({
             ))}
           </div>
         ))}
+      </div>
+      <div className="grid gap-2" data-testid="ai-key-limits">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Limits</h3>
+        <div className="flex items-center gap-2 rounded-xl bg-foreground/[.04] py-1 pl-3 pr-1">
+          <span className="min-w-0 flex-1 text-[13px] [overflow-wrap:anywhere]">{voiceKeyLimitsLine(key.limits)}</span>
+          <Button variant="outline" className="h-11 shrink-0 px-4" onClick={onLimits} data-testid="ai-key-limits-change">
+            Change
+          </Button>
+        </div>
       </div>
       <div className="grid gap-2" data-testid="ai-key-if-down">
         <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">If this is down</h3>

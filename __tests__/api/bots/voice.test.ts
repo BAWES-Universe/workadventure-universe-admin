@@ -31,6 +31,8 @@ let draft: Row | null;
 let revisions: Row[];
 let providers: Row[];
 let lends: Row[];
+// What a super admin saved as the server's voice limits (app_settings), or nothing
+let savedVoiceLimits: Row | null;
 
 const fakeDb = () => {
   const db = {
@@ -48,6 +50,7 @@ const fakeDb = () => {
       },
       update: async ({ data }: { data: Row }) => Object.assign(bot, data),
     },
+    appSetting: { findUnique: async () => (savedVoiceLimits ? { value: savedVoiceLimits } : null) },
     botVoiceDraft: {
       findUnique: async () => draft,
       upsert: async ({ create, update }: { create: Row; update: Row }) => (draft = { ...(draft ?? create), ...update, updatedAt: new Date('2026-10-30T12:00:00Z') }),
@@ -118,6 +121,7 @@ beforeEach(() => {
   revisions = [];
   providers = [provider(), voice()];
   lends = [];
+  savedVoiceLimits = null;
   fakeDb();
   (getSessionUser as jest.Mock).mockReset().mockResolvedValue({ id: 'u-sara', email: 'sara@example.com' });
   (canManageBotMcpServers as jest.Mock).mockReset().mockResolvedValue(true);
@@ -166,7 +170,7 @@ describe('a bot that has never had voice', () => {
   });
 
   it('does not speak, because voice is off', async () => {
-    expect(await (await call(getActive, 'GET', undefined, asGame)).json()).toEqual({ speaks: false, reason: 'off', paidBy: 'universe-ai', parts: { recognition: 'universe-ai', speech: 'universe-ai' }, revision: null, profile: null, down: null });
+    expect(await (await call(getActive, 'GET', undefined, asGame)).json()).toEqual({ speaks: false, reason: 'off', paidBy: 'universe-ai', parts: { recognition: 'universe-ai', speech: 'universe-ai' }, revision: null, profile: null, down: null, limits: expect.objectContaining({ turnSeconds: 180 }) });
   });
 
   it('can\'t be switched on until a profile is published', async () => {
@@ -260,7 +264,7 @@ describe('turning voice on and off', () => {
     const on = await call(putVoice, 'PUT', { enabled: true });
     expect(on.status).toBe(200);
     expect((await on.json()).enabled).toBe(true);
-    expect(await (await call(getActive, 'GET', undefined, asGame)).json()).toEqual({ speaks: true, reason: null, paidBy: 'universe-ai', parts: { recognition: 'universe-ai', speech: 'universe-ai' }, revision: 1, profile: FINISHED, down: null });
+    expect(await (await call(getActive, 'GET', undefined, asGame)).json()).toEqual({ speaks: true, reason: null, paidBy: 'universe-ai', parts: { recognition: 'universe-ai', speech: 'universe-ai' }, revision: 1, profile: FINISHED, down: null, limits: expect.objectContaining({ turnSeconds: 180 }) });
   });
 
   it('is refused when the universe doesn\'t allow voice bots, and off always works', async () => {
@@ -477,5 +481,50 @@ describe('a bot whose key stopped working', () => {
   it('is not held by a server provider\'s health, which has none', async () => {
     providers = [provider({ downSince: NOW }), lent()];
     expect(await active()).toMatchObject({ speaks: true });
+  });
+});
+
+describe('the voice limits a bot\'s spoken turn runs under', () => {
+  const active = async () => (await call(getActive, 'GET', undefined, asGame)).json();
+  const lend = (providerId: string): Row => ({ providerId, universeId: 'uni-1', models: null });
+  const own = (changes: Row = {}) => ({ ownerId: 'u-maker', ...changes });
+  const published = async () => {
+    await saveAndPublish();
+    await call(putVoice, 'PUT', { enabled: true });
+  };
+
+  it('are the server\'s when the bot speaks on the server\'s own providers, the recommended ones when nothing was saved', async () => {
+    await published();
+    expect((await active()).limits).toEqual({ textReserveShare: 6, guestVoiceReplies: 3, turnSeconds: 180, replyCharacters: 600, replySeconds: 60, listenMinutesPerDay: 60, followUpSeconds: 30 });
+    savedVoiceLimits = { revision: 2, limits: { turnSeconds: 120, replyCharacters: 900 } };
+    expect((await active()).limits).toMatchObject({ turnSeconds: 120, replyCharacters: 900, replySeconds: 60 });
+  });
+
+  it('take a lent key\'s own values for the job it does, and leave every other limit the server\'s', async () => {
+    savedVoiceLimits = { revision: 1, limits: { followUpSeconds: 45, replySeconds: 90 } };
+    providers = [
+      provider(own({ voiceLimits: { turnSeconds: 60, listenMinutesPerDay: 15, replyCharacters: 100 } })),
+      voice(own({ voiceLimits: { replyCharacters: 300, turnSeconds: 5 } })),
+    ];
+    lends = [lend('ears'), lend('mouth')];
+    await published();
+    const { limits } = await active();
+    // Listening: turn length and minutes a day from the listening key. Speaking: reply length from the speaking key.
+    // The listening key's reply value and the speaking key's turn value are not theirs to set.
+    expect(limits).toEqual({ textReserveShare: 6, guestVoiceReplies: 3, turnSeconds: 60, listenMinutesPerDay: 15, replyCharacters: 300, replySeconds: 90, followUpSeconds: 45 });
+  });
+
+  it('follow the server for a value the key\'s owner never changed, and for a part on the server\'s own provider', async () => {
+    providers = [provider(), voice(own({ voiceLimits: { replySeconds: 20 } }))];
+    lends = [lend('mouth')];
+    await published();
+    expect((await active()).limits).toMatchObject({ turnSeconds: 180, listenMinutesPerDay: 60, replyCharacters: 600, replySeconds: 20 });
+    // A value that is not a whole number inside its range is ignored
+    providers[1].voiceLimits = { replySeconds: 9999, replyCharacters: 'many' };
+    expect((await active()).limits).toMatchObject({ replyCharacters: 600, replySeconds: 60 });
+  });
+
+  it('are given when the bot does not speak too', async () => {
+    expect(await active()).toMatchObject({ speaks: false, reason: 'off', limits: { turnSeconds: 180 } });
   });
 });
