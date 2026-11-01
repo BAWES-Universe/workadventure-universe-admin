@@ -83,9 +83,9 @@ describe('Load models for a voice key', () => {
   it('says the company refused the key for a 401 or 403, and lists nothing', async () => {
     for (const status of [401, 403]) {
       answer(status);
-      const response = await send({ adapter: 'deepgram', apiKey: KEY });
+      const response = await send({ adapter: 'cartesia', apiKey: KEY });
       expect(response.status).toBe(422);
-      expect(await response.json()).toEqual({ error: 'Deepgram didn’t accept that key. Check it and paste it again.' });
+      expect(await response.json()).toEqual({ error: 'Cartesia didn’t accept that key. Check it and paste it again.' });
     }
   });
 
@@ -94,6 +94,11 @@ describe('Load models for a voice key', () => {
     expect((await send({ adapter: 'elevenlabs', apiKey: KEY })).status).toBe(200);
     answer(401, '{"detail":{"status":"invalid_api_key"}}');
     expect((await send({ adapter: 'elevenlabs', apiKey: KEY })).status).toBe(422);
+    // Deepgram answers a key without projects:read with a 403, and a wrong key with a 401
+    answer(403, '{"err_code":"FORBIDDEN","err_msg":"Insufficient permissions."}');
+    expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(200);
+    answer(401, '{"err_code":"INVALID_AUTH","err_msg":"Invalid credentials."}');
+    expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(422);
   });
 
   it('says it could not be reached for a timeout, a dropped connection or any other answer', async () => {
