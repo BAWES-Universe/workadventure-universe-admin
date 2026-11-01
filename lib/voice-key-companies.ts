@@ -13,7 +13,8 @@
  * - soniox: GET /v1/models, Authorization: Bearer (documents a 401 for a bad key).
  * - elevenlabs: GET /v1/user, xi-api-key. (GET /v1/models takes the key as optional, so it would answer 200 to a wrong one.) A key
  *   limited to some endpoints is answered 401 "missing_permissions": the company recognised the key, so that counts as accepted.
- * - deepgram: GET /v1/projects, Authorization: Token.
+ * - deepgram: GET /v1/projects, Authorization: Token. A key without projects:read (scoped to other jobs) is answered 403, not
+ *   401: Deepgram knows the key, so that counts as accepted. A wrong key is 401.
  * - cartesia: GET /voices?limit=1, Authorization: Bearer with the Cartesia-Version header the reference lists.
  */
 export interface VoiceKeyCompanyInfo {
@@ -37,8 +38,11 @@ export interface VoiceKeyCompanyInfo {
     prefix: string;
     /** Other headers the call needs. */
     headers?: Record<string, string>;
-    /** An answer that is not a 2xx but still means the company knows the key (a key limited to other endpoints). */
-    alsoAccepted?: { status: number; includes: string };
+    /**
+     * An answer that is not a 2xx but still means the company knows the key (a key limited to other endpoints): that status,
+     * and when `includes` is given, only with that text in the answer.
+     */
+    alsoAccepted?: { status: number; includes?: string };
   };
 }
 
@@ -59,7 +63,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     benefit: '{does}. Known for fast listening.',
     step: 'On deepgram.com, open API Keys and create a key.',
     docs: 'https://developers.deepgram.com',
-    check: { url: 'https://api.deepgram.com/v1/projects', header: 'Authorization', prefix: 'Token ' },
+    check: { url: 'https://api.deepgram.com/v1/projects', header: 'Authorization', prefix: 'Token ', alsoAccepted: { status: 403 } },
   },
   {
     adapter: 'cartesia',
