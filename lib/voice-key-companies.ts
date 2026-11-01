@@ -21,7 +21,10 @@ export interface VoiceKeyCompanyInfo {
   label: string;
   /** The provider's logo: a file in `public/ai-providers/` without `.svg`. Absent when we have none; then a chip is drawn. */
   logo?: string;
-  /** One line on why you would pick it (on the card in step 1 of Add a key). */
+  /**
+   * One line on why you would pick it (on the card in step 1 of Add a key). `{does}` is filled in from what Universe's own
+   * providers of this company do ("Listens and speaks", "Listens" or "Speaks"), so the line never claims a job Universe can't run.
+   */
   benefit: string;
   /** How to get a key, one step. */
   step: string;
@@ -44,7 +47,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'elevenlabs',
     label: 'ElevenLabs',
     logo: 'elevenlabs',
-    benefit: 'Listens and speaks, with thousands of voices.',
+    benefit: '{does}, with thousands of voices.',
     step: 'On elevenlabs.io, open Developers, then API keys, and create a key.',
     docs: 'https://elevenlabs.io/docs',
     check: { url: 'https://api.elevenlabs.io/v1/user', header: 'xi-api-key', prefix: '', alsoAccepted: { status: 401, includes: 'missing_permissions' } },
@@ -53,7 +56,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'deepgram',
     label: 'Deepgram',
     logo: 'deepgram',
-    benefit: 'Listens and speaks. Known for fast listening.',
+    benefit: '{does}. Known for fast listening.',
     step: 'On deepgram.com, open API Keys and create a key.',
     docs: 'https://developers.deepgram.com',
     check: { url: 'https://api.deepgram.com/v1/projects', header: 'Authorization', prefix: 'Token ' },
@@ -61,7 +64,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
   {
     adapter: 'cartesia',
     label: 'Cartesia',
-    benefit: 'Listens and speaks. Known for fast speaking.',
+    benefit: '{does}. Known for fast speaking.',
     step: 'On play.cartesia.ai, open API keys and create a key.',
     docs: 'https://docs.cartesia.ai',
     check: { url: 'https://api.cartesia.ai/voices?limit=1', header: 'Authorization', prefix: 'Bearer ', headers: { 'Cartesia-Version': '2026-08-14' } },
@@ -69,7 +72,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
   {
     adapter: 'soniox',
     label: 'Soniox',
-    benefit: 'Listens. Known for fast, accurate listening in many languages.',
+    benefit: '{does}. Known for fast, accurate listening in many languages.',
     step: 'On console.soniox.com, open API Keys and create a key.',
     docs: 'https://soniox.com/docs',
     check: { url: 'https://api.soniox.com/v1/models', header: 'Authorization', prefix: 'Bearer ' },
@@ -78,3 +81,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
 
 export const voiceKeyCompanyInfo = (adapter: unknown): VoiceKeyCompanyInfo | null =>
   VOICE_KEY_COMPANIES.find((entry) => entry.adapter === adapter) ?? null;
+
+/** What a company's line says it does, from the jobs Universe's own providers of it run. */
+export const voiceDoesLine = ({ recognition, speech }: { recognition: boolean; speech: boolean }) =>
+  recognition && speech ? 'Listens and speaks' : recognition ? 'Listens' : 'Speaks';

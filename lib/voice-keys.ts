@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { encryptApiKey } from '@/lib/encryption';
 import { lendAccess, parseLendModels } from '@/lib/ai-key-lend';
 import { readModels, voiceProviderProblem, type VoiceModel } from '@/lib/voice-providers';
-import { VOICE_KEY_COMPANIES, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { VOICE_KEY_COMPANIES, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { startOfMonth } from '@/lib/ai-keys';
 import { healthOf, askForVoiceKeyTry, type VoiceKeyHealth } from '@/lib/voice-key-health';
 
@@ -51,7 +51,7 @@ export async function voiceKeyCompanies(): Promise<VoiceKeyCompany[]> {
     label: info.label,
     ...does.get(info.adapter)!,
     logo: info.logo ?? null,
-    benefit: info.benefit,
+    benefit: info.benefit.replace('{does}', voiceDoesLine(does.get(info.adapter)!)),
     step: info.step,
     docs: info.docs,
   }));

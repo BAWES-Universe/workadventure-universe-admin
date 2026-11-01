@@ -159,6 +159,8 @@ describe('the list', () => {
       expect.objectContaining({ adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true, logo: 'elevenlabs', docs: 'https://elevenlabs.io/docs' }),
       expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: false, logo: 'deepgram' }),
     ]);
+    // Its line says only the jobs Universe runs for it
+    expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual(['Listens and speaks, with thousands of voices.', 'Listens. Known for fast listening.']);
     expect(JSON.stringify(body)).not.toContain('apiKeyEncrypted');
   });
 
