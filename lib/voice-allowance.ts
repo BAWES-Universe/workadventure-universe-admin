@@ -1,4 +1,3 @@
-import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import { ReplyAllowanceError, windowStart } from '@/lib/reply-limits';
@@ -15,8 +14,6 @@ import { servedVoiceLimits } from '@/lib/voice-limits';
 export type VoiceAllowance = { allowed: true } | { allowed: false; resetsAt: string };
 
 const HOUR = 60 * 60 * 1000;
-
-const isUniqueViolation = (error: unknown): boolean => error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
 
 /**
  * May this reply be spoken? Asked by the bot server just before it says one that Universe AI pays for. A person the bot can't
@@ -35,9 +32,6 @@ export async function checkVoiceAllowance(
   const userId = typeof input.userId === 'string' && input.userId ? input.userId.slice(0, 255) : null;
   if (!userId) return { allowed: true };
 
-  const already = await prisma.voiceReplyUse.findUnique({ where: { botId_turnId: { botId, turnId } }, select: { id: true } });
-  if (already) return { allowed: true };
-
   const person = await resolveUsagePerson(userId, input.isGuest);
   const guest = !person.personId;
   // The same words the Universe AI reply window is kept under (lib/reply-limits.ts), so a spoken reply is in the same window
@@ -47,16 +41,15 @@ export async function checkVoiceAllowance(
   const spokenLimit = guest ? window.guest.voiceReplies : window.signedIn.voiceReplies;
   const since = await windowStart(`ua:${personKey}`, window.hours, now);
 
-  // The reply is written down first and counted after, so two replies asked for at once can't both take the last place
-  try {
-    await prisma.voiceReplyUse.create({ data: { botId, turnId, personKey, createdAt: now } });
-  } catch (error) {
-    if (isUniqueViolation(error)) return { allowed: true };
-    throw error;
-  }
-  const spoken = await prisma.voiceReplyUse.count({ where: { personKey, createdAt: { gte: since } } });
-  if (spoken <= spokenLimit) return { allowed: true };
-
-  await prisma.voiceReplyUse.delete({ where: { botId_turnId: { botId, turnId } } }).catch(() => undefined);
-  return { allowed: false, resetsAt: new Date(since.getTime() + window.hours * HOUR).toISOString() };
+  // One person's replies are settled one at a time (a lock held to the end of the transaction), so two replies asked for at once
+  // can't both take the last place, nothing is written for a reply that is turned down, and nothing has to be taken back
+  return prisma.$transaction(async (tx): Promise<VoiceAllowance> => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${personKey}))`;
+    const already = await tx.voiceReplyUse.findUnique({ where: { botId_turnId: { botId, turnId } }, select: { id: true } });
+    if (already) return { allowed: true };
+    const spoken = await tx.voiceReplyUse.count({ where: { personKey, createdAt: { gte: since } } });
+    if (spoken >= spokenLimit) return { allowed: false, resetsAt: new Date(since.getTime() + window.hours * HOUR).toISOString() };
+    await tx.voiceReplyUse.create({ data: { botId, turnId, personKey, createdAt: now } });
+    return { allowed: true };
+  });
 }
