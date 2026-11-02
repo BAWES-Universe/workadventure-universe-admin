@@ -176,6 +176,45 @@ describe('windows and reached limits', () => {
   });
 });
 
+describe('a greeting a voice bot makes on its own (game #1669)', () => {
+  const greet = (person: typeof SARA, source: 'universe-ai' | 'own-key' = 'universe-ai') => checkReplyAllowance('bot-1', { ...person, source, greeting: true }, NOW);
+
+  it('stops once only the 5 replies kept for text are left, and is a reply like any other before that', async () => {
+    counts(24);
+    expect(await greet(SARA)).toEqual({ allowed: true });
+    counts(25);
+    expect(await greet(SARA)).toMatchObject({ allowed: false, limit: 'universe-ai', resetsAt: '2026-10-27T18:20:00.000Z' });
+  });
+
+  it('keeps 2 of a guest\'s 10', async () => {
+    counts(7);
+    expect(await greet(GUEST)).toEqual({ allowed: true });
+    counts(8);
+    expect(await greet(GUEST)).toMatchObject({ allowed: false, limit: 'guest' });
+  });
+
+  it('follows the saved text reserve', async () => {
+    db.appSetting.findUnique.mockImplementation(async ({ where }: { where: { key: string } }) =>
+      where.key === 'voice-limits' ? { value: { limits: { textReserveShare: 3 } } } : null);
+    counts(19);
+    expect(await greet(SARA)).toEqual({ allowed: true });
+    counts(20);
+    expect(await greet(SARA)).toMatchObject({ allowed: false });
+  });
+
+  it('is not someone running out: nothing is remembered for the bot page', async () => {
+    counts(25);
+    await greet(SARA);
+    expect(db.botReplyLimitHit.createMany).not.toHaveBeenCalled();
+  });
+
+  it('never stops anyone on the maker\'s own key, and a reply that is asked for is still allowed up to the full 30', async () => {
+    expect(await greet(SARA, 'own-key')).toEqual({ allowed: true });
+    counts(29);
+    expect(await checkReplyAllowance('bot-1', { ...SARA, source: 'universe-ai' }, NOW)).toEqual({ allowed: true });
+  });
+});
+
 describe('POST /api/bots/:id/reply-allowance', () => {
   const ask = (body: unknown, token = 'svc') =>
     POST(
