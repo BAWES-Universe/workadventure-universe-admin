@@ -1,6 +1,8 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getUniverseAiReplyLimits } from '@/lib/bot-limits';
+import { getVoiceLimits } from '@/lib/voice-limits';
+import { textReserve } from '@/lib/voice-limit-values';
 import { resolveUsagePerson } from '@/lib/usage-person';
 
 /**
@@ -41,7 +43,7 @@ export class ReplyAllowanceError extends Error {
  * When the window under `key` started, starting a new one now when there is none or the last has ended. One statement,
  * so two replies asked for at the same moment agree on the same start.
  */
-async function windowStart(key: string, hours: number, now: Date): Promise<Date> {
+export async function windowStart(key: string, hours: number, now: Date): Promise<Date> {
   const endedBefore = new Date(now.getTime() - hours * HOUR);
   const rows = await prisma.$queryRaw<{ started_at: Date }[]>(Prisma.sql`
     INSERT INTO "reply_windows" ("key", "started_at") VALUES (${key}, ${now})
@@ -66,7 +68,7 @@ type Check = {
  */
 export async function checkReplyAllowance(
   botId: string,
-  input: { userId?: unknown; isGuest?: unknown; source?: unknown },
+  input: { userId?: unknown; isGuest?: unknown; source?: unknown; greeting?: unknown },
   now: Date = new Date(),
 ): Promise<ReplyAllowance> {
   const source = input.source;
@@ -88,14 +90,20 @@ export async function checkReplyAllowance(
     ? { talkedPersonId: person.personId }
     : { talkedUserId: userId, talkedGuest: true };
 
+  // A greeting a voice bot makes on its own (game #1669) stops once only the replies kept for text are left: they are for
+  // what the person asks, not for a greeting nobody asked for
+  const greeting = input.greeting === true;
+  const kept = greeting && source !== 'own-key' ? (await getVoiceLimits()).limits.textReserveShare : 0;
+
   const checks: Check[] = [];
   if (source !== 'own-key') {
     const limits = await getUniverseAiReplyLimits();
+    const room = (window: number) => (greeting ? window - textReserve(window, kept) : window);
     checks.push({
       kind: guest ? 'guest' : 'universe-ai',
       key: `ua:${personKey}`,
       hours: limits.windowHours,
-      limit: guest ? limits.guest : limits.signedIn,
+      limit: room(guest ? limits.guest : limits.signedIn),
       // Every Universe AI reply this person got, from any bot: a reply no personal key paid for
       where: (since) => ({ ...personRows, keyOwnerId: null, error: false, timestamp: { gte: since } }),
     });
@@ -124,9 +132,12 @@ export async function checkReplyAllowance(
     const used = await prisma.botsAiUsage.count({ where: check.where(since) });
     if (used < check.limit) continue;
     const resetsAt = new Date(since.getTime() + check.hours * HOUR);
-    await prisma.botReplyLimitHit
-      .createMany({ data: [{ botId: bot.id, kind: check.kind, talkedUserId: userId, windowEndsAt: resetsAt }], skipDuplicates: true })
-      .catch((error) => console.error('Error remembering a reached reply limit:', error));
+    // A greeting that is not made is not a person running out: nobody asked for it
+    if (!greeting) {
+      await prisma.botReplyLimitHit
+        .createMany({ data: [{ botId: bot.id, kind: check.kind, talkedUserId: userId, windowEndsAt: resetsAt }], skipDuplicates: true })
+        .catch((error) => console.error('Error remembering a reached reply limit:', error));
+    }
     return { allowed: false, limit: check.kind, resetsAt: resetsAt.toISOString(), who };
   }
   return { allowed: true };

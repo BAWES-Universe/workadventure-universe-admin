@@ -51,3 +51,20 @@ switch off stops the bot at once, and a session keeps the `revision` it started 
 
 A lent key's credentials: `GET /api/voice/providers/:id/credentials?botId=…` (`VOICE_PROVIDERS_API.md`) serves the key, still
 encrypted, only while that bot speaks with it. Without `botId`, or for any other bot, it is a 404.
+
+## Spoken replies and the Universe AI allowance (game #1669)
+
+A spoken reply comes out of the same Universe AI window as a text reply (5 hours; 30 replies signed in, 10 for a guest). Some replies
+are always kept for text, and a guest hears at most a few. These come from the voice limits (`textReserveShare`, `guestVoiceReplies`),
+so a super admin changes them with no deploy: `GET /api/voice/limits` gives the replies that leave per window as `window.signedIn.voiceReplies`
+(30 gives 25) and `window.guest.voiceReplies` (10 gives 3).
+
+`POST /api/bots/:id/voice-allowance` (service token) with `{ userId, isGuest, turnId }`: may this reply be spoken? The bot server asks it just
+before it says a reply that Universe AI pays for (a voice part whose `parts` value is `universe-ai`). It answers `{ allowed: true }`, or
+`{ allowed: false, resetsAt }` when the person's spoken replies in the window are used up; the reply then stays in text. A reply is counted
+under its `turnId` (up to 255 characters), so asking again for the same one (a retry, a reconnect) never counts it twice. A person the
+bot can't name yet (no `userId`) is never stopped. The text of the reply is counted as ever, in the usage rows; this only counts which
+replies were also spoken (`voice_reply_uses`), in the same window as the person's Universe AI replies.
+
+`POST /api/bots/:id/reply-allowance` takes an optional `greeting: true` for a greeting a voice bot makes on its own: it is turned down once
+only the replies kept for text are left, and a greeting that is turned down is not counted as someone running out.

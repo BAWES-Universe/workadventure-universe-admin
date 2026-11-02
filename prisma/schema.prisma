@@ -818,6 +818,7 @@ model Bot {
   voiceDraft     BotVoiceDraft?
   voiceRevisions BotVoiceRevision[]
   voiceKeyUsage  VoiceKeyUsage[]
+  voiceReplyUses VoiceReplyUse[]
 
   @@index([roomId])
   @@map("bots")
@@ -1040,6 +1041,25 @@ model ReplyWindow {
   startedAt DateTime @map("started_at")
 
   @@map("reply_windows")
+}
+
+// A spoken reply counted against a person's Universe AI window (game #1669). One row per reply, keyed by the turn the bot
+// server gives it, so asking again for the same reply (a retry, a reconnect) never counts it twice. Whether the text of the
+// reply counted is in the usage rows as ever; this only says which replies were also spoken.
+model VoiceReplyUse {
+  id        String   @id @default(uuid())
+  botId     String   @map("bot_id")
+  // The reply's turn as the bot server names it
+  turnId    String   @map("turn_id") @db.VarChar(255)
+  // "person:<user id>" or "guest:<their id>", the same words the Universe AI reply window is kept under
+  personKey String   @map("person_key") @db.VarChar(320)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@unique([botId, turnId])
+  @@index([personKey, createdAt])
+  @@map("voice_reply_uses")
 }
 
 // Someone reached a reply limit on a bot (game #1159, Orbit #491): once per person, limit and window. The bot page counts
