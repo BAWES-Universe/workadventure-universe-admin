@@ -53,3 +53,18 @@ export async function checkVoiceAllowance(
     return { allowed: true };
   });
 }
+
+/**
+ * A reply that was counted but never played (a person talked over it while it was being settled, a greeting that waited for audio
+ * ran out of time, the voice provider failed) is given back to the person's window. Asked by the bot server under the reply's turn
+ * id. Safe to ask twice, and a reply that was never counted (or already given back) releases nothing: `released` says whether
+ * this call gave one back. A reply asked for again afterwards is counted again, as a new one.
+ */
+export async function releaseVoiceReply(botId: string, input: { turnId?: unknown }): Promise<{ released: boolean }> {
+  const turnId = typeof input.turnId === 'string' && input.turnId ? input.turnId : null;
+  if (!turnId || turnId.length > 255) throw new ReplyAllowanceError('turnId is required (up to 255 characters)', 400);
+  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { id: true } });
+  if (!bot) throw new ReplyAllowanceError('Bot not found', 404);
+  const { count } = await prisma.voiceReplyUse.deleteMany({ where: { botId, turnId } });
+  return { released: count > 0 };
+}

@@ -66,5 +66,10 @@ under its `turnId` (up to 255 characters), so asking again for the same one (a r
 bot can't name yet (no `userId`) is never stopped. The text of the reply is counted as ever, in the usage rows; this only counts which
 replies were also spoken (`voice_reply_uses`), in the same window as the person's Universe AI replies.
 
+`POST /api/bots/:id/voice-allowance/release` (service token) with `{ turnId }`: gives back a counted reply that was never played (a person
+talked over it while it was being settled, a greeting that waited for audio ran out of time, the voice provider failed). It answers
+`{ released: true }` when it gave one back and `{ released: false }` when there was none (never counted, or already given back), so it is safe
+to ask twice. A reply asked for again afterwards is counted again, as a new one.
+
 `POST /api/bots/:id/reply-allowance` takes an optional `greeting: true` for a greeting a voice bot makes on its own: it is turned down once
 only the replies kept for text are left, and a greeting that is turned down is not counted as someone running out.

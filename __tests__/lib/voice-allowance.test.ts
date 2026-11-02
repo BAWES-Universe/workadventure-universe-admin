@@ -4,8 +4,9 @@
  */
 import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db';
-import { checkVoiceAllowance } from '@/lib/voice-allowance';
+import { checkVoiceAllowance, releaseVoiceReply } from '@/lib/voice-allowance';
 import { POST } from '@/app/api/bots/[id]/voice-allowance/route';
+import { POST as RELEASE } from '@/app/api/bots/[id]/voice-allowance/release/route';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/db', () => ({
@@ -14,7 +15,7 @@ jest.mock('@/lib/db', () => ({
     appSetting: { findUnique: jest.fn() },
     bot: { findUnique: jest.fn() },
     user: { findUnique: jest.fn() },
-    voiceReplyUse: { findUnique: jest.fn(), create: jest.fn(), count: jest.fn() },
+    voiceReplyUse: { findUnique: jest.fn(), create: jest.fn(), count: jest.fn(), deleteMany: jest.fn() },
     $executeRaw: jest.fn(),
     $transaction: jest.fn(),
   },
@@ -25,7 +26,7 @@ const db = prisma as unknown as {
   appSetting: { findUnique: jest.Mock };
   bot: { findUnique: jest.Mock };
   user: { findUnique: jest.Mock };
-  voiceReplyUse: { findUnique: jest.Mock; create: jest.Mock; count: jest.Mock };
+  voiceReplyUse: { findUnique: jest.Mock; create: jest.Mock; count: jest.Mock; deleteMany: jest.Mock };
   $executeRaw: jest.Mock;
   $transaction: jest.Mock;
 };
@@ -43,6 +44,7 @@ beforeEach(() => {
   db.voiceReplyUse.findUnique.mockReset().mockResolvedValue(null);
   db.voiceReplyUse.create.mockReset().mockResolvedValue({});
   db.voiceReplyUse.count.mockReset().mockResolvedValue(0);
+  db.voiceReplyUse.deleteMany.mockReset().mockResolvedValue({ count: 1 });
   db.$executeRaw.mockReset().mockResolvedValue(0);
   // The transaction runs its steps against the same mocks, in order
   db.$transaction.mockReset().mockImplementation(async (steps: (tx: unknown) => Promise<unknown>) => steps(db));
@@ -149,5 +151,63 @@ describe('POST /api/bots/:id/voice-allowance', () => {
     expect((await ask({ ...SARA, turnId: 'x'.repeat(256) })).status).toBe(400);
     db.bot.findUnique.mockResolvedValue(null);
     expect((await ask(SARA)).status).toBe(404);
+  });
+});
+
+describe('giving back a reply that was never played', () => {
+  it('removes the counted reply under its turn, for its bot only, and says it did', async () => {
+    expect(await releaseVoiceReply('bot-1', { turnId: SARA.turnId })).toEqual({ released: true });
+    expect(db.voiceReplyUse.deleteMany).toHaveBeenCalledWith({ where: { botId: 'bot-1', turnId: SARA.turnId } });
+  });
+
+  it('releases nothing for a reply that was never counted, or was already given back, and is safe to ask twice', async () => {
+    db.voiceReplyUse.deleteMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValue({ count: 0 });
+    expect(await releaseVoiceReply('bot-1', { turnId: SARA.turnId })).toEqual({ released: true });
+    expect(await releaseVoiceReply('bot-1', { turnId: SARA.turnId })).toEqual({ released: false });
+    expect(await releaseVoiceReply('bot-1', { turnId: 'never-counted' })).toEqual({ released: false });
+  });
+
+  it('frees the place, so the next reply is counted again', async () => {
+    db.voiceReplyUse.count.mockResolvedValue(25);
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toMatchObject({ allowed: false });
+    db.voiceReplyUse.count.mockResolvedValue(24);
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toEqual({ allowed: true });
+  });
+
+  it('refuses a request without a turn, or longer than 255 characters, and a bot it does not know', async () => {
+    await expect(releaseVoiceReply('bot-1', {})).rejects.toMatchObject({ status: 400 });
+    await expect(releaseVoiceReply('bot-1', { turnId: 'x'.repeat(256) })).rejects.toMatchObject({ status: 400 });
+    db.bot.findUnique.mockResolvedValue(null);
+    await expect(releaseVoiceReply('bot-1', { turnId: 't' })).rejects.toMatchObject({ status: 404 });
+    expect(db.voiceReplyUse.deleteMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/bots/:id/voice-allowance/release', () => {
+  const release = (body: unknown, token = 'svc') =>
+    RELEASE(
+      new NextRequest('http://localhost:3333/api/bots/bot-1/voice-allowance/release', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+      { params: Promise.resolve({ id: 'bot-1' }) },
+    );
+  beforeEach(() => {
+    process.env.BOT_SERVICE_TOKEN = 'svc';
+  });
+
+  it('answers the bot server', async () => {
+    const response = await release({ turnId: SARA.turnId });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ released: true });
+  });
+
+  it('refuses anyone without the service token, and releases nothing', async () => {
+    expect((await release({ turnId: SARA.turnId }, 'nope')).status).toBe(401);
+    expect(db.voiceReplyUse.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('says what is wrong with a bad request', async () => {
+    expect((await release({})).status).toBe(400);
+    expect((await release('text')).status).toBe(400);
+    db.bot.findUnique.mockResolvedValue(null);
+    expect((await release({ turnId: 't' })).status).toBe(404);
   });
 });
