@@ -128,6 +128,44 @@ describe('super admin routes', () => {
     expect(db.update.mock.calls[2][0].data).toMatchObject({ apiKeyEncrypted: null, apiKeyLast4: null });
   });
 
+  it('set the voice Universe AI speaks with, keep its name with it, and take it away', async () => {
+    db.findUnique.mockResolvedValue(row({ defaultSpeech: true }));
+    db.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => row(data));
+    const set = await call(patchAdmin, 'PATCH', { defaultVoiceId: 'nora', defaultVoiceName: 'Nora' });
+    expect(set.status).toBe(200);
+    expect(db.update.mock.calls[0][0].data).toMatchObject({ defaultVoiceId: 'nora', defaultVoiceName: 'Nora' });
+    expect((await set.json()).provider).toMatchObject({ defaultVoiceId: 'nora', defaultVoiceName: 'Nora' });
+    // Another voice without a name drops the old name; the same voice keeps it
+    db.findUnique.mockResolvedValue(row({ defaultSpeech: true, defaultVoiceId: 'nora', defaultVoiceName: 'Nora' }));
+    await call(patchAdmin, 'PATCH', { defaultVoiceId: 'sami' });
+    expect(db.update.mock.calls[1][0].data).toMatchObject({ defaultVoiceId: 'sami', defaultVoiceName: null });
+    await call(patchAdmin, 'PATCH', { defaultVoiceId: 'nora' });
+    expect(db.update.mock.calls[2][0].data).toMatchObject({ defaultVoiceId: 'nora', defaultVoiceName: 'Nora' });
+    await call(patchAdmin, 'PATCH', { defaultVoiceId: null });
+    expect(db.update.mock.calls[3][0].data).toMatchObject({ defaultVoiceId: null, defaultVoiceName: null });
+  });
+
+  it('drop the default voice when the provider moves to another company, unless a new voice comes with it', async () => {
+    db.findUnique.mockResolvedValue(row({ defaultSpeech: true, defaultVoiceId: 'nora', defaultVoiceName: 'Nora' }));
+    db.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => row(data));
+    await call(patchAdmin, 'PATCH', { adapter: 'cartesia' });
+    expect(db.update.mock.calls[0][0].data).toMatchObject({ adapter: 'cartesia', defaultVoiceId: null, defaultVoiceName: null });
+    await call(patchAdmin, 'PATCH', { adapter: 'cartesia', defaultVoiceId: 'c1', defaultVoiceName: 'Skylar' });
+    expect(db.update.mock.calls[1][0].data).toMatchObject({ adapter: 'cartesia', defaultVoiceId: 'c1', defaultVoiceName: 'Skylar' });
+    // The same company, renamed: the voice stays
+    await call(patchAdmin, 'PATCH', { adapter: 'elevenlabs', name: 'Eleven' });
+    expect(db.update.mock.calls[2][0].data).not.toHaveProperty('defaultVoiceId');
+  });
+
+  it('turn down a default voice on a provider that doesn\'t speak, a name with no voice, and an empty voice', async () => {
+    db.findUnique.mockResolvedValue(row({ speech: false }));
+    expect((await call(patchAdmin, 'PATCH', { defaultVoiceId: 'nora' })).status).toBe(400);
+    db.findUnique.mockResolvedValue(row());
+    expect((await call(patchAdmin, 'PATCH', { defaultVoiceName: 'Nora' })).status).toBe(400);
+    expect((await call(patchAdmin, 'PATCH', { defaultVoiceId: '  ' })).status).toBe(400);
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
   it('say so when the provider is not there', async () => {
     db.findUnique.mockResolvedValue(null);
     expect((await call(getAdmin, 'GET')).status).toBe(404);

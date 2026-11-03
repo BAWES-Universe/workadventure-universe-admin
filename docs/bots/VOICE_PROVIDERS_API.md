@@ -6,7 +6,7 @@ where to reach it and its key. Nothing in Orbit calls a provider: no key is test
 
 At most one provider is the default for listening and one for speaking. A bot on Universe AI follows them.
 
-A provider: `{ id, adapter, name, recognition, speech, enabled, endpoint, region, hasKey, apiKeyLast4, models, defaultRecognition, defaultSpeech, updatedAt }`.
+A provider: `{ id, adapter, name, recognition, speech, enabled, endpoint, region, hasKey, apiKeyLast4, models, defaultRecognition, defaultSpeech, defaultVoiceId, defaultVoiceName, updatedAt }`.
 `adapter` is lowercase letters, numbers and dashes. `models` is `[{ id, label?, kind: "recognition" | "speech" }]`, each
 kind one the provider does. The key is encrypted with `ENCRYPTION_KEY` and never sent to a browser.
 
@@ -17,7 +17,7 @@ kind one the provider does. The key is encrypted with `ENCRYPTION_KEY` and never
 | `GET /api/admin/voice-providers` | `{ providers }`, never a key |
 | `POST /api/admin/voice-providers` | `{ adapter, name, recognition?, speech?, enabled?, endpoint?, region?, apiKey?, models? }`. Starts off. 201 with `{ provider }` |
 | `GET /api/admin/voice-providers/:id` | `{ provider }` |
-| `PATCH /api/admin/voice-providers/:id` | Changes only what is named. `apiKey: "..."` sets a key, `apiKey: null` takes it away. `defaultRecognition` / `defaultSpeech: true` takes the default from the provider that had it |
+| `PATCH /api/admin/voice-providers/:id` | Changes only what is named. `apiKey: "..."` sets a key, `apiKey: null` takes it away. `defaultRecognition` / `defaultSpeech: true` takes the default from the provider that had it. `defaultVoiceId` (with `defaultVoiceName`, optional) is the voice Universe AI speaks with when a bot's maker turns voice on without a key of their own (game #1668); `null` takes it away. Only a provider that speaks can have one, a name needs its voice, and a new voice id without a name drops the old name. Unset, the bot page uses the first voice the provider lists |
 | `DELETE /api/admin/voice-providers/:id` | Removes a provider that is not a default |
 
 A default must be on, hold its key and do its job (409 when a change would break that, 400 when asked for it). A provider
