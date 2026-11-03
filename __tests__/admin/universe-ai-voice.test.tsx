@@ -13,6 +13,7 @@ const calls: { method: string; url: string; body: Row | null }[] = [];
 let providers: Row[];
 let voicesAnswer: { ok: boolean; status?: number; body: unknown };
 let patchAnswer: { ok: boolean; body: unknown };
+let checkAnswer: { ok: boolean; body: unknown };
 const push = jest.fn();
 
 jest.mock('@/lib/client-auth', () => ({
@@ -23,7 +24,7 @@ jest.mock('@/lib/client-auth', () => ({
     if (url === '/api/admin/voice-providers' && method === 'GET') return answer(true, { providers });
     if (url.endsWith('/voices')) return answer(voicesAnswer.ok, voicesAnswer.body, voicesAnswer.status);
     if (method === 'PATCH') return answer(patchAnswer.ok, patchAnswer.body);
-    if (url === '/api/admin/voice-providers/check') return answer(true, { ok: true });
+    if (url === '/api/admin/voice-providers/check') return answer(checkAnswer.ok, checkAnswer.body);
     if (url === '/api/admin/voice-providers' && method === 'POST') return answer(true, { provider: {} }, 201);
     return answer(true, {});
   },
@@ -53,6 +54,7 @@ beforeEach(() => {
   providers = [soniox(), eleven(), cartesia(), deepgram()];
   voicesAnswer = { ok: true, body: { voices: VOICES } };
   patchAnswer = { ok: true, body: { provider: {} } };
+  checkAnswer = { ok: true, body: { ok: true } };
   push.mockReset();
 });
 
@@ -278,6 +280,50 @@ describe('New voice provider', () => {
       models: [{ id: 'stt-rt-v3', kind: 'recognition' }],
       endpoint: 'wss://stt-rt.soniox.com/transcribe-websocket',
     });
+  });
+});
+
+describe('New voice provider, a key the company turns away', () => {
+  async function setUp(address: string | null) {
+    checkAnswer = { ok: false, body: { error: 'Deepgram turned this key away. Check that you copied all of it.' } };
+    render(<NewVoiceProviderPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Deepgram/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'regional-key-1234' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await screen.findByText('Deepgram turned this key away. Check that you copied all of it.');
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'nova-3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+    if (address !== null) {
+      fireEvent.click(screen.getByRole('button', { name: 'Its own address' }));
+      fireEvent.change(screen.getByLabelText('Address'), { target: { value: address } });
+    }
+  }
+
+  it('can still be added when an address is typed under Its own address, and says why', async () => {
+    await setUp('https://api.eu.deepgram.com');
+    expect(screen.getByText(/You can still add it\./)).toBeTruthy();
+    const add = screen.getByRole('button', { name: 'Add provider' });
+    expect(add.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(add);
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/ai-providers'));
+    const post = calls.find((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers');
+    expect(post?.body).toMatchObject({ adapter: 'deepgram', apiKey: 'regional-key-1234', endpoint: 'https://api.eu.deepgram.com' });
+  });
+
+  it('stays off when no address is typed, or the typed address is not allowed, or the key changes after the check', async () => {
+    await setUp(null);
+    const add = screen.getByRole('button', { name: 'Add provider' });
+    expect(add.hasAttribute('disabled')).toBe(true);
+    expect(screen.queryByText(/You can still add it\./)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Its own address' }));
+    fireEvent.change(screen.getByLabelText('Address'), { target: { value: 'http://nope.example.com' } });
+    expect(add.hasAttribute('disabled')).toBe(true);
+    fireEvent.change(screen.getByLabelText('Address'), { target: { value: 'https://api.eu.deepgram.com' } });
+    expect(add.hasAttribute('disabled')).toBe(false);
+    // A key changed after the check has to be checked again, address or not
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'another-key-5678' } });
+    expect(add.hasAttribute('disabled')).toBe(true);
   });
 });
 

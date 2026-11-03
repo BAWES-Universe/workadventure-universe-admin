@@ -86,7 +86,10 @@ export default function NewVoiceProviderPage() {
 
   const addressProblem =
     address.trim() === '' ? null : /^https:\/\//i.test(address.trim()) || (wssAllowed && /^wss:\/\//i.test(address.trim())) ? null : `The address must start with ${wssAllowed ? 'https:// or wss://' : 'https://'}.`;
-  const canAdd = check.status === 'ok' && models.length > 0 && name.trim() !== '' && !addressProblem;
+  // The check asks the company's own address only. A key that is valid only at an address typed under Its own address can be turned away
+  // there, so with an address typed a turned-away key may still be added; with none typed the key has to pass.
+  const keyChecked = check.status === 'ok' || (check.status === 'refused' && address.trim() !== '' && !addressProblem);
+  const canAdd = keyChecked && models.length > 0 && name.trim() !== '' && !addressProblem;
 
   async function add() {
     if (!info || !canAdd) return;
@@ -195,6 +198,9 @@ export default function NewVoiceProviderPage() {
               )}
               {check.status === 'ok' && <Answered>{info.label} knows this key. Nothing was spoken, so nothing was paid.</Answered>}
               {check.status === 'refused' && <Refused>{check.message}</Refused>}
+              {check.status === 'refused' && address.trim() !== '' && !addressProblem && (
+                <p className={FIELD_HINT}>This check goes to {info.label}’s own address, so it may not know a key made for the address you typed. You can still add it.</p>
+              )}
             </div>
           </Part>
           <Part n={3} title="Its models">
