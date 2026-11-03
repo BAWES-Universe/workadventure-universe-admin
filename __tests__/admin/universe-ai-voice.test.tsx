@@ -283,6 +283,25 @@ describe('New voice provider', () => {
   });
 });
 
+describe('New voice provider, Enter in a model field', () => {
+  it('adds the model being typed and does not submit the form', async () => {
+    render(<NewVoiceProviderPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Soniox/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'soniox-key-1234' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await screen.findByText('Soniox knows this key. Nothing was spoken, so nothing was paid.');
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'stt-rt-v3' } });
+    fireEvent.keyDown(screen.getByLabelText('Model id'), { key: 'Enter' });
+    await waitFor(() => expect(screen.getAllByTestId('model-row')).toHaveLength(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'second' } });
+    fireEvent.keyDown(screen.getByLabelText('Name people see (optional)'), { key: 'Enter' });
+    await waitFor(() => expect(screen.getAllByTestId('model-row')).toHaveLength(2));
+    expect(calls.some((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers')).toBe(false);
+  });
+});
+
 describe('New voice provider, a key the company turns away', () => {
   async function setUp(address: string | null) {
     checkAnswer = { ok: false, body: { error: 'Deepgram turned this key away. Check that you copied all of it.' } };

@@ -6,7 +6,7 @@
  * screen (a caption, a tick line, the model list).
  */
 
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Check, Plus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -192,6 +192,13 @@ export function ModelRows({
     close();
   }
 
+  // Enter in a model field adds that model; inside the New voice provider form it must not submit the form and drop the model being typed
+  function enterAdds(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    if (!disabled) void add();
+  }
+
   const row = (entry: VoiceModel) => (
     <li key={`${entry.kind}:${entry.id}`} className="flex min-h-12 items-center gap-2 border-t border-foreground/10 pl-3 text-[15px] first:border-t-0" data-testid="model-row">
       <span className="grid min-w-0 flex-1">
@@ -244,11 +251,11 @@ export function ModelRows({
           )}
           <div className="grid gap-1.5">
             <Label htmlFor="model-id">Model id</Label>
-            <Input id="model-id" value={id} autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={255} onChange={(event) => setId(event.target.value)} className="h-11 rounded-xl" />
+            <Input id="model-id" value={id} autoComplete="off" autoCapitalize="none" spellCheck={false} maxLength={255} onChange={(event) => setId(event.target.value)} onKeyDown={enterAdds} className="h-11 rounded-xl" />
           </div>
           <div className="grid gap-1.5">
             <Label htmlFor="model-label">Name people see (optional)</Label>
-            <Input id="model-label" value={label} maxLength={255} onChange={(event) => setLabel(event.target.value)} className="h-11 rounded-xl" />
+            <Input id="model-label" value={label} maxLength={255} onChange={(event) => setLabel(event.target.value)} onKeyDown={enterAdds} className="h-11 rounded-xl" />
           </div>
           {problem && <Refused>{problem}</Refused>}
           <div className="flex justify-end gap-2">
