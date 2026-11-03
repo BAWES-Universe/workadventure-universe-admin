@@ -18,6 +18,7 @@ jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: jest.fn() }));
 jest.mock('@/lib/db', () => ({
   prisma: {
     $transaction: jest.fn(),
+    $queryRaw: jest.fn(),
     voiceProvider: { findMany: jest.fn(), findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn(), delete: jest.fn() },
   },
 }));
@@ -58,6 +59,7 @@ beforeEach(() => {
   process.env.ENCRYPTION_KEY = 'a'.repeat(64);
   (isSuperAdmin as jest.Mock).mockImplementation((email?: string | null) => email === 'root@example.com');
   transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(prisma));
+  (prisma as unknown as { $queryRaw: jest.Mock }).$queryRaw.mockResolvedValue([]);
   session.mockResolvedValue(root);
 });
 
@@ -85,6 +87,40 @@ describe('super admin routes', () => {
     expect(body.providers[0]).toMatchObject({ id: 'p1', hasKey: true, apiKeyLast4: 'wxyz', models: [{ id: 'm1', label: 'Model one', kind: 'speech' }] });
     expect(JSON.stringify(body)).not.toContain('iv:tag:data');
     expect(body.providers[0]).not.toHaveProperty('apiKeyEncrypted');
+    // No bot uses it yet
+    expect(body.providers[0].bots).toEqual({ recognition: 0, speech: 0 });
+  });
+
+  it('say how many bots with voice on listen and speak with each provider (#792)', async () => {
+    db.findMany.mockResolvedValue([row(), row({ id: 'p2', adapter: 'soniox', name: 'Soniox' })]);
+    (prisma as unknown as { $queryRaw: jest.Mock }).$queryRaw.mockResolvedValue([
+      { profile: { recognition: { providerId: 'p2', model: 'm' }, speech: { providerId: 'p1', model: 'm', voiceId: 'v' } } },
+      { profile: { recognition: { providerId: 'p2', model: 'm' }, speech: { providerId: 'p1', model: 'm', voiceId: 'w' } } },
+      // A bot on someone's own key, and a profile that isn't readable, count for no server provider
+      { profile: { recognition: { providerId: 'key-1' }, speech: { providerId: 'key-1' } } },
+      { profile: null },
+    ]);
+    const body = await (await listAdmin(new NextRequest('http://localhost:3333/api/x'))).json();
+    expect(body.providers.map((entry: { id: string; bots: unknown }) => [entry.id, entry.bots])).toEqual([
+      ['p1', { recognition: 0, speech: 2 }],
+      ['p2', { recognition: 2, speech: 0 }],
+    ]);
+  });
+
+  it('take a wss:// address for a provider that only listens, and https:// for one that speaks (#792)', async () => {
+    const add = async (body: unknown) => createAdmin(new NextRequest('http://localhost:3333/api/x', { method: 'POST', body: JSON.stringify(body) }));
+    db.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => row({ ...data, id: 'p9' }));
+    expect((await add({ adapter: 'soniox', name: 'Soniox', recognition: true, endpoint: 'wss://stt-rt.soniox.com/transcribe-websocket' })).status).toBe(201);
+    expect((await add({ adapter: 'soniox', name: 'Soniox', recognition: true, endpoint: 'https://proxy.example.com' })).status).toBe(201);
+    const refused = await add({ adapter: 'elevenlabs', name: 'Eleven', speech: true, endpoint: 'wss://api.elevenlabs.io' });
+    expect(refused.status).toBe(400);
+    expect((await refused.json()).error).toBe('A provider that speaks needs an https:// address');
+    expect((await add({ adapter: 'soniox', name: 'Soniox', recognition: true, endpoint: 'ftp://example.com' })).status).toBe(400);
+    expect(db.create).toHaveBeenCalledTimes(2);
+    // Changing a speaking provider's address to a websocket one is turned down too
+    db.findUnique.mockResolvedValue(row());
+    expect((await call(patchAdmin, 'PATCH', { endpoint: 'wss://api.elevenlabs.io' })).status).toBe(400);
+    expect(db.update).not.toHaveBeenCalled();
   });
 
   it('add a provider that is off, with its key encrypted and never sent back', async () => {

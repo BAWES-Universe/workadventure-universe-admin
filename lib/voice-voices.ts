@@ -315,12 +315,8 @@ export interface VoiceSample {
   contentType: string;
 }
 
-/**
- * One voice's free sample, fetched for a company that keeps it behind the key. The address is the one the company's own list
- * named (never one the caller sends), and the key goes only to that company's address.
- */
-export async function fetchVoiceSample(botId: string, source: string, voiceId: string): Promise<VoiceSample> {
-  const { provider } = await sourceFor(botId, source);
+/** One voice's sample from the company, for a provider already found: the address is the one the company's own list named. */
+async function sampleFor(provider: VoiceProvider, voiceId: string): Promise<VoiceSample> {
   const voice = (await listedFor(provider)).find((entry) => entry.voiceId === voiceId);
   if (!voice?.preview) throw new VoiceListRefused('That voice has no sample.', 404);
   const call = callFor(provider);
@@ -345,4 +341,52 @@ export async function fetchVoiceSample(botId: string, source: string, voiceId: s
   const bytes = await response.arrayBuffer().catch(() => null);
   if (!bytes || bytes.byteLength === 0 || bytes.byteLength > MAX_PREVIEW_BYTES) throw unusable();
   return { bytes, contentType: type.split(';')[0].trim() };
+}
+
+/**
+ * One voice's free sample, fetched for a company that keeps it behind the key. The address is the one the company's own list
+ * named (never one the caller sends), and the key goes only to that company's address.
+ */
+export async function fetchVoiceSample(botId: string, source: string, voiceId: string): Promise<VoiceSample> {
+  const { provider } = await sourceFor(botId, source);
+  return sampleFor(provider, voiceId);
+}
+
+/** What the Universe AI page shows for one voice of a server provider. */
+export interface ServerVoiceChoice {
+  voiceId: string;
+  name: string;
+  description: string;
+  languages: string[];
+  previewUrl: string | null;
+}
+
+/** The server's own speaking provider that a super admin looks at (never a person's key): anything else reads as not found. */
+async function serverSpeaker(providerId: string): Promise<VoiceProvider> {
+  const provider = await prisma.voiceProvider.findFirst({ where: { id: providerId, ownerId: null, speech: true } });
+  if (!provider) throw new VoiceListRefused('Voice provider not found', 404);
+  return provider;
+}
+
+const serverPreviewPath = (providerId: string, voiceId: string) => `/api/admin/voice-providers/${encodeURIComponent(providerId)}/voices/${encodeURIComponent(voiceId)}/preview`;
+
+/**
+ * The speaking voices of one of the server's providers, for the Universe AI page's starting voice (#792). Works for a provider
+ * that is not the default yet, so a super admin hears a company's voices before choosing it. Free: the company's own list, nothing
+ * spoken. Cached like the bot page's list.
+ */
+export async function listServerVoices(providerId: string): Promise<ServerVoiceChoice[]> {
+  const provider = await serverSpeaker(providerId);
+  return (await listedFor(provider)).map((voice) => ({
+    voiceId: voice.voiceId,
+    name: voice.name,
+    description: voice.description,
+    languages: voice.languages,
+    previewUrl: !voice.preview ? null : voice.previewNeedsKey ? serverPreviewPath(provider.id, voice.voiceId) : voice.preview,
+  }));
+}
+
+/** One voice's free sample from a server provider that keeps it behind its key. */
+export async function fetchServerVoiceSample(providerId: string, voiceId: string): Promise<VoiceSample> {
+  return sampleFor(await serverSpeaker(providerId), voiceId);
 }
