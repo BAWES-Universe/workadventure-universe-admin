@@ -187,7 +187,12 @@ export default function NewVoiceProviderPage() {
                 <ShieldCheck aria-hidden="true" />
                 {check.status === 'checking' ? 'Checking…' : 'Check key'}
               </Button>
-              {check.status === 'none' && <p className={FIELD_HINT}>Asks {info.label} if it knows the key. Nothing is spoken or heard, so nothing is paid.</p>}
+              {check.status === 'none' && (
+                <p className={FIELD_HINT}>
+                  Asks {info.label} if it knows the key. Nothing is spoken or heard, so nothing is paid.
+                  {address.trim() !== '' && ` The check goes to ${info.label}’s own address, not the one under Its own address.`}
+                </p>
+              )}
               {check.status === 'ok' && <Answered>{info.label} knows this key. Nothing was spoken, so nothing was paid.</Answered>}
               {check.status === 'refused' && <Refused>{check.message}</Refused>}
             </div>

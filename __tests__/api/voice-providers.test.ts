@@ -88,22 +88,25 @@ describe('super admin routes', () => {
     expect(JSON.stringify(body)).not.toContain('iv:tag:data');
     expect(body.providers[0]).not.toHaveProperty('apiKeyEncrypted');
     // No bot uses it yet
-    expect(body.providers[0].bots).toEqual({ recognition: 0, speech: 0 });
+    expect(body.providers[0].bots).toEqual({ recognition: 0, speech: 0, total: 0 });
   });
 
   it('say how many bots with voice on listen and speak with each provider (#792)', async () => {
-    db.findMany.mockResolvedValue([row(), row({ id: 'p2', adapter: 'soniox', name: 'Soniox' })]);
+    db.findMany.mockResolvedValue([row(), row({ id: 'p2', adapter: 'soniox', name: 'Soniox' }), row({ id: 'p3', adapter: 'both', name: 'Both' })]);
     (prisma as unknown as { $queryRaw: jest.Mock }).$queryRaw.mockResolvedValue([
       { profile: { recognition: { providerId: 'p2', model: 'm' }, speech: { providerId: 'p1', model: 'm', voiceId: 'v' } } },
       { profile: { recognition: { providerId: 'p2', model: 'm' }, speech: { providerId: 'p1', model: 'm', voiceId: 'w' } } },
+      // A bot that listens and speaks with one provider is one bot there
+      { profile: { recognition: { providerId: 'p3', model: 'm' }, speech: { providerId: 'p3', model: 'm', voiceId: 'x' } } },
       // A bot on someone's own key, and a profile that isn't readable, count for no server provider
       { profile: { recognition: { providerId: 'key-1' }, speech: { providerId: 'key-1' } } },
       { profile: null },
     ]);
     const body = await (await listAdmin(new NextRequest('http://localhost:3333/api/x'))).json();
     expect(body.providers.map((entry: { id: string; bots: unknown }) => [entry.id, entry.bots])).toEqual([
-      ['p1', { recognition: 0, speech: 2 }],
-      ['p2', { recognition: 2, speech: 0 }],
+      ['p1', { recognition: 0, speech: 2, total: 2 }],
+      ['p2', { recognition: 2, speech: 0, total: 2 }],
+      ['p3', { recognition: 1, speech: 1, total: 1 }],
     ]);
   });
 

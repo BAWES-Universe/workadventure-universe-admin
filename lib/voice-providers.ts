@@ -216,25 +216,31 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
 
 /**
  * How many bots use each server provider, for the Universe AI page: a bot counts for a job when it has voice on and the profile it
- * speaks with names the provider for that job. Bots on a person's own key are not counted here.
+ * speaks with names the provider for that job, and once in `total` however many jobs it uses the provider for. Bots on a person's own
+ * key are not counted here.
  */
-export async function voiceProviderBotCounts(): Promise<Map<string, { recognition: number; speech: number }>> {
+export type VoiceProviderBotCount = { recognition: number; speech: number; total: number };
+
+export async function voiceProviderBotCounts(): Promise<Map<string, VoiceProviderBotCount>> {
   const rows = await prisma.$queryRaw<{ profile: unknown }[]>`
     SELECT r.profile AS profile
     FROM bots b
     JOIN bot_voice_revisions r ON r.bot_id = b.id AND r.number = b.voice_revision
     WHERE b.voice_enabled = true`;
-  const counts = new Map<string, { recognition: number; speech: number }>();
-  const add = (id: unknown, job: 'recognition' | 'speech') => {
-    if (typeof id !== 'string') return;
-    const entry = counts.get(id) ?? { recognition: 0, speech: 0 };
-    entry[job] += 1;
-    counts.set(id, entry);
-  };
+  const counts = new Map<string, VoiceProviderBotCount>();
   for (const { profile } of rows) {
     const saved = typeof profile === 'object' && profile !== null ? (profile as { recognition?: { providerId?: unknown }; speech?: { providerId?: unknown } }) : {};
-    add(saved.recognition?.providerId, 'recognition');
-    add(saved.speech?.providerId, 'speech');
+    const ids = new Set<string>();
+    for (const job of ['recognition', 'speech'] as const) {
+      const id = saved[job]?.providerId;
+      if (typeof id !== 'string') continue;
+      const entry = counts.get(id) ?? { recognition: 0, speech: 0, total: 0 };
+      entry[job] += 1;
+      // A bot that listens and speaks with one provider is one bot there, not two
+      if (!ids.has(id)) entry.total += 1;
+      ids.add(id);
+      counts.set(id, entry);
+    }
   }
   return counts;
 }

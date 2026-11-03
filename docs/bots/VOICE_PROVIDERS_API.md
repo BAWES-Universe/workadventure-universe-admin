@@ -14,7 +14,7 @@ kind one the provider does. The key is encrypted with `ENCRYPTION_KEY` and never
 
 | Route | What it does |
 | --- | --- |
-| `GET /api/admin/voice-providers` | `{ providers }`, never a key. Each also has `bots: { recognition, speech }`: how many bots with voice on listen and speak with it |
+| `GET /api/admin/voice-providers` | `{ providers }`, never a key. Each also has `bots: { recognition, speech, total }`: how many bots with voice on listen and speak with it, and how many bots use it at all (one that does both counts once) |
 | `POST /api/admin/voice-providers` | `{ adapter, name, recognition?, speech?, enabled?, endpoint?, region?, apiKey?, models? }`. Starts off. 201 with `{ provider }` |
 | `GET /api/admin/voice-providers/:id` | `{ provider }` |
 | `PATCH /api/admin/voice-providers/:id` | Changes only what is named. `apiKey: "..."` sets a key, `apiKey: null` takes it away. `defaultRecognition` / `defaultSpeech: true` takes the default from the provider that had it. `defaultVoiceId` (with `defaultVoiceName`, optional) is the voice Universe AI speaks with when a bot's maker turns voice on without a key of their own (game #1668); `null` takes it away. Only a provider that speaks can have one, a name needs its voice, and a new voice id without a name drops the old name. Unset, the bot page uses the first voice the provider lists |

@@ -7,7 +7,7 @@ export const runtime = 'nodejs';
 
 /**
  * GET /api/admin/voice-providers - the voice providers a super admin has set up for the server (#740). Never the key: only
- * whether there is one and its last four characters. Each provider also says how many bots use it (`bots: { recognition, speech }`):
+ * whether there is one and its last four characters. Each provider also says how many bots use it (`bots: { recognition, speech, total }`):
  * bots with voice on whose published voice profile names it for that job.
  */
 export async function GET(request: NextRequest) {
@@ -15,7 +15,7 @@ export async function GET(request: NextRequest) {
   if (!user || !isSuperAdmin(user.email)) return NextResponse.json({ error: 'Unauthorized: Super admin access required' }, { status: 403 });
   try {
     const [rows, counts] = await Promise.all([listVoiceProviders(), voiceProviderBotCounts()]);
-    return NextResponse.json({ providers: rows.map((row) => ({ ...voiceProviderView(row), bots: counts.get(row.id) ?? { recognition: 0, speech: 0 } })) });
+    return NextResponse.json({ providers: rows.map((row) => ({ ...voiceProviderView(row), bots: counts.get(row.id) ?? { recognition: 0, speech: 0, total: 0 } })) });
   } catch (error) {
     console.error('[VoiceProviders] Could not list the providers:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });

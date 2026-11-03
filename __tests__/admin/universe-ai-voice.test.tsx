@@ -37,11 +37,11 @@ import { voiceServerLimits } from '@/app/admin/components/limits';
 import { withStartingModel } from '@/app/admin/ai-providers/voice/voice-shared';
 import { VOICE_LIMITS_RECOMMENDED } from '@/lib/voice-limit-values';
 
-const provider = (changes: Row): Row => ({ region: null, endpoint: null, hasKey: true, defaultRecognition: false, defaultSpeech: false, defaultVoiceId: null, defaultVoiceName: null, bots: { recognition: 0, speech: 0 }, ...changes });
-const soniox = () => provider({ id: 'v-soniox', adapter: 'soniox', name: 'Soniox', recognition: true, speech: false, enabled: true, apiKeyLast4: '9f3c', models: [{ id: 'stt-rt-v3', label: 'Real-time v3', kind: 'recognition' }], defaultRecognition: true, bots: { recognition: 14, speech: 0 } });
+const provider = (changes: Row): Row => ({ region: null, endpoint: null, hasKey: true, defaultRecognition: false, defaultSpeech: false, defaultVoiceId: null, defaultVoiceName: null, bots: { recognition: 0, speech: 0, total: 0 }, ...changes });
+const soniox = () => provider({ id: 'v-soniox', adapter: 'soniox', name: 'Soniox', recognition: true, speech: false, enabled: true, apiKeyLast4: '9f3c', models: [{ id: 'stt-rt-v3', label: 'Real-time v3', kind: 'recognition' }], defaultRecognition: true, bots: { recognition: 14, speech: 0, total: 14 } });
 const eleven = () =>
-  provider({ id: 'v-eleven', adapter: 'elevenlabs', name: 'ElevenLabs', recognition: false, speech: true, enabled: true, apiKeyLast4: 'a1b2', models: [{ id: 'eleven_flash_v2_5', label: 'Flash v2.5', kind: 'speech' }, { id: 'eleven_multilingual_v2', label: 'Multilingual v2', kind: 'speech' }], defaultSpeech: true, defaultVoiceId: 'aria', defaultVoiceName: 'Aria', bots: { recognition: 0, speech: 12 } });
-const cartesia = () => provider({ id: 'v-cartesia', adapter: 'cartesia', name: 'Cartesia', recognition: false, speech: true, enabled: true, apiKeyLast4: '77de', models: [{ id: 'sonic-3', label: 'Sonic 3', kind: 'speech' }], bots: { recognition: 0, speech: 2 } });
+  provider({ id: 'v-eleven', adapter: 'elevenlabs', name: 'ElevenLabs', recognition: false, speech: true, enabled: true, apiKeyLast4: 'a1b2', models: [{ id: 'eleven_flash_v2_5', label: 'Flash v2.5', kind: 'speech' }, { id: 'eleven_multilingual_v2', label: 'Multilingual v2', kind: 'speech' }], defaultSpeech: true, defaultVoiceId: 'aria', defaultVoiceName: 'Aria', bots: { recognition: 0, speech: 12, total: 12 } });
+const cartesia = () => provider({ id: 'v-cartesia', adapter: 'cartesia', name: 'Cartesia', recognition: false, speech: true, enabled: true, apiKeyLast4: '77de', models: [{ id: 'sonic-3', label: 'Sonic 3', kind: 'speech' }], bots: { recognition: 0, speech: 2, total: 2 } });
 const deepgram = () => provider({ id: 'v-deepgram', adapter: 'deepgram', name: 'Deepgram', recognition: true, speech: false, enabled: false, apiKeyLast4: 'c044', models: [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }] });
 const VOICES = [
   { voiceId: 'aria', name: 'Aria', description: 'Calm and clear.', languages: ['en', 'ar'], previewUrl: 'https://x.test/a.mp3' },

@@ -33,7 +33,7 @@ export interface ServerVoiceProvider {
   defaultSpeech: boolean;
   defaultVoiceId: string | null;
   defaultVoiceName: string | null;
-  bots: { recognition: number; speech: number };
+  bots: { recognition: number; speech: number; total: number };
 }
 
 /** The companies a super admin can add, grouped by what each does in Universe (the game's connectors: Soniox and Deepgram listen, ElevenLabs and Cartesia speak). */
@@ -69,8 +69,8 @@ export function withStartingModel(models: VoiceModel[], job: VoiceJob, id: strin
 
 export const bots = (value: number) => `${value.toLocaleString('en')} ${value === 1 ? 'bot' : 'bots'}`;
 
-/** How many bots with voice on use a provider, for either job. */
-export const botsOn = (provider: Pick<ServerVoiceProvider, 'bots'>) => provider.bots.recognition + provider.bots.speech;
+/** How many bots with voice on use a provider, for either job; one that does both counts once. */
+export const botsOn = (provider: Pick<ServerVoiceProvider, 'bots'>) => provider.bots.total;
 
 type Answer<T> = { ok: true; data: T } | { ok: false; error: string; status: number };
 

@@ -218,9 +218,12 @@ const SHOWN_VOICES = 100;
 function useSamples() {
   const audio = useRef<HTMLAudioElement | null>(null);
   const link = useRef<string | null>(null);
+  // Goes up with every start and stop: a sample that is still being fetched when it changes is dropped, never played
+  const turn = useRef(0);
   const [playing, setPlaying] = useState<string | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   function stop() {
+    turn.current += 1;
     audio.current?.pause();
     audio.current = null;
     if (link.current) URL.revokeObjectURL(link.current);
@@ -232,22 +235,32 @@ function useSamples() {
     if (playing === voice.voiceId) return stop();
     stop();
     if (!voice.previewUrl) return;
+    const mine = turn.current;
     setFailed(null);
     setPlaying(voice.voiceId);
+    let fetched: string | null = null;
     try {
       let src = voice.previewUrl;
       if (src.startsWith('/')) {
         const { authenticatedFetch } = await import('@/lib/client-auth');
         const response = await authenticatedFetch(src);
         if (!response.ok) throw new Error('sample');
-        link.current = URL.createObjectURL(await response.blob());
-        src = link.current;
+        const blob = await response.blob();
+        if (mine !== turn.current) return;
+        fetched = URL.createObjectURL(blob);
+        src = fetched;
       }
       const element = new Audio(src);
       element.onended = stop;
       audio.current = element;
+      link.current = fetched;
       await element.play();
     } catch {
+      // Stopped, or another sample started, while this one was loading: nothing to say
+      if (mine !== turn.current) {
+        if (fetched && link.current !== fetched) URL.revokeObjectURL(fetched);
+        return;
+      }
       stop();
       setFailed(`Couldn’t play ${voice.name}’s sample.`);
     }
