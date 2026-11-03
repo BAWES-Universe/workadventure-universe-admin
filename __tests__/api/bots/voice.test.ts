@@ -31,6 +31,8 @@ let draft: Row | null;
 let revisions: Row[];
 let providers: Row[];
 let lends: Row[];
+// What lent keys paid for this month: { providerId, botId, replies }
+let usage: Row[];
 // What a super admin saved as the server's voice limits (app_settings), or nothing
 let savedVoiceLimits: Row | null;
 
@@ -51,6 +53,7 @@ const fakeDb = () => {
       update: async ({ data }: { data: Row }) => Object.assign(bot, data),
     },
     appSetting: { findUnique: async () => (savedVoiceLimits ? { value: savedVoiceLimits } : null) },
+    voiceKeyUsage: { findMany: async () => usage },
     botVoiceDraft: {
       findUnique: async () => draft,
       upsert: async ({ create, update }: { create: Row; update: Row }) => (draft = { ...(draft ?? create), ...update, updatedAt: new Date('2026-10-30T12:00:00Z') }),
@@ -71,9 +74,10 @@ const fakeDb = () => {
         for (const p of hit) applyData(p, data);
         return { count: hit.length };
       },
-      findMany: async ({ where }: { where: { id?: { in: string[] }; ownerId?: string } }) =>
+      findMany: async ({ where }: { where: Row }) =>
         providers
-          .filter((p) => (where.id ? where.id.in.includes(p.id) : p.ownerId === where.ownerId))
+          // By id, the lent keys of a maker (the `lends` filter is answered by the join below), or the server's own providers
+          .filter((p) => (where.id ? where.id.in.includes(p.id) : where.lends ? p.ownerId === where.ownerId : matches({ ownerId: null, ...p }, where)))
           .map((p) => ({ ownerId: null, createdAt: new Date('2026-10-30T10:00:00Z'), adapter: 'x', apiKeyLast4: null, ...p, lends: lends.filter((l) => l.providerId === p.id && l.universeId === 'uni-1') })),
     },
   };
@@ -121,6 +125,7 @@ beforeEach(() => {
   revisions = [];
   providers = [provider(), voice()];
   lends = [];
+  usage = [];
   savedVoiceLimits = null;
   fakeDb();
   (getSessionUser as jest.Mock).mockReset().mockResolvedValue({ id: 'u-sara', email: 'sara@example.com' });
@@ -166,7 +171,26 @@ describe('a bot that has never had voice', () => {
       draft: { profile: {}, updatedAt: null },
       revisions: [],
       lentKeys: [],
+      // No server provider is the default yet, so Universe AI has nothing to speak or listen with
+      universeAi: { recognition: null, speech: null },
+      voiceLimits: expect.objectContaining({ revision: 0, limits: expect.objectContaining({ turnSeconds: 180 }), window: expect.objectContaining({ hours: 5 }) }),
     });
+  });
+
+  it('says what Universe AI starts from: its default providers, their first model, and the voice a super admin set', async () => {
+    providers = [
+      provider({ defaultRecognition: true, models: [{ id: 'nova', label: 'Nova', kind: 'recognition' }, { id: 'nova-2', kind: 'recognition' }] }),
+      voice({ defaultSpeech: true, defaultVoiceId: 'nora', defaultVoiceName: 'Nora', models: [{ id: 'v4', label: 'Eleven v4', kind: 'speech' }] }),
+    ];
+    const { universeAi } = await (await call(getVoice, 'GET')).json();
+    expect(universeAi.recognition).toEqual({ providerId: 'ears', adapter: 'x', name: 'Deepgram', model: 'nova', models: [{ id: 'nova', label: 'Nova' }, { id: 'nova-2', label: null }] });
+    expect(universeAi.speech).toEqual({ providerId: 'mouth', adapter: 'x', name: 'ElevenLabs', model: 'v4', models: [{ id: 'v4', label: 'Eleven v4' }], defaultVoice: { voiceId: 'nora', voiceName: 'Nora' } });
+    // Without a default voice the page takes the first one the provider lists; a default that is off or has no key is not offered
+    providers = [provider({ defaultRecognition: true, enabled: false }), voice({ defaultSpeech: true })];
+    expect((await (await call(getVoice, 'GET')).json()).universeAi).toEqual({ recognition: null, speech: expect.objectContaining({ providerId: 'mouth', defaultVoice: null }) });
+    providers = [provider({ defaultRecognition: true, apiKeyEncrypted: null }), voice({ defaultSpeech: true, models: [{ id: 'v4', kind: 'listen-only' }] })];
+    expect((await (await call(getVoice, 'GET')).json()).universeAi).toEqual({ recognition: null, speech: null });
+    expect(JSON.stringify(await (await call(getVoice, 'GET')).json())).not.toContain('iv:tag:data');
   });
 
   it('does not speak, because voice is off', async () => {
@@ -403,11 +427,41 @@ describe('a bot that speaks on a key its maker lent', () => {
     expect(bot.voiceEnabled).toBe(true);
   });
 
+  it('tells the bot page whether a lent key works, what it paid for this month (all its bots, and this one) and its limits', async () => {
+    providers = [
+      provider(),
+      key({ downSince: new Date('2026-10-30T10:30:00Z'), downReason: 'credit', voiceLimits: { replySeconds: 30 } }),
+    ];
+    lends = [lend(null)];
+    usage = [
+      { providerId: 'mouth', botId: 'bot-1', replies: 3 },
+      { providerId: 'mouth', botId: 'bot-2', replies: 4 },
+      { providerId: 'elsewhere', botId: 'bot-1', replies: 9 },
+    ];
+    const [lent] = (await (await call(getVoice, 'GET')).json()).lentKeys;
+    expect(lent.health).toEqual({ status: 'down', downSince: '2026-10-30T10:30:00.000Z', downReason: 'credit' });
+    expect(lent.month).toEqual({ voiceReplies: 7, botVoiceReplies: 3 });
+    expect(lent.limits.replySeconds).toEqual({ value: 30, recommended: expect.any(Number), changed: true });
+  });
+
   it('lists to the bot\'s managers only the keys its maker lent here, with only the models the lend allows', async () => {
     providers = [provider(), key({ models: [{ id: 'v4', kind: 'speech' }, { id: 'v5', kind: 'speech' }], apiKeyLast4: '9f2a' }), key({ id: 'elsewhere', ownerId: 'u-other' })];
     lends = [lend(['speech:v4']), { providerId: 'elsewhere', universeId: 'uni-1', models: null }];
     const body = await (await call(getVoice, 'GET')).json();
-    expect(body.lentKeys).toEqual([{ id: 'mouth', adapter: 'x', name: 'ElevenLabs', recognition: false, speech: true, last4: '9f2a', models: [{ id: 'v4', kind: 'speech' }] }]);
+    expect(body.lentKeys).toEqual([
+      {
+        id: 'mouth',
+        adapter: 'x',
+        name: 'ElevenLabs',
+        recognition: false,
+        speech: true,
+        last4: '9f2a',
+        models: [{ id: 'v4', kind: 'speech' }],
+        health: { status: 'working', downSince: null, downReason: null },
+        month: { voiceReplies: 0, botVoiceReplies: 0 },
+        limits: expect.objectContaining({ replySeconds: expect.objectContaining({ changed: false }) }),
+      },
+    ]);
     expect(JSON.stringify(body)).not.toContain('iv:tag:data');
     (lendAccess as jest.Mock).mockResolvedValue(null);
     expect((await (await call(getVoice, 'GET')).json()).lentKeys).toEqual([]);

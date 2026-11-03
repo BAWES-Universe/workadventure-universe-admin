@@ -1623,6 +1623,10 @@ model VoiceProvider {
   models             Json     @default("[]")
   defaultRecognition Boolean  @default(false) @map("default_recognition")
   defaultSpeech      Boolean  @default(false) @map("default_speech")
+  // The voice Universe AI speaks with when this is the default speaking provider and a bot is turned on without a key of its own
+  // (game #1668); null = the first voice the provider lists. Only a provider that speaks has one.
+  defaultVoiceId     String?  @map("default_voice_id") @db.VarChar(255)
+  defaultVoiceName   String?  @map("default_voice_name") @db.VarChar(255)
   createdById        String?  @map("created_by_id")
   // Whose key this is (#749). Null = a provider the super admin runs for the whole server, which is every row there was before
   // personal voice keys. Anything that lists or reads providers for the server must keep only ownerId = null.
