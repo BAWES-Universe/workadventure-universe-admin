@@ -158,7 +158,7 @@ export function mergePage(files: FoundFile[], artifacts: FoundArtifact[], offset
 }
 
 /**
- * The artifacts this person may find from here, by #655's rule, with the same filters as files. `titled` is the ones whose
+ * The artifacts this bot may find from here (this chat's, and the ones it made for this person), with the same filters as files. `titled` is the ones whose
  * title has the words (artifactTitleSql), or null with no words.
  */
 function artifactWhere(input: FindInput, who: Who, titled: string[] | null, now: Date) {
@@ -166,7 +166,8 @@ function artifactWhere(input: FindInput, who: Who, titled: string[] | null, now:
   const until = dateOf(input.until);
   return {
     AND: [
-      { OR: [{ chatKind: input.chat.kind, chatRef: input.chat.ref }, ...(who.userId ? [{ ownerId: who.userId }] : [])] },
+      // This chat's, and what this bot made for the person in other chats: never what they made with other bots (game #1781)
+      { OR: [{ chatKind: input.chat.kind, chatRef: input.chat.ref }, ...(who.userId ? [{ ownerId: who.userId, makerBotId: input.botId }] : [])] },
       // A guest's artifact past its day is gone for everyone
       { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
       ...(titled === null ? [] : [{ id: { in: titled } }]),
@@ -206,7 +207,7 @@ export async function findFiles(input: FindInput, ctx: SearchContext = defaultCo
     );
     let titled: string[] | null = null;
     if (wantsArtifacts(input) && words.length > 0) {
-      const byTitle = artifactTitleSql({ userId: who.userId, chatKind: input.chat.kind, chatRef: input.chat.ref }, words, mode);
+      const byTitle = artifactTitleSql({ botId: input.botId, userId: who.userId, chatKind: input.chat.kind, chatRef: input.chat.ref }, words, mode);
       titled = (await sql<{ id: string }>(byTitle.sql, byTitle.values)).map((row) => row.id);
     }
     const artifactsWhere = artifactWhere(input, who, titled, ctx.now);

@@ -163,10 +163,17 @@ export const makeSchema = z
 const MAX_VERSION_NUMBER = 2147483647;
 const versionNumber = z.number().int().min(1).max(MAX_VERSION_NUMBER);
 
+/**
+ * The artifacts the person pointed at in their own message (game #1781): the one way a bot reaches another bot's work.
+ * A few at most; a message with more links than that has no use for the rest.
+ */
+const referencedIds = z.array(z.string().trim().min(1).max(255)).max(20).nullish();
+
 export const changeSchema = z
   .object({
     ...botCall,
     baseVersion: versionNumber.nullish(),
+    referencedArtifactIds: referencedIds,
     edits: z
       .array(z.object({ old: text(LARGEST_ARTIFACT_BYTES), new: text(LARGEST_ARTIFACT_BYTES), all: z.boolean().optional() }).strict())
       .max(50)
@@ -179,7 +186,7 @@ export const changeSchema = z
   })
   .strict();
 
-export const readSchema = z.object({ ...botCall, version: versionNumber.nullish() }).strict();
+export const readSchema = z.object({ ...botCall, version: versionNumber.nullish(), referencedArtifactIds: referencedIds }).strict();
 
 export const inChatSchema = z.object(botCall).strict();
 

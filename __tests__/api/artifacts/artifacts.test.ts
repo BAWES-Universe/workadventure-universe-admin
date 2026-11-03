@@ -320,7 +320,8 @@ describe('artifacts', () => {
       const made = await makeApp();
       await call(share, { viewer: viewer(person('owner')), openScope: 'link', changeScope: 'openers' }, { id: made.artifact.id, method: 'PUT', ...asGame });
       const elsewhere = await call(change, { botId: 'bot1', person: person('friend'), chat: { kind: 'nearby', ref: 'other-bubble' }, content: '<p>x</p>' }, { id: made.artifact.id });
-      expect(elsewhere).toMatchObject({ status: 403, body: { error: 'change_not_allowed' } });
+      // Not in the chat it was made in and not the owner: as if it were not there
+      expect(elsewhere).toMatchObject({ status: 404, body: { error: 'not_found' } });
       const ownerElsewhere = await call(change, { botId: 'bot1', person: person('owner'), chat: DM, content: '<p>x</p>' }, { id: made.artifact.id });
       expect(ownerElsewhere.status).toBe(200);
     });
@@ -646,20 +647,72 @@ describe('artifacts', () => {
         expect((await call(change, { ...friend, content: '<p>x</p>' }, { id })).status).toBe(200);
       });
 
-      it("lets the owner's other bots reach it from their own chat (a direct message with another bot), by its id", async () => {
+      it("keeps one bot's artifacts out of another bot's chats with the same person, unless the person pointed at one (game #1781)", async () => {
         const made = await makeApp();
         const id = made.artifact.id;
         const inDm = { botId: 'bot2', person: person('owner'), chat: DM };
-        expect((await call(read, inDm, { id })).status).toBe(200);
-        expect((await call(change, { ...inDm, content: '<p>x</p>' }, { id })).status).toBe(200);
-        // It was made in the bubble, and it is the owner's, so their direct message lists it too
-        expect((await call(inChat, inDm)).body.artifacts.map((a: { id: string }) => a.id)).toEqual([id]);
+        // Not listed, not read, not changed: as if it were not there
+        expect((await call(inChat, inDm)).body.artifacts).toEqual([]);
+        expect((await call(read, inDm, { id })).status).toBe(404);
+        expect((await call(change, { ...inDm, content: '<p>x</p>' }, { id })).status).toBe(404);
+        expect((await call(read, { ...inDm, referencedArtifactIds: [] }, { id })).status).toBe(404);
+        expect((await call(read, { ...inDm, referencedArtifactIds: ['some-other-id'] }, { id })).status).toBe(404);
+        expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(1);
+        // The person pasted its link into this chat: bot2 opens it and changes it for them
+        const pointed = { ...inDm, referencedArtifactIds: [id] };
+        expect((await call(read, pointed, { id })).status).toBe(200);
+        expect((await call(change, { ...pointed, content: '<p>x</p>' }, { id })).status).toBe(200);
+        expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(2);
+        // Pointing does not widen the list
+        expect((await call(inChat, inDm)).body.artifacts).toEqual([]);
+        // The maker finds its own work in a direct message, with no pointing
+        const maker = { botId: 'bot1', person: person('owner'), chat: DM };
+        expect((await call(inChat, maker)).body.artifacts.map((a: { id: string }) => a.id)).toEqual([id]);
+        expect((await call(read, maker, { id })).status).toBe(200);
+        expect((await call(change, { ...maker, content: '<p>y</p>' }, { id })).status).toBe(200);
       });
 
-      it("lets someone's bot read an artifact shared by link from any chat, but not change it", async () => {
+      it('does not let a pointed-at id open what the rules would not: someone else\'s artifact stays closed, and a change stays in its chat', async () => {
         const made = await makeApp();
         const id = made.artifact.id;
-        const elsewhere = { botId: 'bot2', person: person('stranger'), chat: OTHER_BUBBLE };
+        const stranger = { botId: 'bot2', person: person('stranger'), chat: OTHER_BUBBLE, referencedArtifactIds: [id] };
+        expect((await call(read, stranger, { id })).status).toBe(404);
+        expect((await call(change, { ...stranger, content: '<p>x</p>' }, { id })).status).toBe(404);
+        await sharing(id, { openScope: 'link', changeScope: 'openers' });
+        expect((await call(read, stranger, { id })).status).toBe(200);
+        expect((await call(change, { ...stranger, content: '<p>x</p>' }, { id })).status).toBe(403);
+      });
+
+      it('finds nothing by id for a guest, a deleted maker bot, or an artifact that has run out, even when pointed at', async () => {
+        const made = await makeApp();
+        const id = made.artifact.id;
+        const guestMade = await makeApp(guest, NEARBY, { title: 'Guest' });
+        // The maker bot is gone: its artifacts are reached only by pointing (or from the chat they were made in)
+        db.bots.splice(db.bots.findIndex((bot) => bot.id === 'bot1'), 1);
+        const inDm = { botId: 'bot2', person: person('owner'), chat: DM };
+        expect((await call(read, inDm, { id })).status).toBe(404);
+        expect((await call(read, { ...inDm, referencedArtifactIds: [id] }, { id })).status).toBe(200);
+        // A guest owns nothing, so there is nothing of theirs to point at from another chat
+        const guestElsewhere = { botId: 'bot2', person: guest, chat: OTHER_BUBBLE, referencedArtifactIds: [guestMade.artifact.id] };
+        expect((await call(read, guestElsewhere, { id: guestMade.artifact.id })).status).toBe(404);
+        // Past its day it is gone for everyone, pointed at or not
+        db.artifacts.find((a) => a.id === id)!.expiresAt = new Date(Date.now() - 1000);
+        expect((await call(read, { ...inDm, referencedArtifactIds: [id] }, { id })).status).toBe(404);
+      });
+
+      it('takes at most a few pointed-at ids, each a plain id', async () => {
+        const made = await makeApp();
+        const base = { botId: 'bot1', person: person('owner'), chat: NEARBY };
+        expect((await call(read, { ...base, referencedArtifactIds: Array.from({ length: 21 }, (_, i) => `id-${i}`) }, { id: made.artifact.id })).status).toBe(400);
+        expect((await call(read, { ...base, referencedArtifactIds: [''] }, { id: made.artifact.id })).status).toBe(400);
+        expect((await call(read, { ...base, referencedArtifactIds: 'x' }, { id: made.artifact.id })).status).toBe(400);
+        expect((await call(read, { ...base, referencedArtifactIds: null }, { id: made.artifact.id })).status).toBe(200);
+      });
+
+      it("lets someone's bot read an artifact shared by link from any chat when the person pasted it, but not change it", async () => {
+        const made = await makeApp();
+        const id = made.artifact.id;
+        const elsewhere = { botId: 'bot2', person: person('stranger'), chat: OTHER_BUBBLE, referencedArtifactIds: [id] };
         expect((await call(read, elsewhere, { id })).status).toBe(404);
         await sharing(id, { openScope: 'link', changeScope: 'openers' });
         expect((await call(read, elsewhere, { id })).status).toBe(200);
@@ -681,10 +734,14 @@ describe('artifacts', () => {
         const made = await makeApp();
         const copied = await call(copy, { viewer: viewer(person('friend')) }, { id: made.artifact.id, ...asGame });
         const copyId = copied.body.artifact.id;
-        const asOwner = { botId: 'bot2', person: person('friend'), chat: DM };
+        // The copy is the friend's, made from Scout's artifact: Scout finds it, another bot only when pointed at
+        const asOwner = { botId: 'bot1', person: person('friend'), chat: DM };
         expect((await call(read, asOwner, { id: copyId })).status).toBe(200);
         expect((await call(change, { ...asOwner, content: '<p>mine</p>' }, { id: copyId })).status).toBe(200);
-        expect((await call(read, { ...asOwner, person: person('owner') }, { id: copyId })).status).toBe(404);
+        const otherBot = { ...asOwner, botId: 'bot2' };
+        expect((await call(read, otherBot, { id: copyId })).status).toBe(404);
+        expect((await call(read, { ...otherBot, referencedArtifactIds: [copyId] }, { id: copyId })).status).toBe(200);
+        expect((await call(read, { ...asOwner, person: person('owner'), referencedArtifactIds: [copyId] }, { id: copyId })).status).toBe(404);
       });
     });
   });

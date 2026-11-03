@@ -12,6 +12,13 @@ game (open, versions, code, share, restore, copy, delete).
   link). The owner always can. Someone who may not open it hears `404`, the same as for an artifact that does not exist.
 - **Who can ask for changes** (`changeScope`): `owner` (the default) or `openers` (everyone who can open it, in the chat
   it was made in). The owner may ask in any chat they have with a bot; nobody else asks from another chat.
+- **One bot's work is not another bot's context (game #1781, Orbit #790):** by id, a bot reaches the artifacts made in the
+  chat it is in, and the owner's artifacts this bot made (`makerBotId`) in any chat. Another bot's artifact in another
+  chat is reached only when the call lists its id in `referencedArtifactIds`, which the bot server fills from what the
+  person themselves wrote (a pasted artifact link, or a card they replied to), never from what a bot or a tool result
+  mentioned. Anything else answers `404 not_found`, as for an artifact that is not there. The rules above still apply on
+  top: a pasted link opens someone else's artifact only when its owner shared it by link, and changes stay with the chat it
+  was made in. The search over files and the in-chat list show the same: this chat's, and what this bot made for the person.
 - **Versions:** every change is a new version with what changed and who asked. Nothing is overwritten. Restore makes a
   new version out of an old one. Up to 200 versions; one version is up to 512 KB.
 - **Make a copy:** the signed-in viewer's own artifact (version 1 = the version they pick), in no chat, so only they open
@@ -42,9 +49,9 @@ both use for that chat; a viewer is "in the chat" when the game says so for the 
 | Route | Body | Answer |
 | --- | --- | --- |
 | `POST /api/artifacts` | `title`, `kind` (`app`, `page`, `markdown`, `svg`), `content`, `summary?` | `{ artifact, version, hidden }` |
-| `POST /api/artifacts/:id/change` | `edits: [{ old, new, all? }]` **or** `content`; `summary?`, `title?`, `baseVersion?`, `dropMedia?` | `{ artifact, version, hidden }` |
-| `POST /api/artifacts/:id/read` | `version?` (the latest by default) | `{ artifact, version, content, hidden }` |
-| `POST /api/artifacts/in-chat` | none beyond the three above | `{ artifacts, hidden }`: what was made in this chat that the person may open, plus the person's own artifacts from their other chats; this chat's come first, then the others, each group newest change first (up to 20 in all) |
+| `POST /api/artifacts/:id/change` | `edits: [{ old, new, all? }]` **or** `content`; `summary?`, `title?`, `baseVersion?`, `dropMedia?`, `referencedArtifactIds?` (up to 20) | `{ artifact, version, hidden }` |
+| `POST /api/artifacts/:id/read` | `version?` (the latest by default), `referencedArtifactIds?` (up to 20) | `{ artifact, version, content, hidden }` |
+| `POST /api/artifacts/in-chat` | none beyond the three above | `{ artifacts, hidden }`: what was made in this chat that the person may open, plus the artifacts this bot made for the person in their other chats; this chat's come first, then the others, each group newest change first (up to 20 in all) |
 
 **With media:** send `multipart/form-data` to `POST /api/artifacts` or `POST /api/artifacts/:id/change`: the same JSON
 as a `request` part, and one `media` part per file, its file name being the name the page uses. A change may send only
@@ -61,7 +68,7 @@ change made on the same version at the same moment.
 
 ## Game routes (`ADMIN_API_TOKEN`)
 
-Bodies carry `viewer: { person, inChat, chat }`: `inChat` says the person is in `chat` right now (the game vouches), and counts only when `chat` is the chat the artifact was made in. An artifact belongs to the person who asked, and a bot acts for the person talking to it: any bot in the chat may read or change it for the owner, or for someone in that chat when the owner allowed it, whichever bot made it. A bot never acts on its own across people or chats.
+Bodies carry `viewer: { person, inChat, chat }`: `inChat` says the person is in `chat` right now (the game vouches), and counts only when `chat` is the chat the artifact was made in. An artifact belongs to the person who asked, and a bot acts for the person talking to it: any bot in the chat may read or change it for the owner, or for someone in that chat when the owner allowed it, whichever bot made it. Outside that chat a bot reaches only what it made, or what the person pointed at (`referencedArtifactIds`, above). A bot never acts on its own across people or chats.
 
 | Route | Body | Answer |
 | --- | --- | --- |

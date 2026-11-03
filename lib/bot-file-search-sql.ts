@@ -167,15 +167,15 @@ export function fileHitsSql(fileIds: string[], query: string, anyQuery: string =
 }
 
 /**
- * The artifacts in reach (this chat's, and the person's own) whose title has the words, each anywhere in it, with Arabic
+ * The artifacts in reach (this chat's, and the ones this bot made for the person) whose title has the words, each anywhere in it, with Arabic
  * marks left out of the title as they are of the words ("مرحبا" finds "مَرْحَبًا"). The words are letters and digits only.
  */
-export function artifactTitleSql(scope: { userId: string | null; chatKind: string; chatRef: string }, words: string[], mode: 'all' | 'any'): { sql: string; values: unknown[] } {
+export function artifactTitleSql(scope: { botId: string; userId: string | null; chatKind: string; chatRef: string }, words: string[], mode: 'all' | 'any'): { sql: string; values: unknown[] } {
   return {
-    values: [scope.chatKind, scope.chatRef, scope.userId, words.map((word) => `%${word}%`)],
+    values: [scope.chatKind, scope.chatRef, scope.userId, words.map((word) => `%${word}%`), scope.botId],
     sql: `
       SELECT id FROM artifacts
-      WHERE ((chat_kind = $1 AND chat_ref = $2) OR ($3::text IS NOT NULL AND owner_id = $3::text))
+      WHERE ((chat_kind = $1 AND chat_ref = $2) OR ($3::text IS NOT NULL AND owner_id = $3::text AND maker_bot_id = $5::text))
         AND regexp_replace(title, '${ARABIC_MARKS_CLASS}', '', 'g') ILIKE ${mode === 'all' ? 'ALL' : 'ANY'} ($4::text[])`,
   };
 }
