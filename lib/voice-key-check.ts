@@ -84,3 +84,20 @@ export async function loadVoiceKeyModels(adapter: unknown, apiKey: unknown, enab
   if (models.length === 0) return { ok: false, reason: 'no-models', message: `${company.label} has no models set up here yet.` };
   return { ok: true, models };
 }
+
+/**
+ * Asks a company if it knows a key, with the same free call as "Load models" and nothing else: no model list and no check against
+ * which companies people may add. For a super admin setting up Universe's own key (#792): nothing is spoken or heard, so nothing is
+ * billed. The key is sent only to the company's own fixed address and is never logged or returned.
+ */
+export async function checkVoiceKeyWithCompany(adapter: unknown, apiKey: unknown): Promise<{ ok: true } | { ok: false; reason: 'refused' | 'unreachable' | 'bad-request'; message: string }> {
+  const company = voiceKeyCompanyInfo(adapter);
+  if (!company) return { ok: false, reason: 'bad-request', message: 'Pick a speech company from the list.' };
+  const key = typeof apiKey === 'string' ? apiKey.trim() : '';
+  if (!key) return { ok: false, reason: 'bad-request', message: `Paste the ${company.label} key first.` };
+  if (!KEY_CHARACTERS.test(key)) return { ok: false, reason: 'bad-request', message: KEY_LOOKS_WRONG };
+  const verdict = await ask(company, key);
+  if (verdict === 'refused') return { ok: false, reason: 'refused', message: `${company.label} turned this key away. Check that you copied all of it.` };
+  if (verdict === 'unreachable') return { ok: false, reason: 'unreachable', message: `Couldn’t reach ${company.label}. Try again in a moment.` };
+  return { ok: true };
+}

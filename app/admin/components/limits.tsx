@@ -23,7 +23,7 @@ import {
   type ReplyLimits,
   type ServerLimits,
 } from '@/lib/bot-limit-values';
-import { VOICE_RANGES, type VoiceKeyLimitName, type VoiceKeyLimitValues } from '@/lib/voice-limit-values';
+import { VOICE_LIMITS_RECOMMENDED, VOICE_RANGES, textReserve, type VoiceKeyLimitName, type VoiceKeyLimitValues, type VoiceLimits } from '@/lib/voice-limit-values';
 
 /** One limit that shapes bot replies or artifacts (#666): what it is, its value, and the recommended one. */
 export interface LimitOption {
@@ -684,6 +684,66 @@ export function voiceKeyLimits(values: VoiceKeyLimitValues): Limit[] {
   }));
 }
 
+/** The steps of one voice limit with the value set now among them, so the sheet always opens on a choice that is there. */
+function withCurrent(steps: LimitOption[], value: number, label: (value: number) => string): LimitOption[] {
+  return steps.some((step) => step.value === value) ? steps : [...steps, { value, label: label(value), meaning: 'What is set now.' }];
+}
+
+/**
+ * The 7 voice limits a super admin sets for every voice bot (#740, shown under Limits in #792): the four a key's owner can also
+ * change on their key, then how long a person can keep talking without the bot's name, the share of replies kept for text and how
+ * many voice replies a guest gets. `fair` is the fair usage window the last two are measured in.
+ */
+export function voiceServerLimits(values: VoiceLimits, fair: { signedIn: number; guest: number }): Limit[] {
+  const recommended = VOICE_LIMITS_RECOMMENDED;
+  const keyRows = voiceKeyLimits(
+    Object.fromEntries((['turnSeconds', 'replyCharacters', 'replySeconds', 'listenMinutesPerDay'] as const).map((name) => [name, { value: values[name], recommended: recommended[name], changed: values[name] !== recommended[name] }])) as VoiceKeyLimitValues
+  );
+  const oneIn = (value: number) => `1 in ${value}`;
+  const kept = (share: number) => `${fair.signedIn} replies keep ${textReserve(fair.signedIn, share)} for text.`;
+  const own = (id: keyof VoiceLimits, row: Omit<Limit, 'value' | 'recommended' | 'range' | 'options'> & { steps: LimitOption[]; name: (value: number) => string }): Limit => {
+    const { steps, name, ...rest } = row;
+    return { ...rest, value: values[id], recommended: recommended[id], options: [...withCurrent(voiceOptions(steps, recommended[id], name), values[id], name)].sort((a, b) => a.value - b.value), range: { ...VOICE_RANGES[id], whole: true } };
+  };
+  return [
+    ...keyRows,
+    own('followUpSeconds', {
+      id: 'followUpSeconds',
+      label: 'Keep talking without its name',
+      hint: 'After a bot answers, how long the person can carry on without saying its name.',
+      unit: 'seconds',
+      name: secondsLabel,
+      steps: [
+        { value: 15, label: '15 seconds', meaning: 'Quick back and forth.' },
+        { value: 30, label: '30 seconds', meaning: 'A natural pace.' },
+        { value: 60, label: '1 minute', meaning: 'A relaxed chat. The bot listens longer.' },
+      ],
+    }),
+    own('textReserveShare', {
+      id: 'textReserveShare',
+      label: 'Replies kept for text',
+      hint: `Of each person’s replies in a ${FAIR_USAGE_WINDOW_HOURS}-hour window, about 1 in this many stay for text. ${kept(values.textReserveShare)}`,
+      unit: 'replies',
+      fixedSteps: true,
+      name: oneIn,
+      steps: [3, 6, 10].map((share) => ({ value: share, label: oneIn(share), meaning: kept(share) })),
+    }),
+    own('guestVoiceReplies', {
+      id: 'guestVoiceReplies',
+      label: 'Voice replies for a guest',
+      hint: `Someone who isn’t signed in, every ${FAIR_USAGE_WINDOW_HOURS} hours, from their ${fair.guest} replies.`,
+      unit: 'replies',
+      name: (value) => (value === 0 ? 'None' : `${value} ${value === 1 ? 'reply' : 'replies'}`),
+      steps: [
+        { value: 0, label: 'None', meaning: 'Guests get text only.' },
+        { value: 1, label: '1 reply', meaning: 'A taste of voice.' },
+        { value: 3, label: '3 replies', meaning: 'A short conversation.' },
+        { value: 5, label: '5 replies', meaning: 'Half of a guest’s replies.' },
+      ],
+    }),
+  ];
+}
+
 /** The voice key card's one line: "Recommended: turns up to 3 minutes, replies up to 600 characters", or "Yours: …" once changed. */
 export function voiceKeyLimitsLine(values: VoiceKeyLimitValues): string {
   const rows = voiceKeyLimits(values);
@@ -738,7 +798,9 @@ export function useSaveVoiceKeyLimit() {
 export function UniverseAiLimits() {
   const { addToast } = useToast();
   const [limits, setLimits] = useState<ServerLimits | null>(null);
+  const [voice, setVoice] = useState<VoiceLimits | null>(null);
   const [failed, setFailed] = useState(false);
+  const [voiceFailed, setVoiceFailed] = useState(false);
   const [savingGuard, setSavingGuard] = useState(false);
 
   async function load() {
@@ -753,9 +815,34 @@ export function UniverseAiLimits() {
     }
   }
 
+  // The voice limits are a super admin's too (#792); they are read on their own, so a failure there doesn't hide the others
+  async function loadVoice() {
+    setVoiceFailed(false);
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/voice-limits');
+      if (!response.ok) throw new Error('load');
+      setVoice(((await response.json()) as { limits: VoiceLimits }).limits);
+    } catch {
+      setVoiceFailed(true);
+    }
+  }
+
   useEffect(() => {
     load();
+    loadVoice();
   }, []);
+
+  async function saveVoice(change: Record<string, unknown>): Promise<boolean> {
+    const result = await sendLimits('/api/admin/voice-limits', change);
+    if (!result.ok) {
+      addToast({ description: result.error, variant: 'error' });
+      return false;
+    }
+    setVoice((result.data as { limits: VoiceLimits }).limits);
+    addToast({ description: 'Saved', variant: 'success', duration: 2000 });
+    return true;
+  }
 
   async function save(change: Record<string, unknown>): Promise<boolean> {
     const result = await sendLimits('/api/admin/bot-limits', change);
@@ -800,6 +887,18 @@ export function UniverseAiLimits() {
           </Settings>
           <LimitGroup title="Files in chats, for all bots" limits={fileLimits(limits.files)} onChange={(id, value) => save({ files: { [id]: value } })} />
           <LimitGroup title="Fair usage" limits={fairUsageLimits(limits.fairUsage)} onChange={(id, value) => save({ fairUsage: { [id]: value } })} />
+          {voiceFailed ? (
+            <LoadError label="the voice limits" retry={loadVoice} />
+          ) : !voice ? (
+            <LoadingRows label="the voice limits" rows={2} />
+          ) : (
+            <LimitGroup
+              title="Voice, for all bots"
+              note="People with their own voice key can change the first four on their key."
+              limits={voiceServerLimits(voice, limits.fairUsage)}
+              onChange={(id, value) => saveVoice({ [id]: value })}
+            />
+          )}
         </>
       )}
     </section>

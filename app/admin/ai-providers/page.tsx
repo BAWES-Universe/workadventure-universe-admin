@@ -5,12 +5,13 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { BarChart3, Loader2, Plus, Sparkles } from 'lucide-react';
-import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, StatLine, count } from '../components/ds';
+import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, SectionHeader, StatLine, count } from '../components/ds';
 import { FormSheet } from '../components/form-sheet';
 import { EnabledPill, providerTypeLabel } from './components/provider-state';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import { useToast } from '@/components/ui/toast';
 import { UniverseAiLimits } from '../components/limits';
+import { VoiceSection } from './voice-section';
 
 interface AiProvider {
   providerId: string;
@@ -43,6 +44,8 @@ export default function AiProvidersPage() {
   const [makingDefault, setMakingDefault] = useState<AiProvider | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  // The voice part asks for super admin data, so it waits until this person is known to be one
+  const [allowed, setAllowed] = useState(false);
 
   useEffect(() => {
     checkAuth();
@@ -62,6 +65,7 @@ export default function AiProvidersPage() {
         replacePage('/admin');
         return;
       }
+      setAllowed(true);
       fetchProviders();
     } catch {
       router.push('/admin/login');
@@ -158,7 +162,7 @@ export default function AiProvidersPage() {
             <Button asChild className="h-11">
               <Link href="/admin/ai-providers/new">
                 <Plus className="mr-2 h-4 w-4" />
-                New provider
+                New text provider
               </Link>
             </Button>
             <Button asChild variant="outline" className="h-11">
@@ -182,11 +186,12 @@ export default function AiProvidersPage() {
             title="No AI providers yet."
             text="Add one so bots have a model to talk through."
             href="/admin/ai-providers/new"
-            action="New provider"
+            action="New text provider"
           />
         )
       ) : (
         <div className="grid min-w-0 gap-0.5">
+          <SectionHeader id="text" title="Text" />
           {providers.map((provider) => (
             <EntityRow
               key={provider.providerId}
@@ -242,6 +247,8 @@ export default function AiProvidersPage() {
           ))}
         </div>
       )}
+
+      {allowed && <VoiceSection />}
 
       <UniverseAiLimits />
 

@@ -14,14 +14,20 @@ kind one the provider does. The key is encrypted with `ENCRYPTION_KEY` and never
 
 | Route | What it does |
 | --- | --- |
-| `GET /api/admin/voice-providers` | `{ providers }`, never a key |
+| `GET /api/admin/voice-providers` | `{ providers }`, never a key. Each also has `bots: { recognition, speech, total }`: how many bots with voice on listen and speak with it, and how many bots use it at all (one that does both counts once) |
 | `POST /api/admin/voice-providers` | `{ adapter, name, recognition?, speech?, enabled?, endpoint?, region?, apiKey?, models? }`. Starts off. 201 with `{ provider }` |
 | `GET /api/admin/voice-providers/:id` | `{ provider }` |
 | `PATCH /api/admin/voice-providers/:id` | Changes only what is named. `apiKey: "..."` sets a key, `apiKey: null` takes it away. `defaultRecognition` / `defaultSpeech: true` takes the default from the provider that had it. `defaultVoiceId` (with `defaultVoiceName`, optional) is the voice Universe AI speaks with when a bot's maker turns voice on without a key of their own (game #1668); `null` takes it away. Only a provider that speaks can have one, a name needs its voice, and a new voice id without a name drops the old name. Unset, the bot page uses the first voice the provider lists |
 | `DELETE /api/admin/voice-providers/:id` | Removes a provider that is not a default |
+| `POST /api/admin/voice-providers/check` | `{ adapter, apiKey }` asks the company if it knows a key before a provider is added: one free call to the company's own address (the same one a person's own key gets), nothing spoken or heard, nothing billed. `{ ok: true }`, or `{ error }`: 422 turned away, 502 not reached, 400 not usable, 429 too many tries |
+| `POST /api/admin/voice-providers/:id/check` | The same check for the key a provider holds (409 when it has none) |
+| `GET /api/admin/voice-providers/:id/voices` | `{ voices: [{ voiceId, name, description, languages, previewUrl }] }`: the voices a provider that speaks lists with its company (free), for the starting voice, whether or not it is the default. 409 when the company's voices can't be listed here, 502 when it didn't answer |
+| `GET /api/admin/voice-providers/:id/voices/:voiceId/preview` | One voice's sample, for a company that keeps samples behind the key (a voice whose `previewUrl` is this path) |
+
+The model Universe AI starts a bot on is the first one the provider lists for that job, so the Universe AI page picks it by moving that model to the front of `models`.
 
 A default must be on, hold its key and do its job (409 when a change would break that, 400 when asked for it). A provider
-must listen, speak, or both. `endpoint` starts with `https://`.
+must listen, speak, or both. `endpoint` starts with `https://`, or `wss://` for a provider that only listens (Soniox and Deepgram listen on a websocket address); a provider that speaks needs `https://`.
 
 ## Bot server (service token)
 
