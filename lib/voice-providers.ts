@@ -158,6 +158,7 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
   return prisma.$transaction(async (tx) => {
     const row = await tx.voiceProvider.findUnique({ where: { id } });
     if (!row || row.ownerId !== null) throw new VoiceProviderRefused('Voice provider not found', 404);
+    const changesCompany = input.adapter !== undefined && input.adapter !== row.adapter;
     const next = {
       recognition: input.recognition ?? row.recognition,
       speech: input.speech ?? row.speech,
@@ -166,9 +167,14 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
       defaultSpeech: input.defaultSpeech ?? row.defaultSpeech,
       models: input.models ?? readModels(row.models),
       // The name goes with its voice: a new voice id without a name drops the old name, and no voice has no name
-      defaultVoiceId: input.defaultVoiceId === undefined ? row.defaultVoiceId : input.defaultVoiceId,
+      // A voice belongs to its company: a provider moved to another adapter loses it unless a new one comes with the change
+      defaultVoiceId: input.defaultVoiceId === undefined ? (changesCompany ? null : row.defaultVoiceId) : input.defaultVoiceId,
       defaultVoiceName:
-        input.defaultVoiceName !== undefined ? input.defaultVoiceName : input.defaultVoiceId !== undefined && input.defaultVoiceId !== row.defaultVoiceId ? null : row.defaultVoiceName,
+        input.defaultVoiceName !== undefined
+          ? input.defaultVoiceName
+          : (input.defaultVoiceId !== undefined && input.defaultVoiceId !== row.defaultVoiceId) || (input.defaultVoiceId === undefined && changesCompany)
+            ? null
+            : row.defaultVoiceName,
       hasKey: input.apiKey === undefined ? Boolean(row.apiKeyEncrypted) : input.apiKey !== null,
     };
     const problem = voiceProviderProblem(next);
@@ -189,7 +195,7 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
         enabled: next.enabled,
         defaultRecognition: next.defaultRecognition,
         defaultSpeech: next.defaultSpeech,
-        ...(input.defaultVoiceId !== undefined || input.defaultVoiceName !== undefined
+        ...(input.defaultVoiceId !== undefined || input.defaultVoiceName !== undefined || (changesCompany && row.defaultVoiceId)
           ? { defaultVoiceId: next.defaultVoiceId, defaultVoiceName: next.defaultVoiceId ? next.defaultVoiceName : null }
           : {}),
       },
