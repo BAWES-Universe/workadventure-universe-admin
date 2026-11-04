@@ -9,12 +9,15 @@
 import {
   BotActionError,
   DEFAULTS,
+  MAX_EXTENSIONS,
   argumentsFitScope,
+  cancelRequest,
   canonicalJson,
   claim,
   createRequest,
   decide,
   digestOf,
+  extendReview,
   finishAttempt,
   findGrant,
   readRequest,
@@ -537,6 +540,91 @@ describe('remembered approvals', () => {
     await decide(BOT, request.id, { actorKey: 'user:sara', revision: 1, decision: 'approveAndRemember', idleMinutes: 5, absoluteMinutes: 20 }, T0);
     expect(await findGrant(BOT, lookup(), at(minutes(4)))).not.toBeNull();
     expect(await findGrant(BOT, lookup(), at(minutes(6)))).toBeNull();
+  });
+});
+
+describe('closing one card with X', () => {
+  it('closes only that card, with nothing done and its own reason', async () => {
+    const first = await waiting();
+    const second = await waiting({ proposalKey: 'job1:turn1:call2' });
+    const result = await cancelRequest(BOT, first.id, { actorKey: 'user:sara', revision: 1 }, at(10));
+    expect(result.outcome).toBe('changed');
+    expect(result.action).toMatchObject({ status: 'closed', closedReason: 'cancelled', finishedAt: at(10), revision: 2 });
+    expect((await readRequest(BOT, second.id, at(11))).status).toBe('waiting');
+    expect(await claim(BOT, first.id, {}, at(12))).toMatchObject({ claimed: false, reason: 'closed' });
+  });
+
+  it('is only the asker’s to do', async () => {
+    const request = await waiting();
+    await failsWith(cancelRequest(BOT, request.id, { actorKey: 'user:omar', revision: 1 }, at(1)), 403, 'not_requester');
+    expect((await readRequest(BOT, request.id, at(2))).status).toBe('waiting');
+  });
+
+  it('gives one result for a double tap and for a tap that lost to an approval', async () => {
+    const request = await waiting();
+    const results = await Promise.all([
+      cancelRequest(BOT, request.id, { actorKey: 'user:sara', revision: 1 }, at(10)),
+      cancelRequest(BOT, request.id, { actorKey: 'user:sara', revision: 1 }, at(10)),
+    ]);
+    expect(results.map((r) => r.outcome).sort()).toEqual(['already_decided', 'changed']);
+
+    const other = await waiting({ proposalKey: 'job2:call1' });
+    await decide(BOT, other.id, { actorKey: 'user:sara', revision: 1, decision: 'approve' }, at(10));
+    const late = await cancelRequest(BOT, other.id, { actorKey: 'user:sara', revision: 1 }, at(11));
+    expect(late.outcome).toBe('already_decided');
+    expect(late.action.status).toBe('approved');
+  });
+
+  it('is turned away after the card’s time, by the server clock', async () => {
+    const request = await waiting();
+    const result = await cancelRequest(BOT, request.id, { actorKey: 'user:sara', revision: 1 }, at(minutes(DEFAULTS.reviewMinutes) + 1));
+    expect(result.outcome).toBe('expired');
+    expect(result.action).toMatchObject({ status: 'closed', closedReason: 'expired' });
+  });
+});
+
+describe('more time on a waiting card', () => {
+  it('gives another full wait from now and goes up a revision, without approving anything', async () => {
+    const request = await waiting();
+    const result = await extendReview(BOT, request.id, { actorKey: 'user:sara', revision: 1 }, at(minutes(9)));
+    expect(result.outcome).toBe('changed');
+    expect(result.action).toMatchObject({ status: 'waiting', revision: 2, approvedAt: null, reviewExpiresAt: at(minutes(9 + DEFAULTS.reviewMinutes)) });
+  });
+
+  it('uses the bot’s own wait and never makes a card shorter', async () => {
+    const request = await waiting({ reviewMinutes: 30 });
+    const result = await extendReview(BOT, request.id, { actorKey: 'user:sara', revision: 1, reviewMinutes: 5 }, at(minutes(2)));
+    expect(result.action.reviewExpiresAt).toEqual(at(minutes(30)));
+  });
+
+  it('can be asked for ten times and then says so', async () => {
+    const request = await waiting();
+    let revision = 1;
+    for (let i = 0; i < MAX_EXTENSIONS; i++) {
+      const result = await extendReview(BOT, request.id, { actorKey: 'user:sara', revision }, at(minutes(i)));
+      expect(result.outcome).toBe('changed');
+      revision = result.action.revision;
+    }
+    await failsWith(extendReview(BOT, request.id, { actorKey: 'user:sara', revision }, at(minutes(MAX_EXTENSIONS))), 409, 'no_more_time');
+  });
+
+  it('is only the asker’s to ask, and not for a card that is gone or answered', async () => {
+    const request = await waiting();
+    await failsWith(extendReview(BOT, request.id, { actorKey: 'user:omar', revision: 1 }, at(1)), 403, 'not_requester');
+
+    await decide(BOT, request.id, { actorKey: 'user:sara', revision: 1, decision: 'approve' }, at(2));
+    expect((await extendReview(BOT, request.id, { actorKey: 'user:sara', revision: 1 }, at(3))).outcome).toBe('already_decided');
+
+    const old = await waiting({ proposalKey: 'job2:call1' });
+    const late = await extendReview(BOT, old.id, { actorKey: 'user:sara', revision: 1 }, at(minutes(DEFAULTS.reviewMinutes) + 1));
+    expect(late.outcome).toBe('expired');
+  });
+
+  it('is turned away when it carries a revision that is no longer the card’s', async () => {
+    const request = await waiting();
+    await extendReview(BOT, request.id, { actorKey: 'user:sara', revision: 1 }, at(1));
+    const stale = await extendReview(BOT, request.id, { actorKey: 'user:sara', revision: 1 }, at(2));
+    expect(stale.outcome).toBe('already_decided');
   });
 });
 

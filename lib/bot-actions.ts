@@ -401,6 +401,72 @@ export async function supersedeWaiting(
   });
 }
 
+/** How many times a person can ask for more time on one card. Each gives another full wait. */
+export const MAX_EXTENSIONS = 10;
+
+export type CardChangeResult =
+  | { outcome: 'changed'; action: ActionView }
+  /** Someone else's tap, an expiry or a replacement got there first; `action` shows what it is now. */
+  | { outcome: 'already_decided' | 'expired'; action: ActionView };
+
+/**
+ * The asker closes one card with X: nothing is done. Only a request still waiting, at the revision the card showed, and
+ * only the person who asked. It is the same conditional close a decline uses, with its own reason, so the bot can tell
+ * "Don't" (which it acknowledges) from a card that was closed quietly. Other cards of theirs stay as they are.
+ */
+export async function cancelRequest(
+  botId: string,
+  id: string,
+  input: { actorKey: string; revision: number },
+  now: Date = new Date(),
+): Promise<CardChangeResult> {
+  return prisma.$transaction(async (tx) => {
+    const row = await load(tx, botId, id);
+    if (row.requesterKey !== input.actorKey) {
+      throw new BotActionError(403, 'not_requester', 'Only the person who asked can close it');
+    }
+    if (await closeIfLapsed(tx, row, now)) return { outcome: 'expired' as const, action: toView(await load(tx, botId, id)) };
+    const lost = async () => ({ outcome: 'already_decided' as const, action: toView(await load(tx, botId, id)) });
+    if (row.status !== 'waiting' || row.revision !== input.revision) return lost();
+    const won = await move(tx, row, ['waiting'], { status: 'closed', closedReason: 'cancelled', finishedAt: now }, 'cancel', input.actorKey, {
+      reviewExpiresAt: { gt: now },
+    });
+    if (!won) return lost();
+    return { outcome: 'changed' as const, action: toView(await load(tx, botId, id)) };
+  });
+}
+
+/**
+ * "More time": a card still waiting gets another full wait from now (never shorter than what it has left), up to
+ * MAX_EXTENSIONS times. It changes nothing else and never approves anything. A card that already closed does not come
+ * back: the person reviews again, which makes a fresh request.
+ */
+export async function extendReview(
+  botId: string,
+  id: string,
+  input: { actorKey: string; revision: number; reviewMinutes?: number },
+  now: Date = new Date(),
+): Promise<CardChangeResult> {
+  return prisma.$transaction(async (tx) => {
+    const row = await load(tx, botId, id);
+    if (row.requesterKey !== input.actorKey) {
+      throw new BotActionError(403, 'not_requester', 'Only the person who asked can ask for more time');
+    }
+    if (await closeIfLapsed(tx, row, now)) return { outcome: 'expired' as const, action: toView(await load(tx, botId, id)) };
+    const lost = async () => ({ outcome: 'already_decided' as const, action: toView(await load(tx, botId, id)) });
+    if (row.status !== 'waiting' || row.revision !== input.revision) return lost();
+
+    const used = (await tx.botActionDecision.findMany({ where: { requestId: row.id, event: 'extend' } })).length;
+    if (used >= MAX_EXTENSIONS) throw new BotActionError(409, 'no_more_time', 'This card cannot wait any longer');
+
+    const wait = new Date(now.getTime() + minutes(input.reviewMinutes ?? DEFAULTS.reviewMinutes));
+    const until = wait > row.reviewExpiresAt ? wait : row.reviewExpiresAt;
+    const won = await move(tx, row, ['waiting'], { reviewExpiresAt: until }, 'extend', input.actorKey, { reviewExpiresAt: { gt: now } });
+    if (!won) return lost();
+    return { outcome: 'changed' as const, action: toView(await load(tx, botId, id)) };
+  });
+}
+
 /* --------------------------------- running ---------------------------------- */
 
 export type ClaimResult =
