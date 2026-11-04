@@ -142,8 +142,8 @@ curl -X POST \
      #1659): `allowMoreIdleMinutes` (30, 60, 120; default 60, how long a remembered approval waits for the asker's next
      message) and `allowMoreMaxMinutes` (240, 480, 1440; default 480, the most it lasts). A decision that remembers uses
      the bot's two times when the caller sends none.
-   - **GET /api/bots/:id/action-grants** lists "Allowed more right now": `{ grants: [{ id, requesterKey, toolName,
-     heading, connectionRef, scope: { fixed, varies }, createdAt, idleExpiresAt, absoluteExpiresAt }] }`, newest first,
+   - **GET /api/bots/:id/action-grants** lists "Allowed more right now": `{ grants: [{ id, requesterKey, person: { name,
+     isGuest }, toolName, toolTitle, heading, connectionRef, scope: { fixed, varies }, createdAt, idleExpiresAt, absoluteExpiresAt }] }`, newest first,
      live ones only, never card text. Manage bots, or `ADMIN_API_TOKEN`. **POST /api/bots/:id/action-grants/end-all** is
      "End all": every remembered approval of the bot ends, so the next change asks again. Response `{ ended }`. Manage
      bots only. Waiting cards are left alone.
