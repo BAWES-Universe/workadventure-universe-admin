@@ -19,7 +19,7 @@ game (open, versions, code, share, restore, copy, delete).
   mentioned. Anything else answers `404 not_found`, as for an artifact that is not there. The rules above still apply on
   top: a pasted link opens someone else's artifact only when its owner shared it by link, and changes stay with the chat it
   was made in. The search over files and the in-chat list show the same: this chat's, and what this bot made for the person.
-- **Versions:** every change is a new version with what changed and who asked. Nothing is overwritten. Restore makes a
+- **Versions:** every change by the artifact's maker is a new version with what changed and who asked (another bot's change is a copy of its own, Orbit #800). Nothing is overwritten. Restore makes a
   new version out of an old one. Up to 200 versions; one version is up to 512 KB.
 - **Make a copy:** the signed-in viewer's own artifact (version 1 = the version they pick), in no chat, so only they open
   it until they share it. The file is copied, so deleting the original leaves the copy whole.
@@ -61,6 +61,8 @@ when the limit is 0); a wrong name or type answers `422` (`invalid_media_name`, 
 `media_not_found` for a dropped name that is not there, `too_many_media_files` when the save would leave more files than
 "Files in one artifact" allows, with both numbers in the message).
 
+**A change by another bot makes a copy.** When the calling bot is not the artifact's maker (`makerBotId`), the original is left exactly as it was (no new version, no new title) and the answer is a **new artifact**: made by the calling bot for the person who asked, in the chat the call came from, with `copiedFromId` set to the original, version 1 being the original's latest text and media with the change applied (summary "Copy of version N, changed" unless the bot sent one). It starts shared with its chat only, whatever the original's sharing; the bot's next change to it is an ordinary new version. The same edits, `baseVersion`, size and media rules apply (`baseVersion` is checked against the original); the original's version limit does not, since the copy starts at version 1. A bot sees that it happened by `artifact.id` in the answer differing from the id it sent.
+
 Edits are applied in order, each on the result of the one before. An edit whose `old` is not in the file (`422
 edit_not_found`) or appears more than once without `all` (`422 edit_ambiguous`) changes nothing; the message names the
 edit. `baseVersion` is the version the bot read: a newer one in between answers `409 stale_version`, and so does a second
@@ -68,7 +70,7 @@ change made on the same version at the same moment.
 
 ## Game routes (`ADMIN_API_TOKEN`)
 
-Bodies carry `viewer: { person, inChat, chat }`: `inChat` says the person is in `chat` right now (the game vouches), and counts only when `chat` is the chat the artifact was made in. An artifact belongs to the person who asked, and a bot acts for the person talking to it: any bot in the chat may read or change it for the owner, or for someone in that chat when the owner allowed it, whichever bot made it. Outside that chat a bot reaches only what it made, or what the person pointed at (`referencedArtifactIds`, above). A bot never acts on its own across people or chats.
+Bodies carry `viewer: { person, inChat, chat }`: `inChat` says the person is in `chat` right now (the game vouches), and counts only when `chat` is the chat the artifact was made in. An artifact belongs to the person who asked, and a bot acts for the person talking to it: any bot in the chat may read it for the owner, or for someone in that chat when the owner allowed it, whichever bot made it. A bot that did not make it never writes into it (Orbit #800): its change is made on a copy of its own (below). Outside that chat a bot reaches only what it made, or what the person pointed at (`referencedArtifactIds`, above). A bot never acts on its own across people or chats.
 
 | Route | Body | Answer |
 | --- | --- | --- |

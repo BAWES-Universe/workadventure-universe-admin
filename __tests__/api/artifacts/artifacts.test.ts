@@ -626,14 +626,123 @@ describe('artifacts', () => {
     describe('between bots', () => {
       beforeEach(() => addBot('bot2', 'Pixel'));
 
-      it("lets any bot in the chat work on the owner's artifact when the owner asks it, whichever bot made it", async () => {
+      it("lets any bot in the chat read the owner's artifact when the owner asks it, whichever bot made it, but a change from another bot is made on its own copy (Orbit #800)", async () => {
         const made = await makeApp();
         const id = made.artifact.id;
         const other = { botId: 'bot2', person: person('owner'), chat: NEARBY };
         expect((await call(read, other, { id })).status).toBe(200);
         expect((await call(inChat, other)).body.artifacts).toHaveLength(1);
-        expect((await call(change, { ...other, content: '<p>x</p>' }, { id })).status).toBe(200);
+        const changed = await call(change, { ...other, content: '<p>x</p>' }, { id });
+        expect(changed.status).toBe(200);
+        // The original keeps its one version and its text; the change is version 1 of a new artifact bot2 made
+        expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(1);
+        expect((await call(code, { viewer: viewer(person('owner')) }, { id, number: '1', ...asGame })).body.content).toBe(APP);
+        expect(changed.body.artifact.id).not.toBe(id);
+        expect(changed.body.artifact).toMatchObject({ title: 'Quests board', version: 1, makerBotId: 'bot2', makerName: 'Pixel', copiedFromId: id, chatKind: 'nearby', openScope: 'chat', changeScope: 'owner' });
+        expect(changed.body.artifact.owner).toEqual({ name: 'Owner' });
+        expect(changed.body.version).toMatchObject({ number: 1, summary: 'Copy of version 1, changed', askedByName: 'owner' });
+        const copyId = changed.body.artifact.id;
+        expect((await call(code, { viewer: viewer(person('owner')) }, { id: copyId, number: '1', ...asGame })).body.content).toBe('<p>x</p>');
+        // From then on it is bot2's own: more changes are new versions of the copy, and both are listed in the chat
+        const again = await call(change, { ...other, edits: [{ old: 'x', new: 'y' }] }, { id: copyId });
+        expect(again.body.artifact).toMatchObject({ id: copyId, version: 2 });
+        expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(1);
+        expect((await call(inChat, other)).body.artifacts.map((a: { id: string }) => a.id).sort()).toEqual([id, copyId].sort());
+      });
+
+      it('applies the edits to the original\'s latest text, carries its songs over, and leaves it untouched (Orbit #800)', async () => {
+        const made = await makeApp();
+        const id = made.artifact.id;
+        const base = { botId: 'bot1', person: person('owner'), chat: NEARBY };
+        await call(change, { ...base, content: '<audio src="song.mp3"></audio>', media: undefined }, { id });
+        const latest = db.versions.find((v) => v.artifactId === id && v.number === 2)!;
+        latest.media = [{ name: 'song.mp3', contentType: 'audio/mpeg', sizeBytes: 3, key: `${latest.fileKey.slice(0, latest.fileKey.lastIndexOf('/'))}/song.mp3` }];
+        db.files.set(latest.media[0].key, new Uint8Array([1, 2, 3]));
+        const res = await call(change, { botId: 'bot2', person: person('owner'), chat: NEARBY, baseVersion: 2, edits: [{ old: 'audio', new: 'video', all: true }], title: 'Song video', summary: 'Video' }, { id });
+        expect(res.status).toBe(200);
+        expect(res.body.artifact).toMatchObject({ title: 'Song video', copiedFromId: id, version: 1 });
+        expect(res.body.version).toMatchObject({ number: 1, summary: 'Video', media: [{ name: 'song.mp3', contentType: 'audio/mpeg', sizeBytes: 3 }] });
+        expect((await call(code, { viewer: viewer(person('owner')) }, { id: res.body.artifact.id, number: '1', ...asGame })).body.content).toBe('<video src="song.mp3"></video>');
+        // The original is as it was: version 2, its title, its text, its song
+        const original = db.artifacts.find((a) => a.id === id)!;
+        expect(original).toMatchObject({ latestVersion: 2, title: 'Quests board' });
         expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(2);
+        expect(await fakeFiles.get(latest.fileKey)).toBe('<audio src="song.mp3"></audio>');
+        expect(db.files.get(latest.media[0].key)).toEqual(new Uint8Array([1, 2, 3]));
+        // The copy has its own copy of the song, so deleting one never takes it from the other
+        const copyKey = db.versions.find((v) => v.artifactId === res.body.artifact.id)!.media[0].key;
+        expect(copyKey).not.toBe(latest.media[0].key);
+        expect(db.files.get(copyKey)).toEqual(new Uint8Array([1, 2, 3]));
+      });
+
+      it('still holds a change by another bot to the version it read, and to the same rules as any change (Orbit #800)', async () => {
+        const made = await makeApp();
+        const id = made.artifact.id;
+        const other = { botId: 'bot2', person: person('owner'), chat: NEARBY };
+        await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>2</p>' }, { id });
+        expect((await call(change, { ...other, baseVersion: 1, content: '<p>x</p>' }, { id })).status).toBe(409);
+        expect((await call(change, { ...other, edits: [{ old: 'nowhere', new: 'x' }] }, { id })).status).toBe(422);
+        expect((await call(change, { ...other, content: ' ' }, { id })).status).toBe(422);
+        // Nothing was made by the refused ones
+        expect(db.artifacts).toHaveLength(1);
+        expect(bucketKeys().filter((key) => key.includes('/v1-') || key.includes('/v2-'))).toHaveLength(2);
+      });
+
+      it("makes the copy for the person who asked, so someone the owner allowed gets their own and the owner's stays as it is (Orbit #800)", async () => {
+        const made = await makeApp();
+        const id = made.artifact.id;
+        await sharing(id, { changeScope: 'openers' });
+        const friend = { botId: 'bot2', person: person('friend'), chat: NEARBY };
+        const res = await call(change, { ...friend, content: '<p>friend</p>' }, { id });
+        expect(res.status).toBe(200);
+        expect(res.body.artifact.owner).toEqual({ name: 'Friend' });
+        expect(res.body.artifact.copiedFromId).toBe(id);
+        expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(1);
+        // The owner does not own it, and it is not open to the people the original was shared with except those in the chat
+        expect((await call(mine, { person: person('owner') }, asGame)).body.artifacts.map((a: { id: string }) => a.id)).toEqual([id]);
+      });
+
+      it('makes a copy for a guest that goes after a day like their other artifacts, and one for a deleted maker bot (Orbit #800)', async () => {
+        const guestMade = await makeApp(guest, NEARBY, { title: 'Guest' });
+        const res = await call(change, { botId: 'bot2', person: guest, chat: NEARBY, content: '<p>g</p>' }, { id: guestMade.artifact.id });
+        expect(res.status).toBe(200);
+        expect(res.body.artifact).toMatchObject({ copiedFromId: guestMade.artifact.id, owner: null, changeScope: 'openers' });
+        expect(res.body.artifact.expiresAt).not.toBeNull();
+        // The guest's original keeps its own end of day: making the copy did not push it further
+        const originalEnds = db.artifacts.find((a) => a.id === guestMade.artifact.id)!.expiresAt;
+        expect(new Date(res.body.artifact.expiresAt).getTime()).toBeGreaterThanOrEqual(originalEnds.getTime());
+        expect(db.versions.filter((v) => v.artifactId === guestMade.artifact.id)).toHaveLength(1);
+        const made = await makeApp();
+        db.bots.splice(db.bots.findIndex((bot) => bot.id === 'bot1'), 1);
+        const orphan = await call(change, { botId: 'bot2', person: person('owner'), chat: NEARBY, content: '<p>o</p>' }, { id: made.artifact.id });
+        expect(orphan.status).toBe(200);
+        expect(orphan.body.artifact).toMatchObject({ makerBotId: 'bot2', copiedFromId: made.artifact.id });
+        expect(db.versions.filter((v) => v.artifactId === made.artifact.id)).toHaveLength(1);
+      });
+
+      it("makes the copy even when the original is at its version limit, since the copy starts at version 1 (Orbit #800)", async () => {
+        db.settings.set('bot-limits', { artifacts: { versions: 2 } });
+        const made = await makeApp();
+        const id = made.artifact.id;
+        await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>2</p>' }, { id });
+        expect((await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>3</p>' }, { id })).status).toBe(409);
+        const res = await call(change, { botId: 'bot2', person: person('owner'), chat: NEARBY, content: '<p>3</p>' }, { id });
+        expect(res.status).toBe(200);
+        expect(res.body.artifact.version).toBe(1);
+      });
+
+      it('leaves no file behind when the copy cannot be saved (Orbit #800)', async () => {
+        const made = await makeApp();
+        const before = bucketKeys().length;
+        const original = db.artifacts.push;
+        db.artifacts.push = () => {
+          throw new Error('database is down');
+        };
+        const res = await call(change, { botId: 'bot2', person: person('owner'), chat: NEARBY, content: '<p>x</p>' }, { id: made.artifact.id });
+        db.artifacts.push = original;
+        expect(res.status).toBe(500);
+        expect(bucketKeys()).toHaveLength(before);
+        expect(db.artifacts).toHaveLength(1);
       });
 
       it('follows the person asking, not the bot: someone else in the chat only gets what the owner allowed', async () => {
@@ -645,6 +754,7 @@ describe('artifacts', () => {
         expect((await call(change, { ...friend, content: '<p>x</p>' }, { id })).status).toBe(403);
         await sharing(id, { changeScope: 'openers' });
         expect((await call(change, { ...friend, content: '<p>x</p>' }, { id })).status).toBe(200);
+        expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(1);
       });
 
       it("keeps one bot's artifacts out of another bot's chats with the same person, unless the person pointed at one (game #1781)", async () => {
@@ -658,18 +768,23 @@ describe('artifacts', () => {
         expect((await call(read, { ...inDm, referencedArtifactIds: [] }, { id })).status).toBe(404);
         expect((await call(read, { ...inDm, referencedArtifactIds: ['some-other-id'] }, { id })).status).toBe(404);
         expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(1);
-        // The person pasted its link into this chat: bot2 opens it and changes it for them
+        // The person pasted its link into this chat: bot2 opens it and changes it for them, on a copy in this chat (Orbit #800)
         const pointed = { ...inDm, referencedArtifactIds: [id] };
         expect((await call(read, pointed, { id })).status).toBe(200);
-        expect((await call(change, { ...pointed, content: '<p>x</p>' }, { id })).status).toBe(200);
-        expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(2);
-        // Pointing does not widen the list
-        expect((await call(inChat, inDm)).body.artifacts).toEqual([]);
+        const copied = await call(change, { ...pointed, content: '<p>x</p>' }, { id });
+        expect(copied.status).toBe(200);
+        expect(copied.body.artifact).toMatchObject({ copiedFromId: id, makerBotId: 'bot2', chatKind: 'dm' });
+        expect(db.artifacts.find((a) => a.id === copied.body.artifact.id)!.chatRef).toBe(DM.ref);
+        expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(1);
+        // Pointing does not widen the list: bot2 now finds the copy it made, and still not the original
+        expect((await call(inChat, inDm)).body.artifacts.map((a: { id: string }) => a.id)).toEqual([copied.body.artifact.id]);
         // The maker finds its own work in a direct message, with no pointing
         const maker = { botId: 'bot1', person: person('owner'), chat: DM };
-        expect((await call(inChat, maker)).body.artifacts.map((a: { id: string }) => a.id)).toEqual([id]);
+        // (this test gives both bots the same chat, so bot2's copy is in it as well)
+        expect((await call(inChat, maker)).body.artifacts.map((a: { id: string }) => a.id).sort()).toEqual([id, copied.body.artifact.id].sort());
         expect((await call(read, maker, { id })).status).toBe(200);
         expect((await call(change, { ...maker, content: '<p>y</p>' }, { id })).status).toBe(200);
+        expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(2);
       });
 
       it('does not let a pointed-at id open what the rules would not: someone else\'s artifact stays closed, and a change stays in its chat', async () => {

@@ -391,7 +391,7 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   const changesMedia = (input.media?.length ?? 0) > 0 || (input.dropMedia?.length ?? 0) > 0;
   if (hasEdits && hasContent) throw new ArtifactError('edits_or_content', 422, 'Send small edits or the whole new file, not both.');
   if (!hasEdits && !hasContent && !changesMedia) throw new ArtifactError('edits_or_content', 422, 'Send small edits, the whole new file, or media to add or drop.');
-  const { hidden } = await passBotGate(input);
+  const { botName, hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
   const artifact = await loadArtifact(input.artifactId, now);
   if (!inBotsReach(artifact, who, input)) throw new ArtifactError('not_found', 404, 'No such artifact.');
@@ -401,7 +401,10 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
     throw new ArtifactError('change_not_allowed', 403, 'The owner has not allowed changes from this person.');
   }
   const { maxBytes, maxVersions, maxMediaBytes, maxMediaFiles } = await limitsOf(ctx);
-  checkVersionRoom(artifact.latestVersion, maxVersions);
+  // Another bot's work is never written into: a bot that did not make it works on a copy of its own (game #1805, Orbit #800),
+  // which starts at version 1, so the original's version limit does not apply to it
+  const copying = artifact.makerBotId !== input.botId;
+  if (!copying) checkVersionRoom(artifact.latestVersion, maxVersions);
   if (input.baseVersion != null && input.baseVersion !== artifact.latestVersion) {
     throw new ArtifactError('stale_version', 409, `It is on version ${artifact.latestVersion} now; read it again and send the change on that.`);
   }
@@ -412,11 +415,12 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   const content = hasContent ? (input.content as string) : hasEdits ? applyEdits(await files.get(latest.fileKey), input.edits as ArtifactEdit[], maxBytes) : await files.get(latest.fileKey);
   checkContent(content, maxBytes);
   const merged = mergeMedia(mediaOf(latest), input.media ?? [], input.dropMedia ?? [], kind, maxMediaBytes, maxMediaFiles);
+  const title = cleanLine(input.title, MAX_TITLE_LENGTH);
+  if (copying) return changeInACopy({ input, artifact, latestNumber: latest.number, who, botName, hidden, content, merged, title }, ctx);
 
   const next = artifact.latestVersion + 1;
   const fileKey = newFileKey(artifact.id, next, kind);
   const media = placeMedia(fileKey, merged);
-  const title = cleanLine(input.title, MAX_TITLE_LENGTH);
   const row = await storing(files, fileKey, kind, content, media, () =>
     prisma.$transaction(async (tx) => {
       // The one who gets here first moves the version on; anyone who read the same version before fails here
@@ -445,6 +449,66 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   );
   const fresh = await loadArtifact(artifact.id, now);
   return { artifact: viewOf(fresh), version: botVersionView(row), hidden };
+}
+
+/**
+ * A change by a bot that did not make the artifact (game #1805, Orbit #800): the original keeps its versions as they were, and
+ * the change becomes version 1 of a new artifact this bot makes for the person who asked, in the chat it is in, with the
+ * original's latest text and media plus the change. It starts private to that chat: how the original was shared is not carried
+ * over. The bot's next change to it is an ordinary new version, since it is now the maker.
+ */
+async function changeInACopy(
+  call: {
+    input: ChangeInput;
+    artifact: ArtifactRow;
+    latestNumber: number;
+    who: Who;
+    botName: string;
+    hidden: boolean;
+    content: string;
+    merged: { keep: MediaFile[]; add: MediaUpload[] };
+    title: string | null;
+  },
+  ctx: Context,
+): Promise<Made> {
+  const { files, now } = ctx;
+  const { input, artifact, who } = call;
+  const kind = artifact.kind as ArtifactKind;
+  const id = randomUUID();
+  const fileKey = newFileKey(id, 1, kind);
+  const media = placeMedia(fileKey, call.merged);
+  const created = await storing(files, fileKey, kind, call.content, media, () =>
+    prisma.artifact.create({
+      data: {
+        id,
+        ownerId: who.userId,
+        makerBotId: input.botId,
+        makerName: clipText(call.botName, MAX_NAME_LENGTH),
+        title: call.title ?? artifact.title,
+        kind,
+        chatKind: input.chat.kind,
+        chatRef: input.chat.ref,
+        copiedFromId: artifact.id,
+        // Nothing is kept for a guest beyond a day, and anyone in their chat may ask for a change meanwhile
+        changeScope: who.userId ? 'owner' : 'openers',
+        expiresAt: who.userId ? null : new Date(now.getTime() + GUEST_KEEP_MS),
+        versions: {
+          create: {
+            number: 1,
+            summary: cleanLine(input.summary, MAX_SUMMARY_LENGTH) ?? `Copy of version ${call.latestNumber}, changed`,
+            askedById: who.userId,
+            askedByName: who.name,
+            fileKey,
+            sizeBytes: byteLength(call.content),
+            media: media.files as unknown as Prisma.InputJsonValue,
+          },
+        },
+      },
+      include: { ...ARTIFACT_INCLUDE, versions: true },
+    }),
+  );
+  await pruneExpired(ctx).catch((error) => console.error('Could not clear expired artifacts:', error));
+  return { artifact: viewOf(created), version: botVersionView(created.versions[0]), hidden: call.hidden };
 }
 
 export interface ReadInput extends ReferencingCall {
