@@ -872,6 +872,10 @@ model BotMcpServer {
   // Goes up whenever a heading setting, a tool's heading or a tool's confirmation changes, so a card or a remembered
   // approval made under an older policy can be told apart.
   policyRevision     Int    @default(1) @map("policy_revision")
+  // The bot server shows at most 500 tools per server. When a server has more, it says so when it saves the list, and how
+  // many it has when it knows (null when it did not read them all).
+  toolsCut           Boolean @default(false) @map("tools_cut")
+  toolsSeen          Int?    @map("tools_seen")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 

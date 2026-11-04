@@ -123,6 +123,17 @@ describe('who may reach the tool settings', () => {
 });
 
 describe('what each one does', () => {
+  it('takes the cut flag and the count from the bot server, and still takes a list without them', async () => {
+    session.mockResolvedValue(null);
+    const cut = { ...CATALOG, truncated: true, totalSeen: 731 };
+    expect((await call(PUT_TOOLS as Handler, 'PUT', cut, 'admin-secret')).status).toBe(200);
+    expect(lib.syncCatalog).toHaveBeenLastCalledWith('bot-1', 'srv-1', expect.objectContaining({ truncated: true, totalSeen: 731 }));
+    expect((await call(PUT_TOOLS as Handler, 'PUT', CATALOG, 'admin-secret')).status).toBe(200);
+    lib.syncCatalog.mockClear();
+    expect((await call(PUT_TOOLS as Handler, 'PUT', { ...CATALOG, totalSeen: 731 }, 'admin-secret')).status).toBe(400);
+    expect(lib.syncCatalog).not.toHaveBeenCalled();
+  });
+
   it('reads the tools for the server named', async () => {
     const response = await call(GET_TOOLS as Handler, 'GET');
     expect(response.status).toBe(200);
