@@ -723,9 +723,10 @@ export async function revokeGrants(
 /** One remembered approval that is still alive, as the bot's Approvals page lists it ("Allowed more right now"). */
 export interface ActiveGrantView {
   id: string;
-  /** Who it was made for, as the bot server named them (their user id in the game). */
-  requesterKey: string;
-  /** Their name for the list, when Orbit knows the person; null when it does not (the page then says "Someone"). */
+  /**
+   * Who it was made for, by name, when Orbit knows the person; null when it does not (the page then says "Someone"). Only the
+   * name: the key the game names them by can be their email, which the people who manage the bot must not see.
+   */
   person: { name: string | null; isGuest: boolean };
   toolName: string;
   /** The tool's own title as its server gave it, when the bot has such a tool; null otherwise. */
@@ -771,7 +772,6 @@ export async function listActiveGrants(botId: string, now: Date = new Date()): P
     if (!scope.success) continue;
     views.push({
       id: row.id,
-      requesterKey: row.requesterKey,
       person: people.get(row.requesterKey) ?? { name: null, isGuest: false },
       toolTitle: titles.get(row.toolName) ?? null,
       toolName: row.toolName,
