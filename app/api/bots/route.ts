@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { checkAiProviderRef, checkBotModel } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { mayReadRoomBots } from '@/lib/bot-room-access';
+import { maySeeBotPrivateParts, toPublicBotCard } from '@/lib/bot-public-card';
 import { checkConfigVision } from '@/lib/bot-vision';
 import { startWithToolCallsOn } from '@/lib/bot-tool-call-default';
 import { corsHeaders } from '@/lib/cors';
@@ -116,7 +117,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Get user ID from various auth methods
-    const { userId, isAdminToken } = await getUserIdFromRequest(request);
+    const { userId, userEmail, isAdminToken } = await getUserIdFromRequest(request);
     const isAuthenticated = isAdminToken || !!userId;
 
     if (isAdminToken) {
@@ -268,8 +269,15 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    // Transform bots to camelCase
-    const transformedBots = bots.map(transformBot);
+    // Transform bots to camelCase. What steers each bot and what it runs on (#797) goes only to the bot server and the
+    // people who manage that bot; everyone else who can see the room gets its public card.
+    const transformedBots = await Promise.all(
+      bots.map(async (bot) => {
+        const transformed = transformBot(bot);
+        const showPrivateParts = await maySeeBotPrivateParts({ userId, userEmail, isAdminToken }, bot);
+        return showPrivateParts ? transformed : toPublicBotCard(transformed);
+      }),
+    );
 
     const response = NextResponse.json(transformedBots);
     Object.entries(corsHeaders(request)).forEach(([key, value]) => {
@@ -300,13 +308,13 @@ export async function GET(request: NextRequest) {
 }
 
 // Helper function to get user ID from various auth methods
-async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: string | null; isAdminToken: boolean }> {
+async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: string | null; userEmail: string | null; isAdminToken: boolean }> {
   // PRIORITY 1: Check session token FIRST (from URL param, cookie, or Authorization header)
   // This handles session tokens sent via _token URL param, cookies, or Authorization header
   // Session tokens have 7-day expiration and work even after JWT expires
   const sessionUser = await getSessionUser(request);
   if (sessionUser) {
-    return { userId: sessionUser.id, isAdminToken: false };
+    return { userId: sessionUser.id, userEmail: sessionUser.email, isAdminToken: false };
   }
   
   // PRIORITY 2: Check Authorization header for admin token or OIDC token
@@ -314,7 +322,7 @@ async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: str
   
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     // No Bearer token and no session - unauthorized
-    return { userId: null, isAdminToken: false };
+    return { userId: null, userEmail: null, isAdminToken: false };
   }
   
   const token = authHeader.replace('Bearer ', '').trim();
@@ -322,7 +330,7 @@ async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: str
   
   // Check if it's the admin API token
   if (expectedToken && token === expectedToken) {
-    return { userId: null, isAdminToken: true };
+    return { userId: null, userEmail: null, isAdminToken: true };
   }
   
   // PRIORITY 3: Try to validate as OIDC token (for initial login/fallback)
@@ -352,14 +360,14 @@ async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: str
         });
       }
       
-      return { userId: user.id, isAdminToken: false };
+      return { userId: user.id, userEmail: user.email, isAdminToken: false };
     }
   } catch (error) {
     // Token validation failed - return null (session already checked above)
   }
   
   // No valid authentication found
-  return { userId: null, isAdminToken: false };
+  return { userId: null, userEmail: null, isAdminToken: false };
 }
 
 // POST /api/bots

@@ -5,6 +5,7 @@ import { prisma } from '@/lib/db';
 import { deleteWithHiddenBotData, mustStayPrivateAfterMove } from '@/lib/bot-privacy';
 import { canManageBots, canManageThisBot } from '@/lib/bot-permissions';
 import { mayReadRoomBots } from '@/lib/bot-room-access';
+import { maySeeBotPrivateParts, toPublicBotCard } from '@/lib/bot-public-card';
 import { validateAccessToken } from '@/lib/oidc';
 import { parsePlayUri } from '@/lib/utils';
 import { z } from 'zod';
@@ -29,13 +30,13 @@ export async function OPTIONS(request: NextRequest) {
 }
 
 // Helper function to get user ID from various auth methods
-async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: string | null; isAdminToken: boolean }> {
+async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: string | null; userEmail: string | null; isAdminToken: boolean }> {
   // PRIORITY 1: Check session token FIRST (from URL param, cookie, or Authorization header)
   // This handles session tokens sent via _token URL param, cookies, or Authorization header
   // Session tokens have 7-day expiration and work even after JWT expires
   const sessionUser = await getSessionUser(request);
   if (sessionUser) {
-    return { userId: sessionUser.id, isAdminToken: false };
+    return { userId: sessionUser.id, userEmail: sessionUser.email, isAdminToken: false };
   }
   
   // PRIORITY 2: Check Authorization header for admin token or OIDC token
@@ -43,7 +44,7 @@ async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: str
   
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     // No Bearer token and no session - unauthorized
-    return { userId: null, isAdminToken: false };
+    return { userId: null, userEmail: null, isAdminToken: false };
   }
   
   const token = authHeader.replace('Bearer ', '').trim();
@@ -51,7 +52,7 @@ async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: str
   
   // Check if it's the admin API token
   if (expectedToken && token === expectedToken) {
-    return { userId: null, isAdminToken: true };
+    return { userId: null, userEmail: null, isAdminToken: true };
   }
   
   // PRIORITY 3: Try to validate as OIDC token (for initial login/fallback)
@@ -81,14 +82,14 @@ async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: str
         });
       }
       
-      return { userId: user.id, isAdminToken: false };
+      return { userId: user.id, userEmail: user.email, isAdminToken: false };
     }
   } catch (error) {
     // Token validation failed - return null (session already checked above)
   }
   
   // No valid authentication found
-  return { userId: null, isAdminToken: false };
+  return { userId: null, userEmail: null, isAdminToken: false };
 }
 
 // Validation schema for updating a bot (all fields optional for partial updates)
@@ -175,7 +176,7 @@ export async function GET(
     const { id } = await params;
 
     // Get user ID from various auth methods
-    const { userId, isAdminToken } = await getUserIdFromRequest(request);
+    const { userId, userEmail, isAdminToken } = await getUserIdFromRequest(request);
     const isAuthenticated = isAdminToken || !!userId;
 
     if (isAdminToken) {
@@ -257,10 +258,12 @@ export async function GET(
       return response;
     }
 
-    // Transform to camelCase, with the longest reply and steps of what it runs on (#666), for its own to stay under
+    // Transform to camelCase. What steers the bot and what it runs on (#797) goes only to the bot server and the
+    // people who manage this bot; everyone else who can see the room gets its public card.
     const transformedBot = transformBot(bot);
+    const showPrivateParts = await maySeeBotPrivateParts({ userId, userEmail, isAdminToken }, bot);
 
-    const response = NextResponse.json(transformedBot);
+    const response = NextResponse.json(showPrivateParts ? transformedBot : toPublicBotCard(transformedBot));
     Object.entries(corsHeaders(request)).forEach(([key, value]) => {
       response.headers.set(key, value);
     });
