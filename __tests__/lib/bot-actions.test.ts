@@ -592,6 +592,18 @@ describe('the bot’s own allow-more times, and who is allowed more right now', 
     expect(JSON.stringify(grants)).not.toContain('Fix the login page');
   });
 
+  (REAL ? it.skip : it)('names the person and the tool for the list when Orbit knows them, and says nothing when it does not', async () => {
+    db.users.push({ uuid: 'user:sara', name: ' Sara ', isGuest: false }, { uuid: 'user:guest1', name: null, isGuest: true });
+    db.tools.push({ botId: BOT, name: 'create_issue', title: 'Create issue' });
+    await remember();
+    await remember({ proposalKey: 'job2:turn1:call1', requesterKey: 'user:guest1', conversationKey: 'dm:g:nora' });
+    await remember({ proposalKey: 'job3:turn1:call1', requesterKey: 'user:unknown', conversationKey: 'dm:u:nora', toolName: 'other_tool' });
+    const byKey = Object.fromEntries((await listActiveGrants(BOT, at(60))).map((g) => [g.requesterKey, g]));
+    expect(byKey['user:sara']).toMatchObject({ person: { name: 'Sara', isGuest: false }, toolTitle: 'Create issue' });
+    expect(byKey['user:guest1']).toMatchObject({ person: { name: null, isGuest: true } });
+    expect(byKey['user:unknown']).toMatchObject({ person: { name: null, isGuest: false }, toolTitle: null });
+  });
+
   it('leaves out one that ended: by time, by a revoke, or already ended', async () => {
     await remember();
     expect(await listActiveGrants(BOT, at(minutes(DEFAULTS.idleMinutes) + 1))).toEqual([]);
