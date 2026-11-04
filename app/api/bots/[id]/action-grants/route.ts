@@ -12,7 +12,7 @@ export async function OPTIONS(request: NextRequest) {
 /**
  * GET /api/bots/:id/action-grants
  * "Allowed more right now" on the bot's Approvals page: the remembered approvals ("allow more of the same in this chat")
- * that are still alive. Response: { grants: [{ id, requesterKey, toolName, heading, connectionRef, scope: { fixed, varies },
+ * that are still alive. Response: { grants: [{ id, requesterKey, person: { name, isGuest }, toolName, toolTitle, heading, connectionRef, scope: { fixed, varies },
  * createdAt, idleExpiresAt, absoluteExpiresAt }] }, newest first. Card content is never included.
  *
  * Auth: Manage bots (403 without it), or the bot server's ADMIN_API_TOKEN.

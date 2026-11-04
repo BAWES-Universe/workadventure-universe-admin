@@ -13,12 +13,16 @@ type Row = Record<string, any>;
 
 export const db = {
   bots: [] as Row[],
+  users: [] as Row[],
+  tools: [] as Row[],
   requests: [] as Row[],
   decisions: [] as Row[],
   attempts: [] as Row[],
   grants: [] as Row[],
   reset() {
     this.bots.length = 0;
+    this.users.length = 0;
+    this.tools.length = 0;
     this.requests.length = 0;
     this.decisions.length = 0;
     this.attempts.length = 0;
@@ -135,6 +139,14 @@ export const fakePrisma: any = {
       const row = db.requests.find((candidate) => candidate.botId === key.botId && candidate.proposalKey === key.proposalKey);
       return row ? withInclude(row, include) : null;
     },
+  },
+  user: {
+    findMany: async ({ where }: { where: { OR: Array<{ uuid?: { in: string[] }; email?: { in: string[] } }> } }) =>
+      db.users.filter((user) => where.OR.some((clause) => clause.uuid?.in.includes(user.uuid as string) || clause.email?.in.includes(user.email as string))),
+  },
+  botMcpTool: {
+    findMany: async ({ where }: { where: { server: { botId: string }; name: { in: string[] } } }) =>
+      db.tools.filter((tool) => tool.botId === where.server.botId && where.name.in.includes(tool.name as string)),
   },
   botActionDecision: decisions,
   botActionAttempt: attempts,

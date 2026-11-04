@@ -723,9 +723,13 @@ export async function revokeGrants(
 /** One remembered approval that is still alive, as the bot's Approvals page lists it ("Allowed more right now"). */
 export interface ActiveGrantView {
   id: string;
-  /** Who it was made for, as the bot server named them. Orbit does not look people up. */
+  /** Who it was made for, as the bot server named them (their user id in the game). */
   requesterKey: string;
+  /** Their name for the list, when Orbit knows the person; null when it does not (the page then says "Someone"). */
+  person: { name: string | null; isGuest: boolean };
   toolName: string;
+  /** The tool's own title as its server gave it, when the bot has such a tool; null otherwise. */
+  toolTitle: string | null;
   heading: ActionHeading;
   connectionRef: string | null;
   /** What it allows: `fixed` fields stay as approved (like the team), `varies` fields may be different each time. */
@@ -743,6 +747,24 @@ export async function listActiveGrants(botId: string, now: Date = new Date()): P
     where: { botId, revokedAt: null, idleExpiresAt: { gt: now }, absoluteExpiresAt: { gt: now } },
     orderBy: { createdAt: 'desc' },
   });
+  const people = new Map<string, { name: string | null; isGuest: boolean }>();
+  const titles = new Map<string, string | null>();
+  if (rows.length > 0) {
+    // Names and titles for the list only, for people who manage this bot (they already see who chats with it)
+    // The game names a signed-in person by their uuid or by their email (lib/user-identifier.ts): find them by either
+    const keys = [...new Set(rows.map((row) => row.requesterKey))];
+    for (const user of await prisma.user.findMany({
+      where: { OR: [{ uuid: { in: keys } }, { email: { in: keys } }] },
+      select: { uuid: true, email: true, name: true, isGuest: true },
+    })) {
+      const person = { name: user.name?.trim() || null, isGuest: user.isGuest };
+      if (user.email && !people.has(user.email)) people.set(user.email, person);
+      people.set(user.uuid, person);
+    }
+    for (const tool of await prisma.botMcpTool.findMany({ where: { server: { botId }, name: { in: [...new Set(rows.map((row) => row.toolName))] } }, select: { name: true, title: true } })) {
+      if (!titles.get(tool.name)) titles.set(tool.name, tool.title?.trim() || null);
+    }
+  }
   const views: ActiveGrantView[] = [];
   for (const row of rows) {
     const scope = rememberScopeSchema.safeParse(row.scope);
@@ -750,6 +772,8 @@ export async function listActiveGrants(botId: string, now: Date = new Date()): P
     views.push({
       id: row.id,
       requesterKey: row.requesterKey,
+      person: people.get(row.requesterKey) ?? { name: null, isGuest: false },
+      toolTitle: titles.get(row.toolName) ?? null,
       toolName: row.toolName,
       heading: row.heading as ActionHeading,
       connectionRef: row.connectionRef ?? null,
