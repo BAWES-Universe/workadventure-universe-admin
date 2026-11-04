@@ -19,7 +19,7 @@ game (open, versions, code, share, restore, copy, delete).
   mentioned. Anything else answers `404 not_found`, as for an artifact that is not there. The rules above still apply on
   top: a pasted link opens someone else's artifact only when its owner shared it by link, and changes stay with the chat it
   was made in. The search over files and the in-chat list show the same: this chat's, and what this bot made for the person.
-- **Versions:** every change is a new version with what changed and who asked. Nothing is overwritten. Restore makes a
+- **Versions:** every change by the artifact's maker is a new version with what changed and who asked (another bot's change is a copy of its own, Orbit #800). Nothing is overwritten. Restore makes a
   new version out of an old one. Up to 200 versions; one version is up to 512 KB.
 - **Make a copy:** the signed-in viewer's own artifact (version 1 = the version they pick), in no chat, so only they open
   it until they share it. The file is copied, so deleting the original leaves the copy whole.
