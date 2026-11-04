@@ -138,7 +138,15 @@ curl -X POST \
      starts with looksUp and makesNew on `rightAway`, the others on `asksFirst`.
    - **GET/PUT /api/bots/:id/tool-settings**: the bot's own limits `askBeforeMaking` (3, 5, 10 or null for no limit;
      default 5), `askWhichWay` (`rarely`, `beforeBiggerJobs`, `never`; default `rarely`) and `cardWaitMinutes` (5, 10,
-     30; default 10). GET also takes `ADMIN_API_TOKEN`.
+     30; default 10). GET also takes `ADMIN_API_TOKEN`. Two more for "allow more of the same in this chat" (game
+     #1659): `allowMoreIdleMinutes` (30, 60, 120; default 60, how long a remembered approval waits for the asker's next
+     message) and `allowMoreMaxMinutes` (240, 480, 1440; default 480, the most it lasts). A decision that remembers uses
+     the bot's two times when the caller sends none.
+   - **GET /api/bots/:id/action-grants** lists "Allowed more right now": `{ grants: [{ id, requesterKey, toolName,
+     heading, connectionRef, scope: { fixed, varies }, createdAt, idleExpiresAt, absoluteExpiresAt }] }`, newest first,
+     live ones only, never card text. Manage bots, or `ADMIN_API_TOKEN`. **POST /api/bots/:id/action-grants/end-all** is
+     "End all": every remembered approval of the bot ends, so the next change asks again. Response `{ ended }`. Manage
+     bots only. Waiting cards are left alone.
    - Moving, confirming and every setting need Manage bots (403 without it, 401 when not signed in, 404 for no such bot).
 
 10. **Saved bot actions** (#739): a record for each action that waits for a tap

@@ -796,6 +796,10 @@ model Bot {
   askBeforeMaking     Int?     @default(5) @map("ask_before_making")
   askWhichWay         String   @default("rarely") @map("ask_which_way") @db.VarChar(20)
   cardWaitMinutes     Int      @default(10) @map("card_wait_minutes")
+  // "Allow more of the same in this chat" (game #1659): a card's remembered approval ends after this many minutes without
+  // the asker's messages (30 | 60 | 120) and after this many minutes at most (240 | 480 | 1440).
+  allowMoreIdleMinutes Int     @default(60) @map("allow_more_idle_minutes")
+  allowMoreMaxMinutes  Int     @default(480) @map("allow_more_max_minutes")
   // Voice (#740): off until a person with Manage bots turns it on. voiceRevision is the published voice profile the bot
   // speaks with (BotVoiceRevision.number); null until one is published.
   voiceEnabled        Boolean  @default(false) @map("voice_enabled")

@@ -8,6 +8,9 @@ import { PATCH as PATCH_TOOL } from '@/app/api/bots/[id]/mcp-servers/[serverId]/
 import { POST as CONFIRM } from '@/app/api/bots/[id]/mcp-servers/[serverId]/tools/confirm/route';
 import { PUT as PUT_POLICY } from '@/app/api/bots/[id]/mcp-servers/[serverId]/policy/route';
 import { GET as GET_SETTINGS, PUT as PUT_SETTINGS } from '@/app/api/bots/[id]/tool-settings/route';
+import { GET as GET_GRANTS } from '@/app/api/bots/[id]/action-grants/route';
+import { POST as END_ALL } from '@/app/api/bots/[id]/action-grants/end-all/route';
+import * as actions from '@/lib/bot-actions';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { canManageBotMcpServers } from '@/lib/bot-permissions';
@@ -18,6 +21,11 @@ jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/db', () => ({ prisma: { bot: { findUnique: jest.fn() } } }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/bot-permissions', () => ({ canManageBotMcpServers: jest.fn() }));
+jest.mock('@/lib/bot-actions', () => ({
+  ...jest.requireActual('@/lib/bot-actions'),
+  listActiveGrants: jest.fn(),
+  endAllGrants: jest.fn(),
+}));
 jest.mock('@/lib/mcp-tool-policy', () => ({
   ...jest.requireActual('@/lib/mcp-tool-policy'),
   readServerTools: jest.fn(),
@@ -34,6 +42,8 @@ const manages = canManageBotMcpServers as jest.Mock;
 const findBot = prisma.bot.findUnique as jest.Mock;
 const MOCKED = ['readServerTools', 'syncCatalog', 'moveTool', 'confirmTools', 'saveServerSettings', 'readBotToolSettings', 'saveBotToolSettings'] as const;
 const lib = policy as unknown as Record<(typeof MOCKED)[number], jest.Mock>;
+
+const grantsLib = actions as unknown as { listActiveGrants: jest.Mock; endAllGrants: jest.Mock };
 
 const BOT = { id: 'bot-1', createdById: 'u-maker', roomId: 'room-1' };
 const TOOLS = { serverId: 'srv-1', state: 'notConfirmedYet', policyRevision: 1, settings: {}, tools: [] };
@@ -58,13 +68,15 @@ beforeEach(() => {
   manages.mockReset().mockResolvedValue(true);
   findBot.mockReset().mockResolvedValue(BOT);
   for (const name of MOCKED) lib[name].mockReset();
+  grantsLib.listActiveGrants.mockReset().mockResolvedValue([]);
+  grantsLib.endAllGrants.mockReset().mockResolvedValue({ ended: 2 });
   lib.readServerTools.mockResolvedValue(TOOLS);
   lib.syncCatalog.mockResolvedValue({ ...TOOLS, added: ['a'], changed: [], removed: [] });
   lib.moveTool.mockResolvedValue(TOOLS);
   lib.confirmTools.mockResolvedValue(TOOLS);
   lib.saveServerSettings.mockResolvedValue(TOOLS);
-  lib.readBotToolSettings.mockResolvedValue({ askBeforeMaking: 5, askWhichWay: 'rarely', cardWaitMinutes: 10 });
-  lib.saveBotToolSettings.mockResolvedValue({ askBeforeMaking: 3, askWhichWay: 'rarely', cardWaitMinutes: 10 });
+  lib.readBotToolSettings.mockResolvedValue({ askBeforeMaking: 5, askWhichWay: 'rarely', cardWaitMinutes: 10, allowMoreIdleMinutes: 60, allowMoreMaxMinutes: 480 });
+  lib.saveBotToolSettings.mockResolvedValue({ askBeforeMaking: 3, askWhichWay: 'rarely', cardWaitMinutes: 10, allowMoreIdleMinutes: 60, allowMoreMaxMinutes: 480 });
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
 });
 afterEach(() => jest.restoreAllMocks());
@@ -76,6 +88,8 @@ const everything: [string, Handler, string, unknown][] = [
   ['save settings', PUT_POLICY as Handler, 'PUT', { looksUp: 'off' }],
   ['read bot settings', GET_SETTINGS as Handler, 'GET', undefined],
   ['save bot settings', PUT_SETTINGS as Handler, 'PUT', { askBeforeMaking: 3 }],
+  ['read who is allowed more', GET_GRANTS as Handler, 'GET', undefined],
+  ['end all allowed more', END_ALL as Handler, 'POST', undefined],
 ];
 
 describe('who may reach the tool settings', () => {
@@ -119,6 +133,37 @@ describe('who may reach the tool settings', () => {
     expect((await call(PUT_TOOLS as Handler, 'PUT', CATALOG, 'wrong')).status).toBe(401);
     expect((await call(PUT_TOOLS as Handler, 'PUT', CATALOG, 'admin-secret')).status).toBe(200);
     expect(lib.syncCatalog).toHaveBeenCalledWith('bot-1', 'srv-1', expect.objectContaining({ tools: expect.any(Array) }));
+  });
+});
+
+describe('who is allowed more right now', () => {
+  it('lists the live remembered approvals for the bot, for a person who manages it or the bot server', async () => {
+    grantsLib.listActiveGrants.mockResolvedValue([{ id: 'g1', requesterKey: 'user:sara', toolName: 'create_issue' }]);
+    const response = await call(GET_GRANTS as Handler, 'GET');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ grants: [{ id: 'g1', requesterKey: 'user:sara', toolName: 'create_issue' }] });
+    expect(grantsLib.listActiveGrants).toHaveBeenCalledWith('bot-1');
+    session.mockResolvedValue(null);
+    expect((await call(GET_GRANTS as Handler, 'GET', undefined, 'admin-secret')).status).toBe(200);
+  });
+
+  it('End all ends them for the bot and says how many; not without Manage bots, not with the bot server’s token', async () => {
+    const response = await call(END_ALL as Handler, 'POST');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ended: 2 });
+    expect(grantsLib.endAllGrants).toHaveBeenCalledWith('bot-1');
+    grantsLib.endAllGrants.mockClear();
+    manages.mockResolvedValue(false);
+    expect((await call(END_ALL as Handler, 'POST')).status).toBe(403);
+    manages.mockResolvedValue(true);
+    session.mockResolvedValue(null);
+    expect((await call(END_ALL as Handler, 'POST', undefined, 'admin-secret')).status).toBe(401);
+    expect(grantsLib.endAllGrants).not.toHaveBeenCalled();
+  });
+
+  it('reports a failure it cannot explain without leaking it', async () => {
+    grantsLib.listActiveGrants.mockRejectedValue(new Error('database down'));
+    expect((await call(GET_GRANTS as Handler, 'GET')).status).toBe(500);
   });
 });
 
@@ -182,7 +227,7 @@ describe('what each one does', () => {
     await call(PUT_POLICY as Handler, 'PUT', { changesThings: 'off' });
     expect(lib.saveServerSettings).toHaveBeenCalledWith('bot-1', 'srv-1', { changesThings: 'off' });
     const response = await call(PUT_SETTINGS as Handler, 'PUT', { askBeforeMaking: 3 });
-    expect(await response.json()).toEqual({ askBeforeMaking: 3, askWhichWay: 'rarely', cardWaitMinutes: 10 });
+    expect(await response.json()).toEqual({ askBeforeMaking: 3, askWhichWay: 'rarely', cardWaitMinutes: 10, allowMoreIdleMinutes: 60, allowMoreMaxMinutes: 480 });
     expect(lib.saveBotToolSettings).toHaveBeenCalledWith('bot-1', { askBeforeMaking: 3 });
   });
 
@@ -192,6 +237,8 @@ describe('what each one does', () => {
       [PUT_POLICY, { looksUp: 'always' }],
       [PUT_POLICY, {}],
       [PUT_SETTINGS, { cardWaitMinutes: 15 }],
+      [PUT_SETTINGS, { allowMoreIdleMinutes: 45 }],
+      [PUT_SETTINGS, { allowMoreMaxMinutes: 12 }],
       [PUT_SETTINGS, 'not json'],
     ] as [Handler, unknown][]) {
       expect((await call(handler, 'PUT', body)).status).toBe(400);
