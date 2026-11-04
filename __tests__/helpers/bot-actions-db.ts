@@ -141,7 +141,8 @@ export const fakePrisma: any = {
     },
   },
   user: {
-    findMany: async ({ where }: { where: { uuid: { in: string[] } } }) => db.users.filter((user) => where.uuid.in.includes(user.uuid as string)),
+    findMany: async ({ where }: { where: { OR: Array<{ uuid?: { in: string[] }; email?: { in: string[] } }> } }) =>
+      db.users.filter((user) => where.OR.some((clause) => clause.uuid?.in.includes(user.uuid as string) || clause.email?.in.includes(user.email as string))),
   },
   botMcpTool: {
     findMany: async ({ where }: { where: { server: { botId: string }; name: { in: string[] } } }) =>

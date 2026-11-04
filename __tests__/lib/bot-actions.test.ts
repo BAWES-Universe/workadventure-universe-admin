@@ -604,6 +604,13 @@ describe('the bot’s own allow-more times, and who is allowed more right now', 
     expect(byKey['user:unknown']).toMatchObject({ person: { name: null, isGuest: false }, toolTitle: null });
   });
 
+  (REAL ? it.skip : it)('finds a signed-in person the game named by their email as well as by their uuid', async () => {
+    db.users.push({ uuid: 'uuid-omar', email: 'omar@example.com', name: 'Omar', isGuest: false });
+    await remember({ requesterKey: 'omar@example.com', conversationKey: 'nearby:omar:nora' });
+    const [grant] = await listActiveGrants(BOT, at(60));
+    expect(grant.person).toEqual({ name: 'Omar', isGuest: false });
+  });
+
   it('leaves out one that ended: by time, by a revoke, or already ended', async () => {
     await remember();
     expect(await listActiveGrants(BOT, at(minutes(DEFAULTS.idleMinutes) + 1))).toEqual([]);

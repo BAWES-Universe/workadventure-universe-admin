@@ -751,8 +751,15 @@ export async function listActiveGrants(botId: string, now: Date = new Date()): P
   const titles = new Map<string, string | null>();
   if (rows.length > 0) {
     // Names and titles for the list only, for people who manage this bot (they already see who chats with it)
-    for (const user of await prisma.user.findMany({ where: { uuid: { in: [...new Set(rows.map((row) => row.requesterKey))] } }, select: { uuid: true, name: true, isGuest: true } })) {
-      people.set(user.uuid, { name: user.name?.trim() || null, isGuest: user.isGuest });
+    // The game names a signed-in person by their uuid or by their email (lib/user-identifier.ts): find them by either
+    const keys = [...new Set(rows.map((row) => row.requesterKey))];
+    for (const user of await prisma.user.findMany({
+      where: { OR: [{ uuid: { in: keys } }, { email: { in: keys } }] },
+      select: { uuid: true, email: true, name: true, isGuest: true },
+    })) {
+      const person = { name: user.name?.trim() || null, isGuest: user.isGuest };
+      if (user.email && !people.has(user.email)) people.set(user.email, person);
+      people.set(user.uuid, person);
     }
     for (const tool of await prisma.botMcpTool.findMany({ where: { server: { botId }, name: { in: [...new Set(rows.map((row) => row.toolName))] } }, select: { name: true, title: true } })) {
       if (!titles.get(tool.name)) titles.set(tool.name, tool.title?.trim() || null);
