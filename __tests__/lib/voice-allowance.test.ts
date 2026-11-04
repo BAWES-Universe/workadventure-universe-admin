@@ -230,13 +230,24 @@ describe('what is left', () => {
   });
 
   it('keeps the replies kept for text kept: typed replies take places from the same window', async () => {
-    // 30 replies, 5 kept: with 22 typed replies only 3 places are left, however few were spoken
+    // 30 replies, 5 kept: with 22 replies in the window only 3 places are left, however few were spoken
     db.botsAiUsage.count.mockResolvedValue(22);
     db.voiceReplyUse.count.mockResolvedValue(2);
-    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toMatchObject({ allowed: true, left: 2 });
-    db.botsAiUsage.count.mockResolvedValue(25);
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toMatchObject({ allowed: true, left: 3 });
+    // 26 replies: only the kept ones are left, so no place is left for voice
+    db.botsAiUsage.count.mockResolvedValue(26);
     expect(await checkVoiceAllowance('bot-1', { ...SARA, turnId: 'next' }, NOW)).toEqual({ allowed: false, resetsAt: '2026-11-02T13:00:00.000Z' });
     expect(db.voiceReplyUse.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not count the reply being spoken twice: the 25th is allowed whether or not its text is in the window yet', async () => {
+    db.voiceReplyUse.count.mockResolvedValue(24);
+    // Its text is not counted yet: 24 replies are in the window
+    db.botsAiUsage.count.mockResolvedValue(24);
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toMatchObject({ allowed: true, left: 0 });
+    // Its text is counted already: 25 replies are in the window, the 5 kept ones are untouched
+    db.botsAiUsage.count.mockResolvedValue(25);
+    expect(await checkVoiceAllowance('bot-1', { ...SARA, turnId: 'again' }, NOW)).toMatchObject({ allowed: true, left: 0 });
   });
 
   it('counts the replies a person got from any bot on Universe AI, never ones a personal key paid for', async () => {

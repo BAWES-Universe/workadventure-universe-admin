@@ -31,8 +31,14 @@ type Served = Awaited<ReturnType<typeof servedVoiceLimits>>;
  * and never more than what is left of the window once the replies kept for text are put aside, so replies they typed count too.
  */
 function repliesLeft(served: Served, guest: boolean, spoken: number, used: number): number {
+  const { byVoice, byText } = places(served, guest, spoken, used);
+  return Math.max(0, Math.min(byVoice, byText));
+}
+
+/** The places the voice limits leave (`byVoice`), and the places the window leaves once the replies kept for text are put aside (`byText`). */
+function places(served: Served, guest: boolean, spoken: number, used: number): { byVoice: number; byText: number } {
   const window = guest ? served.window.guest : served.window.signedIn;
-  return Math.max(0, Math.min(window.voiceReplies - spoken, window.replies - used - window.textReserve));
+  return { byVoice: window.voiceReplies - spoken, byText: window.replies - used - window.textReserve };
 }
 
 /** The Universe AI replies a person got in a window, from any bot, as the text limit counts them (lib/reply-limits.ts). */
@@ -82,11 +88,14 @@ export async function checkVoiceAllowance(
     const used = await usedReplies(person, userId, since);
     // A reply asked for again was counted already, so what is left now is what is left
     if (already) return { allowed: true, left: repliesLeft(served, guest, spoken, used), resetsAt };
-    // A place is only for a reply when the replies kept for text stay kept: typed replies take places from the same window
-    const before = repliesLeft(served, guest, spoken, used);
-    if (before < 1) return { allowed: false, resetsAt };
+    // A place is only for a reply when the replies kept for text stay kept: typed replies take places from the same window. The text of
+    // this reply is counted as ever, and the bot server may have sent it before this is asked or not yet, so it is not counted twice:
+    // `used` may already hold it, which is why the window only has to leave 0 places, not 1, and why what is left after this reply
+    // is taken from `used` as it stands
+    const { byVoice, byText } = places(served, guest, spoken, used);
+    if (byVoice < 1 || byText < 0) return { allowed: false, resetsAt };
     await tx.voiceReplyUse.create({ data: { botId, turnId, personKey, createdAt: now } });
-    return { allowed: true, left: before - 1, resetsAt };
+    return { allowed: true, left: Math.max(0, Math.min(byVoice - 1, byText)), resetsAt };
   });
 }
 
