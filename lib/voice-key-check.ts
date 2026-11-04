@@ -22,8 +22,9 @@ type Verdict = 'accepted' | 'refused' | 'unreachable';
 
 async function ask(company: VoiceKeyCompanyInfo, apiKey: string): Promise<Verdict> {
   const { check } = company;
+  let response: Response | undefined;
   try {
-    const response = await fetch(check.url, {
+    response = await fetch(check.url, {
       method: 'GET',
       headers: { Accept: 'application/json', ...check.headers, [check.header]: `${check.prefix}${apiKey}` },
       // A redirect would carry the key somewhere the catalog never named
@@ -42,6 +43,9 @@ async function ask(company: VoiceKeyCompanyInfo, apiKey: string): Promise<Verdic
   } catch {
     // Nothing from the error is kept: it could carry the address with the key's header
     return 'unreachable';
+  } finally {
+    // A body nobody read holds the connection: let it go (a body already read has nothing left to cancel)
+    await response?.body?.cancel().catch(() => undefined);
   }
 }
 
