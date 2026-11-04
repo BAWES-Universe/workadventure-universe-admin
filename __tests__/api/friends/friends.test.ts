@@ -8,9 +8,11 @@ import { POST as places } from '@/app/api/friends/places/route';
 import { MAX_OPEN_REQUESTS } from '@/lib/friends';
 import { addUser, db } from '../../helpers/friends-db';
 import { notifyFriendAccepted, notifyFriendRequest } from '@/lib/push-messages';
+import { wokaTexturesForMany } from '@/lib/woka-avatar';
 
 jest.mock('@/lib/db', () => ({ prisma: jest.requireActual('../../helpers/friends-db').fakePrisma }));
 jest.mock('@/lib/push-messages', () => ({ notifyFriendRequest: jest.fn(), notifyFriendAccepted: jest.fn() }));
+jest.mock('@/lib/woka-avatar', () => ({ wokaTexturesForMany: jest.fn() }));
 
 const BASE = 'http://localhost:3333/api/friends';
 const TOKEN = 'test-admin-token';
@@ -52,6 +54,7 @@ describe('/api/friends', () => {
   beforeEach(() => {
     db.reset();
     jest.clearAllMocks();
+    jest.mocked(wokaTexturesForMany).mockResolvedValue(new Map());
     addUser('a', 'Alice');
     addUser('b', 'Bilal');
     addUser('c', 'Carla');
@@ -264,7 +267,7 @@ describe('/api/friends', () => {
       await send(putSettings, '/settings', 'PUT', { userUuid: 'uuid-b', settings: { findableByName: true } });
       const res = await get(search, '/search', { userUuid: 'uuid-a', q: 'BIL' });
       expect(await res.json()).toEqual({
-        results: [{ uuid: 'uuid-b', name: 'Bilal', chatId: null, universes: ['Bawes', 'Other'], relationship: 'none' }],
+        results: [{ uuid: 'uuid-b', name: 'Bilal', chatId: null, characterTextures: [], universes: ['Bawes', 'Other'], relationship: 'none' }],
       });
     });
 
@@ -275,6 +278,27 @@ describe('/api/friends', () => {
       expect(await chatIdOf('a')).toMatchObject({ relationship: 'request_sent', chatId: '@b:chat' });
       await action('b', 'a', 'accept');
       expect(await chatIdOf('a')).toMatchObject({ relationship: 'friends', chatId: '@b:chat' });
+    });
+
+    describe('the Woka shown next to a name', () => {
+      const bilalsWoka = [{ id: 'body', url: 'https://assets.example/body.png' }, { id: 'hat', url: 'https://assets.example/hat.png' }];
+      const firstResult = async (as: string) => (await (await get(search, '/search', { userUuid: `uuid-${as}`, q: 'bil' })).json()).results[0];
+
+      it("gives a stranger their real Woka layers without their chat id", async () => {
+        jest.mocked(wokaTexturesForMany).mockImplementation(async (ids: string[]) => new Map(ids.map((id) => [id, bilalsWoka])));
+        const stranger = await firstResult('a');
+        expect(stranger).toMatchObject({ relationship: 'none', chatId: null, characterTextures: bilalsWoka });
+        expect(JSON.stringify(stranger)).not.toContain('@b:chat');
+      });
+
+      it('gives none to someone without a Woka of their own, so the game draws its default', async () => {
+        expect(await firstResult('a')).toMatchObject({ characterTextures: [] });
+      });
+
+      it('still lists people when the Woka lookup fails', async () => {
+        jest.mocked(wokaTexturesForMany).mockRejectedValue(new Error('db down'));
+        expect(await firstResult('a')).toMatchObject({ uuid: 'uuid-b', name: 'Bilal', characterTextures: [] });
+      });
     });
 
     describe('the universes shown next to a name', () => {

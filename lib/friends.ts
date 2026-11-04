@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from './db';
 import { notifyFriendAccepted, notifyFriendRequest } from './push-messages';
 import { parsePlayUri } from './utils';
+import { wokaTexturesForMany } from './woka-avatar';
 import {
   PEOPLE_PREFERENCE_KEYS,
   SHARE_ROOM_KEY,
@@ -440,9 +441,11 @@ export interface SearchResult {
   name: string | null;
   /**
    * Lets the game ask for their Woka, as it does for friends and requests. Only for a friend or a request either way: the chat id
-   * is built from the person's email, so a stranger gets null (and shows the default Woka until they are friends).
+   * is built from the person's email, so a stranger gets null. A stranger's Woka comes in `characterTextures` instead.
    */
   chatId: string | null;
+  /** Their Woka as the game takes it ({ id, url } per layer, bottom first); empty when they have none to show (the game draws its default). */
+  characterTextures: { id: string; url: string }[];
   universes: string[];
   relationship: Relationship;
 }
@@ -491,6 +494,9 @@ export async function searchPeople(me: Account, rawQuery: string): Promise<Searc
   });
   const rowFor = new Map(rows.map((row) => [otherId(me.id, row), row]));
 
+  // Never fails the search: someone without a Woka here is drawn with the game's default one.
+  const wokas = await wokaTexturesForMany(users.map((user) => user.id)).catch(() => new Map<string, { id: string; url: string }[]>());
+
   const results: SearchResult[] = [];
   for (const user of users) {
     const relationship = relationshipFor(me.id, rowFor.get(user.id));
@@ -501,7 +507,14 @@ export async function searchPeople(me: Account, rawQuery: string): Promise<Searc
       ? [...new Set(user.worldMemberships.map((m) => m.world.universe.name))].slice(0, 2)
       : [];
     const knowsThem = relationship === 'friends' || relationship === 'request_sent' || relationship === 'request_received';
-    results.push({ uuid: user.uuid, name: user.name, chatId: knowsThem ? user.matrixChatId : null, universes, relationship });
+    results.push({
+      uuid: user.uuid,
+      name: user.name,
+      chatId: knowsThem ? user.matrixChatId : null,
+      characterTextures: wokas.get(user.id) ?? [],
+      universes,
+      relationship,
+    });
     if (results.length === SEARCH_LIMIT) break;
   }
   return results;
