@@ -292,6 +292,12 @@ describe('a key\'s limits', () => {
       expect(JSON.stringify(db.voiceProvider.update.mock.calls[0][0].data.voiceLimits)).not.toContain('turnSeconds');
     });
 
+    it('looks only at the names sent: a limit saved earlier that equals the server\'s today stays saved', async () => {
+      db.voiceProvider.findFirst.mockResolvedValue(key({ voiceLimits: { turnSeconds: 180, replySeconds: 30 } }));
+      await patchLimits({ replyCharacters: 900 });
+      expect(saved()).toEqual({ voiceLimits: { turnSeconds: 180, replySeconds: 30, replyCharacters: 900 } });
+    });
+
     it('compares with the server\'s current value, not a number kept here', async () => {
       db.appSetting.findUnique.mockResolvedValue({ value: { limits: { turnSeconds: 90 } } });
       db.voiceProvider.findFirst.mockResolvedValue(key());

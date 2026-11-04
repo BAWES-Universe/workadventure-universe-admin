@@ -283,14 +283,15 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
     const models = input.models ?? readModels(row.models);
     const refused = problem({ recognition: row.recognition, speech: row.speech, models });
     if (refused) throw new VoiceKeyRefused(refused);
-    // Only what the owner changed is kept: a value picked that is the server's own now is dropped, so it follows the server from then on
+    // Only what the owner changed is kept: a value picked that is the server's own now is dropped, so it follows the server from then on.
+    // Only the names sent are looked at: a limit saved earlier that happens to equal the server's today stays saved
     let voiceLimits: Prisma.InputJsonValue | typeof Prisma.DbNull | undefined;
     if (input.limits !== undefined) {
       const checked = checkVoiceKeyLimits(input.limits);
       if (!checked.ok) throw new VoiceKeyRefused(checked.error);
       const server = (await getVoiceLimits()).limits;
       const next: Record<string, number> = { ...savedVoiceKeyLimits(row.voiceLimits), ...checked.value } as Record<string, number>;
-      for (const name of VOICE_KEY_LIMIT_NAMES) if (next[name] === server[name]) delete next[name];
+      for (const name of VOICE_KEY_LIMIT_NAMES) if (name in checked.value && next[name] === server[name]) delete next[name];
       voiceLimits = Object.keys(next).length > 0 ? next : Prisma.DbNull;
     }
     await tx.voiceProvider.update({
