@@ -101,11 +101,17 @@ so a super admin changes them with no deploy: `GET /api/voice/limits` gives the 
 (30 gives 25) and `window.guest.voiceReplies` (10 gives 3).
 
 `POST /api/bots/:id/voice-allowance` (service token) with `{ userId, isGuest, turnId }`: may this reply be spoken? The bot server asks it just
-before it says a reply that Universe AI pays for (a voice part whose `parts` value is `universe-ai`). It answers `{ allowed: true }`, or
-`{ allowed: false, resetsAt }` when the person's spoken replies in the window are used up; the reply then stays in text. A reply is counted
+before it says a reply that Universe AI pays for (a voice part whose `parts` value is `universe-ai`). It answers `{ allowed: true, left, resetsAt }`
+(`left`: spoken replies still possible after this one; `resetsAt`: when the person's window ends), or `{ allowed: false, resetsAt }` when
+the person has none left; the reply then stays in text. What is left is the voice replies the limits give (30 gives 25) less the spoken
+ones, and never more than what is left of the window once the replies kept for text are put aside, so replies a person typed count too. A reply is counted
 under its `turnId` (up to 255 characters), so asking again for the same one (a retry, a reconnect) never counts it twice. A person the
 bot can't name yet (no `userId`) is never stopped. The text of the reply is counted as ever, in the usage rows; this only counts which
 replies were also spoken (`voice_reply_uses`), in the same window as the person's Universe AI replies.
+
+`POST /api/bots/:id/voice-allowance/left` (service token) with `{ userId, isGuest }`: how many spoken replies the person has left, for the line at
+the bottom of their Voice menu. It counts nothing and starts no window. It answers `{ left, resetsAt }`, with `resetsAt` null while no window
+is running (nothing used yet, or the last one ended), or `{ left: null, resetsAt: null }` for a person the bot can't name.
 
 `POST /api/bots/:id/voice-allowance/release` (service token) with `{ turnId }`: gives back a counted reply that was never played (a person
 talked over it while it was being settled, a greeting that waited for audio ran out of time, the voice provider failed). It answers
