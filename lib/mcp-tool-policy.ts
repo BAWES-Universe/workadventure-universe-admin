@@ -254,8 +254,9 @@ export interface CatalogResult extends ServerToolsJson {
 /**
  * Replace a server's tool list with what the bot server just read. A new tool waits to be confirmed. A tool whose
  * fingerprint is different goes back to not confirmed yet, with its heading cleared, and only that tool does. A tool the
- * server no longer offers is removed. Its suggestion is only a suggestion and never lets it run. It also saves whether the
- * list is cut (the server has more tools than the bot server keeps); a bot server that does not say leaves it "not cut".
+ * server no longer offers is removed, unless the list is cut (the server has more tools than the bot server keeps, so a tool
+ * missing from it may still be there). Its suggestion is only a suggestion and never lets it run. It also saves whether the
+ * list is cut; a bot server that does not say leaves it "not cut".
  */
 export async function syncCatalog(botId: string, serverId: string, body: z.infer<typeof catalogSchema>): Promise<CatalogResult> {
   return prisma.$transaction(async (tx) => {
@@ -298,15 +299,16 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
       }
     }
 
+    // A cut list is only the first 500 of what the server has, so a tool missing from it may still be there: nothing is removed
+    const cut = body.truncated === true;
     const offered = new Set(body.tools.map((tool) => tool.name));
-    const removed = existing.filter((tool) => !offered.has(tool.name));
+    const removed = cut ? [] : existing.filter((tool) => !offered.has(tool.name));
     if (removed.length > 0) await tx.botMcpTool.deleteMany({ where: { id: { in: removed.map((tool) => tool.id) } } });
 
     if (added.length > 0 || changed.length > 0 || removed.length > 0 || reworded) {
       await tx.botMcpServer.update({ where: { id: serverId }, data: bump });
     }
     // Whether the list is the whole server or its first 500 is not a policy: it moves no revision and confirms nothing
-    const cut = body.truncated === true;
     const seen = cut ? (body.totalSeen ?? null) : null;
     if (server.toolsCut !== cut || server.toolsSeen !== seen) {
       await tx.botMcpServer.update({ where: { id: serverId }, data: { toolsCut: cut, toolsSeen: seen } });

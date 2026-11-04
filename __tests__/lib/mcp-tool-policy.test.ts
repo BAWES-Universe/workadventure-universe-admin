@@ -365,6 +365,18 @@ describe('a server with more tools than the bot server keeps', () => {
     expect(whole).toMatchObject({ truncated: false, policyRevision: revision, state: 'confirmed' });
   });
 
+  it('keeps a tool missing from a cut list (it may be past the first 500), and removes it once the list is whole', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a'), tool('b')));
+    const revision = state.servers[0].policyRevision;
+    const cut = await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('a')));
+    expect(cut.removed).toEqual([]);
+    expect(state.tools.map((t) => t.name).sort()).toEqual(['a', 'b']);
+    expect(state.servers[0].policyRevision).toBe(revision);
+    const whole = await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    expect(whole.removed).toEqual(['b']);
+    expect(state.tools.map((t) => t.name)).toEqual(['a']);
+  });
+
   it('writes the server only when what it says about the cut changed', async () => {
     await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('a')));
     const update = prisma.botMcpServer.update as jest.Mock;
