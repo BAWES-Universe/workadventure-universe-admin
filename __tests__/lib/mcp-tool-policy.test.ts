@@ -11,6 +11,8 @@ type ServerRow = {
   changeSetting: string;
   deleteSendSetting: string;
   policyRevision: number;
+  toolsCut: boolean;
+  toolsSeen: number | null;
 };
 type ToolRow = {
   id: string;
@@ -152,6 +154,8 @@ const server = (over: Partial<ServerRow> = {}): ServerRow => ({
   changeSetting: 'asksFirst',
   deleteSendSetting: 'asksFirst',
   policyRevision: 1,
+  toolsCut: false,
+  toolsSeen: null,
   ...over,
 });
 
@@ -233,6 +237,8 @@ describe('a server’s state', () => {
       policyRevision: 1,
       settings: DEFAULT_SETTINGS,
       tools: [],
+      truncated: false,
+      totalSeen: null,
     });
   });
 
@@ -319,6 +325,63 @@ describe('saving the tool list', () => {
   it('answers 404 for a server that is not this bot’s, and saves nothing', async () => {
     await expect(syncCatalog('bot-2', 'srv-1', catalog(tool('a')))).rejects.toMatchObject({ status: 404 });
     expect(state.tools).toHaveLength(0);
+  });
+});
+
+describe('a server with more tools than the bot server keeps', () => {
+  const cutList = (extra: { truncated?: boolean; totalSeen?: number }, ...tools: ReturnType<typeof tool>[]) => catalogSchema.parse({ tools, ...extra });
+
+  it('reads as not cut for a server that never said otherwise, and for a bot server that does not send the flag', async () => {
+    expect(await readServerTools('bot-1', 'srv-1')).toMatchObject({ truncated: false, totalSeen: null });
+    const saved = await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    expect(saved).toMatchObject({ truncated: false, totalSeen: null });
+  });
+
+  it('saves that the list is cut and how many tools the server has', async () => {
+    const saved = await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('a')));
+    expect(saved).toMatchObject({ truncated: true, totalSeen: 731 });
+    expect(await readServerTools('bot-1', 'srv-1')).toMatchObject({ truncated: true, totalSeen: 731 });
+  });
+
+  it('saves that the list is cut when the count is not known (more pages were left)', async () => {
+    const saved = await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true }, tool('a')));
+    expect(saved).toMatchObject({ truncated: true, totalSeen: null });
+  });
+
+  it('goes back to not cut when the next list is whole, or when an older bot server saves without the flag', async () => {
+    await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('a')));
+    expect(await syncCatalog('bot-1', 'srv-1', cutList({ truncated: false }, tool('a')))).toMatchObject({ truncated: false, totalSeen: null });
+    await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 600 }, tool('a')));
+    expect(await syncCatalog('bot-1', 'srv-1', catalog(tool('a')))).toMatchObject({ truncated: false, totalSeen: null });
+  });
+
+  it('moves no policy revision and confirms nothing, whether the list is cut or not', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    await confirmTools('bot-1', 'srv-1', 'u-sara');
+    const revision = state.servers[0].policyRevision;
+    const cut = await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 900 }, tool('a')));
+    expect(cut).toMatchObject({ truncated: true, totalSeen: 900, policyRevision: revision, state: 'confirmed', added: [], changed: [], removed: [] });
+    const whole = await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    expect(whole).toMatchObject({ truncated: false, policyRevision: revision, state: 'confirmed' });
+  });
+
+  it('writes the server only when what it says about the cut changed', async () => {
+    await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('a')));
+    const update = prisma.botMcpServer.update as jest.Mock;
+    update.mockClear();
+    await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('a')));
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('refuses a count without a cut list, a negative or silly count, and more than 500 tools in one save', () => {
+    expect(catalogSchema.safeParse({ tools: [tool('a')], totalSeen: 731 }).success).toBe(false);
+    expect(catalogSchema.safeParse({ tools: [tool('a')], truncated: false, totalSeen: 731 }).success).toBe(false);
+    expect(catalogSchema.safeParse({ tools: [tool('a')], truncated: true, totalSeen: -1 }).success).toBe(false);
+    expect(catalogSchema.safeParse({ tools: [tool('a')], truncated: true, totalSeen: 2_000_000 }).success).toBe(false);
+    expect(catalogSchema.safeParse({ tools: [tool('a')], truncated: true, totalSeen: 731.5 }).success).toBe(false);
+    const many = Array.from({ length: 501 }, (_, i) => tool(`t${i}`));
+    expect(catalogSchema.safeParse({ tools: many.slice(0, 500), truncated: true, totalSeen: 501 }).success).toBe(true);
+    expect(catalogSchema.safeParse({ tools: many, truncated: true, totalSeen: 501 }).success).toBe(false);
   });
 });
 
