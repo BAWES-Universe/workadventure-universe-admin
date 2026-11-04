@@ -264,8 +264,17 @@ describe('/api/friends', () => {
       await send(putSettings, '/settings', 'PUT', { userUuid: 'uuid-b', settings: { findableByName: true } });
       const res = await get(search, '/search', { userUuid: 'uuid-a', q: 'BIL' });
       expect(await res.json()).toEqual({
-        results: [{ uuid: 'uuid-b', name: 'Bilal', chatId: '@b:chat', universes: ['Bawes', 'Other'], relationship: 'none' }],
+        results: [{ uuid: 'uuid-b', name: 'Bilal', chatId: null, universes: ['Bawes', 'Other'], relationship: 'none' }],
       });
+    });
+
+    it('gives the chat id, which is built from the email, only to a friend or a request either way, never to a stranger', async () => {
+      const chatIdOf = async (as: string) => (await (await get(search, '/search', { userUuid: `uuid-${as}`, q: 'bil' })).json()).results[0];
+      expect(await chatIdOf('a')).toMatchObject({ relationship: 'none', chatId: null });
+      await action('a', 'b', 'request');
+      expect(await chatIdOf('a')).toMatchObject({ relationship: 'request_sent', chatId: '@b:chat' });
+      await action('b', 'a', 'accept');
+      expect(await chatIdOf('a')).toMatchObject({ relationship: 'friends', chatId: '@b:chat' });
     });
 
     describe('the universes shown next to a name', () => {

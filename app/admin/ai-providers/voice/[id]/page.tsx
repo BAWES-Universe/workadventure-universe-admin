@@ -103,7 +103,7 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
   const [provider, setProvider] = useState<ServerVoiceProvider | null>(null);
   const [all, setAll] = useState<ServerVoiceProvider[]>([]);
   const [failed, setFailed] = useState(false);
-  const [checked, setChecked] = useState<{ ok: true } | { ok: false; message: string } | null>(null);
+  const [checked, setChecked] = useState<{ ok: true } | { ok: false; message: string } | { ok: 'note'; message: string } | null>(null);
   const [checking, setChecking] = useState(false);
   const [editing, setEditing] = useState<'key' | 'address' | 'name' | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -187,7 +187,14 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
     if (refused) setProblem(refused);
   }
 
+  /** Said instead of a check: the company's own address can't vouch for a key made for another one. */
+  const ownAddressNote = `This provider uses its own address, so ${company} can’t check its key.`;
+
   async function check() {
+    if (provider!.endpoint) {
+      setChecked({ ok: 'note', message: ownAddressNote });
+      return;
+    }
     setChecking(true);
     setChecked(null);
     const answer = await callOrbit('POST', `/api/admin/voice-providers/${encodeURIComponent(id)}/check`);
@@ -197,13 +204,18 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
 
   async function replaceKey(key: string): Promise<string | null> {
     if (key === '') return 'Paste the new key first.';
-    // A key is asked about before it replaces the saved one, so a typo never takes a working key away
-    const asked = await callOrbit('POST', '/api/admin/voice-providers/check', { adapter: provider!.adapter, apiKey: key });
-    if (!asked.ok) return asked.error;
+    // A key is asked about before it replaces the saved one, so a typo never takes a working key away. The check goes to the
+    // company's own address only, so a provider with its own address would have a key made for that address turned away: it is
+    // not asked there.
+    const ownAddress = Boolean(provider!.endpoint);
+    if (!ownAddress) {
+      const asked = await callOrbit('POST', '/api/admin/voice-providers/check', { adapter: provider!.adapter, apiKey: key });
+      if (!asked.ok) return asked.error;
+    }
     const refused = await change({ apiKey: key });
     if (refused) return refused;
     setEditing(null);
-    setChecked({ ok: true });
+    setChecked(ownAddress ? null : { ok: true });
     addToast({ description: 'Key replaced', variant: 'success', duration: 2500 });
     return null;
   }
@@ -268,7 +280,7 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
       <section className="grid gap-2">
         <Caption>Key</Caption>
         {editing === 'key' ? (
-          <EditField label="New key" initial="" type="password" placeholder="Paste the new key" hint={`Asks ${company} if it knows the key first, then replaces the saved one. Stored encrypted.`} save={replaceKey} onCancel={() => setEditing(null)} go="Check and replace" />
+          <EditField label="New key" initial="" type="password" placeholder="Paste the new key" hint={provider.endpoint ? `Replaces the saved one. ${company} can’t check a key for this provider’s own address. Stored encrypted.` : `Asks ${company} if it knows the key first, then replaces the saved one. Stored encrypted.`} save={replaceKey} onCancel={() => setEditing(null)} go={provider.endpoint ? 'Replace' : 'Check and replace'} />
         ) : (
           <div className="flex flex-wrap items-center gap-2 rounded-xl bg-foreground/[.04] py-1 pl-3 pr-1">
             <span className="min-w-0 flex-1 text-[15px]">{provider.hasKey ? `••••${provider.apiKeyLast4 ?? ''}` : 'No key yet'}</span>
@@ -286,6 +298,7 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
         )}
         {checked?.ok === true && <Answered>{company} knows this key. Checked just now, nothing paid.</Answered>}
         {checked?.ok === false && <Refused>{checked.message}</Refused>}
+        {checked?.ok === 'note' && <p className="text-[13px] text-muted-foreground">{checked.message}</p>}
       </section>
       <section className="grid gap-2">
         <Caption>Models</Caption>

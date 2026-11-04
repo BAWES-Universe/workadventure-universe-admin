@@ -138,10 +138,10 @@ describe('who may reach the tool settings', () => {
 
 describe('who is allowed more right now', () => {
   it('lists the live remembered approvals for the bot, for a person who manages it or the bot server', async () => {
-    grantsLib.listActiveGrants.mockResolvedValue([{ id: 'g1', requesterKey: 'user:sara', toolName: 'create_issue' }]);
+    grantsLib.listActiveGrants.mockResolvedValue([{ id: 'g1', person: { name: 'Sara', isGuest: false }, toolName: 'create_issue' }]);
     const response = await call(GET_GRANTS as Handler, 'GET');
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ grants: [{ id: 'g1', requesterKey: 'user:sara', toolName: 'create_issue' }] });
+    expect(await response.json()).toEqual({ grants: [{ id: 'g1', person: { name: 'Sara', isGuest: false }, toolName: 'create_issue' }] });
     expect(grantsLib.listActiveGrants).toHaveBeenCalledWith('bot-1');
     session.mockResolvedValue(null);
     expect((await call(GET_GRANTS as Handler, 'GET', undefined, 'admin-secret')).status).toBe(200);

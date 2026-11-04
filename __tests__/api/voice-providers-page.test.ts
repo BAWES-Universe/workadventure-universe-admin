@@ -113,6 +113,11 @@ describe('Check key', () => {
     expect((await checkSaved(new NextRequest('http://localhost:3333/api/x', { method: 'POST' }), ctx())).status).toBe(409);
     db.findUnique.mockResolvedValue(row({ ownerId: 'u-maker' }));
     expect((await checkSaved(new NextRequest('http://localhost:3333/api/x', { method: 'POST' }), ctx())).status).toBe(404);
+    // A provider with its own address: the company's address can't vouch for its key, so it isn't asked
+    db.findUnique.mockResolvedValue(row({ endpoint: 'https://eleven.example.com' }));
+    const own = await checkSaved(new NextRequest('http://localhost:3333/api/x', { method: 'POST' }), ctx());
+    expect(own.status).toBe(409);
+    expect((await own.json()).error).toBe('This provider uses its own address, so the company can\u2019t check its key.');
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

@@ -31,9 +31,11 @@ jest.mock('@/lib/client-auth', () => ({
 }));
 jest.mock('@/components/ui/toast', () => ({ useToast: () => ({ addToast: jest.fn() }) }));
 jest.mock('next/navigation', () => ({ useRouter: () => ({ push, back: jest.fn() }) }));
+jest.mock('@/app/admin/orbit-frame-context', () => ({ ...jest.requireActual('@/app/admin/orbit-frame-context'), useReplacePage: () => jest.fn() }));
 
 import { VoiceSection } from '@/app/admin/ai-providers/voice-section';
 import NewVoiceProviderPage from '@/app/admin/ai-providers/voice/new/page';
+import VoiceProviderPage from '@/app/admin/ai-providers/voice/[id]/page';
 import { voiceServerLimits } from '@/app/admin/components/limits';
 import { withStartingModel } from '@/app/admin/ai-providers/voice/voice-shared';
 import { VOICE_LIMITS_RECOMMENDED } from '@/lib/voice-limit-values';
@@ -365,5 +367,49 @@ describe('the voice limits', () => {
     expect(reserve.options.map((option) => option.value)).toEqual([3, 6, 8, 10]);
     expect(reserve.recommended).toBe(6);
     expect(rows.find((row) => row.id === 'replyCharacters')!.value).toBe(900);
+  });
+});
+
+describe('A voice provider\u2019s key', () => {
+  const open = async (id: string) => {
+    // Already settled, so React's use() reads it without suspending
+    const params = Object.assign(Promise.resolve({ id }), { status: 'fulfilled', value: { id } });
+    render(<VoiceProviderPage params={params} />);
+    return screen.findByRole('button', { name: 'Replace' });
+  };
+  const checks = () => calls.filter((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers/check');
+  const saves = () => calls.filter((call) => call.method === 'PATCH');
+
+  it('is asked about at the company before it replaces the saved one, and a refused key is not saved', async () => {
+    fireEvent.click(await open('v-eleven'));
+    checkAnswer = { ok: false, body: { error: 'ElevenLabs doesn\u2019t know this key.' } };
+    fireEvent.change(screen.getByLabelText('New key'), { target: { value: 'sk_new_key_0000' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check and replace' }));
+    expect(await screen.findByText('ElevenLabs doesn\u2019t know this key.')).toBeTruthy();
+    expect(checks()).toHaveLength(1);
+    expect(checks()[0].body).toEqual({ adapter: 'elevenlabs', apiKey: 'sk_new_key_0000' });
+    expect(saves()).toHaveLength(0);
+    checkAnswer = { ok: true, body: { ok: true } };
+    fireEvent.click(screen.getByRole('button', { name: 'Check and replace' }));
+    await waitFor(() => expect(saves()).toHaveLength(1));
+    expect(saves()[0].body).toEqual({ apiKey: 'sk_new_key_0000' });
+  });
+
+  it('is replaced without asking the company when the provider has its own address, which the company can\u2019t vouch for', async () => {
+    providers = [soniox(), provider({ ...eleven(), endpoint: 'https://eleven.example.com' })];
+    fireEvent.click(await open('v-eleven'));
+    fireEvent.change(screen.getByLabelText('New key'), { target: { value: 'sk_custom_host_0000' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+    await waitFor(() => expect(saves()).toHaveLength(1));
+    expect(saves()[0].body).toEqual({ apiKey: 'sk_custom_host_0000' });
+    expect(checks()).toHaveLength(0);
+  });
+
+  it('says the company can\u2019t check it when the provider has its own address, instead of a refusal', async () => {
+    providers = [soniox(), provider({ ...eleven(), endpoint: 'https://eleven.example.com' })];
+    await open('v-eleven');
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    expect(await screen.findByText('This provider uses its own address, so ElevenLabs can\u2019t check its key.')).toBeTruthy();
+    expect(calls.some((call) => call.url.endsWith('/check'))).toBe(false);
   });
 });

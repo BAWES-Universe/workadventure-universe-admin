@@ -584,8 +584,11 @@ describe('the bot’s own allow-more times, and who is allowed more right now', 
     await remember();
     await remember({ proposalKey: 'job2:turn1:call1', requesterKey: 'user:omar', conversationKey: 'dm:omar:nora', arguments: { ...ISSUE, team: 'MAP' }, rememberScope: { fixed: { team: 'MAP' }, varies: ['title', 'description'] } });
     const grants = await listActiveGrants(BOT, at(60));
-    expect(grants.map((g) => g.requesterKey).sort()).toEqual(['user:omar', 'user:sara']);
-    const sara = grants.find((g) => g.requesterKey === 'user:sara');
+    const team = (g: (typeof grants)[number]) => (g.scope.fixed as { team?: unknown }).team;
+    expect(grants.map(team).sort()).toEqual(['MAP', 'WEB']);
+    const sara = grants.find((g) => team(g) === 'WEB');
+    // Who it is for is said by name only, never by the key the game names them by
+    expect(grants.every((g) => !('requesterKey' in g))).toBe(true);
     expect(sara).toMatchObject({ toolName: 'create_issue', heading: 'changesThings', connectionRef: 'linear:acme', scope: SCOPE });
     expect(sara?.idleExpiresAt).toEqual(at(minutes(DEFAULTS.idleMinutes)));
     expect(sara?.absoluteExpiresAt).toEqual(at(minutes(DEFAULTS.absoluteMinutes)));
@@ -598,10 +601,15 @@ describe('the bot’s own allow-more times, and who is allowed more right now', 
     await remember();
     await remember({ proposalKey: 'job2:turn1:call1', requesterKey: 'user:guest1', conversationKey: 'dm:g:nora' });
     await remember({ proposalKey: 'job3:turn1:call1', requesterKey: 'user:unknown', conversationKey: 'dm:u:nora', toolName: 'other_tool' });
-    const byKey = Object.fromEntries((await listActiveGrants(BOT, at(60))).map((g) => [g.requesterKey, g]));
-    expect(byKey['user:sara']).toMatchObject({ person: { name: 'Sara', isGuest: false }, toolTitle: 'Create issue' });
-    expect(byKey['user:guest1']).toMatchObject({ person: { name: null, isGuest: true } });
-    expect(byKey['user:unknown']).toMatchObject({ person: { name: null, isGuest: false }, toolTitle: null });
+    const listed = (await listActiveGrants(BOT, at(60))).map((g) => ({ person: g.person, toolTitle: g.toolTitle }));
+    expect(listed).toHaveLength(3);
+    expect(listed).toEqual(
+      expect.arrayContaining([
+        { person: { name: 'Sara', isGuest: false }, toolTitle: 'Create issue' },
+        { person: { name: null, isGuest: true }, toolTitle: 'Create issue' },
+        { person: { name: null, isGuest: false }, toolTitle: null },
+      ])
+    );
   });
 
   (REAL ? it.skip : it)('finds a signed-in person the game named by their email as well as by their uuid', async () => {
@@ -609,6 +617,8 @@ describe('the bot’s own allow-more times, and who is allowed more right now', 
     await remember({ requesterKey: 'omar@example.com', conversationKey: 'nearby:omar:nora' });
     const [grant] = await listActiveGrants(BOT, at(60));
     expect(grant.person).toEqual({ name: 'Omar', isGuest: false });
+    // The email the game named him by is never in the list
+    expect(JSON.stringify(grant)).not.toContain('omar@example.com');
   });
 
   it('leaves out one that ended: by time, by a revoke, or already ended', async () => {
