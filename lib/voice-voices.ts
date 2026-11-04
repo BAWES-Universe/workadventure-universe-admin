@@ -247,7 +247,8 @@ async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
   let voices: Listed[];
   try {
     const call = callFor(provider);
-    voices = await LISTERS[provider.adapter](call);
+    // A lister stops at its page limit, but never trusts that: no more than MAX_VOICES are kept or sent on
+    voices = (await LISTERS[provider.adapter](call)).slice(0, MAX_VOICES);
   } catch (error) {
     if (error instanceof Unreadable) throw new VoiceListRefused(`${voiceKeyCompanyInfo(provider.adapter)?.label ?? provider.name} sent a voice list that can’t be read.`, 502);
     throw error;

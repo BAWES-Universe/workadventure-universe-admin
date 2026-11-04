@@ -11,7 +11,7 @@ import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { prisma } from '@/lib/db';
 import { encryptApiKey } from '@/lib/encryption';
-import { clearVoiceListCache, languageCode, MAX_PREVIEW_BYTES } from '@/lib/voice-voices';
+import { clearVoiceListCache, languageCode, MAX_PREVIEW_BYTES, MAX_VOICES } from '@/lib/voice-voices';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -133,6 +133,14 @@ describe('Universe AI\'s voices', () => {
     providers[0].updatedAt = new Date('2026-11-03T11:00:00Z');
     await voices();
     expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it('send on no more than 1,000 voices, however many a company puts in a page', async () => {
+    const many = Array.from({ length: 1200 }, (_, index) => ({ voice_id: `v${index}`, name: `Voice ${index}` }));
+    fetchMock.mockImplementation(async () => json(eleven({ voices: many, has_more: false })));
+    const list = await (await voices()).json();
+    expect(list).toHaveLength(MAX_VOICES);
+    expect(list[MAX_VOICES - 1].voiceId).toBe(`v${MAX_VOICES - 1}`);
   });
 
   it('say so when the server has none: no default speaking provider, no key, or no speaking model', async () => {
