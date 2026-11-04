@@ -1537,7 +1537,7 @@ model BotActionRequest {
 model BotActionDecision {
   id           String   @id @default(uuid())
   requestId    String   @map("request_id")
-  // approve | approveAndRemember | decline | supersede | expire | stale | cancel | revoke | claim | reconcile
+  // approve | approveAndRemember | decline | supersede | expire | stale | cancel | extend | revoke | claim | reconcile
   event        String   @db.VarChar(24)
   actorKey     String?  @map("actor_key") @db.VarChar(400)
   fromRevision Int      @map("from_revision")

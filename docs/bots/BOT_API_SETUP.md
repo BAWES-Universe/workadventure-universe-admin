@@ -167,6 +167,13 @@ curl -X POST \
       ran out (its dispatcher died) into couldn't confirm.
     - **POST /api/bots/:id/actions/supersede** closes the asker's waiting (or approved-not-started) actions in one
       conversation when they send a replacement instruction.
+    - **POST .../:actionId/cancel** is the X on one card: `{ actorKey, revision }`. Only a card still waiting, only the asker;
+      it closes that card as `cancelled` and leaves their other cards alone. **POST .../:actionId/extend** is "More time":
+      `{ actorKey, revision, reviewMinutes? }` gives a waiting card another full wait from now (never shorter than it has
+      left), up to 10 times (409 `no_more_time`), and raises the revision so the card is redrawn. Neither approves anything.
+      Both answer 200 `{ outcome: "changed", action }`, or 409 `{ outcome: "already_decided" | "expired", action }`.
+    - **POST /api/bots/:id/tool-manager** (service token) `{ identifier }` answers `{ canManage }`: the Manage bots answer the
+      Tools page uses. The bot server asks it before someone tries a tool nobody has confirmed yet.
     - Remembered approvals: **POST /api/bots/:id/action-grants/find** (is this call covered: same asker, conversation,
       connection, reviewed tool, policy revision and heading, inside the idle and absolute time, arguments fit; never for
       deletes or sends), **/touch** (the asker's own message renews the idle time, never past the absolute end) and
