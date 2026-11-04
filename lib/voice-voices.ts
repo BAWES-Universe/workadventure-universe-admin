@@ -338,9 +338,42 @@ async function sampleFor(provider: VoiceProvider, voiceId: string): Promise<Voic
     await response.body?.cancel().catch(() => undefined);
     throw unusable();
   }
-  const bytes = await response.arrayBuffer().catch(() => null);
-  if (!bytes || bytes.byteLength === 0 || bytes.byteLength > MAX_PREVIEW_BYTES) throw unusable();
+  const bytes = await readCapped(response, MAX_PREVIEW_BYTES);
+  if (!bytes || bytes.byteLength === 0) throw unusable();
   return { bytes, contentType: type.split(';')[0].trim() };
+}
+
+/**
+ * The body of a response, read chunk by chunk and given up on (and cancelled) as soon as it goes past `max` bytes, so a company
+ * that leaves out Content-Length can't make this hold more than `max`. Null when it is too big or can't be read.
+ */
+async function readCapped(response: Response, max: number): Promise<ArrayBuffer | null> {
+  const reader = response.body?.getReader();
+  if (!reader) return null;
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > max) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    await reader.cancel().catch(() => undefined);
+    return null;
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return out.buffer;
 }
 
 /**

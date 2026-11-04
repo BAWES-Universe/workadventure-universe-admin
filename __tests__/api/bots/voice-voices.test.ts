@@ -282,6 +282,28 @@ describe('Cartesia\'s voices', () => {
     expect((await preview('c1')).status).toBe(502);
   });
 
+  it('stops reading a sample that goes past the cap when the company sent no length, and cancels the rest', async () => {
+    await voices('part=speech&source=key-1');
+    const chunk = new Uint8Array(MAX_PREVIEW_BYTES / 4 + 1);
+    let pulled = 0;
+    let cancelled = false;
+    // Endless: only a reader that gives up at the cap ever finishes
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        controller.enqueue(chunk);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    fetchMock.mockImplementation(async () => new Response(body, { status: 200, headers: { 'content-type': 'audio/wav' } }));
+    expect((await preview('c1')).status).toBe(502);
+    expect(cancelled).toBe(true);
+    // Four chunks go past the cap; the stream's own look-ahead may have asked for one more
+    expect(pulled).toBeLessThanOrEqual(6);
+  });
+
   it('are not sampled on a key that isn\'t the maker\'s', async () => {
     await voices('part=speech&source=key-1');
     lends = [];
