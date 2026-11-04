@@ -264,7 +264,7 @@ describe('/api/friends', () => {
       await send(putSettings, '/settings', 'PUT', { userUuid: 'uuid-b', settings: { findableByName: true } });
       const res = await get(search, '/search', { userUuid: 'uuid-a', q: 'BIL' });
       expect(await res.json()).toEqual({
-        results: [{ uuid: 'uuid-b', name: 'Bilal', universes: ['Bawes', 'Other'], relationship: 'none' }],
+        results: [{ uuid: 'uuid-b', name: 'Bilal', chatId: '@b:chat', universes: ['Bawes', 'Other'], relationship: 'none' }],
       });
     });
 
@@ -305,6 +305,12 @@ describe('/api/friends', () => {
         const res = await get(search, '/search', { userUuid: 'uuid-a', q: 'bil' });
         expect((await res.json()).results.map((r: { uuid: string }) => r.uuid)).toEqual(['uuid-b']);
       });
+    });
+
+    it('sends a null chatId for someone without a chat account yet, so the game keeps the default Woka', async () => {
+      db.users.find((u) => u.id === 'b')!.matrixChatId = null;
+      const res = await get(search, '/search', { userUuid: 'uuid-a', q: 'bil' });
+      expect((await res.json()).results).toEqual([expect.objectContaining({ uuid: 'uuid-b', chatId: null })]);
     });
 
     it('finds someone who never touched the setting', async () => {

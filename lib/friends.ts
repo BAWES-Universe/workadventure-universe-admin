@@ -438,6 +438,8 @@ export async function relationshipBetween(me: Account, target: Account): Promise
 export interface SearchResult {
   uuid: string;
   name: string | null;
+  /** Lets the game ask for their Woka, as it does for friends and requests. */
+  chatId: string | null;
   universes: string[];
   relationship: Relationship;
 }
@@ -465,6 +467,7 @@ export async function searchPeople(me: Account, rawQuery: string): Promise<Searc
       id: true,
       uuid: true,
       name: true,
+      matrixChatId: true,
       worldMemberships: {
         where: { world: { isPublic: true, universe: { isPublic: true } } },
         select: { world: { select: { universe: { select: { name: true } } } } },
@@ -494,7 +497,7 @@ export async function searchPeople(me: Account, rawQuery: string): Promise<Searc
     const universes = mayShowPlaces
       ? [...new Set(user.worldMemberships.map((m) => m.world.universe.name))].slice(0, 2)
       : [];
-    results.push({ uuid: user.uuid, name: user.name, universes, relationship });
+    results.push({ uuid: user.uuid, name: user.name, chatId: user.matrixChatId, universes, relationship });
     if (results.length === SEARCH_LIMIT) break;
   }
   return results;
