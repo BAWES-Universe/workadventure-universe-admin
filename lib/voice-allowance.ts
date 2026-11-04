@@ -42,8 +42,8 @@ function places(served: Served, guest: boolean, spoken: number, used: number): {
 }
 
 /** The Universe AI replies a person got in a window, from any bot, as the text limit counts them (lib/reply-limits.ts). */
-const usedReplies = (person: { personId: string | null }, userId: string, since: Date) =>
-  prisma.botsAiUsage.count({
+const usedReplies = (db: Pick<typeof prisma, 'botsAiUsage'>, person: { personId: string | null }, userId: string, since: Date) =>
+  db.botsAiUsage.count({
     where: {
       ...(person.personId ? { talkedPersonId: person.personId } : { talkedUserId: userId, talkedGuest: true }),
       keyOwnerId: null,
@@ -85,7 +85,7 @@ export async function checkVoiceAllowance(
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${personKey}))`;
     const already = await tx.voiceReplyUse.findUnique({ where: { botId_turnId: { botId, turnId } }, select: { id: true } });
     const spoken = await tx.voiceReplyUse.count({ where: { personKey, createdAt: { gte: since } } });
-    const used = await usedReplies(person, userId, since);
+    const used = await usedReplies(tx, person, userId, since);
     // A reply asked for again was counted already, so what is left now is what is left
     if (already) return { allowed: true, left: repliesLeft(served, guest, spoken, used), resetsAt };
     // A place is only for a reply when the replies kept for text stay kept: typed replies take places from the same window. The text of
@@ -121,7 +121,7 @@ export async function voiceRepliesLeft(botId: string, input: { userId?: unknown;
   if (!row || !endsAt || endsAt <= now) return { left: repliesLeft(served, guest, 0, 0), resetsAt: null };
   const [spoken, used] = await Promise.all([
     prisma.voiceReplyUse.count({ where: { personKey, createdAt: { gte: row.startedAt } } }),
-    usedReplies(person, userId, row.startedAt),
+    usedReplies(prisma, person, userId, row.startedAt),
   ]);
   return { left: repliesLeft(served, guest, spoken, used), resetsAt: endsAt.toISOString() };
 }
