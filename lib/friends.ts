@@ -438,7 +438,10 @@ export async function relationshipBetween(me: Account, target: Account): Promise
 export interface SearchResult {
   uuid: string;
   name: string | null;
-  /** Lets the game ask for their Woka, as it does for friends and requests. */
+  /**
+   * Lets the game ask for their Woka, as it does for friends and requests. Only for a friend or a request either way: the chat id
+   * is built from the person's email, so a stranger gets null (and shows the default Woka until they are friends).
+   */
   chatId: string | null;
   universes: string[];
   relationship: Relationship;
@@ -497,7 +500,8 @@ export async function searchPeople(me: Account, rawQuery: string): Promise<Searc
     const universes = mayShowPlaces
       ? [...new Set(user.worldMemberships.map((m) => m.world.universe.name))].slice(0, 2)
       : [];
-    results.push({ uuid: user.uuid, name: user.name, chatId: user.matrixChatId, universes, relationship });
+    const knowsThem = relationship === 'friends' || relationship === 'request_sent' || relationship === 'request_received';
+    results.push({ uuid: user.uuid, name: user.name, chatId: knowsThem ? user.matrixChatId : null, universes, relationship });
     if (results.length === SEARCH_LIMIT) break;
   }
   return results;
