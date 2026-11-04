@@ -159,7 +159,8 @@ type BotOnKey = VoiceKeySummary['lentTo'][number]['bots'][number];
 
 /**
  * What the AI keys page shows for these keys: each with what it paid for this month and the bots on it. A bot is on a key when
- * its published voice (the revision named in `bots.voice_revision`) names the key, in a universe the key is lent to.
+ * it has voice on and its published voice (the revision named in `bots.voice_revision`) names the key, in a universe the key is
+ * lent to.
  */
 async function summaries(rows: KeyRow[], ownerId: string): Promise<VoiceKeySummary[]> {
   if (rows.length === 0) return [];
@@ -172,7 +173,8 @@ async function summaries(rows: KeyRow[], ownerId: string): Promise<VoiceKeySumma
     universeIds.length === 0
       ? []
       : prisma.bot.findMany({
-          where: { voiceRevision: { not: null }, room: { world: { universeId: { in: universeIds } } } },
+          // Voice switched off keeps its revision, so only bots with voice on are on a key (as the Universe AI page counts them)
+          where: { voiceEnabled: true, voiceRevision: { not: null }, room: { world: { universeId: { in: universeIds } } } },
           orderBy: { name: 'asc' },
           select: { id: true, name: true, voiceRevision: true, room: { select: { world: { select: { universeId: true } } } } },
         }),

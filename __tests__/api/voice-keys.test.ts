@@ -206,8 +206,33 @@ describe('what a key paid for this month, and the bots on it', () => {
     ]);
     // Only this month's usage, and only the bots in the universes it is lent to whose published voice is on
     expect(db.voiceKeyUsage.findMany.mock.calls[0][0].where).toMatchObject({ providerId: { in: ['k1'] }, month: expect.any(Date) });
-    expect(db.bot.findMany.mock.calls[0][0].where).toEqual({ voiceRevision: { not: null }, room: { world: { universeId: { in: ['uni1'] } } } });
+    expect(db.bot.findMany.mock.calls[0][0].where).toEqual({ voiceEnabled: true, voiceRevision: { not: null }, room: { world: { universeId: { in: ['uni1'] } } } });
     expect(db.botVoiceRevision.findMany.mock.calls[0][0].where.OR).toContainEqual({ botId: 'b1', number: 2 });
+  });
+
+  it('leaves out a bot whose voice is switched off, though it keeps its published voice, while its replies still count for the key', async () => {
+    withProviders([key({ recognition: true, models, lends: [lent()] })]);
+    db.voiceKeyUsage.findMany.mockResolvedValue([
+      { providerId: 'k1', botId: 'b1', replies: 10 },
+      { providerId: 'k1', botId: 'b4', replies: 7 },
+    ]);
+    // Switching voice off keeps bots.voice_revision and flips only voice_enabled, so the stand-in database applies that filter
+    const all = [
+      { ...inSales('b1', 'Sales Researcher', 2), voiceEnabled: true },
+      { ...inSales('b4', 'Voice Off', 3), voiceEnabled: false },
+    ];
+    db.bot.findMany.mockImplementation(async ({ where }: { where: { voiceEnabled?: boolean } }) =>
+      all.filter((bot) => where.voiceEnabled === undefined || bot.voiceEnabled === where.voiceEnabled).map((bot) => inSales(bot.id, bot.name, bot.voiceRevision))
+    );
+    db.botVoiceRevision.findMany.mockResolvedValue([
+      { botId: 'b1', profile: voice('k1', 'k1') },
+      { botId: 'b4', profile: voice('k1', 'k1') },
+    ]);
+    const [entry] = (await (await list(new NextRequest('http://localhost:3333/api/x'))).json()).keys;
+    expect(entry.lentTo[0].bots).toEqual([{ id: 'b1', name: 'Sales Researcher', model: 'Flash', voiceReplies: 10 }]);
+    // What the key paid this month is still every reply made on it
+    expect(entry.month).toEqual({ voiceReplies: 17 });
+    expect(db.botVoiceRevision.findMany.mock.calls[0][0].where.OR).toEqual([{ botId: 'b1', number: 2 }]);
   });
 
   it('is zero, with no bots, for a key that is lent nowhere', async () => {
