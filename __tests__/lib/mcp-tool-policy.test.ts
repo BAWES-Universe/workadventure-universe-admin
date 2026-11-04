@@ -33,7 +33,7 @@ const state = {
   servers: [] as ServerRow[],
   tools: [] as ToolRow[],
   users: { 'u-sara': 'Sara', 'u-omar': 'Omar' } as Record<string, string | null>,
-  bot: { id: 'bot-1', askBeforeMaking: 5 as number | null, askWhichWay: 'rarely', cardWaitMinutes: 10 },
+  bot: { id: 'bot-1', askBeforeMaking: 5 as number | null, askWhichWay: 'rarely', cardWaitMinutes: 10, allowMoreIdleMinutes: 60, allowMoreMaxMinutes: 480 },
   nextId: 1,
 };
 
@@ -183,7 +183,7 @@ beforeEach(() => {
   state.servers = [server()];
   state.tools = [];
   state.nextId = 1;
-  state.bot = { id: 'bot-1', askBeforeMaking: 5, askWhichWay: 'rarely', cardWaitMinutes: 10 };
+  state.bot = { id: 'bot-1', askBeforeMaking: 5, askWhichWay: 'rarely', cardWaitMinutes: 10, allowMoreIdleMinutes: 60, allowMoreMaxMinutes: 480 };
 });
 
 describe('what a request may say', () => {
@@ -208,10 +208,10 @@ describe('what a request may say', () => {
   });
 
   it('a bot’s limits: only the offered choices, null for no limit', () => {
-    for (const ok of [{ askBeforeMaking: 3 }, { askBeforeMaking: null }, { askWhichWay: 'beforeBiggerJobs' }, { cardWaitMinutes: 30 }]) {
+    for (const ok of [{ askBeforeMaking: 3 }, { askBeforeMaking: null }, { askWhichWay: 'beforeBiggerJobs' }, { cardWaitMinutes: 30 }, { allowMoreIdleMinutes: 30 }, { allowMoreIdleMinutes: 120 }, { allowMoreMaxMinutes: 240 }, { allowMoreMaxMinutes: 1440 }]) {
       expect(botToolSettingsSchema.safeParse(ok).success).toBe(true);
     }
-    for (const bad of [{}, { askBeforeMaking: 4 }, { askWhichWay: 'often' }, { cardWaitMinutes: 15 }, { cardWaitMinutes: null }]) {
+    for (const bad of [{}, { askBeforeMaking: 4 }, { askWhichWay: 'often' }, { cardWaitMinutes: 15 }, { cardWaitMinutes: null }, { allowMoreIdleMinutes: 45 }, { allowMoreIdleMinutes: 240 }, { allowMoreMaxMinutes: 60 }, { allowMoreMaxMinutes: null }]) {
       expect(botToolSettingsSchema.safeParse(bad).success).toBe(false);
     }
   });
@@ -604,13 +604,30 @@ describe('the setting under each heading', () => {
 });
 
 describe('a bot’s limits for asking', () => {
-  it('starts with the defaults: before making more than 5, rarely asks which way, a card waits 10 minutes', async () => {
-    expect(await readBotToolSettings('bot-1')).toEqual({ askBeforeMaking: 5, askWhichWay: 'rarely', cardWaitMinutes: 10 });
+  it('starts with the defaults: before making more than 5, rarely asks which way, a card waits 10 minutes, allow more lasts 1 hour quiet and 8 hours at most', async () => {
+    expect(await readBotToolSettings('bot-1')).toEqual({
+      askBeforeMaking: 5,
+      askWhichWay: 'rarely',
+      cardWaitMinutes: 10,
+      allowMoreIdleMinutes: 60,
+      allowMoreMaxMinutes: 480,
+    });
   });
 
   it('changes only what is sent, and null is no limit', async () => {
-    expect(await saveBotToolSettings('bot-1', { cardWaitMinutes: 30 })).toEqual({ askBeforeMaking: 5, askWhichWay: 'rarely', cardWaitMinutes: 30 });
-    expect(await saveBotToolSettings('bot-1', { askBeforeMaking: null, askWhichWay: 'never' })).toEqual({ askBeforeMaking: null, askWhichWay: 'never', cardWaitMinutes: 30 });
+    expect(await saveBotToolSettings('bot-1', { cardWaitMinutes: 30 })).toMatchObject({ askBeforeMaking: 5, askWhichWay: 'rarely', cardWaitMinutes: 30 });
+    expect(await saveBotToolSettings('bot-1', { askBeforeMaking: null, askWhichWay: 'never' })).toMatchObject({ askBeforeMaking: null, askWhichWay: 'never', cardWaitMinutes: 30 });
+  });
+
+  it('saves the two allow-more times on their own, leaving the other limits as they were', async () => {
+    expect(await saveBotToolSettings('bot-1', { allowMoreIdleMinutes: 120 })).toEqual({
+      askBeforeMaking: 5,
+      askWhichWay: 'rarely',
+      cardWaitMinutes: 10,
+      allowMoreIdleMinutes: 120,
+      allowMoreMaxMinutes: 480,
+    });
+    expect(await saveBotToolSettings('bot-1', { allowMoreMaxMinutes: 1440 })).toMatchObject({ allowMoreIdleMinutes: 120, allowMoreMaxMinutes: 1440 });
   });
 
   it('answers null for a bot that is not there', async () => {

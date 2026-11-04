@@ -354,7 +354,10 @@ export async function decide(
 
     let grantId: string | null = null;
     if (input.decision === 'approveAndRemember') {
-      const idle = input.idleMinutes ?? DEFAULTS.idleMinutes;
+      // A time the caller passes wins; otherwise the bot's own "Allow more" times (Approvals page), then the defaults.
+      const times = await tx.bot.findUnique({ where: { id: botId }, select: { allowMoreIdleMinutes: true, allowMoreMaxMinutes: true } });
+      const idle = input.idleMinutes ?? times?.allowMoreIdleMinutes ?? DEFAULTS.idleMinutes;
+      const absolute = input.absoluteMinutes ?? times?.allowMoreMaxMinutes ?? DEFAULTS.absoluteMinutes;
       const grant = await tx.botActionGrant.create({
         data: {
           botId,
@@ -369,7 +372,7 @@ export async function decide(
           fromRequestId: row.id,
           idleMinutes: idle,
           idleExpiresAt: new Date(now.getTime() + minutes(idle)),
-          absoluteExpiresAt: new Date(now.getTime() + minutes(input.absoluteMinutes ?? DEFAULTS.absoluteMinutes)),
+          absoluteExpiresAt: new Date(now.getTime() + minutes(absolute)),
         },
       });
       grantId = grant.id;
@@ -683,6 +686,9 @@ export async function touchGrants(
 
 export const REVOKE_REASONS = ['ask_again', 'signed_out', 'connection_changed', 'policy_changed', 'lost_permission', 'left'] as const;
 
+/** Why a person who manages the bot ended remembered approvals from its Approvals page (not a reason the bot server sends). */
+export const ENDED_BY_MANAGER = 'ended_by_manager';
+
 export const revokeSchema = z
   .object({
     requesterKey: z.string().trim().min(1).max(400),
@@ -712,4 +718,58 @@ export async function revokeGrants(
     for (const row of waiting) await move(prisma, row, ['waiting', 'approved'], { status: 'closed', closedReason: 'revoked', finishedAt: now }, 'revoke', input.requesterKey);
   }
   return { revoked: done.count };
+}
+
+/** One remembered approval that is still alive, as the bot's Approvals page lists it ("Allowed more right now"). */
+export interface ActiveGrantView {
+  id: string;
+  /** Who it was made for, as the bot server named them. Orbit does not look people up. */
+  requesterKey: string;
+  toolName: string;
+  heading: ActionHeading;
+  connectionRef: string | null;
+  /** What it allows: `fixed` fields stay as approved (like the team), `varies` fields may be different each time. */
+  scope: RememberScope;
+  createdAt: Date;
+  /** It ends here unless the asker sends another message... */
+  idleExpiresAt: Date;
+  /** ...and here at the latest. */
+  absoluteExpiresAt: Date;
+}
+
+/** Every remembered approval of this bot that is not revoked and inside both its times, newest first. Content is never included. */
+export async function listActiveGrants(botId: string, now: Date = new Date()): Promise<ActiveGrantView[]> {
+  const rows = await prisma.botActionGrant.findMany({
+    where: { botId, revokedAt: null, idleExpiresAt: { gt: now }, absoluteExpiresAt: { gt: now } },
+    orderBy: { createdAt: 'desc' },
+  });
+  const views: ActiveGrantView[] = [];
+  for (const row of rows) {
+    const scope = rememberScopeSchema.safeParse(row.scope);
+    if (!scope.success) continue;
+    views.push({
+      id: row.id,
+      requesterKey: row.requesterKey,
+      toolName: row.toolName,
+      heading: row.heading as ActionHeading,
+      connectionRef: row.connectionRef ?? null,
+      scope: scope.data,
+      createdAt: row.createdAt,
+      idleExpiresAt: row.idleExpiresAt,
+      absoluteExpiresAt: row.absoluteExpiresAt,
+    });
+  }
+  return views;
+}
+
+/**
+ * "End all" on the Approvals page: every remembered approval of this bot ends, so the next change asks again. Cards that
+ * are waiting are left alone, and so is everything already ended.
+ */
+export async function endAllGrants(botId: string, now: Date = new Date()): Promise<{ ended: number }> {
+  const done = await prisma.botActionGrant.updateMany({
+    where: { botId, revokedAt: null, idleExpiresAt: { gt: now }, absoluteExpiresAt: { gt: now } },
+    data: { revokedAt: now, revokedReason: ENDED_BY_MANAGER },
+  });
+  return { ended: done.count };
 }

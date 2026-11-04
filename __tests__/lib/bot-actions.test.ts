@@ -19,7 +19,9 @@ import {
   digestOf,
   extendReview,
   finishAttempt,
+  endAllGrants,
   findGrant,
+  listActiveGrants,
   readRequest,
   reconcile,
   revokeGrants,
@@ -540,6 +542,78 @@ describe('remembered approvals', () => {
     await decide(BOT, request.id, { actorKey: 'user:sara', revision: 1, decision: 'approveAndRemember', idleMinutes: 5, absoluteMinutes: 20 }, T0);
     expect(await findGrant(BOT, lookup(), at(minutes(4)))).not.toBeNull();
     expect(await findGrant(BOT, lookup(), at(minutes(6)))).toBeNull();
+  });
+});
+
+describe('the bot’s own allow-more times, and who is allowed more right now', () => {
+  const SCOPE = { fixed: { team: 'WEB' }, varies: ['title', 'description'] };
+  const lookup = () => ({
+    requesterKey: 'user:sara',
+    conversationKey: 'dm:sara:nora',
+    connectionRef: 'linear:acme',
+    toolName: 'create_issue',
+    heading: 'changesThings' as const,
+    toolFingerprint: 'fp-1',
+    policyRevision: 3,
+    arguments: { title: 'Another one', description: 'Something else', team: 'WEB' },
+  });
+
+  async function remember(extra: Partial<CreateRequestInput> = {}, times: { idleMinutes?: number; absoluteMinutes?: number } = {}) {
+    const request = await waiting({ rememberScope: SCOPE, ...extra });
+    await decide(BOT, request.id, { actorKey: request.requesterKey, revision: 1, decision: 'approveAndRemember', ...times }, T0);
+  }
+
+  (REAL ? it.skip : it)('uses the bot’s own idle and most times when the caller sends none', async () => {
+    Object.assign(db.bots[0], { allowMoreIdleMinutes: 30, allowMoreMaxMinutes: 240 });
+    await remember();
+    expect(await findGrant(BOT, lookup(), at(minutes(29)))).not.toBeNull();
+    expect(await findGrant(BOT, lookup(), at(minutes(31)))).toBeNull();
+    for (let m = 25; m < 240; m += 25) await touchGrants(BOT, { requesterKey: 'user:sara', conversationKey: 'dm:sara:nora' }, at(minutes(m)));
+    expect(await findGrant(BOT, lookup(), at(minutes(239)))).not.toBeNull();
+    expect(await findGrant(BOT, lookup(), at(minutes(241)))).toBeNull();
+  });
+
+  (REAL ? it.skip : it)('a time the caller sends still wins over the bot’s', async () => {
+    Object.assign(db.bots[0], { allowMoreIdleMinutes: 120, allowMoreMaxMinutes: 1440 });
+    await remember({}, { idleMinutes: 5, absoluteMinutes: 20 });
+    expect(await findGrant(BOT, lookup(), at(minutes(4)))).not.toBeNull();
+    expect(await findGrant(BOT, lookup(), at(minutes(6)))).toBeNull();
+  });
+
+  it('lists what is allowed now: who, which tool, what stays fixed and when it ends, newest first, nothing from the card', async () => {
+    await remember();
+    await remember({ proposalKey: 'job2:turn1:call1', requesterKey: 'user:omar', conversationKey: 'dm:omar:nora', arguments: { ...ISSUE, team: 'MAP' }, rememberScope: { fixed: { team: 'MAP' }, varies: ['title', 'description'] } });
+    const grants = await listActiveGrants(BOT, at(60));
+    expect(grants.map((g) => g.requesterKey).sort()).toEqual(['user:omar', 'user:sara']);
+    const sara = grants.find((g) => g.requesterKey === 'user:sara');
+    expect(sara).toMatchObject({ toolName: 'create_issue', heading: 'changesThings', connectionRef: 'linear:acme', scope: SCOPE });
+    expect(sara?.idleExpiresAt).toEqual(at(minutes(DEFAULTS.idleMinutes)));
+    expect(sara?.absoluteExpiresAt).toEqual(at(minutes(DEFAULTS.absoluteMinutes)));
+    expect(JSON.stringify(grants)).not.toContain('Fix the login page');
+  });
+
+  it('leaves out one that ended: by time, by a revoke, or already ended', async () => {
+    await remember();
+    expect(await listActiveGrants(BOT, at(minutes(DEFAULTS.idleMinutes) + 1))).toEqual([]);
+    expect((await listActiveGrants(BOT, at(60))).length).toBe(1);
+    await revokeGrants(BOT, { requesterKey: 'user:sara', conversationKey: 'dm:sara:nora', reason: 'ask_again' }, at(70));
+    expect(await listActiveGrants(BOT, at(80))).toEqual([]);
+  });
+
+  it('End all ends every one, so the next change asks again, and says how many', async () => {
+    await remember();
+    await remember({ proposalKey: 'job2:turn1:call1', requesterKey: 'user:omar', conversationKey: 'dm:omar:nora' });
+    expect(await endAllGrants(BOT, at(90))).toEqual({ ended: 2 });
+    expect(await findGrant(BOT, lookup(), at(100))).toBeNull();
+    expect(await listActiveGrants(BOT, at(100))).toEqual([]);
+    expect(await endAllGrants(BOT, at(110))).toEqual({ ended: 0 });
+  });
+
+  it('End all leaves a card that is still waiting for a tap alone', async () => {
+    await remember();
+    const pending = await waiting({ proposalKey: 'job3:turn1:call1' });
+    await endAllGrants(BOT, at(90));
+    expect((await readRequest(BOT, pending.id, at(91)))?.status).toBe('waiting');
   });
 });
 

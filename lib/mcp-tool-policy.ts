@@ -112,6 +112,8 @@ export const botToolSettingsSchema = z
     askBeforeMaking: z.union([z.literal(3), z.literal(5), z.literal(10), z.null()]).optional(),
     askWhichWay: z.enum(ASK_WHICH_WAY).optional(),
     cardWaitMinutes: z.union([z.literal(5), z.literal(10), z.literal(30)]).optional(),
+    allowMoreIdleMinutes: z.union([z.literal(30), z.literal(60), z.literal(120)]).optional(),
+    allowMoreMaxMinutes: z.union([z.literal(240), z.literal(480), z.literal(1440)]).optional(),
   })
   .strict()
   .refine((body) => Object.keys(body).length > 0, { message: 'Nothing to change' });
@@ -413,14 +415,34 @@ export interface BotToolSettings {
   askBeforeMaking: number | null;
   askWhichWay: (typeof ASK_WHICH_WAY)[number];
   cardWaitMinutes: number;
+  /** "Allow more": minutes without the asker's messages before it ends (30, 60 or 120; default 60). */
+  allowMoreIdleMinutes: number;
+  /** "Allow more": minutes it lasts at most, even while the asker keeps chatting (240, 480 or 1440; default 480). */
+  allowMoreMaxMinutes: number;
 }
 
-const BOT_SETTINGS_SELECT = { askBeforeMaking: true, askWhichWay: true, cardWaitMinutes: true } as const;
+const BOT_SETTINGS_SELECT = {
+  askBeforeMaking: true,
+  askWhichWay: true,
+  cardWaitMinutes: true,
+  allowMoreIdleMinutes: true,
+  allowMoreMaxMinutes: true,
+} as const;
+
+function toBotToolSettings(bot: Prisma.BotGetPayload<{ select: typeof BOT_SETTINGS_SELECT }>): BotToolSettings {
+  return {
+    askBeforeMaking: bot.askBeforeMaking,
+    askWhichWay: bot.askWhichWay as BotToolSettings['askWhichWay'],
+    cardWaitMinutes: bot.cardWaitMinutes,
+    allowMoreIdleMinutes: bot.allowMoreIdleMinutes,
+    allowMoreMaxMinutes: bot.allowMoreMaxMinutes,
+  };
+}
 
 /** A bot's own limits for asking: null when there is no such bot. */
 export async function readBotToolSettings(botId: string): Promise<BotToolSettings | null> {
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: BOT_SETTINGS_SELECT });
-  return bot ? { askBeforeMaking: bot.askBeforeMaking, askWhichWay: bot.askWhichWay as BotToolSettings['askWhichWay'], cardWaitMinutes: bot.cardWaitMinutes } : null;
+  return bot ? toBotToolSettings(bot) : null;
 }
 
 export async function saveBotToolSettings(botId: string, body: z.infer<typeof botToolSettingsSchema>): Promise<BotToolSettings> {
@@ -428,6 +450,8 @@ export async function saveBotToolSettings(botId: string, body: z.infer<typeof bo
   if (body.askBeforeMaking !== undefined) data.askBeforeMaking = body.askBeforeMaking;
   if (body.askWhichWay !== undefined) data.askWhichWay = body.askWhichWay;
   if (body.cardWaitMinutes !== undefined) data.cardWaitMinutes = body.cardWaitMinutes;
+  if (body.allowMoreIdleMinutes !== undefined) data.allowMoreIdleMinutes = body.allowMoreIdleMinutes;
+  if (body.allowMoreMaxMinutes !== undefined) data.allowMoreMaxMinutes = body.allowMoreMaxMinutes;
   const bot = await prisma.bot.update({ where: { id: botId }, data, select: BOT_SETTINGS_SELECT });
-  return { askBeforeMaking: bot.askBeforeMaking, askWhichWay: bot.askWhichWay as BotToolSettings['askWhichWay'], cardWaitMinutes: bot.cardWaitMinutes };
+  return toBotToolSettings(bot);
 }
