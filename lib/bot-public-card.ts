@@ -1,4 +1,4 @@
-import { canManageThisBot, type ManagedBot } from '@/lib/bot-permissions';
+import { canManageThisBot, type ManageMemo, type ManagedBot } from '@/lib/bot-permissions';
 
 /**
  * The parts of a bot only the people who manage it may read (#797): what its maker wrote to steer it, which AI key and
@@ -41,8 +41,10 @@ export function toPublicBotCard<T extends Card>(bot: T): Omit<T, (typeof PRIVATE
 export async function maySeeBotPrivateParts(
   reader: { userId: string | null; userEmail: string | null; isAdminToken: boolean },
   bot: ManagedBot,
+  /** For a list of bots: the answers kept for this one request (see ManageMemo), so the reader's standing in the room is worked out once. */
+  memo?: ManageMemo,
 ): Promise<boolean> {
   if (reader.isAdminToken) return true;
   if (!reader.userId) return false;
-  return canManageThisBot(reader.userId, reader.userEmail, bot, { creatorPasses: false });
+  return canManageThisBot(reader.userId, reader.userEmail, bot, { creatorPasses: false, memo });
 }

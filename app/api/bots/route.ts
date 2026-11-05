@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
-import { canManageBots } from '@/lib/bot-permissions';
+import { canManageBots, preloadBotRules, type ManageMemo } from '@/lib/bot-permissions';
 import { parsePlayUri } from '@/lib/utils';
 import { validateAccessToken } from '@/lib/oidc';
 import { z } from 'zod';
@@ -271,10 +271,13 @@ export async function GET(request: NextRequest) {
 
     // Transform bots to camelCase. What steers each bot and what it runs on (#797) goes only to the bot server and the
     // people who manage that bot; everyone else who can see the room gets its public card.
+    // Every bot is in this room, so what the reader may do here is worked out once for the request, not once per bot
+    const memo: ManageMemo = new Map();
+    if (userId && !isAdminToken) await preloadBotRules(memo, bots.map((bot) => bot.id));
     const transformedBots = await Promise.all(
       bots.map(async (bot) => {
         const transformed = transformBot(bot);
-        const showPrivateParts = await maySeeBotPrivateParts({ userId, userEmail, isAdminToken }, bot);
+        const showPrivateParts = await maySeeBotPrivateParts({ userId, userEmail, isAdminToken }, bot, memo);
         return showPrivateParts ? transformed : toPublicBotCard(transformed);
       }),
     );
