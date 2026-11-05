@@ -305,24 +305,40 @@ describe('reconnecting', () => {
   });
 });
 
-describe('cards about bots that were removed with their room, world or universe', () => {
+describe('cards about bots that were removed, or that the person can no longer manage', () => {
   const card = (id: string, bot: string) => ({ id, dedupeKey: `tool-signin:${bot}:2026-11-05T09:54:00.000Z` });
+  const bot = (id: string) => ({ id, createdById: 'sara', roomId: 'room-1' });
 
   it('takes down only the ones whose bot is gone', async () => {
     db.userNotice.findMany.mockResolvedValue([card('n1', 'bot-1'), card('n2', 'bot-gone')]);
-    db.bot.findMany.mockResolvedValue([{ id: 'bot-1' }]);
+    db.bot.findMany.mockResolvedValue([bot('bot-1')]);
+    db.user.findUnique.mockResolvedValue({ email: 'yousef@example.com' });
+    mayManage.mockResolvedValue(true);
     await dropOrphanedToolSignInNotices('yousef');
     expect(db.userNotice.findMany.mock.calls[0][0].where).toEqual({ userId: 'yousef', kind: 'tool-signin', dismissedAt: null });
     expect(db.userNotice.updateMany).toHaveBeenCalledTimes(1);
     expect(db.userNotice.updateMany.mock.calls[0][0].where).toEqual({ userId: 'yousef', id: { in: ['n2'] }, dismissedAt: null });
   });
 
-  it('asks nothing more when there are no such cards, and changes nothing when every bot is there', async () => {
+  it('takes down a card about a bot whose tools the person can no longer manage, and keeps the others', async () => {
+    db.userNotice.findMany.mockResolvedValue([card('n1', 'bot-1'), card('n2', 'bot-2')]);
+    db.bot.findMany.mockResolvedValue([bot('bot-1'), bot('bot-2')]);
+    db.user.findUnique.mockResolvedValue({ email: 'yousef@example.com' });
+    mayManage.mockImplementation(async (_user: string, _email: string | null, managed: { id: string }) => managed.id === 'bot-1');
+    await dropOrphanedToolSignInNotices('yousef');
+    expect(mayManage).toHaveBeenCalledWith('yousef', 'yousef@example.com', bot('bot-2'));
+    expect(db.userNotice.updateMany).toHaveBeenCalledTimes(1);
+    expect(db.userNotice.updateMany.mock.calls[0][0].where).toEqual({ userId: 'yousef', id: { in: ['n2'] }, dismissedAt: null });
+  });
+
+  it('asks nothing more when there are no such cards, and changes nothing when the person manages every bot', async () => {
     db.userNotice.findMany.mockResolvedValue([]);
     await dropOrphanedToolSignInNotices('yousef');
     expect(db.bot.findMany).not.toHaveBeenCalled();
     db.userNotice.findMany.mockResolvedValue([card('n1', 'bot-1')]);
-    db.bot.findMany.mockResolvedValue([{ id: 'bot-1' }]);
+    db.bot.findMany.mockResolvedValue([bot('bot-1')]);
+    db.user.findUnique.mockResolvedValue({ email: 'yousef@example.com' });
+    mayManage.mockResolvedValue(true);
     await dropOrphanedToolSignInNotices('yousef');
     expect(db.userNotice.updateMany).not.toHaveBeenCalled();
   });

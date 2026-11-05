@@ -187,9 +187,11 @@ export async function markToolReconnected(serverId: string, personId: string | n
 }
 
 /**
- * Takes down this person's cards about bots that no longer exist. Deleting a bot or a connection runs the sync above, but
- * deleting a whole room, world or universe removes its bots in the database without it, so the cards are checked when Orbit
- * home or the count reads them. Never throws: a card left showing is the smaller harm.
+ * Takes down this person's cards about bots they can no longer act on: bots that no longer exist, and bots whose tools they
+ * can no longer manage (they lost Manage bots in the room, or left it). Deleting a bot or a connection runs the sync above,
+ * but deleting a whole room, world or universe removes its bots in the database without it, and losing a role runs nothing
+ * for the cards already made, so the cards are checked when Orbit home or the count reads them. Never throws: a card left
+ * showing is the smaller harm.
  */
 export async function dropOrphanedToolSignInNotices(userId: string): Promise<void> {
   try {
@@ -197,8 +199,11 @@ export async function dropOrphanedToolSignInNotices(userId: string): Promise<voi
     if (open.length === 0) return;
     // The key is "tool-signin:<bot id>:<time>"
     const botIdOf = (key: string) => key.split(':')[1] ?? '';
-    const alive = new Set((await prisma.bot.findMany({ where: { id: { in: open.map((notice) => botIdOf(notice.dedupeKey)) } }, select: { id: true } })).map((bot) => bot.id));
-    const gone = open.filter((notice) => !alive.has(botIdOf(notice.dedupeKey))).map((notice) => notice.id);
+    const bots = await prisma.bot.findMany({ where: { id: { in: open.map((notice) => botIdOf(notice.dedupeKey)) } }, select: { id: true, createdById: true, roomId: true } });
+    const email = bots.length > 0 ? ((await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }))?.email ?? null) : null;
+    const mayAct = new Map<string, boolean>();
+    for (const bot of bots) mayAct.set(bot.id, await canManageBotMcpServers(userId, email, bot));
+    const gone = open.filter((notice) => !mayAct.get(botIdOf(notice.dedupeKey))).map((notice) => notice.id);
     if (gone.length > 0) await prisma.userNotice.updateMany({ where: { userId, id: { in: gone }, dismissedAt: null }, data: { dismissedAt: new Date() } });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'tool-signin' } });
