@@ -111,10 +111,20 @@ describe('the bot server’s report', () => {
     expect(await reportToolSignIn('bot-1', 's1', { state: 'expired', at: T1, status: 401 })).toEqual({ changed: true });
     expect(await reportToolSignIn('bot-1', 's1', { state: 'expired', at: T2, status: 401 })).toEqual({ changed: false });
     expect(db.botMcpServer.updateMany.mock.calls[0][0]).toEqual({
-      where: { id: 's1', botId: 'bot-1', signInLostAt: null },
+      where: { id: 's1', botId: 'bot-1', signInLostAt: null, OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: T1 } }] },
       data: { signInLostAt: T1, signInLostStatus: 401, noAnswerAt: null, reconnectedAt: null },
     });
     expect(addNotice).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a failure seen before the tool was connected again: the stored state and the cards stay as they are', async () => {
+    db.botMcpServer.findFirst.mockResolvedValue({ id: 's1' });
+    // The database finds no row: its reconnectedAt is later than the failure
+    db.botMcpServer.updateMany.mockResolvedValue({ count: 0 });
+    expect(await reportToolSignIn('bot-1', 's1', { state: 'expired', at: T1, status: 401 })).toEqual({ changed: false });
+    expect(db.botMcpServer.updateMany.mock.calls[0][0].where.OR).toEqual([{ reconnectedAt: null }, { reconnectedAt: { lt: T1 } }]);
+    expect(addNotice).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
   });
 
   it('takes a time from the future as now', async () => {
@@ -131,7 +141,13 @@ describe('the bot server’s report', () => {
     db.botMcpServer.findFirst.mockResolvedValue({ id: 's1' });
     db.botMcpServer.updateMany.mockResolvedValue({ count: 1 });
     expect(await reportToolSignIn('bot-1', 's1', { state: 'no-answer', at: T1 })).toEqual({ changed: true });
-    expect(db.botMcpServer.updateMany.mock.calls[0][0].where).toEqual({ id: 's1', botId: 'bot-1', signInLostAt: null, noAnswerAt: null });
+    expect(db.botMcpServer.updateMany.mock.calls[0][0].where).toEqual({
+      id: 's1',
+      botId: 'bot-1',
+      signInLostAt: null,
+      noAnswerAt: null,
+      OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: T1 } }],
+    });
     expect(addNotice).not.toHaveBeenCalled();
   });
 

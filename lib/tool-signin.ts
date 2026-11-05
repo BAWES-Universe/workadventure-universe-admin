@@ -124,17 +124,19 @@ export async function syncToolSignInNotices(botId: string, fresh?: { serverId: s
 
 /**
  * The bot server's report. "expired" keeps the first time it was seen (the "since"), "no-answer" does too and never
- * replaces an expired sign-in, "ok" clears both. `changed` is true only when what is stored moved. Null when the bot has no
- * such server.
+ * replaces an expired sign-in, "ok" clears both. A failure seen before the tool was last connected again is old news (a
+ * call that started before the reconnect and reported after it) and changes nothing. `changed` is true only when what is
+ * stored moved. Null when the bot has no such server.
  */
 export async function reportToolSignIn(botId: string, serverId: string, report: ToolSignInReport): Promise<{ changed: boolean } | null> {
   const server = await prisma.botMcpServer.findFirst({ where: { id: serverId, botId }, select: { id: true } });
   if (!server) return null;
   const at = clampAt(report.at);
+  const afterLastReconnect = { OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: at } }] };
 
   if (report.state === 'expired') {
     const result = await prisma.botMcpServer.updateMany({
-      where: { id: serverId, botId, signInLostAt: null },
+      where: { id: serverId, botId, signInLostAt: null, ...afterLastReconnect },
       data: { signInLostAt: at, signInLostStatus: report.status ?? null, noAnswerAt: null, reconnectedAt: null },
     });
     if (result.count === 1) await syncToolSignInNotices(botId, { serverId, at });
@@ -143,7 +145,7 @@ export async function reportToolSignIn(botId: string, serverId: string, report: 
 
   if (report.state === 'no-answer') {
     const result = await prisma.botMcpServer.updateMany({
-      where: { id: serverId, botId, signInLostAt: null, noAnswerAt: null },
+      where: { id: serverId, botId, signInLostAt: null, noAnswerAt: null, ...afterLastReconnect },
       data: { noAnswerAt: at, reconnectedAt: null },
     });
     return { changed: result.count === 1 };
