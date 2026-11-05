@@ -746,7 +746,7 @@ export interface ActiveGrantView {
   absoluteExpiresAt: Date;
 }
 
-/** Every remembered approval of this bot that is not revoked and inside both its times, newest first. Content is never included. */
+/** Every remembered approval of this bot that is not revoked and inside both its times, newest first. The card's own content is never included; the values that stay fixed (`scope.fixed`) are. */
 export async function listActiveGrants(botId: string, now: Date = new Date()): Promise<ActiveGrantView[]> {
   const rows = await prisma.botActionGrant.findMany({
     where: { botId, revokedAt: null, idleExpiresAt: { gt: now }, absoluteExpiresAt: { gt: now } },
