@@ -12,8 +12,14 @@ const WHERE = '/admin/memberships';
 
 export const personName = (user: { name: string | null } | null | undefined, fallback: string) => user?.name?.trim() || fallback;
 
+/** A name for a notice. A failed lookup gives the fallback: a notice's words must never undo what already happened. */
 export async function nameOf(db: Db, userId: string, fallback: string): Promise<string> {
-  return personName(await db.user.findUnique({ where: { id: userId }, select: { name: true } }), fallback);
+  try {
+    return personName(await db.user.findUnique({ where: { id: userId }, select: { name: true } }), fallback);
+  } catch (error) {
+    console.error('[Ownership] Could not read a name:', error instanceof Error ? error.message : 'unknown');
+    return fallback;
+  }
 }
 
 /** Tell someone, once. A notice is only a courtesy, so a failure to write one never undoes what already happened. */
@@ -34,15 +40,19 @@ export async function clearOffered(toUserId: string, offerId: string): Promise<v
   }
 }
 
-/** The owner hears about how an offer ended, and so does whoever started it when that was someone else (a super admin). */
+/**
+ * The owner hears about how an offer ended, and so does whoever started it when that was someone else (a super admin).
+ * The words to the owner talk about the owner ("You still own it"), so a starter who is not the owner gets their own.
+ */
 export async function tellOwnerAndStarter(
   offer: { offeredById: string; universe: { ownerId: string } },
   dedupeKey: string,
   title: string,
   body: string,
+  starterBody: string = body,
 ): Promise<void> {
-  const people = new Set([offer.universe.ownerId, offer.offeredById]);
-  for (const userId of people) await tell(userId, dedupeKey, title, body);
+  await tell(offer.universe.ownerId, dedupeKey, title, body);
+  if (offer.offeredById !== offer.universe.ownerId) await tell(offer.offeredById, dedupeKey, title, starterBody);
 }
 
 /**
@@ -64,5 +74,11 @@ export async function endOfferIfLeft(db: Db, universeId: string, userId: string)
   if (gone.count === 0) return;
   await clearOffered(userId, offer.id);
   const name = await nameOf(db, userId, 'They');
-  await tellOwnerAndStarter(offer, `left:${offer.id}`, `The offer for ${offer.universe.name} ended`, `${name} is no longer a member, so the offer to them ended. You still own ${offer.universe.name}.`);
+  await tellOwnerAndStarter(
+    offer,
+    `left:${offer.id}`,
+    `The offer for ${offer.universe.name} ended`,
+    `${name} is no longer a member, so the offer to them ended. You still own ${offer.universe.name}.`,
+    `${name} is no longer a member, so the offer to them ended. Nothing changed.`,
+  );
 }

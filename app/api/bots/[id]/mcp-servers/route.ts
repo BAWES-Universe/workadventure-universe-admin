@@ -356,6 +356,8 @@ export async function POST(
       return tx.botMcpServer.create({
         data: {
           botId,
+          // Who added it is who is told when its sign-in or key stops working (none for the admin token)
+          connectedById: userId,
           name: validatedData.name,
           serverUrl: validatedData.serverUrl,
           authType: validatedData.authType,

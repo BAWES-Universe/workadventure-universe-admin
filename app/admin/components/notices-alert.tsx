@@ -69,6 +69,13 @@ export function NoticesAlert() {
   async function reconnect(botId: string, server: { id: string; name: string }) {
     if (pollRef.current) clearInterval(pollRef.current);
     setReconnectFailed(null);
+    // Opened right now, inside the tap, because a browser can refuse a window opened after a wait; it moves to the provider's
+    // sign-in page once the start request has answered, and closes if that did not work
+    const popup = window.open('', 'oauth-popup', 'width=600,height=700');
+    if (!popup) {
+      setReconnectFailed(server.id);
+      return;
+    }
     setReconnecting(server.id);
     try {
       const redirectUrl = window.location.href.split('?')[0].split('#')[0];
@@ -77,8 +84,8 @@ export function NoticesAlert() {
       );
       if (!response.ok) throw new Error('start failed');
       const { authorizeUrl } = (await response.json()) as { authorizeUrl?: string };
-      const popup = authorizeUrl ? window.open(authorizeUrl, 'oauth-popup', 'width=600,height=700') : null;
-      if (!popup) throw new Error('popup blocked');
+      if (!authorizeUrl) throw new Error('no sign-in address');
+      popup.location.href = authorizeUrl;
       pollRef.current = setInterval(() => {
         if (!popup.closed) return;
         if (pollRef.current) clearInterval(pollRef.current);
@@ -88,6 +95,7 @@ export function NoticesAlert() {
         void load(undefined, true);
       }, 500);
     } catch {
+      popup.close();
       setReconnecting(null);
       setReconnectFailed(server.id);
     }

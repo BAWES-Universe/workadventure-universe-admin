@@ -887,7 +887,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                       </a>
                       <div className="flex flex-wrap gap-1.5 pt-1">
                         <Pill>{server.authType === 'none' ? 'No auth' : server.authType}</Pill>
-                        {server.authType === 'oauth' && server.oauthConnected && <Pill tone="ok">Connected</Pill>}
+                        {server.authType === 'oauth' && server.oauthConnected && !server.signInLostAt && <Pill tone="ok">Connected</Pill>}
                       </div>
                     </div>
                     <label className="flex min-h-11 items-center gap-2 text-sm">

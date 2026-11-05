@@ -190,6 +190,15 @@ describe('GET members/[userId]', () => {
       expect(body.ownership).toMatchObject({ canOffer: true, onBehalfOf: 'Khalid' });
     });
 
+    it('says “The owner” when the owner has no name, never an email', async () => {
+      asSuperAdmin();
+      db.universeMember.findUnique.mockResolvedValue(row('sara'));
+      db.user.findUnique.mockResolvedValue({ name: '   ', email: 'khalid@example.test' });
+      const body = await (await getMember(request('/api/admin/universes/u1/members/sara'), params({ userId: 'sara' }))).json();
+      expect(body.ownership.onBehalfOf).toBe('The owner');
+      expect(JSON.stringify(body.ownership)).not.toMatch(/@/);
+    });
+
     it('offers nothing to anyone else, to the owner themselves, or to someone who is not a member', async () => {
       asViewer('inviter');
       db.universeMember.findUnique.mockResolvedValue(row('sara'));

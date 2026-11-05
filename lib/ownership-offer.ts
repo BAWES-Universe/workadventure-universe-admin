@@ -14,6 +14,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { clearOffered, nameOf, tell, tellOwnerAndStarter } from '@/lib/ownership-offer-ends';
 import { ADMIN_KEY, ensureBuiltInRoles } from '@/lib/roles';
+import { isSuperAdmin } from '@/lib/super-admin';
 import { joinUniverse } from '@/lib/universe-members';
 
 /** A reason an offer, take back or answer was refused, with the status the route sends. */
@@ -70,6 +71,17 @@ export async function startOffer(input: {
     throw error;
   }
 
+  // They may have left between the check above and the insert, when leaving found no offer to end: look again now that it exists.
+  // Someone who left and came back in between holds a different membership, and the offer was not made to that one
+  const stillMember = await prisma.universeMember.findUnique({
+    where: { universeId_userId: { universeId: universe.id, userId: toUserId } },
+    select: { id: true },
+  });
+  if (!stillMember || stillMember.id !== member.id) {
+    await prisma.ownershipOffer.deleteMany({ where: { id: offer.id } });
+    throw new OfferError('They have to be a member first', 404);
+  }
+
   const owner = await nameOf(prisma, universe.ownerId, 'The owner');
   await tell(
     toUserId,
@@ -80,6 +92,8 @@ export async function startOffer(input: {
       : `A super admin offered you the whole universe, on behalf of ${owner}. Open Memberships to accept or decline.`,
     'Offer',
   );
+  // An answer or a take back can finish before the notice above exists, and its clear then found nothing to hide
+  if (!(await prisma.ownershipOffer.findUnique({ where: { id: offer.id }, select: { id: true } }))) await clearOffered(toUserId, offer.id);
   // A super admin who starts one tells the owner, who did not
   if (by.id !== universe.ownerId) {
     await tell(
@@ -98,7 +112,10 @@ export async function takeBackOffer(input: { universe: { id: string; name: strin
   if (!mayOffer(by, universe)) throw new OfferError('Only the owner can take the offer back', 403);
   const removed = await prisma.ownershipOffer.findUnique({ where: { universeId: universe.id } });
   if (!removed) throw new OfferError('There is no offer waiting', 404);
-  const gone = await prisma.ownershipOffer.deleteMany({ where: { id: removed.id } });
+  // The owner is checked again in the delete itself: someone who stopped being the owner while this request ran cannot take back the new owner's offer
+  const gone = await prisma.ownershipOffer.deleteMany({
+    where: { id: removed.id, ...(by.isSuperAdmin ? {} : { universe: { ownerId: by.id } }) },
+  });
   if (gone.count === 0) throw new OfferError('There is no offer waiting', 404);
   await clearOffered(removed.toUserId, removed.id);
   if (by.id !== universe.ownerId) {
@@ -118,7 +135,7 @@ export async function declineOffer(input: { offerId: string; userId: string }) {
   if (gone.count === 0) throw new OfferError('Offer not found', 404);
   await clearOffered(offer.toUserId, offer.id);
   const name = await nameOf(prisma, offer.toUserId, 'They');
-  await tellOwnerAndStarter(offer, `declined:${offer.id}`, `${name} declined ${offer.universe.name}`, `${name} said no to owning ${offer.universe.name}. You still own it.`);
+  await tellOwnerAndStarter(offer, `declined:${offer.id}`, `${name} declined ${offer.universe.name}`, `${name} said no to owning ${offer.universe.name}. You still own it.`, `${name} said no to owning ${offer.universe.name}. Nothing changed.`);
   return offer;
 }
 
@@ -139,6 +156,12 @@ export async function acceptOffer(input: { offerId: string; userId: string }) {
 
       const { universe } = offer;
       if (universe.ownerId === input.userId) throw new OfferError('You already own this universe', 409);
+      // An offer speaks for the owner who made it (or a super admin). If the universe changed hands after it was made (a stale
+      // request can still make one in that instant), the offer is void: it ends here and nothing moves.
+      if (offer.offeredById !== universe.ownerId) {
+        const maker = await tx.user.findUnique({ where: { id: offer.offeredById }, select: { email: true } });
+        if (!isSuperAdmin(maker?.email ?? null)) return { void: true as const, offer };
+      }
       const member = await tx.universeMember.findUnique({
         where: { universeId_userId: { universeId: universe.id, userId: input.userId } },
         select: { id: true },
@@ -163,11 +186,15 @@ export async function acceptOffer(input: { offerId: string; userId: string }) {
         data: { ownerId: input.userId, ownerSince: new Date(), previousOwnerId: universe.ownerId },
       });
       if (moved.count === 0) throw new OfferError('The universe changed hands in the meantime', 409);
-      return { offer, universe, oldOwnerId: universe.ownerId };
+      return { void: false as const, offer, universe, oldOwnerId: universe.ownerId };
     },
     { timeout: 30_000 },
   );
 
+  if (result.void) {
+    await clearOffered(result.offer.toUserId, result.offer.id);
+    throw new OfferError('This offer is no longer valid', 409);
+  }
   const { offer, universe, oldOwnerId } = result;
   await clearOffered(offer.toUserId, offer.id);
   const [newName, oldName] = await Promise.all([nameOf(prisma, offer.toUserId, 'They'), nameOf(prisma, oldOwnerId, 'The previous owner')]);
@@ -177,6 +204,7 @@ export async function acceptOffer(input: { offerId: string; userId: string }) {
     `accepted:${offer.id}`,
     `${newName} owns ${universe.name} now`,
     `${newName} accepted. You stay as Admin in every world.`,
+    `${newName} accepted, so ${universe.name} is theirs now.`,
   );
   return { universeId: universe.id, universeName: universe.name, previousOwnerName: oldName };
 }

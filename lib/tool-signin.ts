@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
+import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { describeToolSignIn, type ToolSignInNoticeData } from '@/lib/tool-signin-words';
 
 /**
@@ -29,17 +30,36 @@ function clampAt(at: Date | undefined, now = new Date()): Date {
   return at;
 }
 
+/** The connectors and the bot's maker who can still manage this bot's tools (the same rule the tools page and routes use). */
+async function peopleWhoCanManageTools(botId: string): Promise<Set<string>> {
+  const bot = await prisma.bot.findUnique({
+    where: { id: botId },
+    select: { id: true, createdById: true, roomId: true, mcpServers: { where: { signInLostAt: { not: null } }, select: { connectedById: true } } },
+  });
+  if (!bot) return new Set();
+  const candidates = new Set([bot.createdById, ...bot.mcpServers.map((server) => server.connectedById)].filter((id): id is string => !!id));
+  const told = new Set<string>();
+  for (const userId of candidates) {
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+    if (await canManageBotMcpServers(userId, user?.email ?? null, bot)) told.add(userId);
+  }
+  return told;
+}
+
 /**
  * Brings the notices of one bot in line with its connections that are signed out: one card per person and bot, a row per
  * connection, taken down when nothing is left (or when the bot or the connection is gone). A card is only made when `fresh`
  * (a connection that just went down) belongs to that person, so a dismissed card stays dismissed until another outage starts.
- * The person told is whoever connected it, or the bot's maker for connections made before that was kept.
+ * The person told is whoever connected it, or the bot's maker for connections made before that was kept, and only while they
+ * can still manage this bot's tools: someone who lost that access gets no card (and an open one is taken down).
  *
  * Runs one bot at a time (an advisory lock held for the transaction): a bot whose tools fail together reports them together,
  * and two syncs that each found no card would otherwise each make one.
  */
 export async function syncToolSignInNotices(botId: string, fresh?: { serverId: string; at: Date }): Promise<void> {
   try {
+    // Who may be told is worked out first, outside the lock: it reads roles and rules, not the notices
+    const mayBeTold = await peopleWhoCanManageTools(botId);
     await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`${TOOL_SIGNIN_KIND}:${botId}`}))`;
       const bot = await tx.bot.findUnique({
@@ -55,7 +75,8 @@ export async function syncToolSignInNotices(botId: string, fresh?: { serverId: s
         : [];
       const byPerson = new Map<string, typeof lost>();
       for (const server of lost) {
-        const person = server.connectedById ?? bot?.createdById;
+        // The one who connected it; the bot's maker when that person can no longer manage it (or never was recorded)
+        const person = [server.connectedById, bot?.createdById].find((candidate): candidate is string => !!candidate && mayBeTold.has(candidate));
         if (person) byPerson.set(person, [...(byPerson.get(person) ?? []), server]);
       }
       const open = await tx.userNotice.findMany({
@@ -75,12 +96,12 @@ export async function syncToolSignInNotices(botId: string, fresh?: { serverId: s
           servers: servers.map((server) => ({
             id: server.id,
             name: server.name,
-            kind: server.authType === 'oauth' ? 'oauth' : 'key',
+            kind: server.authType === 'oauth' ? 'oauth' : server.authType === 'none' ? 'open' : 'key',
             at: (server.signInLostAt as Date).toISOString(),
           })),
         };
         const words = describeToolSignIn(data);
-        const href = data.servers.some((server) => server.kind === 'key') ? `/admin/bots/${botId}/mcp-servers` : null;
+        const href = data.servers.some((server) => server.kind !== 'oauth') ? `/admin/bots/${botId}/mcp-servers` : null;
         const existing = open.find((notice) => notice.userId === userId);
         const fields = { title: words.title.slice(0, 200), body: words.body.slice(0, 1000), badge: words.badge, href, data: data as unknown as Prisma.InputJsonValue };
         if (existing) {
@@ -145,13 +166,19 @@ export async function markToolReconnected(serverId: string, personId: string | n
     const server = await prisma.botMcpServer.findUnique({ where: { id: serverId }, select: { botId: true, signInLostAt: true, noAnswerAt: true } });
     if (!server) return;
     const wasDown = !!server.signInLostAt || !!server.noAnswerAt;
-    await prisma.botMcpServer.update({
-      where: { id: serverId },
-      data: {
-        ...(personId ? { connectedById: personId } : {}),
-        ...(wasDown ? { signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: new Date() } : {}),
-      },
-    });
+    // The clear comes first and on its own: remembering who connected it can fail (that account may be gone by now) and must
+    // never keep a working sign-in marked as lost
+    if (wasDown) {
+      await prisma.botMcpServer.update({
+        where: { id: serverId },
+        data: { signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: new Date() },
+      });
+    }
+    if (personId) {
+      await prisma.botMcpServer.update({ where: { id: serverId }, data: { connectedById: personId } }).catch((error) => {
+        console.warn('[ToolSignIn] Could not remember who connected it:', error instanceof Error ? error.message : 'unknown');
+      });
+    }
     if (server.signInLostAt) await syncToolSignInNotices(server.botId);
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'tool-signin' } });
