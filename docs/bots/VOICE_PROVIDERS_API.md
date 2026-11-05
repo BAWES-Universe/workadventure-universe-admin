@@ -2,7 +2,8 @@
 
 The speech companies a super admin sets up for the whole server. A provider can listen (recognition), speak (speech) or
 both, and lists the models it can be used with. Which adapter runs it is the bot server's business; Orbit keeps its name,
-where to reach it and its key. Nothing in Orbit calls a provider: no key is tested here and nothing paid runs.
+where to reach it and its key. Orbit does call a provider's company for three free things: it asks whether a key is accepted (the check below), it
+reads the company's list of voices, and it fetches a voice's sample. Nothing paid runs here: nothing is spoken or heard.
 
 At most one provider is the default for listening and one for speaking. A bot on Universe AI follows them.
 
