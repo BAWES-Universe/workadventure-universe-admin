@@ -33,10 +33,14 @@ export type FetchMemberDataByUuidResponse =
   | FetchMemberDataByUuidSuccessResponse 
   | ErrorApiData;
 
-/** A member as the game reads it (its MemberData): `id` is the user's uuid; name is null when missing. No email, ever. */
+/**
+ * A member as the game reads it (its MemberData): `id` is the user's uuid; name is null when missing. The game's parser
+ * still requires the `email` key, so it is sent, but always null.
+ */
 export interface MemberData {
   id: string;
   name: string | null;
+  email: null;
   tags?: string[];
   visitCardUrl?: string | null;
   chatID?: string | null; // Matrix chat ID (capital ID for WorkAdventure compatibility)
@@ -203,6 +207,8 @@ export interface WorldChatMembersData {
 export interface ChatMember {
   uuid: string;
   wokaName: string;
+  /** Always null: the game's parser still requires the key, but an address is never sent. */
+  email: null;
   chatId: string | null;
   tags: string[];
   /** The member's saved Woka (bottom layer first), so the chat can draw them while they are away. */

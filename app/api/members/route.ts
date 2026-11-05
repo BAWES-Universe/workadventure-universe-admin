@@ -68,10 +68,12 @@ export async function GET(request: NextRequest) {
     const wokas = await wokaTexturesForMany(members.map(m => m.user.id), worldData.id)
       .catch(() => new Map<string, { id: string; url: string }[]>());
 
-    // The shape the game reads: `id` (not `uuid`), null when there is no name. Never an email address.
+    // The shape the game reads: `id` (not `uuid`), null when there is no name. The game's parser still requires the
+    // `email` key, so it is always sent as null: never an email address.
     const memberData: MemberData[] = members.map(m => ({
       id: m.user.uuid,
       name: m.user.name || null,
+      email: null,
       tags: m.tags,
       visitCardUrl: null,
       characterTextures: wokas.get(m.user.id) ?? [],

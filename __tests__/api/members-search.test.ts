@@ -61,6 +61,7 @@ describe('GET /api/members', () => {
       {
         id: 'alice-uuid',
         name: 'Alice',
+        email: null,
         tags: ['member'],
         visitCardUrl: null,
         characterTextures: [
@@ -69,7 +70,7 @@ describe('GET /api/members', () => {
         ],
       },
       // No outfit: no textures, and the game draws its default Woka.
-      { id: 'bob-uuid', name: null, tags: [], visitCardUrl: null, characterTextures: [] },
+      { id: 'bob-uuid', name: null, email: null, tags: [], visitCardUrl: null, characterTextures: [] },
     ]);
     expect(db.worldMember.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 20 }));
   });
@@ -83,7 +84,8 @@ describe('GET /api/members', () => {
     const response = await search(request('/api/members', { playUri: PLAY_URI, searchText: '' }));
     const text = await response.text();
     expect(text).not.toContain('alice@example.test');
-    expect(JSON.parse(text)[0]).not.toHaveProperty('email');
+    // The game's parser still needs the key, so it is there, and empty
+    expect(JSON.parse(text)[0].email).toBeNull();
     // The query does not even read the email column
     const query = db.worldMember.findMany.mock.calls[0][0];
     expect(query.include.user.select).not.toHaveProperty('email');
@@ -108,7 +110,7 @@ describe('GET /api/members', () => {
 
     const body = await (await search(request('/api/members', { playUri: PLAY_URI, searchText: '' }))).json();
     expect(body).toEqual([
-      { id: 'alice-uuid', name: 'Alice', tags: [], visitCardUrl: null, characterTextures: [] },
+      { id: 'alice-uuid', name: 'Alice', email: null, tags: [], visitCardUrl: null, characterTextures: [] },
     ]);
   });
 });

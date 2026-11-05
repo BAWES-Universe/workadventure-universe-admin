@@ -50,7 +50,8 @@ describe('GET /api/chat/members', () => {
     const response = await GET(new NextRequest(url, { headers: { Authorization: process.env.ADMIN_API_TOKEN as string } }));
     const text = await response.text();
     expect(text).not.toContain('alice@example.test');
-    expect(JSON.parse(text).members[0]).not.toHaveProperty('email');
+    // The game's parser still needs the key, so it is there, and empty
+    expect(JSON.parse(text).members[0].email).toBeNull();
     expect(JSON.parse(text).members[0]).toMatchObject({ uuid: 'alice-uuid', wokaName: 'Alice', chatId: '@alice:chat' });
     const query = db.worldMember.findMany.mock.calls[0][0];
     expect(JSON.stringify(query.where)).not.toMatch(/"email":\{"contains"/);

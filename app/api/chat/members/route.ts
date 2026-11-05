@@ -90,6 +90,8 @@ export async function GET(request: NextRequest) {
       members: members.map((m: typeof members[0]) => ({
         uuid: m.user.uuid,
         wokaName: m.user.name || '',
+        // The game's parser still requires this key; it is always null, never an address
+        email: null,
         chatId: m.user.matrixChatId,
         tags: m.tags,
         characterTextures: wokas.get(m.user.id) ?? [],
