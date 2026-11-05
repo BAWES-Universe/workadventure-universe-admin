@@ -142,7 +142,7 @@ export async function canManageThisBot(
   );
   if (verdict === 'yes') return stillInUniverse(userId, room.world.universeId, member !== null);
   if (verdict === 'no') return false;
-  return canManageBots(userId, bot.roomId);
+  return roomManages();
 }
 
 /**

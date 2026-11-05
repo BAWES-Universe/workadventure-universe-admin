@@ -113,8 +113,12 @@ async function getJson(call: Call, path: string): Promise<unknown> {
     // Nothing from the error is kept: it could carry the address with the key's header
     throw new VoiceListRefused(`Couldn’t reach ${call.company.label}. Try again in a moment.`, 502);
   }
-  if (response.status === 401 || response.status === 403) throw new VoiceListRefused(`${call.company.label} didn’t accept the key.`, 502);
-  if (!response.ok) throw new VoiceListRefused(`Couldn’t reach ${call.company.label}. Try again in a moment.`, 502);
+  if (!response.ok) {
+    // Nothing in the answer is read: let go of the connection instead of waiting for it to be collected
+    await response.body?.cancel().catch(() => undefined);
+    if (response.status === 401 || response.status === 403) throw new VoiceListRefused(`${call.company.label} didn’t accept the key.`, 502);
+    throw new VoiceListRefused(`Couldn’t reach ${call.company.label}. Try again in a moment.`, 502);
+  }
   try {
     return await response.json();
   } catch {
