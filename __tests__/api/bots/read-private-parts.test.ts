@@ -23,7 +23,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/auth', () => ({
   requireAuth: jest.fn(),
 }));
-jest.mock('@/lib/bot-permissions', () => ({ canManageBots: jest.fn(), canManageThisBot: jest.fn() }));
+jest.mock('@/lib/bot-permissions', () => ({ canManageBots: jest.fn(), canManageThisBot: jest.fn(), preloadBotRules: jest.fn(async () => undefined) }));
 jest.mock('@/lib/bot-room-access', () => ({ mayReadRoomBots: jest.fn() }));
 jest.mock('@/lib/oidc', () => ({ validateAccessToken: jest.fn(async () => null) }));
 
@@ -156,7 +156,7 @@ describe.each([
     const { response, pick } = await read();
     expect(response.status).toBe(200);
     expectPublicCard(pick(await response.json()));
-    expect(manages).toHaveBeenCalledWith('u-member', 'member@example.com', expect.objectContaining({ id: 'bot-1', roomId: ROOM_ID }), { creatorPasses: false });
+    expect(manages).toHaveBeenCalledWith('u-member', 'member@example.com', expect.objectContaining({ id: 'bot-1', roomId: ROOM_ID }), expect.objectContaining({ creatorPasses: false }));
   });
 
   it('gives a member of a members-only room without Manage this bot the public card only', async () => {
@@ -203,6 +203,29 @@ describe('GET /api/bots?roomId= with several bots', () => {
     expect(bots).toHaveLength(2);
     expectPublicCard(bots[0]);
     expect(bots[1]).toMatchObject({ id: 'bot-2', chatInstructions: 'Second secret', aiProviderRef: 'key-456' });
+  });
+});
+
+describe('GET /api/bots?roomId= with bots made by different people', () => {
+  it('asks about each bot with the same request-wide memo, and decides for each on its own', async () => {
+    db.bot.findMany.mockResolvedValue([
+      dbBot(true, { id: 'bot-1', createdById: 'u-maker', createdBy: { id: 'u-maker', name: 'Maker' } }),
+      dbBot(true, { id: 'bot-2', createdById: 'u-other', createdBy: { id: 'u-other', name: 'Other' }, chatInstructions: 'Other secret' }),
+      dbBot(true, { id: 'bot-3', createdById: 'u-third', createdBy: { id: 'u-third', name: 'Third' } }),
+    ]);
+    session.mockResolvedValue({ id: 'u-keeper', email: 'keeper@example.com' });
+    // The viewer manages the second bot only (a rule of its own), and made none of them
+    manages.mockImplementation(async (_user: string, _email: string, bot: { id: string }) => bot.id === 'bot-2');
+    const bots = (await (await readList()).json()) as Record<string, any>[];
+    expect(bots.map((bot) => 'chatInstructions' in bot)).toEqual([false, true, false]);
+    expect(bots[1].chatInstructions).toBe('Other secret');
+    // One memo for the request, the same for every bot, and none of them passes for having made the bot
+    const memos = manages.mock.calls.map((call) => call[3].memo);
+    expect(memos).toHaveLength(3);
+    expect(memos[0]).toBeInstanceOf(Map);
+    expect(memos[1]).toBe(memos[0]);
+    expect(memos[2]).toBe(memos[0]);
+    expect(manages.mock.calls.every((call) => call[3].creatorPasses === false)).toBe(true);
   });
 });
 

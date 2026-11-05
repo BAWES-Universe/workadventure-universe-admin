@@ -365,6 +365,18 @@ describe('a server with more tools than the bot server keeps', () => {
     expect(whole).toMatchObject({ truncated: false, policyRevision: revision, state: 'confirmed' });
   });
 
+  it('keeps a tool missing from a cut list (it may be past the first 500), and removes it once the list is whole', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a'), tool('b')));
+    const revision = state.servers[0].policyRevision;
+    const cut = await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('a')));
+    expect(cut.removed).toEqual([]);
+    expect(state.tools.map((t) => t.name).sort()).toEqual(['a', 'b']);
+    expect(state.servers[0].policyRevision).toBe(revision);
+    const whole = await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    expect(whole.removed).toEqual(['b']);
+    expect(state.tools.map((t) => t.name)).toEqual(['a']);
+  });
+
   it('writes the server only when what it says about the cut changed', async () => {
     await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('a')));
     const update = prisma.botMcpServer.update as jest.Mock;
@@ -620,14 +632,29 @@ describe('a bot’s limits for asking', () => {
   });
 
   it('saves the two allow-more times on their own, leaving the other limits as they were', async () => {
+    // Other limits that are not the defaults, so a save that put the defaults back would show
+    await saveBotToolSettings('bot-1', { askBeforeMaking: null, askWhichWay: 'beforeBiggerJobs', cardWaitMinutes: 30 });
     expect(await saveBotToolSettings('bot-1', { allowMoreIdleMinutes: 120 })).toEqual({
-      askBeforeMaking: 5,
-      askWhichWay: 'rarely',
-      cardWaitMinutes: 10,
+      askBeforeMaking: null,
+      askWhichWay: 'beforeBiggerJobs',
+      cardWaitMinutes: 30,
       allowMoreIdleMinutes: 120,
       allowMoreMaxMinutes: 480,
     });
-    expect(await saveBotToolSettings('bot-1', { allowMoreMaxMinutes: 1440 })).toMatchObject({ allowMoreIdleMinutes: 120, allowMoreMaxMinutes: 1440 });
+    expect(await saveBotToolSettings('bot-1', { allowMoreMaxMinutes: 1440 })).toEqual({
+      askBeforeMaking: null,
+      askWhichWay: 'beforeBiggerJobs',
+      cardWaitMinutes: 30,
+      allowMoreIdleMinutes: 120,
+      allowMoreMaxMinutes: 1440,
+    });
+    expect(await readBotToolSettings('bot-1')).toEqual({
+      askBeforeMaking: null,
+      askWhichWay: 'beforeBiggerJobs',
+      cardWaitMinutes: 30,
+      allowMoreIdleMinutes: 120,
+      allowMoreMaxMinutes: 1440,
+    });
   });
 
   it('answers null for a bot that is not there', async () => {

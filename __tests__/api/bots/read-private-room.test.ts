@@ -18,7 +18,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 jest.mock('@/lib/auth', () => ({ requireAuth: jest.fn() }));
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: jest.fn(() => false) }));
 // Who manages a bot is covered in read-private-parts.test.ts; here nobody does, so the card is the public one
-jest.mock('@/lib/bot-permissions', () => ({ canManageBots: jest.fn(async () => false), canManageThisBot: jest.fn(async () => false) }));
+jest.mock('@/lib/bot-permissions', () => ({ canManageBots: jest.fn(async () => false), canManageThisBot: jest.fn(async () => false), preloadBotRules: jest.fn(async () => undefined) }));
 jest.mock('@/lib/oidc', () => ({ validateAccessToken: jest.fn(async () => null) }));
 
 const ROOM_ID = '11111111-1111-4111-8111-111111111111';

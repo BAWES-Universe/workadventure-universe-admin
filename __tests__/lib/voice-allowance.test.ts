@@ -257,6 +257,19 @@ describe('what is left', () => {
     expect(db.botsAiUsage.count).toHaveBeenLastCalledWith({ where: { talkedUserId: 'wa-guest', talkedGuest: true, keyOwnerId: null, error: false, timestamp: { gte: STARTED } } });
   });
 
+  it("counts the typed replies inside the person's transaction, on the transaction's own connection", async () => {
+    const tx = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      voiceReplyUse: { findUnique: jest.fn().mockResolvedValue(null), count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({}) },
+      botsAiUsage: { count: jest.fn().mockResolvedValue(0) },
+    };
+    db.$transaction.mockImplementation(async (steps: (tx: unknown) => Promise<unknown>) => steps(tx));
+    db.botsAiUsage.count.mockClear();
+    await checkVoiceAllowance('bot-1', SARA, NOW);
+    expect(tx.botsAiUsage.count).toHaveBeenCalledTimes(1);
+    expect(db.botsAiUsage.count).not.toHaveBeenCalled();
+  });
+
   it("tells a signed-in person's count without counting anything", async () => {
     db.voiceReplyUse.count.mockResolvedValue(7);
     expect(await voiceRepliesLeft('bot-1', SARA, NOW)).toEqual({ left: 18, resetsAt: '2026-11-02T13:00:00.000Z' });

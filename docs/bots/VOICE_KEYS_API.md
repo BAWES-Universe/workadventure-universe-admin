@@ -6,8 +6,10 @@ listen or speak on their key instead of Universe AI's. The key's owner pays; nob
 ([VOICE_PROVIDERS_API.md](VOICE_PROVIDERS_API.md)), which the routes below never touch, and those routes never list a person's key.
 
 Publishing a bot's voice with a lent key is in `VOICE_BOT_API.md`. A key the provider turns away is Down (below).
-Orbit calls a company only once, to check a pasted key before it is added ("Load models", below): a free, authenticated read, never a
-transcription or a spoken reply. The models a key lists are the exact ids the server's own providers for that company list.
+Orbit calls a company only for free reads, never a transcription or a spoken reply: it checks a pasted key before it is added ("Load models",
+below), and for a key lent to a universe it lists that key's voices and fetches a voice's sample when a maker previews one
+(`VOICE_BOT_API.md`). "Load models" fills the list with the ids the server's own providers for that company list; saving a key checks only
+the shape of each model and that its kind is something the key does, not that the id is one of the server's.
 
 Limits (#783): a key's owner can set four limits for bots that use the key, the ones that are about how much of the key a bot may use:
 `turnSeconds` (longest spoken turn), `replyCharacters` and `replySeconds` (longest spoken reply) and `listenMinutesPerDay` (minutes a day one bot

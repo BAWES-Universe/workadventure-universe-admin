@@ -4,7 +4,7 @@
  */
 type Role = { id: string; key: string; position: number; permissions: bigint };
 type Given = { role: Role; allWorlds: boolean; worldIds: string[] };
-type Rule = { roleId: string | null; userId: string | null; allow: bigint; deny: bigint };
+type Rule = { botId?: string; roleId: string | null; userId: string | null; allow: bigint; deny: bigint };
 
 const state = {
   ownerId: 'owner',
@@ -39,12 +39,17 @@ jest.mock('@/lib/db', () => ({
       ),
     },
     botAccessRule: {
-      findMany: jest.fn(async () => state.rules),
+      // A rule belongs to bot-1 unless it names another bot; asked for one bot or for several in one go
+      findMany: jest.fn(async ({ where }: { where?: { botId?: string | { in: string[] } } } = {}) => {
+        const wanted = where?.botId === undefined ? null : typeof where.botId === 'string' ? [where.botId] : where.botId.in;
+        return state.rules.map((rule) => ({ ...rule, botId: rule.botId ?? 'bot-1' })).filter((rule) => !wanted || wanted.includes(rule.botId));
+      }),
     },
   },
 }));
 
-import { canManageBotMcpServers, canManageBots, canManageThisBot } from '@/lib/bot-permissions';
+import { canManageBotMcpServers, canManageBots, canManageThisBot, preloadBotRules, type ManageMemo } from '@/lib/bot-permissions';
+import { prisma } from '@/lib/db';
 import { ADMIN_KEY, EDITOR_DEFAULT_PERMISSIONS } from '@/lib/roles';
 import { ALL_PERMISSIONS, flag } from '@/lib/permissions';
 import { NO_RULE, withValues, type RuleAction, type RuleValue } from '@/lib/bot-rules';
@@ -209,5 +214,61 @@ describe('row 11: Manage this bot', () => {
     member('ed', [everywhere(EDITOR)]);
     rule({ userId: 'someone-else' }, { manage: 'no' });
     expect(await manage('ed')).toBe(true);
+  });
+});
+
+describe('many bots in one room for one person (the room list)', () => {
+  const bots = [
+    { id: 'bot-1', createdById: 'maker-a', roomId: 'room-hq' },
+    { id: 'bot-2', createdById: 'maker-b', roomId: 'room-hq' },
+    { id: 'bot-3', createdById: 'maker-c', roomId: 'room-hq' },
+    { id: 'bot-4', createdById: 'maker-d', roomId: 'room-hq' },
+  ];
+  const mocks = prisma as unknown as { room: { findUnique: jest.Mock }; botAccessRule: { findMany: jest.Mock } };
+  const verdicts = (userId: string, memo?: ManageMemo) => Promise.all(bots.map((b) => canManageThisBot(userId, null, b, { creatorPasses: false, memo })));
+
+  beforeEach(() => {
+    // bot-1 and bot-2 carry rules of their own, bot-3 and bot-4 follow the room
+    member('plain', []);
+    rule({ userId: 'plain' }, { manage: 'yes' });
+    state.rules.push({ botId: 'bot-2', roleId: null, userId: 'plain', ...withValues(NO_RULE, { manage: 'no' }) });
+    mocks.room.findUnique.mockClear();
+    mocks.botAccessRule.findMany.mockClear();
+  });
+
+  it('gives the same answers with the memo as without, whoever made each bot', async () => {
+    member('keeper', [everywhere(KEEPER)]);
+    for (const userId of ['plain', 'keeper', 'owner', 'stranger']) {
+      const memo: ManageMemo = new Map();
+      await preloadBotRules(memo, bots.map((b) => b.id));
+      expect(await verdicts(userId, memo)).toEqual(await verdicts(userId));
+    }
+    // plain: Yes on bot-1, No on bot-2, nothing from the room for bot-3 and bot-4
+    const memo: ManageMemo = new Map();
+    await preloadBotRules(memo, bots.map((b) => b.id));
+    expect(await verdicts('plain', memo)).toEqual([true, false, false, false]);
+  });
+
+  it('works out the room once and reads the bots’ rules in one query', async () => {
+    const memo: ManageMemo = new Map();
+    await preloadBotRules(memo, bots.map((b) => b.id));
+    await verdicts('plain', memo);
+    expect(mocks.botAccessRule.findMany).toHaveBeenCalledTimes(1);
+    // Once for who they are in the room, once for what the room gives when a bot has no rules of its own
+    expect(mocks.room.findUnique).toHaveBeenCalledTimes(2);
+
+    mocks.room.findUnique.mockClear();
+    mocks.botAccessRule.findMany.mockClear();
+    await verdicts('plain');
+    expect(mocks.botAccessRule.findMany).toHaveBeenCalledTimes(4);
+    expect(mocks.room.findUnique).toHaveBeenCalledTimes(4);
+  });
+
+  it('keeps one person’s answers from another’s when a memo is shared by mistake', async () => {
+    member('keeper', [everywhere(KEEPER)]);
+    const memo: ManageMemo = new Map();
+    await preloadBotRules(memo, bots.map((b) => b.id));
+    expect(await verdicts('keeper', memo)).toEqual([true, true, true, true]);
+    expect(await verdicts('stranger', memo)).toEqual([false, false, false, false]);
   });
 });

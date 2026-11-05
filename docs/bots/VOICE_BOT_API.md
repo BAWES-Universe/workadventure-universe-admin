@@ -81,8 +81,8 @@ the speaking model to use with the voice: the first one the source lists, and fo
   `GET /api/bots/:id/voice/voices/:voiceId/preview?source=…` when the company only serves a sample with the key (Cartesia). That route
   fetches the sample from the address the company's own list named (never one in the request) with the key, and answers the audio (up to
   2 MB, cached privately for a day); like the list it needs the person's session, so the game fetches it the way it fetches the list and
-  plays the bytes. 404 for a voice with no sample, 502 when the company does not answer. A sample address that is not https, or that is at
-  another host than the company's, is left out.
+  plays the bytes. 404 for a voice with no sample, 502 when the company does not answer. A sample address that is not https is left out. For Cartesia, whose samples are fetched with the key, an address at
+  another host than the company's is left out too (ElevenLabs's public sample addresses can be at the host that stores them).
 
 ## Bot server (service token)
 

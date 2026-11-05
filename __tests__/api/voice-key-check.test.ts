@@ -45,6 +45,21 @@ beforeEach(() => {
 afterEach(() => jest.restoreAllMocks());
 
 describe('Load models for a voice key', () => {
+  it.each([200, 500])('lets go of the company\'s answer without reading it (%s)', async (status) => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    fetchMock.mockResolvedValue(new Response(body, { status }));
+    await send({ adapter: 'elevenlabs', apiKey: KEY });
+    expect(cancelled).toBe(true);
+  });
+
   it('is for signed-in people', async () => {
     (getSessionUser as jest.Mock).mockResolvedValue(null);
     expect((await send({ adapter: 'elevenlabs', apiKey: KEY })).status).toBe(401);

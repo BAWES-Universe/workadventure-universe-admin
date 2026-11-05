@@ -197,10 +197,15 @@ describe('super admin routes', () => {
   });
 
   it('turn down a default voice on a provider that doesn\'t speak, a name with no voice, and an empty voice', async () => {
-    db.findUnique.mockResolvedValue(row({ speech: false }));
-    expect((await call(patchAdmin, 'PATCH', { defaultVoiceId: 'nora' })).status).toBe(400);
+    // No models listed, so the only thing wrong is the voice (a speaking model on a provider that doesn't speak would be refused first)
+    db.findUnique.mockResolvedValue(row({ speech: false, models: [] }));
+    const notSpeaking = await call(patchAdmin, 'PATCH', { defaultVoiceId: 'nora' });
+    expect(notSpeaking.status).toBe(400);
+    expect((await notSpeaking.json()).error).toBe('Only a provider that speaks can have a default voice');
     db.findUnique.mockResolvedValue(row());
-    expect((await call(patchAdmin, 'PATCH', { defaultVoiceName: 'Nora' })).status).toBe(400);
+    const noVoice = await call(patchAdmin, 'PATCH', { defaultVoiceName: 'Nora' });
+    expect(noVoice.status).toBe(400);
+    expect((await noVoice.json()).error).toBe('A default voice name needs the default voice');
     expect((await call(patchAdmin, 'PATCH', { defaultVoiceId: '  ' })).status).toBe(400);
     expect(db.update).not.toHaveBeenCalled();
   });
