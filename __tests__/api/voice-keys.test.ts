@@ -288,8 +288,7 @@ describe('a key\'s limits', () => {
       db.voiceProvider.update.mockClear();
       db.voiceProvider.findFirst.mockResolvedValue(key({ voiceLimits: { turnSeconds: 120 } }));
       await patchLimits({ turnSeconds: 180 });
-      expect(db.voiceProvider.update.mock.calls[0][0].data.voiceLimits).toBeDefined();
-      expect(JSON.stringify(db.voiceProvider.update.mock.calls[0][0].data.voiceLimits)).not.toContain('turnSeconds');
+      expect(db.voiceProvider.update.mock.calls[0][0].data.voiceLimits).toBe(Prisma.DbNull);
     });
 
     it('looks only at the names sent: a limit saved earlier that equals the server\'s today stays saved', async () => {

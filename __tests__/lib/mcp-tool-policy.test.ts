@@ -632,14 +632,29 @@ describe('a bot’s limits for asking', () => {
   });
 
   it('saves the two allow-more times on their own, leaving the other limits as they were', async () => {
+    // Other limits that are not the defaults, so a save that put the defaults back would show
+    await saveBotToolSettings('bot-1', { askBeforeMaking: null, askWhichWay: 'beforeBiggerJobs', cardWaitMinutes: 30 });
     expect(await saveBotToolSettings('bot-1', { allowMoreIdleMinutes: 120 })).toEqual({
-      askBeforeMaking: 5,
-      askWhichWay: 'rarely',
-      cardWaitMinutes: 10,
+      askBeforeMaking: null,
+      askWhichWay: 'beforeBiggerJobs',
+      cardWaitMinutes: 30,
       allowMoreIdleMinutes: 120,
       allowMoreMaxMinutes: 480,
     });
-    expect(await saveBotToolSettings('bot-1', { allowMoreMaxMinutes: 1440 })).toMatchObject({ allowMoreIdleMinutes: 120, allowMoreMaxMinutes: 1440 });
+    expect(await saveBotToolSettings('bot-1', { allowMoreMaxMinutes: 1440 })).toEqual({
+      askBeforeMaking: null,
+      askWhichWay: 'beforeBiggerJobs',
+      cardWaitMinutes: 30,
+      allowMoreIdleMinutes: 120,
+      allowMoreMaxMinutes: 1440,
+    });
+    expect(await readBotToolSettings('bot-1')).toEqual({
+      askBeforeMaking: null,
+      askWhichWay: 'beforeBiggerJobs',
+      cardWaitMinutes: 30,
+      allowMoreIdleMinutes: 120,
+      allowMoreMaxMinutes: 1440,
+    });
   });
 
   it('answers null for a bot that is not there', async () => {
