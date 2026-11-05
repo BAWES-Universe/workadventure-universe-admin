@@ -158,3 +158,23 @@ export async function markToolReconnected(serverId: string, personId: string | n
     console.error('[ToolSignIn] Could not clear the lost sign-in:', error instanceof Error ? error.message : 'unknown');
   }
 }
+
+/**
+ * Takes down this person's cards about bots that no longer exist. Deleting a bot or a connection runs the sync above, but
+ * deleting a whole room, world or universe removes its bots in the database without it, so the cards are checked when Orbit
+ * home or the count reads them. Never throws: a card left showing is the smaller harm.
+ */
+export async function dropOrphanedToolSignInNotices(userId: string): Promise<void> {
+  try {
+    const open = await prisma.userNotice.findMany({ where: { userId, kind: TOOL_SIGNIN_KIND, dismissedAt: null }, select: { id: true, dedupeKey: true } });
+    if (open.length === 0) return;
+    // The key is "tool-signin:<bot id>:<time>"
+    const botIdOf = (key: string) => key.split(':')[1] ?? '';
+    const alive = new Set((await prisma.bot.findMany({ where: { id: { in: open.map((notice) => botIdOf(notice.dedupeKey)) } }, select: { id: true } })).map((bot) => bot.id));
+    const gone = open.filter((notice) => !alive.has(botIdOf(notice.dedupeKey))).map((notice) => notice.id);
+    if (gone.length > 0) await prisma.userNotice.updateMany({ where: { userId, id: { in: gone }, dismissedAt: null }, data: { dismissedAt: new Date() } });
+  } catch (error) {
+    Sentry.captureException(error, { tags: { area: 'tool-signin' } });
+    console.error('[ToolSignIn] Could not check the cards for deleted bots:', error instanceof Error ? error.message : 'unknown');
+  }
+}

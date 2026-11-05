@@ -5,14 +5,14 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { describeToolSignIn, type ToolSignInNoticeData } from '@/lib/tool-signin-words';
-import { markToolReconnected, reportToolSignIn, syncToolSignInNotices } from '@/lib/tool-signin';
+import { dropOrphanedToolSignInNotices, markToolReconnected, reportToolSignIn, syncToolSignInNotices } from '@/lib/tool-signin';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 // The notices are worked out inside one transaction that first takes a lock on the bot: the transaction hands the same
 // mocks to its callback, and `$executeRaw` is the lock.
 jest.mock('@/lib/db', () => {
   const prisma: Record<string, unknown> = {
-    bot: { findUnique: jest.fn() },
+    bot: { findUnique: jest.fn(), findMany: jest.fn() },
     botMcpServer: { findFirst: jest.fn(), findUnique: jest.fn(), findMany: jest.fn(), updateMany: jest.fn(), update: jest.fn() },
     userNotice: { findMany: jest.fn(), update: jest.fn(), create: jest.fn(), updateMany: jest.fn() },
     $executeRaw: jest.fn(),
@@ -22,7 +22,7 @@ jest.mock('@/lib/db', () => {
 });
 
 const db = prisma as unknown as {
-  bot: { findUnique: jest.Mock };
+  bot: { findUnique: jest.Mock; findMany: jest.Mock };
   botMcpServer: Record<'findFirst' | 'findUnique' | 'findMany' | 'updateMany' | 'update', jest.Mock>;
   userNotice: Record<'findMany' | 'update' | 'create' | 'updateMany', jest.Mock>;
   $executeRaw: jest.Mock;
@@ -231,5 +231,33 @@ describe('reconnecting', () => {
   it('never throws: the sign-in has already gone through', async () => {
     db.botMcpServer.findUnique.mockRejectedValue(new Error('db down'));
     await expect(markToolReconnected('s1', 'sara')).resolves.toBeUndefined();
+  });
+});
+
+describe('cards about bots that were removed with their room, world or universe', () => {
+  const card = (id: string, bot: string) => ({ id, dedupeKey: `tool-signin:${bot}:2026-11-05T09:54:00.000Z` });
+
+  it('takes down only the ones whose bot is gone', async () => {
+    db.userNotice.findMany.mockResolvedValue([card('n1', 'bot-1'), card('n2', 'bot-gone')]);
+    db.bot.findMany.mockResolvedValue([{ id: 'bot-1' }]);
+    await dropOrphanedToolSignInNotices('yousef');
+    expect(db.userNotice.findMany.mock.calls[0][0].where).toEqual({ userId: 'yousef', kind: 'tool-signin', dismissedAt: null });
+    expect(db.userNotice.updateMany).toHaveBeenCalledTimes(1);
+    expect(db.userNotice.updateMany.mock.calls[0][0].where).toEqual({ userId: 'yousef', id: { in: ['n2'] }, dismissedAt: null });
+  });
+
+  it('asks nothing more when there are no such cards, and changes nothing when every bot is there', async () => {
+    db.userNotice.findMany.mockResolvedValue([]);
+    await dropOrphanedToolSignInNotices('yousef');
+    expect(db.bot.findMany).not.toHaveBeenCalled();
+    db.userNotice.findMany.mockResolvedValue([card('n1', 'bot-1')]);
+    db.bot.findMany.mockResolvedValue([{ id: 'bot-1' }]);
+    await dropOrphanedToolSignInNotices('yousef');
+    expect(db.userNotice.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('never throws', async () => {
+    db.userNotice.findMany.mockRejectedValue(new Error('db down'));
+    await expect(dropOrphanedToolSignInNotices('yousef')).resolves.toBeUndefined();
   });
 });
