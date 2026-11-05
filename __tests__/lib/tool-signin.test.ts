@@ -153,16 +153,36 @@ describe('the bot server’s report', () => {
     expect(addNotice).not.toHaveBeenCalled();
   });
 
-  it('"ok" clears both and takes the card down; a repeat changes nothing', async () => {
+  it('"ok" clears what went down before it and takes the card down; a repeat changes nothing', async () => {
     db.botMcpServer.findFirst.mockResolvedValue({ id: 's1' });
-    // Each report keeps the time first, then clears
-    db.botMcpServer.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+    // Each report keeps the time first, then clears (the second one finds nothing down, for either kind)
+    db.botMcpServer.updateMany.mockResolvedValue({ count: 0 });
+    db.botMcpServer.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 1 });
     db.botMcpServer.findMany.mockResolvedValue([]);
     db.userNotice.findMany.mockResolvedValue([{ id: 'n1', userId: 'yousef' }]);
     expect(await reportToolSignIn('bot-1', 's1', { state: 'ok' })).toEqual({ changed: true });
     expect(await reportToolSignIn('bot-1', 's1', { state: 'ok' })).toEqual({ changed: false });
     expect(db.botMcpServer.updateMany.mock.calls[1][0].data).toEqual({ signInLostAt: null, signInLostStatus: null, noAnswerAt: null });
     expect(dismissed()).toEqual(['n1']);
+  });
+
+  it('"ok" leaves a failure seen after it alone: only what went down at or before its own time is cleared', async () => {
+    db.botMcpServer.findFirst.mockResolvedValue({ id: 's1' });
+    db.botMcpServer.updateMany.mockResolvedValue({ count: 0 });
+    expect(await reportToolSignIn('bot-1', 's1', { state: 'ok', at: T1 })).toEqual({ changed: false });
+    const [, lost, unanswered] = db.botMcpServer.updateMany.mock.calls.map(([call]) => call);
+    expect(lost.where).toEqual({ id: 's1', botId: 'bot-1', signInLostAt: { lte: T1 } });
+    expect(unanswered.where).toEqual({ id: 's1', botId: 'bot-1', noAnswerAt: { lte: T1 } });
+    expect(unanswered.data).toEqual({ noAnswerAt: null });
+    expect(addNotice).not.toHaveBeenCalled();
+    expect(dismissed()).toEqual([]);
+  });
+
+  it('"ok" also clears a "didn’t answer" from before it, and tells nobody', async () => {
+    db.botMcpServer.findFirst.mockResolvedValue({ id: 's1' });
+    db.botMcpServer.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
+    expect(await reportToolSignIn('bot-1', 's1', { state: 'ok', at: T2 })).toEqual({ changed: true });
+    expect(db.userNotice.updateMany).not.toHaveBeenCalled();
   });
 
   it('"ok" keeps the time it saw the tool working, so an older failure that reports after it is turned away', async () => {
@@ -178,7 +198,7 @@ describe('the bot server’s report', () => {
     });
     // The failure from before it (T1) is refused by the same rule that guards a reconnect
     await reportToolSignIn('bot-1', 's1', { state: 'expired', at: T1 });
-    expect(db.botMcpServer.updateMany.mock.calls[2][0].where.OR).toEqual([{ reconnectedAt: null }, { reconnectedAt: { lt: T1 } }]);
+    expect(db.botMcpServer.updateMany.mock.calls[3][0].where.OR).toEqual([{ reconnectedAt: null }, { reconnectedAt: { lt: T1 } }]);
   });
 });
 
