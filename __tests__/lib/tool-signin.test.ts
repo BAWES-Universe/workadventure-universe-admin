@@ -4,13 +4,13 @@
  */
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { canManageBotMcpServers } from '@/lib/bot-permissions';
+import { canManageBotMcpServers, preloadBotRules } from '@/lib/bot-permissions';
 import { describeToolSignIn, type ToolSignInNoticeData } from '@/lib/tool-signin-words';
 import { dropOrphanedToolSignInNotices, markToolReconnected, reportToolSignIn, syncToolSignInNotices } from '@/lib/tool-signin';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 // Who still manages a bot's tools is the tools page's own rule; here it is a switch
-jest.mock('@/lib/bot-permissions', () => ({ canManageBotMcpServers: jest.fn() }));
+jest.mock('@/lib/bot-permissions', () => ({ canManageBotMcpServers: jest.fn(), preloadBotRules: jest.fn() }));
 // The notices are worked out inside one transaction that first takes a lock on the bot: the transaction hands the same
 // mocks to its callback, and `$executeRaw` is the lock.
 jest.mock('@/lib/db', () => {
@@ -111,10 +111,20 @@ describe('the bot server’s report', () => {
     expect(await reportToolSignIn('bot-1', 's1', { state: 'expired', at: T1, status: 401 })).toEqual({ changed: true });
     expect(await reportToolSignIn('bot-1', 's1', { state: 'expired', at: T2, status: 401 })).toEqual({ changed: false });
     expect(db.botMcpServer.updateMany.mock.calls[0][0]).toEqual({
-      where: { id: 's1', botId: 'bot-1', signInLostAt: null },
+      where: { id: 's1', botId: 'bot-1', signInLostAt: null, OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: T1 } }] },
       data: { signInLostAt: T1, signInLostStatus: 401, noAnswerAt: null, reconnectedAt: null },
     });
     expect(addNotice).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a failure seen before the tool was connected again: the stored state and the cards stay as they are', async () => {
+    db.botMcpServer.findFirst.mockResolvedValue({ id: 's1' });
+    // The database finds no row: its reconnectedAt is later than the failure
+    db.botMcpServer.updateMany.mockResolvedValue({ count: 0 });
+    expect(await reportToolSignIn('bot-1', 's1', { state: 'expired', at: T1, status: 401 })).toEqual({ changed: false });
+    expect(db.botMcpServer.updateMany.mock.calls[0][0].where.OR).toEqual([{ reconnectedAt: null }, { reconnectedAt: { lt: T1 } }]);
+    expect(addNotice).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
   });
 
   it('takes a time from the future as now', async () => {
@@ -131,7 +141,13 @@ describe('the bot server’s report', () => {
     db.botMcpServer.findFirst.mockResolvedValue({ id: 's1' });
     db.botMcpServer.updateMany.mockResolvedValue({ count: 1 });
     expect(await reportToolSignIn('bot-1', 's1', { state: 'no-answer', at: T1 })).toEqual({ changed: true });
-    expect(db.botMcpServer.updateMany.mock.calls[0][0].where).toEqual({ id: 's1', botId: 'bot-1', signInLostAt: null, noAnswerAt: null });
+    expect(db.botMcpServer.updateMany.mock.calls[0][0].where).toEqual({
+      id: 's1',
+      botId: 'bot-1',
+      signInLostAt: null,
+      noAnswerAt: null,
+      OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: T1 } }],
+    });
     expect(addNotice).not.toHaveBeenCalled();
   });
 
@@ -292,10 +308,13 @@ describe('reconnecting', () => {
     expect(dismissed()).toEqual(['n1']);
   });
 
-  it('only remembers the person when nothing was down', async () => {
+  it('when nothing was down, keeps the time and the person, and clears nothing: a failure seen before it cannot start an outage', async () => {
     db.botMcpServer.findUnique.mockResolvedValue({ botId: 'bot-1', signInLostAt: null, noAnswerAt: null });
     await markToolReconnected('s1', 'sara');
-    expect(db.botMcpServer.update.mock.calls[0][0].data).toEqual({ connectedById: 'sara' });
+    const stamp = db.botMcpServer.update.mock.calls[0][0].data;
+    expect(Object.keys(stamp)).toEqual(['reconnectedAt']);
+    expect(stamp.reconnectedAt).toBeInstanceOf(Date);
+    expect(db.botMcpServer.update.mock.calls[1][0].data).toEqual({ connectedById: 'sara' });
     expect(db.userNotice.findMany).not.toHaveBeenCalled();
   });
 
@@ -305,24 +324,41 @@ describe('reconnecting', () => {
   });
 });
 
-describe('cards about bots that were removed with their room, world or universe', () => {
+describe('cards about bots that were removed, or that the person can no longer manage', () => {
   const card = (id: string, bot: string) => ({ id, dedupeKey: `tool-signin:${bot}:2026-11-05T09:54:00.000Z` });
+  const bot = (id: string) => ({ id, createdById: 'sara', roomId: 'room-1' });
 
   it('takes down only the ones whose bot is gone', async () => {
     db.userNotice.findMany.mockResolvedValue([card('n1', 'bot-1'), card('n2', 'bot-gone')]);
-    db.bot.findMany.mockResolvedValue([{ id: 'bot-1' }]);
+    db.bot.findMany.mockResolvedValue([bot('bot-1')]);
+    db.user.findUnique.mockResolvedValue({ email: 'yousef@example.com' });
+    mayManage.mockResolvedValue(true);
     await dropOrphanedToolSignInNotices('yousef');
     expect(db.userNotice.findMany.mock.calls[0][0].where).toEqual({ userId: 'yousef', kind: 'tool-signin', dismissedAt: null });
     expect(db.userNotice.updateMany).toHaveBeenCalledTimes(1);
     expect(db.userNotice.updateMany.mock.calls[0][0].where).toEqual({ userId: 'yousef', id: { in: ['n2'] }, dismissedAt: null });
   });
 
-  it('asks nothing more when there are no such cards, and changes nothing when every bot is there', async () => {
+  it('takes down a card about a bot whose tools the person can no longer manage, and keeps the others', async () => {
+    db.userNotice.findMany.mockResolvedValue([card('n1', 'bot-1'), card('n2', 'bot-2')]);
+    db.bot.findMany.mockResolvedValue([bot('bot-1'), bot('bot-2')]);
+    db.user.findUnique.mockResolvedValue({ email: 'yousef@example.com' });
+    mayManage.mockImplementation(async (_user: string, _email: string | null, managed: { id: string }) => managed.id === 'bot-1');
+    await dropOrphanedToolSignInNotices('yousef');
+    expect(preloadBotRules).toHaveBeenCalledWith(expect.any(Map), ['bot-1', 'bot-2']);
+    expect(mayManage).toHaveBeenCalledWith('yousef', 'yousef@example.com', bot('bot-2'), expect.any(Map));
+    expect(db.userNotice.updateMany).toHaveBeenCalledTimes(1);
+    expect(db.userNotice.updateMany.mock.calls[0][0].where).toEqual({ userId: 'yousef', id: { in: ['n2'] }, dismissedAt: null });
+  });
+
+  it('asks nothing more when there are no such cards, and changes nothing when the person manages every bot', async () => {
     db.userNotice.findMany.mockResolvedValue([]);
     await dropOrphanedToolSignInNotices('yousef');
     expect(db.bot.findMany).not.toHaveBeenCalled();
     db.userNotice.findMany.mockResolvedValue([card('n1', 'bot-1')]);
-    db.bot.findMany.mockResolvedValue([{ id: 'bot-1' }]);
+    db.bot.findMany.mockResolvedValue([bot('bot-1')]);
+    db.user.findUnique.mockResolvedValue({ email: 'yousef@example.com' });
+    mayManage.mockResolvedValue(true);
     await dropOrphanedToolSignInNotices('yousef');
     expect(db.userNotice.updateMany).not.toHaveBeenCalled();
   });

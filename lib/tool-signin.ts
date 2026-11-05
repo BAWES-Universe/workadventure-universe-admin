@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
-import { canManageBotMcpServers } from '@/lib/bot-permissions';
+import { canManageBotMcpServers, preloadBotRules, type ManageMemo } from '@/lib/bot-permissions';
 import { describeToolSignIn, type ToolSignInNoticeData } from '@/lib/tool-signin-words';
 
 /**
@@ -124,17 +124,19 @@ export async function syncToolSignInNotices(botId: string, fresh?: { serverId: s
 
 /**
  * The bot server's report. "expired" keeps the first time it was seen (the "since"), "no-answer" does too and never
- * replaces an expired sign-in, "ok" clears both. `changed` is true only when what is stored moved. Null when the bot has no
- * such server.
+ * replaces an expired sign-in, "ok" clears both. A failure seen before the tool was last connected again is old news (a
+ * call that started before the reconnect and reported after it) and changes nothing. `changed` is true only when what is
+ * stored moved. Null when the bot has no such server.
  */
 export async function reportToolSignIn(botId: string, serverId: string, report: ToolSignInReport): Promise<{ changed: boolean } | null> {
   const server = await prisma.botMcpServer.findFirst({ where: { id: serverId, botId }, select: { id: true } });
   if (!server) return null;
   const at = clampAt(report.at);
+  const afterLastReconnect = { OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: at } }] };
 
   if (report.state === 'expired') {
     const result = await prisma.botMcpServer.updateMany({
-      where: { id: serverId, botId, signInLostAt: null },
+      where: { id: serverId, botId, signInLostAt: null, ...afterLastReconnect },
       data: { signInLostAt: at, signInLostStatus: report.status ?? null, noAnswerAt: null, reconnectedAt: null },
     });
     if (result.count === 1) await syncToolSignInNotices(botId, { serverId, at });
@@ -143,7 +145,7 @@ export async function reportToolSignIn(botId: string, serverId: string, report: 
 
   if (report.state === 'no-answer') {
     const result = await prisma.botMcpServer.updateMany({
-      where: { id: serverId, botId, signInLostAt: null, noAnswerAt: null },
+      where: { id: serverId, botId, signInLostAt: null, noAnswerAt: null, ...afterLastReconnect },
       data: { noAnswerAt: at, reconnectedAt: null },
     });
     return { changed: result.count === 1 };
@@ -167,13 +169,12 @@ export async function markToolReconnected(serverId: string, personId: string | n
     if (!server) return;
     const wasDown = !!server.signInLostAt || !!server.noAnswerAt;
     // The clear comes first and on its own: remembering who connected it can fail (that account may be gone by now) and must
-    // never keep a working sign-in marked as lost
-    if (wasDown) {
-      await prisma.botMcpServer.update({
-        where: { id: serverId },
-        data: { signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: new Date() },
-      });
-    }
+    // never keep a working sign-in marked as lost. The time is kept even when nothing was down: a failure that a call saw
+    // before this moment and reports after it must not start an outage on a tool that has just been connected.
+    await prisma.botMcpServer.update({
+      where: { id: serverId },
+      data: wasDown ? { signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: new Date() } : { reconnectedAt: new Date() },
+    });
     if (personId) {
       await prisma.botMcpServer.update({ where: { id: serverId }, data: { connectedById: personId } }).catch((error) => {
         console.warn('[ToolSignIn] Could not remember who connected it:', error instanceof Error ? error.message : 'unknown');
@@ -187,9 +188,11 @@ export async function markToolReconnected(serverId: string, personId: string | n
 }
 
 /**
- * Takes down this person's cards about bots that no longer exist. Deleting a bot or a connection runs the sync above, but
- * deleting a whole room, world or universe removes its bots in the database without it, so the cards are checked when Orbit
- * home or the count reads them. Never throws: a card left showing is the smaller harm.
+ * Takes down this person's cards about bots they can no longer act on: bots that no longer exist, and bots whose tools they
+ * can no longer manage (they lost Manage bots in the room, or left it). Deleting a bot or a connection runs the sync above,
+ * but deleting a whole room, world or universe removes its bots in the database without it, and losing a role runs nothing
+ * for the cards already made, so the cards are checked when Orbit home or the count reads them. Never throws: a card left
+ * showing is the smaller harm.
  */
 export async function dropOrphanedToolSignInNotices(userId: string): Promise<void> {
   try {
@@ -197,8 +200,14 @@ export async function dropOrphanedToolSignInNotices(userId: string): Promise<voi
     if (open.length === 0) return;
     // The key is "tool-signin:<bot id>:<time>"
     const botIdOf = (key: string) => key.split(':')[1] ?? '';
-    const alive = new Set((await prisma.bot.findMany({ where: { id: { in: open.map((notice) => botIdOf(notice.dedupeKey)) } }, select: { id: true } })).map((bot) => bot.id));
-    const gone = open.filter((notice) => !alive.has(botIdOf(notice.dedupeKey))).map((notice) => notice.id);
+    const bots = await prisma.bot.findMany({ where: { id: { in: open.map((notice) => botIdOf(notice.dedupeKey)) } }, select: { id: true, createdById: true, roomId: true } });
+    const email = bots.length > 0 ? ((await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }))?.email ?? null) : null;
+    // One person, one request: their standing in a room is worked out once, and the bots' rules are read in one query
+    const memo: ManageMemo = new Map();
+    await preloadBotRules(memo, bots.map((bot) => bot.id));
+    const mayAct = new Map<string, boolean>();
+    for (const bot of bots) mayAct.set(bot.id, await canManageBotMcpServers(userId, email, bot, memo));
+    const gone = open.filter((notice) => !mayAct.get(botIdOf(notice.dedupeKey))).map((notice) => notice.id);
     if (gone.length > 0) await prisma.userNotice.updateMany({ where: { userId, id: { in: gone }, dismissedAt: null }, data: { dismissedAt: new Date() } });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'tool-signin' } });

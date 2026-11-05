@@ -156,7 +156,8 @@ export async function canManageThisBot(
 export async function canManageBotMcpServers(
   userId: string,
   userEmail: string | null,
-  bot: ManagedBot
+  bot: ManagedBot,
+  memo?: ManageMemo
 ): Promise<boolean> {
-  return canManageThisBot(userId, userEmail, bot, { creatorPasses: false });
+  return canManageThisBot(userId, userEmail, bot, { creatorPasses: false, memo });
 }
