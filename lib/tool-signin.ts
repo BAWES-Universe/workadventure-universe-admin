@@ -154,12 +154,14 @@ export async function reportToolSignIn(botId: string, serverId: string, report: 
   // The moment the tool was seen working is kept first, like a reconnect and only ever moving forward: a failure seen before it
   // that reports after it is old news from here on, even if it arrives between these two writes
   await prisma.botMcpServer.updateMany({ where: { id: serverId, botId, ...afterLastReconnect }, data: { reconnectedAt: at } });
-  const result = await prisma.botMcpServer.updateMany({
-    where: { id: serverId, botId, OR: [{ signInLostAt: { not: null } }, { noAnswerAt: { not: null } }] },
+  // It clears only what went down before it was seen working: a failure seen after it is newer news
+  const lost = await prisma.botMcpServer.updateMany({
+    where: { id: serverId, botId, signInLostAt: { lte: at } },
     data: { signInLostAt: null, signInLostStatus: null, noAnswerAt: null },
   });
-  if (result.count === 1) await syncToolSignInNotices(botId);
-  return { changed: result.count === 1 };
+  const unanswered = lost.count === 1 ? { count: 0 } : await prisma.botMcpServer.updateMany({ where: { id: serverId, botId, noAnswerAt: { lte: at } }, data: { noAnswerAt: null } });
+  if (lost.count === 1) await syncToolSignInNotices(botId);
+  return { changed: lost.count === 1 || unanswered.count === 1 };
 }
 
 /**
