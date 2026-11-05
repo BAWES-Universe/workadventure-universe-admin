@@ -77,7 +77,8 @@ function table(rows: Row[], prefix: string, defaults: () => Row, unique?: (row: 
     },
     findMany: async ({ where, include, orderBy }: { where?: Row; include?: Row; orderBy?: Row } = {}) => {
       const found = rows.filter((row) => matches(row, where));
-      if (orderBy?.createdAt === 'desc') found.reverse();
+      // Newest first by the time each was created; rows made at the same moment, the last saved first
+      if (orderBy?.createdAt === 'desc') found.reverse().sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       return found.map((row) => withInclude(row, include));
     },
     findFirst: async ({ where, include }: { where?: Row; include?: Row } = {}) => {

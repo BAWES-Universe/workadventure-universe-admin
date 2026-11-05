@@ -593,14 +593,26 @@ describe('the bot’s own allow-more times, and who is allowed more right now', 
     await remember({}, { idleMinutes: 5, absoluteMinutes: 20 });
     expect(await findGrant(BOT, lookup(), at(minutes(4)))).not.toBeNull();
     expect(await findGrant(BOT, lookup(), at(minutes(6)))).toBeNull();
+    // A busy chat keeps it going until the caller's 20 minutes, not the bot's 24 hours
+    await remember({ proposalKey: 'job3:turn1:call1', requesterKey: 'user:omar', conversationKey: 'dm:omar:nora' }, { idleMinutes: 5, absoluteMinutes: 20 });
+    const omar = () => ({ ...lookup(), requesterKey: 'user:omar', conversationKey: 'dm:omar:nora' });
+    for (let m = 4; m < 20; m += 4) await touchGrants(BOT, { requesterKey: 'user:omar', conversationKey: 'dm:omar:nora' }, at(minutes(m)));
+    expect(await findGrant(BOT, omar(), at(minutes(19)))).not.toBeNull();
+    expect(await findGrant(BOT, omar(), at(minutes(21)))).toBeNull();
   });
 
   it('lists what is allowed now: who, which tool, what stays fixed and when it ends, newest first, nothing from the card', async () => {
     await remember();
     await remember({ proposalKey: 'job2:turn1:call1', requesterKey: 'user:omar', conversationKey: 'dm:omar:nora', arguments: { ...ISSUE, team: 'MAP' }, rememberScope: { fixed: { team: 'MAP' }, varies: ['title', 'description'] } });
+    // Two different times to be created at, so the order is the newest's and not whichever was saved first
+    const grantsTable = (prisma as unknown as { botActionGrant: { updateMany(args: unknown): Promise<unknown> } }).botActionGrant;
+    await grantsTable.updateMany({ where: { requesterKey: 'user:sara' }, data: { createdAt: at(10) } });
+    await grantsTable.updateMany({ where: { requesterKey: 'user:omar' }, data: { createdAt: at(20) } });
     const grants = await listActiveGrants(BOT, at(60));
     const team = (g: (typeof grants)[number]) => (g.scope.fixed as { team?: unknown }).team;
-    expect(grants.map(team).sort()).toEqual(['MAP', 'WEB']);
+    expect(grants.map(team)).toEqual(['MAP', 'WEB']);
+    await grantsTable.updateMany({ where: { requesterKey: 'user:sara' }, data: { createdAt: at(30) } });
+    expect((await listActiveGrants(BOT, at(60))).map(team)).toEqual(['WEB', 'MAP']);
     const sara = grants.find((g) => team(g) === 'WEB');
     // Who it is for is said by name only, never by the key the game names them by
     expect(grants.every((g) => !('requesterKey' in g))).toBe(true);
@@ -717,6 +729,8 @@ describe('more time on a waiting card', () => {
 
   it('can be asked for ten times and then says so', async () => {
     const request = await waiting();
+    // The test title says ten: if the limit moves, this is where it is noticed
+    expect(MAX_EXTENSIONS).toBe(10);
     let revision = 1;
     for (let i = 0; i < MAX_EXTENSIONS; i++) {
       const result = await extendReview(BOT, request.id, { actorKey: 'user:sara', revision }, at(minutes(i)));
