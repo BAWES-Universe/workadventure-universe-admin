@@ -169,13 +169,12 @@ export async function markToolReconnected(serverId: string, personId: string | n
     if (!server) return;
     const wasDown = !!server.signInLostAt || !!server.noAnswerAt;
     // The clear comes first and on its own: remembering who connected it can fail (that account may be gone by now) and must
-    // never keep a working sign-in marked as lost
-    if (wasDown) {
-      await prisma.botMcpServer.update({
-        where: { id: serverId },
-        data: { signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: new Date() },
-      });
-    }
+    // never keep a working sign-in marked as lost. The time is kept even when nothing was down: a failure that a call saw
+    // before this moment and reports after it must not start an outage on a tool that has just been connected.
+    await prisma.botMcpServer.update({
+      where: { id: serverId },
+      data: wasDown ? { signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: new Date() } : { reconnectedAt: new Date() },
+    });
     if (personId) {
       await prisma.botMcpServer.update({ where: { id: serverId }, data: { connectedById: personId } }).catch((error) => {
         console.warn('[ToolSignIn] Could not remember who connected it:', error instanceof Error ? error.message : 'unknown');

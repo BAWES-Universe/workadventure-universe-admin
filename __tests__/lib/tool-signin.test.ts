@@ -308,10 +308,13 @@ describe('reconnecting', () => {
     expect(dismissed()).toEqual(['n1']);
   });
 
-  it('only remembers the person when nothing was down', async () => {
+  it('when nothing was down, keeps the time and the person, and clears nothing: a failure seen before it cannot start an outage', async () => {
     db.botMcpServer.findUnique.mockResolvedValue({ botId: 'bot-1', signInLostAt: null, noAnswerAt: null });
     await markToolReconnected('s1', 'sara');
-    expect(db.botMcpServer.update.mock.calls[0][0].data).toEqual({ connectedById: 'sara' });
+    const stamp = db.botMcpServer.update.mock.calls[0][0].data;
+    expect(Object.keys(stamp)).toEqual(['reconnectedAt']);
+    expect(stamp.reconnectedAt).toBeInstanceOf(Date);
+    expect(db.botMcpServer.update.mock.calls[1][0].data).toEqual({ connectedById: 'sara' });
     expect(db.userNotice.findMany).not.toHaveBeenCalled();
   });
 
