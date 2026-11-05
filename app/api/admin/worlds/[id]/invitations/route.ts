@@ -61,18 +61,17 @@ export async function GET(
     const invitations = await prisma.membershipInvitation.findMany({
       where: whereClause,
       include: {
+        // Names only: neither the invitee's nor the inviter's email is shown to whoever reads the list
         invitedUser: {
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
         invitedBy: {
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
       },
