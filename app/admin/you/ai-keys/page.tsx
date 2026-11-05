@@ -768,7 +768,9 @@ function LendSheet({
           />
           <p className="text-sm text-muted-foreground">
             {limit === 'all'
-              ? `Every model ${provider} has, including new ones it adds later. Each bot picks one on its page.`
+              ? voice
+                ? 'Every model on this key’s list. Each bot picks one on its page.'
+                : `Every model ${provider} has, including new ones it adds later. Each bot picks one on its page.`
               : `Bots there may only pick the models you tick. New ones ${provider} adds later are not added.`}
           </p>
           {limit === 'only' && voice && <VoiceModelPicker models={voice.models} mode="many" picked={only} onChange={setOnly} label="Models bots there may use" />}

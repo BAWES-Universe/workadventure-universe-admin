@@ -9,9 +9,17 @@ const fetchMock = jest.fn();
 const push = jest.fn();
 // The speech companies the server offers for voice (#749): none unless a test sets them. Reading them is not one of the calls the tests count.
 let voiceCompanies: unknown[] = [];
+// How many reads of the companies fail before one answers
+let voiceCompaniesFailing = 0;
 jest.mock('@/lib/client-auth', () => ({
-  authenticatedFetch: (url: string, ...rest: unknown[]) =>
-    url === '/api/me/voice-keys' && !(rest[0] as { method?: string } | undefined)?.method ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [], companies: voiceCompanies }) }) : fetchMock(url, ...rest),
+  authenticatedFetch: (url: string, ...rest: unknown[]) => {
+    if (url !== '/api/me/voice-keys' || (rest[0] as { method?: string } | undefined)?.method) return fetchMock(url, ...rest);
+    if (voiceCompaniesFailing > 0) {
+      voiceCompaniesFailing -= 1;
+      return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
+    }
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [], companies: voiceCompanies }) });
+  },
 }));
 jest.mock('@/components/ui/toast', () => ({ useToast: () => ({ addToast: jest.fn() }) }));
 jest.mock('next/navigation', () => ({ useRouter: () => ({ push, back: jest.fn() }) }));
@@ -35,6 +43,7 @@ const change = () => fireEvent.click(screen.getByRole('button', { name: 'Change'
 beforeEach(() => {
   fetchMock.mockReset();
   voiceCompanies = [];
+  voiceCompaniesFailing = 0;
   push.mockReset();
   inGame = false;
   openLinkInGame.mockReset().mockReturnValue(true);
@@ -563,6 +572,20 @@ describe('Add a key for voice', () => {
     render(<AddAiKeyPage />);
     await waitFor(() => expect(screen.queryByTestId('kinds-voice')).toBeNull());
     expect(screen.queryByText('For voice, with an API key')).toBeNull();
+  });
+
+  it('says the voice companies could not be loaded, with the same Try again as the keys page, and lists them once it works', async () => {
+    voiceCompanies = [company('elevenlabs', 'ElevenLabs')];
+    voiceCompaniesFailing = 1;
+    render(<AddAiKeyPage />);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('We couldn’t load the voice companies.');
+    // The providers are still there to pick while the voice companies are missing
+    expect(screen.getByRole('radio', { name: /^Claude/ })).toBeTruthy();
+    expect(screen.queryByTestId('kinds-voice')).toBeNull();
+    fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }));
+    expect(await within(await screen.findByTestId('kinds-voice')).findByRole('radio', { name: /^ElevenLabs/ })).toBeTruthy();
+    expect(screen.queryByText(/We couldn’t load the voice companies/)).toBeNull();
   });
 
   it('sets a company up like a provider: get the key, paste it, load models, see what it listens and speaks, name it', async () => {

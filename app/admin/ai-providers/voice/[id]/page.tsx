@@ -107,6 +107,7 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
   const [checking, setChecking] = useState(false);
   const [editing, setEditing] = useState<'key' | 'address' | 'name' | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [turningOff, setTurningOff] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
 
@@ -135,6 +136,14 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
   async function change(body: Record<string, unknown>): Promise<string | null> {
     const answer = await callOrbit('PATCH', `/api/admin/voice-providers/${encodeURIComponent(id)}`, body);
     if (!answer.ok) return answer.error;
+    // What was saved is kept on the page now, so a second quick edit builds on it and not on the list from before the first
+    const saved: Partial<ServerVoiceProvider> = {};
+    if (Array.isArray(body.models)) saved.models = body.models as VoiceModel[];
+    if (typeof body.enabled === 'boolean') saved.enabled = body.enabled;
+    if (typeof body.name === 'string') saved.name = body.name;
+    if ('endpoint' in body) saved.endpoint = (body.endpoint as string | null) ?? null;
+    setProvider((current) => (current ? { ...current, ...saved } : current));
+    setAll((list) => list.map((entry) => (entry.id === id ? { ...entry, ...saved } : entry)));
     reload();
     return null;
   }
@@ -170,7 +179,7 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
   ].filter(Boolean) as string[];
 
   /** A model list change: the default for a job always keeps a model to start from. */
-  async function changeModels(models: VoiceModel[]) {
+  async function changeModels(models: VoiceModel[]): Promise<boolean> {
     setProblem(null);
     for (const [job, isDefaultFor, word] of [
       ['recognition', provider!.defaultRecognition, 'listening'],
@@ -178,12 +187,22 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
     ] as const) {
       if (isDefaultFor && !models.some((model) => model.kind === job)) {
         setProblem(`It’s the default for ${word}, so it keeps a ${word} model. Add another before taking this one off.`);
-        return;
+        return false;
       }
     }
     setBusy(true);
     const refused = await change({ models });
     setBusy(false);
+    if (refused) setProblem(refused);
+    return !refused;
+  }
+
+  async function setEnabled(next: boolean) {
+    setBusy(true);
+    setProblem(null);
+    const refused = await change({ enabled: next });
+    setBusy(false);
+    setTurningOff(false);
     if (refused) setProblem(refused);
   }
 
@@ -254,13 +273,8 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
             hint="Bots and people’s own keys can use it. Off, its bots answer in text."
             checked={provider.enabled}
             disabled={busy}
-            onChange={async (next) => {
-              setBusy(true);
-              setProblem(null);
-              const refused = await change({ enabled: next });
-              setBusy(false);
-              if (refused) setProblem(refused);
-            }}
+            // The last provider of a company that is on takes people's way to add that company's key with it: said first, as on the list
+            onChange={(next) => (next || stillOn ? void setEnabled(next) : setTurningOff(true))}
           />
         </Settings>
       )}
@@ -359,7 +373,7 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
           </ValueRow>
         )}
       </section>
-      {problem && !deleting && <Refused>{problem}</Refused>}
+      {problem && !deleting && !turningOff && <Refused>{problem}</Refused>}
       <section className="grid gap-2 border-t border-foreground/10 pt-5">
         <Caption>Danger zone</Caption>
         <Button variant="outline" className="h-11 w-fit border-[#fca5a5]/60 px-5 text-[#fca5a5] hover:text-[#fca5a5]" disabled={isDefault || busy} onClick={() => setDeleting(true)}>
@@ -374,6 +388,21 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
           <p className="text-[13px] text-muted-foreground">{botsOn(provider) > 0 ? `Its ${bots(botsOn(provider))} answer in text until their maker picks another voice.` : 'No bot uses it.'}</p>
         )}
       </section>
+      <FormSheet open={turningOff} onOpenChange={(open) => !open && !busy && setTurningOff(false)} title={`Disable ${provider.name}?`}>
+        <p className="text-sm text-muted-foreground">
+          {botsOn(provider) > 0 ? `${bots(botsOn(provider))} ${botsOn(provider) === 1 ? 'uses' : 'use'} ${provider.name}. ${botsOn(provider) === 1 ? 'It answers' : 'They answer'} in text until it’s on again, or until their maker picks another voice. ` : ''}
+          People can’t add a {company} key while no {company} provider is on.
+        </p>
+        {problem && <Refused>{problem}</Refused>}
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" className="h-11 px-5" disabled={busy} onClick={() => setTurningOff(false)}>
+            Cancel
+          </Button>
+          <Button className="h-11 px-5" disabled={busy} onClick={() => void setEnabled(false)}>
+            {busy ? 'Disabling…' : 'Disable'}
+          </Button>
+        </div>
+      </FormSheet>
       <FormSheet open={deleting} onOpenChange={(open) => !open && !busy && setDeleting(false)} title={`Delete ${provider.name}?`}>
         <p className="text-sm text-muted-foreground">
           {botsOn(provider) > 0 ? `Its ${bots(botsOn(provider))} answer in text until their maker picks another voice. ` : ''}

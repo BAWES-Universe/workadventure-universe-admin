@@ -13,6 +13,8 @@ const calls: { method: string; url: string; body: Row | null }[] = [];
 let providers: Row[];
 let voicesAnswer: { ok: boolean; status?: number; body: unknown };
 let patchAnswer: { ok: boolean; body: unknown };
+// When set, reading the list never answers: the moment after a save, before the list that follows it arrives
+let holdList = false;
 let checkAnswer: { ok: boolean; body: unknown };
 const push = jest.fn();
 
@@ -21,7 +23,7 @@ jest.mock('@/lib/client-auth', () => ({
     const method = init?.method ?? 'GET';
     calls.push({ method, url, body: init?.body ? JSON.parse(init.body) : null });
     const answer = (ok: boolean, body: unknown, status = ok ? 200 : 400) => Promise.resolve({ ok, status, json: () => Promise.resolve(body) });
-    if (url === '/api/admin/voice-providers' && method === 'GET') return answer(true, { providers });
+    if (url === '/api/admin/voice-providers' && method === 'GET') return holdList ? new Promise(() => {}) : answer(true, { providers });
     if (url.endsWith('/voices')) return answer(voicesAnswer.ok, voicesAnswer.body, voicesAnswer.status);
     if (method === 'PATCH') return answer(patchAnswer.ok, patchAnswer.body);
     if (url === '/api/admin/voice-providers/check') return answer(checkAnswer.ok, checkAnswer.body);
@@ -56,6 +58,7 @@ beforeEach(() => {
   providers = [soniox(), eleven(), cartesia(), deepgram()];
   voicesAnswer = { ok: true, body: { voices: VOICES } };
   patchAnswer = { ok: true, body: { provider: {} } };
+  holdList = false;
   checkAnswer = { ok: true, body: { ok: true } };
   push.mockReset();
 });
@@ -348,7 +351,121 @@ describe('New voice provider, a key the company turns away', () => {
   });
 });
 
+describe('a voice provider\u2019s page, after CodeRabbit\u2019s findings on the voice screens', () => {
+  const open = async (id: string) => {
+    const params = Object.assign(Promise.resolve({ id }), { status: 'fulfilled', value: { id } });
+    render(<VoiceProviderPage params={params} />);
+    return screen.findByRole('button', { name: 'Add a model' });
+  };
+  const addModel = async (id: string) => {
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: id } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+  };
+
+  it('keeps the saved model list on the page, so a second quick edit builds on the first and not on the old list', async () => {
+    await open('v-cartesia');
+    // The list that follows each save has not arrived yet
+    holdList = true;
+    await addModel('sonic-4');
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    await waitFor(() => expect(screen.getAllByTestId('model-row')).toHaveLength(2));
+    await addModel('sonic-5');
+    await waitFor(() => expect(patches()).toHaveLength(2));
+    expect((patches()[1].body as { models: { id: string }[] }).models.map((model) => model.id)).toEqual(['sonic-3', 'sonic-4', 'sonic-5']);
+  });
+
+  it('keeps what was typed for a model when it could not be saved, and closes the form once it is', async () => {
+    await open('v-cartesia');
+    patchAnswer = { ok: false, body: { error: 'Cartesia is not reachable right now.' } };
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'sonic-4' } });
+    fireEvent.change(screen.getByLabelText('Name people see (optional)'), { target: { value: 'Sonic 4' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+    expect(await screen.findByText('Cartesia is not reachable right now.')).toBeTruthy();
+    expect((screen.getByLabelText('Model id') as HTMLInputElement).value).toBe('sonic-4');
+    expect((screen.getByLabelText('Name people see (optional)') as HTMLInputElement).value).toBe('Sonic 4');
+    expect(screen.getAllByTestId('model-row')).toHaveLength(1);
+    patchAnswer = { ok: true, body: { provider: {} } };
+    fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+    await waitFor(() => expect(screen.queryByLabelText('Model id')).toBeNull());
+    expect(patches().at(-1)?.body).toEqual({ models: [{ id: 'sonic-3', label: 'Sonic 3', kind: 'speech' }, { id: 'sonic-4', label: 'Sonic 4', kind: 'speech' }] });
+  });
+
+  it('checks the default\u2019s last model against the list just saved, not the one from before it', async () => {
+    // ElevenLabs is the default for speaking, so it keeps a speaking model
+    await open('v-eleven');
+    holdList = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Take Flash v2.5 off' }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    await waitFor(() => expect(screen.getAllByTestId('model-row')).toHaveLength(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Take Multilingual v2 off' }));
+    expect(await screen.findByText(/keeps a speaking model/)).toBeTruthy();
+    expect(patches()).toHaveLength(1);
+  });
+
+  it('warns that people can\u2019t add a company key before turning off the last provider of it, and turns it off only on Disable', async () => {
+    await open('v-cartesia');
+    fireEvent.click(screen.getByRole('switch', { name: 'On' }));
+    const sheet = await screen.findByRole('dialog');
+    expect(within(sheet).getByRole('heading', { name: 'Disable Cartesia?' })).toBeTruthy();
+    expect(sheet.textContent).toContain('2 bots use Cartesia. They answer in text');
+    expect(sheet.textContent).toContain('People can\u2019t add a Cartesia key while no Cartesia provider is on.');
+    expect(patches()).toHaveLength(0);
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(patches()).toHaveLength(0);
+    fireEvent.click(screen.getByRole('switch', { name: 'On' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Disable' }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0]).toMatchObject({ url: '/api/admin/voice-providers/v-cartesia', body: { enabled: false } });
+  });
+
+  it('turns off at once when another provider of the company is still on', async () => {
+    providers = [soniox(), eleven(), cartesia(), { ...cartesia(), id: 'v-cartesia-2', name: 'Cartesia EU' }];
+    await open('v-cartesia');
+    fireEvent.click(screen.getByRole('switch', { name: 'On' }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(patches()[0].body).toEqual({ enabled: false });
+  });
+});
+
+describe('the Change buttons for what Universe AI listens and speaks with', () => {
+  it('wait for the list that follows a save, so a sheet opened again can\u2019t save the old default back', async () => {
+    providers = [soniox(), eleven(), cartesia(), { ...deepgram(), enabled: true }];
+    render(<VoiceSection />);
+    const listen = await screen.findByTestId('default-listen');
+    await waitFor(() => expect((within(listen).getByRole('button', { name: 'Change' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(within(listen).getByRole('button', { name: 'Change' }));
+    const sheet = await screen.findByRole('dialog');
+    fireEvent.click(within(sheet).getByRole('radio', { name: /Deepgram/ }));
+    holdList = true;
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect((within(screen.getByTestId('default-listen')).getByRole('button', { name: 'Change' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((within(screen.getByTestId('default-speak')).getByRole('button', { name: 'Change' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
 describe('the voice limits', () => {
+  it('offers Never for listening a day, which the range allows, and saves it as 0', () => {
+    const rows = voiceServerLimits({ ...VOICE_LIMITS_RECOMMENDED }, { signedIn: 30, guest: 10 });
+    const listening = rows.find((row) => row.id === 'listenMinutesPerDay')!;
+    expect(listening.range?.min).toBe(0);
+    expect(listening.options[0]).toMatchObject({ value: 0, label: 'Never' });
+    expect(listening.options.map((option) => option.value)).toEqual([0, 15, 30, 60, 120, 240]);
+  });
+
+  it('say what 5 guest replies is from the real allowance, not always half', () => {
+    const meaning = (guest: number) => voiceServerLimits({ ...VOICE_LIMITS_RECOMMENDED }, { signedIn: 30, guest }).find((row) => row.id === 'guestVoiceReplies')!.options.find((option) => option.value === 5)!.meaning;
+    expect(meaning(10)).toBe('Half of a guest\u2019s replies.');
+    expect(meaning(20)).toBe('5 of a guest\u2019s 20 replies.');
+    expect(meaning(8)).toBe('5 of a guest\u2019s 8 replies.');
+    expect(meaning(5)).toBe('All of a guest\u2019s replies.');
+  });
+
   it('are the 7 from #740, the four a key can change first, each with its recommended value', () => {
     const rows = voiceServerLimits({ ...VOICE_LIMITS_RECOMMENDED }, { signedIn: 30, guest: 10 });
     expect(rows.map((row) => row.id)).toEqual(['turnSeconds', 'replyCharacters', 'replySeconds', 'listenMinutesPerDay', 'followUpSeconds', 'textReserveShare', 'guestVoiceReplies']);

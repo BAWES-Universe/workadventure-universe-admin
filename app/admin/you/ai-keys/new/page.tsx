@@ -13,7 +13,7 @@ import { ModelPicker, makerOf } from '../../../components/ds/model-picker';
 import { useToast } from '@/components/ui/toast';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { AI_KEY_KINDS, kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
-import { PageHeader } from '../../../components/ds';
+import { LoadError, PageHeader } from '../../../components/ds';
 import { AiKeyFailure, aiKeyError, aiKeyFailureText } from '../../../hooks/use-ai-keys';
 import { useVoiceCompanies, voiceCompanyKind } from '../../../hooks/use-voice-keys';
 import type { VoiceModel } from '@/lib/voice-providers';
@@ -314,6 +314,7 @@ export default function AddAiKeyPage() {
                 <KindCard key={entry.kind} info={entry} picked={kind === entry.kind} onPick={() => pickKind(entry.kind)} />
               ))}
             </div>}
+            {companies.result.status === 'error' && <LoadError label="the voice companies" retry={companies.retry} />}
             {voice.length > 0 && <div className="grid gap-2" data-testid="kinds-voice">
               <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">For voice, with an API key</h3>
               {voice.map((entry) => (

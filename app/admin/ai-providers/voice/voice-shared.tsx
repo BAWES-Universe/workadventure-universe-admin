@@ -91,6 +91,8 @@ export async function callOrbit<T = Record<string, unknown>>(method: 'GET' | 'PO
 export function useVoiceProviders() {
   const [providers, setProviders] = useState<ServerVoiceProvider[] | null>(null);
   const [failed, setFailed] = useState(false);
+  // True while a load is out, so a screen that offers a change from the list can wait for the list that follows a save
+  const [loading, setLoading] = useState(true);
   const [round, setRound] = useState(0);
   useEffect(() => {
     let current = true;
@@ -98,13 +100,17 @@ export function useVoiceProviders() {
       if (!current) return;
       if (answer.ok) setProviders(answer.data.providers);
       setFailed(!answer.ok);
+      setLoading(false);
     });
     return () => {
       current = false;
     };
   }, [round]);
-  const reload = useCallback(() => setRound((value) => value + 1), []);
-  return { providers, failed, reload };
+  const reload = useCallback(() => {
+    setLoading(true);
+    setRound((value) => value + 1);
+  }, []);
+  return { providers, failed, loading, reload };
 }
 
 export const FIELD_HINT = 'text-[13px] text-muted-foreground';
@@ -164,7 +170,8 @@ export function ModelRows({
   models: VoiceModel[];
   /** The jobs the provider does. */
   jobs: VoiceJob[];
-  onChange: (models: VoiceModel[]) => void | Promise<void>;
+  /** `false` says the list was not saved: a model being added then stays typed, so nothing the person wrote is lost. */
+  onChange: (models: VoiceModel[]) => void | boolean | Promise<void | boolean>;
   disabled?: boolean;
 }) {
   const [adding, setAdding] = useState(false);
@@ -188,8 +195,8 @@ export function ModelRows({
       setProblem('That model is already on the list.');
       return;
     }
-    await onChange([...models, { id: typed, ...(label.trim() ? { label: label.trim() } : {}), kind: job }]);
-    close();
+    const saved = await onChange([...models, { id: typed, ...(label.trim() ? { label: label.trim() } : {}), kind: job }]);
+    if (saved !== false) close();
   }
 
   // Enter in a model field adds that model; inside the New voice provider form it must not submit the form and drop the model being typed
