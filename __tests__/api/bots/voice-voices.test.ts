@@ -216,6 +216,23 @@ describe('a lent key\'s voices', () => {
     expect(console.error).not.toHaveBeenCalledWith(expect.stringContaining(SECRET));
   });
 
+  it('lets go of the answer\'s body when the company turns the key away or fails', async () => {
+    for (const status of [401, 403, 500]) {
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1]));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      fetchMock.mockImplementation(async () => new Response(body, { status }));
+      expect((await voices('part=speech&source=key-1')).status).toBe(502);
+      expect(cancelled).toBe(true);
+    }
+  });
+
   it('are cached for each key on its own', async () => {
     await voices('part=speech&source=key-1');
     await voices();

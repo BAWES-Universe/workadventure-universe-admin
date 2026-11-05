@@ -365,8 +365,9 @@ describe('a server with more tools than the bot server keeps', () => {
     expect(whole).toMatchObject({ truncated: false, policyRevision: revision, state: 'confirmed' });
   });
 
-  it('keeps a tool missing from a cut list (it may be past the first 500), and removes it once the list is whole', async () => {
+  it('keeps a decided tool missing from a cut list (it may be past the first 500), and removes it once the list is whole', async () => {
     await syncCatalog('bot-1', 'srv-1', catalog(tool('a'), tool('b')));
+    await confirmTools('bot-1', 'srv-1', 'u-sara');
     const revision = state.servers[0].policyRevision;
     const cut = await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('a')));
     expect(cut.removed).toEqual([]);
@@ -375,6 +376,25 @@ describe('a server with more tools than the bot server keeps', () => {
     const whole = await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
     expect(whole.removed).toEqual(['b']);
     expect(state.tools.map((t) => t.name)).toEqual(['a']);
+  });
+
+  it('drops a leftover nobody decided on from a cut list, so it can not block confirming the real list', async () => {
+    // The first save saw a, b, c. A later cut list has different first tools: b was confirmed, c moved, a was never touched.
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a', { suggestedHeading: null, suggestionSource: null }), tool('b'), tool('c', { suggestedHeading: null, suggestionSource: null })));
+    await confirmTools('bot-1', 'srv-1', 'u-sara', [state.tools.find((t) => t.name === 'b')!.id]);
+    await moveTool('bot-1', 'srv-1', state.tools.find((t) => t.name === 'c')!.id, 'makesNew', 'u-sara');
+    await expect(confirmTools('bot-1', 'srv-1', 'u-sara')).rejects.toThrow(/Choose what a/);
+
+    const cut = await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('d')));
+    expect(cut.removed).toEqual(['a']);
+    expect(cut.added).toEqual(['d']);
+    expect(state.tools.map((t) => t.name).sort()).toEqual(['b', 'c', 'd']);
+
+    // The decided tools keep their answers, and the real list can be confirmed
+    const confirmed = await confirmTools('bot-1', 'srv-1', 'u-sara');
+    expect(confirmed.state).toBe('confirmed');
+    expect(state.tools.find((t) => t.name === 'b')).toMatchObject({ confirmedById: 'u-sara' });
+    expect(state.tools.find((t) => t.name === 'c')).toMatchObject({ heading: 'makesNew' });
   });
 
   it('writes the server only when what it says about the cut changed', async () => {

@@ -254,8 +254,8 @@ export interface CatalogResult extends ServerToolsJson {
 /**
  * Replace a server's tool list with what the bot server just read. A new tool waits to be confirmed. A tool whose
  * fingerprint is different goes back to not confirmed yet, with its heading cleared, and only that tool does. A tool the
- * server no longer offers is removed, unless the list is cut (the server has more tools than the bot server keeps, so a tool
- * missing from it may still be there). Its suggestion is only a suggestion and never lets it run. It also saves whether the
+ * server no longer offers is removed. When the list is cut (the server has more tools than the bot server keeps, so a tool
+ * missing from it may still be there) only a tool nobody confirmed or moved is removed, and the decided ones stay. Its suggestion is only a suggestion and never lets it run. It also saves whether the
  * list is cut; a bot server that does not say leaves it "not cut".
  */
 export async function syncCatalog(botId: string, serverId: string, body: z.infer<typeof catalogSchema>): Promise<CatalogResult> {
@@ -263,7 +263,7 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
     const server = await loadServer(tx, botId, serverId);
     const existing = await tx.botMcpTool.findMany({
       where: { serverId },
-      select: { id: true, name: true, fingerprint: true, confirmedAt: true, heading: true, suggestedHeading: true, suggestionSource: true },
+      select: { id: true, name: true, fingerprint: true, confirmedAt: true, heading: true, movedById: true, suggestedHeading: true, suggestionSource: true },
     });
     const byName = new Map(existing.map((tool) => [tool.name, tool]));
     const added: string[] = [];
@@ -299,10 +299,12 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
       }
     }
 
-    // A cut list is only the first 500 of what the server has, so a tool missing from it may still be there: nothing is removed
+    // A cut list is only the first 500 of what the server has, so a tool missing from it may still be there: one that a
+    // person confirmed or moved stays. A leftover nobody decided on goes, so it can't block confirming the real list.
     const cut = body.truncated === true;
     const offered = new Set(body.tools.map((tool) => tool.name));
-    const removed = cut ? [] : existing.filter((tool) => !offered.has(tool.name));
+    const decided = (tool: (typeof existing)[number]) => !!tool.confirmedAt || !!tool.heading || !!tool.movedById;
+    const removed = existing.filter((tool) => !offered.has(tool.name) && !(cut && decided(tool)));
     if (removed.length > 0) await tx.botMcpTool.deleteMany({ where: { id: { in: removed.map((tool) => tool.id) } } });
 
     if (added.length > 0 || changed.length > 0 || removed.length > 0 || reworded) {

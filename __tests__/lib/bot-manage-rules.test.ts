@@ -264,6 +264,17 @@ describe('many bots in one room for one person (the room list)', () => {
     expect(mocks.room.findUnique).toHaveBeenCalledTimes(4);
   });
 
+  it('asks the room once, not once per bot, for bots whose rules say nothing about this person', async () => {
+    // Every bot has a rule, but only about someone else: the room answer decides each of them
+    state.rules = bots.map((b) => ({ botId: b.id, roleId: null, userId: 'someone-else', ...withValues(NO_RULE, { manage: 'no' }) }));
+    member('keeper', [everywhere(KEEPER)]);
+    const memo: ManageMemo = new Map();
+    await preloadBotRules(memo, bots.map((b) => b.id));
+    expect(await verdicts('keeper', memo)).toEqual([true, true, true, true]);
+    // Once for who they are in the room, once for what the room gives them
+    expect(mocks.room.findUnique).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps one person’s answers from another’s when a memo is shared by mistake', async () => {
     member('keeper', [everywhere(KEEPER)]);
     const memo: ManageMemo = new Map();

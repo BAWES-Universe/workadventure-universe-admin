@@ -86,8 +86,11 @@ describe('/api/friends', () => {
     expect(db.friendships).toHaveLength(1);
 
     const bilal = await friendsOf('b');
-    expect(bilal.incoming).toEqual([expect.objectContaining({ uuid: 'uuid-a', name: 'Alice', chatId: '@a:chat', sharedWorld: 'Main Hall' })]);
-    expect((await friendsOf('a')).outgoing).toEqual([expect.objectContaining({ uuid: 'uuid-b', chatId: '@b:chat' })]);
+    expect(bilal.incoming).toEqual([expect.objectContaining({ uuid: 'uuid-a', name: 'Alice', sharedWorld: 'Main Hall' })]);
+    expect((await friendsOf('a')).outgoing).toEqual([expect.objectContaining({ uuid: 'uuid-b' })]);
+    // The chat id is built from the person's email: a request, either way, never shows it.
+    expect(JSON.stringify(bilal.incoming)).not.toContain('@a:chat');
+    expect(JSON.stringify((await friendsOf('a')).outgoing)).not.toContain('@b:chat');
 
     expect((await action('b', 'a', 'accept')).body).toEqual({ relationship: 'friends' });
     await action('c', 'a', 'request');
@@ -98,6 +101,21 @@ describe('/api/friends', () => {
     expect(alice.friends[0]).toEqual(expect.objectContaining({ chatId: '@b:chat', shareLocation: true }));
     expect(alice.incoming).toEqual([]);
     expect(alice.outgoing).toEqual([]);
+  });
+
+  it('lists friends and requests with their real Woka layers, and a request without a Woka gets none', async () => {
+    const woka = [{ id: 'body', url: 'https://assets.example/body.png' }, { id: 'hat', url: 'https://assets.example/hat.png' }];
+    jest.mocked(wokaTexturesForMany).mockImplementation(async (ids: string[]) => new Map(ids.filter((id) => id !== 'c').map((id) => [id, woka])));
+    await action('a', 'b', 'request');
+    await action('c', 'a', 'request');
+    expect((await friendsOf('a')).outgoing).toEqual([expect.objectContaining({ uuid: 'uuid-b', characterTextures: woka })]);
+    expect((await friendsOf('a')).incoming).toEqual([expect.objectContaining({ uuid: 'uuid-c', characterTextures: [] })]);
+    expect((await friendsOf('b')).incoming).toEqual([expect.objectContaining({ uuid: 'uuid-a', characterTextures: woka })]);
+    await action('b', 'a', 'accept');
+    expect((await friendsOf('a')).friends).toEqual([expect.objectContaining({ uuid: 'uuid-b', characterTextures: woka })]);
+    // A failing Woka lookup never fails the list.
+    jest.mocked(wokaTexturesForMany).mockRejectedValue(new Error('db down'));
+    expect((await friendsOf('a')).friends).toEqual([expect.objectContaining({ uuid: 'uuid-b', characterTextures: [] })]);
   });
 
   it('notifies the person asked, and the person who asked when it is accepted; nothing else notifies', async () => {
@@ -271,11 +289,12 @@ describe('/api/friends', () => {
       });
     });
 
-    it('gives the chat id, which is built from the email, only to a friend or a request either way, never to a stranger', async () => {
-      const chatIdOf = async (as: string) => (await (await get(search, '/search', { userUuid: `uuid-${as}`, q: 'bil' })).json()).results[0];
+    it('gives the chat id, which is built from the email, only to a friend, never to a stranger or a pending request', async () => {
+      const chatIdOf = async (as: string, q = 'bil') => (await (await get(search, '/search', { userUuid: `uuid-${as}`, q })).json()).results[0];
       expect(await chatIdOf('a')).toMatchObject({ relationship: 'none', chatId: null });
       await action('a', 'b', 'request');
-      expect(await chatIdOf('a')).toMatchObject({ relationship: 'request_sent', chatId: '@b:chat' });
+      expect(await chatIdOf('a')).toMatchObject({ relationship: 'request_sent', chatId: null });
+      expect(await chatIdOf('b', 'ali')).toMatchObject({ relationship: 'request_received', chatId: null });
       await action('b', 'a', 'accept');
       expect(await chatIdOf('a')).toMatchObject({ relationship: 'friends', chatId: '@b:chat' });
     });
