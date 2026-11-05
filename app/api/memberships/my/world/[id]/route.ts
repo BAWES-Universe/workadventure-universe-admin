@@ -56,7 +56,7 @@ export async function DELETE(
     }
 
     // Cancel their pending invitations to this world and take them out of it, together: nothing changes if leaving is refused
-    await prisma.$transaction(async (tx) => {
+    const announce = await prisma.$transaction(async (tx) => {
       await tx.membershipInvitation.updateMany({
         where: {
           worldId: worldId,
@@ -68,8 +68,9 @@ export async function DELETE(
           respondedAt: new Date(),
         },
       });
-      await leaveWorld(tx, worldId, sessionUser.id);
+      return leaveWorld(tx, worldId, sessionUser.id);
     });
+    await announce?.();
 
     return NextResponse.json({ success: true });
   } catch (error) {

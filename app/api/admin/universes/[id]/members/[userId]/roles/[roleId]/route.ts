@@ -87,7 +87,7 @@ export async function DELETE(request: NextRequest, { params }: Params) {
     if (!outranks(access, userId, user.id, theirHighest)) return needs('a role above theirs');
     if (!allows(access, 'GIVE_ROLES', reachOf(given))) return needs('Give roles in every world this role works in');
 
-    await prisma.$transaction(async (tx) => {
+    const announce = await prisma.$transaction(async (tx) => {
       await tx.universeMemberRole.delete({ where: { id: given.id } });
       // Someone left in no world at all is no longer in the universe
       const left = await tx.universeMemberRole.count({ where: { memberId: member.id } });
@@ -95,9 +95,10 @@ export async function DELETE(request: NextRequest, { params }: Params) {
         await tx.universeMember.delete({ where: { id: member.id } });
       }
       await syncWorldMembers(tx, id, userId);
-      // Out of the universe altogether: an ownership offer to them ends (#820)
-      await endOfferIfLeft(tx, id, userId);
+      // Out of the universe altogether: an ownership offer to them ends (#820), and people are told once this commits
+      return endOfferIfLeft(tx, id, userId);
     });
+    await announce?.();
     return NextResponse.json({ success: true });
   } catch (error) {
     return failed(error, 'take role away');
