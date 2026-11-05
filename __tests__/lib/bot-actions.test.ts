@@ -521,6 +521,21 @@ describe('remembered approvals', () => {
     expect((await touchGrants(BOT, { requesterKey: 'user:sara', conversationKey: 'dm:sara:nora' }, at(minutes(DEFAULTS.absoluteMinutes) + 2))).renewed).toBe(0);
   });
 
+  (REAL ? it.skip : it)('is not brought back when it ended between being read and being renewed', async () => {
+    await remembered();
+    const read = (prisma as unknown as { botActionGrant: { findMany: (args: unknown) => Promise<Record<string, unknown>[]> } }).botActionGrant;
+    const findMany = read.findMany;
+    // The grant is alive when it is read; by the time it is written it has ended
+    jest.spyOn(read, 'findMany').mockImplementationOnce(async (args) => {
+      const alive = await findMany(args);
+      db.grants[0].idleExpiresAt = at(minutes(49));
+      return alive;
+    });
+    expect((await touchGrants(BOT, { requesterKey: 'user:sara', conversationKey: 'dm:sara:nora' }, at(minutes(50)))).renewed).toBe(0);
+    expect(db.grants[0].idleExpiresAt).toEqual(at(minutes(49)));
+    jest.restoreAllMocks();
+  });
+
   it('is not renewed by someone else’s message or another chat', async () => {
     await remembered();
     expect((await touchGrants(BOT, { requesterKey: 'user:omar', conversationKey: 'dm:sara:nora' }, at(minutes(50)))).renewed).toBe(0);

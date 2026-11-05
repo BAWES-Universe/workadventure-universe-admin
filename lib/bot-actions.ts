@@ -678,7 +678,11 @@ export async function touchGrants(
   for (const grant of grants) {
     const idleEnd = new Date(now.getTime() + minutes(grant.idleMinutes));
     const next = idleEnd < grant.absoluteExpiresAt ? idleEnd : grant.absoluteExpiresAt;
-    const done = await prisma.botActionGrant.updateMany({ where: { id: grant.id, revokedAt: null }, data: { idleExpiresAt: next } });
+    // Still alive when it is written, not only when it was read: an approval that ended in between is not brought back
+    const done = await prisma.botActionGrant.updateMany({
+      where: { id: grant.id, revokedAt: null, idleExpiresAt: { gt: now }, absoluteExpiresAt: { gt: now } },
+      data: { idleExpiresAt: next },
+    });
     renewed += done.count;
   }
   return { renewed };
