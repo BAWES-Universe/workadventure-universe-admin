@@ -53,10 +53,10 @@ export async function GET(
 
     // Return format expected by WorkAdventure: id (not uuid), and chatID
     // Tags are only in /api/room/access, not in /api/members/{uuid}
-    const memberData: Omit<MemberData, 'name' | 'email'> & { name?: string; email?: string } = {
+    // Never an email address: the game needs only the name
+    const memberData: Omit<MemberData, 'name'> & { name?: string } = {
       id: user.uuid, // WorkAdventure expects 'id' not 'uuid'
       name: user.name || undefined,
-      email: user.email || undefined,
       visitCardUrl: null,
       chatID: user.matrixChatId || null, // Matrix chat ID (capital ID)
       characterTextures,

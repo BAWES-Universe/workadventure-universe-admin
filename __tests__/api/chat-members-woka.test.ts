@@ -38,6 +38,25 @@ beforeEach(() => {
 });
 
 describe('GET /api/chat/members', () => {
+  it('never sends an email, and searches by name only', async () => {
+    db.worldMember.findMany.mockResolvedValue([
+      { tags: [], user: { id: 'u1', uuid: 'alice-uuid', name: 'Alice', email: 'alice@example.test', matrixChatId: '@alice:chat' } },
+    ]);
+    db.userOutfit.findMany.mockResolvedValue([]);
+    const url = new URL('http://localhost:3333/api/chat/members');
+    url.searchParams.set('playUri', 'http://play.test/@/uni/world/room');
+    url.searchParams.set('searchText', 'alice@example.test');
+
+    const response = await GET(new NextRequest(url, { headers: { Authorization: process.env.ADMIN_API_TOKEN as string } }));
+    const text = await response.text();
+    expect(text).not.toContain('alice@example.test');
+    expect(JSON.parse(text).members[0]).not.toHaveProperty('email');
+    expect(JSON.parse(text).members[0]).toMatchObject({ uuid: 'alice-uuid', wokaName: 'Alice', chatId: '@alice:chat' });
+    const query = db.worldMember.findMany.mock.calls[0][0];
+    expect(JSON.stringify(query.where)).not.toMatch(/"email":\{"contains"/);
+    expect(query.include.user.select).not.toHaveProperty('email');
+  });
+
   it("sends each member's saved Woka, and an empty one for a member without", async () => {
     db.worldMember.findMany.mockResolvedValue([
       { tags: ['member'], user: { id: 'u1', uuid: 'alice-uuid', name: 'Alice', email: null, matrixChatId: '@alice:chat' } },
