@@ -35,7 +35,7 @@ describe('visitor emails stay with super admins', () => {
       'app/api/admin/analytics/worlds/[id]/route.ts',
     ]);
     const readers = routeFiles(path.join(root, 'app/api'))
-      .map((file) => path.relative(root, file))
+      .map((file) => path.relative(root, file).split(path.sep).join('/'))
       .filter((file) => fs.readFileSync(path.join(root, file), 'utf8').includes('userEmail: true'))
       .filter((file) => !allowed.has(file));
     expect(readers).toEqual([]);
