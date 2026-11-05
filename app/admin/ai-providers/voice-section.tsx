@@ -37,7 +37,7 @@ import {
 } from './voice/voice-shared';
 
 /** One "Universe AI listens / speaks with" row: what it is now and a Change button. */
-function DefaultRow({ icon, label, value, hint, onChange, testId }: { icon: ReactNode; label: string; value: ReactNode; hint: ReactNode; onChange: () => void; testId: string }) {
+function DefaultRow({ icon, label, value, hint, onChange, testId, disabled }: { icon: ReactNode; label: string; value: ReactNode; hint: ReactNode; onChange: () => void; testId: string; disabled?: boolean }) {
   return (
     <div className="flex min-h-16 w-full items-center gap-3.5 rounded-[14px] border border-border bg-card px-3.5 py-3" data-testid={testId}>
       <span className="shrink-0 text-foreground/85">{icon}</span>
@@ -46,7 +46,7 @@ function DefaultRow({ icon, label, value, hint, onChange, testId }: { icon: Reac
         <strong className="text-[15px] font-semibold [overflow-wrap:anywhere]">{value}</strong>
         <span className="text-xs leading-snug text-muted-foreground">{hint}</span>
       </span>
-      <Button variant="outline" className="h-11 shrink-0 px-4" onClick={onChange}>
+      <Button variant="outline" className="h-11 shrink-0 px-4" disabled={disabled} onClick={onChange}>
         Change
       </Button>
     </div>
@@ -467,7 +467,7 @@ function OffSheet({ provider, providers, onClose, onSaved }: { provider: ServerV
 
 /** Design A: the defaults, the providers, and which companies people can add keys for. */
 export function VoiceSection() {
-  const { providers, failed, reload } = useVoiceProviders();
+  const { providers, failed, loading, reload } = useVoiceProviders();
   const { addToast } = useToast();
   const [sheet, setSheet] = useState<'listen' | 'speak' | null>(null);
   const [off, setOff] = useState<ServerVoiceProvider | null>(null);
@@ -518,6 +518,7 @@ export function VoiceSection() {
               label="Universe AI listens with"
               value={listener ? `${listener.name} · ${modelName(startingModel(listener, 'recognition') ?? { id: 'no model', kind: 'recognition' })}` : 'Nothing yet'}
               hint={listener ? 'A bot that turns voice on starts with this. Bots that already listen keep theirs.' : 'Bots can’t turn voice on with Universe AI until a company listens for it.'}
+              disabled={loading}
               onChange={() => setSheet('listen')}
             />
             <DefaultRow
@@ -532,6 +533,7 @@ export function VoiceSection() {
                     ? 'A bot that turns voice on starts with this voice. Bots that have a voice keep theirs.'
                     : `No starting voice picked: a bot that turns voice on starts with the first voice ${speaker.name} lists. Bots that have a voice keep theirs.`
               }
+              disabled={loading}
               onChange={() => setSheet('speak')}
             />
           </div>
