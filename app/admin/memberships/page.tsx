@@ -13,7 +13,9 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { Check, Loader2, X } from 'lucide-react';
+import { Check, Crown, Loader2, X } from 'lucide-react';
+import { whatMovesCount } from '@/lib/ownership-text';
+import { FormSheet } from '../components/form-sheet';
 import {
   EmptyCard,
   EntityRow,
@@ -69,6 +71,14 @@ function invitedWorlds(invitation: Invitation): string {
 
 type Membership = UniverseMembership;
 
+/** A universe offered to you (#820): the whole universe, once you accept. */
+interface OwnershipOffer {
+  id: string;
+  createdAt: string;
+  universe: { id: string; name: string; worldCount: number };
+  owner: { id: string; name: string | null };
+}
+
 type Loaded<T> = { status: 'loading' } | { status: 'error' } | { status: 'ready'; items: T[] };
 
 async function readList<T>(url: string, key: string): Promise<T[]> {
@@ -84,6 +94,7 @@ export default function MyMembershipsPage() {
   const router = useRouter();
   const [invitationList, setInvitationList] = useState<Loaded<Invitation>>({ status: 'loading' });
   const [membershipList, setMembershipList] = useState<Loaded<Membership>>({ status: 'loading' });
+  const [offerList, setOfferList] = useState<Loaded<OwnershipOffer>>({ status: 'loading' });
   // What went wrong with the last Accept, Decline or Leave (a failed list load shows its own retry instead).
   const [error, setError] = useState<string | null>(null);
   // What the last Accept gave differently from what the invitation said (an older one offering Admin in one world).
@@ -94,6 +105,7 @@ export default function MyMembershipsPage() {
   const [me, setMe] = useState<string | null>(null);
 
   const invitations = invitationList.status === 'ready' ? invitationList.items : [];
+  const offers = offerList.status === 'ready' ? offerList.items : [];
   const memberships = membershipList.status === 'ready' ? membershipList.items : [];
   // Universes you joined come first (the ones you can leave); the ones you own say so once, in their heading.
   const joined = memberships.filter((membership) => !membership.isOwner);
@@ -103,6 +115,7 @@ export default function MyMembershipsPage() {
   // Answers can overlap (two invitations accepted at once): only the latest request of each list paints.
   const invitationRequest = useRef(0);
   const membershipRequest = useRef(0);
+  const offerRequest = useRef(0);
 
   const loadInvitations = useCallback(async () => {
     const request = ++invitationRequest.current;
@@ -126,9 +139,20 @@ export default function MyMembershipsPage() {
     if (request === membershipRequest.current) setMembershipList(next);
   }, []);
 
+  const loadOffers = useCallback(async () => {
+    const request = ++offerRequest.current;
+    let next: Loaded<OwnershipOffer>;
+    try {
+      next = { status: 'ready', items: await readList<OwnershipOffer>('/api/memberships/ownership-offers', 'offers') };
+    } catch {
+      next = { status: 'error' };
+    }
+    if (request === offerRequest.current) setOfferList(next);
+  }, []);
+
   const fetchData = useCallback(async () => {
-    await Promise.all([loadInvitations(), loadMemberships()]);
-  }, [loadInvitations, loadMemberships]);
+    await Promise.all([loadInvitations(), loadMemberships(), loadOffers()]);
+  }, [loadInvitations, loadMemberships, loadOffers]);
 
   useEffect(() => {
     void (async () => {
@@ -196,6 +220,47 @@ export default function MyMembershipsPage() {
   // The invitation whose Decline is waiting for Keep or Decline.
   const [confirmingDecline, setConfirmingDecline] = useState<string | null>(null);
 
+  // The universe offered to you whose Accept sheet is open, or whose Decline is waiting for Keep or Decline, and the ones with an answer on its way
+  const [accepting, setAccepting] = useState<OwnershipOffer | null>(null);
+  const [confirmingOfferDecline, setConfirmingOfferDecline] = useState<string | null>(null);
+  const [answeringOffers, setAnsweringOffers] = useState<ReadonlySet<string>>(() => new Set());
+  const [ownedNotice, setOwnedNotice] = useState<string | null>(null);
+
+  async function answerOffer(offer: OwnershipOffer, answer: 'accept' | 'decline') {
+    if (answeringOffers.has(offer.id)) return;
+    setAnsweringOffers((current) => new Set(current).add(offer.id));
+    try {
+      setError(null);
+      setNotice(null);
+      setOwnedNotice(null);
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/memberships/ownership-offers/${offer.id}/${answer}`, { method: 'POST' });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || (answer === 'accept' ? 'Couldn’t accept. Try again.' : 'Couldn’t decline. Try again.'));
+      }
+      if (answer === 'accept') {
+        const data = await response.json().catch(() => ({}));
+        const from = typeof data.previousOwnerName === 'string' && data.previousOwnerName ? data.previousOwnerName : 'The previous owner';
+        setOwnedNotice(`You own ${offer.universe.name} now, with every world and room in it. ${from} stays as Admin.`);
+      }
+      setAccepting(null);
+      setConfirmingOfferDecline(null);
+      await fetchData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Couldn’t answer the offer. Try again.');
+      setAccepting(null);
+      // The offer may be gone (taken back, or they left): what is shown follows the server
+      await loadOffers();
+    } finally {
+      setAnsweringOffers((current) => {
+        const next = new Set(current);
+        next.delete(offer.id);
+        return next;
+      });
+    }
+  }
+
   async function handleLeave(membership: Membership) {
     try {
       setError(null);
@@ -217,7 +282,7 @@ export default function MyMembershipsPage() {
     }
   }
 
-  const loading = membershipList.status === 'loading' || invitationList.status === 'loading';
+  const loading = membershipList.status === 'loading' || invitationList.status === 'loading' || offerList.status === 'loading';
 
   return (
     <div className="grid min-w-0 gap-6">
@@ -235,11 +300,82 @@ export default function MyMembershipsPage() {
         </p>
       )}
 
+      {ownedNotice && (
+        <p className="text-sm text-muted-foreground" role="status" data-testid="own-done">
+          {ownedNotice}
+        </p>
+      )}
+
       {loading ? (
         <LoadingRows label="your memberships" rows={3} />
       ) : (
         <>
           {invitationList.status === 'error' && <LoadError label="your invitations" retry={() => void loadInvitations()} />}
+
+          {offerList.status === 'error' && <LoadError label="the universes offered to you" retry={() => void loadOffers()} />}
+
+          {offers.length > 0 && (
+            <section className="grid min-w-0 gap-2" aria-labelledby="offers-heading" data-testid="ownership-offers">
+              <SectionHeader id="offers-heading" title="Offered to you" count={offers.length} />
+              <div className={GROUP}>
+                {offers.map((offer) => {
+                  const busy = answeringOffers.has(offer.id);
+                  const from = offer.owner.name || 'The owner';
+                  return (
+                    <EntityRow
+                      key={offer.id}
+                      href={`/admin/universes/${offer.universe.id}`}
+                      kind="universe"
+                      leading={<UniverseGlyph size={32} className="mx-1 shrink-0" aria-hidden="true" />}
+                      tone="waiting"
+                      title={offer.universe.name}
+                      titleAside={<StatusPill status="waiting" />}
+                      context={
+                        <span className="text-xs text-muted-foreground">
+                          {from} offered you the whole universe · {offer.universe.worldCount === 1 ? '1 world' : `${offer.universe.worldCount} worlds`}
+                        </span>
+                      }
+                      meta={
+                        <span className="inline-flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                          <Crown size={13} className="text-[#FACC15]" aria-hidden="true" /> Owner
+                        </span>
+                      }
+                      trailing={
+                        // Declining asks first, as invitations do
+                        confirmingOfferDecline === offer.id ? (
+                          <>
+                            <Button variant="outline" className="h-11 px-4" disabled={busy} onClick={() => setConfirmingOfferDecline(null)}>
+                              Keep
+                            </Button>
+                            <Button variant="destructive" className="h-11 px-4" disabled={busy} onClick={() => void answerOffer(offer, 'decline')}>
+                              {busy ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
+                              Decline
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <Button
+                              variant="outline"
+                              className="h-11 w-11 p-0"
+                              aria-label={`Decline ownership of ${offer.universe.name}`}
+                              disabled={busy}
+                              onClick={() => setConfirmingOfferDecline(offer.id)}
+                            >
+                              <X size={16} aria-hidden="true" />
+                            </Button>
+                            <Button className="h-11 gap-1.5 px-4" disabled={busy} onClick={() => setAccepting(offer)}>
+                              <Check size={15} aria-hidden="true" />
+                              Accept
+                            </Button>
+                          </>
+                        )
+                      }
+                    />
+                  );
+                })}
+              </div>
+            </section>
+          )}
 
           {invitations.length > 0 && (
             <section className="grid min-w-0 gap-2" aria-labelledby="invitations-heading" data-testid="invitations">
@@ -379,6 +515,27 @@ export default function MyMembershipsPage() {
           </section>
         </>
       )}
+
+      <FormSheet open={!!accepting} onOpenChange={(open) => !open && setAccepting(null)} title={`Own ${accepting?.universe.name ?? 'this universe'}?`}>
+        {accepting && (
+          <>
+            <ul className="grid gap-2.5 text-sm text-muted-foreground" data-testid="own-accept">
+              <li><strong className="text-foreground">The whole universe becomes yours:</strong> {whatMovesCount(accepting.universe.worldCount)}. A world or room can’t be owned on its own.</li>
+              <li><strong className="text-foreground">You get every permission</strong> in {accepting.universe.name}, and Admin in every world so the game gives the same.</li>
+              <li><strong className="text-foreground">{accepting.owner.name || 'The owner'} stays as Admin.</strong> You rank above them and can change that.</li>
+              <li><strong className="text-foreground">Bots, AI keys and artifacts stay with their people.</strong> Bots on {accepting.owner.name || 'the owner'}’s key keep running while they’re Admin.</li>
+            </ul>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" className="h-11 px-5" onClick={() => setAccepting(null)}>
+                Cancel
+              </Button>
+              <Button className="h-11 px-5" disabled={answeringOffers.has(accepting.id)} onClick={() => void answerOffer(accepting, 'accept')}>
+                {answeringOffers.has(accepting.id) ? 'Accepting…' : `Own ${accepting.universe.name}`}
+              </Button>
+            </div>
+          </>
+        )}
+      </FormSheet>
 
       <AlertDialog open={!!leaving} onOpenChange={(open) => !open && setLeaving(null)}>
         <AlertDialogContent>

@@ -14,6 +14,7 @@ jest.mock('@/lib/db', () => ({
     role: { findMany: jest.fn(), findFirst: jest.fn() },
     roomAccess: { aggregate: jest.fn(), findMany: jest.fn(), groupBy: jest.fn() },
     membershipInvitation: { findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
+    ownershipOffer: { findUnique: jest.fn() },
   },
 }));
 jest.mock('@/lib/woka-avatar', () => ({ withWokas: jest.fn(async (records: unknown[]) => records) }));
@@ -79,6 +80,7 @@ beforeEach(() => {
   db.roomAccess.findMany.mockResolvedValue([]);
   db.roomAccess.groupBy.mockResolvedValue([]);
   db.membershipInvitation.findMany.mockResolvedValue([]);
+  db.ownershipOffer.findUnique.mockResolvedValue(null);
   friends.mockResolvedValue({ friends: [], incoming: [], outgoing: [], blocked: [] });
   search.mockResolvedValue([]);
 });
@@ -161,6 +163,68 @@ describe('GET members/[userId]', () => {
     const body = await (await getMember(request('/api/admin/universes/u1/members/owner'), params({ userId: 'owner' }))).json();
     expect(body.member).toMatchObject({ userId: 'owner', isOwner: true, roles: [] });
     expect(body.can).toMatchObject({ giveRoleIds: [], remove: false });
+  });
+
+  describe('passing the universe on (#820)', () => {
+    const asSuperAdmin = () => {
+      context.mockResolvedValue({
+        ok: true,
+        user: { id: 'root', uuid: 'uuid-root', email: 'root@example.test', name: 'Root', tags: [], isSuperAdmin: true },
+        access: computeAccess({ universeId: 'u1', worldIds: WORLDS, full: false, isOwner: false, everyone: ZERO, member: ZERO, membership: null, roles: [] }),
+        universe: UNIVERSE,
+      });
+    };
+
+    it('lets the owner offer to a member who is not the owner', async () => {
+      asViewer('owner');
+      db.universeMember.findUnique.mockResolvedValue(row('sara'));
+      const body = await (await getMember(request('/api/admin/universes/u1/members/sara'), params({ userId: 'sara' }))).json();
+      expect(body.ownership).toMatchObject({ canOffer: true, onBehalfOf: null, waiting: null });
+    });
+
+    it('lets a super admin offer too, and says whose universe it is', async () => {
+      asSuperAdmin();
+      db.universeMember.findUnique.mockResolvedValue(row('sara'));
+      db.user.findUnique.mockResolvedValue({ name: 'Khalid' });
+      const body = await (await getMember(request('/api/admin/universes/u1/members/sara'), params({ userId: 'sara' }))).json();
+      expect(body.ownership).toMatchObject({ canOffer: true, onBehalfOf: 'Khalid' });
+    });
+
+    it('offers nothing to anyone else, to the owner themselves, or to someone who is not a member', async () => {
+      asViewer('inviter');
+      db.universeMember.findUnique.mockResolvedValue(row('sara'));
+      let body = await (await getMember(request('/api/admin/universes/u1/members/sara'), params({ userId: 'sara' }))).json();
+      expect(body.ownership).toMatchObject({ canOffer: false, waiting: null });
+
+      asViewer('owner');
+      body = await (await getMember(request('/api/admin/universes/u1/members/owner'), params({ userId: 'owner' }))).json();
+      expect(body.ownership.canOffer).toBe(false);
+    });
+
+    it('shows the waiting offer to the owner only, on the page of the person it is for, and no second offer while it waits', async () => {
+      db.ownershipOffer.findUnique.mockResolvedValue({ toUserId: 'sara', createdAt: new Date('2026-11-05T09:00:00Z'), toUser: { name: 'Sara' } });
+      db.universeMember.findUnique.mockResolvedValue(row('sara'));
+      asViewer('owner');
+      let body = await (await getMember(request('/api/admin/universes/u1/members/sara'), params({ userId: 'sara' }))).json();
+      expect(body.ownership).toMatchObject({ canOffer: false, waiting: { toUserId: 'sara', toName: 'Sara', toThem: true } });
+
+      db.universeMember.findUnique.mockResolvedValue(row('omar'));
+      body = await (await getMember(request('/api/admin/universes/u1/members/omar'), params({ userId: 'omar' }))).json();
+      expect(body.ownership).toMatchObject({ canOffer: false, waiting: { toUserId: 'sara', toThem: false } });
+
+      asViewer('inviter');
+      db.universeMember.findUnique.mockResolvedValue(row('sara'));
+      body = await (await getMember(request('/api/admin/universes/u1/members/sara'), params({ userId: 'sara' }))).json();
+      expect(body.ownership.waiting).toBeNull();
+      expect(db.ownershipOffer.findUnique).toHaveBeenCalledTimes(2);
+    });
+
+    it('says when the owner got the universe and from whom, by name', async () => {
+      asViewer('owner');
+      db.universe.findUnique.mockResolvedValue({ createdAt: new Date('2026-10-01T00:00:00Z'), ownerSince: new Date('2026-11-05T09:00:00Z'), previousOwner: { name: 'Yousef' } });
+      const body = await (await getMember(request('/api/admin/universes/u1/members/owner'), params({ userId: 'owner' }))).json();
+      expect(body.ownership).toMatchObject({ since: '2026-11-05T09:00:00.000Z', from: 'Yousef' });
+    });
   });
 
   it('is a 404 for someone who is neither a member nor the owner', async () => {

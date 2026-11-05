@@ -22,6 +22,7 @@ model User {
 
   // Relations
   ownedUniverses    Universe[]        @relation("UniverseOwner")
+  passedUniverses   Universe[]        @relation("UniversePreviousOwner")
   worldMemberships  WorldMember[]
   bans              Ban[]             @relation("BannedUser")
   bannedBy          Ban[]             @relation("BannedBy")
@@ -44,6 +45,8 @@ model User {
   visitCard         VisitCard?
   membershipInvitationsSent MembershipInvitation[] @relation("InvitedBy")
   membershipInvitationsReceived MembershipInvitation[] @relation("InvitedUser")
+  ownershipOffersReceived OwnershipOffer[] @relation("OwnershipOfferTo")
+  ownershipOffersMade     OwnershipOffer[] @relation("OwnershipOfferBy")
   botsCreated       Bot[] @relation("BotCreatedBy")
   botsUpdated       Bot[] @relation("BotUpdatedBy")
   botAccessRules    BotAccessRule[]
@@ -260,11 +263,15 @@ model Universe {
   hideBotConversations Boolean @default(false) @map("hide_bot_conversations")
   // Allow voice bots here (#740): a bot can only speak and listen in this universe while it is on.
   allowVoiceBots Boolean @default(true) @map("allow_voice_bots")
+  // Set when the universe was passed to this owner (#820): when, and from whom. Null for the person who created it.
+  ownerSince      DateTime? @map("owner_since")
+  previousOwnerId String?   @map("previous_owner_id")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
   // Relations
   owner      User      @relation("UniverseOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  previousOwner User?  @relation("UniversePreviousOwner", fields: [previousOwnerId], references: [id], onDelete: SetNull)
   worlds     World[]
   bans       Ban[]
   favorites  Favorite[]
@@ -274,6 +281,7 @@ model Universe {
   membershipInvitations MembershipInvitation[]
   aiKeyLends AiKeyLend[]
   voiceKeyLends VoiceKeyLend[]
+  ownershipOffer OwnershipOffer?
 
   @@map("universes")
 }
@@ -677,6 +685,25 @@ model MembershipInvitation {
   @@index([invitedByUserId])
   @@index([status])
   @@map("membership_invitations")
+}
+
+// Passing a universe to another account (#820). One waiting offer per universe (the unique universe_id), no time limit.
+// It ends when the person accepts or declines, the owner takes it back, the person leaves or is removed, or the
+// universe is deleted. The universe's owner changes only on accept, in one transaction (lib/ownership-offer.ts).
+model OwnershipOffer {
+  id            String   @id @default(uuid())
+  universeId    String   @unique @map("universe_id")
+  toUserId      String   @map("to_user_id")
+  /** Who started it: the owner, or a super admin acting for them. */
+  offeredById   String   @map("offered_by_id")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  universe  Universe @relation(fields: [universeId], references: [id], onDelete: Cascade)
+  toUser    User     @relation("OwnershipOfferTo", fields: [toUserId], references: [id], onDelete: Cascade)
+  offeredBy User     @relation("OwnershipOfferBy", fields: [offeredById], references: [id], onDelete: Cascade)
+
+  @@index([toUserId])
+  @@map("ownership_offers")
 }
 
 // Room Template Categories

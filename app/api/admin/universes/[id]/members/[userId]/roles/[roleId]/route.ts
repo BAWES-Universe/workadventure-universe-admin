@@ -4,6 +4,7 @@ import { EVERYONE_KEY, MEMBER_KEY, syncWorldMembers } from '@/lib/roles';
 import { allows, isAdministratorRole, ranksAbove, reachOf, scopeChange, type Access } from '@/lib/role-access';
 import { badRequest, checkScope, failed, needs, scopeSchema, universeContext } from '@/lib/universe-route';
 import { notifyRoleGiven } from '@/lib/push-messages';
+import { endOfferIfLeft } from '@/lib/ownership-offer-ends';
 
 type Params = { params: Promise<{ id: string; userId: string; roleId: string }> };
 
@@ -94,6 +95,8 @@ export async function DELETE(request: NextRequest, { params }: Params) {
         await tx.universeMember.delete({ where: { id: member.id } });
       }
       await syncWorldMembers(tx, id, userId);
+      // Out of the universe altogether: an ownership offer to them ends (#820)
+      await endOfferIfLeft(tx, id, userId);
     });
     return NextResponse.json({ success: true });
   } catch (error) {
