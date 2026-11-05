@@ -14,6 +14,7 @@ jest.mock('@/lib/db', () => {
     findUnique: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
+    updateMany: jest.fn(),
     delete: jest.fn(),
     count: jest.fn(),
   };
@@ -595,7 +596,9 @@ describe('/api/bots/[id]/mcp-servers', () => {
         id: MOCK_SERVER_ID, botId: MOCK_BOT_ID, name: 'Server', serverUrl: 'https://example.com', authType: 'oauth', enabled: true,
         createdAt: new Date(), updatedAt: new Date(),
       });
-      await PATCH(
+      // An OAuth settings save goes through the guarded write: it has to land, or the test proves nothing
+      (prisma.botMcpServer.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+      const response = await PATCH(
         new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers/${MOCK_SERVER_ID}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -603,6 +606,8 @@ describe('/api/bots/[id]/mcp-servers', () => {
         }),
         { params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }) }
       );
+      expect(response.status).toBe(200);
+      expect(prisma.botMcpServer.updateMany).toHaveBeenCalled();
       expect(markToolReconnected).not.toHaveBeenCalled();
     });
 
