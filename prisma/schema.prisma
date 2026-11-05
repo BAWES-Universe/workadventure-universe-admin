@@ -796,6 +796,10 @@ model Bot {
   askBeforeMaking     Int?     @default(5) @map("ask_before_making")
   askWhichWay         String   @default("rarely") @map("ask_which_way") @db.VarChar(20)
   cardWaitMinutes     Int      @default(10) @map("card_wait_minutes")
+  // "Allow more of the same in this chat" (game #1659): a card's remembered approval ends after this many minutes without
+  // the asker's messages (30 | 60 | 120) and after this many minutes at most (240 | 480 | 1440).
+  allowMoreIdleMinutes Int     @default(60) @map("allow_more_idle_minutes")
+  allowMoreMaxMinutes  Int     @default(480) @map("allow_more_max_minutes")
   // Voice (#740): off until a person with Manage bots turns it on. voiceRevision is the published voice profile the bot
   // speaks with (BotVoiceRevision.number); null until one is published.
   voiceEnabled        Boolean  @default(false) @map("voice_enabled")
@@ -817,6 +821,8 @@ model Bot {
   actionGrants   BotActionGrant[]
   voiceDraft     BotVoiceDraft?
   voiceRevisions BotVoiceRevision[]
+  voiceKeyUsage  VoiceKeyUsage[]
+  voiceReplyUses VoiceReplyUse[]
 
   @@index([roomId])
   @@map("bots")
@@ -870,6 +876,10 @@ model BotMcpServer {
   // Goes up whenever a heading setting, a tool's heading or a tool's confirmation changes, so a card or a remembered
   // approval made under an older policy can be told apart.
   policyRevision     Int    @default(1) @map("policy_revision")
+  // The bot server shows at most 500 tools per server. When a server has more, it says so when it saves the list, and how
+  // many it has when it knows (null when it did not read them all).
+  toolsCut           Boolean @default(false) @map("tools_cut")
+  toolsSeen          Int?    @map("tools_seen")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -1039,6 +1049,25 @@ model ReplyWindow {
   startedAt DateTime @map("started_at")
 
   @@map("reply_windows")
+}
+
+// A spoken reply counted against a person's Universe AI window (game #1669). One row per reply, keyed by the turn the bot
+// server gives it, so asking again for the same reply (a retry, a reconnect) never counts it twice. Whether the text of the
+// reply counted is in the usage rows as ever; this only says which replies were also spoken.
+model VoiceReplyUse {
+  id        String   @id @default(uuid())
+  botId     String   @map("bot_id")
+  // The reply's turn as the bot server names it
+  turnId    String   @map("turn_id") @db.VarChar(255)
+  // "person:<user id>" or "guest:<their id>", the same words the Universe AI reply window is kept under
+  personKey String   @map("person_key") @db.VarChar(320)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@unique([botId, turnId])
+  @@index([personKey, createdAt])
+  @@map("voice_reply_uses")
 }
 
 // Someone reached a reply limit on a bot (game #1159, Orbit #491): once per person, limit and window. The bot page counts
@@ -1516,7 +1545,7 @@ model BotActionRequest {
 model BotActionDecision {
   id           String   @id @default(uuid())
   requestId    String   @map("request_id")
-  // approve | approveAndRemember | decline | supersede | expire | stale | cancel | revoke | claim | reconcile
+  // approve | approveAndRemember | decline | supersede | expire | stale | cancel | extend | revoke | claim | reconcile
   event        String   @db.VarChar(24)
   actorKey     String?  @map("actor_key") @db.VarChar(400)
   fromRevision Int      @map("from_revision")
@@ -1602,6 +1631,10 @@ model VoiceProvider {
   models             Json     @default("[]")
   defaultRecognition Boolean  @default(false) @map("default_recognition")
   defaultSpeech      Boolean  @default(false) @map("default_speech")
+  // The voice Universe AI speaks with when this is the default speaking provider and a bot is turned on without a key of its own
+  // (game #1668); null = the first voice the provider lists. Only a provider that speaks has one.
+  defaultVoiceId     String?  @map("default_voice_id") @db.VarChar(255)
+  defaultVoiceName   String?  @map("default_voice_name") @db.VarChar(255)
   createdById        String?  @map("created_by_id")
   // Whose key this is (#749). Null = a provider the super admin runs for the whole server, which is every row there was before
   // personal voice keys. Anything that lists or reads providers for the server must keep only ownerId = null.
@@ -1617,11 +1650,15 @@ model VoiceProvider {
   failedRecognition  Int      @default(0) @map("failed_recognition")
   failedSpeech       Int      @default(0) @map("failed_speech")
   healthCheckedAt    DateTime? @map("health_checked_at")
+  // The limits its owner changed for bots that use their key (#783): only the values they set (turnSeconds, replyCharacters, replySeconds,
+  // listenMinutesPerDay); anything not there follows the server's voice limits. Null = none changed.
+  voiceLimits        Json?    @map("voice_limits")
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 
   owner User?           @relation("VoiceKeyOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   lends VoiceKeyLend[]
+  usage VoiceKeyUsage[]
 
   @@index([enabled])
   @@index([ownerId])
@@ -1644,6 +1681,25 @@ model VoiceKeyLend {
   @@unique([providerId, universeId])
   @@index([universeId])
   @@map("voice_key_lends")
+}
+
+// How many voice replies a person's voice key paid for in one month (#749), per bot, for "This month" on the AI keys page. The
+// bot server counts one when it reports a speaking call that worked and names the bot (POST /api/voice/providers/:id/health).
+// `month` is the first day of the month, UTC, the same month as a text key's usage.
+model VoiceKeyUsage {
+  id         String   @id @default(uuid())
+  providerId String   @map("provider_id")
+  botId      String   @map("bot_id")
+  month      DateTime @db.Date
+  replies    Int      @default(0)
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  provider VoiceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  bot      Bot           @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, botId, month])
+  @@index([providerId, month])
+  @@map("voice_key_usage")
 }
 
 // A bot's voice profile (#740). The draft is what a person is editing; a published revision never changes. A bot speaks with

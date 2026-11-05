@@ -17,17 +17,18 @@ export async function OPTIONS(request: NextRequest) {
  * fine and changes nothing, except the model list when one is sent.
  *
  * `models` says which of the key's models bots there may use, each as "kind:id" and each one on the key's list now: null =
- * all of them, left out = as it is (all, for a new lend). Answers with the key and where it is lent.
+ * all of them, left out = as it is (all, for a new lend). `existing: true` changes a lend only: when the key isn't lent there
+ * any more (pulled meanwhile) nothing is lent and the answer is a 409. Answers with the key and where it is lent.
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   if (!meOriginAllowed(request)) return respond(request, { error: 'Origin not allowed' }, 403);
   const user = await getSessionUser(request);
   if (!user) return respond(request, { error: 'Unauthorized' }, 401);
   const body = await request.json().catch(() => null);
-  const input = typeof body === 'object' && body !== null ? (body as { universeId?: unknown; models?: unknown }) : {};
+  const input = typeof body === 'object' && body !== null ? (body as { universeId?: unknown; models?: unknown; existing?: unknown }) : {};
   if (typeof input.universeId !== 'string' || !input.universeId) return respond(request, { error: 'Pick a universe first.' }, 400);
   try {
-    return respond(request, { key: await lendVoiceKey(user.id, (await params).id, input.universeId, input.models) });
+    return respond(request, { key: await lendVoiceKey(user.id, (await params).id, input.universeId, input.models, input.existing === true) });
   } catch (error) {
     if (error instanceof VoiceKeyRefused) return respond(request, { error: error.message }, error.status);
     console.error('[VoiceKeys] Lend failed:', error instanceof Error ? error.message : 'unknown');

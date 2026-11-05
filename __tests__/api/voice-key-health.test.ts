@@ -8,6 +8,7 @@ import { POST as report } from '@/app/api/voice/providers/[id]/health/route';
 import { POST as check } from '@/app/api/me/voice-keys/[id]/check/route';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
+import { startOfMonth } from '@/lib/ai-keys';
 import { claimVoiceKeyTry, reportVoiceKeyCall } from '@/lib/voice-key-health';
 import { voiceProviderTable, type ProviderRow } from '../helpers/voice-provider-rows';
 
@@ -20,6 +21,13 @@ jest.mock('@/lib/voice-keys', () => ({
 }));
 
 let rows: ProviderRow[];
+/** Voice replies counted so far, by "provider:bot:month" (a tiny stand-in for the usage table). */
+let usage: Map<string, number>;
+const usageUpsert = jest.fn(async ({ where, update }: { where: { providerId_botId_month: { providerId: string; botId: string; month: Date } }; update: { replies: { increment: number } } }) => {
+  const { providerId, botId, month } = where.providerId_botId_month;
+  const name = `${providerId}:${botId}:${month.toISOString().slice(0, 10)}`;
+  usage.set(name, (usage.get(name) ?? 0) + update.replies.increment);
+});
 
 const row = (changes: ProviderRow = {}): ProviderRow => ({
   id: 'k1',
@@ -54,9 +62,14 @@ const THEN = at(0);
 beforeEach(() => {
   process.env.BOT_SERVICE_TOKEN = 'service-secret';
   rows = [row(), row({ id: 'server', ownerId: null })];
+  usage = new Map();
+  usageUpsert.mockClear();
   const table = voiceProviderTable(() => rows);
   Object.assign(prisma, {
     voiceProvider: { ...table, findMany: async ({ where }: { where: { ownerId: string } }) => rows.filter((r) => r.ownerId === where.ownerId) },
+    voiceKeyUsage: { findMany: async () => [], upsert: usageUpsert },
+    bot: { findMany: async () => [] },
+    botVoiceRevision: { findMany: async () => [] },
   });
   (getSessionUser as jest.Mock).mockReset().mockResolvedValue({ id: 'u-ana', email: 'ana@example.com' });
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -163,6 +176,38 @@ describe('what the bot server reports', () => {
     rows[0] = row({ downSince: THEN, downReason: 'errors', downPart: 'speech', healthCheckedAt: THEN });
     await reportVoiceKeyCall('k1', 'speech', { ok: false, status: 402 }, at(10));
     expect(rows[0]).toMatchObject({ downSince: THEN, downReason: 'credit', downPart: null, healthCheckedAt: at(10) });
+  });
+});
+
+describe('voice replies this month', () => {
+  it('counts one for the key, bot and month when a speaking call that worked names the bot', async () => {
+    expect((await call({ ok: true, botId: 'b1' })).status).toBe(200);
+    expect((await call({ ok: true, botId: 'b1' })).status).toBe(200);
+    expect((await call({ ok: true, botId: 'b2' })).status).toBe(200);
+    const month = startOfMonth().toISOString().slice(0, 10);
+    expect(Object.fromEntries(usage)).toEqual({ [`k1:b1:${month}`]: 2, [`k1:b2:${month}`]: 1 });
+  });
+
+  it('counts from the first of the month, UTC, as a text key does', async () => {
+    await reportVoiceKeyCall('k1', 'speech', { ok: true, botId: 'b1' }, new Date(Date.UTC(2026, 10, 1, 0, 0, 1)));
+    await reportVoiceKeyCall('k1', 'speech', { ok: true, botId: 'b1' }, new Date(Date.UTC(2026, 9, 31, 23, 59, 59)));
+    expect(Object.fromEntries(usage)).toEqual({ 'k1:b1:2026-11-01': 1, 'k1:b1:2026-10-01': 1 });
+  });
+
+  it('counts nothing for the old report shape, for listening, for a failed call, or for a server provider', async () => {
+    await call({ ok: true });
+    await call({ ok: true, botId: 'b1' }, 'recognition');
+    await call({ ok: false, status: 500 });
+    expect((await call({ ok: true, botId: 'b1' }, 'speech', 'server')).status).toBe(404);
+    expect(usage.size).toBe(0);
+    expect((await call({ ok: false, botId: 'b1' })).status).toBe(400);
+  });
+
+  it('still brings a Down key back, and does not fail the report when the bot is gone', async () => {
+    rows[0] = row({ downSince: THEN, downReason: 'credit', downPart: null });
+    expect((await (await call({ ok: true, botId: 'b1' })).json()).status).toBe('working');
+    usageUpsert.mockRejectedValueOnce(Object.assign(new Error('foreign key'), { code: 'P2003' }));
+    expect((await call({ ok: true, botId: 'gone' })).status).toBe(200);
   });
 });
 

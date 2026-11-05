@@ -12,7 +12,7 @@ export async function OPTIONS(request: NextRequest) {
 /**
  * GET /api/bots/:id/mcp-servers/:serverId/tools
  * The server's tools with what each is suggested to do, what was chosen and who confirmed it, the setting under each
- * heading, the policy revision, and the state of the server: "notCheckedYet" for a server that existed before tools were
+ * heading, the policy revision, whether the list is cut (`truncated`, `totalSeen`), and the state of the server: "notCheckedYet" for a server that existed before tools were
  * checked (it keeps working in text), "notConfirmedYet" while a tool waits, "confirmed" when every tool is.
  *
  * Auth: Manage bots (403 without it), or the bot server's ADMIN_API_TOKEN.
@@ -33,7 +33,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
  * The bot server saves the full tool list it just read (every page). Body: { tools: [{ name, title?, description?,
  * fingerprint, suggestedHeading?, suggestionSource? }] }. A new tool waits to be confirmed; a tool whose fingerprint
  * changed goes back to not confirmed yet; a tool the server no longer offers is removed. A suggestion never lets a tool
- * run. Response: the same as GET, plus which tools were added, changed and removed.
+ * run. When the server has more tools than the bot server keeps (500), the list is the first 500 and the body says so:
+ * `truncated: true`, and `totalSeen` (how many tools the server has) when the bot server read them all. Both are optional
+ * and additive: a bot server that does not send them leaves the server "not cut". GET answers `truncated` and `totalSeen`.
+ * Response: the same as GET, plus which tools were added, changed and removed.
  *
  * Auth: the bot server's ADMIN_API_TOKEN only.
  */

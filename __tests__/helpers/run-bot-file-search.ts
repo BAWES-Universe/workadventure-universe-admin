@@ -111,17 +111,20 @@ async function main() {
   await db.query(
     `INSERT INTO artifacts (id, owner_id, maker_bot_id, maker_name, title, kind, chat_kind, chat_ref, updated_at) VALUES
       ('a-marked', 'owner', 'bot1', 'Scout', $1, 'app', 'nearby', 'room#2#200', now()),
-      ('a-plain', 'friend', 'bot1', 'Scout', 'Quests board', 'app', 'nearby', 'room#9#900', now())`,
+      ('a-plain', 'friend', 'bot1', 'Scout', 'Quests board', 'app', 'nearby', 'room#9#900', now()),
+      ('a-echo', 'owner', 'bot2', 'Echo', 'Quests echo', 'app', 'nearby', 'room#9#901', now())`,
     [`Board ${MARKED}`],
   );
-  const titles = async (words: string, mode: 'all' | 'any', who: { userId: string | null; chatKind: string; chatRef: string }) => {
-    const built = artifactTitleSql(who, searchWords(words), mode);
+  const titles = async (words: string, mode: 'all' | 'any', who: { userId: string | null; chatKind: string; chatRef: string }, botId = 'bot1') => {
+    const built = artifactTitleSql({ botId, ...who }, searchWords(words), mode);
     return (await db.query<{ id: string }>(built.sql, built.values)).rows.map((row) => row.id).sort();
   };
   result.titles = {
     marked: await titles('مرحبا board', 'all', { userId: 'owner', chatKind: 'dm', chatRef: '!owner-dm' }),
     notAll: await titles('مرحبا quests', 'all', { userId: 'owner', chatKind: 'dm', chatRef: '!owner-dm' }),
     outOfReach: await titles('quests', 'any', { userId: 'owner', chatKind: 'dm', chatRef: '!owner-dm' }),
+    // Made with another bot (game #1781): found by that bot, not by this one
+    otherBot: await titles('quests', 'any', { userId: 'owner', chatKind: 'dm', chatRef: '!owner-dm' }, 'bot2'),
     inChat: await titles('quests', 'any', { userId: null, chatKind: 'nearby', chatRef: 'room#9#900' }),
   };
 
