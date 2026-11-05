@@ -83,6 +83,13 @@ describe('starting an offer', () => {
     expect(notices).not.toHaveBeenCalled();
   });
 
+  it('takes the offer back when they left and came back in between (a different membership)', async () => {
+    mockPrisma.universeMember.findUnique.mockResolvedValueOnce({ id: 'm1' }).mockResolvedValueOnce({ id: 'm2' });
+    expect((await refused(start())).status).toBe(404);
+    expect(mockPrisma.ownershipOffer.deleteMany).toHaveBeenCalledWith({ where: { id: 'o1' } });
+    expect(notices).not.toHaveBeenCalled();
+  });
+
   it('takes the “offered to you” card down again when the offer ended while the notice was being written', async () => {
     mockPrisma.ownershipOffer.findUnique.mockResolvedValue(null);
     await start();

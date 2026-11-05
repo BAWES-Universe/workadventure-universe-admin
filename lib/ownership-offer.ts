@@ -71,12 +71,13 @@ export async function startOffer(input: {
     throw error;
   }
 
-  // They may have left between the check above and the insert, when leaving found no offer to end: look again now that it exists
+  // They may have left between the check above and the insert, when leaving found no offer to end: look again now that it exists.
+  // Someone who left and came back in between holds a different membership, and the offer was not made to that one
   const stillMember = await prisma.universeMember.findUnique({
     where: { universeId_userId: { universeId: universe.id, userId: toUserId } },
     select: { id: true },
   });
-  if (!stillMember) {
+  if (!stillMember || stillMember.id !== member.id) {
     await prisma.ownershipOffer.deleteMany({ where: { id: offer.id } });
     throw new OfferError('They have to be a member first', 404);
   }
