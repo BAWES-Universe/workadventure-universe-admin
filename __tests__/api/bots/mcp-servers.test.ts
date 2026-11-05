@@ -5,7 +5,7 @@ import { prisma } from '@/lib/db';
 import * as authSession from '@/lib/auth-session';
 import * as superAdmin from '@/lib/super-admin';
 import * as encryption from '@/lib/encryption';
-import { markToolReconnected } from '@/lib/tool-signin';
+import { markToolReconnected, syncToolSignInNotices } from '@/lib/tool-signin';
 
 // Mock Prisma
 jest.mock('@/lib/db', () => {
@@ -59,7 +59,7 @@ jest.mock('@/lib/db', () => {
 });
 
 // Mock auth session
-jest.mock('@/lib/tool-signin', () => ({ markToolReconnected: jest.fn() }));
+jest.mock('@/lib/tool-signin', () => ({ markToolReconnected: jest.fn(), syncToolSignInNotices: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({
   getSessionUser: jest.fn(),
 }));
@@ -705,6 +705,8 @@ describe('/api/bots/[id]/mcp-servers', () => {
       expect(prisma.botMcpServer.delete).toHaveBeenCalledWith({
         where: { id: MOCK_SERVER_ID },
       });
+      // A sign-in card about the deleted connection goes with it (game #1819)
+      expect(syncToolSignInNotices).toHaveBeenCalledWith(MOCK_BOT_ID);
     });
 
     it('should return 404 if server not found on delete', async () => {

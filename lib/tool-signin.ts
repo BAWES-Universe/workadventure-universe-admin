@@ -1,7 +1,6 @@
 import { Prisma } from '@prisma/client';
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
-import { addNotice, dismissNotice } from '@/lib/notices';
 import { describeToolSignIn, type ToolSignInNoticeData } from '@/lib/tool-signin-words';
 
 /**
@@ -32,66 +31,71 @@ function clampAt(at: Date | undefined, now = new Date()): Date {
 
 /**
  * Brings the notices of one bot in line with its connections that are signed out: one card per person and bot, a row per
- * connection, taken down when nothing is left. A card is only made when `fresh` (a connection that just went down) belongs to
- * that person, so a dismissed card stays dismissed until another outage starts. The person told is whoever connected it, or
- * the bot's maker for connections made before that was kept.
+ * connection, taken down when nothing is left (or when the bot or the connection is gone). A card is only made when `fresh`
+ * (a connection that just went down) belongs to that person, so a dismissed card stays dismissed until another outage starts.
+ * The person told is whoever connected it, or the bot's maker for connections made before that was kept.
+ *
+ * Runs one bot at a time (an advisory lock held for the transaction): a bot whose tools fail together reports them together,
+ * and two syncs that each found no card would otherwise each make one.
  */
 export async function syncToolSignInNotices(botId: string, fresh?: { serverId: string; at: Date }): Promise<void> {
   try {
-    const bot = await prisma.bot.findUnique({
-      where: { id: botId },
-      select: { id: true, name: true, createdById: true, room: { select: { world: { select: { universe: { select: { name: true } } } } } } },
-    });
-    if (!bot) return;
-    const lost = await prisma.botMcpServer.findMany({
-      where: { botId, signInLostAt: { not: null } },
-      select: { id: true, name: true, authType: true, signInLostAt: true, connectedById: true },
-      orderBy: { signInLostAt: 'asc' },
-    });
-    const byPerson = new Map<string, typeof lost>();
-    for (const server of lost) {
-      const person = server.connectedById ?? bot.createdById;
-      if (person) byPerson.set(person, [...(byPerson.get(person) ?? []), server]);
-    }
-    const open = await prisma.userNotice.findMany({
-      where: { kind: TOOL_SIGNIN_KIND, dedupeKey: { startsWith: `${TOOL_SIGNIN_KIND}:${botId}:` }, dismissedAt: null },
-      select: { id: true, userId: true },
-    });
-    for (const notice of open) if (!byPerson.has(notice.userId)) await dismissNotice(notice.userId, notice.id);
-
-    for (const [userId, servers] of byPerson) {
-      const data: ToolSignInNoticeData = {
-        botId,
-        bot: bot.name,
-        universe: bot.room?.world?.universe?.name ?? null,
-        servers: servers.map((server) => ({
-          id: server.id,
-          name: server.name,
-          kind: server.authType === 'oauth' ? 'oauth' : 'key',
-          at: (server.signInLostAt as Date).toISOString(),
-        })),
-      };
-      const words = describeToolSignIn(data);
-      const href = data.servers.some((server) => server.kind === 'key') ? `/admin/bots/${botId}/mcp-servers` : null;
-      const existing = open.find((notice) => notice.userId === userId);
-      if (existing) {
-        await prisma.userNotice.update({
-          where: { id: existing.id },
-          data: { title: words.title.slice(0, 200), body: words.body.slice(0, 1000), badge: words.badge, href, data: data as unknown as Prisma.InputJsonValue },
-        });
-      } else if (fresh && servers.some((server) => server.id === fresh.serverId)) {
-        await addNotice({
-          userId,
-          kind: TOOL_SIGNIN_KIND,
-          dedupeKey: `${TOOL_SIGNIN_KIND}:${botId}:${fresh.at.toISOString()}`,
-          ...words,
-          href,
-          data: data as unknown as Prisma.InputJsonValue,
-        });
+    await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`${TOOL_SIGNIN_KIND}:${botId}`}))`;
+      const bot = await tx.bot.findUnique({
+        where: { id: botId },
+        select: { id: true, name: true, createdById: true, room: { select: { world: { select: { universe: { select: { name: true } } } } } } },
+      });
+      const lost = bot
+        ? await tx.botMcpServer.findMany({
+            where: { botId, signInLostAt: { not: null } },
+            select: { id: true, name: true, authType: true, signInLostAt: true, connectedById: true },
+            orderBy: { signInLostAt: 'asc' },
+          })
+        : [];
+      const byPerson = new Map<string, typeof lost>();
+      for (const server of lost) {
+        const person = server.connectedById ?? bot?.createdById;
+        if (person) byPerson.set(person, [...(byPerson.get(person) ?? []), server]);
       }
-    }
+      const open = await tx.userNotice.findMany({
+        where: { kind: TOOL_SIGNIN_KIND, dedupeKey: { startsWith: `${TOOL_SIGNIN_KIND}:${botId}:` }, dismissedAt: null },
+        select: { id: true, userId: true },
+      });
+      for (const notice of open) {
+        if (!byPerson.has(notice.userId)) await tx.userNotice.updateMany({ where: { id: notice.id, dismissedAt: null }, data: { dismissedAt: new Date() } });
+      }
+      if (!bot) return;
+
+      for (const [userId, servers] of byPerson) {
+        const data: ToolSignInNoticeData = {
+          botId,
+          bot: bot.name,
+          universe: bot.room?.world?.universe?.name ?? null,
+          servers: servers.map((server) => ({
+            id: server.id,
+            name: server.name,
+            kind: server.authType === 'oauth' ? 'oauth' : 'key',
+            at: (server.signInLostAt as Date).toISOString(),
+          })),
+        };
+        const words = describeToolSignIn(data);
+        const href = data.servers.some((server) => server.kind === 'key') ? `/admin/bots/${botId}/mcp-servers` : null;
+        const existing = open.find((notice) => notice.userId === userId);
+        const fields = { title: words.title.slice(0, 200), body: words.body.slice(0, 1000), badge: words.badge, href, data: data as unknown as Prisma.InputJsonValue };
+        if (existing) {
+          await tx.userNotice.update({ where: { id: existing.id }, data: fields });
+        } else if (fresh && servers.some((server) => server.id === fresh.serverId)) {
+          await tx.userNotice.create({
+            data: { userId, kind: TOOL_SIGNIN_KIND, dedupeKey: `${TOOL_SIGNIN_KIND}:${botId}:${fresh.at.toISOString()}`, ...fields },
+          });
+        }
+      }
+    });
   } catch (error) {
-    // The state is saved; a card left out of date is the smaller harm
+    // A card made twice for the same instant (same key) is "already told"; any other failure is reported, and the state is
+    // saved either way: a card left out of date is the smaller harm
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return;
     Sentry.captureException(error, { tags: { area: 'tool-signin' } });
     console.error('[ToolSignIn] Could not update the notices:', error instanceof Error ? error.message : 'unknown');
   }
