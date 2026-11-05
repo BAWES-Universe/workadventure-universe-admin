@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 import { countOpenNotices } from '@/lib/notices';
+import { dropOrphanedToolSignInNotices } from '@/lib/tool-signin';
 import { INVITATIONS_DISMISSED_KEY } from '@/lib/user-preferences';
 
 export const runtime = 'nodejs';
@@ -24,6 +25,7 @@ export async function GET(request: NextRequest) {
   if (!user) return respond(request, { error: 'Unauthorized' }, 401);
 
   try {
+    await dropOrphanedToolSignInNotices(user.id);
     const [pending, dismissed, notices] = await Promise.all([
       prisma.membershipInvitation.findMany({
         where: { invitedUserId: user.id, status: 'pending' },

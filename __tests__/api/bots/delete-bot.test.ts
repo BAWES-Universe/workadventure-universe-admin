@@ -3,6 +3,7 @@ import { DELETE } from '@/app/api/bots/[id]/route';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { canManageBots } from '@/lib/bot-permissions';
+import { syncToolSignInNotices } from '@/lib/tool-signin';
 
 jest.mock('@/lib/db', () => ({
   prisma: {
@@ -18,6 +19,7 @@ jest.mock('@/lib/db', () => ({
   },
 }));
 
+jest.mock('@/lib/tool-signin', () => ({ syncToolSignInNotices: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({
   getSessionUser: jest.fn(async () => null),
 }));
@@ -63,6 +65,8 @@ describe('DELETE /api/bots/:id', () => {
 
     expect(response.status).toBe(204);
     expect(prisma.bot.deleteMany).toHaveBeenCalledWith({ where: { id: 'bot-1' } });
+    // Its tools' sign-in cards on Orbit home go with it (game #1819)
+    expect(syncToolSignInNotices).toHaveBeenCalledWith('bot-1');
   });
 
   it('answers not found, not a server error, when an overlapping delete already removed the bot', async () => {
@@ -73,6 +77,7 @@ describe('DELETE /api/bots/:id', () => {
 
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toEqual({ error: 'Bot not found' });
+    expect(syncToolSignInNotices).not.toHaveBeenCalled();
   });
 
   it('refuses someone who cannot manage bots in the room', async () => {

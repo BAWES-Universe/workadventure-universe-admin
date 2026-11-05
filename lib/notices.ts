@@ -14,6 +14,8 @@ export interface NoticeInput {
   body: string;
   badge?: string | null;
   href?: string | null;
+  /** What a notice with buttons needs to draw them (a tool's lost sign-in, game #1819). */
+  data?: Prisma.InputJsonValue | null;
 }
 
 /** Adds a notice; true if it is new, false if this person already has it (shown or dismissed). */
@@ -28,6 +30,7 @@ export async function addNotice(input: NoticeInput): Promise<boolean> {
         body: input.body.slice(0, 1000),
         badge: input.badge ?? null,
         href: input.href ?? null,
+        ...(input.data ? { data: input.data } : {}),
       },
     });
     return true;

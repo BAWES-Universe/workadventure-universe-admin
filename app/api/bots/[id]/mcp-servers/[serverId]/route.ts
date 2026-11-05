@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
+import { markToolReconnected, syncToolSignInNotices } from '@/lib/tool-signin';
 import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
 import { z } from 'zod';
@@ -434,6 +435,12 @@ export async function PATCH(
       });
     }
 
+    // A new key or token is a new connection: remember who made it and clear a lost sign-in at once (game #1819). An OAuth
+    // save that only changes settings keeps its tokens, so it is not one.
+    if (userId && effectiveAuthType !== 'oauth' && validatedData.authConfig) {
+      await markToolReconnected(serverId, userId);
+    }
+
     return NextResponse.json({
       id: updated.id,
       botId: updated.botId,
@@ -518,6 +525,9 @@ export async function DELETE(
     await prisma.botMcpServer.delete({
       where: { id: serverId },
     });
+
+    // A card about a connection that is gone has nothing left to reconnect (game #1819)
+    await syncToolSignInNotices(botId);
 
     return new NextResponse(null, { status: 204, headers: corsHeaders(request) });
   } catch (error) {

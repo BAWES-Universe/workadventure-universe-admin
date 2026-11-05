@@ -136,6 +136,13 @@ curl -X POST \
    - **PUT .../policy** sets what the bot does under each heading: any of `looksUp`, `makesNew`, `changesThings`,
      `deletesOrSends` as `"rightAway" | "asksFirst" | "off"`. `policyRevision` goes up when one changes. A new server
      starts with looksUp and makesNew on `rightAway`, the others on `asksFirst`.
+   - **PUT /api/bots/:id/mcp-servers/:serverId/sign-in** (`ADMIN_API_TOKEN` only; game #1819): the bot server says what it saw when
+     a bot really used the tool server. Body `{ state: "expired" | "no-answer" | "ok", at?: ISO time, status?: 401 | 403 }`.
+     `"expired"` (a refused sign-in) keeps the first `at` as "since" and, the first time, puts one card on Orbit home for whoever
+     connected it (the bot's maker for older connections); `"no-answer"` (a timeout or server error) shows "Didn't answer" and
+     tells nobody; `"ok"` clears both. Answers `{ changed }` (true only when what is stored moved), 404 when the bot has no such
+     server, 400 for a bad body. **GET /api/bots/:id/mcp-servers** then returns `signInLostAt`, `signInLostStatus`, `noAnswerAt` and
+     `reconnectedAt` (ISO or null) per server. A new sign-in, key or token clears them at once and sets `reconnectedAt`.
    - **GET/PUT /api/bots/:id/tool-settings**: the bot's own limits `askBeforeMaking` (3, 5, 10 or null for no limit;
      default 5), `askWhichWay` (`rarely`, `beforeBiggerJobs`, `never`; default `rarely`) and `cardWaitMinutes` (5, 10,
      30; default 10). GET also takes `ADMIN_API_TOKEN`. Two more for "allow more of the same in this chat" (game

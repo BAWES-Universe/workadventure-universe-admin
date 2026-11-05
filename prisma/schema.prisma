@@ -49,6 +49,7 @@ model User {
   botAccessRules    BotAccessRule[]
   botToolsConfirmed BotMcpTool[] @relation("BotToolConfirmedBy")
   botToolsMoved     BotMcpTool[] @relation("BotToolMovedBy")
+  botServersConnected BotMcpServer[] @relation("BotMcpServerConnectedBy")
   botConversations BotsConversation[]
   botMemories      BotsMemory[]
   avatarGrants     UserAvatarGrant[]
@@ -131,6 +132,8 @@ model UserNotice {
   badge       String?   @db.VarChar(20)
   // An Orbit page the notice leads to
   href        String?   @db.VarChar(300)
+  // What a notice with buttons needs to draw them and tell the time in the viewer's clock (a tool's lost sign-in, #1819)
+  data        Json?
   createdAt   DateTime  @default(now()) @map("created_at")
   dismissedAt DateTime? @map("dismissed_at")
 
@@ -880,11 +883,22 @@ model BotMcpServer {
   // many it has when it knows (null when it did not read them all).
   toolsCut           Boolean @default(false) @map("tools_cut")
   toolsSeen          Int?    @map("tools_seen")
+  // What the bot server last saw when it really used the server (game #1819), reported by it: a refused sign-in (401 or
+  // 403) with when it first happened and the status, or a server that did not answer. Both clear when it works again, and
+  // a reconnect or a saved new key or token clears them at once; `reconnectedAt` is when that last happened.
+  signInLostAt       DateTime? @map("sign_in_lost_at")
+  signInLostStatus   Int?      @map("sign_in_lost_status")
+  noAnswerAt         DateTime? @map("no_answer_at")
+  reconnectedAt      DateTime? @map("reconnected_at")
+  // Who connected it last (a sign-in, a key or a token), the person told when its sign-in expires. Null for connections
+  // made before this was kept: the bot's maker is told instead.
+  connectedById      String?   @map("connected_by_id")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  bot   Bot           @relation(fields: [botId], references: [id], onDelete: Cascade)
-  tools BotMcpTool[]
+  bot         Bot           @relation(fields: [botId], references: [id], onDelete: Cascade)
+  connectedBy User?         @relation("BotMcpServerConnectedBy", fields: [connectedById], references: [id], onDelete: SetNull)
+  tools       BotMcpTool[]
 
   @@index([botId])
   @@map("bot_mcp_servers")

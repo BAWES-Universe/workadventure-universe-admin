@@ -4,6 +4,7 @@ import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { normalizeExpiresIn } from '@/lib/mcp/oauth-token';
 import { checkOutboundUrl } from '@/lib/mcp/outbound-guard';
 import { getOAuthCallbackBase } from '@/lib/oauth-callback';
+import { markToolReconnected } from '@/lib/tool-signin';
 
 export const runtime = 'nodejs';
 
@@ -97,7 +98,7 @@ export async function GET(request: NextRequest) {
       return new NextResponse('Invalid state token', { status: 400 });
     }
 
-    const { botId, serverId, redirectUrl, codeVerifier, redirectUri, resource } = stateData;
+    const { botId, serverId, redirectUrl, codeVerifier, redirectUri, resource, personId } = stateData;
     const openerBase = getOpenerBase(redirectUrl);
 
     // Load the MCP server config to get OAuth provider config
@@ -260,6 +261,9 @@ export async function GET(request: NextRequest) {
 
     console.log(`[OAuthCallback] Tokens stored for server ${serverId} (bot ${botId})`);
 
+    // A fresh sign-in: remember who made it and clear a lost one at once (game #1819)
+    await markToolReconnected(serverId, personId ?? null);
+
     // Redirect to the popup callback page on the opener's origin.
     // This ensures the popup navigates to the same origin as the page that
     // opened it (universe.bawes.net or orbit.bawes.net), so postMessage
@@ -330,7 +334,7 @@ async function storeAuthorizedTokens(
  * Parse the encrypted state token.
  * Checks the `exp` claim (epoch seconds) and returns null if expired.
  */
-function parseStateToken(state: string | null): { botId: string; serverId: string; redirectUrl: string; codeVerifier?: string; redirectUri?: string; resource?: string } | null {
+function parseStateToken(state: string | null): { botId: string; serverId: string; redirectUrl: string; codeVerifier?: string; redirectUri?: string; resource?: string; personId?: string } | null {
   if (!state) return null;
   try {
     const decrypted = decryptApiKey(state);

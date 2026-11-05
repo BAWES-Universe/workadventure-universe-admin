@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { GET as oauthStart } from '@/app/api/bots/[id]/mcp-servers/[serverId]/oauth/start/route';
 import { GET as oauthCallback } from '@/app/api/oauth/mcp-callback/route';
+import { markToolReconnected } from '@/lib/tool-signin';
 import { prisma } from '@/lib/db';
 import * as authSession from '@/lib/auth-session';
 import { checkOutboundUrl } from '@/lib/mcp/outbound-guard';
@@ -55,6 +56,7 @@ jest.mock('@/lib/encryption', () => ({
 }));
 
 // The destination check resolves DNS; tests decide its verdict instead.
+jest.mock('@/lib/tool-signin', () => ({ markToolReconnected: jest.fn() }));
 jest.mock('@/lib/mcp/outbound-guard', () => ({
   checkOutboundUrl: jest.fn(),
 }));
@@ -559,5 +561,64 @@ describe('a login that keeps losing to concurrent writes', () => {
     expect(plainUpdate).not.toHaveBeenCalled();
     expect(response.headers.get('location')).toContain('message=connection_busy_try_again');
     expect(response.headers.get('location')).not.toContain('connection_changed');
+  });
+});
+
+describe('a fresh sign-in remembers who made it and clears a lost one (game #1819)', () => {
+  const state = (extra: object) =>
+    `enc:${JSON.stringify({
+      botId: BOT_ID,
+      serverId: SERVER_ID,
+      redirectUrl: `${ADMIN_BASE}/admin/bots/${BOT_ID}`,
+      codeVerifier: 'test-code-verifier',
+      redirectUri: `${ADMIN_BASE}/api/oauth/mcp-callback`,
+      exp: Math.floor(Date.now() / 1000) + 600,
+      ...extra,
+    })}`;
+
+  it('carries the person who started it in the state token', async () => {
+    findUnique.mockResolvedValue({
+      id: SERVER_ID,
+      botId: BOT_ID,
+      authType: 'oauth',
+      authConfig: `enc:${JSON.stringify(providerConfig)}`,
+      serverUrl: MCP_SERVER_URL,
+      bot: { id: BOT_ID, createdById: 'user-1', name: 'Test bot' },
+    });
+    const response = await oauthStart(new NextRequest(`${ADMIN_BASE}/api/bots/${BOT_ID}/mcp-servers/${SERVER_ID}/oauth/start`), {
+      params: Promise.resolve({ id: BOT_ID, serverId: SERVER_ID }),
+    });
+    const { authorizeUrl } = await response.json();
+    const payload = JSON.parse((new URL(authorizeUrl).searchParams.get('state') as string).replace(/^enc:/, ''));
+    expect(payload.personId).toBe('user-1');
+  });
+
+  it.each([
+    ['that person', { personId: 'user-7' }, 'user-7'],
+    ['no one, when the state names nobody', {}, null],
+  ])('tells the connection it was reconnected by %s once the tokens are stored', async (_label, extra, expected) => {
+    findUnique.mockResolvedValue({
+      id: SERVER_ID,
+      botId: BOT_ID,
+      authType: 'oauth',
+      authConfig: `enc:${JSON.stringify(providerConfig)}`,
+      serverUrl: MCP_SERVER_URL,
+    });
+    update.mockResolvedValue({ count: 1 });
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ access_token: 'access-9', refresh_token: 'refresh-9', expires_in: 3600 }),
+    }) as unknown as typeof fetch;
+
+    const response = await oauthCallback(new NextRequest(`${ADMIN_BASE}/api/oauth/mcp-callback?code=c&state=${encodeURIComponent(state(extra))}`));
+    expect(response.headers.get('location')).toContain('oauth=success');
+    expect(markToolReconnected).toHaveBeenCalledWith(SERVER_ID, expected);
+  });
+
+  it('does not touch it when the tokens could not be stored', async () => {
+    findUnique.mockResolvedValue(null);
+    await oauthCallback(new NextRequest(`${ADMIN_BASE}/api/oauth/mcp-callback?code=c&state=${encodeURIComponent(state({ personId: 'user-7' }))}`));
+    expect(markToolReconnected).not.toHaveBeenCalled();
   });
 });

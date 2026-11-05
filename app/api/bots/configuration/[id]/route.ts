@@ -8,6 +8,7 @@ import { isSuperAdmin } from '@/lib/super-admin';
 import { validateAccessToken } from '@/lib/oidc';
 import { transformBotToServerFormat } from '@/lib/bot-config-helpers';
 import { corsHeaders } from '@/lib/cors';
+import { syncToolSignInNotices } from '@/lib/tool-signin';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
@@ -256,6 +257,9 @@ export async function DELETE(
 
     // Delete bot
     await deleteWithHiddenBotData({ id: botId }, () => prisma.bot.delete({ where: { id: botId } }));
+
+    // Its tools' sign-in cards on Orbit home go with it (game #1819)
+    await syncToolSignInNotices(botId);
 
     // Return 204 No Content
     const response = new NextResponse(null, { status: 204 });
