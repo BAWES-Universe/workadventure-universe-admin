@@ -80,4 +80,14 @@ describe('GET /api/room/access, userId', () => {
     expect(body.status).toBe('ok');
     expect(body).not.toHaveProperty('userId');
   });
+
+  it('sends no id for a guest who only presents their guest identifier', async () => {
+    const guest = { id: 'u-guest', uuid: 'guest-uuid', email: null, name: null, isGuest: true };
+    db.user.findFirst.mockResolvedValue(guest);
+    (authenticateRequest as jest.Mock).mockResolvedValue({ isAuthenticated: false });
+    const url = `http://localhost/api/room/access?userIdentifier=${guest.uuid}&playUri=${encodeURIComponent('http://play.test/@/uni/world/room')}`;
+    const body = await (await roomAccess(new NextRequest(url, { headers: { Authorization: process.env.ADMIN_API_TOKEN as string } }))).json();
+    expect(body.status).toBe('ok');
+    expect(body).not.toHaveProperty('userId');
+  });
 });

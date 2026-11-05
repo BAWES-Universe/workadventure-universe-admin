@@ -598,8 +598,9 @@ export async function GET(request: NextRequest) {
         email: account?.email || null,
         username: account?.name || userName || undefined,
         userUuid: finalUuid,
-        // Only for an account whose token we verified: an identifier somebody only claimed gets no id (#408).
-        ...(account ? { userId: account.id } : {}),
+        // Only for somebody signed in whose token we verified: an identifier somebody only presents (a guest's, or an
+        // account's they never proved) gets no id (#408).
+        ...(verifiedUserId ? { userId: verifiedUserId } : {}),
         tags: verifiedTags,
         visitCardUrl: visitCardUrl,
         isCharacterTexturesValid: isTexturesValid,
