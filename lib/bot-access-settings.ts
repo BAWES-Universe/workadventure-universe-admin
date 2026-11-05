@@ -151,7 +151,7 @@ export async function loadBotPlace(botId: string): Promise<(BotPlace & { roomId:
   };
 }
 
-/** Everything an owner sees: the settings, the rows, and the roles a row may name with what each gives by default. */
+/** Everything an owner sees: the settings, the rows, the roles a row may name with what each gives by default, and the universe's name and owner's name. */
 export async function readBotSettings(botId: string) {
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
@@ -159,7 +159,9 @@ export async function readBotSettings(botId: string) {
       privateBot: true,
       refusalReply: true,
       dailyReplyCap: true,
-      room: { select: { world: { select: { universeId: true } } } },
+      room: {
+        select: { world: { select: { universeId: true, universe: { select: { name: true, owner: { select: { name: true } } } } } } },
+      },
       accessRules: { select: RULE_SELECT, orderBy: { createdAt: 'asc' } },
     },
   });
@@ -171,7 +173,10 @@ export async function readBotSettings(botId: string) {
     orderBy: [{ position: 'desc' }, { name: 'asc' }],
   });
 
+  const universe = bot.room.world.universe;
   return {
+    /** The universe and its owner by name, so the bot page can say who can always use the bot. People's emails are private. */
+    universe: { name: universe.name, ownerName: universe.owner.name },
     privateBot: bot.privateBot,
     refusalReply: bot.refusalReply,
     dailyReplyCap: bot.dailyReplyCap,

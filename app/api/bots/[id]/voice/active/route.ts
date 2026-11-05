@@ -8,11 +8,14 @@ export const runtime = 'nodejs';
 
 /**
  * GET /api/bots/:id/voice/active
- * Whether the bot speaks right now and with what (#740): { speaks, reason, paidBy, parts, revision, profile, down }. `reason`
+ * Whether the bot speaks right now and with what (#740): { speaks, reason, paidBy, parts, revision, profile, down, limits }. `reason`
  * is null when it speaks, and otherwise one of "off" (voice is off for the bot), "universe" (its universe doesn't allow voice
  * bots), "no-profile" (nothing published), "provider" (a provider in the profile is off, has no key, doesn't do that job or
  * no longer lists the model) or "key-down" (a person's key in the profile failed at its provider: the bot replies in text, and
  * `down` says since when and why). Read before each spoken turn, so a change stops it at once. A Down key is let through
+ * `limits` is the server's voice limits (GET /api/voice/limits), except that a part that runs on a person's lent key takes the values
+ * its owner set on that key (#783): `turnSeconds` and `listenMinutesPerDay` from the listening key, `replyCharacters` and
+ * `replySeconds` from the speaking key. Every other limit is the server's. A Down key is let through
  * once every 5 minutes (#749): that turn speaks, and the bot server reports how the call went to
  * POST /api/voice/providers/:id/health.
  *

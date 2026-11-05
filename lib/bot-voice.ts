@@ -3,9 +3,12 @@ import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { BotSettingsError } from '@/lib/bot-access-settings';
 import { lendAccess } from '@/lib/ai-key-lend';
-import { readModels } from '@/lib/voice-providers';
+import { readModels, universeAiDefaults } from '@/lib/voice-providers';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
 import { claimVoiceKeyTry, healthOf, tryIsDue } from '@/lib/voice-key-health';
+import { startOfMonth } from '@/lib/ai-keys';
+import { getVoiceLimits, servedVoiceLimits } from '@/lib/voice-limits';
+import { LISTENING_KEY_LIMITS, SPEAKING_KEY_LIMITS, readVoiceKeyLimits, savedVoiceKeyLimits } from '@/lib/voice-limit-values';
 
 /**
  * A bot's voice (#740): on or off (off until a person with Manage bots turns it on), a draft voice profile, and published
@@ -103,6 +106,24 @@ async function providersFor(profile: VoiceProfile, home: Home): Promise<{ provid
   return { providers, lent };
 }
 
+/**
+ * The voice limits a spoken turn runs under (#783): the server's, except that a part that runs on a lent personal key takes that
+ * key's own values for what that job is limited by (how long a turn and a day of listening for the listening key, how long a
+ * reply for the speaking key), wherever its owner changed them. A key never changes any other limit.
+ */
+async function limitsFor(profile: VoiceProfile | null, providers: Map<string, VoiceProvider>) {
+  const { limits } = await getVoiceLimits();
+  if (!profile) return limits;
+  const ownedBy = (part: 'recognition' | 'speech') => {
+    const row = providers.get(profile[part].providerId);
+    return row && row.ownerId !== null ? savedVoiceKeyLimits(row.voiceLimits) : {};
+  };
+  const listening = ownedBy('recognition');
+  const speaking = ownedBy('speech');
+  const picked = (own: Partial<Record<string, number>>, names: readonly string[]) => Object.fromEntries(names.filter((name) => own[name] !== undefined).map((name) => [name, own[name]]));
+  return { ...limits, ...picked(listening, LISTENING_KEY_LIMITS), ...picked(speaking, SPEAKING_KEY_LIMITS) };
+}
+
 /** Who pays for each part of a voice: Universe AI for a server provider, the key's owner for a key someone lent. */
 async function payersOf(profile: VoiceProfile | null) {
   const universeAi = { recognition: 'universe-ai' as const, speech: 'universe-ai' as const };
@@ -149,23 +170,33 @@ export async function readBotVoice(botId: string) {
     revision: bot.voiceRevision,
     draft: { profile: readDraft(bot.voiceDraft?.profile), updatedAt: bot.voiceDraft?.updatedAt ?? null },
     revisions,
-    lentKeys: await lentKeysFor({ createdById: bot.createdById, universeId: bot.room.world.universeId }),
+    lentKeys: await lentKeysFor(botId, { createdById: bot.createdById, universeId: bot.room.world.universeId }),
+    // What the bot page needs to show and start from Universe AI (game #1668): its default providers, models and voice, and the
+    // server's voice limits with the voice replies a fair-usage window leaves
+    universeAi: await universeAiDefaults(),
+    voiceLimits: await servedVoiceLimits(),
   };
 }
 
 /**
  * The keys this bot's profile may name besides the server's providers: the ones its maker lent to its universe, with only the
- * models the lend allows. Never the key itself.
+ * models the lend allows, whether each works, what it paid for this month and its limits (#783). Never the key itself.
  */
-async function lentKeysFor(home: Home) {
+async function lentKeysFor(botId: string, home: Home) {
   if (!home.createdById || !(await lendAccess(home.createdById, home.universeId))) return [];
   const rows = await prisma.voiceProvider.findMany({
     where: { ownerId: home.createdById, lends: { some: { universeId: home.universeId } } },
     orderBy: { createdAt: 'asc' },
     include: { lends: { where: { universeId: home.universeId }, select: { models: true } } },
   });
+  if (rows.length === 0) return [];
+  const [usage, { limits: server }] = await Promise.all([
+    prisma.voiceKeyUsage.findMany({ where: { providerId: { in: rows.map((row) => row.id) }, month: startOfMonth() }, select: { providerId: true, botId: true, replies: true } }),
+    getVoiceLimits(),
+  ]);
   return rows.map((row) => {
     const allowed = readLendModels(row.lends[0]?.models);
+    const spent = usage.filter((entry) => entry.providerId === row.id);
     return {
       id: row.id,
       adapter: row.adapter,
@@ -174,6 +205,10 @@ async function lentKeysFor(home: Home) {
       speech: row.speech,
       last4: row.apiKeyLast4,
       models: readModels(row.models).filter((model) => !allowed || allowed.includes(lendModelId(model))),
+      health: healthOf(row),
+      // Voice replies this key paid for this month (UTC): all its bots', and this bot's
+      month: { voiceReplies: spent.reduce((sum, entry) => sum + entry.replies, 0), botVoiceReplies: spent.find((entry) => entry.botId === botId)?.replies ?? 0 },
+      limits: readVoiceKeyLimits(row.voiceLimits, server),
     };
   });
 }
@@ -273,6 +308,7 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
     revision: number | null = null,
     profile: VoiceProfile | null = null,
     down: ReturnType<typeof healthOf> | null = null,
+    keys: Map<string, VoiceProvider> = new Map(),
   ) => ({
     speaks: reason === null,
     reason,
@@ -281,6 +317,8 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
     profile,
     // Only for "key-down": since when and why the key is down, for the line a person reads
     down: down ? { since: down.downSince, reason: down.downReason } : null,
+    // The voice limits this bot's turns run under: the server's, with a lent key's own for the job it does (#783)
+    limits: await limitsFor(profile, keys),
   });
   if (!bot.voiceEnabled && !options.ignoreSwitch) return result('off');
   if (!bot.room.world.universe.allowVoiceBots) return result('universe');
@@ -308,5 +346,5 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
       if (!mayTry) return result('key-down', revision.number, null, healthOf([...down].sort((a, b) => a.downSince!.getTime() - b.downSince!.getTime())[0]));
     }
   }
-  return result(null, revision.number, parsed.data);
+  return result(null, revision.number, parsed.data, null, providers);
 }

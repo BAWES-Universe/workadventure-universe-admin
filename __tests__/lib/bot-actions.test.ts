@@ -9,14 +9,19 @@
 import {
   BotActionError,
   DEFAULTS,
+  MAX_EXTENSIONS,
   argumentsFitScope,
+  cancelRequest,
   canonicalJson,
   claim,
   createRequest,
   decide,
   digestOf,
+  extendReview,
   finishAttempt,
+  endAllGrants,
   findGrant,
+  listActiveGrants,
   readRequest,
   reconcile,
   revokeGrants,
@@ -516,6 +521,21 @@ describe('remembered approvals', () => {
     expect((await touchGrants(BOT, { requesterKey: 'user:sara', conversationKey: 'dm:sara:nora' }, at(minutes(DEFAULTS.absoluteMinutes) + 2))).renewed).toBe(0);
   });
 
+  (REAL ? it.skip : it)('is not brought back when it ended between being read and being renewed', async () => {
+    await remembered();
+    const read = (prisma as unknown as { botActionGrant: { findMany: (args: unknown) => Promise<Record<string, unknown>[]> } }).botActionGrant;
+    const findMany = read.findMany;
+    // The grant is alive when it is read; by the time it is written it has ended
+    jest.spyOn(read, 'findMany').mockImplementationOnce(async (args) => {
+      const alive = await findMany(args);
+      db.grants[0].idleExpiresAt = at(minutes(49));
+      return alive;
+    });
+    expect((await touchGrants(BOT, { requesterKey: 'user:sara', conversationKey: 'dm:sara:nora' }, at(minutes(50)))).renewed).toBe(0);
+    expect(db.grants[0].idleExpiresAt).toEqual(at(minutes(49)));
+    jest.restoreAllMocks();
+  });
+
   it('is not renewed by someone else’s message or another chat', async () => {
     await remembered();
     expect((await touchGrants(BOT, { requesterKey: 'user:omar', conversationKey: 'dm:sara:nora' }, at(minutes(50)))).renewed).toBe(0);
@@ -537,6 +557,206 @@ describe('remembered approvals', () => {
     await decide(BOT, request.id, { actorKey: 'user:sara', revision: 1, decision: 'approveAndRemember', idleMinutes: 5, absoluteMinutes: 20 }, T0);
     expect(await findGrant(BOT, lookup(), at(minutes(4)))).not.toBeNull();
     expect(await findGrant(BOT, lookup(), at(minutes(6)))).toBeNull();
+  });
+});
+
+describe('the bot’s own allow-more times, and who is allowed more right now', () => {
+  const SCOPE = { fixed: { team: 'WEB' }, varies: ['title', 'description'] };
+  const lookup = () => ({
+    requesterKey: 'user:sara',
+    conversationKey: 'dm:sara:nora',
+    connectionRef: 'linear:acme',
+    toolName: 'create_issue',
+    heading: 'changesThings' as const,
+    toolFingerprint: 'fp-1',
+    policyRevision: 3,
+    arguments: { title: 'Another one', description: 'Something else', team: 'WEB' },
+  });
+
+  async function remember(extra: Partial<CreateRequestInput> = {}, times: { idleMinutes?: number; absoluteMinutes?: number } = {}) {
+    const request = await waiting({ rememberScope: SCOPE, ...extra });
+    await decide(BOT, request.id, { actorKey: request.requesterKey, revision: 1, decision: 'approveAndRemember', ...times }, T0);
+  }
+
+  (REAL ? it.skip : it)('uses the bot’s own idle and most times when the caller sends none', async () => {
+    Object.assign(db.bots[0], { allowMoreIdleMinutes: 30, allowMoreMaxMinutes: 240 });
+    await remember();
+    expect(await findGrant(BOT, lookup(), at(minutes(29)))).not.toBeNull();
+    expect(await findGrant(BOT, lookup(), at(minutes(31)))).toBeNull();
+    for (let m = 25; m < 240; m += 25) await touchGrants(BOT, { requesterKey: 'user:sara', conversationKey: 'dm:sara:nora' }, at(minutes(m)));
+    expect(await findGrant(BOT, lookup(), at(minutes(239)))).not.toBeNull();
+    expect(await findGrant(BOT, lookup(), at(minutes(241)))).toBeNull();
+  });
+
+  (REAL ? it.skip : it)('a time the caller sends still wins over the bot’s', async () => {
+    Object.assign(db.bots[0], { allowMoreIdleMinutes: 120, allowMoreMaxMinutes: 1440 });
+    await remember({}, { idleMinutes: 5, absoluteMinutes: 20 });
+    expect(await findGrant(BOT, lookup(), at(minutes(4)))).not.toBeNull();
+    expect(await findGrant(BOT, lookup(), at(minutes(6)))).toBeNull();
+    // A busy chat keeps it going until the caller's 20 minutes, not the bot's 24 hours
+    await remember({ proposalKey: 'job3:turn1:call1', requesterKey: 'user:omar', conversationKey: 'dm:omar:nora' }, { idleMinutes: 5, absoluteMinutes: 20 });
+    const omar = () => ({ ...lookup(), requesterKey: 'user:omar', conversationKey: 'dm:omar:nora' });
+    for (let m = 4; m < 20; m += 4) await touchGrants(BOT, { requesterKey: 'user:omar', conversationKey: 'dm:omar:nora' }, at(minutes(m)));
+    expect(await findGrant(BOT, omar(), at(minutes(19)))).not.toBeNull();
+    expect(await findGrant(BOT, omar(), at(minutes(21)))).toBeNull();
+  });
+
+  it('lists what is allowed now: who, which tool, what stays fixed and when it ends, newest first, nothing from the card', async () => {
+    await remember();
+    await remember({ proposalKey: 'job2:turn1:call1', requesterKey: 'user:omar', conversationKey: 'dm:omar:nora', arguments: { ...ISSUE, team: 'MAP' }, rememberScope: { fixed: { team: 'MAP' }, varies: ['title', 'description'] } });
+    // Two different times to be created at, so the order is the newest's and not whichever was saved first
+    const grantsTable = (prisma as unknown as { botActionGrant: { updateMany(args: unknown): Promise<unknown> } }).botActionGrant;
+    await grantsTable.updateMany({ where: { requesterKey: 'user:sara' }, data: { createdAt: at(10) } });
+    await grantsTable.updateMany({ where: { requesterKey: 'user:omar' }, data: { createdAt: at(20) } });
+    const grants = await listActiveGrants(BOT, at(60));
+    const team = (g: (typeof grants)[number]) => (g.scope.fixed as { team?: unknown }).team;
+    expect(grants.map(team)).toEqual(['MAP', 'WEB']);
+    await grantsTable.updateMany({ where: { requesterKey: 'user:sara' }, data: { createdAt: at(30) } });
+    expect((await listActiveGrants(BOT, at(60))).map(team)).toEqual(['WEB', 'MAP']);
+    const sara = grants.find((g) => team(g) === 'WEB');
+    // Who it is for is said by name only, never by the key the game names them by
+    expect(grants.every((g) => !('requesterKey' in g))).toBe(true);
+    expect(sara).toMatchObject({ toolName: 'create_issue', heading: 'changesThings', connectionRef: 'linear:acme', scope: SCOPE });
+    expect(sara?.idleExpiresAt).toEqual(at(minutes(DEFAULTS.idleMinutes)));
+    expect(sara?.absoluteExpiresAt).toEqual(at(minutes(DEFAULTS.absoluteMinutes)));
+    expect(JSON.stringify(grants)).not.toContain('Fix the login page');
+  });
+
+  (REAL ? it.skip : it)('names the person and the tool for the list when Orbit knows them, and says nothing when it does not', async () => {
+    db.users.push({ uuid: 'user:sara', name: ' Sara ', isGuest: false }, { uuid: 'user:guest1', name: null, isGuest: true });
+    db.tools.push({ botId: BOT, name: 'create_issue', title: 'Create issue' });
+    await remember();
+    await remember({ proposalKey: 'job2:turn1:call1', requesterKey: 'user:guest1', conversationKey: 'dm:g:nora' });
+    await remember({ proposalKey: 'job3:turn1:call1', requesterKey: 'user:unknown', conversationKey: 'dm:u:nora', toolName: 'other_tool' });
+    const listed = (await listActiveGrants(BOT, at(60))).map((g) => ({ person: g.person, toolTitle: g.toolTitle }));
+    expect(listed).toHaveLength(3);
+    expect(listed).toEqual(
+      expect.arrayContaining([
+        { person: { name: 'Sara', isGuest: false }, toolTitle: 'Create issue' },
+        { person: { name: null, isGuest: true }, toolTitle: 'Create issue' },
+        { person: { name: null, isGuest: false }, toolTitle: null },
+      ])
+    );
+  });
+
+  (REAL ? it.skip : it)('finds a signed-in person the game named by their email as well as by their uuid', async () => {
+    db.users.push({ uuid: 'uuid-omar', email: 'omar@example.com', name: 'Omar', isGuest: false });
+    await remember({ requesterKey: 'omar@example.com', conversationKey: 'nearby:omar:nora' });
+    const [grant] = await listActiveGrants(BOT, at(60));
+    expect(grant.person).toEqual({ name: 'Omar', isGuest: false });
+    // The email the game named him by is never in the list
+    expect(JSON.stringify(grant)).not.toContain('omar@example.com');
+  });
+
+  it('leaves out one that ended: by time, by a revoke, or already ended', async () => {
+    await remember();
+    expect(await listActiveGrants(BOT, at(minutes(DEFAULTS.idleMinutes) + 1))).toEqual([]);
+    expect((await listActiveGrants(BOT, at(60))).length).toBe(1);
+    await revokeGrants(BOT, { requesterKey: 'user:sara', conversationKey: 'dm:sara:nora', reason: 'ask_again' }, at(70));
+    expect(await listActiveGrants(BOT, at(80))).toEqual([]);
+  });
+
+  it('End all ends every one, so the next change asks again, and says how many', async () => {
+    await remember();
+    await remember({ proposalKey: 'job2:turn1:call1', requesterKey: 'user:omar', conversationKey: 'dm:omar:nora' });
+    expect(await endAllGrants(BOT, at(90))).toEqual({ ended: 2 });
+    expect(await findGrant(BOT, lookup(), at(100))).toBeNull();
+    expect(await listActiveGrants(BOT, at(100))).toEqual([]);
+    expect(await endAllGrants(BOT, at(110))).toEqual({ ended: 0 });
+  });
+
+  it('End all leaves a card that is still waiting for a tap alone', async () => {
+    await remember();
+    const pending = await waiting({ proposalKey: 'job3:turn1:call1' });
+    await endAllGrants(BOT, at(90));
+    expect((await readRequest(BOT, pending.id, at(91)))?.status).toBe('waiting');
+  });
+});
+
+describe('closing one card with X', () => {
+  it('closes only that card, with nothing done and its own reason', async () => {
+    const first = await waiting();
+    const second = await waiting({ proposalKey: 'job1:turn1:call2' });
+    const result = await cancelRequest(BOT, first.id, { actorKey: 'user:sara', revision: 1 }, at(10));
+    expect(result.outcome).toBe('changed');
+    expect(result.action).toMatchObject({ status: 'closed', closedReason: 'cancelled', finishedAt: at(10), revision: 2 });
+    expect((await readRequest(BOT, second.id, at(11))).status).toBe('waiting');
+    expect(await claim(BOT, first.id, {}, at(12))).toMatchObject({ claimed: false, reason: 'closed' });
+  });
+
+  it('is only the asker’s to do', async () => {
+    const request = await waiting();
+    await failsWith(cancelRequest(BOT, request.id, { actorKey: 'user:omar', revision: 1 }, at(1)), 403, 'not_requester');
+    expect((await readRequest(BOT, request.id, at(2))).status).toBe('waiting');
+  });
+
+  it('gives one result for a double tap and for a tap that lost to an approval', async () => {
+    const request = await waiting();
+    const results = await Promise.all([
+      cancelRequest(BOT, request.id, { actorKey: 'user:sara', revision: 1 }, at(10)),
+      cancelRequest(BOT, request.id, { actorKey: 'user:sara', revision: 1 }, at(10)),
+    ]);
+    expect(results.map((r) => r.outcome).sort()).toEqual(['already_decided', 'changed']);
+
+    const other = await waiting({ proposalKey: 'job2:call1' });
+    await decide(BOT, other.id, { actorKey: 'user:sara', revision: 1, decision: 'approve' }, at(10));
+    const late = await cancelRequest(BOT, other.id, { actorKey: 'user:sara', revision: 1 }, at(11));
+    expect(late.outcome).toBe('already_decided');
+    expect(late.action.status).toBe('approved');
+  });
+
+  it('is turned away after the card’s time, by the server clock', async () => {
+    const request = await waiting();
+    const result = await cancelRequest(BOT, request.id, { actorKey: 'user:sara', revision: 1 }, at(minutes(DEFAULTS.reviewMinutes) + 1));
+    expect(result.outcome).toBe('expired');
+    expect(result.action).toMatchObject({ status: 'closed', closedReason: 'expired' });
+  });
+});
+
+describe('more time on a waiting card', () => {
+  it('gives another full wait from now and goes up a revision, without approving anything', async () => {
+    const request = await waiting();
+    const result = await extendReview(BOT, request.id, { actorKey: 'user:sara', revision: 1 }, at(minutes(9)));
+    expect(result.outcome).toBe('changed');
+    expect(result.action).toMatchObject({ status: 'waiting', revision: 2, approvedAt: null, reviewExpiresAt: at(minutes(9 + DEFAULTS.reviewMinutes)) });
+  });
+
+  it('uses the bot’s own wait and never makes a card shorter', async () => {
+    const request = await waiting({ reviewMinutes: 30 });
+    const result = await extendReview(BOT, request.id, { actorKey: 'user:sara', revision: 1, reviewMinutes: 5 }, at(minutes(2)));
+    expect(result.action.reviewExpiresAt).toEqual(at(minutes(30)));
+  });
+
+  it('can be asked for ten times and then says so', async () => {
+    const request = await waiting();
+    // The test title says ten: if the limit moves, this is where it is noticed
+    expect(MAX_EXTENSIONS).toBe(10);
+    let revision = 1;
+    for (let i = 0; i < MAX_EXTENSIONS; i++) {
+      const result = await extendReview(BOT, request.id, { actorKey: 'user:sara', revision }, at(minutes(i)));
+      expect(result.outcome).toBe('changed');
+      revision = result.action.revision;
+    }
+    await failsWith(extendReview(BOT, request.id, { actorKey: 'user:sara', revision }, at(minutes(MAX_EXTENSIONS))), 409, 'no_more_time');
+  });
+
+  it('is only the asker’s to ask, and not for a card that is gone or answered', async () => {
+    const request = await waiting();
+    await failsWith(extendReview(BOT, request.id, { actorKey: 'user:omar', revision: 1 }, at(1)), 403, 'not_requester');
+
+    await decide(BOT, request.id, { actorKey: 'user:sara', revision: 1, decision: 'approve' }, at(2));
+    expect((await extendReview(BOT, request.id, { actorKey: 'user:sara', revision: 1 }, at(3))).outcome).toBe('already_decided');
+
+    const old = await waiting({ proposalKey: 'job2:call1' });
+    const late = await extendReview(BOT, old.id, { actorKey: 'user:sara', revision: 1 }, at(minutes(DEFAULTS.reviewMinutes) + 1));
+    expect(late.outcome).toBe('expired');
+  });
+
+  it('is turned away when it carries a revision that is no longer the card’s', async () => {
+    const request = await waiting();
+    await extendReview(BOT, request.id, { actorKey: 'user:sara', revision: 1 }, at(1));
+    const stale = await extendReview(BOT, request.id, { actorKey: 'user:sara', revision: 1 }, at(2));
+    expect(stale.outcome).toBe('already_decided');
   });
 });
 

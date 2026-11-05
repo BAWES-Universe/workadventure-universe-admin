@@ -43,8 +43,14 @@ export const CARD_WAIT_MINUTES = [5, 10, 30] as const;
 
 export const TITLE_MAX = 255;
 export const DESCRIPTION_MAX = 2000;
-/** More tools than any server offers; stops a runaway script from filling the table. */
+/**
+ * More tools than any server offers; stops a runaway script from filling the table. The bot server keeps the same number
+ * (MAX_TOOLS_PER_SERVER in bots/mcp/ToolCatalog.ts of the game repo), so its list and this one stay identical. A server
+ * that has more is saved as cut, never silently shortened (see `truncated` below).
+ */
 export const MAX_TOOLS_PER_SERVER = 500;
+/** The most tools a server can be said to have; only shown to people. */
+export const MAX_TOTAL_SEEN = 1_000_000;
 
 const headingSchema = z.enum(HEADINGS);
 const settingSchema = z.enum(SETTINGS);
@@ -69,9 +75,17 @@ export const catalogSchema = z
           }),
       )
       .max(MAX_TOOLS_PER_SERVER),
+    /**
+     * True when the server has more tools than the bot server keeps, so `tools` is its first 500 and not all of them.
+     * Optional: a bot server that does not know about it sends neither field, and the server is then saved as not cut.
+     */
+    truncated: z.boolean().optional(),
+    /** How many tools the server has, when the bot server read them all. Left out when it did not (more pages were left). */
+    totalSeen: z.number().int().min(0).max(MAX_TOTAL_SEEN).optional(),
   })
   .strict()
-  .refine((body) => new Set(body.tools.map((tool) => tool.name)).size === body.tools.length, { message: 'Each tool name once' });
+  .refine((body) => new Set(body.tools.map((tool) => tool.name)).size === body.tools.length, { message: 'Each tool name once' })
+  .refine((body) => body.totalSeen === undefined || body.truncated === true, { message: 'A count of tools goes with a cut list' });
 
 export const moveSchema = z.object({ heading: headingSchema }).strict();
 
@@ -98,6 +112,8 @@ export const botToolSettingsSchema = z
     askBeforeMaking: z.union([z.literal(3), z.literal(5), z.literal(10), z.null()]).optional(),
     askWhichWay: z.enum(ASK_WHICH_WAY).optional(),
     cardWaitMinutes: z.union([z.literal(5), z.literal(10), z.literal(30)]).optional(),
+    allowMoreIdleMinutes: z.union([z.literal(30), z.literal(60), z.literal(120)]).optional(),
+    allowMoreMaxMinutes: z.union([z.literal(240), z.literal(480), z.literal(1440)]).optional(),
   })
   .strict()
   .refine((body) => Object.keys(body).length > 0, { message: 'Nothing to change' });
@@ -128,6 +144,10 @@ export interface ServerToolsJson {
   policyRevision: number;
   settings: Record<Heading, Setting>;
   tools: ToolJson[];
+  /** The server has more tools than are listed here (the bot server keeps the first 500). Plain text for people: "Showing the first 500 of N tools". */
+  truncated: boolean;
+  /** How many tools the server has, when the bot server knew; null when it only knew there were more. */
+  totalSeen: number | null;
 }
 
 const TOOL_SELECT = {
@@ -155,6 +175,8 @@ const SERVER_SELECT = {
   changeSetting: true,
   deleteSendSetting: true,
   policyRevision: true,
+  toolsCut: true,
+  toolsSeen: true,
 } as const;
 
 type ServerRow = Prisma.BotMcpServerGetPayload<{ select: typeof SERVER_SELECT }>;
@@ -207,6 +229,8 @@ async function describe(db: Prisma.TransactionClient | typeof prisma, serverId: 
     policyRevision: server.policyRevision,
     settings: settingsOf(server),
     tools,
+    truncated: server.toolsCut,
+    totalSeen: server.toolsCut ? server.toolsSeen : null,
   };
 }
 
@@ -230,14 +254,16 @@ export interface CatalogResult extends ServerToolsJson {
 /**
  * Replace a server's tool list with what the bot server just read. A new tool waits to be confirmed. A tool whose
  * fingerprint is different goes back to not confirmed yet, with its heading cleared, and only that tool does. A tool the
- * server no longer offers is removed. Its suggestion is only a suggestion and never lets it run.
+ * server no longer offers is removed. When the list is cut (the server has more tools than the bot server keeps, so a tool
+ * missing from it may still be there) only a tool nobody confirmed or moved is removed, and the decided ones stay. Its suggestion is only a suggestion and never lets it run. It also saves whether the
+ * list is cut; a bot server that does not say leaves it "not cut".
  */
 export async function syncCatalog(botId: string, serverId: string, body: z.infer<typeof catalogSchema>): Promise<CatalogResult> {
   return prisma.$transaction(async (tx) => {
-    await loadServer(tx, botId, serverId);
+    const server = await loadServer(tx, botId, serverId);
     const existing = await tx.botMcpTool.findMany({
       where: { serverId },
-      select: { id: true, name: true, fingerprint: true, confirmedAt: true, heading: true, suggestedHeading: true, suggestionSource: true },
+      select: { id: true, name: true, fingerprint: true, confirmedAt: true, heading: true, movedById: true, suggestedHeading: true, suggestionSource: true },
     });
     const byName = new Map(existing.map((tool) => [tool.name, tool]));
     const added: string[] = [];
@@ -273,12 +299,21 @@ export async function syncCatalog(botId: string, serverId: string, body: z.infer
       }
     }
 
+    // A cut list is only the first 500 of what the server has, so a tool missing from it may still be there: one that a
+    // person confirmed or moved stays. A leftover nobody decided on goes, so it can't block confirming the real list.
+    const cut = body.truncated === true;
     const offered = new Set(body.tools.map((tool) => tool.name));
-    const removed = existing.filter((tool) => !offered.has(tool.name));
+    const decided = (tool: (typeof existing)[number]) => !!tool.confirmedAt || !!tool.heading || !!tool.movedById;
+    const removed = existing.filter((tool) => !offered.has(tool.name) && !(cut && decided(tool)));
     if (removed.length > 0) await tx.botMcpTool.deleteMany({ where: { id: { in: removed.map((tool) => tool.id) } } });
 
     if (added.length > 0 || changed.length > 0 || removed.length > 0 || reworded) {
       await tx.botMcpServer.update({ where: { id: serverId }, data: bump });
+    }
+    // Whether the list is the whole server or its first 500 is not a policy: it moves no revision and confirms nothing
+    const seen = cut ? (body.totalSeen ?? null) : null;
+    if (server.toolsCut !== cut || server.toolsSeen !== seen) {
+      await tx.botMcpServer.update({ where: { id: serverId }, data: { toolsCut: cut, toolsSeen: seen } });
     }
     return { ...(await describe(tx, serverId)), added, changed, removed: removed.map((tool) => tool.name) };
   });
@@ -384,14 +419,34 @@ export interface BotToolSettings {
   askBeforeMaking: number | null;
   askWhichWay: (typeof ASK_WHICH_WAY)[number];
   cardWaitMinutes: number;
+  /** "Allow more": minutes without the asker's messages before it ends (30, 60 or 120; default 60). */
+  allowMoreIdleMinutes: number;
+  /** "Allow more": minutes it lasts at most, even while the asker keeps chatting (240, 480 or 1440; default 480). */
+  allowMoreMaxMinutes: number;
 }
 
-const BOT_SETTINGS_SELECT = { askBeforeMaking: true, askWhichWay: true, cardWaitMinutes: true } as const;
+const BOT_SETTINGS_SELECT = {
+  askBeforeMaking: true,
+  askWhichWay: true,
+  cardWaitMinutes: true,
+  allowMoreIdleMinutes: true,
+  allowMoreMaxMinutes: true,
+} as const;
+
+function toBotToolSettings(bot: Prisma.BotGetPayload<{ select: typeof BOT_SETTINGS_SELECT }>): BotToolSettings {
+  return {
+    askBeforeMaking: bot.askBeforeMaking,
+    askWhichWay: bot.askWhichWay as BotToolSettings['askWhichWay'],
+    cardWaitMinutes: bot.cardWaitMinutes,
+    allowMoreIdleMinutes: bot.allowMoreIdleMinutes,
+    allowMoreMaxMinutes: bot.allowMoreMaxMinutes,
+  };
+}
 
 /** A bot's own limits for asking: null when there is no such bot. */
 export async function readBotToolSettings(botId: string): Promise<BotToolSettings | null> {
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: BOT_SETTINGS_SELECT });
-  return bot ? { askBeforeMaking: bot.askBeforeMaking, askWhichWay: bot.askWhichWay as BotToolSettings['askWhichWay'], cardWaitMinutes: bot.cardWaitMinutes } : null;
+  return bot ? toBotToolSettings(bot) : null;
 }
 
 export async function saveBotToolSettings(botId: string, body: z.infer<typeof botToolSettingsSchema>): Promise<BotToolSettings> {
@@ -399,6 +454,8 @@ export async function saveBotToolSettings(botId: string, body: z.infer<typeof bo
   if (body.askBeforeMaking !== undefined) data.askBeforeMaking = body.askBeforeMaking;
   if (body.askWhichWay !== undefined) data.askWhichWay = body.askWhichWay;
   if (body.cardWaitMinutes !== undefined) data.cardWaitMinutes = body.cardWaitMinutes;
+  if (body.allowMoreIdleMinutes !== undefined) data.allowMoreIdleMinutes = body.allowMoreIdleMinutes;
+  if (body.allowMoreMaxMinutes !== undefined) data.allowMoreMaxMinutes = body.allowMoreMaxMinutes;
   const bot = await prisma.bot.update({ where: { id: botId }, data, select: BOT_SETTINGS_SELECT });
-  return { askBeforeMaking: bot.askBeforeMaking, askWhichWay: bot.askWhichWay as BotToolSettings['askWhichWay'], cardWaitMinutes: bot.cardWaitMinutes };
+  return toBotToolSettings(bot);
 }

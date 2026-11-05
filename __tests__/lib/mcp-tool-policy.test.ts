@@ -11,6 +11,8 @@ type ServerRow = {
   changeSetting: string;
   deleteSendSetting: string;
   policyRevision: number;
+  toolsCut: boolean;
+  toolsSeen: number | null;
 };
 type ToolRow = {
   id: string;
@@ -31,7 +33,7 @@ const state = {
   servers: [] as ServerRow[],
   tools: [] as ToolRow[],
   users: { 'u-sara': 'Sara', 'u-omar': 'Omar' } as Record<string, string | null>,
-  bot: { id: 'bot-1', askBeforeMaking: 5 as number | null, askWhichWay: 'rarely', cardWaitMinutes: 10 },
+  bot: { id: 'bot-1', askBeforeMaking: 5 as number | null, askWhichWay: 'rarely', cardWaitMinutes: 10, allowMoreIdleMinutes: 60, allowMoreMaxMinutes: 480 },
   nextId: 1,
 };
 
@@ -152,6 +154,8 @@ const server = (over: Partial<ServerRow> = {}): ServerRow => ({
   changeSetting: 'asksFirst',
   deleteSendSetting: 'asksFirst',
   policyRevision: 1,
+  toolsCut: false,
+  toolsSeen: null,
   ...over,
 });
 
@@ -179,7 +183,7 @@ beforeEach(() => {
   state.servers = [server()];
   state.tools = [];
   state.nextId = 1;
-  state.bot = { id: 'bot-1', askBeforeMaking: 5, askWhichWay: 'rarely', cardWaitMinutes: 10 };
+  state.bot = { id: 'bot-1', askBeforeMaking: 5, askWhichWay: 'rarely', cardWaitMinutes: 10, allowMoreIdleMinutes: 60, allowMoreMaxMinutes: 480 };
 });
 
 describe('what a request may say', () => {
@@ -204,10 +208,10 @@ describe('what a request may say', () => {
   });
 
   it('a bot’s limits: only the offered choices, null for no limit', () => {
-    for (const ok of [{ askBeforeMaking: 3 }, { askBeforeMaking: null }, { askWhichWay: 'beforeBiggerJobs' }, { cardWaitMinutes: 30 }]) {
+    for (const ok of [{ askBeforeMaking: 3 }, { askBeforeMaking: null }, { askWhichWay: 'beforeBiggerJobs' }, { cardWaitMinutes: 30 }, { allowMoreIdleMinutes: 30 }, { allowMoreIdleMinutes: 120 }, { allowMoreMaxMinutes: 240 }, { allowMoreMaxMinutes: 1440 }]) {
       expect(botToolSettingsSchema.safeParse(ok).success).toBe(true);
     }
-    for (const bad of [{}, { askBeforeMaking: 4 }, { askWhichWay: 'often' }, { cardWaitMinutes: 15 }, { cardWaitMinutes: null }]) {
+    for (const bad of [{}, { askBeforeMaking: 4 }, { askWhichWay: 'often' }, { cardWaitMinutes: 15 }, { cardWaitMinutes: null }, { allowMoreIdleMinutes: 45 }, { allowMoreIdleMinutes: 240 }, { allowMoreMaxMinutes: 60 }, { allowMoreMaxMinutes: null }]) {
       expect(botToolSettingsSchema.safeParse(bad).success).toBe(false);
     }
   });
@@ -233,6 +237,8 @@ describe('a server’s state', () => {
       policyRevision: 1,
       settings: DEFAULT_SETTINGS,
       tools: [],
+      truncated: false,
+      totalSeen: null,
     });
   });
 
@@ -319,6 +325,95 @@ describe('saving the tool list', () => {
   it('answers 404 for a server that is not this bot’s, and saves nothing', async () => {
     await expect(syncCatalog('bot-2', 'srv-1', catalog(tool('a')))).rejects.toMatchObject({ status: 404 });
     expect(state.tools).toHaveLength(0);
+  });
+});
+
+describe('a server with more tools than the bot server keeps', () => {
+  const cutList = (extra: { truncated?: boolean; totalSeen?: number }, ...tools: ReturnType<typeof tool>[]) => catalogSchema.parse({ tools, ...extra });
+
+  it('reads as not cut for a server that never said otherwise, and for a bot server that does not send the flag', async () => {
+    expect(await readServerTools('bot-1', 'srv-1')).toMatchObject({ truncated: false, totalSeen: null });
+    const saved = await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    expect(saved).toMatchObject({ truncated: false, totalSeen: null });
+  });
+
+  it('saves that the list is cut and how many tools the server has', async () => {
+    const saved = await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('a')));
+    expect(saved).toMatchObject({ truncated: true, totalSeen: 731 });
+    expect(await readServerTools('bot-1', 'srv-1')).toMatchObject({ truncated: true, totalSeen: 731 });
+  });
+
+  it('saves that the list is cut when the count is not known (more pages were left)', async () => {
+    const saved = await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true }, tool('a')));
+    expect(saved).toMatchObject({ truncated: true, totalSeen: null });
+  });
+
+  it('goes back to not cut when the next list is whole, or when an older bot server saves without the flag', async () => {
+    await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('a')));
+    expect(await syncCatalog('bot-1', 'srv-1', cutList({ truncated: false }, tool('a')))).toMatchObject({ truncated: false, totalSeen: null });
+    await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 600 }, tool('a')));
+    expect(await syncCatalog('bot-1', 'srv-1', catalog(tool('a')))).toMatchObject({ truncated: false, totalSeen: null });
+  });
+
+  it('moves no policy revision and confirms nothing, whether the list is cut or not', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    await confirmTools('bot-1', 'srv-1', 'u-sara');
+    const revision = state.servers[0].policyRevision;
+    const cut = await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 900 }, tool('a')));
+    expect(cut).toMatchObject({ truncated: true, totalSeen: 900, policyRevision: revision, state: 'confirmed', added: [], changed: [], removed: [] });
+    const whole = await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    expect(whole).toMatchObject({ truncated: false, policyRevision: revision, state: 'confirmed' });
+  });
+
+  it('keeps a decided tool missing from a cut list (it may be past the first 500), and removes it once the list is whole', async () => {
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a'), tool('b')));
+    await confirmTools('bot-1', 'srv-1', 'u-sara');
+    const revision = state.servers[0].policyRevision;
+    const cut = await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('a')));
+    expect(cut.removed).toEqual([]);
+    expect(state.tools.map((t) => t.name).sort()).toEqual(['a', 'b']);
+    expect(state.servers[0].policyRevision).toBe(revision);
+    const whole = await syncCatalog('bot-1', 'srv-1', catalog(tool('a')));
+    expect(whole.removed).toEqual(['b']);
+    expect(state.tools.map((t) => t.name)).toEqual(['a']);
+  });
+
+  it('drops a leftover nobody decided on from a cut list, so it can not block confirming the real list', async () => {
+    // The first save saw a, b, c. A later cut list has different first tools: b was confirmed, c moved, a was never touched.
+    await syncCatalog('bot-1', 'srv-1', catalog(tool('a', { suggestedHeading: null, suggestionSource: null }), tool('b'), tool('c', { suggestedHeading: null, suggestionSource: null })));
+    await confirmTools('bot-1', 'srv-1', 'u-sara', [state.tools.find((t) => t.name === 'b')!.id]);
+    await moveTool('bot-1', 'srv-1', state.tools.find((t) => t.name === 'c')!.id, 'makesNew', 'u-sara');
+    await expect(confirmTools('bot-1', 'srv-1', 'u-sara')).rejects.toThrow(/Choose what a/);
+
+    const cut = await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('d')));
+    expect(cut.removed).toEqual(['a']);
+    expect(cut.added).toEqual(['d']);
+    expect(state.tools.map((t) => t.name).sort()).toEqual(['b', 'c', 'd']);
+
+    // The decided tools keep their answers, and the real list can be confirmed
+    const confirmed = await confirmTools('bot-1', 'srv-1', 'u-sara');
+    expect(confirmed.state).toBe('confirmed');
+    expect(state.tools.find((t) => t.name === 'b')).toMatchObject({ confirmedById: 'u-sara' });
+    expect(state.tools.find((t) => t.name === 'c')).toMatchObject({ heading: 'makesNew' });
+  });
+
+  it('writes the server only when what it says about the cut changed', async () => {
+    await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('a')));
+    const update = prisma.botMcpServer.update as jest.Mock;
+    update.mockClear();
+    await syncCatalog('bot-1', 'srv-1', cutList({ truncated: true, totalSeen: 731 }, tool('a')));
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('refuses a count without a cut list, a negative or silly count, and more than 500 tools in one save', () => {
+    expect(catalogSchema.safeParse({ tools: [tool('a')], totalSeen: 731 }).success).toBe(false);
+    expect(catalogSchema.safeParse({ tools: [tool('a')], truncated: false, totalSeen: 731 }).success).toBe(false);
+    expect(catalogSchema.safeParse({ tools: [tool('a')], truncated: true, totalSeen: -1 }).success).toBe(false);
+    expect(catalogSchema.safeParse({ tools: [tool('a')], truncated: true, totalSeen: 2_000_000 }).success).toBe(false);
+    expect(catalogSchema.safeParse({ tools: [tool('a')], truncated: true, totalSeen: 731.5 }).success).toBe(false);
+    const many = Array.from({ length: 501 }, (_, i) => tool(`t${i}`));
+    expect(catalogSchema.safeParse({ tools: many.slice(0, 500), truncated: true, totalSeen: 501 }).success).toBe(true);
+    expect(catalogSchema.safeParse({ tools: many, truncated: true, totalSeen: 501 }).success).toBe(false);
   });
 });
 
@@ -541,13 +636,45 @@ describe('the setting under each heading', () => {
 });
 
 describe('a bot’s limits for asking', () => {
-  it('starts with the defaults: before making more than 5, rarely asks which way, a card waits 10 minutes', async () => {
-    expect(await readBotToolSettings('bot-1')).toEqual({ askBeforeMaking: 5, askWhichWay: 'rarely', cardWaitMinutes: 10 });
+  it('starts with the defaults: before making more than 5, rarely asks which way, a card waits 10 minutes, allow more lasts 1 hour quiet and 8 hours at most', async () => {
+    expect(await readBotToolSettings('bot-1')).toEqual({
+      askBeforeMaking: 5,
+      askWhichWay: 'rarely',
+      cardWaitMinutes: 10,
+      allowMoreIdleMinutes: 60,
+      allowMoreMaxMinutes: 480,
+    });
   });
 
   it('changes only what is sent, and null is no limit', async () => {
-    expect(await saveBotToolSettings('bot-1', { cardWaitMinutes: 30 })).toEqual({ askBeforeMaking: 5, askWhichWay: 'rarely', cardWaitMinutes: 30 });
-    expect(await saveBotToolSettings('bot-1', { askBeforeMaking: null, askWhichWay: 'never' })).toEqual({ askBeforeMaking: null, askWhichWay: 'never', cardWaitMinutes: 30 });
+    expect(await saveBotToolSettings('bot-1', { cardWaitMinutes: 30 })).toMatchObject({ askBeforeMaking: 5, askWhichWay: 'rarely', cardWaitMinutes: 30 });
+    expect(await saveBotToolSettings('bot-1', { askBeforeMaking: null, askWhichWay: 'never' })).toMatchObject({ askBeforeMaking: null, askWhichWay: 'never', cardWaitMinutes: 30 });
+  });
+
+  it('saves the two allow-more times on their own, leaving the other limits as they were', async () => {
+    // Other limits that are not the defaults, so a save that put the defaults back would show
+    await saveBotToolSettings('bot-1', { askBeforeMaking: null, askWhichWay: 'beforeBiggerJobs', cardWaitMinutes: 30 });
+    expect(await saveBotToolSettings('bot-1', { allowMoreIdleMinutes: 120 })).toEqual({
+      askBeforeMaking: null,
+      askWhichWay: 'beforeBiggerJobs',
+      cardWaitMinutes: 30,
+      allowMoreIdleMinutes: 120,
+      allowMoreMaxMinutes: 480,
+    });
+    expect(await saveBotToolSettings('bot-1', { allowMoreMaxMinutes: 1440 })).toEqual({
+      askBeforeMaking: null,
+      askWhichWay: 'beforeBiggerJobs',
+      cardWaitMinutes: 30,
+      allowMoreIdleMinutes: 120,
+      allowMoreMaxMinutes: 1440,
+    });
+    expect(await readBotToolSettings('bot-1')).toEqual({
+      askBeforeMaking: null,
+      askWhichWay: 'beforeBiggerJobs',
+      cardWaitMinutes: 30,
+      allowMoreIdleMinutes: 120,
+      allowMoreMaxMinutes: 1440,
+    });
   });
 
   it('answers null for a bot that is not there', async () => {

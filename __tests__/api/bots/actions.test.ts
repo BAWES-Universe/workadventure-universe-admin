@@ -6,6 +6,8 @@ import { NextRequest } from 'next/server';
 import { POST as CREATE } from '@/app/api/bots/[id]/actions/route';
 import { GET as READ } from '@/app/api/bots/[id]/actions/[actionId]/route';
 import { POST as DECIDE } from '@/app/api/bots/[id]/actions/[actionId]/decision/route';
+import { POST as CANCEL } from '@/app/api/bots/[id]/actions/[actionId]/cancel/route';
+import { POST as EXTEND } from '@/app/api/bots/[id]/actions/[actionId]/extend/route';
 import { POST as CLAIM } from '@/app/api/bots/[id]/actions/[actionId]/claim/route';
 import { POST as FINISH } from '@/app/api/bots/[id]/actions/[actionId]/finish/route';
 import { POST as RECONCILE } from '@/app/api/bots/[id]/actions/[actionId]/reconcile/route';
@@ -23,6 +25,8 @@ jest.mock('@/lib/bot-actions', () => ({
   createRequest: jest.fn(),
   readRequest: jest.fn(),
   decide: jest.fn(),
+  cancelRequest: jest.fn(),
+  extendReview: jest.fn(),
   claim: jest.fn(),
   finishAttempt: jest.fn(),
   reconcile: jest.fn(),
@@ -33,7 +37,7 @@ jest.mock('@/lib/bot-actions', () => ({
   revokeGrants: jest.fn(),
 }));
 
-const MOCKED = ['createRequest', 'readRequest', 'decide', 'claim', 'finishAttempt', 'reconcile', 'supersedeWaiting', 'sweep', 'findGrant', 'touchGrants', 'revokeGrants'] as const;
+const MOCKED = ['createRequest', 'readRequest', 'decide', 'cancelRequest', 'extendReview', 'claim', 'finishAttempt', 'reconcile', 'supersedeWaiting', 'sweep', 'findGrant', 'touchGrants', 'revokeGrants'] as const;
 const mocks = lib as unknown as Record<(typeof MOCKED)[number], jest.Mock>;
 
 const params = { params: Promise.resolve({ id: 'bot-1', actionId: 'act-1' }) };
@@ -67,6 +71,8 @@ beforeEach(() => {
   mocks.createRequest.mockResolvedValue({ action: ACTION, created: true });
   mocks.readRequest.mockResolvedValue(ACTION);
   mocks.decide.mockResolvedValue({ outcome: 'decided', action: ACTION, grantId: null });
+  mocks.cancelRequest.mockResolvedValue({ outcome: 'changed', action: ACTION });
+  mocks.extendReview.mockResolvedValue({ outcome: 'changed', action: ACTION });
   mocks.claim.mockResolvedValue({ claimed: true, action: ACTION, attemptId: 'att-1', attemptNo: 1, idempotencyKey: 'act-1' });
   mocks.finishAttempt.mockResolvedValue(ACTION);
   mocks.reconcile.mockResolvedValue(ACTION);
@@ -84,6 +90,8 @@ const everything: [string, Handler, string, unknown][] = [
   ['save', CREATE as Handler, 'POST', CREATE_BODY],
   ['read', READ as Handler, 'GET', undefined],
   ['decide', DECIDE as Handler, 'POST', DECIDE_BODY],
+  ['close a card', CANCEL as Handler, 'POST', { actorKey: 'user:sara', revision: 1 }],
+  ['more time', EXTEND as Handler, 'POST', { actorKey: 'user:sara', revision: 1 }],
   ['claim', CLAIM as Handler, 'POST', {}],
   ['finish', FINISH as Handler, 'POST', { attemptId: 'att-1', outcome: 'succeeded' }],
   ['reconcile', RECONCILE as Handler, 'POST', { outcome: 'succeeded' }],
@@ -151,6 +159,31 @@ describe('what each one does', () => {
       expect((await call(DECIDE as Handler, 'POST', body)).status).toBe(400);
     }
     expect(mocks.decide).not.toHaveBeenCalled();
+  });
+
+  it('answers closing a card and more time: 200 when this one changed it, 409 with what happened when it did not', async () => {
+    for (const [handler, mock] of [
+      [CANCEL, mocks.cancelRequest],
+      [EXTEND, mocks.extendReview],
+    ] as const) {
+      expect((await call(handler as Handler, 'POST', { actorKey: 'user:sara', revision: 1 })).status).toBe(200);
+      expect(mock).toHaveBeenCalledWith('bot-1', 'act-1', { actorKey: 'user:sara', revision: 1 });
+      mock.mockResolvedValue({ outcome: 'expired', action: { ...ACTION, status: 'closed' } });
+      const lost = await call(handler as Handler, 'POST', { actorKey: 'user:sara', revision: 1 });
+      expect(lost.status).toBe(409);
+      expect(await lost.json()).toMatchObject({ outcome: 'expired' });
+    }
+  });
+
+  it('takes nothing with closing a card or more time but who and which revision (and the card wait for more time)', async () => {
+    for (const handler of [CANCEL, EXTEND]) {
+      for (const body of [{ actorKey: 'user:sara' }, { actorKey: 'user:sara', revision: 1, arguments: { title: 'other' } }, { revision: 1 }]) {
+        expect((await call(handler as Handler, 'POST', body)).status).toBe(400);
+      }
+    }
+    expect((await call(EXTEND as Handler, 'POST', { actorKey: 'user:sara', revision: 1, reviewMinutes: 0 })).status).toBe(400);
+    expect(mocks.cancelRequest).not.toHaveBeenCalled();
+    expect(mocks.extendReview).not.toHaveBeenCalled();
   });
 
   it('answers a claim that won with 200 and one that lost with 409', async () => {

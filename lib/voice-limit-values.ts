@@ -99,3 +99,54 @@ export function voiceReplies(window: number, limits: VoiceLimits, guest: boolean
   const left = Math.max(0, Math.floor(window) - textReserve(window, limits.textReserveShare));
   return guest ? Math.min(left, limits.guestVoiceReplies) : left;
 }
+
+/**
+ * The limits a voice key's owner can set for bots that use their key (#783), by the job each belongs to: how long a person may
+ * speak to a bot and how long a bot listens in a day are the key's listening, how much a bot says in a reply is its speaking.
+ */
+export const LISTENING_KEY_LIMITS = ['turnSeconds', 'listenMinutesPerDay'] as const;
+export const SPEAKING_KEY_LIMITS = ['replyCharacters', 'replySeconds'] as const;
+export const VOICE_KEY_LIMIT_NAMES = [...LISTENING_KEY_LIMITS, ...SPEAKING_KEY_LIMITS] as const;
+
+export type VoiceKeyLimitName = (typeof VOICE_KEY_LIMIT_NAMES)[number];
+export type VoiceKeyLimits = Pick<VoiceLimits, VoiceKeyLimitName>;
+
+/** One of a key's limits: what applies, the server's current value for it (the recommended one), and whether the owner changed it. */
+export interface VoiceKeyLimit {
+  value: number;
+  recommended: number;
+  changed: boolean;
+}
+export type VoiceKeyLimitValues = Record<VoiceKeyLimitName, VoiceKeyLimit>;
+
+const isKeyLimit = (name: string): name is VoiceKeyLimitName => (VOICE_KEY_LIMIT_NAMES as readonly string[]).includes(name);
+
+/** The values a key's owner saved: only the four names, each one that is there and fits its range. */
+export function savedVoiceKeyLimits(saved: unknown): Partial<VoiceKeyLimits> {
+  const out: Partial<VoiceKeyLimits> = {};
+  if (!isRecord(saved)) return out;
+  for (const name of VOICE_KEY_LIMIT_NAMES) {
+    const value = saved[name];
+    if (fits(value, VOICE_RANGES[name])) out[name] = value;
+  }
+  return out;
+}
+
+/** A key's limits: what the owner saved, the server's current value (`server`) for the rest. */
+export function readVoiceKeyLimits(saved: unknown, server: VoiceLimits): VoiceKeyLimitValues {
+  const own = savedVoiceKeyLimits(saved);
+  const entry = (name: VoiceKeyLimitName): VoiceKeyLimit => {
+    const value = own[name] ?? server[name];
+    return { value, recommended: server[name], changed: value !== server[name] };
+  };
+  return { turnSeconds: entry('turnSeconds'), replyCharacters: entry('replyCharacters'), replySeconds: entry('replySeconds'), listenMinutesPerDay: entry('listenMinutesPerDay') };
+}
+
+/** A change to a key's limits: only the four a key has, each a whole number inside its range (the same ranges as the server's). */
+export function checkVoiceKeyLimits(input: unknown): Checked<Partial<VoiceKeyLimits>> {
+  if (!isRecord(input)) return { ok: false, error: 'Expected an object' };
+  for (const name of Object.keys(input)) {
+    if (Object.prototype.hasOwnProperty.call(VOICE_RANGES, name) && !isKeyLimit(name)) return { ok: false, error: `${name} is set for all of Universe, not for a key` };
+  }
+  return checkVoiceLimits(input) as Checked<Partial<VoiceKeyLimits>>;
+}
