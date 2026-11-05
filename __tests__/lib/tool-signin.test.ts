@@ -155,13 +155,29 @@ describe('the bot server’s report', () => {
 
   it('"ok" clears both and takes the card down; a repeat changes nothing', async () => {
     db.botMcpServer.findFirst.mockResolvedValue({ id: 's1' });
-    db.botMcpServer.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+    // Each report is the clear, then the time kept
+    db.botMcpServer.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
     db.botMcpServer.findMany.mockResolvedValue([]);
     db.userNotice.findMany.mockResolvedValue([{ id: 'n1', userId: 'yousef' }]);
     expect(await reportToolSignIn('bot-1', 's1', { state: 'ok' })).toEqual({ changed: true });
     expect(await reportToolSignIn('bot-1', 's1', { state: 'ok' })).toEqual({ changed: false });
     expect(db.botMcpServer.updateMany.mock.calls[0][0].data).toEqual({ signInLostAt: null, signInLostStatus: null, noAnswerAt: null });
     expect(dismissed()).toEqual(['n1']);
+  });
+
+  it('"ok" keeps the time it saw the tool working, so an older failure that reports after it is turned away', async () => {
+    db.botMcpServer.findFirst.mockResolvedValue({ id: 's1' });
+    db.botMcpServer.updateMany.mockResolvedValue({ count: 0 });
+    // Nothing was down: the clear changes nothing, but the time is still kept
+    expect(await reportToolSignIn('bot-1', 's1', { state: 'ok', at: T2 })).toEqual({ changed: false });
+    const stamp = db.botMcpServer.updateMany.mock.calls[1][0];
+    expect(stamp).toEqual({
+      where: { id: 's1', botId: 'bot-1', OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: T2 } }] },
+      data: { reconnectedAt: T2 },
+    });
+    // The failure from before it (T1) is refused by the same rule that guards a reconnect
+    await reportToolSignIn('bot-1', 's1', { state: 'expired', at: T1 });
+    expect(db.botMcpServer.updateMany.mock.calls[2][0].where.OR).toEqual([{ reconnectedAt: null }, { reconnectedAt: { lt: T1 } }]);
   });
 });
 

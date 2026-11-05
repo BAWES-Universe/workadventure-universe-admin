@@ -155,6 +155,9 @@ export async function reportToolSignIn(botId: string, serverId: string, report: 
     where: { id: serverId, botId, OR: [{ signInLostAt: { not: null } }, { noAnswerAt: { not: null } }] },
     data: { signInLostAt: null, signInLostStatus: null, noAnswerAt: null },
   });
+  // The moment the tool was seen working is kept like a reconnect, only ever moving forward, so a failure seen before it that
+  // reports after it is old news and cannot start an outage on a tool that has just worked
+  await prisma.botMcpServer.updateMany({ where: { id: serverId, botId, ...afterLastReconnect }, data: { reconnectedAt: at } });
   if (result.count === 1) await syncToolSignInNotices(botId);
   return { changed: result.count === 1 };
 }
