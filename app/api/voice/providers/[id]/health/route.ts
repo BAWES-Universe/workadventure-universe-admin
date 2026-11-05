@@ -7,13 +7,14 @@ import { reportVoiceKeyCall } from '@/lib/voice-key-health';
 export const runtime = 'nodejs';
 
 const part = z.enum(['recognition', 'speech']);
+const botId = z.string().trim().min(1).max(100);
 const outcomeSchema = z.union([
-  z.object({ part, ok: z.literal(true) }).strict(),
+  z.object({ part, ok: z.literal(true), botId: botId.optional() }).strict(),
   z.object({ part, ok: z.literal(false), status: z.number().int().min(100).max(599).optional(), rejected: z.boolean().optional() }).strict(),
 ]);
 
 /**
- * POST /api/voice/providers/:id/health { part, ok: true } | { part, ok: false, status?, rejected? }
+ * POST /api/voice/providers/:id/health { part, ok: true, botId? } | { part, ok: false, status?, rejected? }
  * What the bot server saw when it used a person's voice key for one job, `part` "recognition" or "speech" (#749): it worked, or it failed with the HTTP status the provider
  * answered (`status` left out for a dropped connection or a timeout; `rejected` when the provider refused the key itself).
  * A key out of credit, rejected or (on listening) without its model is Down at once; a 404 on speaking is a voice that bot named, never the key; two other failures in a row of the same job mark it Down
@@ -21,13 +22,16 @@ const outcomeSchema = z.union([
  * when only that job did). Answers with { status: "working" | "down", downSince, downReason }. A server provider, which
  * has no owner and no health, and a key that doesn't exist are "not found".
  *
+ * `botId` (optional, on a call that worked) names the bot it was for: a speaking call that worked and names a bot is one voice reply
+ * counted for that key, bot and month ("This month" on the AI keys page). A report without it works as before and counts nothing.
+ *
  * Auth: service token only.
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     requireServiceToken(request);
     const parsed = outcomeSchema.safeParse(await request.json().catch(() => null));
-    if (!parsed.success) return NextResponse.json({ error: 'Send { part, ok: true } or { part, ok: false, status?, rejected? }' }, { status: 400 });
+    if (!parsed.success) return NextResponse.json({ error: 'Send { part, ok: true, botId? } or { part, ok: false, status?, rejected? }' }, { status: 400 });
     const health = await reportVoiceKeyCall((await params).id, parsed.data.part, parsed.data);
     if (!health) return NextResponse.json({ error: 'Provider not found' }, { status: 404 });
     return NextResponse.json(health, { headers: { 'Cache-Control': 'no-store' } });

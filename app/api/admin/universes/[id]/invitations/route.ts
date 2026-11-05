@@ -130,7 +130,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         ...(where === 'all' ? {} : { allWorlds: false, worldId: { in: where } }),
       },
       include: {
-        invitedUser: { select: { id: true, name: true, email: true } },
+        // Never the invitee's email: they may not have shared it, and a name is all the list needs
+        invitedUser: { select: { id: true, name: true } },
         invitedBy: { select: { id: true, name: true } },
       },
       orderBy: { invitedAt: 'desc' },
@@ -142,7 +143,6 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       id: row.id,
       userId: row.invitedUser.id,
       name: row.invitedUser.name,
-      email: row.invitedUser.email,
       invitedBy: { userId: row.invitedBy.id, name: row.invitedBy.name },
       invitedAt: row.invitedAt,
       roleIds: row.roleIds,

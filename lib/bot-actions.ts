@@ -354,7 +354,10 @@ export async function decide(
 
     let grantId: string | null = null;
     if (input.decision === 'approveAndRemember') {
-      const idle = input.idleMinutes ?? DEFAULTS.idleMinutes;
+      // A time the caller passes wins; otherwise the bot's own "Allow more" times (Approvals page), then the defaults.
+      const times = await tx.bot.findUnique({ where: { id: botId }, select: { allowMoreIdleMinutes: true, allowMoreMaxMinutes: true } });
+      const idle = input.idleMinutes ?? times?.allowMoreIdleMinutes ?? DEFAULTS.idleMinutes;
+      const absolute = input.absoluteMinutes ?? times?.allowMoreMaxMinutes ?? DEFAULTS.absoluteMinutes;
       const grant = await tx.botActionGrant.create({
         data: {
           botId,
@@ -369,7 +372,7 @@ export async function decide(
           fromRequestId: row.id,
           idleMinutes: idle,
           idleExpiresAt: new Date(now.getTime() + minutes(idle)),
-          absoluteExpiresAt: new Date(now.getTime() + minutes(input.absoluteMinutes ?? DEFAULTS.absoluteMinutes)),
+          absoluteExpiresAt: new Date(now.getTime() + minutes(absolute)),
         },
       });
       grantId = grant.id;
@@ -398,6 +401,72 @@ export async function supersedeWaiting(
       if (ok) closed.push(row.id);
     }
     return { closed };
+  });
+}
+
+/** How many times a person can ask for more time on one card. Each gives another full wait. */
+export const MAX_EXTENSIONS = 10;
+
+export type CardChangeResult =
+  | { outcome: 'changed'; action: ActionView }
+  /** Someone else's tap, an expiry or a replacement got there first; `action` shows what it is now. */
+  | { outcome: 'already_decided' | 'expired'; action: ActionView };
+
+/**
+ * The asker closes one card with X: nothing is done. Only a request still waiting, at the revision the card showed, and
+ * only the person who asked. It is the same conditional close a decline uses, with its own reason, so the bot can tell
+ * "Don't" (which it acknowledges) from a card that was closed quietly. Other cards of theirs stay as they are.
+ */
+export async function cancelRequest(
+  botId: string,
+  id: string,
+  input: { actorKey: string; revision: number },
+  now: Date = new Date(),
+): Promise<CardChangeResult> {
+  return prisma.$transaction(async (tx) => {
+    const row = await load(tx, botId, id);
+    if (row.requesterKey !== input.actorKey) {
+      throw new BotActionError(403, 'not_requester', 'Only the person who asked can close it');
+    }
+    if (await closeIfLapsed(tx, row, now)) return { outcome: 'expired' as const, action: toView(await load(tx, botId, id)) };
+    const lost = async () => ({ outcome: 'already_decided' as const, action: toView(await load(tx, botId, id)) });
+    if (row.status !== 'waiting' || row.revision !== input.revision) return lost();
+    const won = await move(tx, row, ['waiting'], { status: 'closed', closedReason: 'cancelled', finishedAt: now }, 'cancel', input.actorKey, {
+      reviewExpiresAt: { gt: now },
+    });
+    if (!won) return lost();
+    return { outcome: 'changed' as const, action: toView(await load(tx, botId, id)) };
+  });
+}
+
+/**
+ * "More time": a card still waiting gets another full wait from now (never shorter than what it has left), up to
+ * MAX_EXTENSIONS times. It changes nothing else and never approves anything. A card that already closed does not come
+ * back: the person reviews again, which makes a fresh request.
+ */
+export async function extendReview(
+  botId: string,
+  id: string,
+  input: { actorKey: string; revision: number; reviewMinutes?: number },
+  now: Date = new Date(),
+): Promise<CardChangeResult> {
+  return prisma.$transaction(async (tx) => {
+    const row = await load(tx, botId, id);
+    if (row.requesterKey !== input.actorKey) {
+      throw new BotActionError(403, 'not_requester', 'Only the person who asked can ask for more time');
+    }
+    if (await closeIfLapsed(tx, row, now)) return { outcome: 'expired' as const, action: toView(await load(tx, botId, id)) };
+    const lost = async () => ({ outcome: 'already_decided' as const, action: toView(await load(tx, botId, id)) });
+    if (row.status !== 'waiting' || row.revision !== input.revision) return lost();
+
+    const used = (await tx.botActionDecision.findMany({ where: { requestId: row.id, event: 'extend' } })).length;
+    if (used >= MAX_EXTENSIONS) throw new BotActionError(409, 'no_more_time', 'This card cannot wait any longer');
+
+    const wait = new Date(now.getTime() + minutes(input.reviewMinutes ?? DEFAULTS.reviewMinutes));
+    const until = wait > row.reviewExpiresAt ? wait : row.reviewExpiresAt;
+    const won = await move(tx, row, ['waiting'], { reviewExpiresAt: until }, 'extend', input.actorKey, { reviewExpiresAt: { gt: now } });
+    if (!won) return lost();
+    return { outcome: 'changed' as const, action: toView(await load(tx, botId, id)) };
   });
 }
 
@@ -609,13 +678,20 @@ export async function touchGrants(
   for (const grant of grants) {
     const idleEnd = new Date(now.getTime() + minutes(grant.idleMinutes));
     const next = idleEnd < grant.absoluteExpiresAt ? idleEnd : grant.absoluteExpiresAt;
-    const done = await prisma.botActionGrant.updateMany({ where: { id: grant.id, revokedAt: null }, data: { idleExpiresAt: next } });
+    // Still alive when it is written, not only when it was read: an approval that ended in between is not brought back
+    const done = await prisma.botActionGrant.updateMany({
+      where: { id: grant.id, revokedAt: null, idleExpiresAt: { gt: now }, absoluteExpiresAt: { gt: now } },
+      data: { idleExpiresAt: next },
+    });
     renewed += done.count;
   }
   return { renewed };
 }
 
 export const REVOKE_REASONS = ['ask_again', 'signed_out', 'connection_changed', 'policy_changed', 'lost_permission', 'left'] as const;
+
+/** Why a person who manages the bot ended remembered approvals from its Approvals page (not a reason the bot server sends). */
+export const ENDED_BY_MANAGER = 'ended_by_manager';
 
 export const revokeSchema = z
   .object({
@@ -646,4 +722,82 @@ export async function revokeGrants(
     for (const row of waiting) await move(prisma, row, ['waiting', 'approved'], { status: 'closed', closedReason: 'revoked', finishedAt: now }, 'revoke', input.requesterKey);
   }
   return { revoked: done.count };
+}
+
+/** One remembered approval that is still alive, as the bot's Approvals page lists it ("Allowed more right now"). */
+export interface ActiveGrantView {
+  id: string;
+  /**
+   * Who it was made for, by name, when Orbit knows the person; null when it does not (the page then says "Someone"). Only the
+   * name: the key the game names them by can be their email, which the people who manage the bot must not see.
+   */
+  person: { name: string | null; isGuest: boolean };
+  toolName: string;
+  /** The tool's own title as its server gave it, when the bot has such a tool; null otherwise. */
+  toolTitle: string | null;
+  heading: ActionHeading;
+  connectionRef: string | null;
+  /** What it allows: `fixed` fields stay as approved (like the team), `varies` fields may be different each time. */
+  scope: RememberScope;
+  createdAt: Date;
+  /** It ends here unless the asker sends another message... */
+  idleExpiresAt: Date;
+  /** ...and here at the latest. */
+  absoluteExpiresAt: Date;
+}
+
+/** Every remembered approval of this bot that is not revoked and inside both its times, newest first. The card's own content is never included; the values that stay fixed (`scope.fixed`) are. */
+export async function listActiveGrants(botId: string, now: Date = new Date()): Promise<ActiveGrantView[]> {
+  const rows = await prisma.botActionGrant.findMany({
+    where: { botId, revokedAt: null, idleExpiresAt: { gt: now }, absoluteExpiresAt: { gt: now } },
+    orderBy: { createdAt: 'desc' },
+  });
+  const people = new Map<string, { name: string | null; isGuest: boolean }>();
+  const titles = new Map<string, string | null>();
+  if (rows.length > 0) {
+    // Names and titles for the list only, for people who manage this bot (they already see who chats with it)
+    // The game names a signed-in person by their uuid or by their email (lib/user-identifier.ts): find them by either
+    const keys = [...new Set(rows.map((row) => row.requesterKey))];
+    for (const user of await prisma.user.findMany({
+      where: { OR: [{ uuid: { in: keys } }, { email: { in: keys } }] },
+      select: { uuid: true, email: true, name: true, isGuest: true },
+    })) {
+      const person = { name: user.name?.trim() || null, isGuest: user.isGuest };
+      if (user.email && !people.has(user.email)) people.set(user.email, person);
+      people.set(user.uuid, person);
+    }
+    for (const tool of await prisma.botMcpTool.findMany({ where: { server: { botId }, name: { in: [...new Set(rows.map((row) => row.toolName))] } }, select: { name: true, title: true } })) {
+      if (!titles.get(tool.name)) titles.set(tool.name, tool.title?.trim() || null);
+    }
+  }
+  const views: ActiveGrantView[] = [];
+  for (const row of rows) {
+    const scope = rememberScopeSchema.safeParse(row.scope);
+    if (!scope.success) continue;
+    views.push({
+      id: row.id,
+      person: people.get(row.requesterKey) ?? { name: null, isGuest: false },
+      toolTitle: titles.get(row.toolName) ?? null,
+      toolName: row.toolName,
+      heading: row.heading as ActionHeading,
+      connectionRef: row.connectionRef ?? null,
+      scope: scope.data,
+      createdAt: row.createdAt,
+      idleExpiresAt: row.idleExpiresAt,
+      absoluteExpiresAt: row.absoluteExpiresAt,
+    });
+  }
+  return views;
+}
+
+/**
+ * "End all" on the Approvals page: every remembered approval of this bot ends, so the next change asks again. Cards that
+ * are waiting are left alone, and so is everything already ended.
+ */
+export async function endAllGrants(botId: string, now: Date = new Date()): Promise<{ ended: number }> {
+  const done = await prisma.botActionGrant.updateMany({
+    where: { botId, revokedAt: null, idleExpiresAt: { gt: now }, absoluteExpiresAt: { gt: now } },
+    data: { revokedAt: now, revokedReason: ENDED_BY_MANAGER },
+  });
+  return { ended: done.count };
 }

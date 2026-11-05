@@ -18,6 +18,7 @@ jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: jest.fn() }));
 jest.mock('@/lib/db', () => ({
   prisma: {
     $transaction: jest.fn(),
+    $queryRaw: jest.fn(),
     voiceProvider: { findMany: jest.fn(), findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn(), delete: jest.fn() },
   },
 }));
@@ -58,6 +59,7 @@ beforeEach(() => {
   process.env.ENCRYPTION_KEY = 'a'.repeat(64);
   (isSuperAdmin as jest.Mock).mockImplementation((email?: string | null) => email === 'root@example.com');
   transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(prisma));
+  (prisma as unknown as { $queryRaw: jest.Mock }).$queryRaw.mockResolvedValue([]);
   session.mockResolvedValue(root);
 });
 
@@ -85,6 +87,43 @@ describe('super admin routes', () => {
     expect(body.providers[0]).toMatchObject({ id: 'p1', hasKey: true, apiKeyLast4: 'wxyz', models: [{ id: 'm1', label: 'Model one', kind: 'speech' }] });
     expect(JSON.stringify(body)).not.toContain('iv:tag:data');
     expect(body.providers[0]).not.toHaveProperty('apiKeyEncrypted');
+    // No bot uses it yet
+    expect(body.providers[0].bots).toEqual({ recognition: 0, speech: 0, total: 0 });
+  });
+
+  it('say how many bots with voice on listen and speak with each provider (#792)', async () => {
+    db.findMany.mockResolvedValue([row(), row({ id: 'p2', adapter: 'soniox', name: 'Soniox' }), row({ id: 'p3', adapter: 'both', name: 'Both' })]);
+    (prisma as unknown as { $queryRaw: jest.Mock }).$queryRaw.mockResolvedValue([
+      { profile: { recognition: { providerId: 'p2', model: 'm' }, speech: { providerId: 'p1', model: 'm', voiceId: 'v' } } },
+      { profile: { recognition: { providerId: 'p2', model: 'm' }, speech: { providerId: 'p1', model: 'm', voiceId: 'w' } } },
+      // A bot that listens and speaks with one provider is one bot there
+      { profile: { recognition: { providerId: 'p3', model: 'm' }, speech: { providerId: 'p3', model: 'm', voiceId: 'x' } } },
+      // A bot on someone's own key, and a profile that isn't readable, count for no server provider
+      { profile: { recognition: { providerId: 'key-1' }, speech: { providerId: 'key-1' } } },
+      { profile: null },
+    ]);
+    const body = await (await listAdmin(new NextRequest('http://localhost:3333/api/x'))).json();
+    expect(body.providers.map((entry: { id: string; bots: unknown }) => [entry.id, entry.bots])).toEqual([
+      ['p1', { recognition: 0, speech: 2, total: 2 }],
+      ['p2', { recognition: 2, speech: 0, total: 2 }],
+      ['p3', { recognition: 1, speech: 1, total: 1 }],
+    ]);
+  });
+
+  it('take a wss:// address for a provider that only listens, and https:// for one that speaks (#792)', async () => {
+    const add = async (body: unknown) => createAdmin(new NextRequest('http://localhost:3333/api/x', { method: 'POST', body: JSON.stringify(body) }));
+    db.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => row({ ...data, id: 'p9' }));
+    expect((await add({ adapter: 'soniox', name: 'Soniox', recognition: true, endpoint: 'wss://stt-rt.soniox.com/transcribe-websocket' })).status).toBe(201);
+    expect((await add({ adapter: 'soniox', name: 'Soniox', recognition: true, endpoint: 'https://proxy.example.com' })).status).toBe(201);
+    const refused = await add({ adapter: 'elevenlabs', name: 'Eleven', speech: true, endpoint: 'wss://api.elevenlabs.io' });
+    expect(refused.status).toBe(400);
+    expect((await refused.json()).error).toBe('A provider that speaks needs an https:// address');
+    expect((await add({ adapter: 'soniox', name: 'Soniox', recognition: true, endpoint: 'ftp://example.com' })).status).toBe(400);
+    expect(db.create).toHaveBeenCalledTimes(2);
+    // Changing a speaking provider's address to a websocket one is turned down too
+    db.findUnique.mockResolvedValue(row());
+    expect((await call(patchAdmin, 'PATCH', { endpoint: 'wss://api.elevenlabs.io' })).status).toBe(400);
+    expect(db.update).not.toHaveBeenCalled();
   });
 
   it('add a provider that is off, with its key encrypted and never sent back', async () => {
@@ -126,6 +165,49 @@ describe('super admin routes', () => {
     expect(decryptApiKey(withKey.apiKeyEncrypted)).toBe('new-secret-key-0000');
     await call(patchAdmin, 'PATCH', { apiKey: null });
     expect(db.update.mock.calls[2][0].data).toMatchObject({ apiKeyEncrypted: null, apiKeyLast4: null });
+  });
+
+  it('set the voice Universe AI speaks with, keep its name with it, and take it away', async () => {
+    db.findUnique.mockResolvedValue(row({ defaultSpeech: true }));
+    db.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => row(data));
+    const set = await call(patchAdmin, 'PATCH', { defaultVoiceId: 'nora', defaultVoiceName: 'Nora' });
+    expect(set.status).toBe(200);
+    expect(db.update.mock.calls[0][0].data).toMatchObject({ defaultVoiceId: 'nora', defaultVoiceName: 'Nora' });
+    expect((await set.json()).provider).toMatchObject({ defaultVoiceId: 'nora', defaultVoiceName: 'Nora' });
+    // Another voice without a name drops the old name; the same voice keeps it
+    db.findUnique.mockResolvedValue(row({ defaultSpeech: true, defaultVoiceId: 'nora', defaultVoiceName: 'Nora' }));
+    await call(patchAdmin, 'PATCH', { defaultVoiceId: 'sami' });
+    expect(db.update.mock.calls[1][0].data).toMatchObject({ defaultVoiceId: 'sami', defaultVoiceName: null });
+    await call(patchAdmin, 'PATCH', { defaultVoiceId: 'nora' });
+    expect(db.update.mock.calls[2][0].data).toMatchObject({ defaultVoiceId: 'nora', defaultVoiceName: 'Nora' });
+    await call(patchAdmin, 'PATCH', { defaultVoiceId: null });
+    expect(db.update.mock.calls[3][0].data).toMatchObject({ defaultVoiceId: null, defaultVoiceName: null });
+  });
+
+  it('drop the default voice when the provider moves to another company, unless a new voice comes with it', async () => {
+    db.findUnique.mockResolvedValue(row({ defaultSpeech: true, defaultVoiceId: 'nora', defaultVoiceName: 'Nora' }));
+    db.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => row(data));
+    await call(patchAdmin, 'PATCH', { adapter: 'cartesia' });
+    expect(db.update.mock.calls[0][0].data).toMatchObject({ adapter: 'cartesia', defaultVoiceId: null, defaultVoiceName: null });
+    await call(patchAdmin, 'PATCH', { adapter: 'cartesia', defaultVoiceId: 'c1', defaultVoiceName: 'Skylar' });
+    expect(db.update.mock.calls[1][0].data).toMatchObject({ adapter: 'cartesia', defaultVoiceId: 'c1', defaultVoiceName: 'Skylar' });
+    // The same company, renamed: the voice stays
+    await call(patchAdmin, 'PATCH', { adapter: 'elevenlabs', name: 'Eleven' });
+    expect(db.update.mock.calls[2][0].data).not.toHaveProperty('defaultVoiceId');
+  });
+
+  it('turn down a default voice on a provider that doesn\'t speak, a name with no voice, and an empty voice', async () => {
+    // No models listed, so the only thing wrong is the voice (a speaking model on a provider that doesn't speak would be refused first)
+    db.findUnique.mockResolvedValue(row({ speech: false, models: [] }));
+    const notSpeaking = await call(patchAdmin, 'PATCH', { defaultVoiceId: 'nora' });
+    expect(notSpeaking.status).toBe(400);
+    expect((await notSpeaking.json()).error).toBe('Only a provider that speaks can have a default voice');
+    db.findUnique.mockResolvedValue(row());
+    const noVoice = await call(patchAdmin, 'PATCH', { defaultVoiceName: 'Nora' });
+    expect(noVoice.status).toBe(400);
+    expect((await noVoice.json()).error).toBe('A default voice name needs the default voice');
+    expect((await call(patchAdmin, 'PATCH', { defaultVoiceId: '  ' })).status).toBe(400);
+    expect(db.update).not.toHaveBeenCalled();
   });
 
   it('say so when the provider is not there', async () => {

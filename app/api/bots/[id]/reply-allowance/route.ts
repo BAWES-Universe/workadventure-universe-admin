@@ -6,7 +6,9 @@ import { ReplyAllowanceError, checkReplyAllowance } from '@/lib/reply-limits';
 /**
  * POST /api/bots/:id/reply-allowance
  * May this person get one more reply from this bot now (game #1159)? Asked by the bot server before each reply.
- * Body: { userId: their WorkAdventure uuid or email, isGuest: boolean, source: "universe-ai" | "provider" | "own-key" }.
+ * Body: { userId: their WorkAdventure uuid or email, isGuest: boolean, source: "universe-ai" | "provider" | "own-key", greeting?: boolean }.
+ * `greeting` (game #1669): the bot is about to greet someone on its own. It is turned down once only the replies kept for text are
+ * left, and a greeting that is turned down is not remembered as someone running out.
  * Response: { allowed: true }, or { allowed: false, limit, resetsAt, who } for the fixed card. See lib/reply-limits.ts.
  *
  * Auth: service token only.

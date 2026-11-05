@@ -54,7 +54,7 @@ export function makerOf(id: string): Maker {
 const shortId = (id: string) => (id.includes('/') ? id.slice(id.indexOf('/') + 1) : id);
 
 /** A tick box drawn inside a row that is itself the checkbox (the row is the 44px target). */
-function Tick({ on }: { on: boolean }) {
+export function Tick({ on }: { on: boolean }) {
   return (
     <span aria-hidden="true" data-checked={on} className="grid h-5 w-5 shrink-0 place-content-center rounded-[6px] border-2 border-foreground/30 text-white data-[checked=true]:border-transparent data-[checked=true]:bg-[image:var(--brand-gradient)]">
       {on && <Check className="h-3.5 w-3.5" strokeWidth={3} />}

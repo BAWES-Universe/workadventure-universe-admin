@@ -1,4 +1,4 @@
-import { VOICE_LIMITS_RECOMMENDED, VOICE_RANGES, checkVoiceLimits, readVoiceLimits, textReserve, voiceReplies } from '@/lib/voice-limit-values';
+import { VOICE_LIMITS_RECOMMENDED, VOICE_RANGES, checkVoiceKeyLimits, checkVoiceLimits, readVoiceKeyLimits, readVoiceLimits, savedVoiceKeyLimits, textReserve, voiceReplies } from '@/lib/voice-limit-values';
 
 describe('voice limits', () => {
   it('start on the recommended values', () => {
@@ -69,5 +69,29 @@ describe('the replies kept back for text', () => {
     expect(voiceReplies(1, VOICE_LIMITS_RECOMMENDED, false)).toBe(0);
     expect(voiceReplies(2, VOICE_LIMITS_RECOMMENDED, true)).toBe(1);
     expect(voiceReplies(10, { ...VOICE_LIMITS_RECOMMENDED, guestVoiceReplies: 0 }, true)).toBe(0);
+  });
+});
+
+describe('a voice key\'s limits', () => {
+  it('are four of the server\'s, checked against the same ranges', () => {
+    expect(checkVoiceKeyLimits({ turnSeconds: 5, replyCharacters: 20_000, replySeconds: 600, listenMinutesPerDay: 0 })).toEqual({ ok: true, value: { turnSeconds: 5, replyCharacters: 20_000, replySeconds: 600, listenMinutesPerDay: 0 } });
+    expect(checkVoiceKeyLimits({})).toEqual({ ok: true, value: {} });
+    expect(checkVoiceKeyLimits({ turnSeconds: 4 })).toEqual({ ok: false, error: `turnSeconds must be a whole number from ${VOICE_RANGES.turnSeconds.min} to 3,600` });
+    expect(checkVoiceKeyLimits({ followUpSeconds: 30 })).toEqual({ ok: false, error: 'followUpSeconds is set for all of Universe, not for a key' });
+    expect(checkVoiceKeyLimits({ textReserveShare: 6 }).ok).toBe(false);
+    expect(checkVoiceKeyLimits({ constructor: 1 })).toEqual({ ok: false, error: 'Unknown limit: constructor' });
+    expect(checkVoiceKeyLimits(null).ok).toBe(false);
+  });
+
+  it('keep only the saved values that fit, and follow the server for the rest', () => {
+    expect(savedVoiceKeyLimits({ turnSeconds: 90, replySeconds: 1, replyCharacters: '5', followUpSeconds: 40 })).toEqual({ turnSeconds: 90 });
+    expect(savedVoiceKeyLimits('x')).toEqual({});
+    const server = { ...VOICE_LIMITS_RECOMMENDED, replyCharacters: 800 };
+    expect(readVoiceKeyLimits({ turnSeconds: 90 }, server)).toEqual({
+      turnSeconds: { value: 90, recommended: 180, changed: true },
+      replyCharacters: { value: 800, recommended: 800, changed: false },
+      replySeconds: { value: 60, recommended: 60, changed: false },
+      listenMinutesPerDay: { value: 60, recommended: 60, changed: false },
+    });
   });
 });

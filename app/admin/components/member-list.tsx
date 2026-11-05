@@ -51,12 +51,10 @@ interface Invitation {
   invitedUser: {
     id: string;
     name: string | null;
-    email: string | null;
   };
   invitedBy: {
     id: string;
     name: string | null;
-    email: string | null;
   };
 }
 
@@ -299,8 +297,8 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
           ) : (
             <div>
               {invitations.map((invitation) => {
-                const invitedUserName = invitation.invitedUser.name || invitation.invitedUser.email || 'Unknown';
-                const invitedBy = invitation.invitedBy.name || invitation.invitedBy.email || 'Unknown';
+                const invitedUserName = invitation.invitedUser.name || 'Someone';
+                const invitedBy = invitation.invitedBy.name || 'Someone';
                 return (
                   <EntityRow
                     key={invitation.id}
@@ -311,7 +309,6 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
                     context={
                       <StatLine
                         items={[
-                          invitation.invitedUser.name ? invitation.invitedUser.email : null,
                           `Invited by ${invitedBy}`,
                           new Date(invitation.invitedAt).toLocaleDateString(),
                         ]}

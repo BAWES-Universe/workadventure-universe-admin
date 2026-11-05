@@ -218,6 +218,16 @@ interface BotCall {
   chat: Chat;
 }
 
+/** What read and change take on top of the call: the artifacts the person themselves pointed at (game #1781). */
+interface ReferencingCall extends BotCall {
+  /**
+   * Ids of artifacts the person put in their own message (a pasted link) or replied to, as the bot server found them. The
+   * only way for a bot to reach another bot's artifact, and only for its owner. Ids a bot or a tool result mentioned are
+   * never sent.
+   */
+  referencedArtifactIds?: string[] | null;
+}
+
 /**
  * What every bot call goes through first: the bot exists, the person may use it the way they asked in this chat (the
  * same answer as /api/bots/:id/access), and the bot chat telemetry switch. `hidden` goes back with every answer, so the
@@ -241,6 +251,18 @@ async function passBotGate(call: BotCall): Promise<{ botName: string; hidden: bo
 
 function inThisChat(artifact: { chatKind: string | null; chatRef: string | null }, chat: Chat): boolean {
   return artifact.chatRef !== null && artifact.chatRef === chat.ref && artifact.chatKind === chat.kind;
+}
+
+/**
+ * Is this artifact within a bot's reach by id? What was made in this chat, whoever the bot is. Beyond this chat only what the
+ * person pointed at (a link in their message, a card they replied to), and the owner's artifacts this bot made. Anything else
+ * looks like an artifact that is not there. The rules for a person (open, change) still apply on top: a pasted link opens
+ * another person's artifact only when its owner shared it by link, and changing it stays with the chat it was made in.
+ */
+function inBotsReach(artifact: ArtifactRow, who: Asker, input: ReferencingCall): boolean {
+  if (inThisChat(artifact, input.chat)) return true;
+  if ((input.referencedArtifactIds ?? []).includes(artifact.id)) return true;
+  return isOwner(artifact, who) && artifact.makerBotId === input.botId;
 }
 
 export interface MakeInput extends BotCall {
@@ -347,7 +369,7 @@ export async function makeArtifact(input: MakeInput, ctx: Context = defaultConte
   return { artifact: viewOf(artifact), version: botVersionView(artifact.versions[0]), hidden };
 }
 
-export interface ChangeInput extends BotCall {
+export interface ChangeInput extends ReferencingCall {
   artifactId: string;
   /** The version the bot read before it changed anything; a newer one in between stops the change. */
   baseVersion?: number | null;
@@ -369,16 +391,20 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   const changesMedia = (input.media?.length ?? 0) > 0 || (input.dropMedia?.length ?? 0) > 0;
   if (hasEdits && hasContent) throw new ArtifactError('edits_or_content', 422, 'Send small edits or the whole new file, not both.');
   if (!hasEdits && !hasContent && !changesMedia) throw new ArtifactError('edits_or_content', 422, 'Send small edits, the whole new file, or media to add or drop.');
-  const { hidden } = await passBotGate(input);
+  const { botName, hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
   const artifact = await loadArtifact(input.artifactId, now);
+  if (!inBotsReach(artifact, who, input)) throw new ArtifactError('not_found', 404, 'No such artifact.');
   if (!canAskForChange(artifact, who, inThisChat(artifact, input.chat), now)) {
     // Someone who cannot even open it hears the same as for an artifact that is not there
     if (!canOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now)) throw new ArtifactError('not_found', 404, 'No such artifact.');
     throw new ArtifactError('change_not_allowed', 403, 'The owner has not allowed changes from this person.');
   }
   const { maxBytes, maxVersions, maxMediaBytes, maxMediaFiles } = await limitsOf(ctx);
-  checkVersionRoom(artifact.latestVersion, maxVersions);
+  // Another bot's work is never written into: a bot that did not make it works on a copy of its own (game #1805, Orbit #800),
+  // which starts at version 1, so the original's version limit does not apply to it
+  const copying = artifact.makerBotId !== input.botId;
+  if (!copying) checkVersionRoom(artifact.latestVersion, maxVersions);
   if (input.baseVersion != null && input.baseVersion !== artifact.latestVersion) {
     throw new ArtifactError('stale_version', 409, `It is on version ${artifact.latestVersion} now; read it again and send the change on that.`);
   }
@@ -389,11 +415,12 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   const content = hasContent ? (input.content as string) : hasEdits ? applyEdits(await files.get(latest.fileKey), input.edits as ArtifactEdit[], maxBytes) : await files.get(latest.fileKey);
   checkContent(content, maxBytes);
   const merged = mergeMedia(mediaOf(latest), input.media ?? [], input.dropMedia ?? [], kind, maxMediaBytes, maxMediaFiles);
+  const title = cleanLine(input.title, MAX_TITLE_LENGTH);
+  if (copying) return changeInACopy({ input, artifact, latestNumber: latest.number, who, botName, hidden, content, merged, title }, ctx);
 
   const next = artifact.latestVersion + 1;
   const fileKey = newFileKey(artifact.id, next, kind);
   const media = placeMedia(fileKey, merged);
-  const title = cleanLine(input.title, MAX_TITLE_LENGTH);
   const row = await storing(files, fileKey, kind, content, media, () =>
     prisma.$transaction(async (tx) => {
       // The one who gets here first moves the version on; anyone who read the same version before fails here
@@ -424,7 +451,67 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   return { artifact: viewOf(fresh), version: botVersionView(row), hidden };
 }
 
-export interface ReadInput extends BotCall {
+/**
+ * A change by a bot that did not make the artifact (game #1805, Orbit #800): the original keeps its versions as they were, and
+ * the change becomes version 1 of a new artifact this bot makes for the person who asked, in the chat it is in, with the
+ * original's latest text and media plus the change. It starts private to that chat: how the original was shared is not carried
+ * over. The bot's next change to it is an ordinary new version, since it is now the maker.
+ */
+async function changeInACopy(
+  call: {
+    input: ChangeInput;
+    artifact: ArtifactRow;
+    latestNumber: number;
+    who: Who;
+    botName: string;
+    hidden: boolean;
+    content: string;
+    merged: { keep: MediaFile[]; add: MediaUpload[] };
+    title: string | null;
+  },
+  ctx: Context,
+): Promise<Made> {
+  const { files, now } = ctx;
+  const { input, artifact, who } = call;
+  const kind = artifact.kind as ArtifactKind;
+  const id = randomUUID();
+  const fileKey = newFileKey(id, 1, kind);
+  const media = placeMedia(fileKey, call.merged);
+  const created = await storing(files, fileKey, kind, call.content, media, () =>
+    prisma.artifact.create({
+      data: {
+        id,
+        ownerId: who.userId,
+        makerBotId: input.botId,
+        makerName: clipText(call.botName, MAX_NAME_LENGTH),
+        title: call.title ?? artifact.title,
+        kind,
+        chatKind: input.chat.kind,
+        chatRef: input.chat.ref,
+        copiedFromId: artifact.id,
+        // Nothing is kept for a guest beyond a day, and anyone in their chat may ask for a change meanwhile
+        changeScope: who.userId ? 'owner' : 'openers',
+        expiresAt: who.userId ? null : new Date(now.getTime() + GUEST_KEEP_MS),
+        versions: {
+          create: {
+            number: 1,
+            summary: cleanLine(input.summary, MAX_SUMMARY_LENGTH) ?? `Copy of version ${call.latestNumber}, changed`,
+            askedById: who.userId,
+            askedByName: who.name,
+            fileKey,
+            sizeBytes: byteLength(call.content),
+            media: media.files as unknown as Prisma.InputJsonValue,
+          },
+        },
+      },
+      include: { ...ARTIFACT_INCLUDE, versions: true },
+    }),
+  );
+  await pruneExpired(ctx).catch((error) => console.error('Could not clear expired artifacts:', error));
+  return { artifact: viewOf(created), version: botVersionView(created.versions[0]), hidden: call.hidden };
+}
+
+export interface ReadInput extends ReferencingCall {
   artifactId: string;
   /** Which version; the latest when left out. */
   version?: number | null;
@@ -439,23 +526,26 @@ export async function readArtifact(input: ReadInput, ctx: Context = defaultConte
   const { hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
   const artifact = await loadArtifact(input.artifactId, now);
+  if (!inBotsReach(artifact, who, input)) throw new ArtifactError('not_found', 404, 'No such artifact.');
   requireOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now);
   const row = await findVersion(artifact, input.version);
   return { artifact: viewOf(artifact), version: botVersionView(row), content: await files.get(row.fileKey), hidden };
 }
 
 /**
- * The artifacts made in this chat (by any bot in it) that the person may open, the most recently changed first: how a bot finds
- * the one "make the buttons bigger" is about, in a later message or after a restart. An artifact belongs to the person who
- * asked, so what a bot may do with it is what that person may, not which bot made it.
+ * The artifacts made in this chat (by any bot in it) that the person may open, plus the ones this bot made for them in other
+ * chats, the most recently changed first: how a bot finds the one "make the buttons bigger" is about, in a later message or
+ * after a restart. An artifact belongs to the person who asked, so what a bot may do with it is what that person may; but a
+ * bot is shown only its own work (and this chat's), never what the person made with other bots (game #1781).
  */
 export async function listArtifactsInChat(input: BotCall, ctx: Context = defaultContext()): Promise<{ artifacts: ArtifactView[]; hidden: boolean }> {
   const { now } = ctx;
   const { hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
   pruneSometimes(ctx);
-  // What was made in this chat, and the asking person's own from any other chat, so a bot in a direct message finds what
-  // they started in nearby chat and the other way round. Only their own: nobody else's artifact is listed outside its chat.
+  // What was made in this chat, and what this bot made for the asking person in any other chat, so a bot in a direct message
+  // finds what they started in nearby chat and the other way round. Only theirs, and only this bot's: nobody else's artifact
+  // is listed outside its chat, and another bot's work is not this bot's context.
   // This chat's come first, so a person with many artifacts elsewhere never pushes the chat's own out of the list.
   const include = ARTIFACT_INCLUDE;
   const orderBy = { updatedAt: 'desc' } as const;
@@ -464,7 +554,7 @@ export async function listArtifactsInChat(input: BotCall, ctx: Context = default
   // the ones that are still there
   const notExpired = { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] };
   const inChat = await prisma.artifact.findMany({ where: { chatKind: input.chat.kind, chatRef: input.chat.ref, ...notExpired }, include, orderBy, take });
-  const own = who.userId ? await prisma.artifact.findMany({ where: { ownerId: who.userId, chatRef: { not: null }, ...notExpired }, include, orderBy, take }) : [];
+  const own = who.userId ? await prisma.artifact.findMany({ where: { ownerId: who.userId, makerBotId: input.botId, chatRef: { not: null }, ...notExpired }, include, orderBy, take }) : [];
   const seen = new Set(inChat.map((row) => row.id));
   const rows = [...inChat, ...own.filter((row) => !seen.has(row.id))];
   return { artifacts: rows.filter((row) => canOpen(row, who, now)).slice(0, LIST_IN_CHAT_LIMIT).map(viewOf), hidden };

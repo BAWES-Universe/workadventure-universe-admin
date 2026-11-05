@@ -85,7 +85,7 @@ The menu only hides entries; every API route enforces its own check.
 | Create world | `/admin/worlds/new` | `POST /api/admin/worlds` | universe owner | full-screen view | universe → New world | none — needs one | preserve |
 | View world | `/admin/worlds/[id]` | `GET /api/admin/worlds/:id` | any signed-in user | both | universe → world | `__tests__/api/admin/entity-visibility.test.ts` | **fixed in #222** |
 | Edit / delete world | `/admin/worlds/[id]` | `PATCH`/`DELETE /api/admin/worlds/:id` | universe owner | full-screen view | world → Edit / Delete | none — needs one | preserve |
-| World members: list, add, change role, remove | `/admin/worlds/[id]` (`member-list`, `invite-member-dialog`) | `/api/admin/worlds/:id/members[/:memberId]`, `/visitors` | owner / world admin | full-screen view | world → Members | none — needs one | preserve |
+| World members: list, add, change role, remove | `/admin/worlds/[id]` (`member-list`) | `/api/admin/worlds/:id/members[/:memberId]` | owner / world admin | full-screen view | world → Members | none — needs one | preserve |
 | World invitations: list, cancel | `/admin/worlds/[id]` | `/api/admin/worlds/:id/invitations[/cancel]` | owner / world admin | full-screen view | world → Members | none — needs one | preserve |
 | World visitors (analytics) | `/admin/worlds/[id]` | `/api/admin/analytics/worlds/:id` | scoped | full-screen view | world → Visitors | `authorisation-scope.test.ts` (#208) | fixed in 0A (#208) |
 | Create room (optionally from template map) | `/admin/rooms/new` | `POST /api/admin/rooms`, `/api/admin/templates/maps/:id`, `/api/templates/:slug` | owner / world editor | full-screen view | world → New room; or template map → Create room | none — needs one | preserve |

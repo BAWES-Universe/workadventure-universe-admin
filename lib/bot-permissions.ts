@@ -42,6 +42,36 @@ export interface ManagedBot {
 }
 
 /**
+ * Answers kept for one request that asks about many bots for the same person (the list of a room's bots): the person's
+ * standing in a room is the same for every bot in it, so it is worked out once, and the bots' own rules are read in one query
+ * (`preloadBotRules`) instead of one per bot. Only ever for one person and one request; never keep one between requests.
+ */
+export type ManageMemo = Map<string, unknown>;
+
+type BotRule = { roleId: string | null; userId: string | null; allow: bigint | number | null; deny: bigint | number | null };
+
+function once<T>(memo: ManageMemo | undefined, key: string, work: () => Promise<T>): Promise<T> {
+  if (!memo) return work();
+  const known = memo.get(key) as Promise<T> | undefined;
+  if (known) return known;
+  const started = work();
+  memo.set(key, started);
+  return started;
+}
+
+/** Reads the manage rules of all these bots in one query and puts them in the memo, so each bot's check does not read its own. */
+export async function preloadBotRules(memo: ManageMemo, botIds: string[]): Promise<void> {
+  if (botIds.length === 0) return;
+  const rules = await prisma.botAccessRule.findMany({
+    where: { botId: { in: botIds } },
+    select: { botId: true, roleId: true, userId: true, allow: true, deny: true },
+  });
+  const byBot = new Map<string, BotRule[]>(botIds.map((id) => [id, []]));
+  for (const { botId, ...rule } of rules) byBot.get(botId)?.push(rule as BotRule);
+  for (const [botId, list] of byBot) memo.set(`rules:${botId}`, Promise.resolve(list));
+}
+
+/**
  * Whether someone still belongs to the universe. Rules are kept when a person leaves (and a rule for Everyone reaches
  * people who never joined), so a Yes on Manage this bot only counts while they are a member: a world membership row
  * (written some other way, read as before) or a universe membership.
@@ -66,35 +96,40 @@ export async function canManageThisBot(
   userId: string,
   userEmail: string | null,
   bot: ManagedBot,
-  options: { creatorPasses: boolean },
+  options: { creatorPasses: boolean; memo?: ManageMemo },
 ): Promise<boolean> {
   if (options.creatorPasses && bot.createdById === userId) return true;
   if (isSuperAdmin(userEmail)) return true;
 
-  const rules = await prisma.botAccessRule.findMany({
-    where: { botId: bot.id },
-    select: { roleId: true, userId: true, allow: true, deny: true },
-  });
-  if (rules.length === 0) return canManageBots(userId, bot.roomId);
+  const { memo } = options;
+  const roomManages = () => once(memo, `${userId}:manage:${bot.roomId}`, () => canManageBots(userId, bot.roomId));
+  const rules = await once(memo, `rules:${bot.id}`, () =>
+    prisma.botAccessRule.findMany({
+      where: { botId: bot.id },
+      select: { roleId: true, userId: true, allow: true, deny: true },
+    }),
+  );
+  if (rules.length === 0) return roomManages();
 
-  const room = await prisma.room.findUnique({
-    where: { id: bot.roomId },
-    select: { world: { select: { id: true, universeId: true, universe: { select: { ownerId: true } } } } },
+  // Who they are in this room is the same for every bot in it; only the bot's own rules below differ
+  const standing = await once(memo, `${userId}:standing:${bot.roomId}`, async () => {
+    const room = await prisma.room.findUnique({
+      where: { id: bot.roomId },
+      select: { world: { select: { id: true, universeId: true, universe: { select: { ownerId: true } } } } },
+    });
+    if (!room) return null;
+    if (room.world.universe.ownerId === userId) return { owner: true as const };
+    const member = await prisma.worldMember.findFirst({
+      where: { worldId: room.world.id, userId },
+      select: { tags: true },
+    });
+    const worldTags = member?.tags ?? [];
+    const access = await worldAccessFor({ userId, worldId: room.world.id, universeId: room.world.universeId, worldTags });
+    return { owner: false as const, room, member, worldTags, ...access };
   });
-  if (!room) return canManageBots(userId, bot.roomId);
-  if (room.world.universe.ownerId === userId) return true;
-
-  const member = await prisma.worldMember.findFirst({
-    where: { worldId: room.world.id, userId },
-    select: { tags: true },
-  });
-  const worldTags = member?.tags ?? [];
-  const { permissions, roles } = await worldAccessFor({
-    userId,
-    worldId: room.world.id,
-    universeId: room.world.universeId,
-    worldTags,
-  });
+  if (!standing) return roomManages();
+  if (standing.owner) return true;
+  const { room, member, worldTags, permissions, roles } = standing;
   if (has(permissions, 'ADMINISTRATOR') || roles.some((role) => role.key === ADMIN_KEY) || worldTags.includes(ADMIN_KEY)) {
     return true;
   }
@@ -107,7 +142,7 @@ export async function canManageThisBot(
   );
   if (verdict === 'yes') return stillInUniverse(userId, room.world.universeId, member !== null);
   if (verdict === 'no') return false;
-  return canManageBots(userId, bot.roomId);
+  return roomManages();
 }
 
 /**

@@ -280,18 +280,18 @@ export async function POST(
           respondedAt: null,
         },
         include: {
+          // Never the invitee's email: the person inviting only needs their name
           invitedUser: {
             select: {
               id: true,
               name: true,
-              email: true,
             },
           },
+          // Never an email address on either side: the inviter is shown by name too
           invitedBy: {
             select: {
               id: true,
               name: true,
-              email: true,
             },
           },
           world: {
@@ -322,18 +322,18 @@ export async function POST(
           message: data.message || null,
         },
         include: {
+          // Never the invitee's email: the person inviting only needs their name
           invitedUser: {
             select: {
               id: true,
               name: true,
-              email: true,
             },
           },
+          // Never an email address on either side: the inviter is shown by name too
           invitedBy: {
             select: {
               id: true,
               name: true,
-              email: true,
             },
           },
           world: {

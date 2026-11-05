@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from './db';
 import { notifyFriendAccepted, notifyFriendRequest } from './push-messages';
 import { parsePlayUri } from './utils';
+import { wokaTexturesForMany } from './woka-avatar';
 import {
   PEOPLE_PREFERENCE_KEYS,
   SHARE_ROOM_KEY,
@@ -215,18 +216,24 @@ async function findPair(aId: string, bId: string) {
   });
 }
 
+/** A Woka as the game takes it: { id, url } per layer, bottom first. Empty when there is none to show. */
+export type WokaLayers = { id: string; url: string }[];
+
 export interface FriendsList {
   friends: {
     uuid: string;
     name: string | null;
+    /** Only friends get it: it is how the game opens a direct chat, and it is built from the person's email. */
     chatId: string | null;
+    characterTextures: WokaLayers;
     shareLocation: boolean;
     since: string | null;
     /** When they last entered a room, or null when they hide where they are. */
     lastSeenAt: string | null;
   }[];
-  incoming: { uuid: string; name: string | null; sharedWorld: string | null; requestedAt: string }[];
-  outgoing: { uuid: string; name: string | null; sentAt: string }[];
+  /** Requests carry the person's Woka layers and never their chat ID, which is built from their email. */
+  incoming: { uuid: string; name: string | null; characterTextures: WokaLayers; sharedWorld: string | null; requestedAt: string }[];
+  outgoing: { uuid: string; name: string | null; characterTextures: WokaLayers; sentAt: string }[];
   blocked: { uuid: string; name: string | null }[];
 }
 
@@ -249,6 +256,9 @@ export async function listFriends(me: Account): Promise<FriendsList> {
   const settings = await loadPeopleSettingsFor(friendIds);
   const lastSeen = await lastRoomEntries(friendIds.filter((id) => settings.get(id)?.friendsSeeLocation !== false));
   const shared = await sharedWorldNames(me.id, incomingRows.map((row) => otherId(me.id, row)));
+  // Never fails the list: someone without a Woka here is drawn with the game's default one.
+  const drawn = rows.filter((row) => relationshipFor(me.id, row) !== 'blocked_by_me' && relationshipFor(me.id, row) !== 'blocked_by_them');
+  const wokas = await wokaTexturesForMany(drawn.map((row) => otherId(me.id, row))).catch(() => new Map<string, WokaLayers>());
 
   const list: FriendsList = { friends: [], incoming: [], outgoing: [], blocked: [] };
   for (const row of rows) {
@@ -261,14 +271,21 @@ export async function listFriends(me: Account): Promise<FriendsList> {
         uuid: user.uuid,
         name: user.name,
         chatId: user.matrixChatId,
+        characterTextures: wokas.get(id) ?? [],
         shareLocation: settings.get(id)?.friendsSeeLocation ?? true,
         since: row.acceptedAt?.toISOString() ?? null,
         lastSeenAt: lastSeen.get(id)?.toISOString() ?? null,
       });
     } else if (relationship === 'request_received' && row.status === 'pending') {
-      list.incoming.push({ uuid: user.uuid, name: user.name, sharedWorld: shared.get(id) ?? null, requestedAt: row.createdAt.toISOString() });
+      list.incoming.push({
+        uuid: user.uuid,
+        name: user.name,
+        characterTextures: wokas.get(id) ?? [],
+        sharedWorld: shared.get(id) ?? null,
+        requestedAt: row.createdAt.toISOString(),
+      });
     } else if (relationship === 'request_sent') {
-      list.outgoing.push({ uuid: user.uuid, name: user.name, sentAt: row.createdAt.toISOString() });
+      list.outgoing.push({ uuid: user.uuid, name: user.name, characterTextures: wokas.get(id) ?? [], sentAt: row.createdAt.toISOString() });
     } else if (relationship === 'blocked_by_me') {
       list.blocked.push({ uuid: user.uuid, name: user.name });
     }
@@ -431,6 +448,13 @@ export async function relationshipBetween(me: Account, target: Account): Promise
 export interface SearchResult {
   uuid: string;
   name: string | null;
+  /**
+   * Only for a friend: the chat id is built from the person's email, so a stranger or a pending request, either way, gets null.
+   * Everyone's Woka comes in `characterTextures` instead.
+   */
+  chatId: string | null;
+  /** Their Woka as the game takes it; empty when they have none to show (the game draws its default). */
+  characterTextures: WokaLayers;
   universes: string[];
   relationship: Relationship;
 }
@@ -458,6 +482,7 @@ export async function searchPeople(me: Account, rawQuery: string): Promise<Searc
       id: true,
       uuid: true,
       name: true,
+      matrixChatId: true,
       worldMemberships: {
         where: { world: { isPublic: true, universe: { isPublic: true } } },
         select: { world: { select: { universe: { select: { name: true } } } } },
@@ -478,6 +503,9 @@ export async function searchPeople(me: Account, rawQuery: string): Promise<Searc
   });
   const rowFor = new Map(rows.map((row) => [otherId(me.id, row), row]));
 
+  // Never fails the search: someone without a Woka here is drawn with the game's default one.
+  const wokas = await wokaTexturesForMany(users.map((user) => user.id)).catch(() => new Map<string, WokaLayers>());
+
   const results: SearchResult[] = [];
   for (const user of users) {
     const relationship = relationshipFor(me.id, rowFor.get(user.id));
@@ -487,7 +515,14 @@ export async function searchPeople(me: Account, rawQuery: string): Promise<Searc
     const universes = mayShowPlaces
       ? [...new Set(user.worldMemberships.map((m) => m.world.universe.name))].slice(0, 2)
       : [];
-    results.push({ uuid: user.uuid, name: user.name, universes, relationship });
+    results.push({
+      uuid: user.uuid,
+      name: user.name,
+      chatId: relationship === 'friends' ? user.matrixChatId : null,
+      characterTextures: wokas.get(user.id) ?? [],
+      universes,
+      relationship,
+    });
     if (results.length === SEARCH_LIMIT) break;
   }
   return results;

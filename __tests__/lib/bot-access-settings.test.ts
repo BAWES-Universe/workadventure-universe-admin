@@ -74,7 +74,7 @@ jest.mock('@/lib/db', () => ({
     bot: {
       findUnique: jest.fn(async () => ({
         ...state.bot,
-        room: { world: { universeId: 'u1' } },
+        room: { world: { universeId: 'u1', universe: { name: 'Nova', owner: { name: 'Layla' } } } },
         accessRules: state.rows.map(withJoins),
       })),
       update: jest.fn(async ({ data }: { data: object }) => Object.assign(state.bot, data)),
@@ -410,6 +410,11 @@ describe('reading a bot’s settings', () => {
   it('gives a bot nobody has touched its defaults: open, no line, no reply limit, no rows', async () => {
     const settings = await readBotSettings('bot-1');
     expect(settings).toMatchObject({ privateBot: false, refusalReply: null, dailyReplyCap: null, rules: [] });
+  });
+
+  it('names the universe and its owner, never an email, for the line on who can always use the bot', async () => {
+    const settings = await readBotSettings('bot-1');
+    expect(settings!.universe).toEqual({ name: 'Nova', ownerName: 'Layla' });
   });
 
   it('lists the roles a row can name, never Admin, with what each gives on its own', async () => {

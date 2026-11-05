@@ -28,13 +28,23 @@ const fields = {
   recognition: z.boolean(),
   speech: z.boolean(),
   enabled: z.boolean(),
-  endpoint: z.string().trim().url('endpoint must be a web address').startsWith('https://', 'endpoint must start with https://').max(2000).nullable(),
+  // https:// for every company; wss:// too, for one that only listens (Soniox and Deepgram listen on a websocket address)
+  endpoint: z
+    .string()
+    .trim()
+    .url('endpoint must be a web address')
+    .refine((value) => /^(https|wss):\/\//i.test(value), 'endpoint must start with https:// (or wss:// for a provider that only listens)')
+    .max(2000)
+    .nullable(),
   region: z.string().trim().min(1).max(50).nullable(),
   // A new key replaces the saved one; null takes it away
   apiKey: z.string().trim().min(8, 'apiKey looks too short').max(2000).nullable(),
   models: z.array(modelSchema).max(200, 'A provider can list up to 200 models'),
   defaultRecognition: z.boolean(),
   defaultSpeech: z.boolean(),
+  // The voice Universe AI speaks with when this is the default speaking provider (game #1668); null takes it away
+  defaultVoiceId: z.string().trim().min(1, 'defaultVoiceId can’t be empty').max(255).nullable(),
+  defaultVoiceName: z.string().trim().min(1, 'defaultVoiceName can’t be empty').max(255).nullable(),
 };
 
 export const createVoiceProviderSchema = z
@@ -61,6 +71,8 @@ export const updateVoiceProviderSchema = z
     models: fields.models,
     defaultRecognition: fields.defaultRecognition,
     defaultSpeech: fields.defaultSpeech,
+    defaultVoiceId: fields.defaultVoiceId,
+    defaultVoiceName: fields.defaultVoiceName,
   })
   .partial()
   .strict();
@@ -88,6 +100,8 @@ export function voiceProviderView(row: VoiceProvider) {
     models: readModels(row.models),
     defaultRecognition: row.defaultRecognition,
     defaultSpeech: row.defaultSpeech,
+    defaultVoiceId: row.defaultVoiceId,
+    defaultVoiceName: row.defaultVoiceName,
     updatedAt: row.updatedAt,
   };
 }
@@ -97,12 +111,22 @@ export function readModels(value: unknown): VoiceModel[] {
   return parsed.success ? parsed.data : [];
 }
 
-type Draft = Pick<VoiceProvider, 'recognition' | 'speech' | 'enabled' | 'defaultRecognition' | 'defaultSpeech'> & { models: VoiceModel[]; hasKey: boolean };
+type Draft = Pick<VoiceProvider, 'recognition' | 'speech' | 'enabled' | 'defaultRecognition' | 'defaultSpeech'> & {
+  models: VoiceModel[];
+  hasKey: boolean;
+  endpoint?: string | null;
+  defaultVoiceId?: string | null;
+  defaultVoiceName?: string | null;
+};
 
 /** Why a provider can't be saved like this, or null. A default must be enabled, hold its key and do its job. */
 export function voiceProviderProblem(draft: Draft): string | null {
   if (!draft.recognition && !draft.speech) return 'A provider must listen, speak, or both';
   if (draft.models.some((model) => !draft[model.kind])) return 'A model can only be listed for what the provider does';
+  if (draft.defaultVoiceId && !draft.speech) return 'Only a provider that speaks can have a default voice';
+  if (draft.defaultVoiceName && !draft.defaultVoiceId) return 'A default voice name needs the default voice';
+  // A speaking call and the list of voices go to the address over https, so a websocket address is for a provider that only listens
+  if (draft.endpoint && /^wss:\/\//i.test(draft.endpoint) && draft.speech) return 'A provider that speaks needs an https:// address';
   const ids = draft.models.map((model) => `${model.kind}:${model.id}`);
   if (new Set(ids).size !== ids.length) return 'A model is listed twice';
   for (const [isDefault, can, job] of [
@@ -121,7 +145,7 @@ export function voiceProviderProblem(draft: Draft): string | null {
 export const listVoiceProviders = () => prisma.voiceProvider.findMany({ where: { ownerId: null }, orderBy: [{ name: 'asc' }, { id: 'asc' }] });
 
 export async function createVoiceProvider(input: z.infer<typeof createVoiceProviderSchema>, userId: string): Promise<VoiceProvider> {
-  const problem = voiceProviderProblem({ ...input, defaultRecognition: false, defaultSpeech: false, hasKey: Boolean(input.apiKey) });
+  const problem = voiceProviderProblem({ ...input, endpoint: input.endpoint ?? null, defaultRecognition: false, defaultSpeech: false, hasKey: Boolean(input.apiKey) });
   if (problem) throw new VoiceProviderRefused(problem);
   return prisma.voiceProvider.create({
     data: {
@@ -144,6 +168,7 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
   return prisma.$transaction(async (tx) => {
     const row = await tx.voiceProvider.findUnique({ where: { id } });
     if (!row || row.ownerId !== null) throw new VoiceProviderRefused('Voice provider not found', 404);
+    const changesCompany = input.adapter !== undefined && input.adapter !== row.adapter;
     const next = {
       recognition: input.recognition ?? row.recognition,
       speech: input.speech ?? row.speech,
@@ -151,6 +176,16 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
       defaultRecognition: input.defaultRecognition ?? row.defaultRecognition,
       defaultSpeech: input.defaultSpeech ?? row.defaultSpeech,
       models: input.models ?? readModels(row.models),
+      endpoint: input.endpoint === undefined ? row.endpoint : input.endpoint,
+      // The name goes with its voice: a new voice id without a name drops the old name, and no voice has no name
+      // A voice belongs to its company: a provider moved to another adapter loses it unless a new one comes with the change
+      defaultVoiceId: input.defaultVoiceId === undefined ? (changesCompany ? null : row.defaultVoiceId) : input.defaultVoiceId,
+      defaultVoiceName:
+        input.defaultVoiceName !== undefined
+          ? input.defaultVoiceName
+          : (input.defaultVoiceId !== undefined && input.defaultVoiceId !== row.defaultVoiceId) || (input.defaultVoiceId === undefined && changesCompany)
+            ? null
+            : row.defaultVoiceName,
       hasKey: input.apiKey === undefined ? Boolean(row.apiKeyEncrypted) : input.apiKey !== null,
     };
     const problem = voiceProviderProblem(next);
@@ -171,9 +206,43 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
         enabled: next.enabled,
         defaultRecognition: next.defaultRecognition,
         defaultSpeech: next.defaultSpeech,
+        ...(input.defaultVoiceId !== undefined || input.defaultVoiceName !== undefined || (changesCompany && row.defaultVoiceId)
+          ? { defaultVoiceId: next.defaultVoiceId, defaultVoiceName: next.defaultVoiceId ? next.defaultVoiceName : null }
+          : {}),
       },
     });
   });
+}
+
+/**
+ * How many bots use each server provider, for the Universe AI page: a bot counts for a job when it has voice on and the profile it
+ * speaks with names the provider for that job, and once in `total` however many jobs it uses the provider for. Bots on a person's own
+ * key are not counted here.
+ */
+export type VoiceProviderBotCount = { recognition: number; speech: number; total: number };
+
+export async function voiceProviderBotCounts(): Promise<Map<string, VoiceProviderBotCount>> {
+  const rows = await prisma.$queryRaw<{ profile: unknown }[]>`
+    SELECT r.profile AS profile
+    FROM bots b
+    JOIN bot_voice_revisions r ON r.bot_id = b.id AND r.number = b.voice_revision
+    WHERE b.voice_enabled = true`;
+  const counts = new Map<string, VoiceProviderBotCount>();
+  for (const { profile } of rows) {
+    const saved = typeof profile === 'object' && profile !== null ? (profile as { recognition?: { providerId?: unknown }; speech?: { providerId?: unknown } }) : {};
+    const ids = new Set<string>();
+    for (const job of ['recognition', 'speech'] as const) {
+      const id = saved[job]?.providerId;
+      if (typeof id !== 'string') continue;
+      const entry = counts.get(id) ?? { recognition: 0, speech: 0, total: 0 };
+      entry[job] += 1;
+      // A bot that listens and speaks with one provider is one bot there, not two
+      if (!ids.has(id)) entry.total += 1;
+      ids.add(id);
+      counts.set(id, entry);
+    }
+  }
+  return counts;
 }
 
 /** A default can't be deleted: another is made the default first. */
@@ -196,6 +265,38 @@ export async function servedVoiceProviders() {
     defaults: {
       recognition: rows.find((row) => row.defaultRecognition)?.id ?? null,
       speech: rows.find((row) => row.defaultSpeech)?.id ?? null,
+    },
+  };
+}
+
+/**
+ * Universe AI as the bot page needs it (game #1668): for listening and for speaking, the server's default provider with the model
+ * to start from (the first one it lists for that job) and, for speaking, the voice a super admin set as the default (null when
+ * none was set: the page then takes the first voice the provider lists). A job is null when the server has no usable default for
+ * it, which the page reads as "Universe AI's voice is off" / "not on this server yet". Never the key.
+ */
+export async function universeAiDefaults() {
+  const rows = await prisma.voiceProvider.findMany({ where: { enabled: true, ownerId: null }, orderBy: [{ name: 'asc' }, { id: 'asc' }] });
+  const part = (kind: 'recognition' | 'speech') => {
+    const row = rows.find((candidate) => (kind === 'recognition' ? candidate.defaultRecognition : candidate.defaultSpeech));
+    if (!row || !row.apiKeyEncrypted) return null;
+    const models = readModels(row.models).filter((model) => model.kind === kind);
+    if (models.length === 0) return null;
+    return {
+      providerId: row.id,
+      adapter: row.adapter,
+      name: row.name,
+      model: models[0].id,
+      models: models.map((model) => ({ id: model.id, label: model.label ?? null })),
+    };
+  };
+  const speech = part('speech');
+  const speechRow = speech ? rows.find((row) => row.id === speech.providerId) : undefined;
+  return {
+    recognition: part('recognition'),
+    speech: speech && {
+      ...speech,
+      defaultVoice: speechRow?.defaultVoiceId ? { voiceId: speechRow.defaultVoiceId, voiceName: speechRow.defaultVoiceName } : null,
     },
   };
 }

@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
+import { RECHECK_MS } from '@/lib/key-recheck';
 import { decryptApiKey } from '@/lib/encryption';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import { cleanModelId, probeChat, probeModels, type ModelFacts, type ProbeFailure } from '@/lib/ai-key-models';
@@ -14,7 +15,7 @@ import { cleanFacts, forgetKeyModels } from '@/lib/ai-key-model-list';
  * 5 minutes, and only when one of its bots needs it (there is no timer); it switches back once it answers. The key's owner
  * gets one notice per outage. Server providers are never touched: they have no owner and no health.
  */
-export const RECHECK_MS = 5 * 60_000;
+export { RECHECK_MS };
 /** How long a bot's request waits for a check of its Down key (Stop replying) before it rests; the check carries on. */
 export const CHECK_WAIT_MS = 8_000;
 export const FAILED_REPLIES_TO_DOWN = 2;
