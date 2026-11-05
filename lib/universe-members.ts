@@ -4,6 +4,7 @@
  */
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { isAdministratorRole } from '@/lib/role-access';
+import { endOfferIfLeft } from '@/lib/ownership-offer-ends';
 import { CUSTOM_MIN_POSITION, EVERYONE_KEY, MEMBER_KEY, ensureBuiltInRoles, syncWorldMembers, type WorldScope } from '@/lib/roles';
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -191,10 +192,14 @@ export async function leaveWorld(db: Db, worldId: string, userId: string): Promi
     else await db.universeMember.update({ where: { id: member.id }, data: scope });
   }
   await syncWorldMembers(db, universeId, userId);
+  // Out of the last world means out of the universe: an ownership offer to them ends (#820)
+  await endOfferIfLeft(db, universeId, userId);
 }
 
 /** Take someone out of a universe: every role, every world. */
 export async function leaveUniverse(db: Db, universeId: string, userId: string): Promise<void> {
   await db.universeMember.deleteMany({ where: { universeId, userId } });
   await syncWorldMembers(db, universeId, userId);
+  // An ownership offer to them ends with their membership (#820)
+  await endOfferIfLeft(db, universeId, userId);
 }

@@ -3,9 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Crown, Lock, Trash2 } from 'lucide-react';
+import { Input } from '@/components/ui/input';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { timeAgo } from '@/lib/time-ago';
 import { cn } from '@/lib/utils';
+import { whatMoves, ownerSinceLine } from '@/lib/ownership-text';
 import { dayWord, isAdministrator, pickableWorlds, rolePickableWorlds, worldsLabel, type AllowedWorlds, type Worlds } from '@/lib/member-roles';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -30,7 +32,22 @@ interface MemberAnswer {
     roles: { roleId: string; allWorlds: boolean; worldIds: string[] }[];
   };
   can: { giveRoleIds: string[]; giveWorlds: AllowedWorlds; widen: boolean; remove: boolean };
+  /** Passing the universe on (#820). */
+  ownership?: {
+    /** You may offer the universe to this person now. */
+    canOffer: boolean;
+    /** Set only when a super admin acts for the owner: the owner's name. */
+    onBehalfOf: string | null;
+    /** The offer that is waiting (shown to the owner and super admins only), and whether it is for this person. */
+    waiting: { toUserId: string; toName: string | null; createdAt: string; toThem: boolean } | null;
+    /** For the owner: when they got the universe and from whom (null for the person who created it). */
+    since: string | null;
+    from: string | null;
+  };
 }
+
+/** What an answer without the ownership part (an older server) means: nothing to offer, nothing waiting. */
+const NO_OWNERSHIP: NonNullable<MemberAnswer['ownership']> = { canOffer: false, onBehalfOf: null, waiting: null, since: null, from: null };
 
 const PICKED = 'border-[rgba(167,139,250,.7)] bg-[rgba(134,41,252,.14)] shadow-[0_0_0_1px_rgba(167,139,250,.35),0_0_24px_-8px_rgba(134,41,252,.6)]';
 
@@ -71,6 +88,11 @@ export function MemberPage() {
   const [confirming, setConfirming] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [viewerId, setViewerId] = useState<string | null>(null);
+  // Passing the universe on: the sheet, the name typed to confirm, and a request on its way
+  const [offering, setOffering] = useState(false);
+  const [typed, setTyped] = useState('');
+  const [offerBusy, setOfferBusy] = useState(false);
+  const [offerError, setOfferError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setFailed(false);
@@ -220,6 +242,49 @@ export function MemberPage() {
     }
   }
 
+  async function offerOwnership() {
+    if (offerBusy || !answer || !universe) return;
+    setOfferBusy(true);
+    setOfferError(null);
+    try {
+      const response = await authenticatedFetch(`/api/admin/universes/${id}/ownership-offer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toUserId: answer.member.userId, universeName: typed }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(typeof body.error === 'string' ? body.error : 'Couldn’t send the offer. Try again.');
+      }
+      setOffering(false);
+      setTyped('');
+      await load();
+    } catch (cause) {
+      setOfferError(cause instanceof Error ? cause.message : 'Couldn’t send the offer. Try again.');
+    } finally {
+      setOfferBusy(false);
+    }
+  }
+
+  async function takeBackOffer() {
+    if (offerBusy) return;
+    setOfferBusy(true);
+    setOfferError(null);
+    try {
+      const response = await authenticatedFetch(`/api/admin/universes/${id}/ownership-offer`, { method: 'DELETE' });
+      // Already gone (they answered meanwhile): the page reloads to say how it stands
+      if (!response.ok && response.status !== 404) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(typeof body.error === 'string' ? body.error : 'Couldn’t take the offer back. Try again.');
+      }
+      await load();
+    } catch (cause) {
+      setOfferError(cause instanceof Error ? cause.message : 'Couldn’t take the offer back. Try again.');
+    } finally {
+      setOfferBusy(false);
+    }
+  }
+
   if (failed) return <LoadError label="this person" retry={() => void load()} />;
   if (basics.status === 'error' || roles.status === 'error') {
     return (
@@ -234,6 +299,7 @@ export function MemberPage() {
   }
   if (!answer || !universe || roles.status !== 'ready') return <LoadingRows label="this person" rows={4} />;
   const { member, can } = answer;
+  const ownership: NonNullable<MemberAnswer['ownership']> = answer.ownership ?? NO_OWNERSHIP;
   const name = member.name || member.email || 'Someone';
   const first = name.trim().split(/\s+/)[0];
   const isYou = viewerId === member.userId;
@@ -342,7 +408,9 @@ export function MemberPage() {
             <div className="flex min-h-12 items-center gap-3 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 py-2">
               <Crown aria-hidden="true" className="h-4 w-4 shrink-0 text-[#FACC15]" />
               <span className="text-[15px] font-semibold">Owner</span>
-              <span className="ml-auto text-right text-[13px] text-muted-foreground">{isYou ? 'You created' : 'Created'} {universe.name}</span>
+              <span className="ml-auto text-right text-[13px] text-muted-foreground">
+                {ownerSinceLine({ universeName: universe.name, isYou, since: ownership.since, from: ownership.from, day: dayWord })}
+              </span>
             </div>
             {member.roles.filter((given) => roles.value.byId.has(given.roleId)).map((given) => {
               const info = roles.value.byId.get(given.roleId)!;
@@ -361,7 +429,11 @@ export function MemberPage() {
               <span className="ml-auto text-right text-[13px]">Everyone who joined</span>
             </div>
           </div>
-          <p className="text-sm text-muted-foreground">The owner has every permission in every world, so roles add nothing here.</p>
+          <p className="text-sm text-muted-foreground">
+            {ownership.since
+              ? `Owning ${universe.name} gives every permission in Orbit. Admin in every world came with it, so the game gives the same.`
+              : 'The owner has every permission in every world, so roles add nothing here.'}
+          </p>
         </section>
       ) : (
         <section className="grid gap-3" aria-labelledby="member-roles">
@@ -390,23 +462,95 @@ export function MemberPage() {
         </section>
       )}
 
-      {can.remove && (
+      {(can.remove || ownership.canOffer || ownership.waiting) && (
         <section className="grid gap-3 border-t border-foreground/10 pt-6" aria-labelledby="member-danger">
           <h2 id="member-danger" className="orbit-display text-lg font-bold text-[#fca5a5]">Danger zone</h2>
-          <div className="flex flex-col items-start gap-3 rounded-2xl border border-[rgba(248,113,113,.4)] sm:flex-row sm:items-center sm:justify-between bg-foreground/[.03] p-4">
-            <div className="min-w-0 flex-1">
-              <strong className="block text-[17px]">{isYou ? `Leave ${universe.name}` : `Remove from ${universe.name}`}</strong>
-              <p className="mt-1 text-sm text-muted-foreground">
-                {isYou ? 'You lose every role and can’t come back in until someone invites you again.' : `${first} loses every role and can’t come back in until someone invites them again.`}
-              </p>
+          {ownership.canOffer && (
+            <div data-testid="make-owner" className="flex flex-col items-start gap-3 rounded-2xl border border-[rgba(248,113,113,.4)] bg-foreground/[.03] p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0 flex-1">
+                <strong className="block text-[17px]">Make {name} the owner</strong>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {name} gets the whole universe, every world and room in it, once they accept. {ownership.onBehalfOf ? `${ownership.onBehalfOf} stays` : 'You stay'} as Admin.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                className="h-11 border-[rgba(248,113,113,.4)] px-5 text-[#fca5a5] hover:text-[#fca5a5]"
+                onClick={() => {
+                  setOfferError(null);
+                  setTyped('');
+                  setOffering(true);
+                }}
+              >
+                <Crown aria-hidden="true" />
+                Make owner
+              </Button>
             </div>
-            <Button variant="outline" className="h-11 border-[rgba(248,113,113,.4)] px-5 text-[#fca5a5] hover:text-[#fca5a5]" onClick={() => setConfirming(true)}>
-              <Trash2 aria-hidden="true" />
-              {isYou ? 'Leave' : 'Remove'}
-            </Button>
-          </div>
+          )}
+          {ownership.waiting?.toThem && (
+            <div data-testid="offer-waiting" className={cn('flex flex-col items-start gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between', PICKED)}>
+              <div className="min-w-0 flex-1">
+                <strong className="block text-[17px]">Waiting for {name} to accept</strong>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {ownership.onBehalfOf ? `${universe.name} was offered to ${name}` : `You offered ${name} ${universe.name}`} {dayWord(new Date(ownership.waiting.createdAt))}. Nothing changes until they accept. It waits until they answer or you take it back.
+                </p>
+              </div>
+              <Button variant="outline" className="h-11 px-5" disabled={offerBusy} onClick={() => void takeBackOffer()}>
+                Take back the offer
+              </Button>
+            </div>
+          )}
+          {ownership.waiting && !ownership.waiting.toThem && (
+            <div data-testid="offer-elsewhere" className="flex flex-col items-start gap-3 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0 flex-1">
+                <strong className="block text-[17px]">An offer is waiting for {ownership.waiting.toName || 'someone else'}</strong>
+                <p className="mt-1 text-sm text-muted-foreground">Only one offer waits at a time. Take it back first to offer {universe.name} to {name}.</p>
+              </div>
+              <Button variant="outline" className="h-11 px-5" onClick={() => router.push(`/admin/universes/${id}/members/${ownership.waiting!.toUserId}`)}>
+                See the offer
+              </Button>
+            </div>
+          )}
+          {offerError && !offering && <p role="alert" className="text-sm text-destructive">{offerError}</p>}
+          {can.remove && (
+            <div className="flex flex-col items-start gap-3 rounded-2xl border border-[rgba(248,113,113,.4)] sm:flex-row sm:items-center sm:justify-between bg-foreground/[.03] p-4">
+              <div className="min-w-0 flex-1">
+                <strong className="block text-[17px]">{isYou ? `Leave ${universe.name}` : `Remove from ${universe.name}`}</strong>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {isYou ? 'You lose every role and can’t come back in until someone invites you again.' : `${first} loses every role and can’t come back in until someone invites them again.`}
+                </p>
+              </div>
+              <Button variant="outline" className="h-11 border-[rgba(248,113,113,.4)] px-5 text-[#fca5a5] hover:text-[#fca5a5]" onClick={() => setConfirming(true)}>
+                <Trash2 aria-hidden="true" />
+                {isYou ? 'Leave' : 'Remove'}
+              </Button>
+            </div>
+          )}
         </section>
       )}
+
+      <FormSheet open={offering} onOpenChange={setOffering} title={`Make ${name} the owner of ${universe.name}?`}>
+        <ul className="grid gap-2.5 text-sm text-muted-foreground" data-testid="offer-sheet">
+          <li><strong className="text-foreground">The whole universe moves:</strong> all of {universe.name}, with {whatMoves(universe.worlds.map((world) => world.name))}. A world or room can’t be passed on its own.</li>
+          <li><strong className="text-foreground">{name}</strong> gets every permission in {universe.name}, and Admin in every world so the game gives the same.</li>
+          <li><strong className="text-foreground">{ownership.onBehalfOf ? `${ownership.onBehalfOf} stays` : 'You stay'} as Admin</strong> in every world. {name} will rank above {ownership.onBehalfOf ? 'them' : 'you'} and can change that.</li>
+          <li><strong className="text-foreground">Bots and AI keys stay with their people</strong> and keep running while {ownership.onBehalfOf ? 'the old owner is' : 'you’re'} Admin. Artifacts stay with the people who asked for them.</li>
+          <li><strong className="text-foreground">{name} has to accept.</strong> Until then nothing changes, and the offer can be taken back.</li>
+        </ul>
+        <label className="grid gap-2 text-sm">
+          <span>Type <strong className="text-foreground">{universe.name}</strong> to confirm</span>
+          <Input value={typed} onChange={(event) => setTyped(event.target.value)} className="h-11" autoComplete="off" />
+        </label>
+        {offerError && <p role="alert" className="text-sm text-destructive">{offerError}</p>}
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" className="h-11 px-5" onClick={() => setOffering(false)}>
+            Cancel
+          </Button>
+          <Button variant="destructive" className="h-11 px-5" disabled={typed !== universe.name || offerBusy} onClick={() => void offerOwnership()}>
+            {offerBusy ? 'Sending…' : 'Offer ownership'}
+          </Button>
+        </div>
+      </FormSheet>
 
       <FormSheet open={confirming} onOpenChange={setConfirming} title={isYou ? `Leave ${universe.name}?` : `Remove ${name} from ${universe.name}?`}>
         <p className="text-sm text-muted-foreground">
