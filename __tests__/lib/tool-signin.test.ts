@@ -299,6 +299,14 @@ describe('who is told', () => {
     expect(created().userId).toBe('maker');
   });
 
+  it('works out who may be told for every connector of the bot, not only those down now: a sync that started before another connection expired must not take its card down', async () => {
+    db.botMcpServer.findMany.mockResolvedValue([tavily]);
+    await syncToolSignInNotices('bot-1', { serverId: 's1', at: T1 });
+    const select = db.bot.findUnique.mock.calls[0][0].select.mcpServers;
+    expect(select.where).toBeUndefined();
+    expect(mayManage.mock.calls.map(([userId]) => userId).sort()).toEqual(['maker', 'sara', 'yousef']);
+  });
+
   it('makes no card, and takes an open one down, when nobody who can manage it is left', async () => {
     db.botMcpServer.findMany.mockResolvedValue([tavily]);
     db.userNotice.findMany.mockResolvedValue([{ id: 'n1', userId: 'yousef' }]);

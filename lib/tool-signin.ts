@@ -30,11 +30,15 @@ function clampAt(at: Date | undefined, now = new Date()): Date {
   return at;
 }
 
-/** The connectors and the bot's maker who can still manage this bot's tools (the same rule the tools page and routes use). */
+/**
+ * The connectors and the bot's maker who can still manage this bot's tools (the same rule the tools page and routes use).
+ * Every connection's connector is checked, not only those signed out now: this runs before the lock, so a connection that
+ * expires while another sync is running must already have its person in the set, or that sync would take their card down.
+ */
 async function peopleWhoCanManageTools(botId: string): Promise<Set<string>> {
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
-    select: { id: true, createdById: true, roomId: true, mcpServers: { where: { signInLostAt: { not: null } }, select: { connectedById: true } } },
+    select: { id: true, createdById: true, roomId: true, mcpServers: { select: { connectedById: true } } },
   });
   if (!bot) return new Set();
   const candidates = new Set([bot.createdById, ...bot.mcpServers.map((server) => server.connectedById)].filter((id): id is string => !!id));
