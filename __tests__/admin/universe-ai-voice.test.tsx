@@ -458,12 +458,19 @@ describe('the voice limits', () => {
     expect(listening.options.map((option) => option.value)).toEqual([0, 15, 30, 60, 120, 240]);
   });
 
-  it('say what 5 guest replies is from the real allowance, not always half', () => {
-    const meaning = (guest: number) => voiceServerLimits({ ...VOICE_LIMITS_RECOMMENDED }, { signedIn: 30, guest }).find((row) => row.id === 'guestVoiceReplies')!.options.find((option) => option.value === 5)!.meaning;
-    expect(meaning(10)).toBe('Half of a guest\u2019s replies.');
-    expect(meaning(20)).toBe('5 of a guest\u2019s 20 replies.');
-    expect(meaning(8)).toBe('5 of a guest\u2019s 8 replies.');
-    expect(meaning(5)).toBe('All of a guest\u2019s replies.');
+  it('say what 5 guest replies is from the voice replies a guest really has, after the replies kept for text', () => {
+    const meaning = (guest: number, textReserveShare = VOICE_LIMITS_RECOMMENDED.textReserveShare) =>
+      voiceServerLimits({ ...VOICE_LIMITS_RECOMMENDED, textReserveShare }, { signedIn: 30, guest }).find((row) => row.id === 'guestVoiceReplies')!.options.find((option) => option.value === 5)!.meaning;
+    // 1 in 6 kept: 10 replies keep 2, 20 keep 4, 8 keep 2
+    expect(meaning(10)).toBe('5 of the 8 voice replies a guest has.');
+    expect(meaning(20)).toBe('5 of the 16 voice replies a guest has.');
+    expect(meaning(8)).toBe('5 of the 6 voice replies a guest has.');
+    // 5 replies keep 1 for text, so only 4 are left for voice
+    expect(meaning(5)).toBe('All 4 voice replies a guest has.');
+    // 1 in 2 kept: 8 replies keep 4, so 4 are left
+    expect(meaning(8, 2)).toBe('All 4 voice replies a guest has.');
+    expect(meaning(2)).toBe('The only voice reply a guest has.');
+    expect(meaning(1)).toBe('Guests get text only.');
   });
 
   it('are the 7 from #740, the four a key can change first, each with its recommended value', () => {

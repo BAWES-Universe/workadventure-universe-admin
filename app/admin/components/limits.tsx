@@ -701,6 +701,14 @@ export function voiceServerLimits(values: VoiceLimits, fair: { signedIn: number;
     Object.fromEntries((['turnSeconds', 'replyCharacters', 'replySeconds', 'listenMinutesPerDay'] as const).map((name) => [name, { value: values[name], recommended: recommended[name], changed: values[name] !== recommended[name] }])) as VoiceKeyLimitValues
   );
   const oneIn = (value: number) => `1 in ${value}`;
+  // What a guest can really get is their replies minus the ones kept for text, the same sum the server does
+  const guestVoiceLeft = Math.max(0, Math.floor(fair.guest) - textReserve(fair.guest, values.textReserveShare));
+  const fiveGuestReplies = (left: number) => {
+    if (left <= 0) return 'Guests get text only.';
+    if (left === 1) return 'The only voice reply a guest has.';
+    if (left <= 5) return `All ${left} voice replies a guest has.`;
+    return `5 of the ${left} voice replies a guest has.`;
+  };
   const kept = (share: number) => `${fair.signedIn} replies keep ${textReserve(fair.signedIn, share)} for text.`;
   const own = (id: keyof VoiceLimits, row: Omit<Limit, 'value' | 'recommended' | 'range' | 'options'> & { steps: LimitOption[]; name: (value: number) => string }): Limit => {
     const { steps, name, ...rest } = row;
@@ -739,7 +747,7 @@ export function voiceServerLimits(values: VoiceLimits, fair: { signedIn: number;
         { value: 0, label: 'None', meaning: 'Guests get text only.' },
         { value: 1, label: '1 reply', meaning: 'A taste of voice.' },
         { value: 3, label: '3 replies', meaning: 'A short conversation.' },
-        { value: 5, label: '5 replies', meaning: fair.guest === 10 ? 'Half of a guest’s replies.' : fair.guest > 5 ? `5 of a guest’s ${fair.guest} replies.` : 'All of a guest’s replies.' },
+        { value: 5, label: '5 replies', meaning: fiveGuestReplies(guestVoiceLeft) },
       ],
     }),
   ];
