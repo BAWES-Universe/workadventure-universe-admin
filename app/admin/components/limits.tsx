@@ -668,6 +668,7 @@ export function voiceKeyLimits(values: VoiceKeyLimitValues): Limit[] {
       unit: 'minutes',
       name: minutesLabel,
       steps: [
+        { value: 0, label: 'Never', meaning: 'The bot doesn’t listen, so nobody can speak to it.' },
         { value: 15, label: '15 minutes', meaning: 'Now and then.' },
         { value: 30, label: '30 minutes', meaning: 'A quiet room.' },
         { value: 120, label: '2 hours', meaning: 'A busy room.' },
@@ -738,7 +739,7 @@ export function voiceServerLimits(values: VoiceLimits, fair: { signedIn: number;
         { value: 0, label: 'None', meaning: 'Guests get text only.' },
         { value: 1, label: '1 reply', meaning: 'A taste of voice.' },
         { value: 3, label: '3 replies', meaning: 'A short conversation.' },
-        { value: 5, label: '5 replies', meaning: 'Half of a guest’s replies.' },
+        { value: 5, label: '5 replies', meaning: fair.guest === 10 ? 'Half of a guest’s replies.' : fair.guest > 5 ? `5 of a guest’s ${fair.guest} replies.` : 'All of a guest’s replies.' },
       ],
     }),
   ];

@@ -261,6 +261,16 @@ describe('lending a voice key', () => {
     expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/models'))).toBe(false);
   });
 
+  it('doesn’t promise All models includes models the company adds later: it is the models on the key’s list', async () => {
+    answer({ voice: [voiceKey], universes });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Lend to a universe' }));
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('Plugn');
+    expect(dialog.textContent).toContain('Every model on this key’s list. Each bot picks one on its page.');
+    expect(dialog.textContent).not.toContain('adds later');
+  });
+
   it('groups the key’s models under Listens and Speaks and lends only the ticked ones as "kind:id"', async () => {
     answer({ voice: [voiceKey], universes });
     render(<AiKeysPage />);
