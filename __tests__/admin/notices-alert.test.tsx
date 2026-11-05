@@ -73,4 +73,68 @@ describe('NoticesAlert', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Dismiss/ }));
     await waitFor(() => expect(screen.queryByText('My LM Studio is down')).toBeNull());
   });
+
+  describe('a tool’s lost sign-in (game #1819)', () => {
+    const server = (id: string, name: string, kind: 'oauth' | 'key', at: string) => ({ id, name, kind, at });
+    const lost = (servers: ReturnType<typeof server>[], href: string | null = null) => ({
+      id: 'n9',
+      kind: 'tool-signin',
+      title: 'stored title',
+      body: 'stored body',
+      badge: 'Sign-in expired',
+      href,
+      data: { botId: 'bot-1', bot: 'Tavily Researcher', universe: 'autonode-labs', servers },
+    });
+    const tavily = server('s1', 'Tavily', 'oauth', '2026-11-05T09:54:00.000Z');
+    const attio = server('s2', 'Attio', 'oauth', '2026-11-05T09:58:00.000Z');
+
+    it('writes the card itself, with one Reconnect button per connection', async () => {
+      answer([lost([tavily, attio])]);
+      render(<NoticesAlert />);
+      expect(await screen.findByText('Tavily Researcher can’t use Tavily and Attio')).toBeTruthy();
+      expect(screen.getByText('Sign-in expired')).toBeTruthy();
+      expect(screen.getByText(/In autonode-labs\. Both stopped accepting this bot’s sign-in \(/)).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Reconnect Tavily' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Reconnect Attio' })).toBeTruthy();
+      expect(screen.queryByRole('link')).toBeNull();
+    });
+
+    it('opens the sign-in window right away, and brings the card down by itself when it closes', async () => {
+      const popup = { closed: false };
+      const open = jest.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+      let reconnected = false;
+      fetchMock.mockImplementation((url: string) => {
+        if (url.includes('/oauth/start')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ authorizeUrl: 'https://tavily.example/authorize?x=1' }) });
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ notices: reconnected ? [] : [lost([tavily])] }) });
+      });
+      render(<NoticesAlert />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Reconnect Tavily' }));
+      await waitFor(() => expect(open).toHaveBeenCalledWith('https://tavily.example/authorize?x=1', 'oauth-popup', 'width=600,height=700'));
+      expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/bots/bot-1/mcp-servers/s1/oauth/start?redirectUrl='))).toBe(true);
+      expect(await screen.findByRole('button', { name: 'Waiting for Tavily…' })).toBeTruthy();
+      reconnected = true;
+      popup.closed = true;
+      await waitFor(() => expect(screen.queryByText(/can’t use Tavily/)).toBeNull(), { timeout: 3000 });
+      open.mockRestore();
+    });
+
+    it('says so when the sign-in could not be started, and lets them try again', async () => {
+      fetchMock.mockImplementation((url: string) =>
+        url.includes('/oauth/start')
+          ? Promise.resolve({ ok: false, status: 403, json: () => Promise.resolve({}) })
+          : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ notices: [lost([tavily])] }) }));
+      render(<NoticesAlert />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Reconnect Tavily' }));
+      expect((await screen.findByRole('alert')).textContent).toMatch(/didn’t work/);
+      expect((screen.getByRole('button', { name: 'Reconnect Tavily' }) as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    it('leads a rejected key to the bot’s page instead, with no Reconnect button', async () => {
+      answer([{ ...lost([server('s3', 'Tavily', 'key', '2026-11-05T09:54:00.000Z')], '/admin/bots/bot-1/mcp-servers'), badge: 'Key rejected' }]);
+      render(<NoticesAlert />);
+      expect(await screen.findByText('Key rejected')).toBeTruthy();
+      expect(screen.getByRole('link', { name: /Tavily Researcher can’t use Tavily/ }).getAttribute('href')).toBe('/admin/bots/bot-1/mcp-servers');
+      expect(screen.queryByRole('button', { name: /Reconnect/ })).toBeNull();
+    });
+  });
 });

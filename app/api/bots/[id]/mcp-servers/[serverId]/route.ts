@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
+import { markToolReconnected } from '@/lib/tool-signin';
 import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
 import { z } from 'zod';
@@ -432,6 +433,12 @@ export async function PATCH(
         where: { id: serverId },
         data: updateData,
       });
+    }
+
+    // A new key or token is a new connection: remember who made it and clear a lost sign-in at once (game #1819). An OAuth
+    // save that only changes settings keeps its tokens, so it is not one.
+    if (userId && effectiveAuthType !== 'oauth' && validatedData.authConfig) {
+      await markToolReconnected(serverId, userId);
     }
 
     return NextResponse.json({

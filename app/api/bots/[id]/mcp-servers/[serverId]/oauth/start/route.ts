@@ -178,6 +178,8 @@ export async function GET(
       // row's serverUrl can be edited while the state is in flight (#188 review).
       ...(server.serverUrl ? { resource: server.serverUrl } : {}),
       codeVerifier, redirectUri,
+      // Who is connecting it, remembered on the connection: the person told if its sign-in expires (game #1819)
+      ...(userId ? { personId: userId } : {}),
       ts: Date.now(),
       exp: Math.floor(Date.now() / 1000) + 600, // 10 minutes from now
     });

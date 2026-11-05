@@ -245,6 +245,11 @@ export async function GET(
             headers: s.headers,
             lastTestedAt: s.lastTestedAt,
             lastTestResult: s.lastTestResult,
+            // What the bot server saw when it really used the server, not only the last Test (game #1819)
+            signInLostAt: s.signInLostAt,
+            signInLostStatus: s.signInLostStatus,
+            noAnswerAt: s.noAnswerAt,
+            reconnectedAt: s.reconnectedAt,
             createdAt: s.createdAt,
             updatedAt: s.updatedAt,
           };

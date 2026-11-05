@@ -26,6 +26,7 @@ export async function GET(request: NextRequest) {
         body: notice.body,
         badge: notice.badge,
         href: notice.href,
+        data: notice.data,
         createdAt: notice.createdAt.toISOString(),
       })),
     });
