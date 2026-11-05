@@ -4,13 +4,13 @@
  */
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { canManageBotMcpServers } from '@/lib/bot-permissions';
+import { canManageBotMcpServers, preloadBotRules } from '@/lib/bot-permissions';
 import { describeToolSignIn, type ToolSignInNoticeData } from '@/lib/tool-signin-words';
 import { dropOrphanedToolSignInNotices, markToolReconnected, reportToolSignIn, syncToolSignInNotices } from '@/lib/tool-signin';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 // Who still manages a bot's tools is the tools page's own rule; here it is a switch
-jest.mock('@/lib/bot-permissions', () => ({ canManageBotMcpServers: jest.fn() }));
+jest.mock('@/lib/bot-permissions', () => ({ canManageBotMcpServers: jest.fn(), preloadBotRules: jest.fn() }));
 // The notices are worked out inside one transaction that first takes a lock on the bot: the transaction hands the same
 // mocks to its callback, and `$executeRaw` is the lock.
 jest.mock('@/lib/db', () => {
@@ -326,7 +326,8 @@ describe('cards about bots that were removed, or that the person can no longer m
     db.user.findUnique.mockResolvedValue({ email: 'yousef@example.com' });
     mayManage.mockImplementation(async (_user: string, _email: string | null, managed: { id: string }) => managed.id === 'bot-1');
     await dropOrphanedToolSignInNotices('yousef');
-    expect(mayManage).toHaveBeenCalledWith('yousef', 'yousef@example.com', bot('bot-2'));
+    expect(preloadBotRules).toHaveBeenCalledWith(expect.any(Map), ['bot-1', 'bot-2']);
+    expect(mayManage).toHaveBeenCalledWith('yousef', 'yousef@example.com', bot('bot-2'), expect.any(Map));
     expect(db.userNotice.updateMany).toHaveBeenCalledTimes(1);
     expect(db.userNotice.updateMany.mock.calls[0][0].where).toEqual({ userId: 'yousef', id: { in: ['n2'] }, dismissedAt: null });
   });

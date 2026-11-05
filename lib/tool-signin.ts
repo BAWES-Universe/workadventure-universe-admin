@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
-import { canManageBotMcpServers } from '@/lib/bot-permissions';
+import { canManageBotMcpServers, preloadBotRules, type ManageMemo } from '@/lib/bot-permissions';
 import { describeToolSignIn, type ToolSignInNoticeData } from '@/lib/tool-signin-words';
 
 /**
@@ -201,8 +201,11 @@ export async function dropOrphanedToolSignInNotices(userId: string): Promise<voi
     const botIdOf = (key: string) => key.split(':')[1] ?? '';
     const bots = await prisma.bot.findMany({ where: { id: { in: open.map((notice) => botIdOf(notice.dedupeKey)) } }, select: { id: true, createdById: true, roomId: true } });
     const email = bots.length > 0 ? ((await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }))?.email ?? null) : null;
+    // One person, one request: their standing in a room is worked out once, and the bots' rules are read in one query
+    const memo: ManageMemo = new Map();
+    await preloadBotRules(memo, bots.map((bot) => bot.id));
     const mayAct = new Map<string, boolean>();
-    for (const bot of bots) mayAct.set(bot.id, await canManageBotMcpServers(userId, email, bot));
+    for (const bot of bots) mayAct.set(bot.id, await canManageBotMcpServers(userId, email, bot, memo));
     const gone = open.filter((notice) => !mayAct.get(botIdOf(notice.dedupeKey))).map((notice) => notice.id);
     if (gone.length > 0) await prisma.userNotice.updateMany({ where: { userId, id: { in: gone }, dismissedAt: null }, data: { dismissedAt: new Date() } });
   } catch (error) {
