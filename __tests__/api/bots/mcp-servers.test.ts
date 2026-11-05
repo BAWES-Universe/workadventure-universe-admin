@@ -5,6 +5,7 @@ import { prisma } from '@/lib/db';
 import * as authSession from '@/lib/auth-session';
 import * as superAdmin from '@/lib/super-admin';
 import * as encryption from '@/lib/encryption';
+import { markToolReconnected, syncToolSignInNotices } from '@/lib/tool-signin';
 
 // Mock Prisma
 jest.mock('@/lib/db', () => {
@@ -13,6 +14,7 @@ jest.mock('@/lib/db', () => {
     findUnique: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
+    updateMany: jest.fn(),
     delete: jest.fn(),
     count: jest.fn(),
   };
@@ -58,6 +60,7 @@ jest.mock('@/lib/db', () => {
 });
 
 // Mock auth session
+jest.mock('@/lib/tool-signin', () => ({ markToolReconnected: jest.fn(), syncToolSignInNotices: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({
   getSessionUser: jest.fn(),
 }));
@@ -158,6 +161,23 @@ describe('/api/bots/[id]/mcp-servers', () => {
       expect(data[0].serverUrl).toBe('https://example.com/mcp');
       // authConfig should NOT be in response
       expect(data[0].authConfig).toBeUndefined();
+    });
+
+    it('returns what the bot server saw when it really used each server, with no Test needed (game #1819)', async () => {
+      const base = { botId: MOCK_BOT_ID, serverUrl: 'https://example.com/mcp', authType: 'none', enabled: true, createdAt: new Date('2025-01-01'), updatedAt: new Date('2025-01-01') };
+      const lost = new Date('2026-11-05T09:54:00.000Z');
+      (prisma.botMcpServer.findMany as jest.Mock).mockResolvedValue([
+        { ...base, id: 'down', name: 'Tavily', signInLostAt: lost, signInLostStatus: 401, noAnswerAt: null, reconnectedAt: null },
+        { ...base, id: 'quiet', name: 'Attio', signInLostAt: null, signInLostStatus: null, noAnswerAt: lost, reconnectedAt: null },
+        { ...base, id: 'fine', name: 'Notion', signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: lost },
+      ]);
+      const response = await GET(new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`), { params: Promise.resolve({ id: MOCK_BOT_ID }) });
+      const data = await response.json();
+      expect(data.map((row: Record<string, unknown>) => [row.id, row.signInLostAt, row.signInLostStatus, row.noAnswerAt, row.reconnectedAt])).toEqual([
+        ['down', lost.toISOString(), 401, null, null],
+        ['quiet', null, null, lost.toISOString(), null],
+        ['fine', null, null, null, lost.toISOString()],
+      ]);
     });
 
     it('says Not checked yet for a server that existed before its tools were checked (#738)', async () => {
@@ -344,6 +364,10 @@ describe('/api/bots/[id]/mcp-servers', () => {
       expect(response.status).toBe(201);
       expect(data.id).toBe(MOCK_SERVER_ID);
       expect(data.name).toBe('New Server');
+      // Who connected it is kept from the start, so a lost sign-in reaches them (game #1819)
+      expect(prisma.botMcpServer.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ connectedById: MOCK_USER_ID }) })
+      );
     });
 
     it('should encrypt authConfig when creating', async () => {
@@ -560,6 +584,92 @@ describe('/api/bots/[id]/mcp-servers', () => {
           data: expect.objectContaining({ authConfig: 'encrypted:new-key' }),
         })
       );
+      // A new key is a new connection: who made it is remembered and a lost sign-in clears at once (game #1819)
+      expect(markToolReconnected).toHaveBeenCalledWith(MOCK_SERVER_ID, MOCK_USER_ID);
+    });
+
+    it('does not call an OAuth settings save a reconnection, even though it carries an authConfig', async () => {
+      (prisma.botMcpServer.findUnique as jest.Mock).mockResolvedValue({
+        id: MOCK_SERVER_ID, botId: MOCK_BOT_ID, name: 'Server', serverUrl: 'https://example.com', authType: 'oauth', authConfig: 'encrypted:{"accessToken":"tok-1"}', enabled: true,
+      });
+      (prisma.botMcpServer.update as jest.Mock).mockResolvedValue({
+        id: MOCK_SERVER_ID, botId: MOCK_BOT_ID, name: 'Server', serverUrl: 'https://example.com', authType: 'oauth', enabled: true,
+        createdAt: new Date(), updatedAt: new Date(),
+      });
+      // An OAuth settings save goes through the guarded write: it has to land, or the test proves nothing
+      (prisma.botMcpServer.updateMany as jest.Mock).mockResolvedValue({ count: 1 });
+      const response = await PATCH(
+        new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers/${MOCK_SERVER_ID}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ authConfig: JSON.stringify({ scopes: 'read write' }) }),
+        }),
+        { params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }) }
+      );
+      expect(response.status).toBe(200);
+      expect(prisma.botMcpServer.updateMany).toHaveBeenCalled();
+      expect(markToolReconnected).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a new address', { serverUrl: 'https://new.example.com' }],
+      ['the sign-in turned off', { authType: 'none' }],
+    ])('calls %s a new connection: what failed was the old one, so a lost sign-in clears at once', async (_name, body) => {
+      (prisma.botMcpServer.findUnique as jest.Mock).mockResolvedValue({
+        id: MOCK_SERVER_ID, botId: MOCK_BOT_ID, name: 'Server', serverUrl: 'https://example.com', authType: 'bearer', enabled: true,
+      });
+      (prisma.botMcpServer.update as jest.Mock).mockResolvedValue({
+        id: MOCK_SERVER_ID, botId: MOCK_BOT_ID, name: 'Server', serverUrl: 'https://new.example.com', authType: 'none', enabled: true,
+        createdAt: new Date(), updatedAt: new Date(),
+      });
+      const response = await PATCH(
+        new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers/${MOCK_SERVER_ID}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        }),
+        { params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }) }
+      );
+      expect(response.status).toBe(200);
+      expect(markToolReconnected).toHaveBeenCalledWith(MOCK_SERVER_ID, MOCK_USER_ID);
+    });
+
+    it('does not call the same address or the same sign-in sent again a reconnection', async () => {
+      (prisma.botMcpServer.findUnique as jest.Mock).mockResolvedValue({
+        id: MOCK_SERVER_ID, botId: MOCK_BOT_ID, name: 'Server', serverUrl: 'https://example.com', authType: 'bearer', enabled: true,
+      });
+      (prisma.botMcpServer.update as jest.Mock).mockResolvedValue({
+        id: MOCK_SERVER_ID, botId: MOCK_BOT_ID, name: 'Server', serverUrl: 'https://example.com', authType: 'bearer', enabled: true,
+        createdAt: new Date(), updatedAt: new Date(),
+      });
+      await PATCH(
+        new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers/${MOCK_SERVER_ID}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serverUrl: 'https://example.com', authType: 'bearer' }),
+        }),
+        { params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }) }
+      );
+      expect(markToolReconnected).not.toHaveBeenCalled();
+    });
+
+    it('does not call a settings-only save a reconnection', async () => {
+      (prisma.botMcpServer.findUnique as jest.Mock).mockResolvedValue({
+        id: MOCK_SERVER_ID, botId: MOCK_BOT_ID, name: 'Server', serverUrl: 'https://example.com', authType: 'bearer', enabled: true,
+      });
+      (prisma.botMcpServer.update as jest.Mock).mockResolvedValue({
+        id: MOCK_SERVER_ID, botId: MOCK_BOT_ID, name: 'Renamed', serverUrl: 'https://example.com', authType: 'bearer', enabled: true,
+        createdAt: new Date(), updatedAt: new Date(),
+      });
+      await PATCH(
+        new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers/${MOCK_SERVER_ID}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: 'Renamed' }),
+        }),
+        { params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }) }
+      );
+      expect(markToolReconnected).not.toHaveBeenCalled();
     });
 
     it('should update headers on PATCH', async () => {
@@ -665,6 +775,8 @@ describe('/api/bots/[id]/mcp-servers', () => {
       expect(prisma.botMcpServer.delete).toHaveBeenCalledWith({
         where: { id: MOCK_SERVER_ID },
       });
+      // A sign-in card about the deleted connection goes with it (game #1819)
+      expect(syncToolSignInNotices).toHaveBeenCalledWith(MOCK_BOT_ID);
     });
 
     it('should return 404 if server not found on delete', async () => {

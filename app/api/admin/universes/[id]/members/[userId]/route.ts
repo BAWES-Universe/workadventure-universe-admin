@@ -4,6 +4,7 @@ import { withWokas } from '@/lib/woka-avatar';
 import { allows } from '@/lib/role-access';
 import { memberCan, reachOfMember } from '@/lib/member-can';
 import { leaveUniverse } from '@/lib/universe-members';
+import { mayOffer } from '@/lib/ownership-offer';
 import { failed, managesPeople, memberForJson, memberInclude, needs, seesHiddenRoles, universeContext } from '@/lib/universe-route';
 
 type Params = { params: Promise<{ id: string; userId: string }> };
@@ -40,6 +41,40 @@ async function ownerWithoutMembership(universeId: string, userId: string) {
   };
 }
 
+/**
+ * Passing the universe on (#820), for this member's page: whether the viewer may offer it to this member, the offer that is
+ * already waiting (only the owner and super admins see it, and it says who it is for), and for the owner when and from
+ * whom they received it. Names only, never emails.
+ */
+async function ownershipFor(
+  universe: { id: string; ownerId: string },
+  viewer: { id: string; isSuperAdmin: boolean },
+  userId: string,
+  isMember: boolean,
+) {
+  const isOwner = userId === universe.ownerId;
+  const [offer, passed] = await Promise.all([
+    mayOffer(viewer, universe)
+      ? prisma.ownershipOffer.findUnique({ where: { universeId: universe.id }, select: { toUserId: true, createdAt: true, toUser: { select: { name: true } } } })
+      : Promise.resolve(null),
+    isOwner
+      ? prisma.universe.findUnique({ where: { id: universe.id }, select: { ownerSince: true, previousOwner: { select: { name: true } } } })
+      : Promise.resolve(null),
+  ]);
+  // Whose universe it is, for the sheet that says who stays Admin when a super admin starts the offer
+  const owner = !isOwner && mayOffer(viewer, universe) && viewer.id !== universe.ownerId
+    ? await prisma.user.findUnique({ where: { id: universe.ownerId }, select: { name: true } })
+    : null;
+  return {
+    canOffer: mayOffer(viewer, universe) && !isOwner && viewer.id !== userId && isMember && !offer,
+    // Set only when a super admin acts for the owner
+    onBehalfOf: owner ? (owner.name?.trim() || 'The owner') : null,
+    waiting: offer ? { toUserId: offer.toUserId, toName: offer.toUser.name, createdAt: offer.createdAt, toThem: offer.toUserId === userId } : null,
+    since: passed?.ownerSince ?? null,
+    from: passed?.ownerSince ? (passed.previousOwner?.name ?? null) : null,
+  };
+}
+
 // GET /api/admin/universes/[id]/members/[userId] - One member, and what you may change about them
 export async function GET(request: NextRequest, { params }: Params) {
   try {
@@ -64,14 +99,16 @@ export async function GET(request: NextRequest, { params }: Params) {
 
     // Who came when is visitor detail: only for people who manage members, and for yourself
     const seesVisits = managesPeople(access) || userId === user.id;
-    const [[withWoka], lastVisitedAt] = await Promise.all([
+    const [[withWoka], lastVisitedAt, ownership] = await Promise.all([
       withWokas([memberForJson(joined, universe.ownerId, managesPeople(access) || userId === user.id, seesHiddenRoles(access) || userId === user.id)]),
       seesVisits ? lastVisitIn(id, userId) : Promise.resolve(undefined),
+      ownershipFor(universe, user, userId, !!member),
     ]);
     return NextResponse.json({
       // When they last came into any room of this universe, from the room visits; left out when you may not see it
       member: seesVisits ? { ...withWoka, lastVisitedAt } : withWoka,
       can,
+      ownership,
     });
   } catch (error) {
     return failed(error, 'read member');
@@ -98,7 +135,8 @@ export async function DELETE(request: NextRequest, { params }: Params) {
       }
     }
 
-    await prisma.$transaction((tx) => leaveUniverse(tx, id, userId), { timeout: 30_000 });
+    const announce = await prisma.$transaction((tx) => leaveUniverse(tx, id, userId), { timeout: 30_000 });
+    await announce?.();
     return NextResponse.json({ success: true });
   } catch (error) {
     return failed(error, 'remove member');

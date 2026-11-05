@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 import { openNotices } from '@/lib/notices';
+import { dropOrphanedToolSignInNotices } from '@/lib/tool-signin';
 
 export const runtime = 'nodejs';
 
@@ -17,6 +18,7 @@ export async function GET(request: NextRequest) {
   const user = await getSessionUser(request);
   if (!user) return respond(request, { error: 'Unauthorized' }, 401);
   try {
+    await dropOrphanedToolSignInNotices(user.id);
     const notices = await openNotices(user.id);
     return respond(request, {
       notices: notices.map((notice) => ({
@@ -26,6 +28,7 @@ export async function GET(request: NextRequest) {
         body: notice.body,
         badge: notice.badge,
         href: notice.href,
+        data: notice.data,
         createdAt: notice.createdAt.toISOString(),
       })),
     });

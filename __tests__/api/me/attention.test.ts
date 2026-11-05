@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import { GET, OPTIONS } from '@/app/api/me/attention/route';
+import { dropOrphanedToolSignInNotices } from '@/lib/tool-signin';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
 
@@ -8,6 +9,7 @@ const invitations: Invitation[] = [];
 const preferences: { userId: string; key: string; value: unknown }[] = [];
 const notices: { userId: string; dismissedAt: Date | null }[] = [];
 
+jest.mock('@/lib/tool-signin', () => ({ dropOrphanedToolSignInNotices: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/db', () => ({
   prisma: {
@@ -60,6 +62,11 @@ describe('/api/me/attention', () => {
     );
     // `invitations` stays what it was; `count` is what waits for an answer in total
     expect(await (await get()).json()).toEqual({ count: 2, invitations: 1 });
+  });
+
+  it('takes down cards about deleted bots before counting (game #1819)', async () => {
+    await get();
+    expect(dropOrphanedToolSignInNotices).toHaveBeenCalledWith('user-a');
   });
 
   it('counts only the caller’s pending invitations', async () => {

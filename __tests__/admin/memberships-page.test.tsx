@@ -46,6 +46,7 @@ describe('Memberships', () => {
     let membershipsOk = false;
     fetchMock.mockImplementation((url: string) => {
       if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/ownership-offers') return json({ offers: [] });
       if (url === '/api/memberships/invitations') return json({ invitations: [] });
       if (url === '/api/memberships/my/universes') return membershipsOk ? json({ universes: [] }) : json({ error: 'down' }, 503);
       return json({});
@@ -64,6 +65,7 @@ describe('Memberships', () => {
     let invitationsOk = false;
     fetchMock.mockImplementation((url: string) => {
       if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/ownership-offers') return json({ offers: [] });
       if (url === '/api/memberships/invitations')
         return invitationsOk ? json({ invitations: [invitation('i1', 'Moon')] }) : json({}, 500);
       if (url === '/api/memberships/my/universes') return json({ universes: [] });
@@ -82,6 +84,7 @@ describe('Memberships', () => {
     let remaining = [invitation('i1', 'Moon'), invitation('i2', 'Mars')];
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/ownership-offers') return json({ offers: [] });
       if (url === '/api/memberships/invitations') return json({ invitations: remaining });
       if (url === '/api/memberships/my/universes') return json({ universes: [] });
       if (init?.method === 'POST') {
@@ -146,6 +149,7 @@ describe('Memberships', () => {
   it('lists your universes with your roles there and where each works, and says you join a universe once', async () => {
     fetchMock.mockImplementation((url: string) => {
       if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/ownership-offers') return json({ offers: [] });
       if (url === '/api/memberships/invitations') return json({ invitations: [] });
       if (url === '/api/memberships/my/universes') return json({ universes: [universe, { ...universe, universe: { ...universe.universe, id: 'u2', name: 'Mine' }, isOwner: true, roles: [] }] });
       return json({});
@@ -176,6 +180,7 @@ describe('Memberships', () => {
     const empty = { ...mine, universe: { id: 'u3', name: 'Empty', createdAt: '2025-12-01T00:00:00Z', worlds: [] }, roles: [] };
     fetchMock.mockImplementation((url: string) => {
       if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/ownership-offers') return json({ offers: [] });
       if (url === '/api/memberships/invitations') return json({ invitations: [] });
       if (url === '/api/memberships/my/universes') return json({ universes: [mine, universe, empty] });
       return json({});
@@ -211,6 +216,7 @@ describe('Memberships', () => {
     };
     fetchMock.mockImplementation((url: string) => {
       if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/ownership-offers') return json({ offers: [] });
       if (url === '/api/memberships/invitations') return json({ invitations: [] });
       if (url === '/api/memberships/my/universes') return json({ universes: [limited] });
       return json({});
@@ -236,6 +242,7 @@ describe('Memberships', () => {
     };
     fetchMock.mockImplementation((url: string) => {
       if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/ownership-offers') return json({ offers: [] });
       if (url === '/api/memberships/invitations') return json({ invitations: [] });
       if (url === '/api/memberships/my/universes') return json({ universes: [scoped] });
       return json({});
@@ -251,6 +258,7 @@ describe('Memberships', () => {
     let left = false;
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/ownership-offers') return json({ offers: [] });
       if (url === '/api/memberships/invitations') return json({ invitations: [] });
       if (url === '/api/memberships/my/universes') return json({ universes: left ? [] : [universe] });
       if (url === '/api/admin/universes/u1/members/me' && init?.method === 'DELETE') {
@@ -271,6 +279,9 @@ describe('Memberships', () => {
     fireEvent.click(Array.from(dialog.querySelectorAll('button')).find((button) => button.textContent === 'Leave')!);
     await screen.findByText('No memberships yet.');
     expect(left).toBe(true);
+    // Leaving ends an offer made to you, so the “Offered to you” list is read again with the memberships
+    const offerReads = fetchMock.mock.calls.filter(([url]) => url === '/api/memberships/ownership-offers').length;
+    expect(offerReads).toBeGreaterThanOrEqual(2);
   });
   it('shows a universe invitation as the universe, the worlds it gives and its roles, and an older one as its world', async () => {
     const toUniverse = (id: string, scope: { allWorlds: boolean; worldIds: string[] }, roles: { id: string; name: string; color: string }[]) => ({
@@ -283,6 +294,7 @@ describe('Memberships', () => {
     });
     fetchMock.mockImplementation((url: string) => {
       if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/ownership-offers') return json({ offers: [] });
       if (url === '/api/memberships/invitations')
         return json({
           invitations: [
@@ -315,6 +327,7 @@ describe('Memberships', () => {
     let remaining = [invitation('i1', 'Moon')];
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/ownership-offers') return json({ offers: [] });
       if (url === '/api/memberships/invitations') return json({ invitations: remaining });
       if (url === '/api/memberships/my/universes') return json({ universes: [] });
       if (init?.method === 'POST') {

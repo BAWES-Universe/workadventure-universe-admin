@@ -61,6 +61,9 @@ interface McpServer {
   headers?: Record<string, string>;
   lastTestedAt?: string | null;
   lastTestResult?: McpTestResult | null;
+  /** What the bot server saw when it really used the server (game #1819) */
+  signInLostAt?: string | null;
+  noAnswerAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -884,7 +887,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                       </a>
                       <div className="flex flex-wrap gap-1.5 pt-1">
                         <Pill>{server.authType === 'none' ? 'No auth' : server.authType}</Pill>
-                        {server.authType === 'oauth' && server.oauthConnected && <Pill tone="ok">Connected</Pill>}
+                        {server.authType === 'oauth' && server.oauthConnected && !server.signInLostAt && <Pill tone="ok">Connected</Pill>}
                       </div>
                     </div>
                     <label className="flex min-h-11 items-center gap-2 text-sm">
@@ -913,6 +916,13 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                         )}
                       </>
                     )}
+                    {testingId !== server.id && (server.signInLostAt || server.noAnswerAt) && (
+                      <span className="mt-1 block text-red-600 dark:text-red-400" data-testid="mcp-live-state">
+                        {server.signInLostAt
+                          ? `Sign-in expired · since ${new Date(server.signInLostAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+                          : `Didn’t answer · ${new Date(server.noAnswerAt as string).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`}
+                      </span>
+                    )}
                     {server.authType === 'oauth' && server.oauthReconnectRequired && server.oauthReconnectReason && (
                       <span className="mt-1 block text-amber-600 dark:text-amber-400">{server.oauthReconnectReason}</span>
                     )}
@@ -933,7 +943,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                       Test
                     </Button>
 
-                    {server.authType === 'oauth' && !server.oauthConnected && (
+                    {server.authType === 'oauth' && (!server.oauthConnected || !!server.signInLostAt) && (
                       <Button
                         variant="outline"
                         className="h-11"
@@ -941,7 +951,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                         disabled={oauthConnectingId === server.id}
                       >
                         {oauthConnectingId === server.id && <Loader2 className="animate-spin" aria-hidden="true" />}
-                        {server.oauthReconnectRequired ? 'Reconnect' : 'Connect with OAuth'}
+                        {server.oauthReconnectRequired || server.signInLostAt ? 'Reconnect' : 'Connect with OAuth'}
                       </Button>
                     )}
 

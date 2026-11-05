@@ -17,6 +17,7 @@ import { checkConfigVision, dropOthersVisionKey } from '@/lib/bot-vision';
 import { tellKeyOwnerMovedOff } from '@/lib/ai-key-moved-off';
 import { corsHeaders } from '@/lib/cors';
 import { clearBotRunsOnNotices } from '@/lib/notices';
+import { syncToolSignInNotices } from '@/lib/tool-signin';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
@@ -695,6 +696,8 @@ export async function DELETE(
     // Delete bot. deleteMany, not delete: when two deletes of the same bot overlap (a double tap), the second finds
     // nothing left to delete; that is "not found", not a server error.
     const { count } = await deleteWithHiddenBotData({ id }, () => prisma.bot.deleteMany({ where: { id } }));
+    // Its tools' sign-in cards on Orbit home go with it (game #1819)
+    if (count > 0) await syncToolSignInNotices(id);
     if (count === 0) {
       const response = NextResponse.json(
         { error: 'Bot not found' },

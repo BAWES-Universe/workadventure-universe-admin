@@ -245,6 +245,11 @@ export async function GET(
             headers: s.headers,
             lastTestedAt: s.lastTestedAt,
             lastTestResult: s.lastTestResult,
+            // What the bot server saw when it really used the server, not only the last Test (game #1819)
+            signInLostAt: s.signInLostAt,
+            signInLostStatus: s.signInLostStatus,
+            noAnswerAt: s.noAnswerAt,
+            reconnectedAt: s.reconnectedAt,
             createdAt: s.createdAt,
             updatedAt: s.updatedAt,
           };
@@ -351,6 +356,8 @@ export async function POST(
       return tx.botMcpServer.create({
         data: {
           botId,
+          // Who added it is who is told when its sign-in or key stops working (none for the admin token)
+          connectedById: userId,
           name: validatedData.name,
           serverUrl: validatedData.serverUrl,
           authType: validatedData.authType,

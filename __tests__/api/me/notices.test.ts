@@ -3,7 +3,9 @@ import { GET, OPTIONS } from '@/app/api/me/notices/route';
 import { DELETE } from '@/app/api/me/notices/[id]/route';
 import { getSessionUser } from '@/lib/auth-session';
 import { dismissNotice, openNotices } from '@/lib/notices';
+import { dropOrphanedToolSignInNotices } from '@/lib/tool-signin';
 
+jest.mock('@/lib/tool-signin', () => ({ dropOrphanedToolSignInNotices: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/notices', () => ({ openNotices: jest.fn(), dismissNotice: jest.fn() }));
 
@@ -33,6 +35,15 @@ describe('GET /api/me/notices', () => {
     expect(await response.json()).toEqual({
       notices: [{ id: 'n1', kind: 'ai-key-down', title: 'My LM Studio is down', body: 'Guide and Nora reply on Universe AI.', badge: 'Down', href: '/admin/you/ai-keys', createdAt: '2026-10-19T11:00:00.000Z' }],
     });
+  });
+
+  it('takes down cards about deleted bots first, and hands a card its data (game #1819)', async () => {
+    const data = { botId: 'bot-1', bot: 'Nora', universe: 'Acme', servers: [{ id: 's1', name: 'Tavily', kind: 'oauth', at: '2026-11-05T09:54:00.000Z' }] };
+    (openNotices as jest.Mock).mockResolvedValue([{ ...row, kind: 'tool-signin', data }]);
+    const body = await (await get()).json();
+    expect(dropOrphanedToolSignInNotices).toHaveBeenCalledWith('user-a');
+    expect((dropOrphanedToolSignInNotices as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan((openNotices as jest.Mock).mock.invocationCallOrder[0]);
+    expect(body.notices[0].data).toEqual(data);
   });
 
   it('refuses another origin, and never answers with *', async () => {

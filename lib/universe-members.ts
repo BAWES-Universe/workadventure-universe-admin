@@ -4,6 +4,7 @@
  */
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { isAdministratorRole } from '@/lib/role-access';
+import { endOfferIfLeft, type AnnounceEndedOffer } from '@/lib/ownership-offer-ends';
 import { CUSTOM_MIN_POSITION, EVERYONE_KEY, MEMBER_KEY, ensureBuiltInRoles, syncWorldMembers, type WorldScope } from '@/lib/roles';
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -175,7 +176,7 @@ export async function setTagsInWorld(db: Db, worldId: string, userId: string, ta
  * Take someone out of one world: their membership and every role of theirs stop working there. When no world is left,
  * they are no longer in the universe. Someone with an Administrator role keeps every world until the role is taken.
  */
-export async function leaveWorld(db: Db, worldId: string, userId: string): Promise<void> {
+export async function leaveWorld(db: Db, worldId: string, userId: string): Promise<AnnounceEndedOffer | null> {
   const world = await db.world.findUniqueOrThrow({ where: { id: worldId }, select: { universeId: true } });
   const { universeId } = world;
   const member = await db.universeMember.findUnique({
@@ -191,10 +192,14 @@ export async function leaveWorld(db: Db, worldId: string, userId: string): Promi
     else await db.universeMember.update({ where: { id: member.id }, data: scope });
   }
   await syncWorldMembers(db, universeId, userId);
+  // Out of the last world means out of the universe: an ownership offer to them ends (#820). The caller tells people once it commits.
+  return endOfferIfLeft(db, universeId, userId);
 }
 
 /** Take someone out of a universe: every role, every world. */
-export async function leaveUniverse(db: Db, universeId: string, userId: string): Promise<void> {
+export async function leaveUniverse(db: Db, universeId: string, userId: string): Promise<AnnounceEndedOffer | null> {
   await db.universeMember.deleteMany({ where: { universeId, userId } });
   await syncWorldMembers(db, universeId, userId);
+  // An ownership offer to them ends with their membership (#820). The caller tells people once it commits.
+  return endOfferIfLeft(db, universeId, userId);
 }

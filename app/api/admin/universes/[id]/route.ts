@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { deleteWithHiddenBotData } from '@/lib/bot-privacy';
+import { clearOffered } from '@/lib/ownership-offer-ends';
 import { z } from 'zod';
 import { FEATURED_FORBIDDEN, refusesFeaturedChange } from '@/lib/featured';
 import { wokaLayersFor } from '@/lib/woka-avatar';
@@ -364,7 +365,10 @@ export async function DELETE(
       );
     }
     
+    // A waiting ownership offer goes with the universe; the card that offered it to someone goes too
+    const pendingOffer = await prisma.ownershipOffer.findUnique({ where: { universeId: id }, select: { id: true, toUserId: true } });
     await deleteWithHiddenBotData({ room: { world: { universeId: id } } }, () => prisma.universe.delete({ where: { id } }));
+    if (pendingOffer) await clearOffered(pendingOffer.toUserId, pendingOffer.id);
     
     return NextResponse.json({ success: true });
   } catch (error) {
