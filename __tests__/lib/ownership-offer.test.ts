@@ -69,6 +69,11 @@ describe('starting an offer', () => {
     expect(mockPrisma.ownershipOffer.create).not.toHaveBeenCalled();
   });
 
+  it('does not let a super admin offer the universe to themselves', async () => {
+    expect((await refused(start({ by: root, toUserId: 'root' }))).status).toBe(400);
+    expect(mockPrisma.ownershipOffer.create).not.toHaveBeenCalled();
+  });
+
   it('does not offer the universe to its owner, or to someone who is not a member', async () => {
     expect((await refused(start({ toUserId: 'yousef' }))).status).toBe(400);
     mockPrisma.universeMember.findUnique.mockResolvedValue(null);

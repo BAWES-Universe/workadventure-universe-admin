@@ -66,7 +66,7 @@ async function ownershipFor(
     ? await prisma.user.findUnique({ where: { id: universe.ownerId }, select: { name: true } })
     : null;
   return {
-    canOffer: mayOffer(viewer, universe) && !isOwner && isMember && !offer,
+    canOffer: mayOffer(viewer, universe) && !isOwner && viewer.id !== userId && isMember && !offer,
     // Set only when a super admin acts for the owner
     onBehalfOf: owner ? (owner.name?.trim() || 'The owner') : null,
     waiting: offer ? { toUserId: offer.toUserId, toName: offer.toUser.name, createdAt: offer.createdAt, toThem: offer.toUserId === userId } : null,

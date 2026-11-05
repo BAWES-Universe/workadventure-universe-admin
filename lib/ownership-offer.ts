@@ -52,6 +52,8 @@ export async function startOffer(input: {
   if (!mayOffer(by, universe)) throw new OfferError('Only the owner can pass the universe on', 403);
   if (typedName !== universe.name) throw new OfferError('Type the universe’s name to confirm', 400);
   if (toUserId === universe.ownerId) throw new OfferError('They already own it', 400);
+  // A super admin acts for the owner, never for themselves: the universe goes to someone else, who then accepts
+  if (toUserId === by.id) throw new OfferError('You cannot offer the universe to yourself', 400);
 
   const member = await prisma.universeMember.findUnique({
     where: { universeId_userId: { universeId: universe.id, userId: toUserId } },
