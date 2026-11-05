@@ -55,30 +55,37 @@ export async function tellOwnerAndStarter(
   if (offer.offeredById !== offer.universe.ownerId) await tell(offer.offeredById, dedupeKey, title, starterBody);
 }
 
+/** The notices for an offer that just ended. Run it once the transaction that ended the offer has committed. */
+export type AnnounceEndedOffer = () => Promise<void>;
+
 /**
  * Call after anything that can take someone out of a universe. If they are no longer a member, the offer made to them
- * ends and the owner is told. Safe to call any number of times, and for people who have no offer.
+ * ends. The notices are not written here: this runs inside the transaction that removes them, and a notice written on the
+ * side would stay when that transaction rolls back. It hands back what to tell people (null when no offer ended), and the
+ * caller runs it after the commit. Safe to call any number of times, and for people who have no offer.
  */
-export async function endOfferIfLeft(db: Db, universeId: string, userId: string): Promise<void> {
+export async function endOfferIfLeft(db: Db, universeId: string, userId: string): Promise<AnnounceEndedOffer | null> {
   const offer = await db.ownershipOffer.findUnique({
     where: { universeId },
     include: { universe: { select: { name: true, ownerId: true } } },
   });
-  if (!offer || offer.toUserId !== userId) return;
+  if (!offer || offer.toUserId !== userId) return null;
   const stillIn = await db.universeMember.findUnique({
     where: { universeId_userId: { universeId, userId } },
     select: { id: true },
   });
-  if (stillIn) return;
+  if (stillIn) return null;
   const gone = await db.ownershipOffer.deleteMany({ where: { id: offer.id } });
-  if (gone.count === 0) return;
-  await clearOffered(userId, offer.id);
+  if (gone.count === 0) return null;
   const name = await nameOf(db, userId, 'They');
-  await tellOwnerAndStarter(
-    offer,
-    `left:${offer.id}`,
-    `The offer for ${offer.universe.name} ended`,
-    `${name} is no longer a member, so the offer to them ended. You still own ${offer.universe.name}.`,
-    `${name} is no longer a member, so the offer to them ended. Nothing changed.`,
-  );
+  return async () => {
+    await clearOffered(userId, offer.id);
+    await tellOwnerAndStarter(
+      offer,
+      `left:${offer.id}`,
+      `The offer for ${offer.universe.name} ended`,
+      `${name} is no longer a member, so the offer to them ended. You still own ${offer.universe.name}.`,
+      `${name} is no longer a member, so the offer to them ended. Nothing changed.`,
+    );
+  };
 }

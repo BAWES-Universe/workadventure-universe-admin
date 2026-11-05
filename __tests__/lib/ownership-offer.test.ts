@@ -269,15 +269,26 @@ describe('when someone leaves', () => {
   it('ends the offer made to them and tells the owner', async () => {
     mockPrisma.ownershipOffer.findUnique.mockResolvedValue(waiting);
     mockPrisma.universeMember.findUnique.mockResolvedValue(null);
-    await endOfferIfLeft(mockPrisma as never, 'u1', 'lab');
+    const announce = await endOfferIfLeft(mockPrisma as never, 'u1', 'lab');
     expect(mockPrisma.ownershipOffer.deleteMany).toHaveBeenCalledWith({ where: { id: 'o1' } });
+    await announce?.();
     expect(notices.mock.calls.map(([notice]) => notice.userId)).toEqual(['yousef']);
+  });
+
+  it('writes no notice until the caller says the transaction committed', async () => {
+    mockPrisma.ownershipOffer.findUnique.mockResolvedValue(waiting);
+    mockPrisma.universeMember.findUnique.mockResolvedValue(null);
+    const announce = await endOfferIfLeft(mockPrisma as never, 'u1', 'lab');
+    // A transaction that rolls back after this never runs the announcement, so no notice is left behind for an offer that still stands
+    expect(typeof announce).toBe('function');
+    expect(notices).not.toHaveBeenCalled();
+    expect(clearNotices).not.toHaveBeenCalled();
   });
 
   it('tells the starter who is not the owner that nothing changed', async () => {
     mockPrisma.ownershipOffer.findUnique.mockResolvedValue({ ...waiting, offeredById: 'root' });
     mockPrisma.universeMember.findUnique.mockResolvedValue(null);
-    await endOfferIfLeft(mockPrisma as never, 'u1', 'lab');
+    await (await endOfferIfLeft(mockPrisma as never, 'u1', 'lab'))?.();
     const byUser = Object.fromEntries(notices.mock.calls.map(([notice]) => [notice.userId, notice.body]));
     expect(Object.keys(byUser).sort()).toEqual(['root', 'yousef']);
     expect(byUser.root).toMatch(/Nothing changed\.$/);
@@ -285,10 +296,10 @@ describe('when someone leaves', () => {
 
   it('leaves the offer alone while they are still a member, or when it is for someone else', async () => {
     mockPrisma.ownershipOffer.findUnique.mockResolvedValue(waiting);
-    await endOfferIfLeft(mockPrisma as never, 'u1', 'lab');
-    await endOfferIfLeft(mockPrisma as never, 'u1', 'other');
+    expect(await endOfferIfLeft(mockPrisma as never, 'u1', 'lab')).toBeNull();
+    expect(await endOfferIfLeft(mockPrisma as never, 'u1', 'other')).toBeNull();
     mockPrisma.ownershipOffer.findUnique.mockResolvedValue(null);
-    await endOfferIfLeft(mockPrisma as never, 'u1', 'lab');
+    expect(await endOfferIfLeft(mockPrisma as never, 'u1', 'lab')).toBeNull();
     expect(mockPrisma.ownershipOffer.deleteMany).not.toHaveBeenCalled();
   });
 });

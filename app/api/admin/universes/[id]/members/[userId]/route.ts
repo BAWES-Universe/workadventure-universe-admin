@@ -135,7 +135,8 @@ export async function DELETE(request: NextRequest, { params }: Params) {
       }
     }
 
-    await prisma.$transaction((tx) => leaveUniverse(tx, id, userId), { timeout: 30_000 });
+    const announce = await prisma.$transaction((tx) => leaveUniverse(tx, id, userId), { timeout: 30_000 });
+    await announce?.();
     return NextResponse.json({ success: true });
   } catch (error) {
     return failed(error, 'remove member');
