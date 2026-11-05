@@ -46,16 +46,9 @@ export async function GET(request: NextRequest) {
     const members = await prisma.worldMember.findMany({
       where: {
         worldId: worldData.id,
+        // Found by name only: matching on email would let anyone confirm whose address is whose
         user: searchText ? {
-          AND: [
-            NOT_SYSTEM_USER,
-            {
-              OR: [
-                { name: { contains: searchText, mode: 'insensitive' } },
-                { email: { contains: searchText, mode: 'insensitive' } },
-              ],
-            },
-          ],
+          AND: [NOT_SYSTEM_USER, { name: { contains: searchText, mode: 'insensitive' } }],
         } : NOT_SYSTEM_USER,
       },
       // A picker shows the first few; typing more narrows it (worlds can have thousands of members).
@@ -66,7 +59,6 @@ export async function GET(request: NextRequest) {
             id: true,
             uuid: true,
             name: true,
-            email: true,
           },
         },
       },
@@ -76,11 +68,12 @@ export async function GET(request: NextRequest) {
     const wokas = await wokaTexturesForMany(members.map(m => m.user.id), worldData.id)
       .catch(() => new Map<string, { id: string; url: string }[]>());
 
-    // The shape the game reads: `id` (not `uuid`), null when there is no name or email.
+    // The shape the game reads: `id` (not `uuid`), null when there is no name. The game's parser still requires the
+    // `email` key, so it is always sent as null: never an email address.
     const memberData: MemberData[] = members.map(m => ({
       id: m.user.uuid,
       name: m.user.name || null,
-      email: m.user.email || null,
+      email: null,
       tags: m.tags,
       visitCardUrl: null,
       characterTextures: wokas.get(m.user.id) ?? [],

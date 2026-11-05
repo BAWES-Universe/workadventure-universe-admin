@@ -1,6 +1,7 @@
 /**
  * The game's member search (owner of a personal desk) reads GET /api/members as its MemberData:
- * `id` (not `uuid`), name and email as strings or null, and each member's Woka so the picker shows it.
+ * `id` (not `uuid`), the name as a string or null, and each member's Woka so the picker shows it. Never an email
+ * address, and a search matches names only.
  */
 import { NextRequest } from 'next/server';
 
@@ -60,7 +61,7 @@ describe('GET /api/members', () => {
       {
         id: 'alice-uuid',
         name: 'Alice',
-        email: 'alice@test',
+        email: null,
         tags: ['member'],
         visitCardUrl: null,
         characterTextures: [
@@ -72,6 +73,33 @@ describe('GET /api/members', () => {
       { id: 'bob-uuid', name: null, email: null, tags: [], visitCardUrl: null, characterTextures: [] },
     ]);
     expect(db.worldMember.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 20 }));
+  });
+
+  it('never sends an email, even when the database row carries one', async () => {
+    db.worldMember.findMany.mockResolvedValue([
+      { tags: [], user: { id: 'u1', uuid: 'alice-uuid', name: 'Alice', email: 'alice@example.test' } },
+    ]);
+    db.userOutfit.findMany.mockResolvedValue([]);
+
+    const response = await search(request('/api/members', { playUri: PLAY_URI, searchText: '' }));
+    const text = await response.text();
+    expect(text).not.toContain('alice@example.test');
+    // The game's parser still needs the key, so it is there, and empty
+    expect(JSON.parse(text)[0].email).toBeNull();
+    // The query does not even read the email column
+    const query = db.worldMember.findMany.mock.calls[0][0];
+    expect(query.include.user.select).not.toHaveProperty('email');
+  });
+
+  it('searches by name only, never by email', async () => {
+    db.worldMember.findMany.mockResolvedValue([]);
+
+    await search(request('/api/members', { playUri: PLAY_URI, searchText: 'someone@example.test' }));
+
+    const query = db.worldMember.findMany.mock.calls[0][0];
+    expect(JSON.stringify(query.where)).toContain('"name"');
+    // (The System account filter names the email column; what must be gone is a search on it.)
+    expect(JSON.stringify(query.where)).not.toMatch(/"email":\{"contains"/);
   });
 
   it('still answers when the Wokas cannot be read', async () => {
@@ -97,5 +125,18 @@ describe('GET /api/members/:uuid', () => {
     });
     const body = await response.json();
     expect(body).toMatchObject({ id: 'alice-uuid', name: 'Alice', characterTextures: [{ id: 'hat1', url: 'https://cdn.test/hat1.png' }] });
+  });
+
+  it('never sends the email of the person asked about', async () => {
+    db.user.findFirst.mockResolvedValue({ id: 'u1', uuid: 'alice-uuid', name: 'Alice', email: 'alice@example.test', matrixChatId: '@alice:chat' });
+    db.userOutfit.findMany.mockResolvedValue([]);
+
+    const response = await getMember(request('/api/members/alice-uuid', { playUri: PLAY_URI }), {
+      params: Promise.resolve({ memberUUID: 'alice-uuid' }),
+    });
+    const text = await response.text();
+    expect(text).not.toContain('alice@example.test');
+    expect(JSON.parse(text)).not.toHaveProperty('email');
+    expect(JSON.parse(text)).toMatchObject({ id: 'alice-uuid', name: 'Alice', chatID: '@alice:chat' });
   });
 });

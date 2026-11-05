@@ -64,12 +64,8 @@ export async function GET(request: NextRequest) {
           AND: [
             NOT_SYSTEM_USER,
             { matrixChatId: { not: null } },
-            searchText ? {
-              OR: [
-                { name: { contains: searchText, mode: 'insensitive' } },
-                { email: { contains: searchText, mode: 'insensitive' } },
-              ],
-            } : undefined,
+            // Found by name only, never by email
+            searchText ? { name: { contains: searchText, mode: 'insensitive' } } : undefined,
           ].filter(Boolean) as any,
         },
       },
@@ -79,7 +75,6 @@ export async function GET(request: NextRequest) {
             id: true,
             uuid: true,
             name: true,
-            email: true,
             matrixChatId: true,
           },
         },
@@ -95,7 +90,8 @@ export async function GET(request: NextRequest) {
       members: members.map((m: typeof members[0]) => ({
         uuid: m.user.uuid,
         wokaName: m.user.name || '',
-        email: m.user.email,
+        // The game's parser still requires this key; it is always null, never an address
+        email: null,
         chatId: m.user.matrixChatId,
         tags: m.tags,
         characterTextures: wokas.get(m.user.id) ?? [],
