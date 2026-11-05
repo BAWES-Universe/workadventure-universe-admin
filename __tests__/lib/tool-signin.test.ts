@@ -112,7 +112,7 @@ describe('the bot server’s report', () => {
     expect(await reportToolSignIn('bot-1', 's1', { state: 'expired', at: T2, status: 401 })).toEqual({ changed: false });
     expect(db.botMcpServer.updateMany.mock.calls[0][0]).toEqual({
       where: { id: 's1', botId: 'bot-1', signInLostAt: null, OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: T1 } }] },
-      data: { signInLostAt: T1, signInLostStatus: 401, noAnswerAt: null, reconnectedAt: null },
+      data: { signInLostAt: T1, signInLostStatus: 401, noAnswerAt: null },
     });
     expect(addNotice).toHaveBeenCalledTimes(1);
   });
@@ -148,6 +148,8 @@ describe('the bot server’s report', () => {
       noAnswerAt: null,
       OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: T1 } }],
     });
+    // The time of the last reconnect stays: a late "expired" from before it must still be turned away
+    expect(db.botMcpServer.updateMany.mock.calls[0][0].data).toEqual({ noAnswerAt: T1 });
     expect(addNotice).not.toHaveBeenCalled();
   });
 
@@ -158,7 +160,7 @@ describe('the bot server’s report', () => {
     db.userNotice.findMany.mockResolvedValue([{ id: 'n1', userId: 'yousef' }]);
     expect(await reportToolSignIn('bot-1', 's1', { state: 'ok' })).toEqual({ changed: true });
     expect(await reportToolSignIn('bot-1', 's1', { state: 'ok' })).toEqual({ changed: false });
-    expect(db.botMcpServer.updateMany.mock.calls[0][0].data).toEqual({ signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: null });
+    expect(db.botMcpServer.updateMany.mock.calls[0][0].data).toEqual({ signInLostAt: null, signInLostStatus: null, noAnswerAt: null });
     expect(dismissed()).toEqual(['n1']);
   });
 });

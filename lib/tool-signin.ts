@@ -137,7 +137,7 @@ export async function reportToolSignIn(botId: string, serverId: string, report: 
   if (report.state === 'expired') {
     const result = await prisma.botMcpServer.updateMany({
       where: { id: serverId, botId, signInLostAt: null, ...afterLastReconnect },
-      data: { signInLostAt: at, signInLostStatus: report.status ?? null, noAnswerAt: null, reconnectedAt: null },
+      data: { signInLostAt: at, signInLostStatus: report.status ?? null, noAnswerAt: null },
     });
     if (result.count === 1) await syncToolSignInNotices(botId, { serverId, at });
     return { changed: result.count === 1 };
@@ -146,14 +146,14 @@ export async function reportToolSignIn(botId: string, serverId: string, report: 
   if (report.state === 'no-answer') {
     const result = await prisma.botMcpServer.updateMany({
       where: { id: serverId, botId, signInLostAt: null, noAnswerAt: null, ...afterLastReconnect },
-      data: { noAnswerAt: at, reconnectedAt: null },
+      data: { noAnswerAt: at },
     });
     return { changed: result.count === 1 };
   }
 
   const result = await prisma.botMcpServer.updateMany({
     where: { id: serverId, botId, OR: [{ signInLostAt: { not: null } }, { noAnswerAt: { not: null } }] },
-    data: { signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: null },
+    data: { signInLostAt: null, signInLostStatus: null, noAnswerAt: null },
   });
   if (result.count === 1) await syncToolSignInNotices(botId);
   return { changed: result.count === 1 };
