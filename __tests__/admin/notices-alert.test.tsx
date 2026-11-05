@@ -100,7 +100,7 @@ describe('NoticesAlert', () => {
     });
 
     it('opens the sign-in window right away, and brings the card down by itself when it closes', async () => {
-      const popup = { closed: false };
+      const popup = { closed: false, close: jest.fn(), location: { href: '' } };
       const open = jest.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
       let reconnected = false;
       fetchMock.mockImplementation((url: string) => {
@@ -109,7 +109,9 @@ describe('NoticesAlert', () => {
       });
       render(<NoticesAlert />);
       fireEvent.click(await screen.findByRole('button', { name: 'Reconnect Tavily' }));
-      await waitFor(() => expect(open).toHaveBeenCalledWith('https://tavily.example/authorize?x=1', 'oauth-popup', 'width=600,height=700'));
+      // Opened blank inside the tap (a browser can refuse a window opened after a wait), then sent to the provider
+      expect(open).toHaveBeenCalledWith('', 'oauth-popup', 'width=600,height=700');
+      await waitFor(() => expect(popup.location.href).toBe('https://tavily.example/authorize?x=1'));
       expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/bots/bot-1/mcp-servers/s1/oauth/start?redirectUrl='))).toBe(true);
       expect(await screen.findByRole('button', { name: 'Waiting for Tavily…' })).toBeTruthy();
       reconnected = true;
@@ -118,7 +120,9 @@ describe('NoticesAlert', () => {
       open.mockRestore();
     });
 
-    it('says so when the sign-in could not be started, and lets them try again', async () => {
+    it('says so when the sign-in could not be started, closes the blank window, and lets them try again', async () => {
+      const popup = { closed: false, close: jest.fn(), location: { href: '' } };
+      const open = jest.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
       fetchMock.mockImplementation((url: string) =>
         url.includes('/oauth/start')
           ? Promise.resolve({ ok: false, status: 403, json: () => Promise.resolve({}) })
@@ -127,6 +131,32 @@ describe('NoticesAlert', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Reconnect Tavily' }));
       expect((await screen.findByRole('alert')).textContent).toMatch(/didn’t work/);
       expect((screen.getByRole('button', { name: 'Reconnect Tavily' }) as HTMLButtonElement).disabled).toBe(false);
+      expect(popup.close).toHaveBeenCalled();
+      open.mockRestore();
+    });
+
+    it('says so, and asks for nothing, when the browser would not open the window', async () => {
+      const open = jest.spyOn(window, 'open').mockReturnValue(null);
+      answer([lost([tavily])]);
+      render(<NoticesAlert />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Reconnect Tavily' }));
+      expect((await screen.findByRole('alert')).textContent).toMatch(/didn’t work/);
+      expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/oauth/start'))).toBe(false);
+      open.mockRestore();
+    });
+
+    it('closes the blank window when the answer has no sign-in address', async () => {
+      const popup = { closed: false, close: jest.fn(), location: { href: '' } };
+      const open = jest.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+      fetchMock.mockImplementation((url: string) =>
+        url.includes('/oauth/start')
+          ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) })
+          : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ notices: [lost([tavily])] }) }));
+      render(<NoticesAlert />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Reconnect Tavily' }));
+      expect((await screen.findByRole('alert')).textContent).toMatch(/didn’t work/);
+      expect(popup.close).toHaveBeenCalled();
+      open.mockRestore();
     });
 
     it('leads a rejected key to the bot’s page instead, with no Reconnect button', async () => {

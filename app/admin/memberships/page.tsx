@@ -275,7 +275,8 @@ export default function MyMembershipsPage() {
       }
 
       setLeaving(null);
-      await loadMemberships();
+      // Leaving ends an offer made to you for that universe, so its card goes too
+      await Promise.all([loadMemberships(), loadOffers()]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Couldn’t leave. Try again.');
       setLeaving(null);

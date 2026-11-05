@@ -11,15 +11,18 @@ jest.mock('@/lib/db', () => ({
     room: { findUnique: jest.fn(), update: jest.fn(), delete: jest.fn() },
     bot: { findMany: jest.fn().mockResolvedValue([]) }, // Hide bot conversations (#435): no bot hides, so a delete is just the delete
     user: { findUnique: jest.fn() },
+    ownershipOffer: { findUnique: jest.fn().mockResolvedValue(null) },
     worldMember: { findMany: jest.fn(), findFirst: jest.fn() },
     favorite: { groupBy: jest.fn(), findMany: jest.fn(), count: jest.fn().mockResolvedValue(0), findFirst: jest.fn() },
   },
 }));
 
+jest.mock('@/lib/ownership-offer-ends', () => ({ clearOffered: jest.fn(async () => undefined) }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/woka-avatar', () => ({ wokaLayersFor: jest.fn().mockResolvedValue([]) }));
 
 import { prisma } from '@/lib/db';
+import { clearOffered } from '@/lib/ownership-offer-ends';
 import { getSessionUser } from '@/lib/auth-session';
 import { GET as getUniverse, PATCH as patchUniverse, DELETE as deleteUniverse } from '@/app/api/admin/universes/[id]/route';
 import { GET as getWorld, PATCH as patchWorld, DELETE as deleteWorld } from '@/app/api/admin/worlds/[id]/route';
@@ -118,6 +121,15 @@ describe('saving and deleting', () => {
     expect((await patch({ ownerId: ROOT_UUID })).status).toBe(403);
     expect((await deleteUniverse(req('/api/admin/universes/un-1', 'root', 'DELETE'), params('un-1'))).status).toBe(200);
     expect(db.universe.delete).toHaveBeenCalled();
+  });
+
+  it('takes the “offered to you” card down when a universe with a waiting offer is deleted', async () => {
+    db.ownershipOffer.findUnique.mockResolvedValueOnce({ id: 'o1', toUserId: 'lab' });
+    expect((await deleteUniverse(req('/api/admin/universes/un-1', 'root', 'DELETE'), params('un-1'))).status).toBe(200);
+    expect(clearOffered).toHaveBeenCalledWith('lab', 'o1');
+    (clearOffered as jest.Mock).mockClear();
+    expect((await deleteUniverse(req('/api/admin/universes/un-1', 'root', 'DELETE'), params('un-1'))).status).toBe(200);
+    expect(clearOffered).not.toHaveBeenCalled();
   });
 
   it('lets a super admin save and delete a world they do not run', async () => {

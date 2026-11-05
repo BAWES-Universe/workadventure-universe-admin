@@ -68,7 +68,7 @@ async function ownershipFor(
   return {
     canOffer: mayOffer(viewer, universe) && !isOwner && isMember && !offer,
     // Set only when a super admin acts for the owner
-    onBehalfOf: owner ? (owner.name ?? 'The owner') : null,
+    onBehalfOf: owner ? (owner.name?.trim() || 'The owner') : null,
     waiting: offer ? { toUserId: offer.toUserId, toName: offer.toUser.name, createdAt: offer.createdAt, toThem: offer.toUserId === userId } : null,
     since: passed?.ownerSince ?? null,
     from: passed?.ownerSince ? (passed.previousOwner?.name ?? null) : null,

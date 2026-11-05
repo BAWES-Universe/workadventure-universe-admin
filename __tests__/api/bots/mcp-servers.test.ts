@@ -363,6 +363,10 @@ describe('/api/bots/[id]/mcp-servers', () => {
       expect(response.status).toBe(201);
       expect(data.id).toBe(MOCK_SERVER_ID);
       expect(data.name).toBe('New Server');
+      // Who connected it is kept from the start, so a lost sign-in reaches them (game #1819)
+      expect(prisma.botMcpServer.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ connectedById: MOCK_USER_ID }) })
+      );
     });
 
     it('should encrypt authConfig when creating', async () => {
@@ -581,6 +585,25 @@ describe('/api/bots/[id]/mcp-servers', () => {
       );
       // A new key is a new connection: who made it is remembered and a lost sign-in clears at once (game #1819)
       expect(markToolReconnected).toHaveBeenCalledWith(MOCK_SERVER_ID, MOCK_USER_ID);
+    });
+
+    it('does not call an OAuth settings save a reconnection, even though it carries an authConfig', async () => {
+      (prisma.botMcpServer.findUnique as jest.Mock).mockResolvedValue({
+        id: MOCK_SERVER_ID, botId: MOCK_BOT_ID, name: 'Server', serverUrl: 'https://example.com', authType: 'oauth', authConfig: 'encrypted:{"accessToken":"tok-1"}', enabled: true,
+      });
+      (prisma.botMcpServer.update as jest.Mock).mockResolvedValue({
+        id: MOCK_SERVER_ID, botId: MOCK_BOT_ID, name: 'Server', serverUrl: 'https://example.com', authType: 'oauth', enabled: true,
+        createdAt: new Date(), updatedAt: new Date(),
+      });
+      await PATCH(
+        new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers/${MOCK_SERVER_ID}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ authConfig: JSON.stringify({ scopes: 'read write' }) }),
+        }),
+        { params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }) }
+      );
+      expect(markToolReconnected).not.toHaveBeenCalled();
     });
 
     it('does not call a settings-only save a reconnection', async () => {

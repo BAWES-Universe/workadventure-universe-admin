@@ -76,6 +76,23 @@ describe('starting an offer', () => {
     expect(mockPrisma.ownershipOffer.create).not.toHaveBeenCalled();
   });
 
+  it('takes the offer back at once when the person left while it was being made', async () => {
+    mockPrisma.universeMember.findUnique.mockResolvedValueOnce({ id: 'm1' }).mockResolvedValueOnce(null);
+    expect((await refused(start())).status).toBe(404);
+    expect(mockPrisma.ownershipOffer.deleteMany).toHaveBeenCalledWith({ where: { id: 'o1' } });
+    expect(notices).not.toHaveBeenCalled();
+  });
+
+  it('takes the “offered to you” card down again when the offer ended while the notice was being written', async () => {
+    mockPrisma.ownershipOffer.findUnique.mockResolvedValue(null);
+    await start();
+    expect(clearNotices).toHaveBeenCalledWith('lab', 'ownership-offer', 'offered:o1');
+    (clearNotices as jest.Mock).mockClear();
+    mockPrisma.ownershipOffer.findUnique.mockResolvedValue({ id: 'o1' });
+    await start();
+    expect(clearNotices).not.toHaveBeenCalled();
+  });
+
   it('allows one offer at a time', async () => {
     mockPrisma.ownershipOffer.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError('Unique', { code: 'P2002', clientVersion: 'test' }));
     expect((await refused(start())).status).toBe(409);
@@ -108,8 +125,22 @@ describe('taking back and declining', () => {
   it('lets the owner take back, and clears the person’s notice', async () => {
     mockPrisma.ownershipOffer.findUnique.mockResolvedValue({ id: 'o1', toUserId: 'lab' });
     await takeBackOffer({ universe, by: owner });
-    expect(mockPrisma.ownershipOffer.deleteMany).toHaveBeenCalledWith({ where: { id: 'o1' } });
+    // Spent only while the universe is still the taker's: a stale request after a hand-over takes back nothing
+    expect(mockPrisma.ownershipOffer.deleteMany).toHaveBeenCalledWith({ where: { id: 'o1', universe: { ownerId: 'yousef' } } });
     expect(clearNotices).toHaveBeenCalledWith('lab', 'ownership-offer', 'offered:o1');
+  });
+
+  it('lets a super admin take back whoever owns the universe now', async () => {
+    mockPrisma.ownershipOffer.findUnique.mockResolvedValue({ id: 'o1', toUserId: 'lab' });
+    await takeBackOffer({ universe, by: root });
+    expect(mockPrisma.ownershipOffer.deleteMany).toHaveBeenCalledWith({ where: { id: 'o1' } });
+  });
+
+  it('does not clear the person’s notice when the owner changed under a stale take back', async () => {
+    mockPrisma.ownershipOffer.findUnique.mockResolvedValue({ id: 'o1', toUserId: 'lab' });
+    mockPrisma.ownershipOffer.deleteMany.mockResolvedValue({ count: 0 });
+    await refused(takeBackOffer({ universe, by: owner }));
+    expect(clearNotices).not.toHaveBeenCalled();
   });
 
   it('refuses a take back from anyone else, and when nothing waits', async () => {
@@ -165,6 +196,30 @@ describe('accepting', () => {
     ]);
   });
 
+  it('is void when the universe changed hands after the offer was made, unless a super admin made it', async () => {
+    mockPrisma.ownershipOffer.findUnique.mockResolvedValue({ ...offer, offeredById: 'old-owner' });
+    mockTx.user.findUnique.mockResolvedValue({ email: 'plain@example.test' });
+    const error = await refused(acceptOffer({ offerId: 'o1', userId: 'lab' }));
+    expect(error.status).toBe(409);
+    expect(mockPrisma.universe.updateMany).not.toHaveBeenCalled();
+    expect(joined).not.toHaveBeenCalled();
+    expect(clearNotices).toHaveBeenCalledWith('lab', 'ownership-offer', 'offered:o1');
+    expect(notices).not.toHaveBeenCalled();
+  });
+
+  it('still goes through when a super admin made the offer for the owner', async () => {
+    const before = process.env.SUPER_ADMINS;
+    process.env.SUPER_ADMINS = 'root@example.test';
+    try {
+      mockPrisma.ownershipOffer.findUnique.mockResolvedValue({ ...offer, offeredById: 'root' });
+      mockTx.user.findUnique.mockResolvedValue({ email: 'root@example.test' });
+      await acceptOffer({ offerId: 'o1', userId: 'lab' });
+      expect(mockPrisma.universe.updateMany).toHaveBeenCalled();
+    } finally {
+      if (before === undefined) delete process.env.SUPER_ADMINS; else process.env.SUPER_ADMINS = before;
+    }
+  });
+
   it('is only for the person it was made to', async () => {
     expect((await refused(acceptOffer({ offerId: 'o1', userId: 'someone-else' }))).status).toBe(404);
     expect(joined).not.toHaveBeenCalled();
@@ -205,6 +260,15 @@ describe('when someone leaves', () => {
     await endOfferIfLeft(mockPrisma as never, 'u1', 'lab');
     expect(mockPrisma.ownershipOffer.deleteMany).toHaveBeenCalledWith({ where: { id: 'o1' } });
     expect(notices.mock.calls.map(([notice]) => notice.userId)).toEqual(['yousef']);
+  });
+
+  it('tells the starter who is not the owner that nothing changed', async () => {
+    mockPrisma.ownershipOffer.findUnique.mockResolvedValue({ ...waiting, offeredById: 'root' });
+    mockPrisma.universeMember.findUnique.mockResolvedValue(null);
+    await endOfferIfLeft(mockPrisma as never, 'u1', 'lab');
+    const byUser = Object.fromEntries(notices.mock.calls.map(([notice]) => [notice.userId, notice.body]));
+    expect(Object.keys(byUser).sort()).toEqual(['root', 'yousef']);
+    expect(byUser.root).toMatch(/Nothing changed\.$/);
   });
 
   it('leaves the offer alone while they are still a member, or when it is for someone else', async () => {

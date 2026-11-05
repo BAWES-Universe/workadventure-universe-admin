@@ -279,6 +279,9 @@ describe('Memberships', () => {
     fireEvent.click(Array.from(dialog.querySelectorAll('button')).find((button) => button.textContent === 'Leave')!);
     await screen.findByText('No memberships yet.');
     expect(left).toBe(true);
+    // Leaving ends an offer made to you, so the “Offered to you” list is read again with the memberships
+    const offerReads = fetchMock.mock.calls.filter(([url]) => url === '/api/memberships/ownership-offers').length;
+    expect(offerReads).toBeGreaterThanOrEqual(2);
   });
   it('shows a universe invitation as the universe, the worlds it gives and its roles, and an older one as its world', async () => {
     const toUniverse = (id: string, scope: { allWorlds: boolean; worldIds: string[] }, roles: { id: string; name: string; color: string }[]) => ({
