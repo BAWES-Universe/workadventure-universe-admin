@@ -280,11 +280,11 @@ export async function POST(
           respondedAt: null,
         },
         include: {
+          // Never the invitee's email: the person inviting only needs their name
           invitedUser: {
             select: {
               id: true,
               name: true,
-              email: true,
             },
           },
           invitedBy: {
@@ -322,11 +322,11 @@ export async function POST(
           message: data.message || null,
         },
         include: {
+          // Never the invitee's email: the person inviting only needs their name
           invitedUser: {
             select: {
               id: true,
               name: true,
-              email: true,
             },
           },
           invitedBy: {

@@ -39,7 +39,6 @@ interface Invitation {
   id: string;
   userId: string;
   name: string | null;
-  email: string | null;
   woka?: string[];
   invitedBy: { userId: string; name: string | null };
   invitedAt: string;
@@ -316,7 +315,7 @@ export function UniverseMembersPage() {
           <SectionHeader id="pending-invitations" title="Pending invitations" count={invitations.list.length} />
           <div className="grid min-w-0 gap-0.5">
             {invitations.list.map((invitation) => {
-              const name = invitation.name || invitation.email || 'Someone';
+              const name = invitation.name || 'Someone';
               const held = invitation.roleIds
                 .filter((roleId) => rolesById.has(roleId))
                 .sort((a, b) => (rolesById.get(b)?.position ?? 0) - (rolesById.get(a)?.position ?? 0))
