@@ -11,7 +11,7 @@ jest.mock('@/lib/db', () => ({
     world: { findUnique: jest.fn() },
     worldMember: { findUnique: jest.fn() },
     user: { findUnique: jest.fn() },
-    membershipInvitation: { findMany: jest.fn(), findFirst: jest.fn(), create: jest.fn() },
+    membershipInvitation: { findMany: jest.fn(), findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
   },
 }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -155,6 +155,29 @@ describe('inviting someone to a world', () => {
 
     expect(response.status).toBe(201);
     expect(text).not.toContain(INVITEE_EMAIL);
+    expect(text).not.toContain(INVITER_EMAIL);
     expect(JSON.parse(text).invitation.invitedUser).toEqual({ id: 'jana', name: 'Jana' });
+    expect(JSON.parse(text).invitation.invitedBy).toEqual({ id: 'sara', name: 'Sara' });
+  });
+
+  it('answers without either email when an earlier invitation is sent again', async () => {
+    session.mockResolvedValue({ id: 'sara' });
+    db.world.findUnique.mockResolvedValue({ id: 'campus', universeId: 'u1', universe: { ownerId: 'sara' }, members: [] });
+    db.user.findUnique.mockResolvedValue({ ...INVITEE, uuid: UUID });
+    db.worldMember.findUnique.mockResolvedValue(null);
+    // No pending invitation, but a cancelled one to send again
+    db.membershipInvitation.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'inv1', status: 'cancelled' });
+    db.membershipInvitation.update.mockImplementation(async ({ include }) => row({ include }));
+
+    const response = await inviteToWorld(
+      request('/api/admin/worlds/campus/members', { method: 'POST', body: JSON.stringify({ userId: UUID, tags: ['member'] }) }),
+      params('campus'),
+    );
+    const text = await response.text();
+
+    expect(response.status).toBe(201);
+    expect(text).not.toContain(INVITEE_EMAIL);
+    expect(text).not.toContain(INVITER_EMAIL);
+    expect(JSON.parse(text).invitation.invitedBy).toEqual({ id: 'sara', name: 'Sara' });
   });
 });

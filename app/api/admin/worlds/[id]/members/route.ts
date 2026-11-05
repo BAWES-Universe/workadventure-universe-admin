@@ -287,11 +287,11 @@ export async function POST(
               name: true,
             },
           },
+          // Never an email address on either side: the inviter is shown by name too
           invitedBy: {
             select: {
               id: true,
               name: true,
-              email: true,
             },
           },
           world: {
@@ -329,11 +329,11 @@ export async function POST(
               name: true,
             },
           },
+          // Never an email address on either side: the inviter is shown by name too
           invitedBy: {
             select: {
               id: true,
               name: true,
-              email: true,
             },
           },
           world: {
