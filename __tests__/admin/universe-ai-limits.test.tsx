@@ -12,9 +12,15 @@ jest.mock('@/components/ui/toast', () => ({ useToast: () => ({ addToast: mockAdd
 
 import { UniverseAiLimits } from '@/app/admin/components/limits';
 import { SERVER_LIMITS_RECOMMENDED } from '@/lib/bot-limit-values';
+import { VOICE_LIMITS_RECOMMENDED } from '@/lib/voice-limit-values';
 
-function answer(limits = SERVER_LIMITS_RECOMMENDED) {
-  fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
+function answer(limits = SERVER_LIMITS_RECOMMENDED, voice = VOICE_LIMITS_RECOMMENDED) {
+  fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+    // The voice limits (#792) are read and saved on their own route
+    if (url === '/api/admin/voice-limits') {
+      const change = init?.method === 'PATCH' ? JSON.parse(String(init.body)) : {};
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ limits: { ...voice, ...change }, revision: 1 }) });
+    }
     if (init?.method === 'PATCH') {
       const change = JSON.parse(String(init.body));
       return Promise.resolve({
@@ -142,6 +148,25 @@ describe('Universe AI limits', () => {
     fireEvent.click(await screen.findByRole('switch', { name: /Say when nothing was saved/ }));
     await waitFor(() => expect(screen.getByRole('switch', { name: /Say when nothing was saved/ }).getAttribute('aria-checked')).toBe('false'));
     expect(JSON.parse(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1].body)).toEqual({ guard: false });
+  });
+
+  it('shows the 7 voice limits after Fair usage and saves one on its own route (#792)', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    expect(await screen.findByText('Voice, for all bots')).toBeTruthy();
+    expect(screen.getByText('People with their own voice key can change the first four on their key.')).toBeTruthy();
+    for (const label of ['Longest turn', 'Longest spoken reply', 'Longest reply in time', 'Listening a day', 'Keep talking without its name', 'Replies kept for text', 'Voice replies for a guest']) {
+      expect(screen.getByText(label)).toBeTruthy();
+    }
+    expect(screen.getByTestId('limit-turnSeconds').textContent).toContain('3 minutes');
+    expect(screen.getByTestId('limit-textReserveShare').textContent).toContain('1 in 6');
+    fireEvent.click(screen.getByTestId('limit-guestVoiceReplies'));
+    fireEvent.click(await screen.findByRole('radio', { name: /5 replies/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/voice-limits' && init?.method === 'PATCH')).toBe(true));
+    const patch = fetchMock.mock.calls.find(([url, init]) => url === '/api/admin/voice-limits' && init?.method === 'PATCH')!;
+    expect(JSON.parse(String(patch[1].body))).toEqual({ guestVoiceReplies: 5 });
+    await waitFor(() => expect(screen.getByTestId('limit-guestVoiceReplies').textContent).toContain('5 replies'));
   });
 
   it('says it could not load, with a way to try again', async () => {

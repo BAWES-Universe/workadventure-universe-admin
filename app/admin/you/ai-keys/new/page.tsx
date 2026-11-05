@@ -15,9 +15,11 @@ import { authenticatedFetch } from '@/lib/client-auth';
 import { AI_KEY_KINDS, kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 import { PageHeader } from '../../../components/ds';
 import { AiKeyFailure, aiKeyError, aiKeyFailureText } from '../../../hooks/use-ai-keys';
+import { useVoiceCompanies, voiceCompanyKind } from '../../../hooks/use-voice-keys';
+import type { VoiceModel } from '@/lib/voice-providers';
 import { openLinkInGame, useLinksOpeningInGame } from '../../../components/orbit-bridge';
 
-type Models = { status: 'none' } | { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'failed'; message: string } | { status: 'typed' };
+type Models = { status: 'none' } | { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'voice'; models: VoiceModel[] } | { status: 'failed'; message: string } | { status: 'typed' };
 
 const FIELD_HINT = 'text-[13px] text-muted-foreground';
 /** More providers than this and a search box appears. */
@@ -105,6 +107,10 @@ export default function AddAiKeyPage() {
   const router = useRouter();
   const { addToast } = useToast();
   const [kind, setKind] = useState<AiKeyKind | null>(null);
+  // A speech company for voice (#749), picked instead of a provider: its adapter
+  const [voiceAdapter, setVoiceAdapter] = useState<string | null>(null);
+  const companies = useVoiceCompanies();
+  const voiceKinds = (companies.result.status === 'ready' ? companies.result.items : []).map(voiceCompanyKind);
   // Two steps on one page: pick a provider, then set it up. Change goes back to the list with the pick kept.
   const [step, setStep] = useState<'pick' | 'setup'>('pick');
   const [region, setRegion] = useState<string | null>(null);
@@ -128,23 +134,39 @@ export default function AddAiKeyPage() {
     stepHeading.current?.focus();
   }, [step]);
 
-  const info = kindInfo(kind);
+  const voiceInfo = voiceKinds.find((entry) => entry.kind === voiceAdapter) ?? null;
+  const info = voiceInfo ?? kindInfo(kind);
   const name = typedName ?? (info ? `My ${info.label}` : '');
   // The picked type stays on screen whatever is typed in the search
   const needle = find.trim().toLowerCase();
-  const matches = (entry: AiKeyKindInfo) => entry.kind === kind || !needle || `${entry.label} ${entry.benefit}`.toLowerCase().includes(needle);
+  const matches = (entry: AiKeyKindInfo) => entry.kind === (voiceAdapter ?? kind) || !needle || `${entry.label} ${entry.benefit}`.toLowerCase().includes(needle);
   const shown = AI_KEY_KINDS.filter((entry) => entry.tier !== 'hidden' && (entry.tier === 'named' ? matches(entry) : entry.kind === kind || (needle !== '' ? matches(entry) : showMore)));
   const ownComputer = shown.filter((entry) => entry.group === 'own-computer');
   const hosted = shown.filter((entry) => entry.group === 'hosted' && entry.tier === 'named');
+  const voice = voiceKinds.filter(matches);
   const more = shown.filter((entry) => entry.tier === 'more');
   const moreCount = AI_KEY_KINDS.filter((entry) => entry.tier === 'more').length;
 
   function pickKind(next: AiKeyKind) {
     // Picking the type that is already picked keeps what was typed for it
-    if (next !== kind) {
+    if (next !== kind || voiceAdapter !== null) {
       setKind(next);
+      setVoiceAdapter(null);
       setRegion(null);
       // A key or address typed for one provider is never sent to another
+      setAddress('');
+      setApiKey('');
+      changed();
+    }
+    goToStep('setup');
+  }
+
+  /** Picks a speech company for voice: its key is checked with the company and added as a voice key. */
+  function pickVoice(adapter: string) {
+    if (adapter !== voiceAdapter) {
+      setKind(null);
+      setVoiceAdapter(adapter);
+      setRegion(null);
       setAddress('');
       setApiKey('');
       changed();
@@ -181,6 +203,19 @@ export default function AddAiKeyPage() {
     setModel(null);
     setFailure(null);
     try {
+      if (voiceInfo) {
+        // One free call to the company with the key; the models are the ones Universe's own providers for it list
+        const response = await authenticatedFetch('/api/me/voice-keys/check', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ adapter: voiceInfo.kind, apiKey }),
+        });
+        const data: { ok?: boolean; models?: VoiceModel[]; error?: string } = await response.json().catch(() => ({}));
+        if (mine !== latestLoad.current) return;
+        if (response.ok && data.ok && Array.isArray(data.models)) setModels({ status: 'voice', models: data.models });
+        else setModels({ status: 'failed', message: response.status === 401 ? 'Sign in again, then try again.' : (data.error ?? 'That didn’t work. Try again.') });
+        return;
+      }
       const response = await authenticatedFetch('/api/me/ai-keys/models', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -204,17 +239,27 @@ export default function AddAiKeyPage() {
   }
 
   // A listed provider needs at least one model for the key's check; a provider with no list needs its model typed
-  const canAdd = models.status === 'ready' ? models.models.length > 0 : models.status === 'typed' && !!model && model.trim() !== '';
+  const canAdd = models.status === 'ready' || models.status === 'voice' ? models.models.length > 0 : models.status === 'typed' && !!model && model.trim() !== '';
 
   async function add() {
     if (!info || !canAdd) return;
     setSaving(true);
     setFailure(null);
     try {
-      const response = await authenticatedFetch('/api/me/ai-keys', {
+      const response = await authenticatedFetch(models.status === 'voice' ? '/api/me/voice-keys' : '/api/me/ai-keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey, ...(model ? { model: model.trim() } : {}), name }),
+        body:
+          models.status === 'voice'
+            ? JSON.stringify({
+                adapter: info.kind,
+                name,
+                apiKey,
+                recognition: models.models.some((entry) => entry.kind === 'recognition'),
+                speech: models.models.some((entry) => entry.kind === 'speech'),
+                models: models.models,
+              })
+            : JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey, ...(model ? { model: model.trim() } : {}), name }),
       });
       if (!response.ok) {
         const data: { error?: string } = await response.json().catch(() => ({}));
@@ -230,7 +275,7 @@ export default function AddAiKeyPage() {
 
   const own = info?.group === 'own-computer';
   const makerCount = models.status === 'ready' ? new Set(models.models.map((id) => makerOf(id).key)).size : 0;
-  const loaded = models.status === 'ready' || models.status === 'typed';
+  const loaded = models.status === 'ready' || models.status === 'typed' || models.status === 'voice';
   let part = 1;
 
   return (
@@ -256,7 +301,7 @@ export default function AddAiKeyPage() {
             />
           )}
           <div role="radiogroup" aria-label="Provider" className="grid gap-4">
-            {shown.length === 0 && <p className={FIELD_HINT}>No provider matches that. “Any OpenAI-compatible server” takes any address that speaks the OpenAI format.</p>}
+            {shown.length === 0 && voice.length === 0 && <p className={FIELD_HINT}>No provider matches that. “Any OpenAI-compatible server” takes any address that speaks the OpenAI format.</p>}
             {ownComputer.length > 0 && <div className="grid gap-2">
               <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">On your own computer</h3>
               {ownComputer.map((entry) => (
@@ -267,6 +312,12 @@ export default function AddAiKeyPage() {
               <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Hosted, with an API key</h3>
               {hosted.map((entry) => (
                 <KindCard key={entry.kind} info={entry} picked={kind === entry.kind} onPick={() => pickKind(entry.kind)} />
+              ))}
+            </div>}
+            {voice.length > 0 && <div className="grid gap-2" data-testid="kinds-voice">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">For voice, with an API key</h3>
+              {voice.map((entry) => (
+                <KindCard key={entry.kind} info={entry} picked={voiceAdapter === entry.kind} onPick={() => pickVoice(entry.kind)} />
               ))}
             </div>}
             {more.length > 0 && <div className="grid gap-2">
@@ -382,7 +433,7 @@ export default function AddAiKeyPage() {
                   {models.message}
                 </p>
               )}
-              {models.status === 'ready' && (
+              {(models.status === 'ready' || models.status === 'voice') && (
                 <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
                   <Check size={16} aria-hidden="true" className="text-[#4ade80]" />
                   It answered. {info.label} has {models.models.length} {models.models.length === 1 ? 'model' : 'models'}{makerCount > 1 ? ` from ${makerCount} makers` : ''}.
@@ -411,6 +462,28 @@ export default function AddAiKeyPage() {
                 </p>
               </div>
             )}
+            {models.status === 'voice' && (
+              <>
+                <p className={FIELD_HINT}>Nothing to pick here. Each bot picks one of these on its own page. When you lend the key, you can limit which ones bots there may use.</p>
+                {(['recognition', 'speech'] as const).map((job) => {
+                  const list = models.models.filter((entry) => entry.kind === job);
+                  return (
+                    list.length > 0 && (
+                      <div key={job} className="grid gap-1.5" data-testid={`voice-models-${job}`}>
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{job === 'recognition' ? 'Listens' : 'Speaks'}</h3>
+                        <ul className="m-0 grid list-none gap-0 rounded-2xl border border-foreground/10 p-0">
+                          {list.map((entry) => (
+                            <li key={entry.id} className="flex min-h-11 items-center gap-2 border-t border-foreground/10 px-3 text-[15px] first:border-t-0" data-testid="model-row">
+                              <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{entry.label || entry.id}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )
+                  );
+                })}
+              </>
+            )}
             {models.status === 'ready' && (
               <>
                 <p className={FIELD_HINT}>Nothing to pick here. Each bot picks one of these on its own page. When you lend the key, you can limit which ones bots there may use.</p>
@@ -423,7 +496,7 @@ export default function AddAiKeyPage() {
             <div className="grid gap-1.5">
               <Label htmlFor="ai-key-name" className="sr-only">Name</Label>
               <Input id="ai-key-name" maxLength={60} value={name} onChange={(event) => setTypedName(event.target.value)} className="h-11 rounded-xl" />
-              <p className={FIELD_HINT}>Shown here, and in Runs on for the bots that use it.</p>
+              <p className={FIELD_HINT}>{voiceInfo ? 'Shown here, and under Voice for the bots that use it.' : 'Shown here, and in Runs on for the bots that use it.'}</p>
             </div>
           </Part>
 
