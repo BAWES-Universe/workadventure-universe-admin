@@ -130,6 +130,8 @@ describe('Change what Universe AI listens with', () => {
     expect((within(sheet).getByRole('radio', { name: /Soniox/ }) as HTMLButtonElement).getAttribute('aria-checked')).toBe('true');
     expect(within(sheet).getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
     // Nothing changes yet, and no bot listens with another company, so the line names only new bots
+    expect(screen.getByTestId('default-listen').textContent).toContain('A bot that turns voice on starts with this. Bots on Soniox listen with this model too.');
+    expect(screen.getByTestId('default-speak').textContent).toContain('A bot that turns voice on starts with this voice. Bots on ElevenLabs speak with this model too, in their own voices.');
     expect(within(sheet).getByTestId('listen-change-line').textContent).toBe('Bots that turn voice on from now listen with it.');
     // Our suggestion is marked, nothing more: every company that can listen is offered
     expect(within(within(sheet).getByRole('radio', { name: /Soniox/ })).getByText('Recommended')).toBeTruthy();

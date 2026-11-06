@@ -528,7 +528,7 @@ export function VoiceSection() {
               icon={<Ear size={22} aria-hidden="true" />}
               label="Universe AI listens with"
               value={listener ? `${listener.name} · ${modelName(startingModel(listener, 'recognition') ?? { id: 'no model', kind: 'recognition' })}` : 'Nothing yet'}
-              hint={listener ? 'A bot that turns voice on starts with this. Bots that already listen keep theirs.' : 'Bots can’t turn voice on with Universe AI until a company listens for it.'}
+              hint={listener ? `A bot that turns voice on starts with this. Bots on ${listener.name} listen with this model too.` : 'Bots can’t turn voice on with Universe AI until a company listens for it.'}
               disabled={loading}
               onChange={() => setSheet('listen')}
             />
@@ -541,8 +541,8 @@ export function VoiceSection() {
                 !speaker
                   ? 'Bots can’t turn voice on with Universe AI until a company speaks for it.'
                   : speaker.defaultVoiceId
-                    ? 'A bot that turns voice on starts with this voice. Bots that have a voice keep theirs.'
-                    : `No starting voice picked: a bot that turns voice on starts with the first voice ${speaker.name} lists. Bots that have a voice keep theirs.`
+                    ? `A bot that turns voice on starts with this voice. Bots on ${speaker.name} speak with this model too, in their own voices.`
+                    : `No starting voice picked: a bot that turns voice on starts with the first voice ${speaker.name} lists. Bots on ${speaker.name} speak with this model too, in their own voices.`
               }
               disabled={loading}
               onChange={() => setSheet('speak')}
