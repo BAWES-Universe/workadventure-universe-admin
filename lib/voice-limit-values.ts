@@ -21,6 +21,8 @@ export interface VoiceLimits {
   listenMinutesPerDay: number;
   /** Seconds after a bot answers in which the person can keep going without its name. */
   followUpSeconds: number;
+  /** Voices listed first when a maker gives a bot a voice; the rest are behind "All voices". */
+  voicesShownFirst: number;
 }
 
 export const VOICE_LIMITS_RECOMMENDED: VoiceLimits = {
@@ -31,6 +33,7 @@ export const VOICE_LIMITS_RECOMMENDED: VoiceLimits = {
   replySeconds: 60,
   listenMinutesPerDay: 60,
   followUpSeconds: 30,
+  voicesShownFirst: 5,
 };
 
 /** The values that can be saved: anything a person might mean, nothing that would break a turn. */
@@ -47,6 +50,7 @@ export const VOICE_RANGES: Record<keyof VoiceLimits, Range> = {
   replySeconds: { min: 5, max: 600 },
   listenMinutesPerDay: { min: 0, max: 1_440 },
   followUpSeconds: { min: 5, max: 600 },
+  voicesShownFirst: { min: 1, max: 20 },
 };
 
 const fits = (value: unknown, range: Range): value is number =>

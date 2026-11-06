@@ -11,6 +11,7 @@ describe('voice limits', () => {
       replySeconds: 60,
       listenMinutesPerDay: 60,
       followUpSeconds: 30,
+      voicesShownFirst: 5,
     });
   });
 
@@ -27,6 +28,8 @@ describe('voice limits', () => {
     expect(checkVoiceLimits({ turnSeconds: 1 })).toEqual({ ok: false, error: 'turnSeconds must be a whole number from 5 to 3,600' });
     expect(checkVoiceLimits({ replySeconds: 10.5 }).ok).toBe(false);
     expect(checkVoiceLimits({ followUpSeconds: '30' }).ok).toBe(false);
+    expect(checkVoiceLimits({ voicesShownFirst: 8 })).toEqual({ ok: true, value: { voicesShownFirst: 8 } });
+    expect(checkVoiceLimits({ voicesShownFirst: 0 })).toEqual({ ok: false, error: 'voicesShownFirst must be a whole number from 1 to 20' });
     expect(checkVoiceLimits({ speed: 3 })).toEqual({ ok: false, error: 'Unknown limit: speed' });
     expect(checkVoiceLimits({ constructor: 3 }).ok).toBe(false);
     expect(checkVoiceLimits('turnSeconds')).toEqual({ ok: false, error: 'Expected an object' });

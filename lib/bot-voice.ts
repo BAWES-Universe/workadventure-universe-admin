@@ -15,7 +15,8 @@ import { LISTENING_KEY_LIMITS, SPEAKING_KEY_LIMITS, readVoiceKeyLimits, savedVoi
  * revisions of it. A bot speaks with the revision named in `bots.voice_revision`: publishing makes a new revision and rolling
  * back names an earlier one, so a revision never changes once it is published.
  *
- * The profile names the providers by id (lib/voice-providers.ts) with an exact model for each, and the voice. A provider is
+ * The profile names the providers by id (lib/voice-providers.ts) with a model for each, and the voice (a part on one of the server's
+ * own providers speaks with that provider's current model, see followUniverseAi). A provider is
  * one a super admin runs, so Universe AI pays, or a key (lib/voice-keys.ts) that the bot's maker lent to its universe, so the
  * maker pays; the person talking never does. A bot never speaks on anyone else's key, and when the key stops being usable
  * (pulled, deleted, a model taken off it, its owner no longer able to manage bots there) the bot carries on in text.
@@ -52,6 +53,26 @@ const readDraft = (value: unknown) => {
 
 /** For a key that is lent: the models the lend allows (as "kind:id"), or null for all of them. */
 type Lends = Map<string, string[] | null>;
+
+/**
+ * A part that runs on one of the server's own providers (Universe AI) uses the model that provider starts from for the job, which
+ * is the first one it lists, whatever model the bot was turned on with: a super admin moving Universe AI to a newer model of the same
+ * company moves every such bot with it, and a model taken off no longer silences them. The voice and the company stay as published.
+ * A part on a person's lent key keeps the model its maker picked (their key, their choice). A provider that lists no model for the
+ * job leaves the published one, so `profileProblem` still says so.
+ */
+export function followUniverseAi(profile: VoiceProfile, providers: Map<string, VoiceProvider>): VoiceProfile {
+  const follow = <P extends 'recognition' | 'speech'>(part: P): VoiceProfile[P] => {
+    const choice = profile[part];
+    const provider = providers.get(choice.providerId);
+    if (!provider || provider.ownerId !== null) return choice;
+    const current = readModels(provider.models).find((model) => model.kind === part);
+    return current && current.id !== choice.model ? { ...choice, model: current.id } : choice;
+  };
+  const recognition = follow('recognition');
+  const speech = follow('speech');
+  return recognition === profile.recognition && speech === profile.speech ? profile : { ...profile, recognition, speech };
+}
 
 /** The first reason a finished profile can't be used with the providers as they are now, or null. */
 export function profileProblem(profile: VoiceProfile, providers: Map<string, VoiceProvider>, lent: Lends = new Map()): string | null {
@@ -233,7 +254,7 @@ export async function publishVoiceDraft(botId: string, note: string | null, user
       throw new BotSettingsError(400, `The voice profile isn't finished: ${issue?.path.join('.') || 'profile'} is ${issue?.code === 'invalid_type' ? 'missing' : 'not valid'}`);
     }
     const { providers, lent } = await providersFor(parsed.data, await homeOf(botId));
-    const problem = profileProblem(parsed.data, providers, lent);
+    const problem = profileProblem(followUniverseAi(parsed.data, providers), providers, lent);
     if (problem) throw new BotSettingsError(409, problem);
     const last = await tx.botVoiceRevision.findFirst({ where: { botId }, orderBy: { number: 'desc' }, select: { number: true } });
     const number = (last?.number ?? 0) + 1;
@@ -251,7 +272,7 @@ export async function rollBackVoice(botId: string, number: number) {
     const parsed = voiceProfileSchema.safeParse(revision.profile);
     if (!parsed.success) throw new BotSettingsError(409, 'That revision can\'t be read');
     const { providers, lent } = await providersFor(parsed.data, await homeOf(botId));
-    const problem = profileProblem(parsed.data, providers, lent);
+    const problem = profileProblem(followUniverseAi(parsed.data, providers), providers, lent);
     if (problem) throw new BotSettingsError(409, problem);
     await tx.bot.update({ where: { id: botId }, data: { voiceRevision: number } });
   });
@@ -327,11 +348,13 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
   const parsed = revision ? voiceProfileSchema.safeParse(revision.profile) : null;
   if (!revision || !parsed?.success) return result('no-profile');
   const { providers, lent } = await providersFor(parsed.data, { createdById: bot.createdById, universeId: bot.room.world.universeId });
-  if (profileProblem(parsed.data, providers, lent)) return result('provider', revision.number);
+  // A bot on Universe AI speaks with the models Universe AI uses now, not the ones it was turned on with
+  const profile = followUniverseAi(parsed.data, providers);
+  if (profileProblem(profile, providers, lent)) return result('provider', revision.number);
   if (!options.ignoreKeyHealth) {
-    const ids = [...new Set([parsed.data.recognition.providerId, parsed.data.speech.providerId])];
+    const ids = [...new Set([profile.recognition.providerId, profile.speech.providerId])];
     // A key that went Down on one job holds back only a bot that uses it for that job
-    const usedFor = (id: string) => (['recognition', 'speech'] as const).filter((part) => parsed.data[part].providerId === id);
+    const usedFor = (id: string) => (['recognition', 'speech'] as const).filter((part) => profile[part].providerId === id);
     const down = ids
       .map((id) => providers.get(id))
       .filter((row): row is VoiceProvider => Boolean(row && row.ownerId !== null && row.downSince && (!row.downPart || usedFor(row.id).includes(row.downPart as 'recognition' | 'speech'))));
@@ -346,5 +369,5 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
       if (!mayTry) return result('key-down', revision.number, null, healthOf([...down].sort((a, b) => a.downSince!.getTime() - b.downSince!.getTime())[0]));
     }
   }
-  return result(null, revision.number, parsed.data, null, providers);
+  return result(null, revision.number, profile, null, providers);
 }
