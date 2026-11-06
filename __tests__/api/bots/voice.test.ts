@@ -13,6 +13,7 @@ import { getSessionUser } from '@/lib/auth-session';
 import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { prisma } from '@/lib/db';
+import { effectiveBotVoice } from '@/lib/bot-voice';
 import { POST as reportKeyCall } from '@/app/api/voice/providers/[id]/health/route';
 import { GET as getCredentials } from '@/app/api/voice/providers/[id]/credentials/route';
 import { matches, applyData } from '../../helpers/voice-provider-rows';
@@ -576,6 +577,16 @@ describe('the voice limits a bot\'s spoken turn runs under', () => {
     // A value that is not a whole number inside its range is ignored
     providers[1].voiceLimits = { replySeconds: 9999, replyCharacters: 'many' };
     expect((await active()).limits).toMatchObject({ replyCharacters: 600, replySeconds: 60 });
+  });
+
+  it('are still the lent listening key\'s own while that key is Down, when read for the daily listening count (#1859)', async () => {
+    providers = [provider(own({ voiceLimits: { listenMinutesPerDay: 15 }, downSince: new Date('2026-10-30T10:30:00Z'), downReason: 'credit', downPart: 'recognition' })), voice()];
+    lends = [lend('ears')];
+    await published();
+    // Read with the key's health, a Down key reads as key-down with no profile, so the server's limit stands in for the key's
+    expect(await effectiveBotVoice('bot-1', { ignoreSwitch: true })).toMatchObject({ reason: 'key-down', limits: { listenMinutesPerDay: 60 } });
+    // Read for the count, the key's own limit applies whatever the key's health
+    expect((await effectiveBotVoice('bot-1', { ignoreSwitch: true, ignoreKeyHealth: true })).limits).toMatchObject({ listenMinutesPerDay: 15 });
   });
 
   it('are given when the bot does not speak too', async () => {
