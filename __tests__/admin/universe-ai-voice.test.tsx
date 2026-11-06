@@ -43,7 +43,7 @@ import { withStartingModel } from '@/app/admin/ai-providers/voice/voice-shared';
 import { VOICE_LIMITS_RECOMMENDED } from '@/lib/voice-limit-values';
 
 const provider = (changes: Row): Row => ({ region: null, endpoint: null, hasKey: true, defaultRecognition: false, defaultSpeech: false, defaultVoiceId: null, defaultVoiceName: null, bots: { recognition: 0, speech: 0, total: 0 }, ...changes });
-const soniox = () => provider({ id: 'v-soniox', adapter: 'soniox', name: 'Soniox', recognition: true, speech: false, enabled: true, apiKeyLast4: '9f3c', models: [{ id: 'stt-rt-v3', label: 'Real-time v3', kind: 'recognition' }], defaultRecognition: true, bots: { recognition: 14, speech: 0, total: 14 } });
+const soniox = () => provider({ id: 'v-soniox', adapter: 'soniox', name: 'Soniox', recognition: true, speech: false, enabled: true, apiKeyLast4: '9f3c', models: [{ id: 'stt-rt-v6', label: 'Real-time v3', kind: 'recognition' }], defaultRecognition: true, bots: { recognition: 14, speech: 0, total: 14 } });
 const eleven = () =>
   provider({ id: 'v-eleven', adapter: 'elevenlabs', name: 'ElevenLabs', recognition: false, speech: true, enabled: true, apiKeyLast4: 'a1b2', models: [{ id: 'eleven_flash_v2_5', label: 'Flash v2.5', kind: 'speech' }, { id: 'eleven_multilingual_v2', label: 'Multilingual v2', kind: 'speech' }], defaultSpeech: true, defaultVoiceId: 'aria', defaultVoiceName: 'Aria', bots: { recognition: 0, speech: 12, total: 12 } });
 const cartesia = () => provider({ id: 'v-cartesia', adapter: 'cartesia', name: 'Cartesia', recognition: false, speech: true, enabled: true, apiKeyLast4: '77de', models: [{ id: 'sonic-3', label: 'Sonic 3', kind: 'speech' }], bots: { recognition: 0, speech: 2, total: 2 } });
@@ -264,7 +264,7 @@ describe('New voice provider', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
     await screen.findByText('Soniox knows this key. Nothing was spoken, so nothing was paid.');
     fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
-    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'stt-rt-v3' } });
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'stt-rt-v6' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
     // Soniox listens on a websocket address, which is allowed here
     fireEvent.click(screen.getByRole('button', { name: 'Its own address' }));
@@ -282,7 +282,7 @@ describe('New voice provider', () => {
       speech: false,
       enabled: true,
       apiKey: 'soniox-key-1234',
-      models: [{ id: 'stt-rt-v3', kind: 'recognition' }],
+      models: [{ id: 'stt-rt-v6', kind: 'recognition' }],
       endpoint: 'wss://stt-rt.soniox.com/transcribe-websocket',
     });
   });
@@ -296,7 +296,7 @@ describe('New voice provider, Enter in a model field', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
     await screen.findByText('Soniox knows this key. Nothing was spoken, so nothing was paid.');
     fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
-    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'stt-rt-v3' } });
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'stt-rt-v6' } });
     fireEvent.keyDown(screen.getByLabelText('Model id'), { key: 'Enter' });
     await waitFor(() => expect(screen.getAllByTestId('model-row')).toHaveLength(1));
     fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
