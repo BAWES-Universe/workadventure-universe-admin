@@ -16,6 +16,8 @@
  * - deepgram: GET /v1/projects, Authorization: Token. A key without projects:read (scoped to other jobs) is answered 403, not
  *   401: Deepgram knows the key, so that counts as accepted. A wrong key is 401.
  * - cartesia: GET /voices?limit=1, Authorization: Bearer with the Cartesia-Version header the reference lists.
+ * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
+ *   free account with no credit still has the answer, and that is fine: the free model needs none.
  */
 export interface VoiceKeyCompanyInfo {
   adapter: string;
@@ -72,6 +74,15 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On play.cartesia.ai, open API keys and create a key.',
     docs: 'https://docs.cartesia.ai',
     check: { url: 'https://api.cartesia.ai/voices?limit=1', header: 'Authorization', prefix: 'Bearer ', headers: { 'Cartesia-Version': '2026-08-14' } },
+  },
+  {
+    adapter: 'fish',
+    label: 'Fish Audio',
+    logo: 'fish-audio',
+    benefit: '{does}, with a free model for your own key.',
+    step: 'On fish.audio, open API Keys and create a key.',
+    docs: 'https://docs.fish.audio',
+    check: { url: 'https://api.fish.audio/wallet/self/api-credit', header: 'Authorization', prefix: 'Bearer ' },
   },
   {
     adapter: 'soniox',

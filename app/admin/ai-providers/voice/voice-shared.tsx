@@ -36,11 +36,11 @@ export interface ServerVoiceProvider {
   bots: { recognition: number; speech: number; total: number };
 }
 
-/** The companies a super admin can add, grouped by what each does in Universe (the game's connectors: Soniox and Deepgram listen, ElevenLabs and Cartesia speak). */
-export const COMPANY_JOBS: Record<string, VoiceJob> = { soniox: 'recognition', deepgram: 'recognition', elevenlabs: 'speech', cartesia: 'speech' };
+/** The companies a super admin can add, grouped by what each does in Universe (the game's connectors: Soniox and Deepgram listen, ElevenLabs, Cartesia and Fish Audio speak). */
+export const COMPANY_JOBS: Record<string, VoiceJob> = { soniox: 'recognition', deepgram: 'recognition', elevenlabs: 'speech', cartesia: 'speech', fish: 'speech' };
 
 /** The company's own address, as the bot server calls it when nothing else is typed. */
-export const COMPANY_HOST: Record<string, string> = { soniox: 'stt-rt.soniox.com', deepgram: 'api.deepgram.com', elevenlabs: 'api.elevenlabs.io', cartesia: 'api.cartesia.ai' };
+export const COMPANY_HOST: Record<string, string> = { soniox: 'stt-rt.soniox.com', deepgram: 'api.deepgram.com', elevenlabs: 'api.elevenlabs.io', cartesia: 'api.cartesia.ai', fish: 'api.fish.audio' };
 
 export const JOBS: { job: VoiceJob; word: string; ing: string }[] = [
   { job: 'recognition', word: 'Listens', ing: 'listening' },
