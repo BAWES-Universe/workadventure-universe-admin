@@ -23,7 +23,7 @@ export async function GET(request: NextRequest) {
 
 /**
  * PATCH /api/admin/voice-limits { textReserveShare?, guestVoiceReplies?, turnSeconds?, replyCharacters?, replySeconds?,
- * listenMinutesPerDay?, followUpSeconds? } - changes only the values it names. Answers with all of them as saved, or 400 with
+ * listenMinutesPerDay?, followUpSeconds?, voicesShownFirst? } - changes only the values it names. Answers with all of them as saved, or 400 with
  * the line that says why not.
  */
 export async function PATCH(request: NextRequest) {
