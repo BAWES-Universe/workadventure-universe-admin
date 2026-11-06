@@ -38,8 +38,9 @@ export async function reportListening(botId: string, input: { seconds?: unknown 
 
   const day = dayOf(now);
   const resetsAt = new Date(day.getTime() + 24 * 60 * 60 * 1000).toISOString();
-  // Throws "Bot not found" (404) for a bot that does not exist
-  const { limits } = await effectiveBotVoice(botId, { ignoreSwitch: true });
+  // Throws "Bot not found" (404) for a bot that does not exist. Key health is left out: a Down key reads as "key-down" with no profile,
+  // which would swap a lent listening key's own limit for the server's
+  const { limits } = await effectiveBotVoice(botId, { ignoreSwitch: true, ignoreKeyHealth: true });
   const limitSeconds = Math.max(0, Math.round(limits.listenMinutesPerDay * 60));
 
   // One statement adds to the day, so reports that arrive together are all counted

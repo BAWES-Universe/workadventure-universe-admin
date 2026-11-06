@@ -81,7 +81,8 @@ describe('the limit', () => {
     voice.mockResolvedValue({ limits: { listenMinutesPerDay: 5 } });
     db.voiceListenUse.findUnique.mockResolvedValue({ seconds: 299 });
     expect(await reportListening('bot-1', {}, NOW)).toMatchObject({ spent: false, limitSeconds: 300 });
-    expect(voice).toHaveBeenCalledWith('bot-1', { ignoreSwitch: true });
+    // Whatever the key's health, the limit a lent listening key sets is the one that applies
+    expect(voice).toHaveBeenCalledWith('bot-1', { ignoreSwitch: true, ignoreKeyHealth: true });
   });
 
   it('is 0 minutes: the bot does not listen to groups at all', async () => {
