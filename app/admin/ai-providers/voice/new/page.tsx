@@ -12,7 +12,8 @@ import { VOICE_KEY_COMPANIES, type VoiceKeyCompanyInfo } from '@/lib/voice-key-c
 import type { VoiceModel } from '@/lib/voice-providers';
 import { PageHeader } from '../../../components/ds';
 import { ProviderLogo } from '../../../components/ds/provider-logo';
-import { Answered, COMPANY_HOST, COMPANY_JOBS, FIELD_HINT, JOBS, ModelRows, Refused, callOrbit, type VoiceJob } from '../voice-shared';
+import { Answered, COMPANY_HOST, COMPANY_JOBS, FIELD_HINT, JOBS, ModelRows, RECOMMENDED_COMPANY, Refused, callOrbit, type VoiceJob } from '../voice-shared';
+import { RecommendedPill } from '../../../components/limits';
 
 /** One numbered part of step 2, as Add a key has them. */
 function Part({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {
@@ -130,7 +131,13 @@ export default function NewVoiceProviderPage() {
             <div key={each} className="grid gap-2" role="radiogroup" aria-label={word}>
               <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{word}</h3>
               {VOICE_KEY_COMPANIES.filter((entry) => COMPANY_JOBS[entry.adapter] === each).map((entry) => (
-                <PickCard key={entry.adapter} role="radio" picked={false} onClick={() => pick(entry.adapter)} indicator={<ProviderLogo info={entry} />} trailing={<Radio checked={false} className="mt-0.5 self-start" />} title={entry.label} description={benefitOf(entry)} className="items-start" />
+                <PickCard key={entry.adapter} role="radio" picked={false} onClick={() => pick(entry.adapter)} indicator={<ProviderLogo info={entry} />} trailing={<Radio checked={false} className="mt-0.5 self-start" />} title={
+                    <span className="flex flex-wrap items-center gap-2">
+                      {entry.label}
+                      {RECOMMENDED_COMPANY[each] === entry.adapter && <RecommendedPill />}
+                    </span>
+                  }
+                  description={benefitOf(entry)} className="items-start" />
               ))}
             </div>
           ))}

@@ -39,7 +39,7 @@ import { VoiceSection } from '@/app/admin/ai-providers/voice-section';
 import NewVoiceProviderPage from '@/app/admin/ai-providers/voice/new/page';
 import VoiceProviderPage from '@/app/admin/ai-providers/voice/[id]/page';
 import { voiceServerLimits } from '@/app/admin/components/limits';
-import { withStartingModel } from '@/app/admin/ai-providers/voice/voice-shared';
+import { defaultChangeLine, withStartingModel } from '@/app/admin/ai-providers/voice/voice-shared';
 import { VOICE_LIMITS_RECOMMENDED } from '@/lib/voice-limit-values';
 
 const provider = (changes: Row): Row => ({ region: null, endpoint: null, hasKey: true, defaultRecognition: false, defaultSpeech: false, defaultVoiceId: null, defaultVoiceName: null, bots: { recognition: 0, speech: 0, total: 0 }, ...changes });
@@ -129,7 +129,11 @@ describe('Change what Universe AI listens with', () => {
     expect(deepgramCard.textContent).toContain('Disabled. Enable it to pick it.');
     expect((within(sheet).getByRole('radio', { name: /Soniox/ }) as HTMLButtonElement).getAttribute('aria-checked')).toBe('true');
     expect(within(sheet).getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
-    expect(sheet.textContent).toContain('The 14 bots that already listen keep what they have.');
+    // Nothing changes yet, and no bot listens with another company, so the line names only new bots
+    expect(within(sheet).getByTestId('listen-change-line').textContent).toBe('Bots that turn voice on from now listen with it.');
+    // Our suggestion is marked, nothing more: every company that can listen is offered
+    expect(within(within(sheet).getByRole('radio', { name: /Soniox/ })).getByText('Recommended')).toBeTruthy();
+    expect(within(deepgramCard).queryByText('Recommended')).toBeNull();
   });
 
   it('makes a company the default for listening with the model it starts on, first in its list', async () => {
@@ -157,7 +161,17 @@ describe('Change what Universe AI speaks with', () => {
     // A voice with a sample has a Play button; one without has none
     expect(within(list).getByRole('button', { name: 'Play Aria' })).toBeTruthy();
     expect(within(list).queryByRole('button', { name: 'Play Sarah' })).toBeNull();
-    expect(sheet.textContent).toContain('The 14 bots that already speak keep the voice they have.');
+    expect(within(sheet).getByTestId('speak-change-line').textContent).toBe('Bots that turn voice on from now start with it. The 2 bots speaking with Cartesia stay on Cartesia.');
+    expect(within(within(sheet).getByRole('radio', { name: /ElevenLabs/ })).getByText('Recommended')).toBeTruthy();
+    expect(within(within(sheet).getByRole('radio', { name: /Cartesia/ })).queryByText('Recommended')).toBeNull();
+  });
+
+  it('says that bots on the company it moves away from stay there', async () => {
+    render(<VoiceSection />);
+    fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
+    const sheet = await screen.findByRole('dialog');
+    fireEvent.click(within(sheet).getByRole('radio', { name: /Cartesia/ }));
+    expect(within(sheet).getByTestId('speak-change-line').textContent).toBe('Bots that turn voice on from now start with it. The 12 bots speaking with ElevenLabs stay on ElevenLabs.');
   });
 
   it('saves a new starting voice with its name, and only then', async () => {
@@ -214,6 +228,22 @@ describe('Change what Universe AI speaks with', () => {
   });
 });
 
+describe('what a change of Universe AI\u2019s company or model does to bots', () => {
+  type Counted = Parameters<typeof defaultChangeLine>[1] & object;
+  const as = (row: Row) => row as unknown as Counted;
+  const rows = [soniox(), { ...deepgram(), bots: { recognition: 3, speech: 0, total: 3 } }, eleven(), cartesia()].map(as);
+  it('moves the bots already on the picked provider to a new model, and says they keep their voices', () => {
+    expect(defaultChangeLine(rows, as(eleven()), 'speech', true)).toBe(
+      'Bots that turn voice on from now start with it. The 12 bots speaking with ElevenLabs move to this model and keep their voices. The 2 bots speaking with Cartesia stay on Cartesia.'
+    );
+    expect(defaultChangeLine(rows, as(soniox()), 'recognition', true)).toBe('Bots that turn voice on from now listen with it. The 14 bots listening with Soniox move to this model. The 3 bots listening with Deepgram stay on Deepgram.');
+  });
+  it('says nothing moves when the model stays, and counts one bot as a bot', () => {
+    expect(defaultChangeLine(rows, as(eleven()), 'speech', false)).toBe('Bots that turn voice on from now start with it. The 2 bots speaking with Cartesia stay on Cartesia.');
+    expect(defaultChangeLine([as({ ...cartesia(), bots: { recognition: 0, speech: 1, total: 1 } })], as(eleven()), 'speech', false)).toBe('Bots that turn voice on from now start with it. The 1 bot speaking with Cartesia stays on Cartesia.');
+  });
+});
+
 describe('the model Universe AI starts a bot on', () => {
   it('is the first one the provider lists for the job, so picking one moves it to the front of its own job only', () => {
     const models = [
@@ -236,6 +266,11 @@ describe('New voice provider', () => {
     const speaks = screen.getByRole('radiogroup', { name: 'Speaks' });
     expect(['Soniox', 'Deepgram'].every((name) => within(listens).getByRole('radio', { name: new RegExp(`^${name}`) }))).toBe(true);
     expect(['ElevenLabs', 'Cartesia'].every((name) => within(speaks).getByRole('radio', { name: new RegExp(`^${name}`) }))).toBe(true);
+    // Soniox and ElevenLabs are marked as our suggestion; every company stays offered
+    expect(within(listens).getAllByText('Recommended')).toHaveLength(1);
+    expect(within(within(listens).getByRole('radio', { name: /^Soniox/ })).getByText('Recommended')).toBeTruthy();
+    expect(within(speaks).getAllByText('Recommended')).toHaveLength(1);
+    expect(within(within(speaks).getByRole('radio', { name: /^ElevenLabs/ })).getByText('Recommended')).toBeTruthy();
     fireEvent.click(within(speaks).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByRole('heading', { name: 'Set up ElevenLabs' })).toBeTruthy();
     const add = screen.getByRole('button', { name: 'Add provider' });

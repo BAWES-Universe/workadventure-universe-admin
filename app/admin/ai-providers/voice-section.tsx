@@ -16,16 +16,19 @@ import { useToast } from '@/components/ui/toast';
 import { EntityRow, LoadError, LoadingRows, SectionHeader, StatLine } from '../components/ds';
 import { ProviderLogo } from '../components/ds/provider-logo';
 import { FormSheet } from '../components/form-sheet';
+import { RecommendedPill } from '../components/limits';
 import { EnabledPill } from './components/provider-state';
 import {
   Caption,
   DefaultPills,
   FIELD_HINT,
+  RECOMMENDED_COMPANY,
   Refused,
   bots,
   botsOn,
   callOrbit,
   companyLabel,
+  defaultChangeLine,
   doesLine,
   logoOf,
   modelName,
@@ -89,6 +92,16 @@ function ModelSelect({ label, models, value, onChange }: { label: string; models
   );
 }
 
+/** A company's name on its card, with the Recommended pill on the one we suggest for the job (a suggestion, never a lock). */
+function CompanyTitle({ name, recommended }: { name: string; recommended: boolean }) {
+  return (
+    <span className="flex flex-wrap items-center gap-2">
+      {name}
+      {recommended && <RecommendedPill />}
+    </span>
+  );
+}
+
 /** Why a provider can't be picked as the default for a job, or null. */
 function whyNot(provider: ServerVoiceProvider, job: VoiceJob): string | null {
   if (!provider.enabled) return 'Disabled. Enable it to pick it.';
@@ -147,7 +160,6 @@ function ListenSheet({ open, providers, onClose, onSaved }: SheetProps) {
   const picked = candidates.find((provider) => provider.id === pickedId) ?? null;
   const models = picked ? picked.models.filter((model) => model.kind === 'recognition') : [];
   const unchanged = !picked || (picked.defaultRecognition && modelId === startingModel(picked, 'recognition')?.id);
-  const already = providers.reduce((total, provider) => total + provider.bots.recognition, 0);
   return (
     <FormSheet open={open} onOpenChange={(next) => !next && !busy && onClose()} title="Universe AI listens with">
       <div role="radiogroup" aria-label="Company" className="grid gap-2">
@@ -166,7 +178,7 @@ function ListenSheet({ open, providers, onClose, onSaved }: SheetProps) {
               }}
               indicator={<ProviderLogo info={logoOf(provider.adapter)} />}
               trailing={<Radio checked={isPicked} />}
-              title={provider.name}
+              title={<CompanyTitle name={provider.name} recommended={provider.adapter === RECOMMENDED_COMPANY.recognition} />}
               description={reason ?? `${modelName(startingModel(provider, 'recognition')!)} · key ••••${provider.apiKeyLast4 ?? ''}`}
             />
           );
@@ -174,8 +186,8 @@ function ListenSheet({ open, providers, onClose, onSaved }: SheetProps) {
         {candidates.length === 0 && <p className={FIELD_HINT}>No voice provider listens yet. Add one first.</p>}
       </div>
       {picked && modelId && <ModelSelect label="Listening model" models={models.map((model) => ({ id: model.id, name: modelName(model) }))} value={modelId} onChange={setModelId} />}
-      <p className={FIELD_HINT}>
-        Bots that turn voice on from now listen with it. {already > 0 ? `The ${bots(already)} that already listen keep what they have.` : 'Bots that already listen keep what they have.'}
+      <p className={FIELD_HINT} data-testid="listen-change-line">
+        {defaultChangeLine(providers, picked, 'recognition', Boolean(picked && modelId && modelId !== startingModel(picked, 'recognition')?.id))}
       </p>
       {failure && <Refused>{failure}</Refused>}
       <SheetButtons
@@ -317,7 +329,6 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
   const rows = pickedVoice && !shown.includes(pickedVoice) ? [pickedVoice, ...shown] : shown;
   const voiceChanged = voiceId !== (picked?.defaultVoiceId ?? null);
   const unchanged = !picked || (picked.defaultSpeech && modelId === startingModel(picked, 'speech')?.id && !voiceChanged);
-  const already = providers.reduce((total, provider) => total + provider.bots.speech, 0);
   const company = picked ? companyLabel(picked.adapter) : '';
 
   return (
@@ -343,7 +354,7 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
               }}
               indicator={<ProviderLogo info={logoOf(provider.adapter)} />}
               trailing={<Radio checked={isPicked} />}
-              title={provider.name}
+              title={<CompanyTitle name={provider.name} recommended={provider.adapter === RECOMMENDED_COMPANY.speech} />}
               description={reason ?? `key ••••${provider.apiKeyLast4 ?? ''}`}
             />
           );
@@ -404,8 +415,8 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
           )}
         </div>
       )}
-      <p className={FIELD_HINT}>
-        Bots that turn voice on from now start with it. {already > 0 ? `The ${bots(already)} that already speak keep the voice they have.` : 'Bots that already speak keep the voice they have.'}
+      <p className={FIELD_HINT} data-testid="speak-change-line">
+        {defaultChangeLine(providers, picked, 'speech', Boolean(picked && modelId && modelId !== startingModel(picked, 'speech')?.id))}
       </p>
       {failure && <Refused>{failure}</Refused>}
       <SheetButtons
