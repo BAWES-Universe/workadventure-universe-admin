@@ -46,7 +46,7 @@ describe('the voice company catalog', () => {
       // A job whose model is typed (an Azure deployment) starts with none; every other job has its starting models
       for (const job of companyJobs(entry)) if (entry.account?.typedModel?.kind !== job) expect(entry.jobs[job]!.models.length).toBeGreaterThan(0);
     }
-    expect(voiceKeyCompanyInfo('soniox')?.does).toEqual({ recognition: true, speech: false, talk: false });
+    expect(voiceKeyCompanyInfo('fish')?.does).toEqual({ recognition: false, speech: true, talk: false });
     expect(voiceKeyCompanyInfo('fish')?.models.map((model) => model.kind)).toEqual(['speech', 'speech']);
   });
 
