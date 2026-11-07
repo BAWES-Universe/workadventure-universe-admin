@@ -6,6 +6,7 @@ import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels } from '@/lib/voice-providers';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
 import { voiceKeyCompanyInfo, type VoiceKeyCompanyInfo, type VoiceListSpec } from '@/lib/voice-key-companies';
+import { OWN_SPEECH_LABEL, isOwnSpeechAdapter, listOwnSpeechVoices } from '@/lib/voice-own-server';
 
 /**
  * The voices a bot's maker can pick from on the bot page (game #1668): the speaking voices of one source, which is Universe AI
@@ -233,6 +234,30 @@ function callFor(provider: VoiceProvider): Call & { spec: VoiceListSpec } {
   return { company, spec, base, headers: { ...check.headers, [check.header]: `${check.prefix}${key}` } };
 }
 
+/**
+ * The voices of a speech server on a person's own computer (game #1874): its own list at /audio/voices when it has one. A server
+ * with no list answers "can't list voices", and the bot's maker types the voice's name instead. The checks on the address run again
+ * on every list, so a name that later points inside a network is never reached.
+ */
+async function listOwnVoices(provider: VoiceProvider): Promise<Listed[]> {
+  const noList = () => new VoiceListRefused(`${provider.name} doesn’t list its voices. Type the voice’s name.`, 409);
+  if (!provider.endpoint) throw noList();
+  let key = '';
+  if (provider.apiKeyEncrypted) {
+    try {
+      key = decryptApiKey(provider.apiKeyEncrypted);
+    } catch {
+      throw new VoiceListRefused(`${provider.name}’s key can’t be read.`, 409);
+    }
+  }
+  const listed = await listOwnSpeechVoices(provider.endpoint, key);
+  // A server that can't be asked is said so: only a server that answers with no list tells the maker to type the name
+  if (!listed.ok) throw new VoiceListRefused(listed.message, listed.reason === 'unreachable' ? 502 : listed.reason === 'refused' ? 502 : 409);
+  const voices = listed.voices;
+  if (!voices) throw noList();
+  return voices.map(({ voiceId }) => ({ voiceId, name: voiceId, description: '', languages: [], preview: null, previewNeedsKey: false }));
+}
+
 async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
   // A new key or address is a new row version, so it is never served an older list
   const id = `${provider.id}:${provider.updatedAt.getTime()}`;
@@ -240,11 +265,15 @@ async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.voices;
   let voices: Listed[];
   try {
-    const call = callFor(provider);
-    // A lister stops at its page limit, but never trusts that: no more than MAX_VOICES are kept or sent on
-    voices = (await listFromSpec(call, call.spec)).slice(0, MAX_VOICES);
+    if (isOwnSpeechAdapter(provider.adapter)) {
+      voices = (await listOwnVoices(provider)).slice(0, MAX_VOICES);
+    } else {
+      const call = callFor(provider);
+      // A lister stops at its page limit, but never trusts that: no more than MAX_VOICES are kept or sent on
+      voices = (await listFromSpec(call, call.spec)).slice(0, MAX_VOICES);
+    }
   } catch (error) {
-    if (error instanceof Unreadable) throw new VoiceListRefused(`${voiceKeyCompanyInfo(provider.adapter)?.label ?? provider.name} sent a voice list that can’t be read.`, 502);
+    if (error instanceof Unreadable) throw new VoiceListRefused(`${isOwnSpeechAdapter(provider.adapter) ? OWN_SPEECH_LABEL : (voiceKeyCompanyInfo(provider.adapter)?.label ?? provider.name)} sent a voice list that can’t be read.`, 502);
     throw error;
   }
   cache.delete(id);

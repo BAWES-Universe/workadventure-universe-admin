@@ -166,6 +166,8 @@ describe('the list', () => {
       expect.objectContaining({ adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true, logo: 'elevenlabs', docs: 'https://elevenlabs.io/docs' }),
       expect.objectContaining({ adapter: 'fish', label: 'Fish Audio', recognition: false, speech: true, logo: 'fish-audio' }),
       expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: false }),
+      // The speech server on a person's own computer is last, and is not a company (game #1874)
+      expect.objectContaining({ adapter: 'openai-compatible', label: 'Any OpenAI-compatible speech server', ownServer: expect.any(Object) }),
     ]);
     // Its line says only the jobs Universe runs for it, the same neutral shape for every company
     expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual([
@@ -174,6 +176,7 @@ describe('the list', () => {
       'Listens and speaks. Uses your account at elevenlabs.io.',
       'Speaks. Uses your account at fish.audio.',
       'Listens. Uses your account at soniox.com.',
+      'Speaches, Kokoro-FastAPI, your own Whisper: anything that answers /v1/audio.',
     ]);
     expect(JSON.stringify(body)).not.toContain('apiKeyEncrypted');
   });
