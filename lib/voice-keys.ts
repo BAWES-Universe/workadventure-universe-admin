@@ -342,10 +342,11 @@ const CLEAN_HEALTH = { downSince: null, downReason: null, downPart: null, failed
  * new address is public, answers its model list with the saved key, and lists every model the key already has: a bot on the old
  * address carries on with the same models, and a different server is a new key.
  */
-async function movedAddress(row: VoiceProvider, address: string): Promise<string> {
+async function movedAddress(row: VoiceProvider, address: string, newKey?: string): Promise<string> {
   if (!isOwnSpeechAdapter(row.adapter)) throw new VoiceKeyRefused(`${companyName(row.adapter)} can’t be moved to another address.`);
-  let key = '';
-  if (row.apiKeyEncrypted) {
+  // A key changed in the same request is the one the new address is asked with
+  let key = newKey ?? '';
+  if (newKey === undefined && row.apiKeyEncrypted) {
     try {
       key = decryptApiKey(row.apiKeyEncrypted);
     } catch {
@@ -354,7 +355,7 @@ async function movedAddress(row: VoiceProvider, address: string): Promise<string
   }
   const loaded = await loadOwnSpeechServer(address, key);
   if (!loaded.ok) throw new VoiceKeyRefused(loaded.message, loaded.reason === 'unreachable' ? 409 : 400);
-  const there = new Set([...loaded.models.map((model) => model.id), ...loaded.unsure]);
+  const there = loaded.listed;
   const missing = readModels(row.models).find((model) => !there.has(model.id));
   if (missing) throw new VoiceKeyRefused(`That address doesn’t have ${missing.id}. If it is another server, add it as a new key.`);
   const typed = ownSpeechEndpoint(address);
@@ -378,7 +379,7 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
         throw new VoiceKeyRefused('apiKey looks too short');
       }
     }
-    if (input.address !== undefined) endpoint = await movedAddress(current, input.address);
+    if (input.address !== undefined) endpoint = await movedAddress(current, input.address, input.apiKey);
   }
   await prisma.$transaction(async (tx) => {
     const row = await tx.voiceProvider.findFirst({ where: { id, ownerId } });

@@ -130,6 +130,8 @@ export type OwnSpeechLoad =
       models: VoiceModel[];
       /** The ids of models the server lists without saying what they do: the person picks for each. */
       unsure: string[];
+      /** Every id the server lists, with none left out for length: a saved model is looked for here, never in the capped lists above. */
+      listed: Set<string>;
       /** How many voices the server lists, or null when it has no voice list. */
       voices: number | null;
     }
@@ -174,10 +176,13 @@ export async function loadOwnSpeechServer(address: unknown, apiKey: unknown): Pr
   const models: VoiceModel[] = [];
   const unsure: string[] = [];
   const seen = new Set<string>();
+  const listed = new Set<string>();
   for (const entry of entries) {
     const id = isRecord(entry) && typeof entry.id === 'string' ? entry.id.trim() : '';
     if (!id || id.length > 255 || seen.has(id)) continue;
-    if (seen.size >= MAX_OWN_MODELS) break;
+    listed.add(id);
+    // Past this many a person can't pick through them, but they still count as listed
+    if (seen.size >= MAX_OWN_MODELS) continue;
     seen.add(id);
     const kind = taskKind((entry as Record<string, unknown>).task);
     if (kind) models.push({ id, kind });
@@ -194,14 +199,26 @@ export async function loadOwnSpeechServer(address: unknown, apiKey: unknown): Pr
     const found = answer.ok ? readVoices(answer.body) : null;
     voices = found && found.length > 0 ? found.length : null;
   }
-  return { ok: true, models, unsure, voices };
+  return { ok: true, models, unsure, listed, voices };
 }
 
-/** The voices of a saved own server, for a bot's Voice row: its own list, or null when it has none. Cached by the caller. */
-export async function listOwnSpeechVoices(endpoint: string, apiKey: string): Promise<{ voiceId: string }[] | null> {
+export type OwnVoiceList = { ok: true; voices: { voiceId: string }[] | null } | { ok: false; reason: 'private' | 'unreachable' | 'refused' | 'bad-request'; message: string };
+
+/**
+ * The voices of a saved own server, for a bot's Voice row: its own list, `voices: null` when the server has none (the maker types
+ * the name), or why the server could not be asked (down, a key it refuses, a private address), so those are never read as "no list".
+ * Cached by the caller.
+ */
+export async function listOwnSpeechVoices(endpoint: string, apiKey: string): Promise<OwnVoiceList> {
   const target = await checkOwnSpeechEndpoint(endpoint);
-  if (!target.ok) return null;
+  if (!target.ok) return { ok: false, reason: target.reason, message: target.message };
   const answer = await getList(target.checked, endpoint, '/audio/voices', apiKey);
-  const found = answer.ok ? readVoices(answer.body) : null;
-  return found && found.length > 0 ? found.map((voiceId) => ({ voiceId })) : null;
+  if (!answer.ok) {
+    if (answer.reason === 'unreachable') return { ok: false, reason: 'unreachable', message: WORDS.unreachable };
+    if (answer.reason === 'refused') return { ok: false, reason: 'refused', message: WORDS.refused };
+    // A status other than 200 (a server with no such list answers 404) or a list that can't be read: it has no list
+    return { ok: true, voices: null };
+  }
+  const found = readVoices(answer.body);
+  return { ok: true, voices: found && found.length > 0 ? found.map((voiceId) => ({ voiceId })) : null };
 }

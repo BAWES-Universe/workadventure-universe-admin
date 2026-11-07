@@ -249,7 +249,10 @@ async function listOwnVoices(provider: VoiceProvider): Promise<Listed[]> {
       throw new VoiceListRefused(`${provider.name}’s key can’t be read.`, 409);
     }
   }
-  const voices = await listOwnSpeechVoices(provider.endpoint, key);
+  const listed = await listOwnSpeechVoices(provider.endpoint, key);
+  // A server that can't be asked is said so: only a server that answers with no list tells the maker to type the name
+  if (!listed.ok) throw new VoiceListRefused(listed.message, listed.reason === 'unreachable' ? 502 : listed.reason === 'refused' ? 502 : 409);
+  const voices = listed.voices;
   if (!voices) throw noList();
   return voices.map(({ voiceId }) => ({ voiceId, name: voiceId, description: '', languages: [], preview: null, previewNeedsKey: false }));
 }

@@ -268,6 +268,20 @@ describe('changing the address of your own speech server', () => {
     expect(db.voiceProvider.update.mock.calls[0][0].data).toHaveProperty('apiKeyEncrypted');
   });
 
+  it('finds a saved model on a server that lists more than a person can pick through', async () => {
+    const many = Array.from({ length: 150 }, (_, i) => ({ id: `model-${i}`, task: 'text-to-speech' }));
+    db.voiceProvider.findFirst.mockResolvedValue(row({ models: [{ id: 'model-149', kind: 'speech' }] }));
+    server({ '/v1/models': answer(200, { data: many }) });
+    expect((await send(patch, { address: 'https://new.example.com' }, 'PATCH')).status).toBe(200);
+  });
+
+  it('asks the new address with the key sent in the same request, not the old one', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(row());
+    server({ '/v1/models': answer(200, SPEACHES) });
+    expect((await send(patch, { address: 'https://new.example.com', apiKey: 'fresh-key' }, 'PATCH')).status).toBe(200);
+    expect(get.mock.calls[0][1].headers).toEqual({ Authorization: 'Bearer fresh-key' });
+  });
+
   it('is only for an own speech server', async () => {
     db.voiceProvider.findFirst.mockResolvedValue(row({ adapter: 'elevenlabs', endpoint: null }));
     const response = await send(patch, { address: 'https://new.example.com' }, 'PATCH');
@@ -317,6 +331,14 @@ describe('a bot’s Voice row for an own speech server', () => {
   it('says it has no list when the server has none, so the voice is typed', async () => {
     server({});
     await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 409, message: 'My speech server doesn’t list its voices. Type the voice’s name.' });
+  });
+
+  it('says a server that is down or refuses the key is down or refusing, never that it has no list', async () => {
+    server({ '/v1/audio/voices': { ok: false, reason: 'unreachable' } });
+    await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 502, message: 'It didn’t answer. Is the server running and the tunnel up?' });
+    clearVoiceListCache();
+    server({ '/v1/audio/voices': answer(401, 'nope') });
+    await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 502, message: 'The server asked for a key, or didn’t accept the one you gave.' });
   });
 
   it('checks the address again on every list: a name that now points inside a network is never reached', async () => {
