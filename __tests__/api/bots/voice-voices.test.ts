@@ -571,6 +571,34 @@ describe('Gradium\'s voices', () => {
   });
 });
 
+describe('Mistral\'s voices', () => {
+  const mistral = () => key({ adapter: 'mistral', name: 'Mistral', models: [{ id: 'voxtral-mini-tts-2603', label: 'Voxtral Mini TTS', kind: 'speech' }] });
+  const pages = [
+    { data: [{ id: 'v-1', name: 'Paul', description: 'Calm narrator', gender: 'male', tags: ['narration'], languages: ['en', 'fr'], type: 'preset' }], next_page_token: 'page-2' },
+    { data: [{ id: 'v-2', name: 'My voice', description: null, gender: 'female', tags: ['custom'], languages: ['ar'], type: 'custom' }], next_page_token: null },
+  ];
+
+  beforeEach(() => {
+    providers = [mistral()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    let page = 0;
+    fetchMock.mockImplementation(async () => json(pages[page++]));
+  });
+
+  it('are read page after page while Mistral gives a token, with the key as a bearer', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.languages])).toEqual([
+      ['v-1', 'Paul', 'Calm narrator', ['en', 'fr']],
+      ['v-2', 'My voice', 'female, custom', ['ar']],
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [first, init] = fetchMock.mock.calls[0];
+    expect(first).toBe('https://api.mistral.ai/v2/audio/voices?page_size=100');
+    expect(fetchMock.mock.calls[1][0]).toBe('https://api.mistral.ai/v2/audio/voices?page_size=100&page_token=page-2');
+    expect(init.headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+  });
+});
+
 describe('Groq\'s voices', () => {
   const groq = () => key({ adapter: 'groq', name: 'Groq', models: [{ id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' }] });
 
