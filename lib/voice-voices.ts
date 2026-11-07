@@ -180,7 +180,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
       const paged = (spec.paging.kind === 'token' || spec.paging.kind === 'after') && next !== null ? `${spec.paging.param}=${encodeURIComponent(next)}` : '';
       const answer = await getJson(call, [query, paged].filter(Boolean).join('&'));
       if (typeof answer !== 'object' || answer === null) throw unreadable(call);
-      const voices = (answer as Record<string, unknown>)[spec.list];
+      const voices = spec.list.endsWith('[]') ? valuesAt(answer, spec.list) : (answer as Record<string, unknown>)[spec.list];
       if (!Array.isArray(voices)) throw unreadable(call);
       for (const voice of voices) {
         if (typeof voice !== 'object' || voice === null) throw unreadable(call);
@@ -233,7 +233,8 @@ function callFor(provider: VoiceProvider): Call & { spec: VoiceListSpec } {
   if (!company || !job || !spec) throw new VoiceListRefused(`${company?.label ?? provider.name}’s voices can’t be listed here.`, 409);
   if (!provider.apiKeyEncrypted) throw new VoiceListRefused(`${provider.name} has no key.`, 409);
   // The server's own provider may name another address (a proxy); a person's key never does
-  const base = (provider.ownerId === null && provider.endpoint ? provider.endpoint : `https://${job.host}`).replace(/\/+$/, '');
+  // A list kept at another host than the job's is always read there
+  const base = (spec.host ? `https://${spec.host}` : provider.ownerId === null && provider.endpoint ? provider.endpoint : `https://${job.host}`).replace(/\/+$/, '');
   const { check } = company;
   let key: string;
   try {
