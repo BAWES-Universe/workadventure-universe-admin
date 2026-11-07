@@ -177,11 +177,14 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
       const body = spec.body ? Object.fromEntries(Object.entries(spec.body).map(([field, value]) => [field, value === '{size}' ? PAGE_SIZE : value])) : undefined;
       const answer = await getJson(call, [query, paged].filter(Boolean).join('&'), body);
       if (typeof answer !== 'object' || answer === null) throw unreadable(call);
-      const voices = (answer as Record<string, unknown>)[spec.list];
+      // An empty `list`: the answer is the list itself (CAMB.AI)
+      const voices = spec.list === '' ? answer : (answer as Record<string, unknown>)[spec.list];
       if (!Array.isArray(voices)) throw unreadable(call);
       for (const voice of voices) {
         if (typeof voice !== 'object' || voice === null) throw unreadable(call);
-        const id = (voice as Record<string, unknown>)[spec.id];
+        // A whole-number id (CAMB.AI) is kept as its digits
+        const rawId = (voice as Record<string, unknown>)[spec.id];
+        const id = typeof rawId === 'number' && Number.isSafeInteger(rawId) && rawId >= 0 ? String(rawId) : rawId;
         if (typeof id !== 'string' || id.length === 0 || id.length > 255) throw unreadable(call);
         const fields = voice as Record<string, unknown>;
         if (spec.keep && Object.entries(spec.keep).some(([field, wanted]) => fields[field] != null && fields[field] !== wanted)) continue;

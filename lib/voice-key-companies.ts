@@ -28,6 +28,7 @@
  *   transcripts: nothing is transcribed. A wrong key is 401.
  * - async: POST /voices with { limit: 1 }, x-api-key and version: v1. It lists voices: nothing is spoken. A wrong key is 401.
  * - bland: GET /v1/voices, Authorization: Bearer. It lists voices: nothing is spoken.
+ * - camb: GET /apis/list-voices, x-api-key. It lists voices: nothing is spoken.
  * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
  *   free account with no credit still has the answer, and that is fine: the free model needs none.
  */
@@ -71,7 +72,7 @@ export interface VoiceListSpec {
   path: string;
   /** Set when the company lists its voices with a POST: this JSON body, a `'{size}'` value being the page size (Async). */
   body?: Record<string, unknown>;
-  /** The field holding the voices. */
+  /** The field holding the voices, or '' when the answer is the list itself (CAMB.AI). */
   list: string;
   /**
    * How the next page is asked for: a token the answer gives (`token`) or the last voice's id (`after`), sent as `param`, while
@@ -83,6 +84,7 @@ export interface VoiceListSpec {
   passes?: string[];
   /** A voice is kept only when each of these fields, when the company sends it, has this value. */
   keep?: Record<string, string>;
+  /** The field holding a voice's id: text, or a whole number kept as its digits (CAMB.AI). */
   id: string;
   name: string;
   /** The first of these that says something: a field, or several fields joined with commas. */
@@ -238,6 +240,36 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On app.bland.ai, open Settings, then API keys, and copy your key.',
     docs: 'https://docs.bland.ai/tts/welcome',
     check: { url: 'https://api.bland.ai/v1/voices', header: 'Authorization', prefix: 'Bearer ' },
+  }),
+  company({
+    adapter: 'camb',
+    label: 'CAMB.AI',
+    jobs: {
+      speech: {
+        // Text to speech, one streamed request per reply (POST /apis/tts-stream). CAMB.AI has no model list, so its models are
+        // typed, from its own SDK (camb-sdk 1.6.6): MARS Flash, Pro and Instruct. Its 62 languages include Kuwaiti Arabic (ar-kw)
+        host: 'client.camb.ai',
+        models: [
+          { id: 'mars-flash', label: 'MARS Flash' },
+          { id: 'mars-pro', label: 'MARS Pro' },
+          { id: 'mars-instruct', label: 'MARS Instruct' },
+        ],
+        // GET /apis/list-voices: the account's voices and CAMB.AI's own, all in one answer that is the list itself
+        voices: {
+          path: '/apis/list-voices',
+          list: '',
+          paging: { kind: 'none' },
+          id: 'id',
+          name: 'voice_name',
+          description: ['description'],
+          languages: [],
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at camb.ai.',
+    step: 'On studio.camb.ai, open your account settings, then API, and create a key.',
+    docs: 'https://docs.camb.ai',
+    check: { url: 'https://client.camb.ai/apis/list-voices', header: 'x-api-key', prefix: '' },
   }),
   company({
     adapter: 'cartesia',

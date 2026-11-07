@@ -513,6 +513,39 @@ describe('Bland\'s voices', () => {
   });
 });
 
+describe('CAMB.AI\'s voices', () => {
+  const camb = () => key({ adapter: 'camb', name: 'CAMB.AI', models: [{ id: 'mars-flash', label: 'MARS Flash', kind: 'speech' }] });
+  const answer = [
+    { id: 147320, voice_name: 'Noor', gender: 2, age: 30, language: 1, description: 'Warm Gulf voice' },
+    { id: 9, voice_name: 'Sam', description: null },
+  ];
+
+  beforeEach(() => {
+    providers = [camb()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(answer));
+  });
+
+  it('are the answer itself, each id a whole number kept as its digits, with the key in x-api-key', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.model])).toEqual([
+      ['147320', 'Noor', 'Warm Gulf voice', 'mars-flash'],
+      ['9', 'Sam', '', 'mars-flash'],
+    ]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://client.camb.ai/apis/list-voices');
+    expect(init.headers).toMatchObject({ 'x-api-key': SECRET });
+  });
+
+  it('say so when a voice has an id that is not a whole number, or the answer is not a list', async () => {
+    fetchMock.mockImplementation(async () => json([{ id: 1.5, voice_name: 'Odd' }]));
+    expect((await voices('part=speech&source=key-1')).status).toBe(502);
+    clearVoiceListCache();
+    fetchMock.mockImplementation(async () => json({ voices: [] }));
+    expect((await voices('part=speech&source=key-1')).status).toBe(502);
+  });
+});
+
 describe('languageCode', () => {
   it('keeps the language of a code and drops anything that isn\'t one', () => {
     expect([languageCode('en-GB'), languageCode('AR_kw'), languageCode('ara'), languageCode('English'), languageCode(''), languageCode(7)]).toEqual(['en', 'ar', 'ara', null, null, null]);
