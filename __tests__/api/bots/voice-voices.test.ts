@@ -337,6 +337,86 @@ describe('Cartesia\'s voices', () => {
   });
 });
 
+describe('Fish Audio\'s voices', () => {
+  const fish = () => key({ adapter: 'fish', name: 'Fish Audio', models: [{ id: 's2.1-pro-free', label: 'S2.1 Pro (free)', kind: 'speech' }, { id: 's2.1-pro', kind: 'speech' }] });
+  const voice = (id: string, extra: Row = {}) => ({ _id: id, type: 'tts', state: 'trained', title: `Voice ${id}`, description: '', languages: ['en'], samples: [{ audio: `https://public.fish.example/${id}.mp3` }], ...extra });
+  const own = { items: [voice('f1', { title: 'Mine', description: 'My own voice', languages: ['ar-KW', 'en'] })], total: 1, has_more: false };
+  const library = {
+    items: [
+      voice('f2'),
+      // A voice that is not for speaking, one still training, a copy of an own voice, one with an unsafe sample, one with none
+      voice('f3', { type: 'svc' }),
+      voice('f4', { state: 'training' }),
+      voice('f1'),
+      voice('f5', { samples: [{ audio: 'http://insecure.example.com/f5.mp3' }] }),
+      voice('f6', { samples: [] }),
+    ],
+    total: 6,
+    has_more: false,
+  };
+
+  beforeEach(() => {
+    providers = [fish()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async (url: string) => json(url.includes('self=true') ? own : library));
+  });
+
+  it('are the person\'s own first, then the public library, with the key as a bearer and the first model the key lists', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toEqual([
+      { voiceId: 'f1', name: 'Mine', description: 'My own voice', languages: ['ar', 'en'], previewUrl: 'https://public.fish.example/f1.mp3', providerId: 'key-1', model: 's2.1-pro-free' },
+      { voiceId: 'f2', name: 'Voice f2', description: '', languages: ['en'], previewUrl: 'https://public.fish.example/f2.mp3', providerId: 'key-1', model: 's2.1-pro-free' },
+      { voiceId: 'f5', name: 'Voice f5', description: '', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 's2.1-pro-free' },
+      { voiceId: 'f6', name: 'Voice f6', description: '', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 's2.1-pro-free' },
+    ]);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'https://api.fish.audio/model?page_size=100&page_number=1&sort_by=score&self=true',
+      'https://api.fish.audio/model?page_size=100&page_number=1&sort_by=score&self=false',
+    ]);
+    for (const [, init] of fetchMock.mock.calls) expect(init.headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+  });
+
+  it('read more pages while the company says there are more, and stop at the cap', async () => {
+    const full = (start: number) => ({ items: Array.from({ length: 100 }, (_, index) => voice(`p${start + index}`)), has_more: true });
+    fetchMock.mockImplementation(async (url: string) => (url.includes('self=true') ? json({ items: [], has_more: false }) : json(full(Number(new URL(url).searchParams.get('page_number')) * 1000))));
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toHaveLength(MAX_VOICES);
+    // Own voices (1 call), then ten pages of the library: never more than the cap
+    expect(fetchMock).toHaveBeenCalledTimes(11);
+  });
+
+  it('read a full page without a "has more" as a sign of another, and a short one as the end', async () => {
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('self=true')) return json({ items: [] });
+      return json(url.includes('page_number=1&') ? { items: Array.from({ length: 100 }, (_, index) => voice(`a${index}`)) } : { items: [voice('z1')] });
+    });
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toHaveLength(101);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('hand the sample over as the company\'s public address, never through Orbit with the key', async () => {
+    const [first] = await (await voices('part=speech&source=key-1')).json();
+    expect(first.previewUrl).toBe('https://public.fish.example/f1.mp3');
+    expect(first.previewUrl).not.toContain('/api/bots/');
+  });
+
+  it('say Fish Audio did not accept the key, or could not be reached', async () => {
+    fetchMock.mockImplementation(async () => new Response('', { status: 401 }));
+    const refused = await voices('part=speech&source=key-1');
+    expect(refused.status).toBe(502);
+    expect((await refused.json()).error).toBe('Fish Audio didn’t accept the key.');
+    clearVoiceListCache();
+    fetchMock.mockRejectedValue(new Error('down'));
+    expect((await voices('part=speech&source=key-1')).status).toBe(502);
+  });
+
+  it('say so when the list is not one', async () => {
+    fetchMock.mockImplementation(async () => json({ items: 'nope' }));
+    expect((await voices('part=speech&source=key-1')).status).toBe(502);
+  });
+});
+
 describe('languageCode', () => {
   it('keeps the language of a code and drops anything that isn\'t one', () => {
     expect([languageCode('en-GB'), languageCode('AR_kw'), languageCode('ara'), languageCode('English'), languageCode(''), languageCode(7)]).toEqual(['en', 'ar', 'ara', null, null, null]);

@@ -25,6 +25,7 @@ const serverRows = [
   { adapter: 'elevenlabs', name: 'ElevenLabs EU', recognition: false, speech: true, models: [{ id: 'eleven_flash_v2_5', label: 'Flash (EU)', kind: 'speech' }, { id: 'eleven_v3', kind: 'speech' }, { id: 'scribe_v1', kind: 'recognition' }] },
   { adapter: 'deepgram', name: 'Deepgram', recognition: true, speech: false, models: [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }] },
   { adapter: 'cartesia', name: 'Cartesia', recognition: false, speech: true, models: [{ id: 'sonic-3', kind: 'speech' }] },
+  { adapter: 'fish', name: 'Fish Audio', recognition: false, speech: true, models: [{ id: 's2.1-pro-free', label: 'S2.1 Pro (free)', kind: 'speech' }, { id: 's2.1-pro', kind: 'speech' }] },
 ];
 
 const send = (body: unknown) =>
@@ -114,6 +115,17 @@ describe('Load models for a voice key', () => {
     expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(200);
     answer(401, '{"err_code":"INVALID_AUTH","err_msg":"Invalid credentials."}');
     expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(422);
+  });
+
+  it('Fish Audio: asks its free credit call, lists its models, and refuses a wrong key with its own name', async () => {
+    answer(200);
+    const accepted = await send({ adapter: 'fish', apiKey: KEY });
+    expect(await accepted.json()).toEqual({ ok: true, models: [{ id: 's2.1-pro-free', label: 'S2.1 Pro (free)', kind: 'speech' }, { id: 's2.1-pro', kind: 'speech' }] });
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.fish.audio/wallet/self/api-credit');
+    answer(401);
+    const refused = await send({ adapter: 'fish', apiKey: KEY });
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toEqual({ error: 'Fish Audio didn’t accept that key. Check it and paste it again.' });
   });
 
   it('says it could not be reached for a timeout, a dropped connection or any other answer', async () => {
