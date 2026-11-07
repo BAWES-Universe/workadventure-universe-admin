@@ -937,3 +937,59 @@ describe('a key with a talking model (game #1910)', () => {
     expect(list[0]).toEqual(expect.objectContaining({ model: 'gpt-4o-mini-tts', talk: false }));
   });
 });
+
+describe('Inworld’s voices (game #1910)', () => {
+  const INWORLD = 'aWQ6c2VjcmV0LWlud29ybGQ=';
+  const inworld = () => key({ adapter: 'inworld', name: 'My Inworld', recognition: true, speech: true, apiKeyEncrypted: encryptApiKey(INWORLD), models: [{ id: 'inworld-tts-2', kind: 'talk' }] });
+  const page = (ids: string[], nextPageToken = '') => ({
+    voices: ids.map((id) => ({ voiceId: id, displayName: `Voice ${id}`, langCode: 'EN_US', description: `About ${id}`, tags: ['calm'], source: 'SYSTEM' })),
+    totalSize: 3,
+    nextPageToken,
+  });
+
+  it('are listed with the key as Basic, page after page while Inworld gives a next token, for the talking model', async () => {
+    providers = [inworld()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async (url: string) => json(url.includes('pageToken=') ? page(['c']) : page(['a', 'b'], 'next-1')));
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toEqual([
+      { voiceId: 'a', name: 'Voice a', description: 'About a', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 'inworld-tts-2', talk: true },
+      { voiceId: 'b', name: 'Voice b', description: 'About b', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 'inworld-tts-2', talk: true },
+      { voiceId: 'c', name: 'Voice c', description: 'About c', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 'inworld-tts-2', talk: true },
+    ]);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://api.inworld.ai/voices/v1/voices?pageSize=100', 'https://api.inworld.ai/voices/v1/voices?pageSize=100&pageToken=next-1']);
+    for (const [, init] of fetchMock.mock.calls) expect(init.headers).toMatchObject({ Authorization: `Basic ${INWORLD}` });
+  });
+});
+
+describe('Ultravox’s voices (game #1910)', () => {
+  const ULTRAVOX = 'uvx-key-test-123';
+  const ultravox = () => key({ adapter: 'ultravox', name: 'My Ultravox', recognition: true, speech: true, apiKeyEncrypted: encryptApiKey(ULTRAVOX), models: [{ id: 'ultravox-v0.7', kind: 'talk' }] });
+  const page = (ids: string[], next: string | null = null) => ({
+    results: ids.map((id) => ({ voiceId: id, name: `Voice ${id}`, primaryLanguage: 'ar-SA', description: `About ${id}`, previewUrl: `https://api.ultravox.ai/api/voices/${id}/preview`, ownership: 'public' })),
+    next,
+    previous: null,
+    total: 3,
+  });
+
+  it('are listed with the key in X-API-Key, page after page by the cursor in `next`, only ever at Ultravox’s own address', async () => {
+    providers = [ultravox()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    // The next page's address names another host: only its cursor is taken
+    fetchMock.mockImplementation(async (url: string) => json(url.includes('cursor=') ? page(['c']) : page(['a', 'b'], 'https://elsewhere.example.com/api/voices?cursor=cD0x&pageSize=100')));
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: { voiceId: string }) => voice.voiceId)).toEqual(['a', 'b', 'c']);
+    expect(list[0]).toEqual({
+      voiceId: 'a',
+      name: 'Voice a',
+      description: 'About a',
+      languages: ['ar'],
+      previewUrl: '/api/bots/bot-1/voice/voices/a/preview?source=key-1',
+      providerId: 'key-1',
+      model: 'ultravox-v0.7',
+      talk: true,
+    });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://api.ultravox.ai/api/voices?pageSize=100', 'https://api.ultravox.ai/api/voices?pageSize=100&cursor=cD0x']);
+    for (const [, init] of fetchMock.mock.calls) expect(init.headers).toMatchObject({ 'X-API-Key': ULTRAVOX });
+  });
+});
