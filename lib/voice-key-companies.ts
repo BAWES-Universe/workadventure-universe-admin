@@ -92,11 +92,12 @@ export interface VoiceListSpec {
   host?: string;
   /**
    * How the next page is asked for: a token the answer gives (`token`) or the last voice's id (`after`), sent as `param`, while
-   * `more` says there is more; or a page number (`page`, from 1, in the path) while `more` says so, or, when the company doesn't
-   * say, while a page is full; `first` is the number of the first page when it is not 1 (Hume counts from 0). `none`: the whole
-   * list comes in one answer.
+   * `more` says there is more (or, for a company with no such field, while there is a token); or a page number (`page`, from 1,
+   * in the path) while `more` says so, or, when the company doesn't say, while a page is full; `first` is the number of the first
+   * page when it is not 1 (Hume counts from 0). With `nextIsLink` the answer gives the next page's address instead (Ultravox): only
+   * its `param` is taken from it, and the page is still asked at the company's own. `none`: the whole list comes in one answer.
    */
-  paging: { kind: 'token' | 'after'; param: string; next: string; more: string } | { kind: 'page'; more?: string; first?: 0 | 1 } | { kind: 'none' };
+  paging: { kind: 'token' | 'after'; param: string; next: string; more?: string; nextIsLink?: boolean } | { kind: 'page'; more?: string; first?: 0 | 1 } | { kind: 'none' };
   /** Asked one after the other, each added to `path` (Fish: the person's own voices, then the public library). A voice met twice is kept once. */
   passes?: string[];
   /** A voice is kept only when each of these fields, when the company sends it, has this value. */
@@ -756,6 +757,36 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     check: { url: 'https://api.hume.ai/v0/tts/voices?provider=CUSTOM_VOICE&page_size=1', header: 'X-Hume-Api-Key', prefix: '' },
   }),
   company({
+    adapter: 'inworld',
+    label: 'Inworld',
+    jobs: {
+      talk: {
+        host: 'api.inworld.ai',
+        // Its realtime session hears with Inworld STT and speaks with these, from Inworld's realtime docs (7 Nov 2026). Its LLM is
+        // never called: the session never answers, and the Mind's words are spoken as they are (response.speak)
+        models: [
+          { id: 'inworld-tts-2', label: 'Inworld TTS 2' },
+          { id: 'inworld-tts-2-flash', label: 'Inworld TTS 2 Flash' },
+        ],
+        // GET /voices/v1/voices, its system voices and the key's own, `nextPageToken` until it is empty
+        voices: {
+          path: '/voices/v1/voices?pageSize={size}',
+          list: 'voices',
+          paging: { kind: 'token', param: 'pageToken', next: 'nextPageToken' },
+          id: 'voiceId',
+          name: 'displayName',
+          description: ['description'],
+          languages: ['langCode'],
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at inworld.ai.',
+    step: 'On platform.inworld.ai, open API Keys and copy a key with its Base64 copy button.',
+    docs: 'https://docs.inworld.ai/realtime/connect/websocket',
+    // GET /voices/v1/voices lists the voices the key may use: free. The key is already "ID:secret" in Base64, sent as it is
+    check: { url: 'https://api.inworld.ai/voices/v1/voices?pageSize=1', header: 'Authorization', prefix: 'Basic ' },
+  }),
+  company({
     adapter: 'openai',
     label: 'OpenAI',
     jobs: {
@@ -823,6 +854,35 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     check: { url: 'https://api.soniox.com/v1/models', header: 'Authorization', prefix: 'Bearer ' },
   }),
   company({
+    adapter: 'ultravox',
+    label: 'Ultravox',
+    jobs: {
+      talk: {
+        host: 'api.ultravox.ai',
+        // Ultravox's own model, the one Pipecat's Ultravox service names (7 Nov 2026). Each stretch and each reply is its own call;
+        // the listening call answers in text nobody reads, and the speaking one says the Mind's words as they are
+        models: [{ id: 'ultravox-v0.7', label: 'Ultravox v0.7' }],
+        // GET /api/voices, its public voices and the account's own; `next` is the next page's address, with its cursor
+        voices: {
+          path: '/api/voices?pageSize={size}',
+          list: 'results',
+          paging: { kind: 'token', param: 'cursor', next: 'next', nextIsLink: true },
+          id: 'voiceId',
+          name: 'name',
+          description: ['description'],
+          languages: ['primaryLanguage'],
+          preview: 'previewUrl',
+          previewNeedsKey: true,
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at ultravox.ai.',
+    step: 'On app.ultravox.ai, open Settings, then API Keys, and create a key.',
+    docs: 'https://docs.ultravox.ai',
+    // GET /api/voices lists the voices the key may use: free
+    check: { url: 'https://api.ultravox.ai/api/voices?pageSize=1', header: 'X-API-Key', prefix: '' },
+  }),
+  company({
     adapter: 'xai',
     label: 'xAI',
     jobs: {
@@ -872,6 +932,36 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     docs: 'https://docs.x.ai',
     // GET /v1/tts/voices lists the built-in voices: free, and a wrong key is 401
     check: { url: 'https://api.x.ai/v1/tts/voices', header: 'Authorization', prefix: 'Bearer ' },
+  }),
+  company({
+    adapter: 'zoom',
+    label: 'Zoom',
+    jobs: {
+      talk: {
+        host: 'api.zoom.us',
+        // Zoom's Voice Agent in live mode thinks with its built-in gemma-4, from Zoom's AI Services docs (7 Nov 2026). It writes
+        // down English only, and is told the Mind's words as the only thing it says
+        models: [{ id: 'gemma-4', label: 'Gemma 4' }],
+        // Zoom has no call that lists voices: these are the voices its live mode docs list, Jenna first (its default)
+        fixedVoices: [
+          { id: 'jenna', name: 'Jenna' },
+          { id: 'alex', name: 'Alex' },
+          { id: 'ariel', name: 'Ariel' },
+          { id: 'ava', name: 'Ava' },
+          { id: 'brooke', name: 'Brooke' },
+          { id: 'hazel', name: 'Hazel' },
+          { id: 'mark', name: 'Mark' },
+          { id: 'reid', name: 'Reid' },
+          { id: 'scott', name: 'Scott' },
+          { id: 'tony', name: 'Tony' },
+        ],
+      },
+    },
+    benefit: '{does}, in English. Uses your Zoom AI Services account.',
+    step: 'In Zoom’s Platform Studio, open AI Services, then API keys, and create a key.',
+    docs: 'https://developers.zoom.us/docs/ai-services/voice-agent/',
+    // GET /v2/aiservices/scribe/jobs lists the account's transcription jobs: free, with the same AI Services key
+    check: { url: 'https://api.zoom.us/v2/aiservices/scribe/jobs?page_size=1', header: 'Authorization', prefix: 'Bearer ' },
   }),
 ];
 
