@@ -98,12 +98,13 @@ const clean = (value: unknown, max: number) => (typeof value === 'string' ? valu
 /** A company that answered with something other than a list, a rejection or a failure to reach it. */
 class Unreadable extends Error {}
 
-async function getJson(call: Call, path: string): Promise<unknown> {
+async function getJson(call: Call, path: string, body?: Record<string, unknown>): Promise<unknown> {
   let response: Response;
   try {
     response = await fetch(`${call.base}${path}`, {
-      method: 'GET',
-      headers: { Accept: 'application/json', ...call.headers },
+      method: body ? 'POST' : 'GET',
+      headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}), ...call.headers },
+      ...(body ? { body: JSON.stringify(body) } : {}),
       // A redirect would carry the key somewhere the catalog never named
       redirect: 'manual',
       signal: AbortSignal.timeout(LIST_TIMEOUT_MS),
@@ -173,7 +174,8 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
     for (let page = 1; out.length < MAX_VOICES && page <= MAX_PAGES; page++) {
       const query = [spec.path.replace('{size}', String(PAGE_SIZE)).replace('{page}', String(page)), pass].filter(Boolean).join('&');
       const paged = (spec.paging.kind === 'token' || spec.paging.kind === 'after') && next !== null ? `${spec.paging.param}=${encodeURIComponent(next)}` : '';
-      const answer = await getJson(call, [query, paged].filter(Boolean).join('&'));
+      const body = spec.body ? Object.fromEntries(Object.entries(spec.body).map(([field, value]) => [field, value === '{size}' ? PAGE_SIZE : value])) : undefined;
+      const answer = await getJson(call, [query, paged].filter(Boolean).join('&'), body);
       if (typeof answer !== 'object' || answer === null) throw unreadable(call);
       const voices = (answer as Record<string, unknown>)[spec.list];
       if (!Array.isArray(voices)) throw unreadable(call);

@@ -446,6 +446,45 @@ describe('Fish Audio\'s voices', () => {
   });
 });
 
+describe('Async\'s voices', () => {
+  const asyncKey = () => key({ adapter: 'async', name: 'Async', models: [{ id: 'async_flash_v1.0', label: 'Flash v1.0', kind: 'speech' }] });
+  const answer = {
+    voices: [
+      { voice_id: 'a1', name: 'Layla', description: 'Calm and clear', language: 'ar', gender: 'female', voice_type: 'library' },
+      { voice_id: 'a2', name: 'Theo', description: '', language: 'en', gender: 'male', voice_type: 'library' },
+    ],
+    next_cursor: null,
+  };
+
+  beforeEach(() => {
+    providers = [asyncKey()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(answer));
+  });
+
+  it('are asked for with a POST that carries the page size, the key and the API version', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.languages, voice.model])).toEqual([
+      ['a1', 'Layla', ['ar'], 'async_flash_v1.0'],
+      ['a2', 'Theo', ['en'], 'async_flash_v1.0'],
+    ]);
+    expect(list[0].description).toContain('Calm and clear');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.async.com/voices');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({ limit: 100 });
+    expect(init.headers).toMatchObject({ 'x-api-key': SECRET, version: 'v1', 'Content-Type': 'application/json' });
+  });
+
+  it('say Async did not accept the key', async () => {
+    fetchMock.mockImplementation(async () => new Response('', { status: 401 }));
+    const refused = await voices('part=speech&source=key-1');
+    expect(refused.status).toBe(502);
+    expect((await refused.json()).error).toBe('Async didn’t accept the key.');
+  });
+});
+
 describe('languageCode', () => {
   it('keeps the language of a code and drops anything that isn\'t one', () => {
     expect([languageCode('en-GB'), languageCode('AR_kw'), languageCode('ara'), languageCode('English'), languageCode(''), languageCode(7)]).toEqual(['en', 'ar', 'ara', null, null, null]);

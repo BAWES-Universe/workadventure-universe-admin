@@ -26,6 +26,7 @@
  * - cartesia: GET /voices?limit=1, Authorization: Bearer with the Cartesia-Version header the reference lists.
  * - assemblyai: GET /v2/transcript?limit=1, Authorization with the key as it is (no Bearer). It lists the account's own past
  *   transcripts: nothing is transcribed. A wrong key is 401.
+ * - async: POST /voices with { limit: 1 }, x-api-key and version: v1. It lists voices: nothing is spoken. A wrong key is 401.
  * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
  *   free account with no credit still has the answer, and that is fine: the free model needs none.
  */
@@ -67,6 +68,8 @@ export interface VoiceModelListSpec {
 export interface VoiceListSpec {
   /** Path and query of one page, after the company's address. `{size}` is the page size, `{page}` the page number when paging by number. */
   path: string;
+  /** Set when the company lists its voices with a POST: this JSON body, a `'{size}'` value being the page size (Async). */
+  body?: Record<string, unknown>;
   /** The field holding the voices. */
   list: string;
   /**
@@ -128,6 +131,8 @@ export interface VoiceKeyCompanyEntry {
     prefix: string;
     /** Other headers the call needs. */
     headers?: Record<string, string>;
+    /** Set when the free call is a POST (a list asked for with a body, as Async's voices are): this JSON body. */
+    body?: Record<string, unknown>;
     /**
      * An answer that is not a 2xx but still means the company knows the key (a key limited to other endpoints): that status,
      * and when `includes` is given, only with that text in the answer.
@@ -172,6 +177,37 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On assemblyai.com, open your dashboard, then API Keys, and copy a key.',
     docs: 'https://www.assemblyai.com/docs',
     check: { url: 'https://api.assemblyai.com/v2/transcript?limit=1', header: 'Authorization', prefix: '' },
+  }),
+  company({
+    adapter: 'async',
+    label: 'Async',
+    jobs: {
+      speech: {
+        // Text to speech over a socket. Async has no model list, so its models are typed. async_flash_v1.0 covers the most
+        // languages (Arabic among them); async_flash_v1.5 and async_pro_v1.0 cover fewer (https://docs.async.com/models-2161359m0)
+        host: 'api.async.com',
+        models: [
+          { id: 'async_flash_v1.0', label: 'Async Flash v1.0' },
+          { id: 'async_flash_v1.5', label: 'Async Flash v1.5' },
+          { id: 'async_pro_v1.0', label: 'Async Pro v1.0' },
+        ],
+        // POST /voices with a page size. Its next-page cursor isn't documented, so the first 100 are listed; any other voice id is typed
+        voices: {
+          path: '/voices',
+          body: { limit: '{size}' },
+          list: 'voices',
+          paging: { kind: 'none' },
+          id: 'voice_id',
+          name: 'name',
+          description: ['description', { join: ['gender', 'language'] }],
+          languages: ['language'],
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at async.com.',
+    step: 'On async.com, open your account settings, then API keys, and create a key.',
+    docs: 'https://docs.async.com',
+    check: { url: 'https://api.async.com/voices', header: 'x-api-key', prefix: '', headers: { version: 'v1' }, body: { limit: 1 } },
   }),
   company({
     adapter: 'cartesia',
