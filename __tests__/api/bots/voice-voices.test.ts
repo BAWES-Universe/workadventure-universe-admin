@@ -631,19 +631,32 @@ describe('Neuphonic\'s voices', () => {
 });
 
 describe('Groq\'s voices', () => {
-  const groq = () => key({ adapter: 'groq', name: 'Groq', models: [{ id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' }] });
+  const ENGLISH = { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' };
+  const ARABIC = { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' };
+  const groq = (models = [ENGLISH, ARABIC]) => key({ adapter: 'groq', name: 'Groq', models });
 
   beforeEach(() => {
     providers = [groq()];
     lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
   });
 
-  it('are the ones its docs name, with their language, and nothing is asked with the key', async () => {
+  it('are the ones its docs name, each with its language and its own model, and nothing is asked with the key', async () => {
     const list = await (await voices('part=speech&source=key-1')).json();
     expect(list).toHaveLength(12);
-    expect(list[0]).toEqual({ voiceId: 'autumn', name: 'Autumn', description: 'Orpheus English', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 'canopylabs/orpheus-arabic-saudi' });
-    expect(list.find((voice: Row) => voice.voiceId === 'noura')).toMatchObject({ name: 'Noura', languages: ['ar'] });
+    expect(list[0]).toEqual({ voiceId: 'autumn', name: 'Autumn', description: 'Orpheus English', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 'canopylabs/orpheus-v1-english' });
+    expect(list.find((voice: Row) => voice.voiceId === 'noura')).toMatchObject({ name: 'Noura', languages: ['ar'], model: 'canopylabs/orpheus-arabic-saudi' });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('are only the voices of the models set up on the key and allowed in the universe', async () => {
+    providers = [groq([ARABIC])];
+    const arabicOnly = await (await voices('part=speech&source=key-1')).json();
+    expect(arabicOnly.map((voice: Row) => voice.voiceId)).toEqual(['abdullah', 'fahad', 'sultan', 'lulwa', 'noura', 'aisha']);
+
+    providers = [groq()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: ['speech:canopylabs/orpheus-v1-english'] }];
+    const lentEnglish = await (await voices('part=speech&source=key-1')).json();
+    expect(lentEnglish.map((voice: Row) => voice.model)).toEqual(Array(6).fill('canopylabs/orpheus-v1-english'));
   });
 });
 
