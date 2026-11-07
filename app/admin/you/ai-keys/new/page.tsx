@@ -436,7 +436,7 @@ export default function AddAiKeyPage() {
                   />
                 ))}
               </div>
-              <p className={FIELD_HINT}>{account?.regions ? `Where ${info.label} runs your voice. Pick one near the people talking with your bots.` : 'A key only works in the region it was made in.'}</p>
+              <p className={FIELD_HINT}>{account?.regionHint ?? (account?.regions ? `Where ${info.label} runs your voice. Pick one near the people talking with your bots.` : 'A key only works in the region it was made in.')}</p>
             </Part>
           )}
 

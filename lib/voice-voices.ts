@@ -184,7 +184,8 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
       const paged = (spec.paging.kind === 'token' || spec.paging.kind === 'after') && next !== null ? `${spec.paging.param}=${encodeURIComponent(next)}` : '';
       const answer = await getJson(call, [query, paged].filter(Boolean).join('&'));
       if (typeof answer !== 'object' || answer === null) throw unreadable(call);
-      const voices = spec.list.endsWith('[]') ? valuesAt(answer, spec.list) : (answer as Record<string, unknown>)[spec.list];
+      // An empty `list`: the answer is the list itself (Azure AI Speech)
+      const voices = spec.list === '' ? answer : spec.list.endsWith('[]') ? valuesAt(answer, spec.list) : (answer as Record<string, unknown>)[spec.list];
       if (!Array.isArray(voices)) throw unreadable(call);
       for (const voice of voices) {
         if (typeof voice !== 'object' || voice === null) throw unreadable(call);
@@ -250,9 +251,10 @@ function callFor(provider: VoiceProvider, voiceJob: VoiceJob): Call & { spec: Vo
   if (!provider.apiKeyEncrypted) throw new VoiceListRefused(`${provider.name} has no key.`, 409);
   // The server's own provider may name another address (a proxy); a person's key never does
   // A list kept at another host than the job's is always read there
-  // A list signed with the key (AWS) is read in the provider's own region, at the company's host for it
-  const region = spec.sign ? accountRegion(company, provider.region) : null;
-  if (spec.sign && !region) throw new VoiceListRefused(`${provider.name} has no region picked.`, 409);
+  // A list read in the provider's own region (AWS signed with the key, Azure AI Speech) is read at the company's host for it
+  const inRegion = Boolean(spec.sign) || Boolean(spec.host?.includes('{region}'));
+  const region = inRegion ? accountRegion(company, provider.region) : null;
+  if (inRegion && !region) throw new VoiceListRefused(`${provider.name} has no region picked.`, 409);
   const host = spec.host && region ? spec.host.replace('{region}', region) : spec.host;
   const base = (host ? `https://${host}` : provider.ownerId === null && provider.endpoint ? provider.endpoint : `https://${job.host}`).replace(/\/+$/, '');
   const { check } = company;

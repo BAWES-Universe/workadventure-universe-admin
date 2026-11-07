@@ -516,6 +516,38 @@ describe('AWS Polly\'s voices (#1886)', () => {
   });
 });
 
+describe('Azure AI Speech\'s voices (#1875)', () => {
+  const azure = (region: string | null) => key({ adapter: 'azure-speech', name: 'Azure AI Speech', region, recognition: true, speech: true, models: [{ id: 'azure-tts', kind: 'speech' }] });
+  const list = [
+    { Name: 'Microsoft Server Speech Text to Speech Voice (ar-KW, FahedNeural)', DisplayName: 'Fahed', ShortName: 'ar-KW-FahedNeural', Gender: 'Male', Locale: 'ar-KW', LocaleName: 'Arabic (Kuwait)', VoiceType: 'Neural' },
+    { DisplayName: 'Ava Multilingual', ShortName: 'en-US-AvaMultilingualNeural', Gender: 'Female', Locale: 'en-US', LocaleName: 'English (United States)', SecondaryLocaleList: ['fr-FR', 'ar-EG'], VoiceType: 'Neural' },
+  ];
+
+  it('lists them in the key’s own region, from an answer that is the list itself, the key in its one header', async () => {
+    providers = [azure('uaenorth')];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(list));
+    const answer = await (await voices('part=speech&source=key-1')).json();
+    expect(answer.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.languages, voice.model])).toEqual([
+      ['ar-KW-FahedNeural', 'Fahed', 'Male, Arabic (Kuwait)', ['ar'], 'azure-tts'],
+      ['en-US-AvaMultilingualNeural', 'Ava Multilingual', 'Female, English (United States)', ['en', 'fr', 'ar'], 'azure-tts'],
+    ]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://uaenorth.tts.speech.microsoft.com/cognitiveservices/voices/list');
+    expect(init.headers).toMatchObject({ 'Ocp-Apim-Subscription-Key': SECRET });
+  });
+
+  it('can’t be listed without a region of Azure’s own, and calls nothing', async () => {
+    for (const region of [null, 'evil.com/x']) {
+      clearVoiceListCache();
+      providers = [azure(region)];
+      lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+      expect((await voices('part=speech&source=key-1')).status).toBe(409);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('a key with a talking model (game #1910)', () => {
   const openai = (models: Row[] = [{ id: 'gpt-realtime-2.1', kind: 'talk' }, { id: 'gpt-realtime-2.1-mini', kind: 'talk' }]) =>
     key({ adapter: 'openai', name: 'My OpenAI', recognition: true, speech: true, models });

@@ -296,12 +296,13 @@ describe('New voice provider', () => {
     expect(within(listens).getAllByRole('radio').map((card) => card.textContent)).toEqual([
       'AssemblyAIListens. Uses your account at assemblyai.com.',
       'AWSListens, speaks and talks live. Uses your AWS account, in the region you pick.',
+      'Azure AI SpeechListens and speaks. Uses your Azure Speech resource, in the region you pick.',
       'CartesiaListens and speaks. Uses your account at cartesia.ai.',
       'DeepgramListens and speaks. Uses your account at deepgram.com.',
       'ElevenLabsListens and speaks. Uses your account at elevenlabs.io.',
       'SonioxListens and speaks. Uses your account at soniox.com.',
     ]);
-    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['AWSListens, speaks and talks live', 'CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks', 'SonioxListens and speaks']);
+    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['AWSListens, speaks and talks live', 'Azure AI SpeechListens and speaks', 'CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks', 'SonioxListens and speaks']);
     expect(screen.queryByText('Recommended')).toBeNull();
     fireEvent.click(within(speaks).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByRole('heading', { name: 'Set up ElevenLabs' })).toBeTruthy();

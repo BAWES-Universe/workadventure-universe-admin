@@ -219,6 +219,8 @@ describe('the list', () => {
         talk: true,
         account: expect.objectContaining({ regions: expect.arrayContaining([expect.objectContaining({ id: 'eu-north-1' })]), keyId: expect.objectContaining({ label: 'Access key ID' }), keyLabel: 'Secret access key' }),
       }),
+      // A key made per region, with the region picked from Azure's own list (#1875)
+      expect.objectContaining({ adapter: 'azure-speech', label: 'Azure AI Speech', recognition: true, speech: true, talk: false, account: { regions: expect.arrayContaining([{ id: 'uaenorth', label: 'UAE North', host: 'uaenorth.tts.speech.microsoft.com' }]), regionHint: expect.stringContaining('Location/Region') } }),
       expect.objectContaining({ adapter: 'azure', label: 'Azure OpenAI', recognition: false, speech: false, talk: true, account: expect.objectContaining({ address: expect.objectContaining({ label: 'Endpoint' }), typedModel: expect.objectContaining({ label: 'Deployment name', kind: 'talk' }) }) }),
       expect.objectContaining({ adapter: 'cartesia', label: 'Cartesia', recognition: true, speech: true }),
       expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: true, logo: 'deepgram' }),
@@ -236,6 +238,7 @@ describe('the list', () => {
     expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual([
       'Listens. Uses your account at assemblyai.com.',
       'Listens, speaks and talks live. Uses your AWS account, in the region you pick.',
+      'Listens and speaks. Uses your Azure Speech resource, in the region you pick.',
       'Talks live. Uses your Azure OpenAI resource.',
       'Listens and speaks. Uses your account at cartesia.ai.',
       'Listens and speaks. Uses your account at deepgram.com.',
