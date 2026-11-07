@@ -175,6 +175,7 @@ describe('the list', () => {
       expect.objectContaining({ adapter: 'groq', label: 'Groq', recognition: true, speech: true }),
       expect.objectContaining({ adapter: 'hume', label: 'Hume', recognition: false, speech: true }),
       expect.objectContaining({ adapter: 'meta', label: 'Meta', recognition: true, speech: false }),
+      expect.objectContaining({ adapter: 'mistral', label: 'Mistral', recognition: true, speech: true }),
       expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: false }),
       // The speech server on a person's own computer is last, and is not a company (game #1874)
       expect.objectContaining({ adapter: 'openai-compatible', label: 'Any OpenAI-compatible speech server', ownServer: expect.any(Object) }),
@@ -195,6 +196,7 @@ describe('the list', () => {
       'Listens and speaks. Uses your account at groq.com.',
       'Speaks. Uses your account at hume.ai.',
       'Listens. Uses your account at dev.meta.ai.',
+      'Listens and speaks. Uses your account at mistral.ai.',
       'Listens. Uses your account at soniox.com.',
       'Speaches, Kokoro-FastAPI, your own Whisper: anything that answers /v1/audio.',
     ]);

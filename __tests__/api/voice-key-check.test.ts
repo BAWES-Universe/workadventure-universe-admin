@@ -198,6 +198,7 @@ describe('Load models for a voice key', () => {
       ['gladia', [{ id: 'solaria-1', label: 'Solaria-1', kind: 'recognition' }]],
       ['gradium', [{ id: 'default', label: 'Gradium (current)', kind: 'recognition' }, { id: 'default', label: 'Gradium TTS (current)', kind: 'speech' }, { id: 'gradium-tts-beta', label: 'Gradium TTS beta', kind: 'speech' }]],
       ['groq', [{ id: 'whisper-large-v3-turbo', label: 'Whisper Large v3 Turbo', kind: 'recognition' }, { id: 'whisper-large-v3', label: 'Whisper Large v3', kind: 'recognition' }, { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' }, { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' }]],
+      ['mistral', [{ id: 'voxtral-mini-transcribe-realtime-2602', label: 'Voxtral Mini Transcribe Realtime', kind: 'recognition' }, { id: 'voxtral-mini-tts-2603', label: 'Voxtral Mini TTS', kind: 'speech' }]],
       ['meta', [{ id: 'muse-voice-transcribe-1.0', label: 'Muse Voice Transcribe 1.0', kind: 'recognition' }]],
       ['hume', [{ id: 'octave-2', label: 'Octave 2', kind: 'speech' }, { id: 'octave-1', label: 'Octave 1', kind: 'speech' }]],
       ['bland', [{ id: 'btts-3', label: 'Bland TTS v3', kind: 'speech' }, { id: 'btts-2', label: 'Bland TTS v2', kind: 'speech' }]],

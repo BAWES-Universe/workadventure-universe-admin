@@ -82,11 +82,11 @@ export interface VoiceListSpec {
   list: string;
   /**
    * How the next page is asked for: a token the answer gives (`token`) or the last voice's id (`after`), sent as `param`, while
-   * `more` says there is more; or a page number (`page`, from 1, in the path) while `more` says so, or, when the company doesn't
+   * `more` says there is more (with no `more`, while the answer gives a token: Mistral); or a page number (`page`, from 1, in the path) while `more` says so, or, when the company doesn't
    * say, while a page is full; `first` is the number of the first page when it is not 1 (Hume counts from 0). `none`: the whole
    * list comes in one answer.
    */
-  paging: { kind: 'token' | 'after'; param: string; next: string; more: string } | { kind: 'page'; more?: string; first?: 0 | 1 } | { kind: 'none' };
+  paging: { kind: 'token' | 'after'; param: string; next: string; more?: string } | { kind: 'page'; more?: string; first?: 0 | 1 } | { kind: 'none' };
   /** Asked one after the other, each added to `path` (Fish: the person's own voices, then the public library). A voice met twice is kept once. */
   passes?: string[];
   /** A voice is kept only when each of these fields, when the company sends it, has this value. */
@@ -570,6 +570,37 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     docs: 'https://dev.meta.ai/docs/api-reference/voice/realtime',
     // The Model API's model list, free with the key as a bearer
     check: { url: 'https://api.meta.ai/v1/models', header: 'Authorization', prefix: 'Bearer ' },
+  }),
+  company({
+    adapter: 'mistral',
+    label: 'Mistral',
+    jobs: {
+      recognition: {
+        // Voxtral's live hearing socket (wss://api.mistral.ai/v1/audio/transcriptions/realtime), Pipecat's MistralSTTService model
+        host: 'api.mistral.ai',
+        models: [{ id: 'voxtral-mini-transcribe-realtime-2602', label: 'Voxtral Mini Transcribe Realtime' }],
+      },
+      speech: {
+        // POST /v1/audio/speech streamed (https://docs.mistral.ai/api/endpoint/audio/speech), Pipecat's MistralTTSService model
+        host: 'api.mistral.ai',
+        models: [{ id: 'voxtral-mini-tts-2603', label: 'Voxtral Mini TTS' }],
+        // GET /v2/audio/voices: Mistral's preset voices and the account's own, page by page with the token it gives
+        voices: {
+          path: '/v2/audio/voices?page_size={size}',
+          list: 'data',
+          paging: { kind: 'token', param: 'page_token', next: 'next_page_token' },
+          id: 'id',
+          name: 'name',
+          description: ['description', { join: ['gender', 'tags[]'] }],
+          languages: ['languages[]'],
+        },
+      },
+    },
+    logo: 'mistral',
+    benefit: '{does}. Uses your account at mistral.ai.',
+    step: 'On console.mistral.ai, open API Keys and create a key.',
+    docs: 'https://docs.mistral.ai/capabilities/audio/',
+    check: { url: 'https://api.mistral.ai/v1/models', header: 'Authorization', prefix: 'Bearer ' },
   }),
   company({
     adapter: 'soniox',
