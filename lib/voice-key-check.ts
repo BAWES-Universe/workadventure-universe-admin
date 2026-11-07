@@ -43,7 +43,9 @@ async function ask(company: VoiceKeyCompanyInfo, apiKey: string): Promise<Verdic
         body = null;
       }
       const code = check.refusedWhen.field.split('.').reduce<unknown>((value, field) => (typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[field] : undefined), body);
-      return typeof code === 'number' && check.refusedWhen.codes.includes(code) ? 'refused' : 'accepted';
+      if (typeof code === 'number' && check.refusedWhen.codes.includes(code)) return 'refused';
+      // Only a code that says success takes the key: anything else can't be read as a yes
+      return typeof code === 'number' && check.refusedWhen.ok.includes(code) ? 'accepted' : 'unreachable';
     }
     if (check.alsoAccepted && response.status === check.alsoAccepted.status) {
       const wanted = check.alsoAccepted.includes;

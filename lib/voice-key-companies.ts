@@ -174,10 +174,11 @@ export interface VoiceKeyCompanyEntry {
      */
     alsoAccepted?: { status: number; includes?: string };
     /**
-     * A company that answers a wrong key with 200 and says so inside (MiniMax: `base_resp.status_code` 1004): the field holding its
-     * own code, and the codes that mean the key is refused.
+     * A company that answers a wrong key with 200 and says so inside (MiniMax: `base_resp.status_code` 1004 or 2049): the field
+     * holding its own code, the codes that mean the key is refused, and the codes that mean it was taken. Any other answer (another
+     * code, no code, or no JSON) says nothing about the key, so the key is not taken.
      */
-    refusedWhen?: { field: string; codes: number[] };
+    refusedWhen?: { field: string; codes: number[]; ok: number[] };
   };
 }
 
@@ -666,13 +667,13 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     benefit: '{does}. Uses your account at minimax.io.',
     step: 'On platform.minimax.io, open Account Management, then API Keys, and create a key.',
     docs: 'https://platform.minimax.io/docs',
-    // MiniMax's own voice list, free to read. A wrong key still answers 200, with 1004 in base_resp
+    // MiniMax's own voice list, free to read. A wrong key still answers 200, with 1004 or 2049 in base_resp; 0 is success
     check: {
       url: 'https://api.minimax.io/v1/get_voice',
       header: 'Authorization',
       prefix: 'Bearer ',
       body: { voice_type: 'system' },
-      refusedWhen: { field: 'base_resp.status_code', codes: [1004] },
+      refusedWhen: { field: 'base_resp.status_code', codes: [1004, 2049], ok: [0] },
     },
   }),
   company({

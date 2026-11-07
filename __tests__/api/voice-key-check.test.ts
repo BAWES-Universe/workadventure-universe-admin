@@ -30,7 +30,8 @@ const serverRows = [
 
 const send = (body: unknown) =>
   check(new NextRequest('http://localhost:3333/api/me/voice-keys/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }));
-const answer = (status: number, text = '') => fetchMock.mockResolvedValue({ status, text: async () => text });
+// A plain 200 also says success inside, for a company that only takes a key when it says so (MiniMax)
+const answer = (status: number, text = status === 200 ? '{"base_resp":{"status_code":0}}' : '') => fetchMock.mockResolvedValue({ status, text: async () => text });
 
 // A new person for each test, so the limit on tries (kept per person) starts over
 let people = 0;
@@ -122,6 +123,13 @@ describe('Load models for a voice key', () => {
     expect((await send({ adapter: 'minimax', apiKey: KEY })).status).toBe(422);
     answer(200, '{"system_voice":[],"base_resp":{"status_code":0,"status_msg":"success"}}');
     expect((await send({ adapter: 'minimax', apiKey: KEY })).status).toBe(200);
+    answer(200, '{"base_resp":{"status_code":2049,"status_msg":"invalid api key"}}');
+    expect((await send({ adapter: 'minimax', apiKey: KEY })).status).toBe(422);
+    // An answer that doesn't say success (another code, no code, no JSON) never takes the key
+    for (const body of ['{"base_resp":{"status_code":1002,"status_msg":"rate limit"}}', '{"system_voice":[]}', 'not json']) {
+      answer(200, body);
+      expect((await send({ adapter: 'minimax', apiKey: KEY })).status).not.toBe(200);
+    }
     // Deepgram answers a key without projects:read with a 403, and a wrong key with a 401
     answer(403, '{"err_code":"FORBIDDEN","err_msg":"Insufficient permissions."}');
     expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(200);
