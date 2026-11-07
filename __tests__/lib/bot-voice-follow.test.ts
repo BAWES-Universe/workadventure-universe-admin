@@ -127,6 +127,14 @@ describe('followUniverseAi', () => {
     expect(profileProblem(followUniverseAi(published, providers(ears, mouth)), providers(ears, mouth))).toBeNull();
   });
 
+  it('keeps a Polly voice on the engine it was published on, since each voice speaks with some engines only', () => {
+    const polly = provider({ id: 'polly', adapter: 'aws', name: 'AWS', models: [{ id: 'generative', kind: 'speech' }, { id: 'neural', kind: 'speech' }] });
+    const hala = profile({ speech: { providerId: 'polly', model: 'neural', voiceId: 'Hala' } });
+    expect(followUniverseAi(hala, providers(ears, polly)).speech).toBe(hala.speech);
+    const generativeOnly = provider({ ...polly, models: [{ id: 'generative', kind: 'speech' }] });
+    expect(profileProblem(followUniverseAi(hala, providers(ears, generativeOnly)), providers(ears, generativeOnly))).toBe("AWS doesn't list the model neural for speaking");
+  });
+
   it('leaves a provider that is missing to profileProblem', () => {
     expect(followUniverseAi(profile(), providers(ears))).toEqual(profile({ recognition: { providerId: 'soniox', model: 'stt-rt-v6' } }));
     expect(profileProblem(followUniverseAi(profile(), providers(ears)), providers(ears))).toBe("The provider chosen for speaking doesn't exist");

@@ -194,6 +194,20 @@ describe('the voices of a server provider', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('https://api.elevenlabs.io/v2/voices?page_size=100');
   });
 
+  it('are only the Polly voices that speak with the provider\'s starting engine, which a borrowed starting voice uses', async () => {
+    fetchMock.mockResolvedValue(
+      json({
+        Voices: [
+          { Id: 'Hala', Name: 'Hala', LanguageCode: 'ar-AE', SupportedEngines: ['neural'] },
+          { Id: 'Joanna', Name: 'Joanna', LanguageCode: 'en-US', SupportedEngines: ['generative', 'neural'] },
+        ],
+      }),
+    );
+    db.findFirst.mockResolvedValue(row({ adapter: 'aws', name: 'AWS', region: 'us-east-1', apiKeyEncrypted: encryptApiKey('AKIAIOSFODNN7EXAMPLE:secret'), models: [{ id: 'generative', kind: 'speech' }, { id: 'neural', kind: 'speech' }] }));
+    const list = (await (await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx())).json()).voices;
+    expect(list.map((voice: Row) => voice.voiceId)).toEqual(['Joanna']);
+  });
+
   it('are not listed for a provider that isn\'t there, doesn\'t speak, or is somebody\'s own key', async () => {
     expect((await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx('other'))).status).toBe(404);
     expect(fetchMock).not.toHaveBeenCalled();
