@@ -152,7 +152,8 @@ const textAt = (value: unknown, path: string, max: number) => clean(valuesAt(val
 /** A voice's description: the first of the spec's choices that says something. */
 function descriptionOf(voice: unknown, choices: VoiceListSpec['description']): string {
   for (const choice of choices) {
-    const text = typeof choice === 'string' ? textAt(voice, choice, 300) : choice.join.map((path) => textAt(voice, path, 60)).filter(Boolean).join(', ');
+    // Joined, a list (`tags[]`) gives every entry, not only its first
+    const text = typeof choice === 'string' ? textAt(voice, choice, 300) : clean(choice.join.flatMap((path) => (path.includes('[]') ? valuesAt(voice, path) : valuesAt(voice, path).slice(0, 1)).map((entry) => (typeof entry === 'string' ? clean(entry, 60) : ''))).filter(Boolean).join(', '), 300);
     if (text) return text;
   }
   return '';
@@ -177,8 +178,8 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
       const body = spec.body ? Object.fromEntries(Object.entries(spec.body).map(([field, value]) => [field, value === '{size}' ? PAGE_SIZE : value])) : undefined;
       const answer = await getJson(call, [query, paged].filter(Boolean).join('&'), body);
       if (typeof answer !== 'object' || answer === null) throw unreadable(call);
-      // An empty `list`: the answer is the list itself (CAMB.AI)
-      const voices = spec.list === '' ? answer : (answer as Record<string, unknown>)[spec.list];
+      // An empty `list`: the answer is the list itself (CAMB.AI); `a.b`: a field inside a field (Neuphonic's data.voices)
+      const voices = spec.list === '' ? answer : spec.list.split('.').reduce<unknown>((at, field) => (typeof at === 'object' && at !== null ? (at as Record<string, unknown>)[field] : undefined), answer);
       if (!Array.isArray(voices)) throw unreadable(call);
       for (const voice of voices) {
         if (typeof voice !== 'object' || voice === null) throw unreadable(call);

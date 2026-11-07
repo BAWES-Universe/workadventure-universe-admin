@@ -356,7 +356,7 @@ describe('Deepgram\'s voices', () => {
   it('are every speaking voice in one answer, each its own model, with a public sample, the key as a token', async () => {
     const list = await (await voices('part=speech&source=key-1')).json();
     expect(list).toEqual([
-      { voiceId: 'aura-2-thalia-en', name: 'thalia', description: 'American, Adult, clear', languages: ['en'], previewUrl: 'https://static.deepgram.com/samples/thalia.wav', providerId: 'key-1', model: 'aura-2' },
+      { voiceId: 'aura-2-thalia-en', name: 'thalia', description: 'American, Adult, clear, confident', languages: ['en'], previewUrl: 'https://static.deepgram.com/samples/thalia.wav', providerId: 'key-1', model: 'aura-2' },
       { voiceId: 'aura-2-celeste-es', name: 'celeste', description: '', languages: ['es'], previewUrl: null, providerId: 'key-1', model: 'aura-2' },
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -596,6 +596,37 @@ describe('Mistral\'s voices', () => {
     expect(first).toBe('https://api.mistral.ai/v2/audio/voices?page_size=100');
     expect(fetchMock.mock.calls[1][0]).toBe('https://api.mistral.ai/v2/audio/voices?page_size=100&page_token=page-2');
     expect(init.headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+  });
+});
+
+describe('Neuphonic\'s voices', () => {
+  const neuphonic = () => key({ adapter: 'neuphonic', name: 'Neuphonic', models: [{ id: 'neuphonic', label: 'Neuphonic TTS', kind: 'speech' }] });
+
+  beforeEach(() => {
+    providers = [neuphonic()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () =>
+      json({
+        data: {
+          voices: [
+            { id: 'v-1', voice_id: 'v-1', name: 'Holly', tags: ['Female', 'British'], lang_code: 'en', type: 'Standard' },
+            { id: 'v-2', voice_id: 'v-2', name: 'Amira', tags: null, lang_code: 'ar', type: 'Cloned' },
+          ],
+        },
+      })
+    );
+  });
+
+  it('come in one answer inside its data, each with its language, the key in its own header', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.languages, voice.model])).toEqual([
+      ['v-1', 'Holly', 'Female, British', ['en'], 'neuphonic'],
+      ['v-2', 'Amira', '', ['ar'], 'neuphonic'],
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.neuphonic.com/voices');
+    expect(init.headers).toMatchObject({ 'X-API-KEY': SECRET });
   });
 });
 
