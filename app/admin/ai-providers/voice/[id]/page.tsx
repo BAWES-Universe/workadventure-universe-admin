@@ -8,13 +8,13 @@ import { Input } from '@/components/ui/input';
 import { useToast } from '@/components/ui/toast';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import type { VoiceModel } from '@/lib/voice-providers';
+import { companyHost } from '@/lib/voice-key-companies';
 import { LoadError, LoadingRows, PageHeader, SettingSwitch, Settings } from '../../../components/ds';
 import { ProviderLogo } from '../../../components/ds/provider-logo';
 import { FormSheet } from '../../../components/form-sheet';
 import { EnabledPill } from '../../components/provider-state';
 import {
   Answered,
-  COMPANY_HOST,
   Caption,
   DefaultPills,
   FIELD_HINT,
@@ -167,7 +167,7 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
 
   const isDefault = provider.defaultRecognition || provider.defaultSpeech;
   const company = companyLabel(provider.adapter);
-  const own = COMPANY_HOST[provider.adapter];
+  const own = companyHost(provider.adapter, provider.recognition ? 'recognition' : 'speech');
   // People can add a company's key while any provider of it is on
   const stillOn = all.some((other) => other.id !== id && other.adapter === provider.adapter && other.enabled);
   const jobs: VoiceJob[] = [...(provider.recognition ? (['recognition'] as const) : []), ...(provider.speech ? (['speech'] as const) : [])];
