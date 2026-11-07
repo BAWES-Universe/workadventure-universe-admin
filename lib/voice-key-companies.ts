@@ -769,7 +769,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     benefit: '{does}. Uses your account at dev.meta.ai.',
     step: 'On dev.meta.ai, create a Model API key.',
     docs: 'https://dev.meta.ai/docs/api-reference/voice/realtime',
-    // The Model API's model list, free with the key as a bearer
+    // The Model API's model list (GET https://api.meta.ai/v1/models, https://dev.meta.ai/docs/models), free with the key as a bearer
     check: { url: 'https://api.meta.ai/v1/models', header: 'Authorization', prefix: 'Bearer ' },
   }),
   company({
