@@ -77,9 +77,11 @@ export interface VoiceListSpec {
   /**
    * How the next page is asked for: a token the answer gives (`token`) or the last voice's id (`after`), sent as `param`, while
    * `more` says there is more (or, for a company with no such field, while there is a token); or a page number (`page`, from 1,
-   * in the path) while `more` says so, or, when the company doesn't say, while a page is full. `none`: the whole list comes in one answer.
+   * in the path) while `more` says so, or, when the company doesn't say, while a page is full. With `nextIsLink` the answer gives
+   * the next page's address instead (Ultravox): only its `param` is taken from it, and the page is still asked at the company's own.
+   * `none`: the whole list comes in one answer.
    */
-  paging: { kind: 'token' | 'after'; param: string; next: string; more?: string } | { kind: 'page'; more?: string } | { kind: 'none' };
+  paging: { kind: 'token' | 'after'; param: string; next: string; more?: string; nextIsLink?: boolean } | { kind: 'page'; more?: string } | { kind: 'none' };
   /** Asked one after the other, each added to `path` (Fish: the person's own voices, then the public library). A voice met twice is kept once. */
   passes?: string[];
   /** A voice is kept only when each of these fields, when the company sends it, has this value. */
@@ -568,6 +570,35 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On console.soniox.com, open API Keys and create a key.',
     docs: 'https://soniox.com/docs',
     check: { url: 'https://api.soniox.com/v1/models', header: 'Authorization', prefix: 'Bearer ' },
+  }),
+  company({
+    adapter: 'ultravox',
+    label: 'Ultravox',
+    jobs: {
+      talk: {
+        host: 'api.ultravox.ai',
+        // Ultravox's own model, the one Pipecat's Ultravox service names (7 Nov 2026). Each stretch and each reply is its own call;
+        // the listening call answers in text nobody reads, and the speaking one says the Mind's words as they are
+        models: [{ id: 'ultravox-v0.7', label: 'Ultravox v0.7' }],
+        // GET /api/voices, its public voices and the account's own; `next` is the next page's address, with its cursor
+        voices: {
+          path: '/api/voices?pageSize={size}',
+          list: 'results',
+          paging: { kind: 'token', param: 'cursor', next: 'next', nextIsLink: true },
+          id: 'voiceId',
+          name: 'name',
+          description: ['description'],
+          languages: ['primaryLanguage'],
+          preview: 'previewUrl',
+          previewNeedsKey: true,
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at ultravox.ai.',
+    step: 'On app.ultravox.ai, open Settings, then API Keys, and create a key.',
+    docs: 'https://docs.ultravox.ai',
+    // GET /api/voices lists the voices the key may use: free
+    check: { url: 'https://api.ultravox.ai/api/voices?pageSize=1', header: 'X-API-Key', prefix: '' },
   }),
   company({
     adapter: 'xai',
