@@ -650,6 +650,42 @@ describe('Resemble\'s voices', () => {
   });
 });
 
+describe('Rime\'s voices', () => {
+  const rime = (models: string[]) => key({ adapter: 'rime', name: 'Rime', models: models.map((id) => ({ id, label: id, kind: 'speech' })) });
+  const details = [
+    { speaker: 'astra', gender: 'Female', age: 'Young Adult', country: 'US', modelId: 'mistv2', lang: 'eng', description: 'Bright, lively' },
+    { speaker: 'astra', gender: 'Female', age: 'Young Adult', country: 'US', modelId: 'coda', lang: 'eng', description: 'Bright, lively' },
+    { speaker: 'layla', gender: 'Female', age: 'Adult', country: 'SA', modelId: 'mistv3', lang: 'ara', description: '' },
+    { speaker: 'cove', gender: 'Male', age: 'Adult', country: 'US', modelId: 'mistv2', lang: 'eng' },
+  ];
+
+  beforeEach(() => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(details));
+  });
+
+  it('are each listed once, with the first of their models the key has, and three-letter languages read as two', async () => {
+    providers = [rime(['coda', 'mistv3'])];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.languages, voice.model])).toEqual([
+      ['astra', 'astra', 'Bright, lively', ['en'], 'coda'],
+      ['layla', 'layla', 'Female, Adult, SA', ['ar'], 'mistv3'],
+    ]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://users.rime.ai/data/voices/voice_details.json');
+    expect(init.headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+  });
+
+  it('come with the model the key has when a voice is in more than one', async () => {
+    providers = [rime(['mistv2'])];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.model])).toEqual([
+      ['astra', 'mistv2'],
+      ['cove', 'mistv2'],
+    ]);
+  });
+});
+
 describe('Groq\'s voices', () => {
   const ENGLISH = { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' };
   const ARABIC = { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' };
@@ -708,7 +744,7 @@ describe('Hume\'s voices', () => {
 });
 
 describe('languageCode', () => {
-  it('keeps the language of a code and drops anything that isn\'t one', () => {
-    expect([languageCode('en-GB'), languageCode('AR_kw'), languageCode('ara'), languageCode('English'), languageCode(''), languageCode(7)]).toEqual(['en', 'ar', 'ara', null, null, null]);
+  it('keeps the language of a code, reads a three-letter one as its two-letter code, and drops anything that isn\'t one', () => {
+    expect([languageCode('en-GB'), languageCode('AR_kw'), languageCode('ara'), languageCode('ger'), languageCode('fil'), languageCode('English'), languageCode(''), languageCode(7)]).toEqual(['en', 'ar', 'ar', 'de', 'fil', null, null, null]);
   });
 });

@@ -49,8 +49,8 @@ interface Listed {
   languages: string[];
   preview: string | null;
   previewNeedsKey: boolean;
-  /** The one speaking model this voice belongs to, when the company ties voices to models (Groq). */
-  model?: string;
+  /** The speaking models this voice belongs to, when the company ties voices to models (Groq's Orpheus, Rime): one of them is used. */
+  models?: string[];
 }
 
 /** A source that can't be listed, with the line that says why (shown as it is). */
@@ -77,11 +77,17 @@ interface Call {
   headers: Record<string, string>;
 }
 
-/** The primary language code of "en-GB", "ar_KW" or "ara", or null when it doesn't look like one. */
+/** Three-letter codes (ISO 639-2, as Rime lists them) of languages that have a two-letter one. */
+const TWO_LETTER: Record<string, string> = {
+  ara: 'ar', chi: 'zh', deu: 'de', dut: 'nl', eng: 'en', fra: 'fr', fre: 'fr', ger: 'de', hin: 'hi', ita: 'it', jpn: 'ja',
+  kor: 'ko', nld: 'nl', por: 'pt', rus: 'ru', spa: 'es', tur: 'tr', zho: 'zh',
+};
+
+/** The primary language code of "en-GB", "ar_KW" or "ara" ("ar"), or null when it doesn't look like one. */
 export function languageCode(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const primary = value.trim().toLowerCase().split(/[-_]/)[0];
-  return /^[a-z]{2,3}$/.test(primary) ? primary : null;
+  return /^[a-z]{2,3}$/.test(primary) ? (TWO_LETTER[primary] ?? primary) : null;
 }
 
 const languagesOf = (...values: unknown[]): string[] => [...new Set(values.flat().map(languageCode).filter((code): code is string => code !== null))];
@@ -191,7 +197,13 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
         if (typeof id !== 'string' || id.length === 0 || id.length > 255) throw unreadable(call);
         const fields = voice as Record<string, unknown>;
         if (spec.keep && Object.entries(spec.keep).some(([field, wanted]) => fields[field] != null && fields[field] !== wanted)) continue;
-        if (seen.has(id)) continue;
+        // A voice the company lists once for each model it speaks in (Rime) is kept once, with every model it has
+        const model = spec.model ? textAt(voice, spec.model, 255) : '';
+        if (seen.has(id)) {
+          const kept = model ? out.find((entry) => entry.voiceId === id) : undefined;
+          if (kept?.models && !kept.models.includes(model)) kept.models.push(model);
+          continue;
+        }
         seen.add(id);
         const sample = (spec.preview ? valuesAt(voice, spec.preview) : []).map(httpsUrl).find((url): url is string => url !== null) ?? null;
         out.push({
@@ -202,6 +214,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
           // A sample served with the key must be at the company's own address: the key never goes to one a listing names
           preview: sample && (!spec.previewNeedsKey || new URL(sample).host === host) ? sample : null,
           previewNeedsKey: spec.previewNeedsKey === true,
+          ...(model ? { models: [model] } : {}),
         });
       }
       if (spec.paging.kind === 'none') break;
@@ -289,7 +302,7 @@ async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
         languages: voice.languages,
         preview: null,
         previewNeedsKey: false,
-        ...(voice.model ? { model: voice.model } : {}),
+        ...(voice.model ? { models: [voice.model] } : {}),
       }));
     } else {
       const call = callFor(provider);
@@ -352,15 +365,18 @@ const previewPath = (botId: string, source: string, voiceId: string) =>
 export async function listBotVoices(botId: string, source: string): Promise<VoiceChoice[]> {
   const { provider, model, models } = await sourceFor(botId, source);
   const listed = await listedFor(provider);
-  // A voice tied to one model (Groq) comes with that model, and only when that model is set up and allowed here
-  return listed.filter((voice) => !voice.model || models.includes(voice.model)).map((voice) => ({
+  // A voice tied to models (Groq, Rime) comes with the first of them set up and allowed here, and not at all when none is
+  return listed.flatMap((voice) => {
+    const own = voice.models ? models.find((id) => voice.models!.includes(id)) : model;
+    return own ? [{ ...voice, own }] : [];
+  }).map((voice) => ({
     voiceId: voice.voiceId,
     name: voice.name,
     description: voice.description,
     languages: voice.languages,
     previewUrl: !voice.preview ? null : voice.previewNeedsKey ? previewPath(botId, source, voice.voiceId) : voice.preview,
     providerId: provider.id,
-    model: voice.model ?? model,
+    model: voice.own,
   }));
 }
 

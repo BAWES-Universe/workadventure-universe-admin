@@ -93,6 +93,8 @@ export interface VoiceListSpec {
   passes?: string[];
   /** A voice is kept only when each of these fields, when the company sends it, has this value. */
   keep?: Record<string, string>;
+  /** The field naming the one speaking model a voice is listed for (Rime lists each voice once a model): the voice is kept once, with every model it has. */
+  model?: string;
   /** The field holding a voice's id: text, or a whole number kept as its digits (CAMB.AI). */
   id: string;
   name: string;
@@ -657,6 +659,39 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On app.resemble.ai, open Account, then API, and copy your API key.',
     docs: 'https://docs.resemble.ai',
     check: { url: 'https://app.resemble.ai/api/v2/voices?page=1&page_size=10', header: 'Authorization', prefix: 'Bearer ' },
+  }),
+  company({
+    adapter: 'rime',
+    label: 'Rime',
+    jobs: {
+      speech: {
+        // Text to speech, one streamed request per reply (POST /v1/rime-tts, the model named in the request), as Pipecat's
+        // RimeHttpTTSService does. Rime has no model list a key can read; Coda is Pipecat's default, Mist v3 and v2 Rime's earlier
+        // models (https://docs.rime.ai)
+        host: 'users.rime.ai',
+        models: [
+          { id: 'coda', label: 'Coda' },
+          { id: 'mistv3', label: 'Mist v3' },
+          { id: 'mistv2', label: 'Mist v2' },
+        ],
+        // Rime's voices, listed once for each model they speak in (one public file, the same for every key)
+        voices: {
+          path: '/data/voices/voice_details.json',
+          list: '',
+          paging: { kind: 'none' },
+          id: 'speaker',
+          name: 'speaker',
+          model: 'modelId',
+          description: ['description', { join: ['gender', 'age', 'country'] }],
+          languages: ['lang'],
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at rime.ai.',
+    step: 'On app.rime.ai, open API Tokens and create a token.',
+    docs: 'https://docs.rime.ai',
+    // Rime's word coverage check: it lists the words Rime doesn't know, nothing is spoken (https://docs.rime.ai/api-reference/other/oov)
+    check: { url: 'https://users.rime.ai/oov', header: 'Authorization', prefix: 'Bearer ', body: { text: 'Hello' } },
   }),
   company({
     adapter: 'soniox',
