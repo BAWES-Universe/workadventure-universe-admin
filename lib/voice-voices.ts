@@ -6,6 +6,7 @@ import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels } from '@/lib/voice-providers';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
 import { voiceKeyCompanyInfo, type VoiceKeyCompanyInfo, type VoiceListSpec } from '@/lib/voice-key-companies';
+import { OWN_SPEECH_LABEL, isOwnSpeechAdapter, listOwnSpeechVoices } from '@/lib/voice-own-server';
 
 /**
  * The voices a bot's maker can pick from on the bot page (game #1668): the speaking voices of one source, which is Universe AI
@@ -57,7 +58,8 @@ interface Listed {
 
 /** A source that can't be listed, with the line that says why (shown as it is). */
 export class VoiceListRefused extends Error {
-  constructor(message: string, readonly status: 404 | 409 | 502 = 409) {
+  /** `code` names a case a screen answers in its own way; it is sent next to the line, never instead of it. */
+  constructor(message: string, readonly status: 404 | 409 | 502 = 409, readonly code?: 'no_voice_list') {
     super(message);
   }
 }
@@ -175,7 +177,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
     let next: string | null = null;
     for (let page = 1; out.length < MAX_VOICES && page <= MAX_PAGES; page++) {
       const query = [spec.path.replace('{size}', String(PAGE_SIZE)).replace('{page}', String(page)), pass].filter(Boolean).join('&');
-      const paged = spec.paging.kind !== 'page' && next !== null ? `${spec.paging.param}=${encodeURIComponent(next)}` : '';
+      const paged = (spec.paging.kind === 'token' || spec.paging.kind === 'after') && next !== null ? `${spec.paging.param}=${encodeURIComponent(next)}` : '';
       const answer = await getJson(call, [query, paged].filter(Boolean).join('&'));
       if (typeof answer !== 'object' || answer === null) throw unreadable(call);
       const voices = (answer as Record<string, unknown>)[spec.list];
@@ -199,6 +201,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
           previewNeedsKey: spec.previewNeedsKey === true,
         });
       }
+      if (spec.paging.kind === 'none') break;
       const more = spec.paging.more ? (answer as Record<string, unknown>)[spec.paging.more] : undefined;
       if (spec.paging.kind === 'page') {
         // The list says when it ends; a full page is the sign there may be more when it doesn't
@@ -252,6 +255,31 @@ function callFor(provider: VoiceProvider): Call & { spec: VoiceListSpec } {
   return { company, spec, base, headers: { ...check.headers, [check.header]: `${check.prefix}${key}` } };
 }
 
+/**
+ * The voices of a speech server on a person's own computer (game #1874): its own list at /audio/voices when it has one. A server
+ * with no list answers "can't list voices", and the bot's maker types the voice's name instead. The checks on the address run again
+ * on every list, so a name that later points inside a network is never reached.
+ */
+async function listOwnVoices(provider: VoiceProvider): Promise<Listed[]> {
+  // `no_voice_list`: the game shows a field to type the voice's name instead of Try again
+  const noList = () => new VoiceListRefused(`${provider.name} doesn’t list its voices. Type the voice’s name.`, 409, 'no_voice_list');
+  if (!provider.endpoint) throw noList();
+  let key = '';
+  if (provider.apiKeyEncrypted) {
+    try {
+      key = decryptApiKey(provider.apiKeyEncrypted);
+    } catch {
+      throw new VoiceListRefused(`${provider.name}’s key can’t be read.`, 409);
+    }
+  }
+  const listed = await listOwnSpeechVoices(provider.endpoint, key);
+  // A server that can't be asked is said so: only a server that answers with no list tells the maker to type the name
+  if (!listed.ok) throw new VoiceListRefused(listed.message, listed.reason === 'unreachable' ? 502 : listed.reason === 'refused' ? 502 : 409);
+  const voices = listed.voices;
+  if (!voices) throw noList();
+  return voices.map(({ voiceId }) => ({ voiceId, name: voiceId, description: '', languages: [], preview: null, previewNeedsKey: false }));
+}
+
 async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
   // A company with no list call (OpenAI's talking voices) has its voices in the catalog: nothing to call, nothing to cache
   const fixed = voiceJobOf(voiceKeyCompanyInfo(provider.adapter))?.fixedVoices;
@@ -262,11 +290,15 @@ async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.voices;
   let voices: Listed[];
   try {
-    const call = callFor(provider);
-    // A lister stops at its page limit, but never trusts that: no more than MAX_VOICES are kept or sent on
-    voices = (await listFromSpec(call, call.spec)).slice(0, MAX_VOICES);
+    if (isOwnSpeechAdapter(provider.adapter)) {
+      voices = (await listOwnVoices(provider)).slice(0, MAX_VOICES);
+    } else {
+      const call = callFor(provider);
+      // A lister stops at its page limit, but never trusts that: no more than MAX_VOICES are kept or sent on
+      voices = (await listFromSpec(call, call.spec)).slice(0, MAX_VOICES);
+    }
   } catch (error) {
-    if (error instanceof Unreadable) throw new VoiceListRefused(`${voiceKeyCompanyInfo(provider.adapter)?.label ?? provider.name} sent a voice list that can’t be read.`, 502);
+    if (error instanceof Unreadable) throw new VoiceListRefused(`${isOwnSpeechAdapter(provider.adapter) ? OWN_SPEECH_LABEL : (voiceKeyCompanyInfo(provider.adapter)?.label ?? provider.name)} sent a voice list that can’t be read.`, 502);
     throw error;
   }
   cache.delete(id);

@@ -62,10 +62,10 @@ describe('the voice company catalog', () => {
       const voices = entry.jobs.speech?.voices;
       if (!voices) continue;
       expect(voices.path.startsWith('/')).toBe(true);
-      expect(voices.path).toContain('{size}');
+      if (voices.paging.kind !== 'none') expect(voices.path).toContain('{size}');
       if (voices.paging.kind === 'page') expect(voices.path).toContain('{page}');
     }
-    expect(['cartesia', 'elevenlabs', 'fish'].every((adapter) => voiceKeyCompanyInfo(adapter)?.jobs.speech?.voices)).toBe(true);
+    expect(['cartesia', 'deepgram', 'elevenlabs', 'fish'].every((adapter) => voiceKeyCompanyInfo(adapter)?.jobs.speech?.voices)).toBe(true);
   });
 });
 
