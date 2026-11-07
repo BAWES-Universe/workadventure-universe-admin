@@ -183,12 +183,14 @@ function groupVoices(call: Call, groups: NonNullable<VoiceListSpec['groups']>, g
  * page after page while the company says there are more, up to MAX_VOICES, each voice read from the fields the spec names. A page
  * that isn't a list, or a voice without an id, is a list that can't be read.
  */
-async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> {
+async function listFromSpec(call: Call, spec: VoiceListSpec, speechModels: string[] = []): Promise<Listed[]> {
   const out: Listed[] = [];
   const seen = new Set<string>();
   const host = new URL(call.base).host;
+  // Only the models set up on the key are asked for (Smallest AI): a model the account can't use may be refused, and its
+  // voices couldn't be spoken here anyway
   const runs = spec.perModel
-    ? spec.perModel.map((run) => ({ path: run.path, pass: '', model: run.model }))
+    ? spec.perModel.filter((run) => speechModels.includes(run.model)).map((run) => ({ path: run.path, pass: '', model: run.model }))
     : (spec.passes ?? ['']).map((pass) => ({ path: spec.path, pass, model: undefined }));
   for (const { path, pass, model: runModel } of runs) {
     let next: string | null = null;
@@ -322,7 +324,8 @@ async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
     } else {
       const call = callFor(provider);
       // A lister stops at its page limit, but never trusts that: no more than MAX_VOICES are kept or sent on
-      voices = (await listFromSpec(call, call.spec)).slice(0, MAX_VOICES);
+      const speechModels = readModels(provider.models).filter((entry) => entry.kind === 'speech').map((entry) => entry.id);
+      voices = (await listFromSpec(call, call.spec, speechModels)).slice(0, MAX_VOICES);
     }
   } catch (error) {
     if (error instanceof Unreadable) throw new VoiceListRefused(`${isOwnSpeechAdapter(provider.adapter) ? OWN_SPEECH_LABEL : (voiceKeyCompanyInfo(provider.adapter)?.label ?? provider.name)} sent a voice list that can’t be read.`, 502);
@@ -477,6 +480,8 @@ export interface ServerVoiceChoice {
   description: string;
   languages: string[];
   previewUrl: string | null;
+  /** The speaking model the voice speaks in as the starting voice, when the company ties voices to models (Groq's Orpheus, Rime). */
+  model?: string;
 }
 
 /** The server's own speaking provider that a super admin looks at (never a person's key): anything else reads as not found. */
@@ -495,13 +500,27 @@ const serverPreviewPath = (providerId: string, voiceId: string) => `/api/admin/v
  */
 export async function listServerVoices(providerId: string): Promise<ServerVoiceChoice[]> {
   const provider = await serverSpeaker(providerId);
-  return (await listedFor(provider)).map((voice) => ({
-    voiceId: voice.voiceId,
-    name: voice.name,
-    description: voice.description,
-    languages: voice.languages,
-    previewUrl: !voice.preview ? null : voice.previewNeedsKey ? serverPreviewPath(provider.id, voice.voiceId) : voice.preview,
-  }));
+  const models = readModels(provider.models).filter((entry) => entry.kind === 'speech').map((entry) => entry.id);
+  const named = 'fixed' in (voiceKeyCompanyInfo(provider.adapter)?.jobs.speech?.voices ?? {});
+  // A voice tied to models is offered only with the model it would speak in as the starting voice (borrowUniverseAi): its own
+  // model when the catalog names it (Groq's Orpheus) and the provider lists it, or else the provider's starting model when the
+  // voice speaks in it (Rime)
+  const speaksWith = (voice: Listed) =>
+    !voice.models ? undefined : named ? models.find((id) => voice.models!.includes(id)) : models[0] && voice.models.includes(models[0]) ? models[0] : undefined;
+  return (await listedFor(provider)).flatMap((voice) => {
+    const model = speaksWith(voice);
+    if (voice.models && !model) return [];
+    return [
+      {
+        voiceId: voice.voiceId,
+        name: voice.name,
+        description: voice.description,
+        languages: voice.languages,
+        previewUrl: !voice.preview ? null : voice.previewNeedsKey ? serverPreviewPath(provider.id, voice.voiceId) : voice.preview,
+        ...(model ? { model } : {}),
+      },
+    ];
+  });
 }
 
 /** One voice's free sample from a server provider that keeps it behind its key. */
