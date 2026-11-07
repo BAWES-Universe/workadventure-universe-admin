@@ -146,6 +146,20 @@ async function homeOf(botId: string): Promise<Home> {
 }
 
 /**
+ * Whether a speech server of the bot's maker (game #1874) is lent to the bot's universe, so a voice name typed for it can be heard
+ * before voice is on ("Hear <name> say hello" on the Voice row's first screen, when no profile names the server yet). Only a speech
+ * server on a person's own computer, only for a bot its owner made, and only while the lend and the owner's access to the universe
+ * stand: the same rules a bot that speaks with it is held to.
+ */
+export async function ownServerLentToBot(provider: Pick<VoiceProvider, 'id' | 'ownerId' | 'adapter'>, botId: string): Promise<boolean> {
+  if (!provider.ownerId || !isOwnSpeechAdapter(provider.adapter)) return false;
+  const home = await homeOf(botId);
+  if (home.createdById !== provider.ownerId) return false;
+  const lend = await prisma.voiceKeyLend.findUnique({ where: { providerId_universeId: { providerId: provider.id, universeId: home.universeId } }, select: { id: true } });
+  return lend !== null && Boolean(await lendAccess(provider.ownerId, home.universeId));
+}
+
+/**
  * The providers a profile may use for this bot: the server's own, and a key only when the bot's maker owns it, lent it to
  * this universe, and still owns the universe or has Manage bots in it (the same rules as a text key). Anything else is left
  * out, so the profile reads as naming a provider that doesn't exist. When a part names a server provider that is off, the server's
