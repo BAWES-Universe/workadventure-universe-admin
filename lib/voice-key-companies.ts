@@ -694,6 +694,49 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     check: { url: 'https://users.rime.ai/oov', header: 'Authorization', prefix: 'Bearer ', body: { text: 'Hello' } },
   }),
   company({
+    adapter: 'sarvam',
+    label: 'Sarvam AI',
+    jobs: {
+      recognition: {
+        // Live hearing over Sarvam's socket (wss://api.sarvam.ai/speech-to-text/ws), as Pipecat's SarvamSTTService does: Indian
+        // languages and Indian English. Saaras v4 is Pipecat's default (https://docs.sarvam.ai)
+        host: 'api.sarvam.ai',
+        models: [
+          { id: 'saaras:v4', label: 'Saaras v4' },
+          { id: 'saaras:v3', label: 'Saaras v3' },
+        ],
+      },
+      speech: {
+        // Text to speech over Sarvam's socket (wss://api.sarvam.ai/text-to-speech/ws), as Pipecat's SarvamTTSService does.
+        // Bulbul v3 is Pipecat's default; Bulbul v4 Flash is faster, with its own voices
+        host: 'api.sarvam.ai',
+        models: [
+          { id: 'bulbul:v3', label: 'Bulbul v3' },
+          { id: 'bulbul:v4-flash', label: 'Bulbul v4 Flash' },
+        ],
+        // Sarvam has no list of its own voices to ask: these are Bulbul v3's speakers as Pipecat names them, each speaking
+        // Sarvam's eleven languages
+        voices: {
+          fixed: [
+            'shubh', 'aditya', 'ritu', 'priya', 'neha', 'rahul', 'pooja', 'rohan', 'simran', 'kavya', 'amit', 'dev', 'ishita',
+            'shreya', 'ratan', 'varun', 'manan', 'sumit', 'roopa', 'kabir', 'aayan', 'ashutosh', 'advait', 'amelia', 'sophia',
+          ].map((id) => ({
+            id,
+            name: id.charAt(0).toUpperCase() + id.slice(1),
+            description: 'Bulbul v3',
+            languages: ['bn', 'en', 'gu', 'hi', 'kn', 'ml', 'mr', 'or', 'pa', 'ta', 'te'],
+            model: 'bulbul:v3',
+          })),
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at sarvam.ai.',
+    step: 'On dashboard.sarvam.ai, open API Keys and create a key.',
+    docs: 'https://docs.sarvam.ai',
+    // The workspace's own cloned voices, free to read
+    check: { url: 'https://api.sarvam.ai/voices?limit=1', header: 'api-subscription-key', prefix: '' },
+  }),
+  company({
     adapter: 'soniox',
     label: 'Soniox',
     jobs: {

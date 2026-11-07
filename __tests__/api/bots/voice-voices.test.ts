@@ -686,6 +686,25 @@ describe('Rime\'s voices', () => {
   });
 });
 
+describe('Sarvam\'s voices', () => {
+  beforeEach(() => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+  });
+
+  it('are Bulbul v3\'s speakers, with no call made, and none for a key that speaks only with Bulbul v4 Flash', async () => {
+    providers = [key({ adapter: 'sarvam', name: 'Sarvam', models: [{ id: 'bulbul:v4-flash', label: 'v4', kind: 'speech' }, { id: 'bulbul:v3', label: 'v3', kind: 'speech' }] })];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toHaveLength(25);
+    expect(list[0]).toMatchObject({ voiceId: 'shubh', name: 'Shubh', model: 'bulbul:v3' });
+    expect(list[0].languages).toContain('hi');
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    clearVoiceListCache();
+    providers = [key({ adapter: 'sarvam', name: 'Sarvam', models: [{ id: 'bulbul:v4-flash', label: 'v4', kind: 'speech' }] })];
+    expect(await (await voices('part=speech&source=key-1')).json()).toEqual([]);
+  });
+});
+
 describe('Groq\'s voices', () => {
   const ENGLISH = { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' };
   const ARABIC = { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' };

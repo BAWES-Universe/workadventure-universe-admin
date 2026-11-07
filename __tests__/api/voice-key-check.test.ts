@@ -202,6 +202,7 @@ describe('Load models for a voice key', () => {
       ['meta', [{ id: 'muse-voice-transcribe-1.0', label: 'Muse Voice Transcribe 1.0', kind: 'recognition' }]],
       ['neuphonic', [{ id: 'neuphonic', label: 'Neuphonic TTS', kind: 'speech' }]],
       ['resemble', [{ id: 'resemble', label: 'Resemble TTS', kind: 'speech' }]],
+      ['sarvam', [{ id: 'saaras:v4', label: 'Saaras v4', kind: 'recognition' }, { id: 'saaras:v3', label: 'Saaras v3', kind: 'recognition' }, { id: 'bulbul:v3', label: 'Bulbul v3', kind: 'speech' }, { id: 'bulbul:v4-flash', label: 'Bulbul v4 Flash', kind: 'speech' }]],
       ['rime', [{ id: 'coda', label: 'Coda', kind: 'speech' }, { id: 'mistv3', label: 'Mist v3', kind: 'speech' }, { id: 'mistv2', label: 'Mist v2', kind: 'speech' }]],
       ['hume', [{ id: 'octave-2', label: 'Octave 2', kind: 'speech' }, { id: 'octave-1', label: 'Octave 1', kind: 'speech' }]],
       ['bland', [{ id: 'btts-3', label: 'Bland TTS v3', kind: 'speech' }, { id: 'btts-2', label: 'Bland TTS v2', kind: 'speech' }]],
