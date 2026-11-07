@@ -330,12 +330,12 @@ describe('a bot’s Voice row for an own speech server', () => {
 
   it('says it has no list when the server has none, so the voice is typed', async () => {
     server({});
-    await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 409, message: 'My speech server doesn’t list its voices. Type the voice’s name.' });
+    await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 409, code: 'no_voice_list', message: 'My speech server doesn’t list its voices. Type the voice’s name.' });
   });
 
   it('says a server that is down or refuses the key is down or refusing, never that it has no list', async () => {
     server({ '/v1/audio/voices': { ok: false, reason: 'unreachable' } });
-    await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 502, message: 'It didn’t answer. Is the server running and the tunnel up?' });
+    await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 502, code: undefined, message: 'It didn’t answer. Is the server running and the tunnel up?' });
     clearVoiceListCache();
     server({ '/v1/audio/voices': answer(401, 'nope') });
     await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 502, message: 'The server asked for a key, or didn’t accept the one you gave.' });
