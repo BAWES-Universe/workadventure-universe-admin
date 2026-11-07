@@ -757,23 +757,6 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     check: { url: 'https://api.hume.ai/v0/tts/voices?provider=CUSTOM_VOICE&page_size=1', header: 'X-Hume-Api-Key', prefix: '' },
   }),
   company({
-    adapter: 'meta',
-    label: 'Meta',
-    jobs: {
-      recognition: {
-        // Muse Voice live hearing over a socket (wss://api.meta.ai/v1/asr/realtime), the key in its first message
-        // (https://dev.meta.ai/docs/api-reference/voice/realtime). Billed by the second of audio
-        host: 'api.meta.ai',
-        models: [{ id: 'muse-voice-transcribe-1.0', label: 'Muse Voice Transcribe 1.0' }],
-      },
-    },
-    benefit: '{does}. Uses your account at dev.meta.ai.',
-    step: 'On dev.meta.ai, create a Model API key.',
-    docs: 'https://dev.meta.ai/docs/api-reference/voice/realtime',
-    // The Model API's model list (GET https://api.meta.ai/v1/models, https://dev.meta.ai/docs/models), free with the key as a bearer
-    check: { url: 'https://api.meta.ai/v1/models', header: 'Authorization', prefix: 'Bearer ' },
-  }),
-  company({
     adapter: 'inworld',
     label: 'Inworld',
     jobs: {
@@ -802,6 +785,23 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     docs: 'https://docs.inworld.ai/realtime/connect/websocket',
     // GET /voices/v1/voices lists the voices the key may use: free. The key is already "ID:secret" in Base64, sent as it is
     check: { url: 'https://api.inworld.ai/voices/v1/voices?pageSize=1', header: 'Authorization', prefix: 'Basic ' },
+  }),
+  company({
+    adapter: 'meta',
+    label: 'Meta',
+    jobs: {
+      recognition: {
+        // Muse Voice live hearing over a socket (wss://api.meta.ai/v1/asr/realtime), the key in its first message
+        // (https://dev.meta.ai/docs/api-reference/voice/realtime). Billed by the second of audio
+        host: 'api.meta.ai',
+        models: [{ id: 'muse-voice-transcribe-1.0', label: 'Muse Voice Transcribe 1.0' }],
+      },
+    },
+    benefit: '{does}. Uses your account at dev.meta.ai.',
+    step: 'On dev.meta.ai, create a Model API key.',
+    docs: 'https://dev.meta.ai/docs/api-reference/voice/realtime',
+    // The Model API's model list (GET https://api.meta.ai/v1/models, https://dev.meta.ai/docs/models), free with the key as a bearer
+    check: { url: 'https://api.meta.ai/v1/models', header: 'Authorization', prefix: 'Bearer ' },
   }),
   company({
     adapter: 'openai',
