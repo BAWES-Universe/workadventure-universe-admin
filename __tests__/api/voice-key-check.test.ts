@@ -196,6 +196,7 @@ describe('Load models for a voice key', () => {
       ['camb', [{ id: 'mars-flash', label: 'MARS Flash', kind: 'speech' }, { id: 'mars-pro', label: 'MARS Pro', kind: 'speech' }, { id: 'mars-instruct', label: 'MARS Instruct', kind: 'speech' }]],
       ['fal', [{ id: 'fal-ai/wizper', label: 'Wizper (Whisper large v3)', kind: 'recognition' }, { id: 'fal-ai/whisper', label: 'Whisper', kind: 'recognition' }]],
       ['gladia', [{ id: 'solaria-1', label: 'Solaria-1', kind: 'recognition' }]],
+      ['gradium', [{ id: 'default', label: 'Gradium (current)', kind: 'recognition' }, { id: 'default', label: 'Gradium TTS (current)', kind: 'speech' }, { id: 'gradium-tts-beta', label: 'Gradium TTS beta', kind: 'speech' }]],
       ['bland', [{ id: 'btts-3', label: 'Bland TTS v3', kind: 'speech' }, { id: 'btts-2', label: 'Bland TTS v2', kind: 'speech' }]],
       ['assemblyai', [{ id: 'universal-3-6-pro', label: 'Universal-3.6 Pro', kind: 'recognition' }, { id: 'universal-streaming-multilingual', label: 'Universal Streaming Multilingual', kind: 'recognition' }, { id: 'universal-streaming-english', label: 'Universal Streaming English', kind: 'recognition' }]],
       ['deepgram', [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }, { id: 'aura-2', label: 'Aura 2', kind: 'speech' }]],
