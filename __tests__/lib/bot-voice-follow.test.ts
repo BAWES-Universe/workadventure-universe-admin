@@ -147,6 +147,14 @@ describe('followUniverseAi', () => {
     expect(followUniverseAi(autumn, providers(ears, groq)).speech.model).toBe('canopylabs/orpheus-v1-english');
   });
 
+  it('keeps a Rime voice on the model it was published on while the provider lists it, since Rime voices speak only in some', () => {
+    const rime = provider({ id: 'rime', adapter: 'rime', name: 'Rime', models: [{ id: 'coda', kind: 'speech' }, { id: 'mistv3', kind: 'speech' }] });
+    const layla = profile({ speech: { providerId: 'rime', model: 'mistv3', voiceId: 'layla' } });
+    expect(followUniverseAi(layla, providers(ears, rime))).toEqual(profile({ recognition: { providerId: 'soniox', model: 'stt-rt-v6' }, speech: layla.speech }));
+    const codaOnly = provider({ ...rime, models: [{ id: 'coda', kind: 'speech' }] });
+    expect(profileProblem(followUniverseAi(layla, providers(ears, codaOnly)), providers(ears, codaOnly))).toBe("Rime doesn't list the model mistv3 for speaking");
+  });
+
   it('leaves a provider that is missing to profileProblem', () => {
     expect(followUniverseAi(profile(), providers(ears))).toEqual(profile({ recognition: { providerId: 'soniox', model: 'stt-rt-v6' } }));
     expect(profileProblem(followUniverseAi(profile(), providers(ears)), providers(ears))).toBe("The provider chosen for speaking doesn't exist");

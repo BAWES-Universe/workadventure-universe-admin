@@ -6,7 +6,7 @@ import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels, universeAiDefaults } from '@/lib/voice-providers';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
 import { isOwnSpeechAdapter } from '@/lib/voice-own-server';
-import { fixedVoiceModel } from '@/lib/voice-key-companies';
+import { fixedVoiceModel, voicesTiedToModels } from '@/lib/voice-key-companies';
 import { claimVoiceKeyTry, healthOf, tryIsDue } from '@/lib/voice-key-health';
 import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits, servedVoiceLimits } from '@/lib/voice-limits';
@@ -69,10 +69,15 @@ export function followUniverseAi(profile: VoiceProfile, providers: Map<string, V
     const provider = providers.get(choice.providerId);
     if (!provider || provider.ownerId !== null) return choice;
     const models = readModels(provider.models).filter((model) => model.kind === part);
-    // A voice tied to one model (Groq's Orpheus) speaks only with that model: kept while the provider lists it, and when it
-    // doesn't the published one stays, so profileProblem says so rather than the voice going to a model it can't speak with
-    const tied = part === 'speech' ? fixedVoiceModel(provider.adapter, (choice as VoiceProfile['speech']).voiceId) : undefined;
-    const current = tied ? models.find((model) => model.id === tied) : models[0];
+    // A voice tied to models (Groq's Orpheus, Rime) speaks only in them: Groq's own model, or for Rime the one it was published
+    // on, kept while the provider lists it. When it doesn't, the published one stays, so profileProblem says so rather than
+    // the voice going to a model it can't speak with
+    if (part === 'speech' && voicesTiedToModels(provider.adapter)) {
+      const tied = fixedVoiceModel(provider.adapter, (choice as VoiceProfile['speech']).voiceId) ?? choice.model;
+      const own = models.find((model) => model.id === tied);
+      return own && own.id !== choice.model ? { ...choice, model: own.id } : choice;
+    }
+    const current = models[0];
     return current && current.id !== choice.model ? { ...choice, model: current.id } : choice;
   };
   const recognition = follow('recognition');
@@ -98,7 +103,8 @@ export function borrowUniverseAi(profile: VoiceProfile, providers: Map<string, V
     if (!now || !models.length) return choice;
     if (part === 'recognition') return { providerId: now.id, model: models[0].id } as VoiceProfile[P];
     if (!now.defaultVoiceId) return choice;
-    // The starting voice speaks with its own model when the company ties voices to models (Groq's Orpheus)
+    // The starting voice speaks with its own model when the company names it (Groq's Orpheus); a voice Rime lists is offered
+    // as the starting voice only when it speaks the starting model (listServerVoices)
     const tied = fixedVoiceModel(now.adapter, now.defaultVoiceId);
     const model = tied ? models.find((entry) => entry.id === tied) : models[0];
     if (!model) return choice;

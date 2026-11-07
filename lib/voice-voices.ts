@@ -462,7 +462,7 @@ export interface ServerVoiceChoice {
   description: string;
   languages: string[];
   previewUrl: string | null;
-  /** The one speaking model the voice belongs to, when the company ties each voice to a model (Groq's Orpheus). */
+  /** The speaking model the voice speaks in as the starting voice, when the company ties voices to models (Groq's Orpheus, Rime). */
   model?: string;
 }
 
@@ -483,17 +483,26 @@ const serverPreviewPath = (providerId: string, voiceId: string) => `/api/admin/v
 export async function listServerVoices(providerId: string): Promise<ServerVoiceChoice[]> {
   const provider = await serverSpeaker(providerId);
   const models = readModels(provider.models).filter((entry) => entry.kind === 'speech').map((entry) => entry.id);
-  // A voice tied to one model (Groq's Orpheus) is offered only when the provider lists that model, and bots on Universe AI speak it with that model
-  return (await listedFor(provider))
-    .filter((voice) => !voice.model || models.includes(voice.model))
-    .map((voice) => ({
-      voiceId: voice.voiceId,
-      name: voice.name,
-      description: voice.description,
-      languages: voice.languages,
-      previewUrl: !voice.preview ? null : voice.previewNeedsKey ? serverPreviewPath(provider.id, voice.voiceId) : voice.preview,
-      ...(voice.model ? { model: voice.model } : {}),
-    }));
+  const named = 'fixed' in (voiceKeyCompanyInfo(provider.adapter)?.jobs.speech?.voices ?? {});
+  // A voice tied to models is offered only with the model it would speak in as the starting voice (borrowUniverseAi): its own
+  // model when the catalog names it (Groq's Orpheus) and the provider lists it, or else the provider's starting model when the
+  // voice speaks in it (Rime)
+  const speaksWith = (voice: Listed) =>
+    !voice.models ? undefined : named ? models.find((id) => voice.models!.includes(id)) : models[0] && voice.models.includes(models[0]) ? models[0] : undefined;
+  return (await listedFor(provider)).flatMap((voice) => {
+    const model = speaksWith(voice);
+    if (voice.models && !model) return [];
+    return [
+      {
+        voiceId: voice.voiceId,
+        name: voice.name,
+        description: voice.description,
+        languages: voice.languages,
+        previewUrl: !voice.preview ? null : voice.previewNeedsKey ? serverPreviewPath(provider.id, voice.voiceId) : voice.preview,
+        ...(model ? { model } : {}),
+      },
+    ];
+  });
 }
 
 /** One voice's free sample from a server provider that keeps it behind its key. */

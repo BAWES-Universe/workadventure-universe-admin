@@ -203,6 +203,19 @@ describe('the voices of a server provider', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('are only the Rime voices that speak in the provider\'s starting model, which a borrowed starting voice uses', async () => {
+    fetchMock.mockResolvedValue(
+      json([
+        { speaker: 'astra', modelId: 'mistv2', lang: 'eng' },
+        { speaker: 'astra', modelId: 'coda', lang: 'eng' },
+        { speaker: 'layla', modelId: 'mistv3', lang: 'ara' },
+      ]),
+    );
+    db.findFirst.mockResolvedValue(row({ adapter: 'rime', name: 'Rime', models: [{ id: 'coda', kind: 'speech' }, { id: 'mistv3', kind: 'speech' }] }));
+    const list = (await (await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx())).json()).voices;
+    expect(list.map((voice: Row) => [voice.voiceId, voice.model])).toEqual([['astra', 'coda']]);
+  });
+
   it('are not listed for a provider that isn\'t there, doesn\'t speak, or is somebody\'s own key', async () => {
     expect((await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx('other'))).status).toBe(404);
     expect(fetchMock).not.toHaveBeenCalled();
