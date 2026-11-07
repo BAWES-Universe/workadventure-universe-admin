@@ -17,7 +17,7 @@ export async function OPTIONS(request: NextRequest) {
 const STATUS = { refused: 422, unreachable: 502, 'bad-request': 400, 'no-models': 409 } as const;
 
 /**
- * POST /api/me/voice-keys/check { adapter, apiKey, address? } - "Load models" for a voice key (#749): one free, authenticated call to the
+ * POST /api/me/voice-keys/check { adapter, apiKey, address?, region? } - "Load models" for a voice key (#749): one free, authenticated call to the
  * company with the pasted key, to see that it accepts it. Nothing is saved, transcribed or spoken, so nothing is billed, and the
  * key is never logged or returned. Answers 200 `{ ok: true, models }`, the models the server's own providers for that company list
  * (`[{ id, label?, kind: "recognition" | "speech" | "talk" }]`, each kind and id once; none and `typed: true` for a company whose
@@ -37,14 +37,14 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => null);
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return respond(request, { error: 'Expected an object' }, 400);
   if (!allowKeyAttempt(user.id)) return respond(request, { error: 'Too many tries. Wait a minute and try again.' }, 429);
-  const input = body as { adapter?: unknown; apiKey?: unknown; address?: unknown };
+  const input = body as { adapter?: unknown; apiKey?: unknown; address?: unknown; region?: unknown };
   try {
     if (isOwnSpeechAdapter(input.adapter)) {
       const own = await loadOwnSpeechServer(input.address, input.apiKey);
       if (!own.ok) return respond(request, { error: own.message }, STATUS[own.reason]);
       return respond(request, { ok: true, models: own.models, unsure: own.unsure, voices: own.voices });
     }
-    const result = await loadVoiceKeyModels(input.adapter, input.apiKey, (await voiceKeyCompanies()).map((company) => company.adapter), input.address);
+    const result = await loadVoiceKeyModels(input.adapter, input.apiKey, (await voiceKeyCompanies()).map((company) => company.adapter), input.address, input.region);
     if (!result.ok) return respond(request, { error: result.message }, STATUS[result.reason]);
     return respond(request, { ok: true, models: result.models, ...(result.typed ? { typed: true } : {}) });
   } catch (error) {

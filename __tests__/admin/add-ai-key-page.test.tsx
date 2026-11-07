@@ -661,6 +661,46 @@ describe('Add a key for voice', () => {
     });
   });
 
+  it('asks an AWS key for its region, its access key ID and its secret, and sends the key as one, in that region', async () => {
+    const account = {
+      regions: [
+        { id: 'us-east-1', label: 'US East (N. Virginia)', host: 'bedrock-runtime.us-east-1.amazonaws.com' },
+        { id: 'eu-north-1', label: 'Europe (Stockholm)', host: 'bedrock-runtime.eu-north-1.amazonaws.com' },
+      ],
+      keyId: { label: 'Access key ID', example: 'AKIA…', hint: 'It starts with AKIA.' },
+      keyLabel: 'Secret access key',
+    };
+    const nova = [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }];
+    voiceCompanies = [company('aws', 'AWS', { recognition: false, speech: false, talk: true, account })];
+    render(<AddAiKeyPage />);
+    fireEvent.click(await screen.findByRole('radio', { name: /^AWS/ }));
+    expect(screen.getByRole('heading', { name: /Pick the region/ })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: /Paste your access key/ })).toBeTruthy();
+    expect((screen.getByLabelText('Access key ID') as HTMLInputElement).placeholder).toBe('AKIA…');
+    fireEvent.change(screen.getByLabelText('Access key ID'), { target: { value: ' AKIAIOSFODNN7EXAMPLE ' } });
+    fireEvent.change(screen.getByLabelText('Secret access key'), { target: { value: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' } });
+    // No check without the region
+    expect((screen.getByRole('button', { name: 'Load models' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('radio', { name: /Europe \(Stockholm\)/ }));
+    fetchMock.mockImplementation((url: string) => (url === '/api/me/voice-keys/check' ? json({ ok: true, models: nova }) : json({ key: { id: 'vk-new' } })));
+    fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
+    await screen.findByText(/It answered/);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ adapter: 'aws', apiKey: 'AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', region: 'eu-north-1' });
+    fireEvent.click(addButton());
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/you/ai-keys'));
+    const [url, init] = fetchMock.mock.calls.at(-1)!;
+    expect(url).toBe('/api/me/voice-keys');
+    expect(JSON.parse(init.body)).toEqual({
+      adapter: 'aws',
+      name: 'My AWS',
+      apiKey: 'AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      recognition: true,
+      speech: true,
+      models: nova,
+      region: 'eu-north-1',
+    });
+  });
+
   it('adds a voice key with what it listens and speaks, then goes back to the AI keys page', async () => {
     voiceCompanies = [company('elevenlabs', 'ElevenLabs')];
     render(<AddAiKeyPage />);
