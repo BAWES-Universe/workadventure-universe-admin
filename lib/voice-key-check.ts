@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/db';
 import { KEY_CHARACTERS, KEY_LOOKS_WRONG } from '@/lib/ai-key-models';
-import { voiceKeyCompanyInfo, type VoiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { companyJobs, voiceKeyCompanyInfo, type VoiceCompanyJobName, type VoiceKeyCompanyInfo, type VoiceModelListSpec } from '@/lib/voice-key-companies';
 import { readModels, type VoiceModel } from '@/lib/voice-providers';
 
 /**
@@ -106,7 +106,7 @@ function languagesOf(value: unknown): string[] {
 }
 
 /** One line about a model from the company's own fields: what it always points to, its languages, its own description. */
-function noteOf(spec: NonNullable<VoiceKeyCompanyInfo['modelList']>, fields: Record<string, unknown>, languages: string[]): string | undefined {
+function noteOf(spec: VoiceModelListSpec, fields: Record<string, unknown>, languages: string[]): string | undefined {
   const parts: string[] = [];
   const alias = spec.aliasOf && typeof fields[spec.aliasOf] === 'string' ? (fields[spec.aliasOf] as string).trim() : '';
   if (alias) parts.push(`Always the same as ${alias}`);
@@ -121,14 +121,14 @@ function noteOf(spec: NonNullable<VoiceKeyCompanyInfo['modelList']>, fields: Rec
  * The models a company lists for a key, kept to the ones Universe can run for the company's job (Orbit #840: an operator ticks them
  * instead of typing ids), each with a short line from what the company says about it (what it points to, its languages, its
  * own description) so a person can choose. One free GET to the company's own fixed address with the same key header as the check:
- * nothing is heard or spoken. Null when the company has no list (`modelList` absent from its catalog entry), or the list can't be
+ * nothing is heard or spoken. Null when the company has no list for the job (`modelList` absent from it in the catalog entry), or the list can't be
  * read: then the models are typed, as before. Each id once, in the company's order; a model listed once per language has its
  * languages added up.
  */
-export async function listCompanyModels(company: VoiceKeyCompanyInfo, apiKey: string): Promise<ListedVoiceModel[] | null> {
-  const spec = company.modelList;
-  // Each company's connector does one job here, and its list is kept to that job
-  const kind: VoiceModel['kind'] = company.does.speech ? 'speech' : 'recognition';
+export async function listCompanyModels(company: VoiceKeyCompanyInfo, apiKey: string, job?: VoiceCompanyJobName): Promise<ListedVoiceModel[] | null> {
+  // Each job has its own list, kept to models that do that job; with none named, the company's first job
+  const kind: VoiceModel['kind'] = job ?? companyJobs(company)[0] ?? 'speech';
+  const spec = company.jobs[kind]?.modelList;
   if (!spec) return null;
   let response: Response | undefined;
   try {

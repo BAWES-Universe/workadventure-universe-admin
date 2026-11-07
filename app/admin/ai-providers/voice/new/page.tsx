@@ -8,13 +8,13 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { PickCard, Radio } from '@/components/ui/choice';
 import { useToast } from '@/components/ui/toast';
-import { VOICE_KEY_COMPANIES, type VoiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { VOICE_KEY_COMPANIES, companyHost, voiceDoesLine, type VoiceKeyCompanyInfo, type VoiceKeyCompanyModel } from '@/lib/voice-key-companies';
 import type { VoiceModel } from '@/lib/voice-providers';
 import { PageHeader } from '../../../components/ds';
 import { ProviderLogo } from '../../../components/ds/provider-logo';
 import { VoiceModelPicker } from '../../../components/ds/voice-model-picker';
 import { lendModelId } from '@/lib/voice-lend-model';
-import { Answered, COMPANY_HOST, COMPANY_JOBS, FIELD_HINT, JOBS, ModelRows, Refused, callOrbit, type VoiceJob } from '../voice-shared';
+import { Answered, COMPANY_JOBS, FIELD_HINT, JOBS, ModelRows, Refused, callOrbit, type VoiceJob } from '../voice-shared';
 
 /** One numbered part of step 2, as Add a key has them. */
 function Part({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {
@@ -29,9 +29,10 @@ function Part({ n, title, children }: { n: number; title: string; children: Reac
   );
 }
 
-const jobOf = (info: VoiceKeyCompanyInfo): VoiceJob => COMPANY_JOBS[info.adapter] ?? 'speech';
-/** The company's own line with what it does in Universe filled in: "Speaks, with thousands of voices." */
-const benefitOf = (info: VoiceKeyCompanyInfo) => info.benefit.replace('{does}', jobOf(info) === 'recognition' ? 'Listens' : 'Speaks');
+/** The company's own line with what it does in Universe filled in: "Listens and speaks. Uses your account at …" */
+const benefitOf = (info: VoiceKeyCompanyInfo) => info.benefit.replace('{does}', voiceDoesLine(info.does));
+/** The models a company's key starts with for one job. */
+const startingModels = (info: VoiceKeyCompanyInfo, job: VoiceJob): VoiceKeyCompanyModel[] => (info.jobs[job]?.models ?? []).map((model) => ({ ...model, kind: job }));
 
 /** `listed`: the models the company lists for its job, to tick (null: it has no list, or it couldn't be read, so they are typed). */
 type Listed = VoiceModel & { note?: string };
@@ -47,6 +48,8 @@ export default function NewVoiceProviderPage() {
   const router = useRouter();
   const { addToast } = useToast();
   const [adapter, setAdapter] = useState<string | null>(null);
+  // The job this provider is set up for: a company that listens and speaks is picked under one of them
+  const [job, setJob] = useState<VoiceJob>('speech');
   const [apiKey, setApiKey] = useState('');
   const [check, setCheck] = useState<Check>({ status: 'none' });
   const [models, setModels] = useState<VoiceModel[]>([]);
@@ -59,15 +62,17 @@ export default function NewVoiceProviderPage() {
   const latest = useRef(0);
   const heading = useRef<HTMLHeadingElement>(null);
 
-  const info = VOICE_KEY_COMPANIES.find((entry) => entry.adapter === adapter && COMPANY_JOBS[entry.adapter]) ?? null;
-  const job = info ? jobOf(info) : 'speech';
+  const info = VOICE_KEY_COMPANIES.find((entry) => entry.adapter === adapter && entry.jobs[job]) ?? null;
+  const known = info ? startingModels(info, job) : [];
+  const modelList = info?.jobs[job]?.modelList;
   const name = typedName ?? info?.label ?? '';
   const wssAllowed = job === 'recognition';
 
-  function pick(next: string) {
-    if (next !== adapter) {
+  function pick(next: string, nextJob: VoiceJob) {
+    if (next !== adapter || nextJob !== job) {
       latest.current += 1;
       setAdapter(next);
+      setJob(nextJob);
       // A key typed for one company is never sent to another
       setApiKey('');
       setCheck({ status: 'none' });
@@ -84,7 +89,7 @@ export default function NewVoiceProviderPage() {
     if (!info) return;
     const mine = ++latest.current;
     setCheck({ status: 'checking' });
-    const answer = await callOrbit('POST', '/api/admin/voice-providers/check', { adapter: info.adapter, apiKey });
+    const answer = await callOrbit('POST', '/api/admin/voice-providers/check', { adapter: info.adapter, apiKey, job });
     if (mine !== latest.current) return;
     if (!answer.ok) {
       setCheck({ status: 'refused', message: answer.error });
@@ -95,7 +100,7 @@ export default function NewVoiceProviderPage() {
     setCheck({ status: 'ok', listed });
     // Like Pipecat's services, a working model is ticked from the start: the one Universe starts this company's keys on. Nothing
     // picked by hand is replaced.
-    const start = listed ? info.models[0] : undefined;
+    const start = listed ? known[0] : undefined;
     if (start) setModels((now) => (now.length > 0 ? now : [{ id: start.id, label: start.label, kind: start.kind }]));
   }
 
@@ -113,11 +118,11 @@ export default function NewVoiceProviderPage() {
   const options: Listed[] | null =
     listed && info
       ? [
-          ...info.models.map((known) => ({ ...known, ...(listed.find((entry) => entry.id === known.id)?.note ? { note: listed.find((entry) => entry.id === known.id)!.note } : {}) })),
-          ...listed.filter((entry) => !info.models.some((known) => known.id === entry.id)),
+          ...known.map((model) => ({ ...model, ...(listed.find((entry) => entry.id === model.id)?.note ? { note: listed.find((entry) => entry.id === model.id)!.note } : {}) })),
+          ...listed.filter((entry) => !known.some((model) => model.id === entry.id)),
         ]
       : null;
-  const typing = !info?.modelList || (check.status === 'ok' && !listed) || check.status === 'refused';
+  const typing = !modelList || (check.status === 'ok' && !listed) || check.status === 'refused';
 
   async function add() {
     if (!info || !canAdd) return;
@@ -157,8 +162,8 @@ export default function NewVoiceProviderPage() {
           {JOBS.map(({ job: each, word }) => (
             <div key={each} className="grid gap-2" role="radiogroup" aria-label={word}>
               <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{word}</h3>
-              {VOICE_KEY_COMPANIES.filter((entry) => COMPANY_JOBS[entry.adapter] === each).map((entry) => (
-                <PickCard key={entry.adapter} role="radio" picked={false} onClick={() => pick(entry.adapter)} indicator={<ProviderLogo info={entry} />} trailing={<Radio checked={false} className="mt-0.5 self-start" />} title={entry.label} description={benefitOf(entry)} className="items-start" />
+              {VOICE_KEY_COMPANIES.filter((entry) => COMPANY_JOBS[entry.adapter]?.includes(each)).map((entry) => (
+                <PickCard key={entry.adapter} role="radio" picked={false} onClick={() => pick(entry.adapter, each)} indicator={<ProviderLogo info={entry} />} trailing={<Radio checked={false} className="mt-0.5 self-start" />} title={entry.label} description={benefitOf(entry)} className="items-start" />
               ))}
             </div>
           ))}
@@ -220,7 +225,7 @@ export default function NewVoiceProviderPage() {
               </Button>
               {check.status === 'none' && (
                 <p className={FIELD_HINT}>
-                  Asks {info.label} if it knows the key{info.modelList ? ' and which models it has' : ''}. Nothing is spoken or heard, so nothing is paid.
+                  Asks {info.label} if it knows the key{modelList ? ' and which models it has' : ''}. Nothing is spoken or heard, so nothing is paid.
                   {address.trim() !== '' && ` The check goes to ${info.label}’s own address, not the one under Its own address.`}
                 </p>
               )}
@@ -254,24 +259,24 @@ export default function NewVoiceProviderPage() {
             ) : typing ? (
               <>
                 <p className={FIELD_HINT}>
-                  {info.modelList
+                  {modelList
                     ? check.status === 'refused'
                       ? `Tick the models Universe knows for ${info.label}, or type one as ${info.label} writes it.`
                       : `Couldn’t read ${info.label}’s list of models. Tick the ones Universe knows for it, or type one as ${info.label} writes it.`
                     : `${info.label} doesn’t share a list of its models. Tick the ones Universe knows for it, or type one as ${info.label} writes it.`}{' '}
                   Bots on Universe AI, and people’s own {info.label} keys, can use only the models listed here. The first one is what bots start on.
                 </p>
-                {info.models.length > 0 && (
+                {known.length > 0 && (
                   <VoiceModelPicker
-                    models={info.models}
+                    models={known}
                     mode="many"
                     label={`${info.label} models`}
                     picked={models.map(lendModelId)}
                     onChange={(ids) =>
                       // Ticking keeps a typed model where it is; a model ticked off goes, one ticked on goes last
                       setModels([
-                        ...models.filter((model) => ids.includes(lendModelId(model)) || !info.models.some((known) => lendModelId(known) === lendModelId(model))),
-                        ...info.models.filter((known) => ids.includes(lendModelId(known)) && !models.some((model) => lendModelId(model) === lendModelId(known))),
+                        ...models.filter((model) => ids.includes(lendModelId(model)) || !known.some((start) => lendModelId(start) === lendModelId(model))),
+                        ...known.filter((start) => ids.includes(lendModelId(start)) && !models.some((model) => lendModelId(model) === lendModelId(start))),
                       ])
                     }
                   />
@@ -293,8 +298,8 @@ export default function NewVoiceProviderPage() {
           {showAddress && (
             <div className="grid gap-1.5">
               <Label htmlFor="voice-address">Address</Label>
-              <Input id="voice-address" type="url" inputMode="url" autoComplete="off" placeholder={`${wssAllowed ? 'wss' : 'https'}://${COMPANY_HOST[info.adapter]}`} value={address} onChange={(event) => setAddress(event.target.value)} className="h-11 rounded-xl" aria-invalid={addressProblem ? true : undefined} />
-              <p className={FIELD_HINT}>Leave empty to use {info.label}’s own ({COMPANY_HOST[info.adapter]}). Must start with {wssAllowed ? 'https:// or wss://' : 'https://'}.</p>
+              <Input id="voice-address" type="url" inputMode="url" autoComplete="off" placeholder={`${wssAllowed ? 'wss' : 'https'}://${companyHost(info.adapter, job)}`} value={address} onChange={(event) => setAddress(event.target.value)} className="h-11 rounded-xl" aria-invalid={addressProblem ? true : undefined} />
+              <p className={FIELD_HINT}>Leave empty to use {info.label}’s own ({companyHost(info.adapter, job)}). Must start with {wssAllowed ? 'https:// or wss://' : 'https://'}.</p>
               {addressProblem && <Refused>{addressProblem}</Refused>}
             </div>
           )}
