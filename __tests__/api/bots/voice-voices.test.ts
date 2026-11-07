@@ -588,6 +588,33 @@ describe('Groq\'s voices', () => {
   });
 });
 
+describe('Hume\'s voices', () => {
+  const hume = () => key({ adapter: 'hume', name: 'Hume', models: [{ id: 'octave-2', label: 'Octave 2', kind: 'speech' }] });
+  const voice = (id: string, provider: string) => ({ id, name: `Voice ${id}`, provider, compatible_octave_models: ['2'] });
+
+  beforeEach(() => {
+    providers = [hume()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+  });
+
+  it('are the account\'s own, then Hume\'s library, counting pages from 0, with the key in X-Hume-Api-Key', async () => {
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('CUSTOM_VOICE')) return json({ page_number: 0, page_size: 100, total_pages: 1, voices_page: [voice('mine', 'CUSTOM_VOICE')] });
+      const page = Number(new URL(url).searchParams.get('page_number'));
+      return json({ page_number: page, page_size: 100, total_pages: 2, voices_page: page === 0 ? Array.from({ length: 100 }, (_, i) => voice(`lib${i}`, 'HUME_AI')) : [voice('last', 'HUME_AI')] });
+    });
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toHaveLength(102);
+    expect(list[0]).toMatchObject({ voiceId: 'mine', name: 'Voice mine', model: 'octave-2' });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'https://api.hume.ai/v0/tts/voices?page_size=100&page_number=0&provider=CUSTOM_VOICE',
+      'https://api.hume.ai/v0/tts/voices?page_size=100&page_number=0&provider=HUME_AI',
+      'https://api.hume.ai/v0/tts/voices?page_size=100&page_number=1&provider=HUME_AI',
+    ]);
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ 'X-Hume-Api-Key': SECRET });
+  });
+});
+
 describe('languageCode', () => {
   it('keeps the language of a code and drops anything that isn\'t one', () => {
     expect([languageCode('en-GB'), languageCode('AR_kw'), languageCode('ara'), languageCode('English'), languageCode(''), languageCode(7)]).toEqual(['en', 'ar', 'ara', null, null, null]);

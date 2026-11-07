@@ -34,6 +34,7 @@
  * - gladia: GET /v2/live?limit=1, x-gladia-key. It lists the account's past live sessions: nothing is transcribed. A wrong key is 401.
  * - gradium: GET /api/usages/credits, x-api-key. Free (it reads the account's credit), nothing is generated.
  * - groq: GET /openai/v1/models, Authorization: Bearer. It lists models: nothing is run. A wrong key is 401.
+ * - hume: GET /v0/tts/voices (the account's own, one), X-Hume-Api-Key. It lists voices: nothing is spoken.
  * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
  *   free account with no credit still has the answer, and that is fine: the free model needs none.
  */
@@ -82,9 +83,10 @@ export interface VoiceListSpec {
   /**
    * How the next page is asked for: a token the answer gives (`token`) or the last voice's id (`after`), sent as `param`, while
    * `more` says there is more; or a page number (`page`, from 1, in the path) while `more` says so, or, when the company doesn't
-   * say, while a page is full. `none`: the whole list comes in one answer.
+   * say, while a page is full; `first` is the number of the first page when it is not 1 (Hume counts from 0). `none`: the whole
+   * list comes in one answer.
    */
-  paging: { kind: 'token' | 'after'; param: string; next: string; more: string } | { kind: 'page'; more?: string } | { kind: 'none' };
+  paging: { kind: 'token' | 'after'; param: string; next: string; more: string } | { kind: 'page'; more?: string; first?: 0 | 1 } | { kind: 'none' };
   /** Asked one after the other, each added to `path` (Fish: the person's own voices, then the public library). A voice met twice is kept once. */
   passes?: string[];
   /** A voice is kept only when each of these fields, when the company sends it, has this value. */
@@ -521,6 +523,36 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On console.groq.com, open API Keys and create a key.',
     docs: 'https://console.groq.com/docs/speech-to-text',
     check: { url: 'https://api.groq.com/openai/v1/models', header: 'Authorization', prefix: 'Bearer ' },
+  }),
+  company({
+    adapter: 'hume',
+    label: 'Hume',
+    jobs: {
+      speech: {
+        // Text to speech with Octave, one streamed request per reply (POST /v0/tts/stream/json), as Pipecat's HumeTTSService does.
+        // Hume has no model list a key can read; Octave 2 is its current model (https://dev.hume.ai/docs/text-to-speech-tts/overview)
+        host: 'api.hume.ai',
+        models: [
+          { id: 'octave-2', label: 'Octave 2' },
+          { id: 'octave-1', label: 'Octave 1' },
+        ],
+        // GET /v0/tts/voices: the account's own voices, then Hume's library, page by page from page 0
+        voices: {
+          path: '/v0/tts/voices?page_size={size}&page_number={page}',
+          passes: ['provider=CUSTOM_VOICE', 'provider=HUME_AI'],
+          list: 'voices_page',
+          paging: { kind: 'page', first: 0 },
+          id: 'id',
+          name: 'name',
+          description: [],
+          languages: [],
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at hume.ai.',
+    step: 'On platform.hume.ai, open API keys and copy your API key.',
+    docs: 'https://dev.hume.ai/docs/text-to-speech-tts/overview',
+    check: { url: 'https://api.hume.ai/v0/tts/voices?provider=CUSTOM_VOICE&page_size=1', header: 'X-Hume-Api-Key', prefix: '' },
   }),
   company({
     adapter: 'soniox',
