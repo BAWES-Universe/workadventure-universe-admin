@@ -194,6 +194,15 @@ describe('the voices of a server provider', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('https://api.elevenlabs.io/v2/voices?page_size=100');
   });
 
+  it('are only Groq\'s voices whose own model the provider lists, each with that model, and nothing is asked', async () => {
+    const groq = row({ adapter: 'groq', name: 'Groq', models: [{ id: 'canopylabs/orpheus-arabic-saudi', kind: 'speech' }] });
+    db.findFirst.mockResolvedValue(groq);
+    const list = (await (await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx())).json()).voices;
+    expect(list.map((voice: Row) => voice.voiceId)).toEqual(['abdullah', 'fahad', 'sultan', 'lulwa', 'noura', 'aisha']);
+    expect(list.every((voice: Row) => voice.model === 'canopylabs/orpheus-arabic-saudi')).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('are not listed for a provider that isn\'t there, doesn\'t speak, or is somebody\'s own key', async () => {
     expect((await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx('other'))).status).toBe(404);
     expect(fetchMock).not.toHaveBeenCalled();
