@@ -53,7 +53,8 @@ interface Listed {
 
 /** A source that can't be listed, with the line that says why (shown as it is). */
 export class VoiceListRefused extends Error {
-  constructor(message: string, readonly status: 404 | 409 | 502 = 409) {
+  /** `code` names a case a screen answers in its own way; it is sent next to the line, never instead of it. */
+  constructor(message: string, readonly status: 404 | 409 | 502 = 409, readonly code?: 'no_voice_list') {
     super(message);
   }
 }
@@ -240,7 +241,8 @@ function callFor(provider: VoiceProvider): Call & { spec: VoiceListSpec } {
  * on every list, so a name that later points inside a network is never reached.
  */
 async function listOwnVoices(provider: VoiceProvider): Promise<Listed[]> {
-  const noList = () => new VoiceListRefused(`${provider.name} doesn’t list its voices. Type the voice’s name.`, 409);
+  // `no_voice_list`: the game shows a field to type the voice's name instead of Try again
+  const noList = () => new VoiceListRefused(`${provider.name} doesn’t list its voices. Type the voice’s name.`, 409, 'no_voice_list');
   if (!provider.endpoint) throw noList();
   let key = '';
   if (provider.apiKeyEncrypted) {
