@@ -11,7 +11,7 @@
  * Adding a company, or a job to one, is one entry here plus its connector in the game, never `if (adapter === ...)` in the logic.
  *
  * `modelList` is where a company lists a job's models (GET, the same key header): Soniox GET /v1/models (real-time ones), Deepgram
- * GET /v1/models (streaming listening ones), ElevenLabs GET /v1/models (speaking ones), Cartesia GET /models?capability=tts. Fish
+ * GET /v1/models (streaming listening ones), ElevenLabs GET /v1/models (speaking ones), Cartesia GET /models?capability=stt|tts. Fish
  * Audio has no such list, so its models are typed on New voice provider. `voices` is where a speaking job lists its voices
  * (lib/voice-voices.ts reads every company's the same way).
  *
@@ -76,9 +76,9 @@ export interface VoiceListSpec {
   /**
    * How the next page is asked for: a token the answer gives (`token`) or the last voice's id (`after`), sent as `param`, while
    * `more` says there is more; or a page number (`page`, from 1, in the path) while `more` says so, or, when the company doesn't
-   * say, while a page is full.
+   * say, while a page is full. `none`: the whole list comes in one answer.
    */
-  paging: { kind: 'token' | 'after'; param: string; next: string; more: string } | { kind: 'page'; more?: string };
+  paging: { kind: 'token' | 'after'; param: string; next: string; more: string } | { kind: 'page'; more?: string } | { kind: 'none' };
   /** Asked one after the other, each added to `path` (Fish: the person's own voices, then the public library). A voice met twice is kept once. */
   passes?: string[];
   /** A voice is kept only when each of these fields, when the company sends it, has this value. */
@@ -230,6 +230,12 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'cartesia',
     label: 'Cartesia',
     jobs: {
+      recognition: {
+        host: 'api.cartesia.ai',
+        // ink-whisper: the one that takes a language; ink-2 and newer detect it
+        models: [{ id: 'ink-whisper', label: 'Ink Whisper' }],
+        modelList: { url: 'https://api.cartesia.ai/models?capability=stt', list: 'data', id: 'id', where: { capability: 'stt' } },
+      },
       speech: {
         host: 'api.cartesia.ai',
         // sonic-3.6 follows Cartesia's latest stable snapshot
@@ -263,6 +269,22 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
         models: [{ id: 'nova-3', label: 'Nova 3' }],
         modelList: { url: 'https://api.deepgram.com/v1/models', list: 'stt', id: 'canonical_name', where: { streaming: true }, languages: 'languages' },
       },
+      speech: {
+        host: 'api.deepgram.com',
+        // A Deepgram voice is its own model (aura-2-thalia-en): the game sends the voice picked, and the model names its family
+        models: [{ id: 'aura-2', label: 'Aura 2' }],
+        // GET /v1/models: every voice in one answer, each with its languages and a public sample
+        voices: {
+          path: '/v1/models',
+          list: 'tts',
+          paging: { kind: 'none' },
+          id: 'canonical_name',
+          name: 'name',
+          description: [{ join: ['metadata.accent', 'metadata.age', 'metadata.tags[]'] }],
+          languages: ['languages[]'],
+          preview: 'metadata.sample',
+        },
+      },
     },
     logo: 'deepgram',
     benefit: '{does}. Uses your account at deepgram.com.',
@@ -274,6 +296,12 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'elevenlabs',
     label: 'ElevenLabs',
     jobs: {
+      recognition: {
+        host: 'api.elevenlabs.io',
+        // Scribe v2 Realtime: ElevenLabs' real-time listening model. Its model list (GET /v1/models) holds speaking models only, so
+        // listening models are typed
+        models: [{ id: 'scribe_v2_realtime', label: 'Scribe v2 Realtime' }],
+      },
       speech: {
         host: 'api.elevenlabs.io',
         // eleven_v4_turbo: ElevenLabs' recommended real-time model, served over its Text to Dialogue socket (game #1848)
