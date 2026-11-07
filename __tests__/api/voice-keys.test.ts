@@ -225,6 +225,7 @@ describe('the list', () => {
       expect.objectContaining({ adapter: 'fish', label: 'Fish Audio', recognition: false, speech: true, logo: 'fish-audio' }),
       expect.objectContaining({ adapter: 'google', label: 'Google', recognition: false, speech: false, talk: true, logo: 'google' }),
       // A talking model listens and speaks in one (game #1910)
+      expect.objectContaining({ adapter: 'inworld', label: 'Inworld', recognition: false, speech: false, talk: true, account: null }),
       expect.objectContaining({ adapter: 'openai', label: 'OpenAI', recognition: false, speech: false, talk: true, logo: 'openai' }),
       expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: false }),
       expect.objectContaining({ adapter: 'xai', label: 'xAI', recognition: false, speech: false, talk: true, logo: 'xai' }),
@@ -238,6 +239,7 @@ describe('the list', () => {
       'Listens and speaks. Uses your account at elevenlabs.io.',
       'Speaks. Uses your account at fish.audio.',
       'Talks live. Uses your account at aistudio.google.com.',
+      'Talks live. Uses your account at inworld.ai.',
       'Talks live. Uses your account at platform.openai.com.',
       'Listens. Uses your account at soniox.com.',
       'Talks live. Uses your account at console.x.ai.',

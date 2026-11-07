@@ -76,10 +76,10 @@ export interface VoiceListSpec {
   list: string;
   /**
    * How the next page is asked for: a token the answer gives (`token`) or the last voice's id (`after`), sent as `param`, while
-   * `more` says there is more; or a page number (`page`, from 1, in the path) while `more` says so, or, when the company doesn't
-   * say, while a page is full.
+   * `more` says there is more (or, for a company with no such field, while there is a token); or a page number (`page`, from 1,
+   * in the path) while `more` says so, or, when the company doesn't say, while a page is full.
    */
-  paging: { kind: 'token' | 'after'; param: string; next: string; more: string } | { kind: 'page'; more?: string };
+  paging: { kind: 'token' | 'after'; param: string; next: string; more?: string } | { kind: 'page'; more?: string };
   /** Asked one after the other, each added to `path` (Fish: the person's own voices, then the public library). A voice met twice is kept once. */
   passes?: string[];
   /** A voice is kept only when each of these fields, when the company sends it, has this value. */
@@ -460,6 +460,36 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
       prefix: '',
       alsoRefused: { status: 400, includes: 'API_KEY_INVALID' },
     },
+  }),
+  company({
+    adapter: 'inworld',
+    label: 'Inworld',
+    jobs: {
+      talk: {
+        host: 'api.inworld.ai',
+        // Its realtime session hears with Inworld STT and speaks with these, from Inworld's realtime docs (7 Nov 2026). Its LLM is
+        // never called: the session never answers, and the Mind's words are spoken as they are (response.speak)
+        models: [
+          { id: 'inworld-tts-2', label: 'Inworld TTS 2' },
+          { id: 'inworld-tts-2-flash', label: 'Inworld TTS 2 Flash' },
+        ],
+        // GET /voices/v1/voices, its system voices and the key's own, `nextPageToken` until it is empty
+        voices: {
+          path: '/voices/v1/voices?pageSize={size}',
+          list: 'voices',
+          paging: { kind: 'token', param: 'pageToken', next: 'nextPageToken' },
+          id: 'voiceId',
+          name: 'displayName',
+          description: ['description'],
+          languages: ['langCode'],
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at inworld.ai.',
+    step: 'On platform.inworld.ai, open API Keys and copy a key with its Base64 copy button.',
+    docs: 'https://docs.inworld.ai/realtime/connect/websocket',
+    // GET /voices/v1/voices lists the voices the key may use: free. The key is already "ID:secret" in Base64, sent as it is
+    check: { url: 'https://api.inworld.ai/voices/v1/voices?pageSize=1', header: 'Authorization', prefix: 'Basic ' },
   }),
   company({
     adapter: 'openai',

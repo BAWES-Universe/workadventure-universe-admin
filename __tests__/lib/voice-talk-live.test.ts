@@ -75,6 +75,21 @@ describe('the Google entry', () => {
   });
 });
 
+describe('the Inworld entry', () => {
+  it('talks live only, speaking with its TTS models and listing its voices with the key, checked for free with Basic', () => {
+    const inworld = voiceKeyCompanyInfo('inworld');
+    expect(inworld?.does).toEqual({ recognition: false, speech: false, talk: true });
+    expect(inworld?.models).toEqual([
+      { id: 'inworld-tts-2', label: 'Inworld TTS 2', kind: 'talk' },
+      { id: 'inworld-tts-2-flash', label: 'Inworld TTS 2 Flash', kind: 'talk' },
+    ]);
+    expect(inworld?.jobs.talk?.fixedVoices).toBeUndefined();
+    expect(inworld?.jobs.talk?.voices?.paging).toEqual({ kind: 'token', param: 'pageToken', next: 'nextPageToken' });
+    expect(inworld?.check).toEqual({ url: 'https://api.inworld.ai/voices/v1/voices?pageSize=1', header: 'Authorization', prefix: 'Basic ' });
+    expect(JSON.stringify(inworld)).not.toMatch(/recommend/i);
+  });
+});
+
 describe('the xAI entry', () => {
   it('talks live only, with its Grok Voice models and its 28 built-in voices, Eve first', () => {
     const xai = voiceKeyCompanyInfo('xai');
