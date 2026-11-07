@@ -221,6 +221,8 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
       next = token;
     }
   }
+  // A list that reaches the cap may hold more than is offered: said in the logs, so it's seen when a company's list outgrows it
+  if (out.length >= MAX_VOICES) console.warn(`[voices] ${host} lists ${out.length > MAX_VOICES ? out.length : 'at least ' + MAX_VOICES} voices; the first ${MAX_VOICES} are offered`);
   return out.slice(0, MAX_VOICES);
 }
 

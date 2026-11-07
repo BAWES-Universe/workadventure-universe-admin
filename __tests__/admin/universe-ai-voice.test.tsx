@@ -380,6 +380,18 @@ describe('New voice provider', () => {
     });
   });
 
+  it('asks Azure AI Speech\'s region before its key is checked, with where Azure shows it, and saves it', async () => {
+    render(<NewVoiceProviderPage />);
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Speaks' })).getByRole('radio', { name: /^Azure AI Speech/ }));
+    expect(screen.getByText(/Azure shows it as Location\/Region next to the key/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'azure-key-1234' } });
+    expect(screen.getByRole('button', { name: 'Check key' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Region' })).getByRole('radio', { name: /^East US 2/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await screen.findByText(/^Azure AI Speech knows this key/);
+    expect(calls.find((call) => call.url === '/api/admin/voice-providers/check')?.body).toEqual({ adapter: 'azure-speech', apiKey: 'azure-key-1234', job: 'speech', region: 'eastus2' });
+  });
+
   it('sets up the job picked for a company that listens and speaks, asking it for that job\'s models (#844)', async () => {
     render(<NewVoiceProviderPage />);
     fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Cartesia/ }));

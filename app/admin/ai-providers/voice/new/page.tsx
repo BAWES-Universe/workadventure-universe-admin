@@ -233,7 +233,7 @@ export default function NewVoiceProviderPage() {
                   />
                 ))}
               </div>
-              <p className={FIELD_HINT}>A key only works in the region it was made in.</p>
+              <p className={FIELD_HINT}>{account.regionHint ?? 'A key only works in the region it was made in.'}</p>
             </Part>
           )}
           <Part n={part++} title={account?.keyId ? 'Paste the access key' : 'Paste the key'}>

@@ -84,6 +84,7 @@ beforeEach(() => {
   (canManageBotMcpServers as jest.Mock).mockReset().mockResolvedValue(true);
   (lendAccess as jest.Mock).mockReset().mockResolvedValue('manage');
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  jest.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 afterEach(() => jest.restoreAllMocks());
 
@@ -441,6 +442,8 @@ describe('Fish Audio\'s voices', () => {
     expect(list).toHaveLength(MAX_VOICES);
     // Own voices (1 call), then ten pages of the library: never more than the cap
     expect(fetchMock).toHaveBeenCalledTimes(11);
+    // Reaching the cap is said in the logs, so a list that outgrows it is seen
+    expect(console.warn).toHaveBeenCalledWith('[voices] api.fish.audio lists at least 1000 voices; the first 1000 are offered');
   });
 
   it('read a full page without a "has more" as a sign of another, and a short one as the end', async () => {
@@ -546,6 +549,14 @@ describe('Azure AI Speech\'s voices (#1875)', () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('https://uaenorth.tts.speech.microsoft.com/cognitiveservices/voices/list');
     expect(init.headers).toMatchObject({ 'Ocp-Apim-Subscription-Key': SECRET });
+  });
+
+  it('offers the first MAX_VOICES of an unpaged list longer than that, and says so in the logs', async () => {
+    providers = [azure('uaenorth')];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(Array.from({ length: MAX_VOICES + 200 }, (_, i) => ({ ...list[0], ShortName: `ar-KW-Voice${i}Neural` }))));
+    expect(await (await voices('part=speech&source=key-1')).json()).toHaveLength(MAX_VOICES);
+    expect(console.warn).toHaveBeenCalledWith(`[voices] uaenorth.tts.speech.microsoft.com lists ${MAX_VOICES + 200} voices; the first ${MAX_VOICES} are offered`);
   });
 
   it('can’t be listed without a region of Azure’s own, and calls nothing', async () => {
