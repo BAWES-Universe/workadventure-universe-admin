@@ -198,6 +198,10 @@ describe('Load models for a voice key', () => {
     expect((await send({ adapter: 'minimax', apiKey: KEY })).status).toBe(200);
     answer(200, '{"base_resp":{"status_code":2049,"status_msg":"invalid api key"}}');
     expect((await send({ adapter: 'minimax', apiKey: KEY })).status).toBe(422);
+    // Its voice catalog runs well past 100 kB, with the code after the voices: the whole answer is read
+    const voices = Array.from({ length: 400 }, (_, i) => ({ voice_id: `voice_${i}`, voice_name: `Voice ${i}`, description: ['x'.repeat(300)] }));
+    answer(200, JSON.stringify({ system_voice: voices, base_resp: { status_code: 0, status_msg: 'success' } }));
+    expect((await send({ adapter: 'minimax', apiKey: KEY })).status).toBe(200);
     // An answer that doesn't say success (another code, no code, no JSON) never takes the key
     for (const body of ['{"base_resp":{"status_code":1002,"status_msg":"rate limit"}}', '{"system_voice":[]}', 'not json']) {
       answer(200, body);

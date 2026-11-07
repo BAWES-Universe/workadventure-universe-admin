@@ -52,8 +52,10 @@ async function ask(company: VoiceKeyCompanyInfo, apiKey: string, address: string
       if (!check.refusedWhen) return 'accepted';
       // The company says inside a 200 whether it took the key
       let body: unknown = null;
+      // Read whole: a code can come after a long list (MiniMax puts base_resp after its voice catalog, past 100 kB), and a
+      // body cut short isn't JSON. The cap only guards against an answer that never ends
       try {
-        body = JSON.parse((await response.text().catch(() => '')).slice(0, 100_000));
+        body = JSON.parse((await response.text().catch(() => '')).slice(0, 5_000_000));
       } catch {
         body = null;
       }
