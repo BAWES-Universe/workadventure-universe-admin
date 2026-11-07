@@ -23,9 +23,9 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => null);
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return NextResponse.json({ error: 'Expected an object' }, { status: 400 });
   if (!allowKeyAttempt(user.id)) return NextResponse.json({ error: 'Too many tries. Wait a minute and try again.' }, { status: 429 });
-  const input = body as { adapter?: unknown; apiKey?: unknown; job?: unknown };
+  const input = body as { adapter?: unknown; apiKey?: unknown; job?: unknown; region?: unknown };
   try {
-    const result = await checkVoiceKeyWithCompany(input.adapter, input.apiKey);
+    const result = await checkVoiceKeyWithCompany(input.adapter, input.apiKey, input.region);
     if (!result.ok) return NextResponse.json({ error: result.message }, { status: STATUS[result.reason] });
     // The company knows the key: its own list of models, so the super admin ticks them instead of typing ids (null: typed)
     const company = voiceKeyCompanyInfo(input.adapter);
