@@ -462,6 +462,8 @@ export interface ServerVoiceChoice {
   description: string;
   languages: string[];
   previewUrl: string | null;
+  /** The one speaking model the voice belongs to, when the company ties each voice to a model (Groq's Orpheus). */
+  model?: string;
 }
 
 /** The server's own speaking provider that a super admin looks at (never a person's key): anything else reads as not found. */
@@ -480,13 +482,18 @@ const serverPreviewPath = (providerId: string, voiceId: string) => `/api/admin/v
  */
 export async function listServerVoices(providerId: string): Promise<ServerVoiceChoice[]> {
   const provider = await serverSpeaker(providerId);
-  return (await listedFor(provider)).map((voice) => ({
-    voiceId: voice.voiceId,
-    name: voice.name,
-    description: voice.description,
-    languages: voice.languages,
-    previewUrl: !voice.preview ? null : voice.previewNeedsKey ? serverPreviewPath(provider.id, voice.voiceId) : voice.preview,
-  }));
+  const models = readModels(provider.models).filter((entry) => entry.kind === 'speech').map((entry) => entry.id);
+  // A voice tied to one model (Groq's Orpheus) is offered only when the provider lists that model, and bots on Universe AI speak it with that model
+  return (await listedFor(provider))
+    .filter((voice) => !voice.model || models.includes(voice.model))
+    .map((voice) => ({
+      voiceId: voice.voiceId,
+      name: voice.name,
+      description: voice.description,
+      languages: voice.languages,
+      previewUrl: !voice.preview ? null : voice.previewNeedsKey ? serverPreviewPath(provider.id, voice.voiceId) : voice.preview,
+      ...(voice.model ? { model: voice.model } : {}),
+    }));
 }
 
 /** One voice's free sample from a server provider that keeps it behind its key. */
