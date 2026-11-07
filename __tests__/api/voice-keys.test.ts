@@ -168,6 +168,7 @@ describe('the list', () => {
       expect.objectContaining({ adapter: 'cartesia', label: 'Cartesia', recognition: true, speech: true }),
       expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: true, logo: 'deepgram' }),
       expect.objectContaining({ adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true, logo: 'elevenlabs', docs: 'https://elevenlabs.io/docs' }),
+      expect.objectContaining({ adapter: 'fal', label: 'fal', recognition: true, speech: false }),
       expect.objectContaining({ adapter: 'fish', label: 'Fish Audio', recognition: false, speech: true, logo: 'fish-audio' }),
       expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: false }),
       // The speech server on a person's own computer is last, and is not a company (game #1874)
@@ -182,6 +183,7 @@ describe('the list', () => {
       'Listens and speaks. Uses your account at cartesia.ai.',
       'Listens and speaks. Uses your account at deepgram.com.',
       'Listens and speaks. Uses your account at elevenlabs.io.',
+      'Listens. Uses your account at fal.ai.',
       'Speaks. Uses your account at fish.audio.',
       'Listens. Uses your account at soniox.com.',
       'Speaches, Kokoro-FastAPI, your own Whisper: anything that answers /v1/audio.',

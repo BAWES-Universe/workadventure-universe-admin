@@ -122,6 +122,12 @@ describe('Load models for a voice key', () => {
     expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(200);
     answer(401, '{"err_code":"INVALID_AUTH","err_msg":"Invalid credentials."}');
     expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(422);
+    // fal answers a usual API key (no billing permission) with a 403, and a wrong key with a 401
+    answer(403, '{"error":{"type":"authorization_error","message":"Access denied"}}');
+    expect((await send({ adapter: 'fal', apiKey: KEY })).status).toBe(200);
+    expect(fetchMock.mock.calls.at(-1)[0]).toBe('https://api.fal.ai/v1/account/billing');
+    answer(401, '{"error":{"type":"authorization_error","message":"Authentication required"}}');
+    expect((await send({ adapter: 'fal', apiKey: KEY })).status).toBe(422);
   });
 
   it('Fish Audio: asks its free credit call, lists its models, and refuses a wrong key with its own name', async () => {
@@ -188,6 +194,7 @@ describe('Load models for a voice key', () => {
       ['soniox', [{ id: 'stt-rt-v6', label: 'Soniox real-time v6', kind: 'recognition' }]],
       ['async', [{ id: 'async_flash_v1.0', label: 'Async Flash v1.0', kind: 'speech' }, { id: 'async_flash_v1.5', label: 'Async Flash v1.5', kind: 'speech' }, { id: 'async_pro_v1.0', label: 'Async Pro v1.0', kind: 'speech' }]],
       ['camb', [{ id: 'mars-flash', label: 'MARS Flash', kind: 'speech' }, { id: 'mars-pro', label: 'MARS Pro', kind: 'speech' }, { id: 'mars-instruct', label: 'MARS Instruct', kind: 'speech' }]],
+      ['fal', [{ id: 'fal-ai/wizper', label: 'Wizper (Whisper large v3)', kind: 'recognition' }, { id: 'fal-ai/whisper', label: 'Whisper', kind: 'recognition' }]],
       ['bland', [{ id: 'btts-3', label: 'Bland TTS v3', kind: 'speech' }, { id: 'btts-2', label: 'Bland TTS v2', kind: 'speech' }]],
       ['assemblyai', [{ id: 'universal-3-6-pro', label: 'Universal-3.6 Pro', kind: 'recognition' }, { id: 'universal-streaming-multilingual', label: 'Universal Streaming Multilingual', kind: 'recognition' }, { id: 'universal-streaming-english', label: 'Universal Streaming English', kind: 'recognition' }]],
       ['deepgram', [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }, { id: 'aura-2', label: 'Aura 2', kind: 'speech' }]],
