@@ -14,6 +14,7 @@ import { useToast } from '@/components/ui/toast';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { AI_KEY_KINDS, kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 import { LoadError, PageHeader } from '../../../components/ds';
+import { VOICE_JOB_TITLES } from '../../../components/ds/voice-model-picker';
 import { AiKeyFailure, aiKeyError, aiKeyFailureText } from '../../../hooks/use-ai-keys';
 import { useVoiceCompanies, voiceCompanyKind } from '../../../hooks/use-voice-keys';
 import type { VoiceModel } from '@/lib/voice-providers';
@@ -274,8 +275,9 @@ export default function AddAiKeyPage() {
                 // A server with no key sends none
                 ...(apiKey.trim() ? { apiKey } : {}),
                 ...(ownSpeech ? { address } : {}),
-                recognition: picked.some((entry) => entry.kind === 'recognition'),
-                speech: picked.some((entry) => entry.kind === 'speech'),
+                // A talking model listens and speaks in one (game #1910)
+                recognition: picked.some((entry) => entry.kind === 'recognition' || entry.kind === 'talk'),
+                speech: picked.some((entry) => entry.kind === 'speech' || entry.kind === 'talk'),
                 models: picked,
               })
             : JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey, ...(model ? { model: model.trim() } : {}), name }),
@@ -491,20 +493,20 @@ export default function AddAiKeyPage() {
             )}
             {models.status === 'voice' && (
               <>
-                {/* One key from a company that listens and speaks is a bot's whole voice (#1911) */}
-                {picked.some((entry) => entry.kind === 'recognition') && picked.some((entry) => entry.kind === 'speech') && (
+                {/* One key from a company that listens and speaks is a bot's whole voice (#1911); a talking model does both (game #1910) */}
+                {picked.some((entry) => entry.kind === 'recognition' || entry.kind === 'talk') && picked.some((entry) => entry.kind === 'speech' || entry.kind === 'talk') && (
                   <p className="flex items-start gap-2 rounded-2xl border border-foreground/10 bg-foreground/[.04] px-3.5 py-2.5 text-[13px]" data-testid="voice-one-key">
                     <Check size={16} aria-hidden="true" className="mt-0.5 shrink-0 text-[#4ade80]" />
                     <span>{ownSpeech ? 'This server listens and speaks' : 'This key listens and speaks'}, so it’s all a bot needs. On a bot’s Voice row you can still split: listen with one company, speak with another.</span>
                   </p>
                 )}
                 {unsure.length === 0 && <p className={FIELD_HINT}>Nothing to pick here. Each bot picks one of these on its own page. When you lend the key, you can limit which ones bots there may use.</p>}
-                {(['recognition', 'speech'] as const).map((job) => {
+                {VOICE_JOB_TITLES.map(({ kind: job, title }) => {
                   const list = picked.filter((entry) => entry.kind === job);
                   return (
                     list.length > 0 && (
                       <div key={job} className="grid gap-1.5" data-testid={`voice-models-${job}`}>
-                        <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{job === 'recognition' ? 'Listens' : 'Speaks'}</h3>
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{title}</h3>
                         {ownSpeech && job === 'recognition' && <p className={FIELD_HINT} data-testid="own-speech-pause">It hears a person once they pause, so no words show while they talk.</p>}
                         <ul className="m-0 grid list-none gap-0 rounded-2xl border border-foreground/10 p-0">
                           {list.map((entry) => (
