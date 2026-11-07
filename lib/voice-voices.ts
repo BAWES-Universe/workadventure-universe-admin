@@ -226,7 +226,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec, speechModels: strin
       for (const { voice, groupModel } of entries) {
         if (typeof voice !== 'object' || voice === null) throw unreadable(call);
         // A whole-number id (CAMB.AI) is kept as its digits
-        const rawId = (voice as Record<string, unknown>)[spec.id];
+        const rawId = (Array.isArray(spec.id) ? spec.id : [spec.id]).map((field) => (voice as Record<string, unknown>)[field]).find((value) => value != null && value !== '');
         const id = typeof rawId === 'number' && Number.isSafeInteger(rawId) && rawId >= 0 ? String(rawId) : rawId;
         if (typeof id !== 'string' || id.length === 0 || id.length > 255) throw unreadable(call);
         const fields = voice as Record<string, unknown>;
