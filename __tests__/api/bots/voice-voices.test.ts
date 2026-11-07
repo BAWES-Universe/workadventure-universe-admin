@@ -852,6 +852,30 @@ describe('NVIDIA\'s voices', () => {
   });
 });
 
+describe('MiniMax\'s voices', () => {
+  it('are its own voices, then the account\'s cloned and designed ones, from one POST', async () => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    providers = [key({ adapter: 'minimax', name: 'MiniMax', models: [{ id: 'speech-2.8-turbo', label: 'Turbo', kind: 'speech' }] })];
+    fetchMock.mockImplementation(async () =>
+      json({
+        system_voice: [{ voice_id: 'English_Graceful_Lady', voice_name: 'Graceful Lady', description: ['Elegant', 'Calm'] }],
+        voice_cloning: [{ voice_id: 'my-clone', description: [], created_time: '2026-11-01' }],
+        voice_generation: null,
+        base_resp: { status_code: 0, status_msg: 'success' },
+      }),
+    );
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description])).toEqual([
+      ['English_Graceful_Lady', 'Graceful Lady', 'Elegant, Calm'],
+      ['my-clone', 'my-clone', ''],
+    ]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.minimax.io/v1/get_voice');
+    expect(init).toMatchObject({ method: 'POST', headers: expect.objectContaining({ Authorization: `Bearer ${SECRET}` }) });
+    expect(JSON.parse(init.body)).toEqual({ voice_type: 'all' });
+  });
+});
+
 describe('Groq\'s voices', () => {
   const ENGLISH = { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' };
   const ARABIC = { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' };

@@ -33,7 +33,18 @@ async function ask(company: VoiceKeyCompanyInfo, apiKey: string): Promise<Verdic
       signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
       cache: 'no-store',
     });
-    if (response.status >= 200 && response.status < 300) return 'accepted';
+    if (response.status >= 200 && response.status < 300) {
+      if (!check.refusedWhen) return 'accepted';
+      // The company says inside a 200 whether it took the key
+      let body: unknown = null;
+      try {
+        body = JSON.parse((await response.text().catch(() => '')).slice(0, 100_000));
+      } catch {
+        body = null;
+      }
+      const code = check.refusedWhen.field.split('.').reduce<unknown>((value, field) => (typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[field] : undefined), body);
+      return typeof code === 'number' && check.refusedWhen.codes.includes(code) ? 'refused' : 'accepted';
+    }
     if (check.alsoAccepted && response.status === check.alsoAccepted.status) {
       const wanted = check.alsoAccepted.includes;
       if (wanted === undefined) return 'accepted';

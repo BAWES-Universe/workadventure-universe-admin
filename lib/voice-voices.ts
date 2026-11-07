@@ -199,8 +199,13 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
       const answer = await getJson(call, [query, paged].filter(Boolean).join('&'), body);
       if (typeof answer !== 'object' || answer === null) throw unreadable(call);
       // An empty `list`: the answer is the list itself (CAMB.AI); `a.b`: a field inside a field (Neuphonic's data.voices)
-      const voices = spec.list === '' ? answer : spec.list.split('.').reduce<unknown>((at, field) => (typeof at === 'object' && at !== null ? (at as Record<string, unknown>)[field] : undefined), answer);
-      if (!Array.isArray(voices)) throw unreadable(call);
+      const at = (path: string) => path.split('.').reduce<unknown>((value, field) => (typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[field] : undefined), answer);
+      const first = spec.list === '' ? answer : at(spec.list);
+      if (!Array.isArray(first)) throw unreadable(call);
+      // More voices in other fields of the same answer (MiniMax's cloned and designed voices): one that is absent holds none
+      const others = (spec.alsoLists ?? []).map((path) => at(path) ?? []);
+      if (others.some((list) => !Array.isArray(list))) throw unreadable(call);
+      const voices = [...first, ...(others as unknown[][]).flat()];
       // Grouped by model (Together AI): each group's voices, each with the group's model
       const entries = spec.groups ? voices.flatMap((group) => groupVoices(call, spec.groups!, group)) : voices.map((voice) => ({ voice, groupModel: undefined }));
       for (const { voice, groupModel } of entries) {

@@ -117,6 +117,11 @@ describe('Load models for a voice key', () => {
     expect((await send({ adapter: 'elevenlabs', apiKey: KEY })).status).toBe(200);
     answer(401, '{"detail":{"status":"invalid_api_key"}}');
     expect((await send({ adapter: 'elevenlabs', apiKey: KEY })).status).toBe(422);
+    // MiniMax answers a wrong key with a 200 that says 1004 inside, and a right one with 0
+    answer(200, '{"system_voice":[],"base_resp":{"status_code":1004,"status_msg":"login fail: Please carry the API secret key"}}');
+    expect((await send({ adapter: 'minimax', apiKey: KEY })).status).toBe(422);
+    answer(200, '{"system_voice":[],"base_resp":{"status_code":0,"status_msg":"success"}}');
+    expect((await send({ adapter: 'minimax', apiKey: KEY })).status).toBe(200);
     // Deepgram answers a key without projects:read with a 403, and a wrong key with a 401
     answer(403, '{"err_code":"FORBIDDEN","err_msg":"Insufficient permissions."}');
     expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(200);
@@ -208,6 +213,7 @@ describe('Load models for a voice key', () => {
       ['speechmatics', [{ id: 'linden-1', label: 'Linden 1', kind: 'recognition' }, { id: 'speechmatics', label: 'Speechmatics TTS (preview)', kind: 'speech' }]],
       ['together', [{ id: 'openai/whisper-large-v3', label: 'Whisper Large v3', kind: 'recognition' }, { id: 'hexgrad/Kokoro-82M', label: 'Kokoro 82M', kind: 'speech' }, { id: 'canopylabs/orpheus-3b-0.1-ft', label: 'Orpheus 3B', kind: 'speech' }]],
       ['nvidia', [{ id: 'nemotron-asr-streaming', label: 'Nemotron ASR Streaming', kind: 'recognition' }, { id: 'magpie-tts-multilingual', label: 'Magpie TTS Multilingual', kind: 'speech' }]],
+      ['minimax', [{ id: 'speech-2.8-turbo', label: 'Speech 2.8 Turbo', kind: 'speech' }, { id: 'speech-2.8-hd', label: 'Speech 2.8 HD', kind: 'speech' }, { id: 'speech-2.6-turbo', label: 'Speech 2.6 Turbo', kind: 'speech' }, { id: 'speech-2.6-hd', label: 'Speech 2.6 HD', kind: 'speech' }, { id: 'speech-02-turbo', label: 'Speech 02 Turbo', kind: 'speech' }, { id: 'speech-02-hd', label: 'Speech 02 HD', kind: 'speech' }]],
       ['rime', [{ id: 'coda', label: 'Coda', kind: 'speech' }, { id: 'mistv3', label: 'Mist v3', kind: 'speech' }, { id: 'mistv2', label: 'Mist v2', kind: 'speech' }]],
       ['hume', [{ id: 'octave-2', label: 'Octave 2', kind: 'speech' }, { id: 'octave-1', label: 'Octave 1', kind: 'speech' }]],
       ['bland', [{ id: 'btts-3', label: 'Bland TTS v3', kind: 'speech' }, { id: 'btts-2', label: 'Bland TTS v2', kind: 'speech' }]],

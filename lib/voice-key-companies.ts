@@ -82,6 +82,8 @@ export interface VoiceListSpec {
   body?: Record<string, unknown>;
   /** The field holding the voices (`a.b` for a field inside a field: Neuphonic), or '' when the answer is the list itself (CAMB.AI). */
   list: string;
+  /** More fields in the same answer holding voices (MiniMax: the account's cloned and designed voices). One that is absent holds none. */
+  alsoLists?: string[];
   /**
    * How the next page is asked for: a token the answer gives (`token`) or the last voice's id (`after`), sent as `param`, while
    * `more` says there is more (with no `more`, while the answer gives a token: Mistral); or a page number (`page`, from 1, in the path) while `more` says so, or, when the company doesn't
@@ -171,6 +173,11 @@ export interface VoiceKeyCompanyEntry {
      * and when `includes` is given, only with that text in the answer.
      */
     alsoAccepted?: { status: number; includes?: string };
+    /**
+     * A company that answers a wrong key with 200 and says so inside (MiniMax: `base_resp.status_code` 1004): the field holding its
+     * own code, and the codes that mean the key is refused.
+     */
+    refusedWhen?: { field: string; codes: number[] };
   };
 }
 
@@ -625,6 +632,48 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     docs: 'https://dev.meta.ai/docs/api-reference/voice/realtime',
     // The Model API's model list, free with the key as a bearer
     check: { url: 'https://api.meta.ai/v1/models', header: 'Authorization', prefix: 'Bearer ' },
+  }),
+  company({
+    adapter: 'minimax',
+    label: 'MiniMax',
+    jobs: {
+      speech: {
+        // Text to speech, one streamed request per reply (POST /v1/t2a_v2), as Pipecat's MiniMaxHttpTTSService does. Speech 2.8
+        // Turbo is Pipecat's default; the others are MiniMax's HD and earlier models (https://platform.minimax.io/docs)
+        host: 'api.minimax.io',
+        models: [
+          { id: 'speech-2.8-turbo', label: 'Speech 2.8 Turbo' },
+          { id: 'speech-2.8-hd', label: 'Speech 2.8 HD' },
+          { id: 'speech-2.6-turbo', label: 'Speech 2.6 Turbo' },
+          { id: 'speech-2.6-hd', label: 'Speech 2.6 HD' },
+          { id: 'speech-02-turbo', label: 'Speech 02 Turbo' },
+          { id: 'speech-02-hd', label: 'Speech 02 HD' },
+        ],
+        // POST /v1/get_voice: MiniMax's own voices, then the account's cloned and designed ones, in one answer
+        voices: {
+          path: '/v1/get_voice',
+          body: { voice_type: 'all' },
+          list: 'system_voice',
+          alsoLists: ['voice_cloning', 'voice_generation'],
+          paging: { kind: 'none' },
+          id: 'voice_id',
+          name: 'voice_name',
+          description: [{ join: ['description[]'] }],
+          languages: [],
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at minimax.io.',
+    step: 'On platform.minimax.io, open Account Management, then API Keys, and create a key.',
+    docs: 'https://platform.minimax.io/docs',
+    // MiniMax's own voice list, free to read. A wrong key still answers 200, with 1004 in base_resp
+    check: {
+      url: 'https://api.minimax.io/v1/get_voice',
+      header: 'Authorization',
+      prefix: 'Bearer ',
+      body: { voice_type: 'system' },
+      refusedWhen: { field: 'base_resp.status_code', codes: [1004] },
+    },
   }),
   company({
     adapter: 'mistral',
