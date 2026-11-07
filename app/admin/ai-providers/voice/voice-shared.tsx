@@ -39,6 +39,12 @@ export interface ServerVoiceProvider {
 /** The companies a super admin can add, grouped by what each does in Universe (the game's connectors: Soniox and Deepgram listen, ElevenLabs and Cartesia speak). */
 export const COMPANY_JOBS: Record<string, VoiceJob> = { soniox: 'recognition', deepgram: 'recognition', elevenlabs: 'speech', cartesia: 'speech' };
 
+/**
+ * The company we suggest for each job, marked Recommended where a company is picked. Only a suggestion: whoever runs the server
+ * (Universe is open source) picks any company for Universe AI, and nothing else follows from this.
+ */
+export const RECOMMENDED_COMPANY: Record<VoiceJob, string> = { recognition: 'soniox', speech: 'elevenlabs' };
+
 /** The company's own address, as the bot server calls it when nothing else is typed. */
 export const COMPANY_HOST: Record<string, string> = { soniox: 'stt-rt.soniox.com', deepgram: 'api.deepgram.com', elevenlabs: 'api.elevenlabs.io', cartesia: 'api.cartesia.ai' };
 
@@ -65,6 +71,27 @@ export function withStartingModel(models: VoiceModel[], job: VoiceJob, id: strin
   if (!picked) return models;
   const first = models.findIndex((model) => model.kind === job);
   return [...models.slice(0, first), picked, ...models.slice(first).filter((model) => model !== picked)];
+}
+
+/**
+ * What saving a company and model as Universe AI's default does to bots, for the line under the Change sheets. New bots start
+ * with it. Bots already on that same provider move to the picked model (lib/bot-voice.ts followUniverseAi) and keep their voice;
+ * bots on another of the server's providers stay there, since a voice belongs to its company.
+ */
+export function defaultChangeLine(providers: Pick<ServerVoiceProvider, 'id' | 'name' | 'bots'>[], picked: Pick<ServerVoiceProvider, 'id' | 'name' | 'bots'> | null, job: VoiceJob, modelChanged: boolean): string {
+  const start = job === 'recognition' ? 'Bots that turn voice on from now listen with it.' : 'Bots that turn voice on from now start with it.';
+  const lines = [start];
+  const here = picked ? picked.bots[job] : 0;
+  if (picked && here > 0 && modelChanged) {
+    const move = here === 1 ? 'moves' : 'move';
+    lines.push(job === 'recognition' ? `The ${bots(here)} listening with ${picked.name} ${move} to this model.` : `The ${bots(here)} speaking with ${picked.name} ${move} to this model and ${here === 1 ? 'keeps its voice' : 'keep their voices'}.`);
+  }
+  const elsewhere = providers.filter((provider) => provider.id !== picked?.id && provider.bots[job] > 0);
+  for (const provider of elsewhere) {
+    const count = provider.bots[job];
+    lines.push(`The ${bots(count)} ${job === 'recognition' ? 'listening' : 'speaking'} with ${provider.name} ${count === 1 ? 'stays' : 'stay'} on ${provider.name}.`);
+  }
+  return lines.join(' ');
 }
 
 export const bots = (value: number) => `${value.toLocaleString('en')} ${value === 1 ? 'bot' : 'bots'}`;
