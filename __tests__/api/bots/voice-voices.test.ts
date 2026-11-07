@@ -722,19 +722,29 @@ describe('Smallest AI\'s voices', () => {
     fetchMock.mockImplementation(async (url: string) => json(lists[url]));
   });
 
-  it('are read model by model, each voice with its own model, and only for the models the key has', async () => {
+  it('are read model by model, asking only for the models the key has, each voice with its own model', async () => {
     providers = [smallest(['lightning_v3.1_pro'])];
     const list = await (await voices('part=speech&source=key-1')).json();
     expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.languages, voice.model])).toEqual([
       ['kaitlyn', 'Kaitlyn', 'female, young, american, support, sales', ['en'], 'lightning_v3.1_pro'],
       ['layla', 'Layla', 'female', ['ar', 'en'], 'lightning_v3.1_pro'],
     ]);
-    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(Object.keys(lists));
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://api.smallest.ai/waves/v1/lightning-v3.1-pro/get_voices']);
     expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
 
     clearVoiceListCache();
+    fetchMock.mockClear();
     providers = [smallest(['lightning_v3.1'])];
     expect((await (await voices('part=speech&source=key-1')).json()).map((voice: Row) => [voice.voiceId, voice.model])).toEqual([['sophia', 'lightning_v3.1']]);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://api.smallest.ai/waves/v1/lightning-v3.1/get_voices']);
+  });
+
+  it('still list when the account can\'t use a model it doesn\'t have: that model is never asked', async () => {
+    fetchMock.mockImplementation(async (url: string) => (url.includes('lightning-v3.1-pro') ? json({ message: 'Forbidden' }, 403) : json(lists[url])));
+    providers = [smallest(['lightning_v3.1'])];
+    const response = await voices('part=speech&source=key-1');
+    expect(response.status).toBe(200);
+    expect((await response.json()).map((voice: Row) => voice.voiceId)).toEqual(['sophia']);
   });
 });
 
