@@ -91,6 +91,11 @@ export interface VoiceListSpec {
   paging: { kind: 'token' | 'after'; param: string; next: string; more?: string } | { kind: 'page'; more?: string; first?: 0 | 1 } | { kind: 'none' };
   /** Asked one after the other, each added to `path` (Fish: the person's own voices, then the public library). A voice met twice is kept once. */
   passes?: string[];
+  /**
+   * The company lists each model's voices at that model's own path (Smallest AI): each is asked in turn instead of `path`, and its
+   * voices belong to that model. A voice met under two models is kept once, with both.
+   */
+  perModel?: { model: string; path: string }[];
   /** A voice is kept only when each of these fields, when the company sends it, has this value. */
   keep?: Record<string, string>;
   /** The field naming the one speaking model a voice is listed for (Rime lists each voice once a model): the voice is kept once, with every model it has. */
@@ -735,6 +740,49 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     docs: 'https://docs.sarvam.ai',
     // The workspace's own cloned voices, free to read
     check: { url: 'https://api.sarvam.ai/voices?limit=1', header: 'api-subscription-key', prefix: '' },
+  }),
+  company({
+    adapter: 'smallest',
+    label: 'Smallest AI',
+    jobs: {
+      recognition: {
+        // Pulse's live hearing socket (wss://api.smallest.ai/waves/v1/stt/live), as Pipecat's SmallestSTTService does. Pulse is
+        // Pipecat's default; Pulse 2 hears English only (https://docs.smallest.ai)
+        host: 'api.smallest.ai',
+        models: [
+          { id: 'pulse', label: 'Pulse' },
+          { id: 'pulse-2', label: 'Pulse 2 (English)' },
+        ],
+      },
+      speech: {
+        // Lightning over Smallest's socket (wss://api.smallest.ai/waves/v1/tts/live), as Pipecat's SmallestTTSService does.
+        // Lightning v3.1 Pro (Pipecat's default) speaks 29 languages, Arabic among them; Lightning v3.1 speaks 12
+        host: 'api.smallest.ai',
+        models: [
+          { id: 'lightning_v3.1_pro', label: 'Lightning v3.1 Pro' },
+          { id: 'lightning_v3.1', label: 'Lightning v3.1' },
+        ],
+        // GET /waves/v1/{model}/get_voices: each model's voices at its own path, a voice working only with its own model
+        voices: {
+          path: '/waves/v1/lightning-v3.1-pro/get_voices',
+          perModel: [
+            { model: 'lightning_v3.1_pro', path: '/waves/v1/lightning-v3.1-pro/get_voices' },
+            { model: 'lightning_v3.1', path: '/waves/v1/lightning-v3.1/get_voices' },
+          ],
+          list: 'voices',
+          paging: { kind: 'none' },
+          id: 'voiceId',
+          name: 'displayName',
+          description: [{ join: ['tags.gender', 'tags.age', 'tags.accent', 'tags.usecases[]'] }],
+          languages: ['tags.language[]', 'tags.language'],
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at smallest.ai.',
+    step: 'On app.smallest.ai, open API Keys and create a key.',
+    docs: 'https://docs.smallest.ai',
+    // Lightning v3.1 Pro's voice list, free with the key as a bearer
+    check: { url: 'https://api.smallest.ai/waves/v1/lightning-v3.1-pro/get_voices', header: 'Authorization', prefix: 'Bearer ' },
   }),
   company({
     adapter: 'soniox',

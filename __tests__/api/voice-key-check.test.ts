@@ -203,6 +203,7 @@ describe('Load models for a voice key', () => {
       ['neuphonic', [{ id: 'neuphonic', label: 'Neuphonic TTS', kind: 'speech' }]],
       ['resemble', [{ id: 'resemble', label: 'Resemble TTS', kind: 'speech' }]],
       ['sarvam', [{ id: 'saaras:v4', label: 'Saaras v4', kind: 'recognition' }, { id: 'saaras:v3', label: 'Saaras v3', kind: 'recognition' }, { id: 'bulbul:v3', label: 'Bulbul v3', kind: 'speech' }, { id: 'bulbul:v4-flash', label: 'Bulbul v4 Flash', kind: 'speech' }]],
+      ['smallest', [{ id: 'pulse', label: 'Pulse', kind: 'recognition' }, { id: 'pulse-2', label: 'Pulse 2 (English)', kind: 'recognition' }, { id: 'lightning_v3.1_pro', label: 'Lightning v3.1 Pro', kind: 'speech' }, { id: 'lightning_v3.1', label: 'Lightning v3.1', kind: 'speech' }]],
       ['rime', [{ id: 'coda', label: 'Coda', kind: 'speech' }, { id: 'mistv3', label: 'Mist v3', kind: 'speech' }, { id: 'mistv2', label: 'Mist v2', kind: 'speech' }]],
       ['hume', [{ id: 'octave-2', label: 'Octave 2', kind: 'speech' }, { id: 'octave-1', label: 'Octave 1', kind: 'speech' }]],
       ['bland', [{ id: 'btts-3', label: 'Bland TTS v3', kind: 'speech' }, { id: 'btts-2', label: 'Bland TTS v2', kind: 'speech' }]],
@@ -212,6 +213,8 @@ describe('Load models for a voice key', () => {
       ['fish', [{ id: 's2.1-pro-free', label: 'S2.1 Pro (free)', kind: 'speech' }, { id: 's2.1-pro', label: 'S2.1 Pro', kind: 'speech' }]],
       ['elevenlabs', [{ id: 'scribe_v2_realtime', label: 'Scribe v2 Realtime', kind: 'recognition' }, { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }, { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }]],
     ] as const) {
+      // One person per company, so the limit on tries never decides how many companies this can cover
+      (getSessionUser as jest.Mock).mockResolvedValue({ id: `u-${people}-${adapter}`, email: 'ana@example.com' });
       answer(200);
       const response = await send({ adapter, apiKey: KEY });
       expect([adapter, response.status, await response.json()]).toEqual([adapter, 200, { ok: true, models }]);

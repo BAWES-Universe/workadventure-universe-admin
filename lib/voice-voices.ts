@@ -178,10 +178,13 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
   const out: Listed[] = [];
   const seen = new Set<string>();
   const host = new URL(call.base).host;
-  for (const pass of spec.passes ?? ['']) {
+  const runs = spec.perModel
+    ? spec.perModel.map((run) => ({ path: run.path, pass: '', model: run.model }))
+    : (spec.passes ?? ['']).map((pass) => ({ path: spec.path, pass, model: undefined }));
+  for (const { path, pass, model: runModel } of runs) {
     let next: string | null = null;
     for (let page = 1; out.length < MAX_VOICES && page <= MAX_PAGES; page++) {
-      const query = [spec.path.replace('{size}', String(PAGE_SIZE)).replace('{page}', String(spec.paging.kind === 'page' && spec.paging.first === 0 ? page - 1 : page)), pass].filter(Boolean).join('&');
+      const query = [path.replace('{size}', String(PAGE_SIZE)).replace('{page}', String(spec.paging.kind === 'page' && spec.paging.first === 0 ? page - 1 : page)), pass].filter(Boolean).join('&');
       const paged = (spec.paging.kind === 'token' || spec.paging.kind === 'after') && next !== null ? `${spec.paging.param}=${encodeURIComponent(next)}` : '';
       const body = spec.body ? Object.fromEntries(Object.entries(spec.body).map(([field, value]) => [field, value === '{size}' ? PAGE_SIZE : value])) : undefined;
       const answer = await getJson(call, [query, paged].filter(Boolean).join('&'), body);
@@ -198,7 +201,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
         const fields = voice as Record<string, unknown>;
         if (spec.keep && Object.entries(spec.keep).some(([field, wanted]) => fields[field] != null && fields[field] !== wanted)) continue;
         // A voice the company lists once for each model it speaks in (Rime) is kept once, with every model it has
-        const model = spec.model ? textAt(voice, spec.model, 255) : '';
+        const model = runModel ?? (spec.model ? textAt(voice, spec.model, 255) : '');
         if (seen.has(id)) {
           const kept = model ? out.find((entry) => entry.voiceId === id) : undefined;
           if (kept?.models && !kept.models.includes(model)) kept.models.push(model);

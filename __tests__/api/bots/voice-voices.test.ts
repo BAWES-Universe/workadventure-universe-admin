@@ -705,6 +705,39 @@ describe('Sarvam\'s voices', () => {
   });
 });
 
+describe('Smallest AI\'s voices', () => {
+  const smallest = (models: string[]) => key({ adapter: 'smallest', name: 'Smallest', models: models.map((id) => ({ id, label: id, kind: 'speech' })) });
+  const lists: Record<string, unknown> = {
+    'https://api.smallest.ai/waves/v1/lightning-v3.1-pro/get_voices': {
+      voices: [
+        { voiceId: 'kaitlyn', displayName: 'Kaitlyn', tags: { language: ['en'], accent: 'american', gender: 'female', age: 'young', usecases: ['support', 'sales'] } },
+        { voiceId: 'layla', displayName: 'Layla', tags: { language: ['ar', 'en'], gender: 'female' } },
+      ],
+    },
+    'https://api.smallest.ai/waves/v1/lightning-v3.1/get_voices': { voices: [{ voiceId: 'sophia', displayName: 'Sophia', tags: { language: ['en'], gender: 'female' } }] },
+  };
+
+  beforeEach(() => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async (url: string) => json(lists[url]));
+  });
+
+  it('are read model by model, each voice with its own model, and only for the models the key has', async () => {
+    providers = [smallest(['lightning_v3.1_pro'])];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.languages, voice.model])).toEqual([
+      ['kaitlyn', 'Kaitlyn', 'female, young, american, support, sales', ['en'], 'lightning_v3.1_pro'],
+      ['layla', 'Layla', 'female', ['ar', 'en'], 'lightning_v3.1_pro'],
+    ]);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(Object.keys(lists));
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+
+    clearVoiceListCache();
+    providers = [smallest(['lightning_v3.1'])];
+    expect((await (await voices('part=speech&source=key-1')).json()).map((voice: Row) => [voice.voiceId, voice.model])).toEqual([['sophia', 'lightning_v3.1']]);
+  });
+});
+
 describe('Groq\'s voices', () => {
   const ENGLISH = { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' };
   const ARABIC = { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' };
