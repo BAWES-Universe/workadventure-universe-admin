@@ -90,6 +90,18 @@ describe('the Inworld entry', () => {
   });
 });
 
+describe('the Ultravox entry', () => {
+  it('talks live only, with its own model, listing its voices with the key page by page, checked for free with X-API-Key', () => {
+    const ultravox = voiceKeyCompanyInfo('ultravox');
+    expect(ultravox?.does).toEqual({ recognition: false, speech: false, talk: true });
+    expect(ultravox?.models).toEqual([{ id: 'ultravox-v0.7', label: 'Ultravox v0.7', kind: 'talk' }]);
+    expect(ultravox?.jobs.talk?.voices?.paging).toEqual({ kind: 'token', param: 'cursor', next: 'next', nextIsLink: true });
+    expect(ultravox?.jobs.talk?.voices?.previewNeedsKey).toBe(true);
+    expect(ultravox?.check).toEqual({ url: 'https://api.ultravox.ai/api/voices?pageSize=1', header: 'X-API-Key', prefix: '' });
+    expect(JSON.stringify(ultravox)).not.toMatch(/recommend/i);
+  });
+});
+
 describe('the xAI entry', () => {
   it('talks live only, with its Grok Voice models and its 28 built-in voices, Eve first', () => {
     const xai = voiceKeyCompanyInfo('xai');
