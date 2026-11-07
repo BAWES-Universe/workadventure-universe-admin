@@ -209,7 +209,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
         continue;
       }
       const token = (answer as Record<string, unknown>)[spec.paging.next];
-      if (more !== true || typeof token !== 'string' || token === '') break;
+      if ((spec.paging.more && more !== true) || typeof token !== 'string' || token === '') break;
       next = token;
     }
   }
