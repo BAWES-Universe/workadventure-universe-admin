@@ -230,6 +230,7 @@ describe('the list', () => {
       expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: false }),
       expect.objectContaining({ adapter: 'ultravox', label: 'Ultravox', recognition: false, speech: false, talk: true, account: null }),
       expect.objectContaining({ adapter: 'xai', label: 'xAI', recognition: false, speech: false, talk: true, logo: 'xai' }),
+      expect.objectContaining({ adapter: 'zoom', label: 'Zoom', recognition: false, speech: false, talk: true, account: null }),
     ]);
     // Its line says only the jobs Universe runs for it, the same neutral shape for every company
     expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual([
@@ -245,6 +246,7 @@ describe('the list', () => {
       'Listens. Uses your account at soniox.com.',
       'Talks live. Uses your account at ultravox.ai.',
       'Talks live. Uses your account at console.x.ai.',
+      'Talks live, in English. Uses your Zoom AI Services account.',
     ]);
     expect(JSON.stringify(body)).not.toContain('apiKeyEncrypted');
   });
