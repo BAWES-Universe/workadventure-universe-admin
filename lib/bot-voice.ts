@@ -111,7 +111,8 @@ export function borrowUniverseAi(profile: VoiceProfile, providers: Map<string, V
     if (part === 'recognition') return { providerId: now.id, model: models[0].id } as VoiceProfile[P];
     if (!now.defaultVoiceId) return choice;
     // The starting voice speaks with its own model when the company names it (Groq's Orpheus); a voice Rime lists is offered
-    // as the starting voice only when it speaks the starting model (listServerVoices)
+    // as the starting voice only when it speaks the starting model (listServerVoices), and a new starting model drops it
+    // (updateVoiceProvider), so the starting model is always one it speaks
     const tied = fixedVoiceModel(now.adapter, now.defaultVoiceId);
     const model = tied ? models.find((entry) => entry.id === tied) : models[0];
     if (!model) return choice;
