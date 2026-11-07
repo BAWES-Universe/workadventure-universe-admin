@@ -79,6 +79,33 @@ describe('the Google entry', () => {
   });
 });
 
+describe('the Inworld entry', () => {
+  it('talks live only, speaking with its TTS models and listing its voices with the key, checked for free with Basic', () => {
+    const inworld = voiceKeyCompanyInfo('inworld');
+    expect(inworld?.does).toEqual({ recognition: false, speech: false, talk: true });
+    expect(inworld?.models).toEqual([
+      { id: 'inworld-tts-2', label: 'Inworld TTS 2', kind: 'talk' },
+      { id: 'inworld-tts-2-flash', label: 'Inworld TTS 2 Flash', kind: 'talk' },
+    ]);
+    expect(inworld?.jobs.talk?.fixedVoices).toBeUndefined();
+    expect(inworld?.jobs.talk?.voices?.paging).toEqual({ kind: 'token', param: 'pageToken', next: 'nextPageToken' });
+    expect(inworld?.check).toEqual({ url: 'https://api.inworld.ai/voices/v1/voices?pageSize=1', header: 'Authorization', prefix: 'Basic ' });
+    expect(JSON.stringify(inworld)).not.toMatch(/recommend/i);
+  });
+});
+
+describe('the Ultravox entry', () => {
+  it('talks live only, with its own model, listing its voices with the key page by page, checked for free with X-API-Key', () => {
+    const ultravox = voiceKeyCompanyInfo('ultravox');
+    expect(ultravox?.does).toEqual({ recognition: false, speech: false, talk: true });
+    expect(ultravox?.models).toEqual([{ id: 'ultravox-v0.7', label: 'Ultravox v0.7', kind: 'talk' }]);
+    expect(ultravox?.jobs.talk?.voices?.paging).toEqual({ kind: 'token', param: 'cursor', next: 'next', nextIsLink: true });
+    expect(ultravox?.jobs.talk?.voices?.previewNeedsKey).toBe(true);
+    expect(ultravox?.check).toEqual({ url: 'https://api.ultravox.ai/api/voices?pageSize=1', header: 'X-API-Key', prefix: '' });
+    expect(JSON.stringify(ultravox)).not.toMatch(/recommend/i);
+  });
+});
+
 describe('the xAI entry', () => {
   it('talks live only, with its Grok Voice models and its 28 built-in voices, Eve first', () => {
     const xai = voiceKeyCompanyInfo('xai');
@@ -162,5 +189,17 @@ describe('a provider with a talking model', () => {
   it('listens and speaks with it', () => {
     expect(voiceProviderProblem({ ...draft, recognition: true, speech: true, models: [{ id: 'gpt-realtime-2.1', kind: 'talk' }] })).toBeNull();
     expect(voiceProviderProblem({ ...draft, recognition: false, speech: true, models: [{ id: 'gpt-realtime-2.1', kind: 'talk' }] })).toBe('A model can only be listed for what the provider does');
+  });
+});
+
+describe('the Zoom entry', () => {
+  it('talks live only, in English, with its built-in model and its ten listed voices, Jenna first, checked for free with Bearer', () => {
+    const zoom = voiceKeyCompanyInfo('zoom');
+    expect(zoom?.does).toEqual({ recognition: false, speech: false, talk: true });
+    expect(zoom?.models).toEqual([{ id: 'gemma-4', label: 'Gemma 4', kind: 'talk' }]);
+    expect(zoom?.jobs.talk?.fixedVoices?.map((voice) => voice.id)).toEqual(['jenna', 'alex', 'ariel', 'ava', 'brooke', 'hazel', 'mark', 'reid', 'scott', 'tony']);
+    expect(zoom?.jobs.talk?.voices).toBeUndefined();
+    expect(zoom?.check).toEqual({ url: 'https://api.zoom.us/v2/aiservices/scribe/jobs?page_size=1', header: 'Authorization', prefix: 'Bearer ' });
+    expect(JSON.stringify(zoom)).not.toMatch(/recommend/i);
   });
 });
