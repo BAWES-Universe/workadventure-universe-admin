@@ -1,7 +1,7 @@
 import { Prisma, type VoiceProvider } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
-import { encryptApiKey } from '@/lib/encryption';
+import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { lendAccess, parseLendModels } from '@/lib/ai-key-lend';
 import { readModels, voiceProviderProblem, type VoiceModel } from '@/lib/voice-providers';
 import { lendModelId } from '@/lib/voice-lend-model';
@@ -10,6 +10,7 @@ import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { checkVoiceKeyLimits, readVoiceKeyLimits, savedVoiceKeyLimits, VOICE_KEY_LIMIT_NAMES, type VoiceKeyLimitValues } from '@/lib/voice-limit-values';
 import { healthOf, askForVoiceKeyTry, type VoiceKeyHealth } from '@/lib/voice-key-health';
+import { OWN_SPEECH_ENTRY, OWN_SPEECH_LABEL, OWN_SPEECH_NAME, checkOwnSpeechEndpoint, isOwnSpeechAdapter, loadOwnSpeechServer, ownSpeechEndpoint, ownSpeechKey, type OwnSpeechStep } from '@/lib/voice-own-server';
 
 /**
  * Personal voice keys (#749). A key is a VoiceProvider row with an `ownerId`; the rows with none are the server's own
@@ -31,6 +32,11 @@ export interface VoiceKeyCompany {
   benefit: string;
   step: string;
   docs: string;
+  /**
+   * Set for the one entry that is a speech server on the person's own computer, not a company (game #1874): it is added with an
+   * https address and an optional key, and these are its setup steps. Absent for every company.
+   */
+  ownServer?: { steps: OwnSpeechStep[] };
 }
 
 /**
@@ -43,7 +49,7 @@ export async function voiceKeyCompanies(): Promise<VoiceKeyCompany[]> {
     where: { enabled: true, ownerId: null },
     select: { adapter: true, recognition: true, speech: true },
   });
-  return VOICE_KEY_COMPANIES.map((info) => {
+  const companies = VOICE_KEY_COMPANIES.map((info) => {
     const does = { ...info.does };
     for (const row of rows) {
       if (row.adapter !== info.adapter) continue;
@@ -60,6 +66,23 @@ export async function voiceKeyCompanies(): Promise<VoiceKeyCompany[]> {
       docs: info.docs,
     };
   });
+  // The own speech server is not a company: it comes last, and the page shows it in a group of its own. What it does is up to the server.
+  return [
+    ...companies,
+    {
+      adapter: OWN_SPEECH_ENTRY.adapter,
+      label: OWN_SPEECH_ENTRY.label,
+      recognition: true,
+      speech: true,
+      // An own server listens or speaks; no talking model (game #1910)
+      talk: false,
+      logo: null,
+      benefit: OWN_SPEECH_ENTRY.benefit,
+      step: '',
+      docs: '',
+      ownServer: { steps: OWN_SPEECH_ENTRY.steps.map((step) => ({ ...step })) },
+    },
+  ];
 }
 
 const modelSchema = z.object({
@@ -70,6 +93,9 @@ const modelSchema = z.object({
 const fields = {
   name: z.string().trim().min(1, 'name is required').max(255),
   apiKey: z.string().trim().min(8, 'apiKey looks too short').max(2000),
+  // A server on the person's own computer may take a short key, or none
+  ownApiKey: z.string().trim().max(2000),
+  address: z.string().trim().min(1, 'Paste the https address of your server.').max(2000),
   models: z.array(modelSchema).max(200, 'A key can list up to 200 models'),
 };
 
@@ -79,13 +105,15 @@ export const createVoiceKeySchema = z
     name: fields.name.optional(),
     recognition: z.boolean().default(false),
     speech: z.boolean().default(false),
-    apiKey: fields.apiKey,
+    // A company's key is needed and at least 8 characters; an own speech server's is optional (checked in createVoiceKey)
+    apiKey: fields.ownApiKey.optional(),
+    address: fields.address.optional(),
     models: fields.models.default([]),
   })
   .strict();
 
 export const updateVoiceKeySchema = z
-  .object({ name: fields.name, apiKey: fields.apiKey, models: fields.models, limits: z.record(z.string(), z.unknown()) })
+  .object({ name: fields.name, apiKey: fields.ownApiKey.min(1, 'apiKey looks too short'), models: fields.models, limits: z.record(z.string(), z.unknown()), address: fields.address })
   .partial()
   .strict();
 
@@ -111,8 +139,10 @@ export interface VoiceKeySummary {
   name: string;
   recognition: boolean;
   speech: boolean;
-  /** The last four characters of the key. */
+  /** The last four characters of the key; null for a server with no key. */
   last4: string | null;
+  /** The host of an own speech server's address, e.g. "speech.example.com"; null for a company's key. */
+  address: string | null;
   models: VoiceModel[];
   /** The universes it is lent to, and which of its models bots there may use ("kind:id", null for all of them). */
   lentTo: {
@@ -142,7 +172,17 @@ export interface VoiceKeySummary {
 type KeyRow = VoiceProvider & { lends: { models: Prisma.JsonValue; universe: { id: string; name: string; ownerId: string } }[] };
 
 /** How the key is named: its company's name from the catalog, else the adapter as it is. */
-const companyName = (adapter: string) => voiceKeyCompanyInfo(adapter)?.label ?? adapter;
+const companyName = (adapter: string) => (isOwnSpeechAdapter(adapter) ? OWN_SPEECH_LABEL : (voiceKeyCompanyInfo(adapter)?.label ?? adapter));
+
+/** The host of a saved address, for showing: never the path. */
+function hostOf(endpoint: string | null): string | null {
+  if (!endpoint) return null;
+  try {
+    return new URL(endpoint).host;
+  } catch {
+    return null;
+  }
+}
 
 /** Which provider a published voice names for each job. Read loosely: lib/bot-voice.ts owns the profile's shape and imports this file. */
 function namedProviders(profile: unknown): { part: 'recognition' | 'speech'; providerId: string; model: string }[] {
@@ -218,6 +258,7 @@ async function summaries(rows: KeyRow[], ownerId: string): Promise<VoiceKeySumma
       recognition: row.recognition,
       speech: row.speech,
       last4: row.apiKeyLast4,
+      address: isOwnSpeechAdapter(row.adapter) ? hostOf(row.endpoint) : null,
       models,
       lentTo: row.lends.map((lend) => ({
         universeId: lend.universe.id,
@@ -255,22 +296,42 @@ export async function createVoiceKey(ownerId: string, input: z.infer<typeof crea
   if (refused) throw new VoiceKeyRefused(refused);
   const company = (await voiceKeyCompanies()).find((entry) => entry.adapter === input.adapter);
   if (!company) throw new VoiceKeyRefused('Pick a speech company from the list');
-  // A company with a talking model listens and speaks with it (game #1910)
-  const can = { recognition: company.recognition || company.talk, speech: company.speech || company.talk };
-  if ((input.recognition && !can.recognition) || (input.speech && !can.speech)) {
-    throw new VoiceKeyRefused(`${company.label} doesn’t do ${input.recognition && !can.recognition ? 'listening' : 'speaking'}`);
+  const own = isOwnSpeechAdapter(company.adapter);
+  // What is saved for the key: a company's own address is fixed, an own server's is the one typed (checked public, and saved as its origin with /v1)
+  let endpoint: string | null = null;
+  let apiKey: string | null = null;
+  if (own) {
+    const typed = ownSpeechEndpoint(input.address);
+    if (!typed.ok) throw new VoiceKeyRefused(typed.message);
+    const target = await checkOwnSpeechEndpoint(typed.endpoint);
+    if (!target.ok) throw new VoiceKeyRefused(target.message);
+    const key = ownSpeechKey(input.apiKey);
+    if (!key.ok) throw new VoiceKeyRefused(key.message);
+    if (!input.recognition && !input.speech) throw new VoiceKeyRefused('Pick what the server does: listens, speaks or both.');
+    endpoint = typed.endpoint;
+    apiKey = key.key || null;
+  } else {
+    if (input.address !== undefined) throw new VoiceKeyRefused(`${company.label} has its own address.`);
+    if (!input.apiKey || input.apiKey.length < 8) throw new VoiceKeyRefused('apiKey looks too short');
+    // A company with a talking model listens and speaks with it (game #1910)
+    const can = { recognition: company.recognition || company.talk, speech: company.speech || company.talk };
+    if ((input.recognition && !can.recognition) || (input.speech && !can.speech)) {
+      throw new VoiceKeyRefused(`${company.label} doesn’t do ${input.recognition && !can.recognition ? 'listening' : 'speaking'}`);
+    }
+    apiKey = input.apiKey;
   }
   if (input.models.some((model) => model.kind === 'talk') && !company.talk) throw new VoiceKeyRefused(`${company.label} doesn’t talk live`);
   const row = await prisma.voiceProvider.create({
     data: {
       adapter: input.adapter,
-      name: input.name ?? company.label,
+      name: input.name ?? (own ? OWN_SPEECH_NAME : company.label),
       recognition: input.recognition,
       speech: input.speech,
       // A person's own key is on from the start: it only reaches bots they made, in universes they lend it to
       enabled: true,
-      apiKeyEncrypted: encryptApiKey(input.apiKey),
-      apiKeyLast4: input.apiKey.slice(-4),
+      endpoint,
+      apiKeyEncrypted: apiKey ? encryptApiKey(apiKey) : null,
+      apiKeyLast4: apiKey && !own ? apiKey.slice(-4) : null,
       models: input.models as Prisma.InputJsonValue,
       ownerId,
       createdById: ownerId,
@@ -280,8 +341,53 @@ export async function createVoiceKey(ownerId: string, input: z.infer<typeof crea
   return summary(row, ownerId);
 }
 
+/** A key or address changed: its record of failures starts clean, so it is tried at once, not after the old one's wait. */
+const CLEAN_HEALTH = { downSince: null, downReason: null, downPart: null, failedRecognition: 0, failedSpeech: 0, healthCheckedAt: null };
+
+/**
+ * Where an own speech server now answers (a cloudflared tunnel gets a new address when it restarts). Nothing is saved until the
+ * new address is public, answers its model list with the saved key, and lists every model the key already has: a bot on the old
+ * address carries on with the same models, and a different server is a new key.
+ */
+async function movedAddress(row: VoiceProvider, address: string, newKey?: string): Promise<string> {
+  if (!isOwnSpeechAdapter(row.adapter)) throw new VoiceKeyRefused(`${companyName(row.adapter)} can’t be moved to another address.`);
+  // A key changed in the same request is the one the new address is asked with
+  let key = newKey ?? '';
+  if (newKey === undefined && row.apiKeyEncrypted) {
+    try {
+      key = decryptApiKey(row.apiKeyEncrypted);
+    } catch {
+      throw new VoiceKeyRefused('This key can’t be read. Add the server again.', 409);
+    }
+  }
+  const loaded = await loadOwnSpeechServer(address, key);
+  if (!loaded.ok) throw new VoiceKeyRefused(loaded.message, loaded.reason === 'unreachable' ? 409 : 400);
+  const there = loaded.listed;
+  const missing = readModels(row.models).find((model) => !there.has(model.id));
+  if (missing) throw new VoiceKeyRefused(`That address doesn’t have ${missing.id}. If it is another server, add it as a new key.`);
+  const typed = ownSpeechEndpoint(address);
+  if (!typed.ok) throw new VoiceKeyRefused(typed.message);
+  return typed.endpoint;
+}
+
 /** Changes only what is named. A model taken off the key is taken off every lend that named it; a lend left with none is pulled. */
 export async function updateVoiceKey(ownerId: string, id: string, input: z.infer<typeof updateVoiceKeySchema>): Promise<VoiceKeySummary> {
+  // The new address is asked outside the save: a slow server never holds the database
+  let endpoint: string | undefined;
+  if (input.address !== undefined || input.apiKey !== undefined) {
+    const current = await prisma.voiceProvider.findFirst({ where: { id, ownerId } });
+    if (!current) throw new VoiceKeyRefused('Key not found', 404);
+    if (input.apiKey !== undefined) {
+      // A company's key is at least 8 characters; an own server's may be short, but is held to what a header can carry, as when it was added
+      if (isOwnSpeechAdapter(current.adapter)) {
+        const key = ownSpeechKey(input.apiKey);
+        if (!key.ok) throw new VoiceKeyRefused(key.message);
+      } else if (input.apiKey.length < 8) {
+        throw new VoiceKeyRefused('apiKey looks too short');
+      }
+    }
+    if (input.address !== undefined) endpoint = await movedAddress(current, input.address, input.apiKey);
+  }
   await prisma.$transaction(async (tx) => {
     const row = await tx.voiceProvider.findFirst({ where: { id, ownerId } });
     if (!row) throw new VoiceKeyRefused('Key not found', 404);
@@ -305,8 +411,10 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
         ...(input.name !== undefined ? { name: input.name } : {}),
         // A new key starts clean: it is tried at once, not after the old one's wait
         ...(input.apiKey !== undefined
-          ? { apiKeyEncrypted: encryptApiKey(input.apiKey), apiKeyLast4: input.apiKey.slice(-4), downSince: null, downReason: null, downPart: null, failedRecognition: 0, failedSpeech: 0, healthCheckedAt: null }
+          ? { apiKeyEncrypted: encryptApiKey(input.apiKey), apiKeyLast4: isOwnSpeechAdapter(row.adapter) ? null : input.apiKey.slice(-4), ...CLEAN_HEALTH }
           : {}),
+        // A new address is a new connection: tried at once too
+        ...(endpoint !== undefined ? { endpoint, ...CLEAN_HEALTH } : {}),
         ...(input.models !== undefined ? { models: input.models as Prisma.InputJsonValue } : {}),
         ...(voiceLimits !== undefined ? { voiceLimits } : {}),
       },
