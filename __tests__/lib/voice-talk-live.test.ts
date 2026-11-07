@@ -61,6 +61,24 @@ describe('the OpenAI entry', () => {
   });
 });
 
+describe('the xAI entry', () => {
+  it('talks live only, with its Grok Voice models and its 28 built-in voices, Eve first', () => {
+    const xai = voiceKeyCompanyInfo('xai');
+    expect(xai?.label).toBe('xAI');
+    expect(xai?.does).toEqual({ recognition: false, speech: false, talk: true });
+    expect(xai?.models).toEqual([
+      { id: 'grok-voice-latest', label: 'Grok Voice (latest)', kind: 'talk' },
+      { id: 'grok-voice-3.0', label: 'Grok Voice 3.0', kind: 'talk' },
+    ]);
+    const voices = xai?.jobs.talk?.fixedVoices ?? [];
+    expect(voices).toHaveLength(28);
+    expect(voices[0]).toEqual({ id: 'eve', name: 'Eve' });
+    expect(new Set(voices.map((voice) => voice.id)).size).toBe(28);
+    expect(xai?.check).toEqual({ url: 'https://api.x.ai/v1/tts/voices', header: 'Authorization', prefix: 'Bearer ' });
+    expect(JSON.stringify(xai)).not.toMatch(/recommend/i);
+  });
+});
+
 describe('what a company or key says it does', () => {
   it('names each job once, talks live last', () => {
     expect(voiceDoesLine({ recognition: false, speech: false, talk: true })).toBe('Talks live');

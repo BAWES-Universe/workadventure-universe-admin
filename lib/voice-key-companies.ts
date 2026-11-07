@@ -26,6 +26,8 @@
  * - cartesia: GET /voices?limit=1, Authorization: Bearer with the Cartesia-Version header the reference lists.
  * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
  *   free account with no credit still has the answer, and that is fine: the free model needs none.
+ * - openai: GET /v1/models, Authorization: Bearer.
+ * - xai: GET /v1/tts/voices, Authorization: Bearer (lists the built-in voices; a wrong key is 401).
  */
 /** A model a key can be used with, as the bot server calls it. The first one of a job is the one a bot starts on. */
 export interface VoiceKeyCompanyModel {
@@ -349,6 +351,57 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On console.soniox.com, open API Keys and create a key.',
     docs: 'https://soniox.com/docs',
     check: { url: 'https://api.soniox.com/v1/models', header: 'Authorization', prefix: 'Bearer ' },
+  }),
+  company({
+    adapter: 'xai',
+    label: 'xAI',
+    jobs: {
+      talk: {
+        host: 'api.x.ai',
+        // From xAI's voice agent docs (7 Nov 2026): grok-voice-latest always points to the current model, grok-voice-3.0 stays put
+        models: [
+          { id: 'grok-voice-latest', label: 'Grok Voice (latest)' },
+          { id: 'grok-voice-3.0', label: 'Grok Voice 3.0' },
+        ],
+        // xAI's built-in voices, Eve (its default) first, then as its text to speech docs list them. Every one speaks every language.
+        fixedVoices: [
+          { id: 'eve', name: 'Eve' },
+          { id: 'ara', name: 'Ara' },
+          { id: 'leo', name: 'Leo' },
+          { id: 'rex', name: 'Rex' },
+          { id: 'sal', name: 'Sal' },
+          { id: 'carina', name: 'Carina' },
+          { id: 'zagan', name: 'Zagan' },
+          { id: 'helix', name: 'Helix' },
+          { id: 'orion', name: 'Orion' },
+          { id: 'luna', name: 'Luna' },
+          { id: 'iris', name: 'Iris' },
+          { id: 'altair', name: 'Altair' },
+          { id: 'zenith', name: 'Zenith' },
+          { id: 'perseus', name: 'Perseus' },
+          { id: 'helios', name: 'Helios' },
+          { id: 'lux', name: 'Lux' },
+          { id: 'kepler', name: 'Kepler' },
+          { id: 'rigel', name: 'Rigel' },
+          { id: 'cosmo', name: 'Cosmo' },
+          { id: 'celeste', name: 'Celeste' },
+          { id: 'ursa', name: 'Ursa' },
+          { id: 'sirius', name: 'Sirius' },
+          { id: 'lumen', name: 'Lumen' },
+          { id: 'castor', name: 'Castor' },
+          { id: 'naksh', name: 'Naksh' },
+          { id: 'atlas', name: 'Atlas' },
+          { id: 'aurora', name: 'Aurora' },
+          { id: 'liora', name: 'Liora' },
+        ],
+      },
+    },
+    logo: 'xai',
+    benefit: '{does}. Uses your account at console.x.ai.',
+    step: 'On console.x.ai, open API Keys and create a key.',
+    docs: 'https://docs.x.ai',
+    // GET /v1/tts/voices lists the built-in voices: free, and a wrong key is 401
+    check: { url: 'https://api.x.ai/v1/tts/voices', header: 'Authorization', prefix: 'Bearer ' },
   }),
 ];
 
