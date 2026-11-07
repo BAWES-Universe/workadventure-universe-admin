@@ -198,6 +198,7 @@ describe('Load models for a voice key', () => {
       ['gladia', [{ id: 'solaria-1', label: 'Solaria-1', kind: 'recognition' }]],
       ['gradium', [{ id: 'default', label: 'Gradium (current)', kind: 'recognition' }, { id: 'default', label: 'Gradium TTS (current)', kind: 'speech' }, { id: 'gradium-tts-beta', label: 'Gradium TTS beta', kind: 'speech' }]],
       ['groq', [{ id: 'whisper-large-v3-turbo', label: 'Whisper Large v3 Turbo', kind: 'recognition' }, { id: 'whisper-large-v3', label: 'Whisper Large v3', kind: 'recognition' }, { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' }, { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' }]],
+      ['hume', [{ id: 'octave-2', label: 'Octave 2', kind: 'speech' }, { id: 'octave-1', label: 'Octave 1', kind: 'speech' }]],
       ['bland', [{ id: 'btts-3', label: 'Bland TTS v3', kind: 'speech' }, { id: 'btts-2', label: 'Bland TTS v2', kind: 'speech' }]],
       ['assemblyai', [{ id: 'universal-3-6-pro', label: 'Universal-3.6 Pro', kind: 'recognition' }, { id: 'universal-streaming-multilingual', label: 'Universal Streaming Multilingual', kind: 'recognition' }, { id: 'universal-streaming-english', label: 'Universal Streaming English', kind: 'recognition' }]],
       ['deepgram', [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }, { id: 'aura-2', label: 'Aura 2', kind: 'speech' }]],

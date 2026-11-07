@@ -172,7 +172,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
   for (const pass of spec.passes ?? ['']) {
     let next: string | null = null;
     for (let page = 1; out.length < MAX_VOICES && page <= MAX_PAGES; page++) {
-      const query = [spec.path.replace('{size}', String(PAGE_SIZE)).replace('{page}', String(page)), pass].filter(Boolean).join('&');
+      const query = [spec.path.replace('{size}', String(PAGE_SIZE)).replace('{page}', String(spec.paging.kind === 'page' && spec.paging.first === 0 ? page - 1 : page)), pass].filter(Boolean).join('&');
       const paged = (spec.paging.kind === 'token' || spec.paging.kind === 'after') && next !== null ? `${spec.paging.param}=${encodeURIComponent(next)}` : '';
       const body = spec.body ? Object.fromEntries(Object.entries(spec.body).map(([field, value]) => [field, value === '{size}' ? PAGE_SIZE : value])) : undefined;
       const answer = await getJson(call, [query, paged].filter(Boolean).join('&'), body);
