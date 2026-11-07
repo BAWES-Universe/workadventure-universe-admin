@@ -136,7 +136,7 @@ describe('adding a key', () => {
 
   it.each([
     ['a company that isn’t on the list', { adapter: 'unknown-co', speech: true, apiKey: 'sk-secret-key-9f2a' }],
-    ['a job the company doesn’t do', { adapter: 'soniox', speech: true, apiKey: 'sk-secret-key-9f2a' }],
+    ['a job the company doesn’t do', { adapter: 'fish', recognition: true, apiKey: 'sk-secret-key-9f2a' }],
     ['a key that does nothing', { adapter: 'elevenlabs', apiKey: 'sk-secret-key-9f2a' }],
     ['a key that is too short', { adapter: 'elevenlabs', speech: true, apiKey: 'short' }],
     ['a model for a job the key doesn’t do', { adapter: 'elevenlabs', speech: true, apiKey: 'sk-secret-key-9f2a', models: [{ id: 'a', kind: 'recognition' }] }],
@@ -209,6 +209,7 @@ describe('the list', () => {
     // Every company in the catalog, in its order, with no server setup: named and described by the catalog, doing what it says
     // plus what a provider the server has on does (ElevenLabs also listens here, since the stand-in server has one that does)
     expect(body.companies).toEqual([
+      expect.objectContaining({ adapter: 'assemblyai', label: 'AssemblyAI', recognition: true, speech: false }),
       // A key at the person's own Azure resource, with its deployment typed as its model
       expect.objectContaining({
         adapter: 'aws',
@@ -226,13 +227,14 @@ describe('the list', () => {
       expect.objectContaining({ adapter: 'google', label: 'Google', recognition: false, speech: false, talk: true, logo: 'google' }),
       // A talking model listens and speaks in one (game #1910)
       expect.objectContaining({ adapter: 'openai', label: 'OpenAI', recognition: false, speech: false, talk: true, logo: 'openai' }),
-      expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: false }),
+      expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: true }),
       expect.objectContaining({ adapter: 'xai', label: 'xAI', recognition: false, speech: false, talk: true, logo: 'xai' }),
       // The speech server on a person's own computer is last, and is not a company (game #1874)
       expect.objectContaining({ adapter: 'openai-compatible', label: 'Any OpenAI-compatible speech server', ownServer: expect.any(Object) }),
     ]);
     // Its line says only the jobs Universe runs for it, the same neutral shape for every company
     expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual([
+      'Listens. Uses your account at assemblyai.com.',
       'Talks live. Uses your AWS account, in the region you pick.',
       'Talks live. Uses your Azure OpenAI resource.',
       'Listens and speaks. Uses your account at cartesia.ai.',
@@ -241,7 +243,7 @@ describe('the list', () => {
       'Speaks. Uses your account at fish.audio.',
       'Talks live. Uses your account at aistudio.google.com.',
       'Talks live. Uses your account at platform.openai.com.',
-      'Listens. Uses your account at soniox.com.',
+      'Listens and speaks. Uses your account at soniox.com.',
       'Talks live. Uses your account at console.x.ai.',
       'Speaches, Kokoro-FastAPI, your own Whisper: anything that answers /v1/audio.',
     ]);

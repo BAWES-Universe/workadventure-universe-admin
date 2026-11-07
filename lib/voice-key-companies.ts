@@ -11,7 +11,8 @@
  * Adding a company, or a job to one, is one entry here plus its connector in the game, never `if (adapter === ...)` in the logic.
  *
  * `modelList` is where a company lists a job's models (GET, the same key header): Soniox GET /v1/models (real-time ones), Deepgram
- * GET /v1/models (streaming listening ones), ElevenLabs GET /v1/models (speaking ones), Cartesia GET /models?capability=stt|tts. Fish
+ * GET /v1/models (streaming listening ones), ElevenLabs GET /v1/models (speaking ones), Cartesia GET /models?capability=stt|tts, Soniox
+ * GET /v1/tts-models (speaking ones). Fish
  * Audio has no such list, so its models are typed on New voice provider. `voices` is where a speaking job lists its voices
  * (lib/voice-voices.ts reads every company's the same way).
  *
@@ -24,6 +25,8 @@
  * - deepgram: GET /v1/projects, Authorization: Token. A key without projects:read (scoped to other jobs) is answered 403, not
  *   401: Deepgram knows the key, so that counts as accepted. A wrong key is 401.
  * - cartesia: GET /voices?limit=1, Authorization: Bearer with the Cartesia-Version header the reference lists.
+ * - assemblyai: GET /v2/transcript?limit=1, Authorization with the key as it is (no Bearer). It lists the account's own past
+ *   transcripts: nothing is transcribed. A wrong key is 401.
  * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
  *   free account with no credit still has the answer, and that is fine: the free model needs none.
  * - azure: GET {address}/openai/v1/models on the person's own resource, api-key.
@@ -72,8 +75,10 @@ export interface VoiceModelListSpec {
 export interface VoiceListSpec {
   /** Path and query of one page, after the company's address. `{size}` is the page size, `{page}` the page number when paging by number. */
   path: string;
-  /** The field holding the voices. */
+  /** The field holding the voices; `a[].b[]` gathers them from inside a list (Soniox lists voices inside each model). */
   list: string;
+  /** The host voices are listed at, when it isn't the job's own (Soniox speaks at tts-rt.soniox.com, lists at api.soniox.com). */
+  host?: string;
   /**
    * How the next page is asked for: a token the answer gives (`token`) or the last voice's id (`after`), sent as `param`, while
    * `more` says there is more; or a page number (`page`, from 1, in the path) while `more` says so, or, when the company doesn't
@@ -205,6 +210,25 @@ const company = (entry: VoiceKeyCompanyEntry): VoiceKeyCompanyInfo => ({
 
 // In alphabetical order by name, so the list ranks no company over another
 export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
+  company({
+    adapter: 'assemblyai',
+    label: 'AssemblyAI',
+    jobs: {
+      recognition: {
+        // Universal Streaming (/v3/ws). AssemblyAI has no model list, so its streaming models are typed; universal-3-6-pro is its default
+        host: 'streaming.assemblyai.com',
+        models: [
+          { id: 'universal-3-6-pro', label: 'Universal-3.6 Pro' },
+          { id: 'universal-streaming-multilingual', label: 'Universal Streaming Multilingual' },
+          { id: 'universal-streaming-english', label: 'Universal Streaming English' },
+        ],
+      },
+    },
+    benefit: '{does}. Uses your account at assemblyai.com.',
+    step: 'On assemblyai.com, open your dashboard, then API Keys, and copy a key.',
+    docs: 'https://www.assemblyai.com/docs',
+    check: { url: 'https://api.assemblyai.com/v2/transcript?limit=1', header: 'Authorization', prefix: '' },
+  }),
   company({
     adapter: 'aws',
     label: 'AWS',
@@ -532,6 +556,23 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
         // stt-rt-v6: stt-rt-v5 is removed on 15 Dec 2026 and stt-rt-v4 is only its alias
         models: [{ id: 'stt-rt-v6', label: 'Soniox real-time v6' }],
         modelList: { url: 'https://api.soniox.com/v1/models', list: 'models', id: 'id', label: 'name', where: { transcription_mode: 'real_time' }, aliasOf: 'aliased_model_id', languages: 'languages' },
+      },
+      speech: {
+        host: 'tts-rt.soniox.com',
+        // tts-rt-v2: the model Pipecat's Soniox service starts on
+        models: [{ id: 'tts-rt-v2', label: 'Soniox TTS v2' }],
+        modelList: { url: 'https://api.soniox.com/v1/tts-models', list: 'models', id: 'id', label: 'name', aliasOf: 'aliased_model_id', languages: 'languages' },
+        // GET /v1/tts-models: every model with its voices, in one answer. A voice is named by its id; there are no samples
+        voices: {
+          host: 'api.soniox.com',
+          path: '/v1/tts-models',
+          list: 'models[].voices[]',
+          paging: { kind: 'none' },
+          id: 'id',
+          name: 'id',
+          description: ['description', 'gender'],
+          languages: [],
+        },
       },
     },
     benefit: '{does}. Uses your account at soniox.com.',
