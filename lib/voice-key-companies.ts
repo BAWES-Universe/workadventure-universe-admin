@@ -33,6 +33,7 @@
  *   billing permission (the usual API key) is answered 403, not 401: fal knows the key, so that counts as accepted.
  * - gladia: GET /v2/live?limit=1, x-gladia-key. It lists the account's past live sessions: nothing is transcribed. A wrong key is 401.
  * - gradium: GET /api/usages/credits, x-api-key. Free (it reads the account's credit), nothing is generated.
+ * - groq: GET /openai/v1/models, Authorization: Bearer. It lists models: nothing is run. A wrong key is 401.
  * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
  *   free account with no credit still has the answer, and that is fine: the free model needs none.
  */
@@ -101,6 +102,12 @@ export interface VoiceListSpec {
   previewNeedsKey?: boolean;
 }
 
+/** A company with no voice list to ask (Groq): its voices as its own docs name them, the same for every key. */
+export interface FixedVoices {
+  /** `model`: the one speaking model the voice belongs to, when the company ties each voice to a model (Groq's Orpheus). */
+  fixed: { id: string; name: string; description?: string; languages: string[]; model?: string }[];
+}
+
 /** One job a company does: its own address for it, the models a key starts with, and where it lists models and voices. */
 export interface VoiceCompanyJob {
   /** The company's own host for this job, as the bot server calls it when no address is typed. */
@@ -109,7 +116,7 @@ export interface VoiceCompanyJob {
   models: { id: string; label: string }[];
   modelList?: VoiceModelListSpec;
   /** Speaking only. */
-  voices?: VoiceListSpec;
+  voices?: VoiceListSpec | FixedVoices;
 }
 
 /** One company, everything about it in one place. */
@@ -480,6 +487,41 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On gradium.ai, open your account, then API keys, and create a key.',
     docs: 'https://docs.gradium.ai',
     check: { url: 'https://api.gradium.ai/api/usages/credits', header: 'x-api-key', prefix: '' },
+  }),
+  company({
+    adapter: 'groq',
+    label: 'Groq',
+    jobs: {
+      recognition: {
+        // Hearing by upload: each stretch of speech is sent as one file to Groq's Whisper (/openai/v1/audio/transcriptions), as
+        // Pipecat's GroqSTTService does (https://console.groq.com/docs/speech-to-text)
+        host: 'api.groq.com',
+        models: [
+          { id: 'whisper-large-v3-turbo', label: 'Whisper Large v3 Turbo' },
+          { id: 'whisper-large-v3', label: 'Whisper Large v3' },
+        ],
+      },
+      speech: {
+        // Text to speech (/openai/v1/audio/speech) with Canopy Labs' Orpheus: one model for English, one for Saudi Arabic
+        // (https://console.groq.com/docs/text-to-speech/orpheus). A voice belongs to one of them, and the game uses its model
+        host: 'api.groq.com',
+        models: [
+          { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English' },
+          { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)' },
+        ],
+        // Groq has no voice list to ask: these are the voices its Orpheus page names
+        voices: {
+          fixed: [
+            ...['Autumn', 'Diana', 'Hannah', 'Austin', 'Daniel', 'Troy'].map((name) => ({ id: name.toLowerCase(), name, description: 'Orpheus English', languages: ['en'], model: 'canopylabs/orpheus-v1-english' })),
+            ...['Abdullah', 'Fahad', 'Sultan', 'Lulwa', 'Noura', 'Aisha'].map((name) => ({ id: name.toLowerCase(), name, description: 'Orpheus Arabic (Saudi)', languages: ['ar'], model: 'canopylabs/orpheus-arabic-saudi' })),
+          ],
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at groq.com.',
+    step: 'On console.groq.com, open API Keys and create a key.',
+    docs: 'https://console.groq.com/docs/speech-to-text',
+    check: { url: 'https://api.groq.com/openai/v1/models', header: 'Authorization', prefix: 'Bearer ' },
   }),
   company({
     adapter: 'soniox',
