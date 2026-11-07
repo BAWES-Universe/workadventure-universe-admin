@@ -24,7 +24,7 @@ type Verdict = 'accepted' | 'refused' | 'unreachable';
 async function ask(company: VoiceKeyCompanyInfo, apiKey: string, address: string | null): Promise<Verdict> {
   const { check } = company;
   // The person's own address only ever comes checked (accountAddress): https, on the company's own hosts
-  const url = address ? check.url.replace('{address}', address) : check.url;
+  const url = address ? check.url.replace('{address}', () => address) : check.url;
   if (url.includes('{address}')) return 'unreachable';
   let response: Response | undefined;
   try {

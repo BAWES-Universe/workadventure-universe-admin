@@ -488,6 +488,8 @@ export function accountAddress(info: Pick<VoiceKeyCompanyEntry, 'account'>, type
   }
   if (url.protocol !== 'https:' || url.username || url.password || url.port) return null;
   const host = url.hostname.toLowerCase();
+  // A host name is letters, digits, dots and dashes: anything else ($, ', &) would read as more than a host further on
+  if (!/^[a-z0-9.-]+$/.test(host)) return null;
   if (!spec.hosts.some((ending) => host.endsWith(ending) && host.length > ending.length)) return null;
   return `https://${host}`;
 }

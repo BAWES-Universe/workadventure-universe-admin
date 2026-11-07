@@ -99,7 +99,7 @@ describe('a key at the person’s own address (Azure)', () => {
     expect(accountAddress(azure, 'https://My-Res.openai.azure.com/openai/v1/')).toBe('https://my-res.openai.azure.com');
     expect(accountAddress(azure, ' https://my-res.cognitiveservices.azure.com ')).toBe('https://my-res.cognitiveservices.azure.com');
     expect(accountAddress(azure, 'https://my-res.services.ai.azure.com')).toBe('https://my-res.services.ai.azure.com');
-    for (const wrong of ['http://my-res.openai.azure.com', 'https://openai.azure.com', 'https://my-res.openai.azure.com.evil.com', 'https://x.example.com', 'https://u:p@my-res.openai.azure.com', 'https://my-res.openai.azure.com:444', 'nope', 42]) {
+    for (const wrong of ['http://my-res.openai.azure.com', 'https://openai.azure.com', 'https://my-res.openai.azure.com.evil.com', 'https://x.example.com', 'https://u:p@my-res.openai.azure.com', 'https://my-res.openai.azure.com:444', "https://x$'y.openai.azure.com", 'https://a&b.openai.azure.com', 'nope', 42]) {
       expect(accountAddress(azure, wrong)).toBeNull();
     }
     expect(accountAddress(voiceKeyCompanyInfo('openai')!, 'https://my-res.openai.azure.com')).toBeNull();
