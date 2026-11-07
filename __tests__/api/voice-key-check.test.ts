@@ -165,7 +165,7 @@ describe('Load models for a voice key', () => {
   it('needs no setup by a super admin: a company the server has no provider for starts with the catalog\'s own models', async () => {
     findMany.mockImplementation(async ({ where }: { where: { adapter?: string } }) => (where.adapter ? [] : serverRows));
     for (const [adapter, models] of [
-      ['soniox', [{ id: 'stt-rt-v6', label: 'Soniox real-time v6', kind: 'recognition' }]],
+      ['soniox', [{ id: 'stt-rt-v6', label: 'Soniox real-time v6', kind: 'recognition' }, { id: 'tts-rt-v2', label: 'Soniox TTS v2', kind: 'speech' }]],
       ['deepgram', [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }, { id: 'aura-2', label: 'Aura 2', kind: 'speech' }]],
       ['cartesia', [{ id: 'ink-whisper', label: 'Ink Whisper', kind: 'recognition' }, { id: 'sonic-3.6', label: 'Sonic 3.6', kind: 'speech' }]],
       ['fish', [{ id: 's2.1-pro-free', label: 'S2.1 Pro (free)', kind: 'speech' }, { id: 's2.1-pro', label: 'S2.1 Pro', kind: 'speech' }]],

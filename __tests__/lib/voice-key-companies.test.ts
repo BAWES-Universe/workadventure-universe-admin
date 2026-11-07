@@ -45,7 +45,7 @@ describe('the voice company catalog', () => {
       expect(entry.models).toEqual(companyJobs(entry).flatMap((job) => entry.jobs[job]!.models.map((model) => ({ ...model, kind: job }))));
       for (const job of companyJobs(entry)) expect(entry.jobs[job]!.models.length).toBeGreaterThan(0);
     }
-    expect(voiceKeyCompanyInfo('soniox')?.does).toEqual({ recognition: true, speech: false });
+    expect(voiceKeyCompanyInfo('fish')?.does).toEqual({ recognition: false, speech: true });
     expect(voiceKeyCompanyInfo('fish')?.models.map((model) => model.kind)).toEqual(['speech', 'speech']);
   });
 

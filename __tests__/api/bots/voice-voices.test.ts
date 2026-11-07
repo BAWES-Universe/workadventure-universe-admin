@@ -156,10 +156,11 @@ describe('Universe AI\'s voices', () => {
   });
 
   it('say so when the company is one whose voices can\'t be listed', async () => {
-    providers = [provider({ defaultSpeech: true, adapter: 'soniox', name: 'Soniox' })];
+    // A company no longer in the catalog
+    providers = [provider({ defaultSpeech: true, adapter: 'retired-co', name: 'Retired Co' })];
     const response = await voices();
     expect(response.status).toBe(409);
-    expect((await response.json()).error).toBe('Soniox’s voices can’t be listed here.');
+    expect((await response.json()).error).toBe('Retired Co’s voices can’t be listed here.');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -363,6 +364,34 @@ describe('Deepgram\'s voices', () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('https://api.deepgram.com/v1/models');
     expect(init.headers).toMatchObject({ Authorization: `Token ${SECRET}` });
+  });
+});
+
+describe('Soniox\'s voices', () => {
+  const soniox = () => key({ adapter: 'soniox', name: 'Soniox', models: [{ id: 'tts-rt-v2', label: 'Soniox TTS v2', kind: 'speech' }] });
+  const answer = {
+    models: [
+      { id: 'tts-rt-v1', name: 'TTS v1', voices: [{ id: 'Maya', description: 'Warm and clear.', gender: 'female' }] },
+      { id: 'tts-rt-v2', name: 'TTS v2', voices: [{ id: 'Maya', description: 'Warm and clear.', gender: 'female' }, { id: 'Bryce', gender: 'male' }] },
+    ],
+  };
+
+  beforeEach(() => {
+    providers = [soniox()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(answer));
+  });
+
+  it('are the voices of every model, each once, read from api.soniox.com with the key as a bearer', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toEqual([
+      { voiceId: 'Maya', name: 'Maya', description: 'Warm and clear.', languages: [], previewUrl: null, providerId: 'key-1', model: 'tts-rt-v2' },
+      { voiceId: 'Bryce', name: 'Bryce', description: 'male', languages: [], previewUrl: null, providerId: 'key-1', model: 'tts-rt-v2' },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.soniox.com/v1/tts-models');
+    expect(init.headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
   });
 });
 
