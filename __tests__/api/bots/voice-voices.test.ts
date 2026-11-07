@@ -840,6 +840,18 @@ describe('Together AI\'s voices', () => {
   });
 });
 
+describe('NVIDIA\'s voices', () => {
+  it('are Magpie Multilingual\'s 36 voices, each in its own language, with no call made', async () => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    providers = [key({ adapter: 'nvidia', name: 'NVIDIA', models: [{ id: 'magpie-tts-multilingual', label: 'Magpie', kind: 'speech' }] })];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toHaveLength(36);
+    expect(new Set(list.map((voice: Row) => voice.voiceId)).size).toBe(36);
+    expect(list.find((voice: Row) => voice.voiceId === 'Magpie-Multilingual.AR-AR.Sofia')).toMatchObject({ name: 'Sofia (Arabic)', description: 'Arabic', languages: ['ar'], model: 'magpie-tts-multilingual' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('Groq\'s voices', () => {
   const ENGLISH = { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' };
   const ARABIC = { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' };

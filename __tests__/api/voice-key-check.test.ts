@@ -207,6 +207,7 @@ describe('Load models for a voice key', () => {
       ['speechify', [{ id: 'simba-3.5', label: 'Simba 3.5', kind: 'speech' }, { id: 'simba-3.2', label: 'Simba 3.2 (English)', kind: 'speech' }, { id: 'simba-3.0', label: 'Simba 3.0', kind: 'speech' }]],
       ['speechmatics', [{ id: 'linden-1', label: 'Linden 1', kind: 'recognition' }, { id: 'speechmatics', label: 'Speechmatics TTS (preview)', kind: 'speech' }]],
       ['together', [{ id: 'openai/whisper-large-v3', label: 'Whisper Large v3', kind: 'recognition' }, { id: 'hexgrad/Kokoro-82M', label: 'Kokoro 82M', kind: 'speech' }, { id: 'canopylabs/orpheus-3b-0.1-ft', label: 'Orpheus 3B', kind: 'speech' }]],
+      ['nvidia', [{ id: 'nemotron-asr-streaming', label: 'Nemotron ASR Streaming', kind: 'recognition' }, { id: 'magpie-tts-multilingual', label: 'Magpie TTS Multilingual', kind: 'speech' }]],
       ['rime', [{ id: 'coda', label: 'Coda', kind: 'speech' }, { id: 'mistv3', label: 'Mist v3', kind: 'speech' }, { id: 'mistv2', label: 'Mist v2', kind: 'speech' }]],
       ['hume', [{ id: 'octave-2', label: 'Octave 2', kind: 'speech' }, { id: 'octave-1', label: 'Octave 1', kind: 'speech' }]],
       ['bland', [{ id: 'btts-3', label: 'Bland TTS v3', kind: 'speech' }, { id: 'btts-2', label: 'Bland TTS v2', kind: 'speech' }]],

@@ -191,6 +191,43 @@ const company = (entry: VoiceKeyCompanyEntry): VoiceKeyCompanyInfo => ({
 });
 
 // In alphabetical order by name, so the list ranks no company over another
+/** Magpie TTS Multilingual's voices, by speaker and the languages NVIDIA's docs list for each (docs.nvidia.com/nim/speech, Voices). */
+const MAGPIE_LANGUAGES: Record<string, string> = {
+  'EN-US': 'English (US)',
+  'ES-US': 'Spanish (US)',
+  'FR-FR': 'French',
+  'DE-DE': 'German',
+  'IT-IT': 'Italian',
+  'PT-BR': 'Portuguese (Brazil)',
+  'AR-AR': 'Arabic',
+  'HI-IN': 'Hindi',
+  'JA-JP': 'Japanese',
+  'KO-KR': 'Korean',
+  'VI-VN': 'Vietnamese',
+};
+const MAGPIE_VOICES = (
+  [
+    ['Aria', ['EN-US', 'KO-KR']],
+    ['Jason', ['EN-US', 'DE-DE', 'VI-VN', 'AR-AR']],
+    ['Leo', ['EN-US', 'DE-DE', 'HI-IN']],
+    ['Mia', ['EN-US', 'DE-DE']],
+    ['Ray', ['EN-US', 'DE-DE', 'JA-JP', 'KO-KR', 'AR-AR']],
+    ['Sofia', ['EN-US', 'HI-IN', 'AR-AR']],
+    ['Diego', ['ES-US', 'DE-DE', 'KO-KR', 'PT-BR']],
+    ['Isabela', ['ES-US', 'VI-VN', 'IT-IT', 'JA-JP', 'PT-BR']],
+    ['Pascal', ['FR-FR', 'DE-DE', 'VI-VN', 'IT-IT', 'HI-IN', 'KO-KR']],
+    ['Long', ['VI-VN']],
+    ['Louise', ['FR-FR']],
+  ] as const
+).flatMap(([speaker, locales]) =>
+  locales.map((locale) => ({
+    id: `Magpie-Multilingual.${locale}.${speaker}`,
+    name: `${speaker} (${MAGPIE_LANGUAGES[locale]})`,
+    description: MAGPIE_LANGUAGES[locale],
+    languages: [locale.slice(0, 2).toLowerCase()],
+  })),
+);
+
 export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
   company({
     adapter: 'assemblyai',
@@ -645,6 +682,40 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On app.neuphonic.com, open API Keys and create a key.',
     docs: 'https://docs.neuphonic.com',
     check: { url: 'https://api.neuphonic.com/voices', header: 'X-API-KEY', prefix: '' },
+  }),
+  company({
+    adapter: 'nvidia',
+    label: 'NVIDIA',
+    jobs: {
+      recognition: {
+        // Riva's streaming recognition over gRPC on NVIDIA's hosted endpoint (grpc.nvcf.nvidia.com), as Pipecat's NvidiaSTTService
+        // does: Nemotron ASR Streaming is Pipecat's default (https://build.nvidia.com/nvidia/nemotron-asr-streaming)
+        host: 'grpc.nvcf.nvidia.com',
+        models: [{ id: 'nemotron-asr-streaming', label: 'Nemotron ASR Streaming' }],
+      },
+      speech: {
+        // Riva's speech over gRPC, as Pipecat's NvidiaTTSService does: Magpie TTS Multilingual is Pipecat's default
+        // (https://build.nvidia.com/nvidia/magpie-tts-multilingual)
+        host: 'grpc.nvcf.nvidia.com',
+        models: [{ id: 'magpie-tts-multilingual', label: 'Magpie TTS Multilingual' }],
+        // NVIDIA has no voice list to ask over the web: these are Magpie Multilingual's voices as its docs list them, each
+        // speaking its own language
+        voices: {
+          fixed: MAGPIE_VOICES,
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at build.nvidia.com.',
+    step: 'On build.nvidia.com, open API Keys and create a key.',
+    docs: 'https://docs.nvidia.com/nim/speech/latest',
+    // NVIDIA has no free call that reads a key: this asks its chat service for one token, as NVIDIA's own key testers do.
+    // That one token counts against the key's credits
+    check: {
+      url: 'https://integrate.api.nvidia.com/v1/chat/completions',
+      header: 'Authorization',
+      prefix: 'Bearer ',
+      body: { model: 'meta/llama-3.1-8b-instruct', messages: [{ role: 'user', content: 'hi' }], max_tokens: 1 },
+    },
   }),
   company({
     adapter: 'resemble',
