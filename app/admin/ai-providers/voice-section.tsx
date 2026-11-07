@@ -368,7 +368,7 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
                 <Input type="search" aria-label="Search voices" placeholder={`Search ${all.length.toLocaleString('en')} voices`} value={find} onChange={(event) => setFind(event.target.value)} className="h-11 rounded-full pl-10" />
               </div>
               <p className={FIELD_HINT}>Samples come from {company}, free.</p>
-              <div role="radiogroup" aria-label="Voice" className="grid max-h-[300px] gap-0 overflow-auto rounded-2xl border border-foreground/10" data-testid="voice-list">
+              <div role="radiogroup" aria-label="Voice" className="max-h-[300px] overflow-auto rounded-2xl border border-foreground/10" data-testid="voice-list">
                 {rows.map((voice) => {
                   const isPicked = voice.voiceId === voiceId;
                   const languages = voice.languages.map(languageName).join(', ');
@@ -378,7 +378,16 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
                         <Radio checked={isPicked} />
                         <span className="grid min-w-0 flex-1">
                           <strong className="text-[15px] font-semibold [overflow-wrap:anywhere]">{voice.name}</strong>
-                          <span className="text-xs text-muted-foreground">{[voice.description, languages].filter(Boolean).join(' ')}</span>
+                          {voice.description && (
+                            <span className="line-clamp-2 text-xs text-muted-foreground" title={voice.description}>
+                              {voice.description}
+                            </span>
+                          )}
+                          {languages && (
+                            <span className="line-clamp-1 text-xs text-muted-foreground" title={languages}>
+                              {languages}
+                            </span>
+                          )}
                         </span>
                       </button>
                       {voice.previewUrl ? (
