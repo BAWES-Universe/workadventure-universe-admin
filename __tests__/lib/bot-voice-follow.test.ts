@@ -127,6 +127,26 @@ describe('followUniverseAi', () => {
     expect(profileProblem(followUniverseAi(published, providers(ears, mouth)), providers(ears, mouth))).toBeNull();
   });
 
+  it('keeps a voice tied to one model (Groq) on that model, and never moves it to a model it can\'t speak with', () => {
+    const groq = provider({
+      id: 'groq',
+      adapter: 'groq',
+      name: 'Groq',
+      models: [
+        { id: 'canopylabs/orpheus-v1-english', kind: 'speech' },
+        { id: 'canopylabs/orpheus-arabic-saudi', kind: 'speech' },
+      ],
+    });
+    const noura = profile({ speech: { providerId: 'groq', model: 'canopylabs/orpheus-arabic-saudi', voiceId: 'noura' } });
+    expect(followUniverseAi(noura, providers(ears, groq)).speech.model).toBe('canopylabs/orpheus-arabic-saudi');
+    const englishOnly = provider({ ...groq, models: [{ id: 'canopylabs/orpheus-v1-english', kind: 'speech' }] });
+    const followed = followUniverseAi(noura, providers(ears, englishOnly));
+    expect(followed.speech.model).toBe('canopylabs/orpheus-arabic-saudi');
+    expect(profileProblem(followed, providers(ears, englishOnly))).toBe("Groq doesn't list the model canopylabs/orpheus-arabic-saudi for speaking");
+    const autumn = profile({ speech: { providerId: 'groq', model: 'canopylabs/orpheus-arabic-saudi', voiceId: 'autumn' } });
+    expect(followUniverseAi(autumn, providers(ears, groq)).speech.model).toBe('canopylabs/orpheus-v1-english');
+  });
+
   it('leaves a provider that is missing to profileProblem', () => {
     expect(followUniverseAi(profile(), providers(ears))).toEqual(profile({ recognition: { providerId: 'soniox', model: 'stt-rt-v6' } }));
     expect(profileProblem(followUniverseAi(profile(), providers(ears)), providers(ears))).toBe("The provider chosen for speaking doesn't exist");
@@ -145,6 +165,15 @@ describe('borrowUniverseAi (#840)', () => {
     expect(borrowed.speech).toEqual({ providerId: 'eleven', model: 'eleven_v4_turbo', voiceId: 'aria', voiceName: 'Aria' });
     expect(borrowed.recognition).toBe(onCartesia.recognition);
     expect(borrowed.expression).toBe('natural');
+  });
+
+  it('borrows a starting voice tied to one model (Groq) with that model, or nothing when the provider doesn\'t list it', () => {
+    const groq = (models: { id: string; kind: string }[]) =>
+      provider({ id: 'groq', adapter: 'groq', name: 'Groq', defaultSpeech: true, defaultVoiceId: 'noura', defaultVoiceName: 'Noura', models });
+    const both = groq([{ id: 'canopylabs/orpheus-v1-english', kind: 'speech' }, { id: 'canopylabs/orpheus-arabic-saudi', kind: 'speech' }]);
+    expect(borrowUniverseAi(onCartesia, providers(defaultEars, both, cartesia)).speech).toEqual({ providerId: 'groq', model: 'canopylabs/orpheus-arabic-saudi', voiceId: 'noura', voiceName: 'Noura' });
+    const englishOnly = groq([{ id: 'canopylabs/orpheus-v1-english', kind: 'speech' }]);
+    expect(borrowUniverseAi(onCartesia, providers(defaultEars, englishOnly, cartesia))).toBe(onCartesia);
   });
 
   it('lets a listening part on a company that is off listen with Universe AI\'s current company', () => {
