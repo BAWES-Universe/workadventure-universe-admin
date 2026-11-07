@@ -60,6 +60,7 @@ export function voiceCompanyKind(company: VoiceKeyCompany): AiKeyKindInfo {
     steps: [{ text: company.step }],
     providerType: 'openai',
     address: company.account?.address ? 'required' : 'none',
+    ...(company.account?.regions ? { regions: company.account.regions.map((region) => ({ id: region.id, label: region.label, base: `https://${region.host}` })) } : {}),
     apiKey: 'required',
     docs: company.docs,
     protocol: 'openai',

@@ -82,7 +82,7 @@ describe('Load models for a voice key', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it.each(VOICE_KEY_COMPANIES.map((company) => [company.adapter, company]))('%s: a GET to its own address with the key in one header and nothing billed', async (adapter, company) => {
+  it.each(VOICE_KEY_COMPANIES.filter((company) => !company.check.sign).map((company) => [company.adapter, company]))('%s: a GET to its own address with the key in one header and nothing billed', async (adapter, company) => {
     findMany.mockResolvedValue([{ adapter, name: company.label, recognition: true, speech: true, models: [{ id: 'm', kind: 'speech' }] }]);
     answer(200);
     // A company whose keys live at the person's own address (Azure) is asked there
@@ -117,6 +117,48 @@ describe('Load models for a voice key', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     },
   );
+
+  describe('AWS: a key in two parts, made per region (#1910)', () => {
+    const ID = 'AKIAIOSFODNN7EXAMPLE';
+    const SECRET = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+    const AWS = `${ID}:${SECRET}`;
+
+    it('signs a free STS call in the region picked: the ID and a signature go, never the secret', async () => {
+      answer(200);
+      const response = await send({ adapter: 'aws', apiKey: AWS, region: 'eu-north-1' });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true, models: [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }] });
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe('https://sts.eu-north-1.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15');
+      expect(init.method).toBe('GET');
+      expect(init.redirect).toBe('manual');
+      expect(init.headers.Authorization).toMatch(new RegExp(`^AWS4-HMAC-SHA256 Credential=${ID}/\\d{8}/eu-north-1/sts/aws4_request, SignedHeaders=host;x-amz-date, Signature=[0-9a-f]{64}$`));
+      expect(init.headers['x-amz-date']).toMatch(/^\d{8}T\d{6}Z$/);
+      expect(JSON.stringify(init)).not.toContain(SECRET);
+    });
+
+    it('says AWS refused a key it answers 403', async () => {
+      answer(403, '<ErrorResponse><Error><Code>InvalidClientTokenId</Code></Error></ErrorResponse>');
+      const response = await send({ adapter: 'aws', apiKey: AWS, region: 'us-east-1' });
+      expect(response.status).toBe(422);
+      expect(await response.json()).toEqual({ error: 'AWS didn’t accept that key. Check it and paste it again.' });
+    });
+
+    it.each([undefined, '', 'eu-west-1', 'us-east-1.evil.com'])('asks for a region first, and calls no one, for %p', async (region) => {
+      answer(200);
+      const response = await send({ adapter: 'aws', apiKey: AWS, region });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'Pick the region first.' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it.each([SECRET, `${ID}:`, `:${SECRET}`, `ASIAIOSFODNN7EXAMPLE:${SECRET}`, `${ID}:${SECRET}:x`])('refuses a key not in two parts, without calling anyone (%p)', async (apiKey) => {
+      answer(200);
+      const response = await send({ adapter: 'aws', apiKey, region: 'us-east-1' });
+      expect(response.status).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
 
   it('says Google refused a key it answers 400 API_KEY_INVALID, and counts any other 400 as not reached', async () => {
     answer(400, '{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}');

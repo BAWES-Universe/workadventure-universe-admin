@@ -127,7 +127,22 @@ export interface VoiceKeyAccount {
   address?: { label: string; example: string; hint: string; hosts: string[] };
   /** The model is typed, as the person named it at the company (Azure: the deployment name), for this job. */
   typedModel?: { title: string; label: string; hint: string; kind: VoiceCompanyJobName };
+  /** The regions a key may be in, one picked on Add a key (AWS), each with the host the bot server calls there. */
+  regions?: { id: string; label: string; host: string }[];
+  /** A key in two parts (AWS): this one shown as typed (the access key ID), the other kept secret like any key. */
+  keyId?: { label: string; example: string; hint: string };
+  /** What the secret part is called, when not "API key" (AWS: "Secret access key"). */
+  keyLabel?: string;
 }
+
+/**
+ * An AWS key as kept and sent on: the access key ID, a colon, then the secret access key. Only long-term keys (AKIA): a
+ * temporary key needs a session token too, which nothing here keeps.
+ */
+export const AWS_KEY = /^AKIA[A-Z0-9]{12,124}:[A-Za-z0-9/+=]{20,128}$/;
+
+/** A key in two parts kept as one: the ID part, a colon, the secret part (AWS). */
+export const joinKey = (keyId: string, secret: string) => `${keyId.trim()}:${secret.trim()}`;
 
 /** One company, everything about it in one place. */
 export interface VoiceKeyCompanyEntry {
@@ -164,6 +179,11 @@ export interface VoiceKeyCompanyEntry {
     alsoAccepted?: { status: number; includes?: string };
     /** An answer other than 401 or 403 that still means the key is wrong (Google: 400 with API_KEY_INVALID), only with that text. */
     alsoRefused?: { status: number; includes: string };
+    /**
+     * The call is signed with the key instead of carrying it (AWS Signature Version 4, for this service), in the region picked
+     * (`{region}` in the url). Neither part of the key is ever sent.
+     */
+    sign?: { service: string };
   };
 }
 
@@ -185,6 +205,54 @@ const company = (entry: VoiceKeyCompanyEntry): VoiceKeyCompanyInfo => ({
 
 // In alphabetical order by name, so the list ranks no company over another
 export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
+  company({
+    adapter: 'aws',
+    label: 'AWS',
+    jobs: {
+      talk: {
+        // The region picked on Add a key names the host: bedrock-runtime.<region>.amazonaws.com
+        host: 'bedrock-runtime.us-east-1.amazonaws.com',
+        // From Bedrock's Nova 2 Sonic model card (7 Nov 2026): in us-east-1, us-west-2, eu-north-1 and ap-northeast-1 only
+        models: [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic' }],
+        // AWS has no call that lists Nova Sonic voices: these are the voices its language table lists, in that order. Tiffany and
+        // Matthew speak every language Nova Sonic does; Kiara and Arjun speak Indian English and Hindi
+        fixedVoices: [
+          { id: 'tiffany', name: 'Tiffany' },
+          { id: 'matthew', name: 'Matthew' },
+          { id: 'amy', name: 'Amy' },
+          { id: 'olivia', name: 'Olivia' },
+          { id: 'kiara', name: 'Kiara' },
+          { id: 'arjun', name: 'Arjun' },
+          { id: 'ambre', name: 'Ambre' },
+          { id: 'florian', name: 'Florian' },
+          { id: 'beatrice', name: 'Beatrice' },
+          { id: 'lorenzo', name: 'Lorenzo' },
+          { id: 'tina', name: 'Tina' },
+          { id: 'lennart', name: 'Lennart' },
+          { id: 'lupe', name: 'Lupe' },
+          { id: 'carlos', name: 'Carlos' },
+          { id: 'carolina', name: 'Carolina' },
+          { id: 'leo', name: 'Leo' },
+        ],
+      },
+    },
+    benefit: '{does}. Uses your AWS account, in the region you pick.',
+    step: 'In the AWS console, open IAM and create an access key for a user allowed bedrock:InvokeModelWithBidirectionalStream.',
+    docs: 'https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-2-sonic.html',
+    account: {
+      regions: [
+        { id: 'us-east-1', label: 'US East (N. Virginia)', host: 'bedrock-runtime.us-east-1.amazonaws.com' },
+        { id: 'us-west-2', label: 'US West (Oregon)', host: 'bedrock-runtime.us-west-2.amazonaws.com' },
+        { id: 'eu-north-1', label: 'Europe (Stockholm)', host: 'bedrock-runtime.eu-north-1.amazonaws.com' },
+        { id: 'ap-northeast-1', label: 'Asia Pacific (Tokyo)', host: 'bedrock-runtime.ap-northeast-1.amazonaws.com' },
+      ],
+      keyId: { label: 'Access key ID', example: 'AKIA…', hint: 'Shown next to the secret when you create the access key. It starts with AKIA.' },
+      keyLabel: 'Secret access key',
+    },
+    // STS GetCallerIdentity answers any valid key, needs no permission and is free; a wrong key is 403. The call is signed, so
+    // neither part of the key leaves Universe
+    check: { url: 'https://sts.{region}.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15', header: 'Authorization', prefix: '', sign: { service: 'sts' } },
+  }),
   company({
     adapter: 'azure',
     label: 'Azure OpenAI',
@@ -554,3 +622,10 @@ export function accountAddress(info: Pick<VoiceKeyCompanyEntry, 'account'>, type
 
 /** A model name a person typed (an Azure deployment name): letters, digits, dot, dash and underscore, up to 64. */
 export const TYPED_MODEL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** The region a person picked for a company whose keys are made per region (AWS), when it is one of the company's own. */
+export function accountRegion(info: Pick<VoiceKeyCompanyEntry, 'account'>, picked: unknown): string | null {
+  const regions = info.account?.regions;
+  if (!regions || typeof picked !== 'string') return null;
+  return regions.find((region) => region.id === picked)?.id ?? null;
+}
