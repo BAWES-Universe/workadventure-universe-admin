@@ -31,6 +31,7 @@
  * - camb: GET /apis/list-voices, x-api-key. It lists voices: nothing is spoken.
  * - fal: GET https://api.fal.ai/v1/account/billing, Authorization: Key. Free (it reads the account's name). A key without the
  *   billing permission (the usual API key) is answered 403, not 401: fal knows the key, so that counts as accepted.
+ * - gladia: GET /v2/live?limit=1, x-gladia-key. It lists the account's past live sessions: nothing is transcribed. A wrong key is 401.
  * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
  *   free account with no credit still has the answer, and that is fine: the free model needs none.
  */
@@ -428,6 +429,22 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On fish.audio, open API Keys and create a key.',
     docs: 'https://docs.fish.audio',
     check: { url: 'https://api.fish.audio/wallet/self/api-credit', header: 'Authorization', prefix: 'Bearer ' },
+  }),
+  company({
+    adapter: 'gladia',
+    label: 'Gladia',
+    jobs: {
+      recognition: {
+        // Live speech to text (POST /v2/live for a session, then its socket). Solaria-1 is Gladia's only live model
+        // (https://docs.gladia.io/api-reference/v2/live/init)
+        host: 'api.gladia.io',
+        models: [{ id: 'solaria-1', label: 'Solaria-1' }],
+      },
+    },
+    benefit: '{does}. Uses your account at gladia.io.',
+    step: 'On app.gladia.io, open API keys and create a key.',
+    docs: 'https://docs.gladia.io',
+    check: { url: 'https://api.gladia.io/v2/live?limit=1', header: 'x-gladia-key', prefix: '' },
   }),
   company({
     adapter: 'soniox',
