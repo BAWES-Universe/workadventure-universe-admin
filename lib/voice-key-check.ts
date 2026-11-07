@@ -89,6 +89,53 @@ export async function loadVoiceKeyModels(adapter: unknown, apiKey: unknown, enab
   return { ok: true, models };
 }
 
+/** The most models one company's list may give: more is not a list a person can tick through. */
+export const MAX_LISTED_MODELS = 100;
+
+/**
+ * The models a company lists for a key, kept to the ones Universe can run for the company's job (Orbit #840: an operator ticks them instead
+ * of typing ids). One free GET to the company's own fixed address with the same key header as the check: nothing is heard or
+ * spoken. Null when the company has no list (`models` absent from its catalog entry), or the list can't be read: then the models
+ * are typed, as before. Each id once, in the company's order.
+ */
+export async function listCompanyModels(company: VoiceKeyCompanyInfo, apiKey: string): Promise<VoiceModel[] | null> {
+  const spec = company.models;
+  if (!spec) return null;
+  let response: Response | undefined;
+  try {
+    response = await fetch(spec.url, {
+      method: 'GET',
+      headers: { Accept: 'application/json', ...company.check.headers, [company.check.header]: `${company.check.prefix}${apiKey}` },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
+      cache: 'no-store',
+    });
+    if (response.status < 200 || response.status >= 300) return null;
+    const body: unknown = await response.json();
+    const list = spec.list ? (body as Record<string, unknown> | null)?.[spec.list] : body;
+    if (!Array.isArray(list)) return null;
+    const seen = new Set<string>();
+    const models: VoiceModel[] = [];
+    for (const entry of list) {
+      if (typeof entry !== 'object' || entry === null) continue;
+      const fields = entry as Record<string, unknown>;
+      if (spec.where && !Object.entries(spec.where).every(([field, value]) => fields[field] === value)) continue;
+      const id = typeof fields[spec.id] === 'string' ? (fields[spec.id] as string).trim() : '';
+      if (!id || id.length > 255 || seen.has(id)) continue;
+      seen.add(id);
+      const label = spec.label && typeof fields[spec.label] === 'string' ? (fields[spec.label] as string).trim().slice(0, 255) : '';
+      models.push({ id, ...(label && label !== id ? { label } : {}), kind: spec.kind });
+      if (models.length >= MAX_LISTED_MODELS) break;
+    }
+    return models.length > 0 ? models : null;
+  } catch {
+    // Nothing from the error is kept: it could carry the address with the key's header
+    return null;
+  } finally {
+    await response?.body?.cancel().catch(() => undefined);
+  }
+}
+
 /**
  * Asks a company if it knows a key, with the same free call as "Load models" and nothing else: no model list and no check against
  * which companies people may add. For a super admin setting up Universe's own key (#792): nothing is spoken or heard, so nothing is

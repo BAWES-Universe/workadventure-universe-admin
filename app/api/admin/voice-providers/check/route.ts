@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { allowKeyAttempt } from '@/lib/ai-key-models';
-import { checkVoiceKeyWithCompany } from '@/lib/voice-key-check';
+import { checkVoiceKeyWithCompany, listCompanyModels } from '@/lib/voice-key-check';
+import { voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 
 export const runtime = 'nodejs';
 
@@ -11,7 +12,9 @@ const STATUS = { refused: 422, unreachable: 502, 'bad-request': 400 } as const;
 /**
  * POST /api/admin/voice-providers/check { adapter, apiKey } - asks the company if it knows a key before a provider is added
  * (#792). One free call to the company's own address, the same one a person's own key gets: nothing is saved, spoken or heard, so
- * nothing is billed, and the key is never logged or returned. Answers `{ ok: true }`, or `{ error }` with a plain sentence: 422 the
+ * nothing is billed, and the key is never logged or returned. Answers `{ ok: true, models }`, with the models the company lists for its
+ * job (`[{ id, label?, kind }]`, read with one more free call: Orbit #840), or null when it has no list or the list can't be read
+ * (then they are typed), or `{ error }` with a plain sentence: 422 the
  * company turned the key away, 502 it couldn't be reached, 400 the company or key isn't usable, 429 too many tries.
  */
 export async function POST(request: NextRequest) {
@@ -23,7 +26,11 @@ export async function POST(request: NextRequest) {
   const input = body as { adapter?: unknown; apiKey?: unknown };
   try {
     const result = await checkVoiceKeyWithCompany(input.adapter, input.apiKey);
-    return result.ok ? NextResponse.json({ ok: true }) : NextResponse.json({ error: result.message }, { status: STATUS[result.reason] });
+    if (!result.ok) return NextResponse.json({ error: result.message }, { status: STATUS[result.reason] });
+    // The company knows the key: its own list of models, so the super admin ticks them instead of typing ids (null: typed)
+    const company = voiceKeyCompanyInfo(input.adapter);
+    const models = company && typeof input.apiKey === 'string' ? await listCompanyModels(company, input.apiKey.trim()) : null;
+    return NextResponse.json({ ok: true, models });
   } catch (error) {
     console.error('[VoiceProviders] Check key failed:', error instanceof Error ? error.message : 'unknown');
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });

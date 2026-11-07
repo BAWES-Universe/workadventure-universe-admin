@@ -7,6 +7,10 @@
  * least one enabled server provider is offered, and what it listens and speaks with is what those providers list. Everything
  * else about a company is data here, one entry each, never `if (adapter === ...)` in the logic.
  *
+ * `models` is where a company lists its models (GET, the same key header): Soniox GET /v1/models (real-time ones), Deepgram GET
+ * /v1/models (streaming listening ones), ElevenLabs GET /v1/models (speaking ones), Cartesia GET /models?capability=tts. Fish Audio
+ * has no such list, so its models are typed.
+ *
  * `check` is the one free, authenticated call "Load models" makes with a pasted key, to see that the company accepts it. It lists
  * something or returns the account's own details: nothing is transcribed or spoken, so nothing is billed. Chosen from each
  * company's current API reference (Nov 2026):
@@ -35,6 +39,21 @@ export interface VoiceKeyCompanyInfo {
   step: string;
   /** Where to read about the company and get a key. */
   docs: string;
+  /**
+   * Where the company lists its models, read with the same key header as `check` (free: nothing is heard or spoken). Absent for a
+   * company with no list (Fish Audio picks its model by name only), so its models are typed. `list` is the field holding the list
+   * (none: the answer is the list), `id` and `label` the fields of one model, and `where` what a model must say to be one Universe
+   * can run for the company's job (real-time listening, or speaking).
+   */
+  models?: {
+    /** The job the listed models do in Universe (the game's connector for this company does only that one). */
+    kind: 'recognition' | 'speech';
+    url: string;
+    list?: string;
+    id: string;
+    label?: string;
+    where?: Record<string, string | boolean>;
+  };
   check: {
     url: string;
     /** The header the key goes in, and what comes before it there (`Bearer `, `Token `, or nothing). */
@@ -58,6 +77,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     benefit: '{does}. Uses your account at cartesia.ai.',
     step: 'On play.cartesia.ai, open API keys and create a key.',
     docs: 'https://docs.cartesia.ai',
+    models: { kind: 'speech', url: 'https://api.cartesia.ai/models?capability=tts', list: 'data', id: 'id', where: { capability: 'tts' } },
     check: { url: 'https://api.cartesia.ai/voices?limit=1', header: 'Authorization', prefix: 'Bearer ', headers: { 'Cartesia-Version': '2026-08-14' } },
   },
   {
@@ -67,6 +87,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     benefit: '{does}. Uses your account at deepgram.com.',
     step: 'On deepgram.com, open API Keys and create a key.',
     docs: 'https://developers.deepgram.com',
+    models: { kind: 'recognition', url: 'https://api.deepgram.com/v1/models', list: 'stt', id: 'canonical_name', where: { streaming: true } },
     check: { url: 'https://api.deepgram.com/v1/projects', header: 'Authorization', prefix: 'Token ', alsoAccepted: { status: 403 } },
   },
   {
@@ -76,6 +97,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     benefit: '{does}. Uses your account at elevenlabs.io.',
     step: 'On elevenlabs.io, open Developers, then API keys, and create a key.',
     docs: 'https://elevenlabs.io/docs',
+    models: { kind: 'speech', url: 'https://api.elevenlabs.io/v1/models', id: 'model_id', label: 'name', where: { can_do_text_to_speech: true } },
     check: { url: 'https://api.elevenlabs.io/v1/user', header: 'xi-api-key', prefix: '', alsoAccepted: { status: 401, includes: 'missing_permissions' } },
   },
   {
@@ -93,6 +115,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     benefit: '{does}. Uses your account at soniox.com.',
     step: 'On console.soniox.com, open API Keys and create a key.',
     docs: 'https://soniox.com/docs',
+    models: { kind: 'recognition', url: 'https://api.soniox.com/v1/models', list: 'models', id: 'id', label: 'name', where: { transcription_mode: 'real_time' } },
     check: { url: 'https://api.soniox.com/v1/models', header: 'Authorization', prefix: 'Bearer ' },
   },
 ];

@@ -12,6 +12,8 @@ import { VOICE_KEY_COMPANIES, type VoiceKeyCompanyInfo } from '@/lib/voice-key-c
 import type { VoiceModel } from '@/lib/voice-providers';
 import { PageHeader } from '../../../components/ds';
 import { ProviderLogo } from '../../../components/ds/provider-logo';
+import { VoiceModelPicker } from '../../../components/ds/voice-model-picker';
+import { lendModelId } from '@/lib/voice-lend-model';
 import { Answered, COMPANY_HOST, COMPANY_JOBS, FIELD_HINT, JOBS, ModelRows, Refused, callOrbit, type VoiceJob } from '../voice-shared';
 
 /** One numbered part of step 2, as Add a key has them. */
@@ -31,11 +33,13 @@ const jobOf = (info: VoiceKeyCompanyInfo): VoiceJob => COMPANY_JOBS[info.adapter
 /** The company's own line with what it does in Universe filled in: "Speaks, with thousands of voices." */
 const benefitOf = (info: VoiceKeyCompanyInfo) => info.benefit.replace('{does}', jobOf(info) === 'recognition' ? 'Listens' : 'Speaks');
 
-type Check = { status: 'none' } | { status: 'checking' } | { status: 'ok' } | { status: 'refused'; message: string };
+/** `listed`: the models the company lists for its job, to tick (null: it has no list, or it couldn't be read, so they are typed). */
+type Check = { status: 'none' } | { status: 'checking' } | { status: 'ok'; listed: VoiceModel[] | null } | { status: 'refused'; message: string };
 
 /**
  * New voice provider (#792): one company Universe AI can listen or speak with, on Universe's own key. Two steps like Add a key:
- * pick a company, then set it up (get the key, paste and check it for free, type its models, name it). Add provider stays off until
+ * pick a company, then set it up (get the key, paste and check it for free, tick the models the company lists or type them when it
+ * has no list, name it). Add provider stays off until
  * the company has accepted the key and one model is listed.
  */
 export default function NewVoiceProviderPage() {
@@ -81,7 +85,12 @@ export default function NewVoiceProviderPage() {
     setCheck({ status: 'checking' });
     const answer = await callOrbit('POST', '/api/admin/voice-providers/check', { adapter: info.adapter, apiKey });
     if (mine !== latest.current) return;
-    setCheck(answer.ok ? { status: 'ok' } : { status: 'refused', message: answer.error });
+    if (!answer.ok) {
+      setCheck({ status: 'refused', message: answer.error });
+      return;
+    }
+    const listed = (answer.data as { models?: unknown } | null)?.models;
+    setCheck({ status: 'ok', listed: Array.isArray(listed) && listed.length > 0 ? (listed as VoiceModel[]) : null });
   }
 
   const addressProblem =
@@ -90,6 +99,10 @@ export default function NewVoiceProviderPage() {
   // there, so with an address typed a turned-away key may still be added; with none typed the key has to pass.
   const keyChecked = check.status === 'ok' || (check.status === 'refused' && address.trim() !== '' && !addressProblem);
   const canAdd = keyChecked && models.length > 0 && name.trim() !== '' && !addressProblem;
+  // The models the company listed for the key, to tick; typed instead when it has no list, the list couldn't be read, or the company
+  // turned the key away (it may still be added for an address typed under Its own address)
+  const listed = check.status === 'ok' ? check.listed : null;
+  const typing = !info?.models || (check.status === 'ok' && !listed) || check.status === 'refused';
 
   async function add() {
     if (!info || !canAdd) return;
@@ -192,11 +205,15 @@ export default function NewVoiceProviderPage() {
               </Button>
               {check.status === 'none' && (
                 <p className={FIELD_HINT}>
-                  Asks {info.label} if it knows the key. Nothing is spoken or heard, so nothing is paid.
+                  Asks {info.label} if it knows the key{info.models ? ' and which models it has' : ''}. Nothing is spoken or heard, so nothing is paid.
                   {address.trim() !== '' && ` The check goes to ${info.label}’s own address, not the one under Its own address.`}
                 </p>
               )}
-              {check.status === 'ok' && <Answered>{info.label} knows this key. Nothing was spoken, so nothing was paid.</Answered>}
+              {check.status === 'ok' && (
+                <Answered>
+                  {info.label} knows this key{check.listed ? ` and lists ${check.listed.length} ${check.listed.length === 1 ? 'model' : 'models'} for it` : ''}. Nothing was spoken, so nothing was paid.
+                </Answered>
+              )}
               {check.status === 'refused' && <Refused>{check.message}</Refused>}
               {check.status === 'refused' && address.trim() !== '' && !addressProblem && (
                 <p className={FIELD_HINT}>This check goes to {info.label}’s own address, so it may not know a key made for the address you typed. You can still add it.</p>
@@ -204,8 +221,34 @@ export default function NewVoiceProviderPage() {
             </div>
           </Part>
           <Part n={3} title="Its models">
-            <p className={FIELD_HINT}>Type each model as {info.label} writes it. Bots on Universe AI, and people’s own {info.label} keys, can use only the models listed here. The first one is what bots start on.</p>
-            <ModelRows models={models} jobs={[job]} onChange={setModels} disabled={saving} />
+            {listed ? (
+              <>
+                <p className={FIELD_HINT}>
+                  {info.label} lists these. Tick the ones bots may use: bots on Universe AI, and people’s own {info.label} keys, can use only those. The first you tick is what bots start on.
+                </p>
+                <VoiceModelPicker
+                  models={listed}
+                  mode="many"
+                  label={`${info.label} models`}
+                  picked={models.map(lendModelId)}
+                  onChange={(ids) => setModels(ids.flatMap((id) => listed.filter((entry) => lendModelId(entry) === id)))}
+                />
+              </>
+            ) : typing ? (
+              <>
+                <p className={FIELD_HINT}>
+                  {info.models
+                    ? check.status === 'refused'
+                      ? `Type each model as ${info.label} writes it.`
+                      : `Couldn’t read ${info.label}’s list of models, so type each as ${info.label} writes it.`
+                    : `${info.label} doesn’t share a list of its models, so type each as ${info.label} writes it.`}{' '}
+                  Bots on Universe AI, and people’s own {info.label} keys, can use only the models listed here. The first one is what bots start on.
+                </p>
+                <ModelRows models={models} jobs={[job]} onChange={setModels} disabled={saving} />
+              </>
+            ) : (
+              <p className={FIELD_HINT}>Check the key and {info.label}’s models show here to tick.</p>
+            )}
           </Part>
           <Part n={4} title="Name it">
             <Input aria-label="Name" value={name} maxLength={255} onChange={(event) => setTypedName(event.target.value)} className="h-11 rounded-xl" />

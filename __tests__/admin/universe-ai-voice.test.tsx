@@ -348,6 +348,41 @@ describe('New voice provider', () => {
   });
 });
 
+describe('New voice provider, models the company lists (#840)', () => {
+  it('lists the company\'s models after Check key to tick, with no id to type, and the first ticked is where bots start', async () => {
+    checkAnswer = {
+      ok: true,
+      body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }, { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' }] },
+    };
+    render(<NewVoiceProviderPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^ElevenLabs/ }));
+    expect(screen.getByText('Check the key and ElevenLabs’s models show here to tick.')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk_0000000000000000a1b2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    expect(await screen.findByText('ElevenLabs knows this key and lists 2 models for it. Nothing was spoken, so nothing was paid.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Add a model' })).toBeNull();
+    const add = screen.getByRole('button', { name: 'Add provider' });
+    expect(add.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Eleven v3' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Eleven Flash v2.5' }));
+    expect(screen.getByRole('checkbox', { name: 'Eleven v3' }).getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(add);
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/ai-providers'));
+    const post = calls.find((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers');
+    expect(post?.body?.models).toEqual([
+      { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' },
+      { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' },
+    ]);
+  });
+
+  it('asks for the models to be typed for a company that shares no list', async () => {
+    render(<NewVoiceProviderPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Fish Audio/ }));
+    expect(screen.getByText(/Fish Audio doesn’t share a list of its models, so type each as Fish Audio writes it\./)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Add a model' })).toBeTruthy();
+  });
+});
+
 describe('New voice provider, Enter in a model field', () => {
   it('adds the model being typed and does not submit the form', async () => {
     render(<NewVoiceProviderPage />);
