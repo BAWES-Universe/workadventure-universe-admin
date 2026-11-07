@@ -10,7 +10,7 @@ export async function OPTIONS(request: NextRequest) {
 }
 
 /**
- * GET /api/bots/:id/voice/voices/:voiceId/preview?source=universe-ai|<keyId>
+ * GET /api/bots/:id/voice/voices/:voiceId/preview?source=universe-ai|<keyId>[&part=talk]
  * One voice's free sample, for a voice company that keeps it behind the key (a voice from the list whose `previewUrl` is this
  * path). The audio comes from the address the company's own list named, never from one in the request; the key never leaves
  * Orbit. Answers the audio, with the same errors as the list (404 for a voice with no sample, 502 when the company didn't answer).
@@ -24,7 +24,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (auth.response) return auth.response;
     const source = request.nextUrl.searchParams.get('source')?.trim();
     if (!source || source.length > 100) return json(request, { error: 'source is required' }, 400);
-    const sample = await fetchVoiceSample(id, source, voiceId);
+    const part = request.nextUrl.searchParams.get('part') === 'talk' ? 'talk' : 'speech';
+    const sample = await fetchVoiceSample(id, source, voiceId, part);
     return new NextResponse(sample.bytes, { headers: { ...corsHeaders(request), 'Content-Type': sample.contentType, 'Cache-Control': 'private, max-age=86400' } });
   } catch (error) {
     if (error instanceof VoiceListRefused) return json(request, { error: error.message }, error.status);
