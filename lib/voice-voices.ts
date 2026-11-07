@@ -39,6 +39,11 @@ export interface VoiceChoice {
   providerId: string;
   /** The speaking model to use with this voice: the first one the source lists (and the lend allows). */
   model: string;
+  /**
+   * The model is a talking model (game #1910): it listens and speaks in one, so a bot that picks this voice names it for both
+   * listening and speaking.
+   */
+  talk: boolean;
 }
 
 /** A voice as a company listed it. `preview` is the company's address for the sample, `previewNeedsKey` whether it wants the key. */
@@ -186,8 +191,9 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
       const body = spec.body ? Object.fromEntries(Object.entries(spec.body).map(([field, value]) => [field, value === '{size}' ? PAGE_SIZE : value])) : undefined;
       const answer = await getJson(call, [query, paged].filter(Boolean).join('&'), body);
       if (typeof answer !== 'object' || answer === null) throw unreadable(call);
-      // An empty `list`: the answer is the list itself (CAMB.AI); `a.b`: a field inside a field (Neuphonic's data.voices)
-      const voices = spec.list === '' ? answer : spec.list.split('.').reduce<unknown>((at, field) => (typeof at === 'object' && at !== null ? (at as Record<string, unknown>)[field] : undefined), answer);
+      // An empty `list`: the answer is the list itself (CAMB.AI); `a[].b[]`: gathered from inside a list (Soniox); `a.b`: a field
+      // inside a field (Neuphonic's data.voices)
+      const voices = spec.list === '' ? answer : spec.list.endsWith('[]') ? valuesAt(answer, spec.list) : spec.list.split('.').reduce<unknown>((at, field) => (typeof at === 'object' && at !== null ? (at as Record<string, unknown>)[field] : undefined), answer);
       if (!Array.isArray(voices)) throw unreadable(call);
       for (const voice of voices) {
         if (typeof voice !== 'object' || voice === null) throw unreadable(call);
@@ -239,15 +245,19 @@ const cache = new Map<string, Cached>();
 /** For tests: forgets every list. */
 export const clearVoiceListCache = () => cache.clear();
 
+/** The job whose voices a provider's bots pick from: speaking, or talking (game #1910) for a company that only talks live. */
+const voiceJobOf = (company: VoiceKeyCompanyInfo | null) => (company?.jobs.speech ? company.jobs.speech : company?.jobs.talk);
+
 /** Where a source's calls go and how they are signed: the company's own address, the key in its one header. */
 function callFor(provider: VoiceProvider): Call & { spec: VoiceListSpec } {
   const company = voiceKeyCompanyInfo(provider.adapter);
-  const spec = company?.jobs.speech?.voices;
-  if (!company || !spec || 'fixed' in spec) throw new VoiceListRefused(`${company?.label ?? provider.name}’s voices can’t be listed here.`, 409);
+  const job = voiceJobOf(company);
+  const spec = job?.voices;
+  if (!company || !job || !spec) throw new VoiceListRefused(`${company?.label ?? provider.name}’s voices can’t be listed here.`, 409);
   if (!provider.apiKeyEncrypted) throw new VoiceListRefused(`${provider.name} has no key.`, 409);
   // The server's own provider may name another address (a proxy); a person's key never does
-  // A list at its own host (Resemble) is always asked there: a proxy for speaking is not a voice list
-  const base = (spec.host ? `https://${spec.host}` : provider.ownerId === null && provider.endpoint ? provider.endpoint : `https://${company.jobs.speech!.host}`).replace(/\/+$/, '');
+  // A list kept at another host than the job's (Resemble) is always read there: a proxy for speaking is not a voice list
+  const base = (spec.host ? `https://${spec.host}` : provider.ownerId === null && provider.endpoint ? provider.endpoint : `https://${job.host}`).replace(/\/+$/, '');
   const { check } = company;
   let key: string;
   try {
@@ -284,26 +294,27 @@ async function listOwnVoices(provider: VoiceProvider): Promise<Listed[]> {
 }
 
 async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
+  // A company with no list call (OpenAI's talking voices) has its voices in the catalog: nothing to call, nothing to cache
+  const fixed = voiceJobOf(voiceKeyCompanyInfo(provider.adapter))?.fixedVoices;
+  if (fixed) {
+    return fixed.map((voice) => ({
+      voiceId: voice.id,
+      name: voice.name,
+      description: voice.description ?? '',
+      languages: voice.languages ?? [],
+      preview: null,
+      previewNeedsKey: false,
+      ...(voice.model ? { models: [voice.model] } : {}),
+    }));
+  }
   // A new key or address is a new row version, so it is never served an older list
   const id = `${provider.id}:${provider.updatedAt.getTime()}`;
   const hit = cache.get(id);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.voices;
   let voices: Listed[];
   try {
-    const listing = voiceKeyCompanyInfo(provider.adapter)?.jobs.speech?.voices;
     if (isOwnSpeechAdapter(provider.adapter)) {
       voices = (await listOwnVoices(provider)).slice(0, MAX_VOICES);
-    } else if (listing && 'fixed' in listing) {
-      // Named in the catalog: nothing is asked, and the key is never sent
-      voices = listing.fixed.map((voice) => ({
-        voiceId: voice.id,
-        name: voice.name,
-        description: voice.description ?? '',
-        languages: voice.languages,
-        preview: null,
-        previewNeedsKey: false,
-        ...(voice.model ? { models: [voice.model] } : {}),
-      }));
     } else {
       const call = callFor(provider);
       // A lister stops at its page limit, but never trusts that: no more than MAX_VOICES are kept or sent on
@@ -324,7 +335,8 @@ interface Source {
   provider: VoiceProvider;
   /** The speaking model a bot starts on: the first one set up and allowed here. */
   model: string;
-  /** Every speaking model set up and allowed here. */
+  talk: boolean;
+  /** Every model of the same kind set up and allowed here, first to last: a voice tied to one model (Groq) is offered only with it. */
   models: string[];
 }
 
@@ -351,11 +363,11 @@ async function sourceFor(botId: string, source: string): Promise<Source> {
     if (!provider || !bot.createdById || !(await lendAccess(bot.createdById, universeId))) throw new VoiceListRefused('Voice key not found.', 404);
   }
   const allowed = provider.lends?.length ? readLendModels(provider.lends[0].models) : null;
-  const models = readModels(provider.models)
-    .filter((entry) => entry.kind === 'speech' && (!allowed || allowed.includes(lendModelId(entry))))
-    .map((entry) => entry.id);
-  if (!models.length) throw new VoiceListRefused(`${provider.name} has no speaking model set up here.`, 409);
-  return { provider, model: models[0], models };
+  // A speaking model first; a key whose only speaking is a talking model (game #1910) gives that one
+  const usable = readModels(provider.models).filter((entry) => !allowed || allowed.includes(lendModelId(entry)));
+  const model = usable.find((entry) => entry.kind === 'speech') ?? usable.find((entry) => entry.kind === 'talk');
+  if (!model) throw new VoiceListRefused(`${provider.name} has no speaking model set up here.`, 409);
+  return { provider, model: model.id, talk: model.kind === 'talk', models: usable.filter((entry) => entry.kind === model.kind).map((entry) => entry.id) };
 }
 
 const previewPath = (botId: string, source: string, voiceId: string) =>
@@ -363,7 +375,7 @@ const previewPath = (botId: string, source: string, voiceId: string) =>
 
 /** The speaking voices of one source (`universe-ai` or a voice key's id) for a bot, in the order the company lists them. */
 export async function listBotVoices(botId: string, source: string): Promise<VoiceChoice[]> {
-  const { provider, model, models } = await sourceFor(botId, source);
+  const { provider, model, talk, models } = await sourceFor(botId, source);
   const listed = await listedFor(provider);
   // A voice tied to models (Groq, Rime) comes with the first of them set up and allowed here, and not at all when none is
   return listed.flatMap((voice) => {
@@ -377,6 +389,7 @@ export async function listBotVoices(botId: string, source: string): Promise<Voic
     previewUrl: !voice.preview ? null : voice.previewNeedsKey ? previewPath(botId, source, voice.voiceId) : voice.preview,
     providerId: provider.id,
     model: voice.own,
+    talk,
   }));
 }
 
@@ -483,7 +496,7 @@ const serverPreviewPath = (providerId: string, voiceId: string) => `/api/admin/v
 export async function listServerVoices(providerId: string): Promise<ServerVoiceChoice[]> {
   const provider = await serverSpeaker(providerId);
   const models = readModels(provider.models).filter((entry) => entry.kind === 'speech').map((entry) => entry.id);
-  const named = 'fixed' in (voiceKeyCompanyInfo(provider.adapter)?.jobs.speech?.voices ?? {});
+  const named = !!voiceKeyCompanyInfo(provider.adapter)?.jobs.speech?.fixedVoices;
   // A voice tied to models is offered only with the model it would speak in as the starting voice (borrowUniverseAi): its own
   // model when the catalog names it (Groq's Orpheus) and the provider lists it, or else the provider's starting model when the
   // voice speaks in it (Rime)
