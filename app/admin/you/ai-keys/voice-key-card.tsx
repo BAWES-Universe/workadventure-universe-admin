@@ -1,6 +1,6 @@
 'use client';
 
-import { Bot, Plus, RefreshCw, X } from 'lucide-react';
+import { Bot, Globe, Plus, RefreshCw, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { VoiceKeySummary } from '@/lib/voice-keys';
 import { voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
@@ -29,6 +29,7 @@ export function VoiceKeyCard({
   onEditModels,
   onPull,
   onLimits,
+  onChangeAddress,
 }: {
   keyItem: VoiceKeySummary;
   renaming: boolean;
@@ -42,9 +43,11 @@ export function VoiceKeyCard({
   onEditModels: (universeId: string) => void;
   onPull: (lent: VoiceLent) => void;
   onLimits: () => void;
+  onChangeAddress: () => void;
 }) {
   const down = key.health.status === 'down';
-  const logo = { logo: voiceKeyCompanyInfo(key.adapter)?.logo };
+  // A speech server on the person's own computer has the plug a chat server has; a company has its logo
+  const logo = { logo: voiceKeyCompanyInfo(key.adapter)?.logo, ...(key.address ? { plainIcon: 'plug' as const } : {}) };
   return (
     <article
       className={`grid gap-4 rounded-2xl border bg-foreground/[.03] p-4 ${down ? 'border-[rgb(245_196_81/0.55)]' : 'border-foreground/10'}`}
@@ -139,6 +142,13 @@ export function VoiceKeyCard({
           <Plus aria-hidden="true" />
           Lend to a universe
         </Button>
+        {/* A tunnel gets a new address when it restarts: the key, its lends and its bots stay */}
+        {key.address && (
+          <Button variant="outline" className="h-11 w-fit px-5" onClick={onChangeAddress}>
+            <Globe aria-hidden="true" />
+            Change address
+          </Button>
+        )}
       </div>
     </article>
   );
