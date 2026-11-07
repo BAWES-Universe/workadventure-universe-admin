@@ -25,8 +25,9 @@ async function ask(company: VoiceKeyCompanyInfo, apiKey: string): Promise<Verdic
   let response: Response | undefined;
   try {
     response = await fetch(check.url, {
-      method: 'GET',
-      headers: { Accept: 'application/json', ...check.headers, [check.header]: `${check.prefix}${apiKey}` },
+      method: check.body ? 'POST' : 'GET',
+      headers: { Accept: 'application/json', ...(check.body ? { 'Content-Type': 'application/json' } : {}), ...check.headers, [check.header]: `${check.prefix}${apiKey}` },
+      ...(check.body ? { body: JSON.stringify(check.body) } : {}),
       // A redirect would carry the key somewhere the catalog never named
       redirect: 'manual',
       signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),

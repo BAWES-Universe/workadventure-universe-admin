@@ -82,15 +82,22 @@ describe('Load models for a voice key', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it.each(VOICE_KEY_COMPANIES.map((company) => [company.adapter, company]))('%s: a GET to its own address with the key in one header and nothing billed', async (adapter, company) => {
+  it.each(VOICE_KEY_COMPANIES.map((company) => [company.adapter, company]))('%s: a free call to its own address with the key in one header and nothing billed', async (adapter, company) => {
     findMany.mockResolvedValue([{ adapter, name: company.label, recognition: true, speech: true, models: [{ id: 'm', kind: 'speech' }] }]);
     answer(200);
     expect((await send({ adapter, apiKey: KEY })).status).toBe(200);
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe(company.check.url);
     expect(new URL(url).protocol).toBe('https:');
-    expect(init.method).toBe('GET');
-    expect(init.body).toBeUndefined();
+    // A GET, or a POST with the catalog's own body when the company lists that way (Async): never the key in the body
+    if (company.check.body) {
+      expect(init.method).toBe('POST');
+      expect(JSON.parse(init.body)).toEqual(company.check.body);
+      expect(init.headers['Content-Type']).toBe('application/json');
+    } else {
+      expect(init.method).toBe('GET');
+      expect(init.body).toBeUndefined();
+    }
     expect(init.redirect).toBe('manual');
     expect(init.headers[company.check.header]).toBe(`${company.check.prefix}${KEY}`);
     expect(Object.values(init.headers).filter((value) => String(value).includes(KEY))).toHaveLength(1);
@@ -179,6 +186,7 @@ describe('Load models for a voice key', () => {
     findMany.mockImplementation(async ({ where }: { where: { adapter?: string } }) => (where.adapter ? [] : serverRows));
     for (const [adapter, models] of [
       ['soniox', [{ id: 'stt-rt-v6', label: 'Soniox real-time v6', kind: 'recognition' }]],
+      ['async', [{ id: 'async_flash_v1.0', label: 'Async Flash v1.0', kind: 'speech' }, { id: 'async_flash_v1.5', label: 'Async Flash v1.5', kind: 'speech' }, { id: 'async_pro_v1.0', label: 'Async Pro v1.0', kind: 'speech' }]],
       ['assemblyai', [{ id: 'universal-3-6-pro', label: 'Universal-3.6 Pro', kind: 'recognition' }, { id: 'universal-streaming-multilingual', label: 'Universal Streaming Multilingual', kind: 'recognition' }, { id: 'universal-streaming-english', label: 'Universal Streaming English', kind: 'recognition' }]],
       ['deepgram', [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }, { id: 'aura-2', label: 'Aura 2', kind: 'speech' }]],
       ['cartesia', [{ id: 'ink-whisper', label: 'Ink Whisper', kind: 'recognition' }, { id: 'sonic-3.6', label: 'Sonic 3.6', kind: 'speech' }]],
