@@ -188,6 +188,38 @@ const company = (entry: VoiceKeyCompanyEntry): VoiceKeyCompanyInfo => ({
   models: VOICE_COMPANY_JOBS.flatMap((kind) => (entry.jobs[kind]?.models ?? []).map((model) => ({ ...model, kind }))),
 });
 
+/** xAI's built-in voices, Eve (its default) first, then as its text to speech docs list them. Every one speaks every language. */
+const XAI_VOICES: FixedVoice[] = [
+  { id: 'eve', name: 'Eve' },
+  { id: 'ara', name: 'Ara' },
+  { id: 'leo', name: 'Leo' },
+  { id: 'rex', name: 'Rex' },
+  { id: 'sal', name: 'Sal' },
+  { id: 'carina', name: 'Carina' },
+  { id: 'zagan', name: 'Zagan' },
+  { id: 'helix', name: 'Helix' },
+  { id: 'orion', name: 'Orion' },
+  { id: 'luna', name: 'Luna' },
+  { id: 'iris', name: 'Iris' },
+  { id: 'altair', name: 'Altair' },
+  { id: 'zenith', name: 'Zenith' },
+  { id: 'perseus', name: 'Perseus' },
+  { id: 'helios', name: 'Helios' },
+  { id: 'lux', name: 'Lux' },
+  { id: 'kepler', name: 'Kepler' },
+  { id: 'rigel', name: 'Rigel' },
+  { id: 'cosmo', name: 'Cosmo' },
+  { id: 'celeste', name: 'Celeste' },
+  { id: 'ursa', name: 'Ursa' },
+  { id: 'sirius', name: 'Sirius' },
+  { id: 'lumen', name: 'Lumen' },
+  { id: 'castor', name: 'Castor' },
+  { id: 'naksh', name: 'Naksh' },
+  { id: 'atlas', name: 'Atlas' },
+  { id: 'aurora', name: 'Aurora' },
+  { id: 'liora', name: 'Liora' },
+];
+
 // In alphabetical order by name, so the list ranks no company over another
 export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
   company({
@@ -516,6 +548,19 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'xai',
     label: 'xAI',
     jobs: {
+      recognition: {
+        // Live hearing over xAI's speech to text socket (wss://api.x.ai/v1/stt), as Pipecat's XAISTTService does. Grok Voice
+        // Transcribe 2.0 is xAI's default and the one model its docs name (#1907)
+        host: 'api.x.ai',
+        models: [{ id: 'grok-voice-transcribe-2.0', label: 'Grok Voice Transcribe 2.0' }],
+      },
+      speech: {
+        // Text to speech, one request per reply (POST /v1/tts), as Pipecat's XAIHttpTTSService does. xAI names no model for it:
+        // this id only tells it apart from the talking models
+        host: 'api.x.ai',
+        models: [{ id: 'grok-tts', label: 'Grok Text to Speech' }],
+        fixedVoices: XAI_VOICES,
+      },
       talk: {
         host: 'api.x.ai',
         // From xAI's voice agent docs (7 Nov 2026): grok-voice-latest always points to the current model, grok-voice-3.0 stays put
@@ -523,37 +568,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
           { id: 'grok-voice-latest', label: 'Grok Voice (latest)' },
           { id: 'grok-voice-3.0', label: 'Grok Voice 3.0' },
         ],
-        // xAI's built-in voices, Eve (its default) first, then as its text to speech docs list them. Every one speaks every language.
-        fixedVoices: [
-          { id: 'eve', name: 'Eve' },
-          { id: 'ara', name: 'Ara' },
-          { id: 'leo', name: 'Leo' },
-          { id: 'rex', name: 'Rex' },
-          { id: 'sal', name: 'Sal' },
-          { id: 'carina', name: 'Carina' },
-          { id: 'zagan', name: 'Zagan' },
-          { id: 'helix', name: 'Helix' },
-          { id: 'orion', name: 'Orion' },
-          { id: 'luna', name: 'Luna' },
-          { id: 'iris', name: 'Iris' },
-          { id: 'altair', name: 'Altair' },
-          { id: 'zenith', name: 'Zenith' },
-          { id: 'perseus', name: 'Perseus' },
-          { id: 'helios', name: 'Helios' },
-          { id: 'lux', name: 'Lux' },
-          { id: 'kepler', name: 'Kepler' },
-          { id: 'rigel', name: 'Rigel' },
-          { id: 'cosmo', name: 'Cosmo' },
-          { id: 'celeste', name: 'Celeste' },
-          { id: 'ursa', name: 'Ursa' },
-          { id: 'sirius', name: 'Sirius' },
-          { id: 'lumen', name: 'Lumen' },
-          { id: 'castor', name: 'Castor' },
-          { id: 'naksh', name: 'Naksh' },
-          { id: 'atlas', name: 'Atlas' },
-          { id: 'aurora', name: 'Aurora' },
-          { id: 'liora', name: 'Liora' },
-        ],
+        fixedVoices: XAI_VOICES,
       },
     },
     logo: 'xai',

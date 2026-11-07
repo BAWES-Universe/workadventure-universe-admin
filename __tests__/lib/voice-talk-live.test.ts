@@ -76,11 +76,14 @@ describe('the Google entry', () => {
 });
 
 describe('the xAI entry', () => {
-  it('talks live only, with its Grok Voice models and its 28 built-in voices, Eve first', () => {
+  it('listens, speaks and talks live, with its Grok models and its 28 built-in voices for speaking and talking, Eve first', () => {
     const xai = voiceKeyCompanyInfo('xai');
     expect(xai?.label).toBe('xAI');
-    expect(xai?.does).toEqual({ recognition: false, speech: false, talk: true });
+    // Hearing and speaking of its own besides talking live (#1907)
+    expect(xai?.does).toEqual({ recognition: true, speech: true, talk: true });
     expect(xai?.models).toEqual([
+      { id: 'grok-voice-transcribe-2.0', label: 'Grok Voice Transcribe 2.0', kind: 'recognition' },
+      { id: 'grok-tts', label: 'Grok Text to Speech', kind: 'speech' },
       { id: 'grok-voice-latest', label: 'Grok Voice (latest)', kind: 'talk' },
       { id: 'grok-voice-3.0', label: 'Grok Voice 3.0', kind: 'talk' },
     ]);
@@ -88,6 +91,7 @@ describe('the xAI entry', () => {
     expect(voices).toHaveLength(28);
     expect(voices[0]).toEqual({ id: 'eve', name: 'Eve' });
     expect(new Set(voices.map((voice) => voice.id)).size).toBe(28);
+    expect(xai?.jobs.speech?.fixedVoices).toEqual(voices);
     expect(xai?.check).toEqual({ url: 'https://api.x.ai/v1/tts/voices', header: 'Authorization', prefix: 'Bearer ' });
     expect(JSON.stringify(xai)).not.toMatch(/recommend/i);
   });
