@@ -12,8 +12,9 @@ import { VOICE_KEY_COMPANIES, type VoiceKeyCompanyInfo } from '@/lib/voice-key-c
 import type { VoiceModel } from '@/lib/voice-providers';
 import { PageHeader } from '../../../components/ds';
 import { ProviderLogo } from '../../../components/ds/provider-logo';
-import { Answered, COMPANY_HOST, COMPANY_JOBS, FIELD_HINT, JOBS, ModelRows, RECOMMENDED_COMPANY, Refused, callOrbit, type VoiceJob } from '../voice-shared';
-import { RecommendedPill } from '../../../components/limits';
+import { VoiceModelPicker } from '../../../components/ds/voice-model-picker';
+import { lendModelId } from '@/lib/voice-lend-model';
+import { Answered, COMPANY_HOST, COMPANY_JOBS, FIELD_HINT, JOBS, ModelRows, Refused, callOrbit, type VoiceJob } from '../voice-shared';
 
 /** One numbered part of step 2, as Add a key has them. */
 function Part({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {
@@ -32,11 +33,14 @@ const jobOf = (info: VoiceKeyCompanyInfo): VoiceJob => COMPANY_JOBS[info.adapter
 /** The company's own line with what it does in Universe filled in: "Speaks, with thousands of voices." */
 const benefitOf = (info: VoiceKeyCompanyInfo) => info.benefit.replace('{does}', jobOf(info) === 'recognition' ? 'Listens' : 'Speaks');
 
-type Check = { status: 'none' } | { status: 'checking' } | { status: 'ok' } | { status: 'refused'; message: string };
+/** `listed`: the models the company lists for its job, to tick (null: it has no list, or it couldn't be read, so they are typed). */
+type Listed = VoiceModel & { note?: string };
+type Check = { status: 'none' } | { status: 'checking' } | { status: 'ok'; listed: Listed[] | null } | { status: 'refused'; message: string };
 
 /**
  * New voice provider (#792): one company Universe AI can listen or speak with, on Universe's own key. Two steps like Add a key:
- * pick a company, then set it up (get the key, paste and check it for free, type its models, name it). Add provider stays off until
+ * pick a company, then set it up (get the key, paste and check it for free, tick the models the company lists or type them when it
+ * has no list, name it). Add provider stays off until
  * the company has accepted the key and one model is listed.
  */
 export default function NewVoiceProviderPage() {
@@ -82,7 +86,17 @@ export default function NewVoiceProviderPage() {
     setCheck({ status: 'checking' });
     const answer = await callOrbit('POST', '/api/admin/voice-providers/check', { adapter: info.adapter, apiKey });
     if (mine !== latest.current) return;
-    setCheck(answer.ok ? { status: 'ok' } : { status: 'refused', message: answer.error });
+    if (!answer.ok) {
+      setCheck({ status: 'refused', message: answer.error });
+      return;
+    }
+    const found = (answer.data as { models?: unknown } | null)?.models;
+    const listed = Array.isArray(found) && found.length > 0 ? (found as Listed[]) : null;
+    setCheck({ status: 'ok', listed });
+    // Like Pipecat's services, a working model is ticked from the start: the one Universe starts this company's keys on. Nothing
+    // picked by hand is replaced.
+    const start = listed ? info.models[0] : undefined;
+    if (start) setModels((now) => (now.length > 0 ? now : [{ id: start.id, label: start.label, kind: start.kind }]));
   }
 
   const addressProblem =
@@ -91,6 +105,19 @@ export default function NewVoiceProviderPage() {
   // there, so with an address typed a turned-away key may still be added; with none typed the key has to pass.
   const keyChecked = check.status === 'ok' || (check.status === 'refused' && address.trim() !== '' && !addressProblem);
   const canAdd = keyChecked && models.length > 0 && name.trim() !== '' && !addressProblem;
+  // The models the company listed for the key, to tick; typed instead when it has no list, the list couldn't be read, or the company
+  // turned the key away (it may still be added for an address typed under Its own address)
+  const listed = check.status === 'ok' ? check.listed : null;
+  // The models to tick: the ones Universe starts this company's keys on first (with the company's line when it lists them too), then
+  // the rest of the company's list
+  const options: Listed[] | null =
+    listed && info
+      ? [
+          ...info.models.map((known) => ({ ...known, ...(listed.find((entry) => entry.id === known.id)?.note ? { note: listed.find((entry) => entry.id === known.id)!.note } : {}) })),
+          ...listed.filter((entry) => !info.models.some((known) => known.id === entry.id)),
+        ]
+      : null;
+  const typing = !info?.modelList || (check.status === 'ok' && !listed) || check.status === 'refused';
 
   async function add() {
     if (!info || !canAdd) return;
@@ -131,13 +158,7 @@ export default function NewVoiceProviderPage() {
             <div key={each} className="grid gap-2" role="radiogroup" aria-label={word}>
               <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{word}</h3>
               {VOICE_KEY_COMPANIES.filter((entry) => COMPANY_JOBS[entry.adapter] === each).map((entry) => (
-                <PickCard key={entry.adapter} role="radio" picked={false} onClick={() => pick(entry.adapter)} indicator={<ProviderLogo info={entry} />} trailing={<Radio checked={false} className="mt-0.5 self-start" />} title={
-                    <span className="flex flex-wrap items-center gap-2">
-                      {entry.label}
-                      {RECOMMENDED_COMPANY[each] === entry.adapter && <RecommendedPill />}
-                    </span>
-                  }
-                  description={benefitOf(entry)} className="items-start" />
+                <PickCard key={entry.adapter} role="radio" picked={false} onClick={() => pick(entry.adapter)} indicator={<ProviderLogo info={entry} />} trailing={<Radio checked={false} className="mt-0.5 self-start" />} title={entry.label} description={benefitOf(entry)} className="items-start" />
               ))}
             </div>
           ))}
@@ -199,11 +220,15 @@ export default function NewVoiceProviderPage() {
               </Button>
               {check.status === 'none' && (
                 <p className={FIELD_HINT}>
-                  Asks {info.label} if it knows the key. Nothing is spoken or heard, so nothing is paid.
+                  Asks {info.label} if it knows the key{info.modelList ? ' and which models it has' : ''}. Nothing is spoken or heard, so nothing is paid.
                   {address.trim() !== '' && ` The check goes to ${info.label}’s own address, not the one under Its own address.`}
                 </p>
               )}
-              {check.status === 'ok' && <Answered>{info.label} knows this key. Nothing was spoken, so nothing was paid.</Answered>}
+              {check.status === 'ok' && (
+                <Answered>
+                  {info.label} knows this key{check.listed ? ` and lists ${check.listed.length} ${check.listed.length === 1 ? 'model' : 'models'} for it` : ''}. Nothing was spoken, so nothing was paid.
+                </Answered>
+              )}
               {check.status === 'refused' && <Refused>{check.message}</Refused>}
               {check.status === 'refused' && address.trim() !== '' && !addressProblem && (
                 <p className={FIELD_HINT}>This check goes to {info.label}’s own address, so it may not know a key made for the address you typed. You can still add it.</p>
@@ -211,8 +236,51 @@ export default function NewVoiceProviderPage() {
             </div>
           </Part>
           <Part n={3} title="Its models">
-            <p className={FIELD_HINT}>Type each model as {info.label} writes it. Bots on Universe AI, and people’s own {info.label} keys, can use only the models listed here. The first one is what bots start on.</p>
-            <ModelRows models={models} jobs={[job]} onChange={setModels} disabled={saving} />
+            {options ? (
+              <>
+                <p className={FIELD_HINT}>
+                  {info.label} lists these, each with what {info.label} says about it. One that works is ticked already. Tick more to let bots pick between them: bots on Universe AI, and people’s own {info.label} keys, can use only the ticked ones. The first ticked is what bots start on.
+                </p>
+                <VoiceModelPicker
+                  models={options}
+                  mode="many"
+                  detailed
+                  label={`${info.label} models`}
+                  picked={models.map(lendModelId)}
+                  // What is saved is the model only: the line about it is the company's, read again whenever the list is
+                  onChange={(ids) => setModels(ids.flatMap((id) => options.filter((entry) => lendModelId(entry) === id).map(({ id: modelId, label, kind }) => ({ id: modelId, ...(label ? { label } : {}), kind }))))}
+                />
+              </>
+            ) : typing ? (
+              <>
+                <p className={FIELD_HINT}>
+                  {info.modelList
+                    ? check.status === 'refused'
+                      ? `Tick the models Universe knows for ${info.label}, or type one as ${info.label} writes it.`
+                      : `Couldn’t read ${info.label}’s list of models. Tick the ones Universe knows for it, or type one as ${info.label} writes it.`
+                    : `${info.label} doesn’t share a list of its models. Tick the ones Universe knows for it, or type one as ${info.label} writes it.`}{' '}
+                  Bots on Universe AI, and people’s own {info.label} keys, can use only the models listed here. The first one is what bots start on.
+                </p>
+                {info.models.length > 0 && (
+                  <VoiceModelPicker
+                    models={info.models}
+                    mode="many"
+                    label={`${info.label} models`}
+                    picked={models.map(lendModelId)}
+                    onChange={(ids) =>
+                      // Ticking keeps a typed model where it is; a model ticked off goes, one ticked on goes last
+                      setModels([
+                        ...models.filter((model) => ids.includes(lendModelId(model)) || !info.models.some((known) => lendModelId(known) === lendModelId(model))),
+                        ...info.models.filter((known) => ids.includes(lendModelId(known)) && !models.some((model) => lendModelId(model) === lendModelId(known))),
+                      ])
+                    }
+                  />
+                )}
+                <ModelRows models={models} jobs={[job]} onChange={setModels} disabled={saving} />
+              </>
+            ) : (
+              <p className={FIELD_HINT}>Check the key and {info.label}’s models show here to tick.</p>
+            )}
           </Part>
           <Part n={4} title="Name it">
             <Input aria-label="Name" value={name} maxLength={255} onChange={(event) => setTypedName(event.target.value)} className="h-11 rounded-xl" />

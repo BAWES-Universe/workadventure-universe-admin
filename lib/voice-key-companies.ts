@@ -9,6 +9,10 @@
  * operator can keep them current without a deploy. Everything else about a company is data here, one entry each, never
  * `if (adapter === ...)` in the logic.
  *
+ * `modelList` is where a company lists its models (GET, the same key header): Soniox GET /v1/models (real-time ones), Deepgram GET
+ * /v1/models (streaming listening ones), ElevenLabs GET /v1/models (speaking ones), Cartesia GET /models?capability=tts. Fish Audio
+ * has no such list, so its models are typed on New voice provider.
+ *
  * `check` is the one free, authenticated call "Load models" makes with a pasted key, to see that the company accepts it. It lists
  * something or returns the account's own details: nothing is transcribed or spoken, so nothing is billed. Chosen from each
  * company's current API reference (Nov 2026):
@@ -41,14 +45,33 @@ export interface VoiceKeyCompanyInfo {
   /** The provider's logo: a file in `public/ai-providers/` without `.svg`. Absent when we have none; then a chip is drawn. */
   logo?: string;
   /**
-   * One line on why you would pick it (on the card in step 1 of Add a key). `{does}` is filled in from what Universe's own
-   * providers of this company do ("Listens and speaks", "Listens" or "Speaks"), so the line never claims a job Universe can't run.
+   * One neutral line on its card (step 1 of Add a key and New voice provider): what it does here and where its account is, the same
+   * shape for every company. No company is ranked or praised over another: every company competes on its own offer, and whoever
+   * runs the server picks. `{does}` is filled in from what Universe's own providers of this company do ("Listens and speaks",
+   * "Listens" or "Speaks"), so the line never claims a job Universe can't run.
    */
   benefit: string;
   /** How to get a key, one step. */
   step: string;
   /** Where to read about the company and get a key. */
   docs: string;
+  /**
+   * Where the company lists its models, read with the same key header as `check` (free: nothing is heard or spoken), so a super
+   * admin ticks models on New voice provider instead of typing ids. Absent for a company with no list (Fish Audio picks its model by
+   * name only). `list` is the field holding the list (none: the answer is the list), `id` and `label` the fields of one model, and
+   * `where` what a model must say to be one Universe can run for the company's job (real-time listening, or speaking).
+   */
+  modelList?: {
+    url: string;
+    list?: string;
+    id: string;
+    label?: string;
+    where?: Record<string, string | boolean>;
+    /** Fields that help a person choose, shown under the model (never saved): the model it always points to, the languages it covers, the company's own description of it. */
+    aliasOf?: string;
+    languages?: string;
+    about?: string;
+  };
   check: {
     url: string;
     /** The header the key goes in, and what comes before it there (`Bearer `, `Token `, or nothing). */
@@ -64,7 +87,32 @@ export interface VoiceKeyCompanyInfo {
   };
 }
 
+// In alphabetical order by name, so the list ranks no company over another
 export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
+  {
+    adapter: 'cartesia',
+    label: 'Cartesia',
+    does: { recognition: false, speech: true },
+    // sonic-3.6 follows Cartesia's latest stable snapshot
+    models: [{ id: 'sonic-3.6', label: 'Sonic 3.6', kind: 'speech' }],
+    benefit: '{does}. Uses your account at cartesia.ai.',
+    step: 'On play.cartesia.ai, open API keys and create a key.',
+    docs: 'https://docs.cartesia.ai',
+    modelList: { url: 'https://api.cartesia.ai/models?capability=tts', list: 'data', id: 'id', where: { capability: 'tts' }, languages: 'supported_languages' },
+    check: { url: 'https://api.cartesia.ai/voices?limit=1', header: 'Authorization', prefix: 'Bearer ', headers: { 'Cartesia-Version': '2026-08-14' } },
+  },
+  {
+    adapter: 'deepgram',
+    label: 'Deepgram',
+    does: { recognition: true, speech: false },
+    models: [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }],
+    logo: 'deepgram',
+    benefit: '{does}. Uses your account at deepgram.com.',
+    step: 'On deepgram.com, open API Keys and create a key.',
+    docs: 'https://developers.deepgram.com',
+    modelList: { url: 'https://api.deepgram.com/v1/models', list: 'stt', id: 'canonical_name', where: { streaming: true }, languages: 'languages' },
+    check: { url: 'https://api.deepgram.com/v1/projects', header: 'Authorization', prefix: 'Token ', alsoAccepted: { status: 403 } },
+  },
   {
     adapter: 'elevenlabs',
     label: 'ElevenLabs',
@@ -75,32 +123,11 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
       { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' },
     ],
     logo: 'elevenlabs',
-    benefit: '{does}, with thousands of voices.',
+    benefit: '{does}. Uses your account at elevenlabs.io.',
     step: 'On elevenlabs.io, open Developers, then API keys, and create a key.',
     docs: 'https://elevenlabs.io/docs',
+    modelList: { url: 'https://api.elevenlabs.io/v1/models', id: 'model_id', label: 'name', where: { can_do_text_to_speech: true }, languages: 'languages', about: 'description' },
     check: { url: 'https://api.elevenlabs.io/v1/user', header: 'xi-api-key', prefix: '', alsoAccepted: { status: 401, includes: 'missing_permissions' } },
-  },
-  {
-    adapter: 'deepgram',
-    label: 'Deepgram',
-    does: { recognition: true, speech: false },
-    models: [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }],
-    logo: 'deepgram',
-    benefit: '{does}. Known for fast listening.',
-    step: 'On deepgram.com, open API Keys and create a key.',
-    docs: 'https://developers.deepgram.com',
-    check: { url: 'https://api.deepgram.com/v1/projects', header: 'Authorization', prefix: 'Token ', alsoAccepted: { status: 403 } },
-  },
-  {
-    adapter: 'cartesia',
-    label: 'Cartesia',
-    does: { recognition: false, speech: true },
-    // sonic-3.6 follows Cartesia's latest stable snapshot
-    models: [{ id: 'sonic-3.6', label: 'Sonic 3.6', kind: 'speech' }],
-    benefit: '{does}. Known for fast speaking.',
-    step: 'On play.cartesia.ai, open API keys and create a key.',
-    docs: 'https://docs.cartesia.ai',
-    check: { url: 'https://api.cartesia.ai/voices?limit=1', header: 'Authorization', prefix: 'Bearer ', headers: { 'Cartesia-Version': '2026-08-14' } },
   },
   {
     adapter: 'fish',
@@ -112,7 +139,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
       { id: 's2.1-pro', label: 'S2.1 Pro', kind: 'speech' },
     ],
     logo: 'fish-audio',
-    benefit: '{does}, with a free model for your own key.',
+    benefit: '{does}. Uses your account at fish.audio.',
     step: 'On fish.audio, open API Keys and create a key.',
     docs: 'https://docs.fish.audio',
     check: { url: 'https://api.fish.audio/wallet/self/api-credit', header: 'Authorization', prefix: 'Bearer ' },
@@ -123,9 +150,10 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     does: { recognition: true, speech: false },
     // stt-rt-v6: stt-rt-v5 is removed on 15 Dec 2026 and stt-rt-v4 is only its alias
     models: [{ id: 'stt-rt-v6', label: 'Soniox real-time v6', kind: 'recognition' }],
-    benefit: '{does}. Known for fast, accurate listening in many languages.',
+    benefit: '{does}. Uses your account at soniox.com.',
     step: 'On console.soniox.com, open API Keys and create a key.',
     docs: 'https://soniox.com/docs',
+    modelList: { url: 'https://api.soniox.com/v1/models', list: 'models', id: 'id', label: 'name', where: { transcription_mode: 'real_time' }, aliasOf: 'aliased_model_id', languages: 'languages' },
     check: { url: 'https://api.soniox.com/v1/models', header: 'Authorization', prefix: 'Bearer ' },
   },
 ];

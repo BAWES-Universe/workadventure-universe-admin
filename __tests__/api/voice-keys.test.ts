@@ -161,19 +161,19 @@ describe('the list', () => {
     // Every company in the catalog, in its order, with no server setup: named and described by the catalog, doing what it says
     // plus what a provider the server has on does (ElevenLabs also listens here, since the stand-in server has one that does)
     expect(body.companies).toEqual([
-      expect.objectContaining({ adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true, logo: 'elevenlabs', docs: 'https://elevenlabs.io/docs' }),
-      expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: false, logo: 'deepgram' }),
       expect.objectContaining({ adapter: 'cartesia', label: 'Cartesia', recognition: false, speech: true }),
+      expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: false, logo: 'deepgram' }),
+      expect.objectContaining({ adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true, logo: 'elevenlabs', docs: 'https://elevenlabs.io/docs' }),
       expect.objectContaining({ adapter: 'fish', label: 'Fish Audio', recognition: false, speech: true, logo: 'fish-audio' }),
       expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: false }),
     ]);
-    // Its line says only the jobs Universe runs for it
+    // Its line says only the jobs Universe runs for it, the same neutral shape for every company
     expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual([
-      'Listens and speaks, with thousands of voices.',
-      'Listens. Known for fast listening.',
-      'Speaks. Known for fast speaking.',
-      'Speaks, with a free model for your own key.',
-      'Listens. Known for fast, accurate listening in many languages.',
+      'Speaks. Uses your account at cartesia.ai.',
+      'Listens. Uses your account at deepgram.com.',
+      'Listens and speaks. Uses your account at elevenlabs.io.',
+      'Speaks. Uses your account at fish.audio.',
+      'Listens. Uses your account at soniox.com.',
     ]);
     expect(JSON.stringify(body)).not.toContain('apiKeyEncrypted');
   });

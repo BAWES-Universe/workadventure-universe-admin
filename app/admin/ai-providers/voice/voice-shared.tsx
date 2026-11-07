@@ -41,12 +41,6 @@ export const COMPANY_JOBS: Record<string, VoiceJob> = Object.fromEntries(
   VOICE_KEY_COMPANIES.map((company) => [company.adapter, company.does.speech ? 'speech' : 'recognition'] as const)
 );
 
-/**
- * The company we suggest for each job, marked Recommended where a company is picked. Only a suggestion: whoever runs the server
- * (Universe is open source) picks any company for Universe AI, and nothing else follows from this.
- */
-export const RECOMMENDED_COMPANY: Record<VoiceJob, string> = { recognition: 'soniox', speech: 'elevenlabs' };
-
 /** The company's own address, as the bot server calls it when nothing else is typed. */
 export const COMPANY_HOST: Record<string, string> = { soniox: 'stt-rt.soniox.com', deepgram: 'api.deepgram.com', elevenlabs: 'api.elevenlabs.io', cartesia: 'api.cartesia.ai', fish: 'api.fish.audio' };
 
@@ -94,6 +88,40 @@ export function defaultChangeLine(providers: Pick<ServerVoiceProvider, 'id' | 'n
     lines.push(`The ${bots(count)} ${job === 'recognition' ? 'listening' : 'speaking'} with ${provider.name} ${count === 1 ? 'stays' : 'stay'} on ${provider.name}.`);
   }
   return lines.join(' ');
+}
+
+/** What turning a provider off does to the bots on it, for one job: where they borrow from (null: they answer in text), and the line. */
+export interface OffJob {
+  job: VoiceJob;
+  count: number;
+  to: Pick<ServerVoiceProvider, 'id' | 'adapter' | 'name'> | null;
+  voice: string | null;
+  line: string;
+}
+
+/**
+ * For the Disable sheet (#840): bots on a provider that is turned off borrow what Universe AI uses now for the job (lib/bot-voice.ts
+ * borrowUniverseAi) and get their own back when it is on again. Speaking borrows only when Universe AI has a starting voice; with
+ * none, or no usable default for the job, they answer in text until it is on again.
+ */
+export function offJobs(provider: Pick<ServerVoiceProvider, 'id' | 'name' | 'bots'>, providers: ServerVoiceProvider[]): OffJob[] {
+  return JOBS.flatMap(({ job }): OffJob[] => {
+    const count = provider.bots[job];
+    if (count === 0) return [];
+    const one = count === 1;
+    const now = providers.find((other) => other.id !== provider.id && other.enabled && other.hasKey && (job === 'recognition' ? other.defaultRecognition : other.defaultSpeech) && startingModel(other, job));
+    const voice = job === 'speech' ? (now?.defaultVoiceId ? (now.defaultVoiceName ?? 'its starting voice') : null) : null;
+    const lead = `${bots(count)} ${job === 'recognition' ? (one ? 'listens' : 'listen') : one ? 'speaks' : 'speak'} with ${provider.name}.`;
+    if (!now || (job === 'speech' && !voice)) {
+      return [{ job, count, to: null, voice: null, line: `${lead} ${one ? 'It answers' : 'They answer'} in text until it’s on again, or until ${one ? 'its maker picks' : 'their makers pick'} another voice.` }];
+    }
+    const they = one ? 'it' : 'they';
+    const line =
+      job === 'recognition'
+        ? `${lead} While it’s off, ${they} ${one ? 'listens' : 'listen'} with ${now.name}. Turn ${provider.name} on again and ${they} ${one ? 'listens' : 'listen'} with it again.`
+        : `${lead} While it’s off, ${they} ${one ? 'speaks' : 'speak'} as ${voice} on ${now.name}, so none goes quiet. Turn ${provider.name} on again and ${one ? 'it gets its own voice' : 'they get their own voices'} back. A maker can pick another voice any time.`;
+    return [{ job, count, to: { id: now.id, adapter: now.adapter, name: now.name }, voice, line }];
+  });
 }
 
 export const bots = (value: number) => `${value.toLocaleString('en')} ${value === 1 ? 'bot' : 'bots'}`;
