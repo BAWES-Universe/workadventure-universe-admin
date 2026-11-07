@@ -232,9 +232,12 @@ describe('the list', () => {
       expect.objectContaining({ adapter: 'google', label: 'Google', recognition: false, speech: false, talk: true, logo: 'google' }),
       expect.objectContaining({ adapter: 'gradium', label: 'Gradium', recognition: true, speech: true }),
       // A talking model listens and speaks in one (game #1910)
+      expect.objectContaining({ adapter: 'inworld', label: 'Inworld', recognition: false, speech: false, talk: true, account: null }),
       expect.objectContaining({ adapter: 'openai', label: 'OpenAI', recognition: false, speech: false, talk: true, logo: 'openai' }),
       expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: true }),
+      expect.objectContaining({ adapter: 'ultravox', label: 'Ultravox', recognition: false, speech: false, talk: true, account: null }),
       expect.objectContaining({ adapter: 'xai', label: 'xAI', recognition: false, speech: false, talk: true, logo: 'xai' }),
+      expect.objectContaining({ adapter: 'zoom', label: 'Zoom', recognition: false, speech: false, talk: true, account: null }),
       // The speech server on a person's own computer is last, and is not a company (game #1874)
       expect.objectContaining({ adapter: 'openai-compatible', label: 'Any OpenAI-compatible speech server', ownServer: expect.any(Object) }),
     ]);
@@ -253,10 +256,13 @@ describe('the list', () => {
       'Speaks. Uses your account at fish.audio.',
       'Listens. Uses your account at gladia.io.',
       'Talks live. Uses your account at aistudio.google.com.',
+      'Talks live. Uses your account at inworld.ai.',
       'Listens and speaks. Uses your account at gradium.ai.',
       'Talks live. Uses your account at platform.openai.com.',
       'Listens and speaks. Uses your account at soniox.com.',
+      'Talks live. Uses your account at ultravox.ai.',
       'Talks live. Uses your account at console.x.ai.',
+      'Talks live, in English. Uses your Zoom AI Services account.',
       'Speaches, Kokoro-FastAPI, your own Whisper: anything that answers /v1/audio.',
     ]);
     expect(JSON.stringify(body)).not.toContain('apiKeyEncrypted');
