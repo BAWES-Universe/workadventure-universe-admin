@@ -160,11 +160,11 @@ describe('the list', () => {
     ]);
     // Named and described by the catalog, in its order, doing what the server's providers for each do
     expect(body.companies).toEqual([
-      expect.objectContaining({ adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true, logo: 'elevenlabs', docs: 'https://elevenlabs.io/docs' }),
       expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: false, logo: 'deepgram' }),
+      expect.objectContaining({ adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true, logo: 'elevenlabs', docs: 'https://elevenlabs.io/docs' }),
     ]);
-    // Its line says only the jobs Universe runs for it
-    expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual(['Listens and speaks, with thousands of voices.', 'Listens. Known for fast listening.']);
+    // Its line says only the jobs Universe runs for it, the same neutral shape for every company
+    expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual(['Listens. Uses your account at deepgram.com.', 'Listens and speaks. Uses your account at elevenlabs.io.']);
     expect(JSON.stringify(body)).not.toContain('apiKeyEncrypted');
   });
 

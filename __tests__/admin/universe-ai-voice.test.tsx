@@ -156,9 +156,8 @@ describe('Change what Universe AI listens with', () => {
     expect(screen.getByTestId('default-listen').textContent).toContain('A bot that turns voice on starts with this. Bots on Soniox listen with this model too.');
     expect(screen.getByTestId('default-speak').textContent).toContain('A bot that turns voice on starts with this voice. Bots on ElevenLabs speak with this model too, in their own voices.');
     expect(within(sheet).getByTestId('listen-change-line').textContent).toBe('Bots that turn voice on from now listen with it.');
-    // Our suggestion is marked, nothing more: every company that can listen is offered
-    expect(within(within(sheet).getByRole('radio', { name: /Soniox/ })).getByText('Recommended')).toBeTruthy();
-    expect(within(deepgramCard).queryByText('Recommended')).toBeNull();
+    // Every company that can listen is offered the same way: none is marked Recommended
+    expect(within(sheet).queryByText('Recommended')).toBeNull();
   });
 
   it('makes a company the default for listening with the model it starts on, first in its list', async () => {
@@ -187,8 +186,7 @@ describe('Change what Universe AI speaks with', () => {
     expect(within(list).getByRole('button', { name: 'Play Aria' })).toBeTruthy();
     expect(within(list).queryByRole('button', { name: 'Play Sarah' })).toBeNull();
     expect(within(sheet).getByTestId('speak-change-line').textContent).toBe('Bots that turn voice on from now start with it. The 2 bots speaking with Cartesia stay on Cartesia.');
-    expect(within(within(sheet).getByRole('radio', { name: /ElevenLabs/ })).getByText('Recommended')).toBeTruthy();
-    expect(within(within(sheet).getByRole('radio', { name: /Cartesia/ })).queryByText('Recommended')).toBeNull();
+    expect(within(sheet).queryByText('Recommended')).toBeNull();
   });
 
   it('says that bots on the company it moves away from stay there', async () => {
@@ -291,11 +289,13 @@ describe('New voice provider', () => {
     const speaks = screen.getByRole('radiogroup', { name: 'Speaks' });
     expect(['Soniox', 'Deepgram'].every((name) => within(listens).getByRole('radio', { name: new RegExp(`^${name}`) }))).toBe(true);
     expect(['ElevenLabs', 'Cartesia'].every((name) => within(speaks).getByRole('radio', { name: new RegExp(`^${name}`) }))).toBe(true);
-    // Soniox and ElevenLabs are marked as our suggestion; every company stays offered
-    expect(within(listens).getAllByText('Recommended')).toHaveLength(1);
-    expect(within(within(listens).getByRole('radio', { name: /^Soniox/ })).getByText('Recommended')).toBeTruthy();
-    expect(within(speaks).getAllByText('Recommended')).toHaveLength(1);
-    expect(within(within(speaks).getByRole('radio', { name: /^ElevenLabs/ })).getByText('Recommended')).toBeTruthy();
+    // Every company is offered the same way, in alphabetical order, with the same neutral line: none is marked Recommended or praised
+    expect(within(listens).getAllByRole('radio').map((card) => card.textContent)).toEqual([
+      'DeepgramListens. Uses your account at deepgram.com.',
+      'SonioxListens. Uses your account at soniox.com.',
+    ]);
+    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['CartesiaSpeaks', 'ElevenLabsSpeaks', 'Fish AudioSpeaks']);
+    expect(screen.queryByText('Recommended')).toBeNull();
     fireEvent.click(within(speaks).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByRole('heading', { name: 'Set up ElevenLabs' })).toBeTruthy();
     const add = screen.getByRole('button', { name: 'Add provider' });

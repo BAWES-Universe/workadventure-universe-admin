@@ -25,8 +25,10 @@ export interface VoiceKeyCompanyInfo {
   /** The provider's logo: a file in `public/ai-providers/` without `.svg`. Absent when we have none; then a chip is drawn. */
   logo?: string;
   /**
-   * One line on why you would pick it (on the card in step 1 of Add a key). `{does}` is filled in from what Universe's own
-   * providers of this company do ("Listens and speaks", "Listens" or "Speaks"), so the line never claims a job Universe can't run.
+   * One neutral line on its card (step 1 of Add a key and New voice provider): what it does here and where its account is, the same
+   * shape for every company. No company is ranked or praised over another: every company competes on its own offer, and whoever
+   * runs the server picks. `{does}` is filled in from what Universe's own providers of this company do ("Listens and speaks",
+   * "Listens" or "Speaks"), so the line never claims a job Universe can't run.
    */
   benefit: string;
   /** How to get a key, one step. */
@@ -48,38 +50,39 @@ export interface VoiceKeyCompanyInfo {
   };
 }
 
+// In alphabetical order by name, so the list ranks no company over another
 export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
-  {
-    adapter: 'elevenlabs',
-    label: 'ElevenLabs',
-    logo: 'elevenlabs',
-    benefit: '{does}, with thousands of voices.',
-    step: 'On elevenlabs.io, open Developers, then API keys, and create a key.',
-    docs: 'https://elevenlabs.io/docs',
-    check: { url: 'https://api.elevenlabs.io/v1/user', header: 'xi-api-key', prefix: '', alsoAccepted: { status: 401, includes: 'missing_permissions' } },
-  },
-  {
-    adapter: 'deepgram',
-    label: 'Deepgram',
-    logo: 'deepgram',
-    benefit: '{does}. Known for fast listening.',
-    step: 'On deepgram.com, open API Keys and create a key.',
-    docs: 'https://developers.deepgram.com',
-    check: { url: 'https://api.deepgram.com/v1/projects', header: 'Authorization', prefix: 'Token ', alsoAccepted: { status: 403 } },
-  },
   {
     adapter: 'cartesia',
     label: 'Cartesia',
-    benefit: '{does}. Known for fast speaking.',
+    benefit: '{does}. Uses your account at cartesia.ai.',
     step: 'On play.cartesia.ai, open API keys and create a key.',
     docs: 'https://docs.cartesia.ai',
     check: { url: 'https://api.cartesia.ai/voices?limit=1', header: 'Authorization', prefix: 'Bearer ', headers: { 'Cartesia-Version': '2026-08-14' } },
   },
   {
+    adapter: 'deepgram',
+    label: 'Deepgram',
+    logo: 'deepgram',
+    benefit: '{does}. Uses your account at deepgram.com.',
+    step: 'On deepgram.com, open API Keys and create a key.',
+    docs: 'https://developers.deepgram.com',
+    check: { url: 'https://api.deepgram.com/v1/projects', header: 'Authorization', prefix: 'Token ', alsoAccepted: { status: 403 } },
+  },
+  {
+    adapter: 'elevenlabs',
+    label: 'ElevenLabs',
+    logo: 'elevenlabs',
+    benefit: '{does}. Uses your account at elevenlabs.io.',
+    step: 'On elevenlabs.io, open Developers, then API keys, and create a key.',
+    docs: 'https://elevenlabs.io/docs',
+    check: { url: 'https://api.elevenlabs.io/v1/user', header: 'xi-api-key', prefix: '', alsoAccepted: { status: 401, includes: 'missing_permissions' } },
+  },
+  {
     adapter: 'fish',
     label: 'Fish Audio',
     logo: 'fish-audio',
-    benefit: '{does}, with a free model for your own key.',
+    benefit: '{does}. Uses your account at fish.audio.',
     step: 'On fish.audio, open API Keys and create a key.',
     docs: 'https://docs.fish.audio',
     check: { url: 'https://api.fish.audio/wallet/self/api-credit', header: 'Authorization', prefix: 'Bearer ' },
@@ -87,7 +90,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
   {
     adapter: 'soniox',
     label: 'Soniox',
-    benefit: '{does}. Known for fast, accurate listening in many languages.',
+    benefit: '{does}. Uses your account at soniox.com.',
     step: 'On console.soniox.com, open API Keys and create a key.',
     docs: 'https://soniox.com/docs',
     check: { url: 'https://api.soniox.com/v1/models', header: 'Authorization', prefix: 'Bearer ' },

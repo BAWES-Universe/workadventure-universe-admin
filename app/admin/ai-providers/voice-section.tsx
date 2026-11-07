@@ -16,13 +16,11 @@ import { useToast } from '@/components/ui/toast';
 import { EntityRow, LoadError, LoadingRows, SectionHeader, StatLine } from '../components/ds';
 import { ProviderLogo } from '../components/ds/provider-logo';
 import { FormSheet } from '../components/form-sheet';
-import { RecommendedPill } from '../components/limits';
 import { EnabledPill } from './components/provider-state';
 import {
   Caption,
   DefaultPills,
   FIELD_HINT,
-  RECOMMENDED_COMPANY,
   Refused,
   bots,
   botsOn,
@@ -93,15 +91,6 @@ function ModelSelect({ label, models, value, onChange }: { label: string; models
   );
 }
 
-/** A company's name on its card, with the Recommended pill on the one we suggest for the job (a suggestion, never a lock). */
-function CompanyTitle({ name, recommended }: { name: string; recommended: boolean }) {
-  return (
-    <span className="flex flex-wrap items-center gap-2">
-      {name}
-      {recommended && <RecommendedPill />}
-    </span>
-  );
-}
 
 /** Why a provider can't be picked as the default for a job, or null. */
 function whyNot(provider: ServerVoiceProvider, job: VoiceJob): string | null {
@@ -179,7 +168,7 @@ function ListenSheet({ open, providers, onClose, onSaved }: SheetProps) {
               }}
               indicator={<ProviderLogo info={logoOf(provider.adapter)} />}
               trailing={<Radio checked={isPicked} />}
-              title={<CompanyTitle name={provider.name} recommended={provider.adapter === RECOMMENDED_COMPANY.recognition} />}
+              title={provider.name}
               description={reason ?? `${modelName(startingModel(provider, 'recognition')!)} · key ••••${provider.apiKeyLast4 ?? ''}`}
             />
           );
@@ -355,7 +344,7 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
               }}
               indicator={<ProviderLogo info={logoOf(provider.adapter)} />}
               trailing={<Radio checked={isPicked} />}
-              title={<CompanyTitle name={provider.name} recommended={provider.adapter === RECOMMENDED_COMPANY.speech} />}
+              title={provider.name}
               description={reason ?? `key ••••${provider.apiKeyLast4 ?? ''}`}
             />
           );
