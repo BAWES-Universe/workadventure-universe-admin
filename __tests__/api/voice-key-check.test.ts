@@ -83,12 +83,14 @@ describe('Load models for a voice key', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it.each(VOICE_KEY_COMPANIES.map((company) => [company.adapter, company]))('%s: a free call to its own address with the key in one header and nothing billed', async (adapter, company) => {
+  it.each(VOICE_KEY_COMPANIES.filter((company) => !company.check.sign).map((company) => [company.adapter, company]))('%s: a free call to its own address with the key in one header and nothing billed', async (adapter, company) => {
     findMany.mockResolvedValue([{ adapter, name: company.label, recognition: true, speech: true, models: [{ id: 'm', kind: 'speech' }] }]);
     answer(200);
-    expect((await send({ adapter, apiKey: KEY })).status).toBe(200);
+    // A company whose keys live at the person's own address (Azure) is asked there
+    const address = company.account?.address ? 'https://my-resource.openai.azure.com' : undefined;
+    expect((await send({ adapter, apiKey: KEY, ...(address ? { address } : {}) })).status).toBe(200);
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe(company.check.url);
+    expect(url).toBe(company.check.url.replace('{address}', address ?? ''));
     expect(new URL(url).protocol).toBe('https:');
     // A GET, or a POST with the catalog's own body when the company lists that way (Async): never the key in the body
     if (company.check.body) {
@@ -102,6 +104,77 @@ describe('Load models for a voice key', () => {
     expect(init.redirect).toBe('manual');
     expect(init.headers[company.check.header]).toBe(`${company.check.prefix}${KEY}`);
     expect(Object.values(init.headers).filter((value) => String(value).includes(KEY))).toHaveLength(1);
+  });
+
+  it('checks an Azure key on the person’s own resource, then asks for the deployment to be typed', async () => {
+    answer(200);
+    const response = await send({ adapter: 'azure', apiKey: KEY, address: 'https://My-Res.openai.azure.com/openai/v1' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, models: [], typed: true });
+    expect(fetchMock.mock.calls[0][0]).toBe('https://my-res.openai.azure.com/openai/v1/models');
+    expect(fetchMock.mock.calls[0][1].headers['api-key']).toBe(KEY);
+  });
+
+  it.each([undefined, '', 'my-res', 'http://my-res.openai.azure.com', 'https://evil.example.com', 'https://openai.azure.com', 'https://my-res.openai.azure.com.evil.com', 'https://u:p@my-res.openai.azure.com'])(
+    'never sends an Azure key to %p',
+    async (address) => {
+      answer(200);
+      const response = await send({ adapter: 'azure', apiKey: KEY, address });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'Paste your endpoint as it is, like https://your-resource.openai.azure.com.' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  describe('AWS: a key in two parts, made per region (#1910)', () => {
+    const ID = 'AKIAIOSFODNN7EXAMPLE';
+    const SECRET = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+    const AWS = `${ID}:${SECRET}`;
+
+    it('signs a free STS call in the region picked: the ID and a signature go, never the secret', async () => {
+      answer(200);
+      const response = await send({ adapter: 'aws', apiKey: AWS, region: 'eu-north-1' });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true, models: [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }] });
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe('https://sts.eu-north-1.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15');
+      expect(init.method).toBe('GET');
+      expect(init.redirect).toBe('manual');
+      expect(init.headers.Authorization).toMatch(new RegExp(`^AWS4-HMAC-SHA256 Credential=${ID}/\\d{8}/eu-north-1/sts/aws4_request, SignedHeaders=host;x-amz-date, Signature=[0-9a-f]{64}$`));
+      expect(init.headers['x-amz-date']).toMatch(/^\d{8}T\d{6}Z$/);
+      expect(JSON.stringify(init)).not.toContain(SECRET);
+    });
+
+    it('says AWS refused a key it answers 403', async () => {
+      answer(403, '<ErrorResponse><Error><Code>InvalidClientTokenId</Code></Error></ErrorResponse>');
+      const response = await send({ adapter: 'aws', apiKey: AWS, region: 'us-east-1' });
+      expect(response.status).toBe(422);
+      expect(await response.json()).toEqual({ error: 'AWS didn’t accept that key. Check it and paste it again.' });
+    });
+
+    it.each([undefined, '', 'eu-west-1', 'us-east-1.evil.com'])('asks for a region first, and calls no one, for %p', async (region) => {
+      answer(200);
+      const response = await send({ adapter: 'aws', apiKey: AWS, region });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'Pick the region first.' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it.each([SECRET, `${ID}:`, `:${SECRET}`, `ASIAIOSFODNN7EXAMPLE:${SECRET}`, `${ID}:${SECRET}:x`])('refuses a key not in two parts, without calling anyone (%p)', async (apiKey) => {
+      answer(200);
+      const response = await send({ adapter: 'aws', apiKey, region: 'us-east-1' });
+      expect(response.status).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it('says Google refused a key it answers 400 API_KEY_INVALID, and counts any other 400 as not reached', async () => {
+    answer(400, '{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}');
+    const refused = await send({ adapter: 'google', apiKey: KEY });
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toEqual({ error: 'Google didn’t accept that key. Check it and paste it again.' });
+    answer(400, '{"error":{"code":400,"status":"FAILED_PRECONDITION"}}');
+    expect((await send({ adapter: 'google', apiKey: KEY })).status).toBe(502);
   });
 
   it('says the company refused the key for a 401 or 403, and lists nothing', async () => {
@@ -141,6 +214,14 @@ describe('Load models for a voice key', () => {
     expect(fetchMock.mock.calls.at(-1)[0]).toBe('https://api.fal.ai/v1/account/billing');
     answer(401, '{"error":{"type":"authorization_error","message":"Authentication required"}}');
     expect((await send({ adapter: 'fal', apiKey: KEY })).status).toBe(422);
+    // OpenAI answers a restricted key without the models permission with a 403 naming the scope; any other 403 is still refused
+    findMany.mockResolvedValue([{ adapter: 'openai', name: 'OpenAI', recognition: true, speech: true, models: [{ id: 'm', kind: 'speech' }] }]);
+    answer(403, '{"error":{"message":"You have insufficient permissions for this operation. Missing scopes: api.model.read."}}');
+    expect((await send({ adapter: 'openai', apiKey: KEY })).status).toBe(200);
+    answer(403, '{"error":{"message":"You are not allowed to sample from this model"}}');
+    expect((await send({ adapter: 'openai', apiKey: KEY })).status).toBe(422);
+    answer(401, '{"error":{"code":"invalid_api_key"}}');
+    expect((await send({ adapter: 'openai', apiKey: KEY })).status).toBe(422);
   });
 
   it('Fish Audio: asks its free credit call, lists its models, and refuses a wrong key with its own name', async () => {
@@ -204,7 +285,7 @@ describe('Load models for a voice key', () => {
   it('needs no setup by a super admin: a company the server has no provider for starts with the catalog\'s own models', async () => {
     findMany.mockImplementation(async ({ where }: { where: { adapter?: string } }) => (where.adapter ? [] : serverRows));
     for (const [adapter, models] of [
-      ['soniox', [{ id: 'stt-rt-v6', label: 'Soniox real-time v6', kind: 'recognition' }]],
+      ['soniox', [{ id: 'stt-rt-v6', label: 'Soniox real-time v6', kind: 'recognition' }, { id: 'tts-rt-v2', label: 'Soniox TTS v2', kind: 'speech' }]],
       ['async', [{ id: 'async_flash_v1.0', label: 'Async Flash v1.0', kind: 'speech' }, { id: 'async_flash_v1.5', label: 'Async Flash v1.5', kind: 'speech' }, { id: 'async_pro_v1.0', label: 'Async Pro v1.0', kind: 'speech' }]],
       ['camb', [{ id: 'mars-flash', label: 'MARS Flash', kind: 'speech' }, { id: 'mars-pro', label: 'MARS Pro', kind: 'speech' }, { id: 'mars-instruct', label: 'MARS Instruct', kind: 'speech' }]],
       ['fal', [{ id: 'fal-ai/wizper', label: 'Wizper (Whisper large v3)', kind: 'recognition' }, { id: 'fal-ai/whisper', label: 'Whisper', kind: 'recognition' }]],

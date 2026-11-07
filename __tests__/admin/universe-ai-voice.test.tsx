@@ -307,11 +307,11 @@ describe('New voice provider', () => {
       'NVIDIAListens and speaks. Uses your account at build.nvidia.com.',
       'Sarvam AIListens and speaks. Uses your account at sarvam.ai.',
       'Smallest AIListens and speaks. Uses your account at smallest.ai.',
-      'SonioxListens. Uses your account at soniox.com.',
+      'SonioxListens and speaks. Uses your account at soniox.com.',
       'SpeechmaticsListens and speaks. Uses your account at speechmatics.com.',
       'Together AIListens and speaks. Uses your account at together.ai.',
     ]);
-    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['AsyncSpeaks', 'BlandSpeaks', 'CAMB', 'CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks', 'GradiumListens and speaks', 'GroqListens and speaks', 'HumeSpeaks', 'MiniMaxSpeaks', 'MistralListens and speaks', 'NeuphonicSpeaks', 'NVIDIAListens and speaks', 'Resemble AISpeaks', 'RimeSpeaks', 'Sarvam AIListens and speaks', 'Smallest AIListens and speaks', 'SpeechifySpeaks', 'SpeechmaticsListens and speaks', 'Together AIListens and speaks']);
+    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['AsyncSpeaks', 'BlandSpeaks', 'CAMB', 'CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks', 'GradiumListens and speaks', 'GroqListens and speaks', 'HumeSpeaks', 'MiniMaxSpeaks', 'MistralListens and speaks', 'NeuphonicSpeaks', 'NVIDIAListens and speaks', 'Resemble AISpeaks', 'RimeSpeaks', 'Sarvam AIListens and speaks', 'Smallest AIListens and speaks', 'SonioxListens and speaks', 'SpeechifySpeaks', 'SpeechmaticsListens and speaks', 'Together AIListens and speaks']);
     expect(screen.queryByText('Recommended')).toBeNull();
     fireEvent.click(within(speaks).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByRole('heading', { name: 'Set up ElevenLabs' })).toBeTruthy();
@@ -336,7 +336,7 @@ describe('New voice provider', () => {
 
   it('adds the provider on, with its key, its models and the job its company does', async () => {
     render(<NewVoiceProviderPage />);
-    fireEvent.click(screen.getByRole('radio', { name: /^Soniox/ }));
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Soniox/ }));
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'soniox-key-1234' } });
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
     await screen.findByText('Soniox knows this key. Nothing was spoken, so nothing was paid.');
@@ -446,7 +446,7 @@ describe('New voice provider, models the company lists (#840)', () => {
 describe('New voice provider, Enter in a model field', () => {
   it('adds the model being typed and does not submit the form', async () => {
     render(<NewVoiceProviderPage />);
-    fireEvent.click(screen.getByRole('radio', { name: /^Soniox/ }));
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Soniox/ }));
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'soniox-key-1234' } });
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
     await screen.findByText('Soniox knows this key. Nothing was spoken, so nothing was paid.');

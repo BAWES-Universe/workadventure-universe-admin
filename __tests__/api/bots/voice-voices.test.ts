@@ -110,9 +110,9 @@ describe('Universe AI\'s voices', () => {
     const response = await voices();
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual([
-      { voiceId: 'nora', name: 'Nora', description: 'Relaxed, neutral', languages: ['en', 'ar'], previewUrl: 'https://storage.example.com/nora.mp3', providerId: 'mouth', model: 'eleven_v4' },
+      { voiceId: 'nora', name: 'Nora', description: 'Relaxed, neutral', languages: ['en', 'ar'], previewUrl: 'https://storage.example.com/nora.mp3', providerId: 'mouth', model: 'eleven_v4', talk: false },
       // No description: what the company labels it with. A sample that isn't https is left out
-      { voiceId: 'sami', name: 'Sami', description: 'warm, gulf, male, middle_aged', languages: [], previewUrl: null, providerId: 'mouth', model: 'eleven_v4' },
+      { voiceId: 'sami', name: 'Sami', description: 'warm, gulf, male, middle_aged', languages: [], previewUrl: null, providerId: 'mouth', model: 'eleven_v4', talk: false },
     ]);
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('https://api.elevenlabs.io/v2/voices?page_size=100');
@@ -156,10 +156,11 @@ describe('Universe AI\'s voices', () => {
   });
 
   it('say so when the company is one whose voices can\'t be listed', async () => {
-    providers = [provider({ defaultSpeech: true, adapter: 'soniox', name: 'Soniox' })];
+    // A company no longer in the catalog
+    providers = [provider({ defaultSpeech: true, adapter: 'retired-co', name: 'Retired Co' })];
     const response = await voices();
     expect(response.status).toBe(409);
-    expect((await response.json()).error).toBe('Soniox’s voices can’t be listed here.');
+    expect((await response.json()).error).toBe('Retired Co’s voices can’t be listed here.');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -173,7 +174,7 @@ describe('a lent key\'s voices', () => {
   it('are listed on the key, with the first model the lend allows', async () => {
     lends = [{ providerId: 'key-1', universeId: 'uni-1', models: ['speech:eleven_v3'] }];
     const list = await (await voices('part=speech&source=key-1')).json();
-    expect(list[0]).toMatchObject({ voiceId: 'nora', providerId: 'key-1', model: 'eleven_v3' });
+    expect(list[0]).toMatchObject({ voiceId: 'nora', providerId: 'key-1', model: 'eleven_v3', talk: false });
     expect(fetchMock.mock.calls[0][1].headers['xi-api-key']).toBe(SECRET);
   });
 
@@ -262,10 +263,10 @@ describe('Cartesia\'s voices', () => {
   it('are listed with the key and the pinned version, and a sample that needs the key goes through Orbit', async () => {
     const list = await (await voices('part=speech&source=key-1')).json();
     expect(list).toEqual([
-      { voiceId: 'c1', name: 'Skylar', description: 'Approachable and warm.', languages: ['en', 'ar'], previewUrl: '/api/bots/bot-1/voice/voices/c1/preview?source=key-1', providerId: 'key-1', model: 'sonic-3' },
+      { voiceId: 'c1', name: 'Skylar', description: 'Approachable and warm.', languages: ['en', 'ar'], previewUrl: '/api/bots/bot-1/voice/voices/c1/preview?source=key-1', providerId: 'key-1', model: 'sonic-3', talk: false },
       // No description: its tagline. A sample at another address is never used (the key would go there)
-      { voiceId: 'c2', name: 'Omar', description: 'Calm', languages: ['ar'], previewUrl: null, providerId: 'key-1', model: 'sonic-3' },
-      { voiceId: 'c3', name: 'Lina', description: '', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 'sonic-3' },
+      { voiceId: 'c2', name: 'Omar', description: 'Calm', languages: ['ar'], previewUrl: null, providerId: 'key-1', model: 'sonic-3', talk: false },
+      { voiceId: 'c3', name: 'Lina', description: '', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 'sonic-3', talk: false },
     ]);
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('https://api.cartesia.ai/voices?limit=100&expand%5B%5D=preview_file_url');
@@ -356,13 +357,41 @@ describe('Deepgram\'s voices', () => {
   it('are every speaking voice in one answer, each its own model, with a public sample, the key as a token', async () => {
     const list = await (await voices('part=speech&source=key-1')).json();
     expect(list).toEqual([
-      { voiceId: 'aura-2-thalia-en', name: 'thalia', description: 'American, Adult, clear, confident', languages: ['en'], previewUrl: 'https://static.deepgram.com/samples/thalia.wav', providerId: 'key-1', model: 'aura-2' },
-      { voiceId: 'aura-2-celeste-es', name: 'celeste', description: '', languages: ['es'], previewUrl: null, providerId: 'key-1', model: 'aura-2' },
+      { voiceId: 'aura-2-thalia-en', name: 'thalia', description: 'American, Adult, clear, confident', languages: ['en'], previewUrl: 'https://static.deepgram.com/samples/thalia.wav', providerId: 'key-1', model: 'aura-2', talk: false },
+      { voiceId: 'aura-2-celeste-es', name: 'celeste', description: '', languages: ['es'], previewUrl: null, providerId: 'key-1', model: 'aura-2', talk: false },
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('https://api.deepgram.com/v1/models');
     expect(init.headers).toMatchObject({ Authorization: `Token ${SECRET}` });
+  });
+});
+
+describe('Soniox\'s voices', () => {
+  const soniox = () => key({ adapter: 'soniox', name: 'Soniox', models: [{ id: 'tts-rt-v2', label: 'Soniox TTS v2', kind: 'speech' }] });
+  const answer = {
+    models: [
+      { id: 'tts-rt-v1', name: 'TTS v1', voices: [{ id: 'Maya', description: 'Warm and clear.', gender: 'female' }] },
+      { id: 'tts-rt-v2', name: 'TTS v2', voices: [{ id: 'Maya', description: 'Warm and clear.', gender: 'female' }, { id: 'Bryce', gender: 'male' }] },
+    ],
+  };
+
+  beforeEach(() => {
+    providers = [soniox()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(answer));
+  });
+
+  it('are the voices of every model, each once, read from api.soniox.com with the key as a bearer', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toEqual([
+      { voiceId: 'Maya', name: 'Maya', description: 'Warm and clear.', languages: [], previewUrl: null, providerId: 'key-1', model: 'tts-rt-v2', talk: false },
+      { voiceId: 'Bryce', name: 'Bryce', description: 'male', languages: [], previewUrl: null, providerId: 'key-1', model: 'tts-rt-v2', talk: false },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.soniox.com/v1/tts-models');
+    expect(init.headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
   });
 });
 
@@ -393,10 +422,10 @@ describe('Fish Audio\'s voices', () => {
   it('are the person\'s own first, then the public library, with the key as a bearer and the first model the key lists', async () => {
     const list = await (await voices('part=speech&source=key-1')).json();
     expect(list).toEqual([
-      { voiceId: 'f1', name: 'Mine', description: 'My own voice', languages: ['ar', 'en'], previewUrl: 'https://public.fish.example/f1.mp3', providerId: 'key-1', model: 's2.1-pro-free' },
-      { voiceId: 'f2', name: 'Voice f2', description: '', languages: ['en'], previewUrl: 'https://public.fish.example/f2.mp3', providerId: 'key-1', model: 's2.1-pro-free' },
-      { voiceId: 'f5', name: 'Voice f5', description: '', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 's2.1-pro-free' },
-      { voiceId: 'f6', name: 'Voice f6', description: '', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 's2.1-pro-free' },
+      { voiceId: 'f1', name: 'Mine', description: 'My own voice', languages: ['ar', 'en'], previewUrl: 'https://public.fish.example/f1.mp3', providerId: 'key-1', model: 's2.1-pro-free', talk: false },
+      { voiceId: 'f2', name: 'Voice f2', description: '', languages: ['en'], previewUrl: 'https://public.fish.example/f2.mp3', providerId: 'key-1', model: 's2.1-pro-free', talk: false },
+      { voiceId: 'f5', name: 'Voice f5', description: '', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 's2.1-pro-free', talk: false },
+      { voiceId: 'f6', name: 'Voice f6', description: '', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 's2.1-pro-free', talk: false },
     ]);
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       'https://api.fish.audio/model?page_size=100&page_number=1&sort_by=score&self=true',
@@ -899,7 +928,7 @@ describe('Groq\'s voices', () => {
   it('are the ones its docs name, each with its language and its own model, and nothing is asked with the key', async () => {
     const list = await (await voices('part=speech&source=key-1')).json();
     expect(list).toHaveLength(12);
-    expect(list[0]).toEqual({ voiceId: 'autumn', name: 'Autumn', description: 'Orpheus English', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 'canopylabs/orpheus-v1-english' });
+    expect(list[0]).toEqual({ voiceId: 'autumn', name: 'Autumn', description: 'Orpheus English', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 'canopylabs/orpheus-v1-english', talk: false });
     expect(list.find((voice: Row) => voice.voiceId === 'noura')).toMatchObject({ name: 'Noura', languages: ['ar'], model: 'canopylabs/orpheus-arabic-saudi' });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -946,5 +975,28 @@ describe('Hume\'s voices', () => {
 describe('languageCode', () => {
   it('keeps the language of a code, reads a three-letter one as its two-letter code, and drops anything that isn\'t one', () => {
     expect([languageCode('en-GB'), languageCode('AR_kw'), languageCode('ara'), languageCode('ger'), languageCode('fil'), languageCode('English'), languageCode(''), languageCode(7)]).toEqual(['en', 'ar', 'ar', 'de', 'fil', null, null, null]);
+  });
+});
+
+describe('a key with a talking model (game #1910)', () => {
+  const openai = (models: Row[] = [{ id: 'gpt-realtime-2.1', kind: 'talk' }, { id: 'gpt-realtime-2.1-mini', kind: 'talk' }]) =>
+    key({ adapter: 'openai', name: 'My OpenAI', recognition: true, speech: true, models });
+
+  it('lists the company’s fixed voices without calling it, each for the first talking model the lend allows', async () => {
+    providers = [openai()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: ['talk:gpt-realtime-2.1-mini'] }];
+    const response = await voices('part=speech&source=key-1');
+    expect(response.status).toBe(200);
+    const list = await response.json();
+    expect(list.map((voice: Row) => voice.voiceId)).toEqual(['marin', 'cedar', 'alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse']);
+    expect(list[0]).toEqual({ voiceId: 'marin', name: 'Marin', description: '', languages: [], previewUrl: null, providerId: 'key-1', model: 'gpt-realtime-2.1-mini', talk: true });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('a speaking model still comes first when the key has both', async () => {
+    providers = [openai([{ id: 'gpt-realtime-2.1', kind: 'talk' }, { id: 'gpt-4o-mini-tts', kind: 'speech' }])];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list[0]).toEqual(expect.objectContaining({ model: 'gpt-4o-mini-tts', talk: false }));
   });
 });
