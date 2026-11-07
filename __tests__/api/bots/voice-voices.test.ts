@@ -922,6 +922,17 @@ describe('MiniMax\'s voices', () => {
     expect(init).toMatchObject({ method: 'POST', headers: expect.objectContaining({ Authorization: `Bearer ${SECRET}` }) });
     expect(JSON.parse(init.body)).toEqual({ voice_type: 'all' });
   });
+
+  it('say MiniMax didn\'t accept the key when it answers a wrong one with a 200 that says so', async () => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    providers = [key({ adapter: 'minimax', name: 'MiniMax', models: [{ id: 'speech-2.8-turbo', label: 'Turbo', kind: 'speech' }] })];
+    for (const code of [1004, 2049]) {
+      fetchMock.mockImplementation(async () => json({ system_voice: null, base_resp: { status_code: code, status_msg: 'invalid api key' } }));
+      const refused = await voices('part=speech&source=key-1');
+      expect(refused.status).toBe(502);
+      expect((await refused.json()).error).toBe('MiniMax didn’t accept the key.');
+    }
+  });
 });
 
 describe('Groq\'s voices', () => {

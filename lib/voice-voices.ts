@@ -133,11 +133,18 @@ async function getJson(call: Call, path: string, body?: Record<string, unknown>)
     if (response.status === 401 || response.status === 403) throw new VoiceListRefused(`${call.company.label} didn’t accept the key.`, 502);
     throw new VoiceListRefused(`Couldn’t reach ${call.company.label}. Try again in a moment.`, 502);
   }
+  let answer: unknown;
   try {
-    return await response.json();
+    answer = await response.json();
   } catch {
     throw new Unreadable();
   }
+  // A company that answers a wrong key with a 200 and says so inside (MiniMax: base_resp.status_code 1004 or 2049), read the way
+  // the key check reads it
+  const refusedWhen = call.company.check.refusedWhen;
+  const code = refusedWhen ? valuesAt(answer, refusedWhen.field)[0] : undefined;
+  if (refusedWhen && typeof code === 'number' && refusedWhen.codes.includes(code)) throw new VoiceListRefused(`${call.company.label} didn’t accept the key.`, 502);
+  return answer;
 }
 
 /** Every value at a path into a voice: `a.b` a field inside a field, `a[].b` that field of every entry of a list. */
