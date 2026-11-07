@@ -292,11 +292,14 @@ describe('New voice provider', () => {
     expect(['Soniox', 'Deepgram'].every((name) => within(listens).getByRole('radio', { name: new RegExp(`^${name}`) }))).toBe(true);
     expect(['ElevenLabs', 'Cartesia'].every((name) => within(speaks).getByRole('radio', { name: new RegExp(`^${name}`) }))).toBe(true);
     // Every company is offered the same way, in alphabetical order, with the same neutral line: none is marked Recommended or praised
+    // A company that listens and speaks is under both, with the same line (#844)
     expect(within(listens).getAllByRole('radio').map((card) => card.textContent)).toEqual([
-      'DeepgramListens. Uses your account at deepgram.com.',
+      'CartesiaListens and speaks. Uses your account at cartesia.ai.',
+      'DeepgramListens and speaks. Uses your account at deepgram.com.',
+      'ElevenLabsListens and speaks. Uses your account at elevenlabs.io.',
       'SonioxListens. Uses your account at soniox.com.',
     ]);
-    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['CartesiaSpeaks', 'ElevenLabsSpeaks', 'Fish AudioSpeaks']);
+    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks']);
     expect(screen.queryByText('Recommended')).toBeNull();
     fireEvent.click(within(speaks).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByRole('heading', { name: 'Set up ElevenLabs' })).toBeTruthy();
@@ -348,6 +351,27 @@ describe('New voice provider', () => {
       endpoint: 'wss://stt-rt.soniox.com/transcribe-websocket',
     });
   });
+
+  it('sets up the job picked for a company that listens and speaks, asking it for that job\'s models (#844)', async () => {
+    render(<NewVoiceProviderPage />);
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Cartesia/ }));
+    expect(screen.getByRole('heading', { name: 'Set up Cartesia' })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk_car_0000000000001234' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await screen.findByText('Cartesia knows this key. Nothing was spoken, so nothing was paid.');
+    expect(calls.find((call) => call.url === '/api/admin/voice-providers/check')?.body).toMatchObject({ adapter: 'cartesia', job: 'recognition' });
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'ink-whisper' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add provider' }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/ai-providers'));
+    expect(calls.find((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers')?.body).toMatchObject({
+      adapter: 'cartesia',
+      recognition: true,
+      speech: false,
+      models: [{ id: 'ink-whisper', kind: 'recognition' }],
+    });
+  });
 });
 
 describe('New voice provider, models the company lists (#840)', () => {
@@ -357,7 +381,7 @@ describe('New voice provider, models the company lists (#840)', () => {
       body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech', note: '2 languages · Fast.' }, { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' }] },
     };
     render(<NewVoiceProviderPage />);
-    fireEvent.click(screen.getByRole('radio', { name: /^ElevenLabs/ }));
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Speaks' })).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByText('Check the key and ElevenLabs’s models show here to tick.')).toBeTruthy();
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk_0000000000000000a1b2' } });
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
@@ -430,7 +454,7 @@ describe('New voice provider, a key the company turns away', () => {
   async function setUp(address: string | null) {
     checkAnswer = { ok: false, body: { error: 'Deepgram turned this key away. Check that you copied all of it.' } };
     render(<NewVoiceProviderPage />);
-    fireEvent.click(screen.getByRole('radio', { name: /^Deepgram/ }));
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Deepgram/ }));
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'regional-key-1234' } });
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
     await screen.findByText('Deepgram turned this key away. Check that you copied all of it.');

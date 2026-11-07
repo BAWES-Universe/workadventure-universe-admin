@@ -112,11 +112,12 @@ describe('Check key', () => {
         tts: [{ name: 'asteria', canonical_name: 'aura-asteria-en' }],
       },
       'https://api.cartesia.ai/models?capability=tts': { data: [{ id: 'sonic-3', capability: 'tts' }, { id: 'ink-whisper', capability: 'stt' }] },
+      'https://api.cartesia.ai/models?capability=stt': { data: [{ id: 'ink-whisper', capability: 'stt', modes: ['stream'] }, { id: 'sonic-3', capability: 'tts' }] },
     };
     fetchMock.mockImplementation(async (url: string) => json(lists[url] ?? {}));
-    const models = async (adapter: string) => (await (await post(checkPasted, { adapter, apiKey: SECRET })).json()).models;
+    const models = async (adapter: string, job?: string) => (await (await post(checkPasted, { adapter, apiKey: SECRET, job })).json()).models;
     // Each with a line from what the company says about it, to help choose: its languages and its own description
-    expect(await models('elevenlabs')).toEqual([
+    expect(await models('elevenlabs', 'speech')).toEqual([
       { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech', note: '2 languages · Fast, low latency.' },
       { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' },
     ]);
@@ -126,7 +127,12 @@ describe('Check key', () => {
     ]);
     // Listed once per language: one model, its languages added up
     expect(await models('deepgram')).toEqual([{ id: 'nova-3-general', kind: 'recognition', note: '3 languages' }]);
-    expect(await models('cartesia')).toEqual([{ id: 'sonic-3', kind: 'speech' }]);
+    // ElevenLabs lists no listening models: those are typed
+    expect(await models('elevenlabs', 'recognition')).toBeNull();
+    // A company that listens and speaks lists each job's models from that job's own list (#844); its first job when none is named
+    expect(await models('cartesia', 'speech')).toEqual([{ id: 'sonic-3', kind: 'speech' }]);
+    expect(await models('cartesia', 'recognition')).toEqual([{ id: 'ink-whisper', kind: 'recognition' }]);
+    expect(await models('cartesia')).toEqual([{ id: 'ink-whisper', kind: 'recognition' }]);
     // The list goes with the same key header as the check, to the company's own address, and is never followed elsewhere
     const listCall = fetchMock.mock.calls.find(([url]) => url === 'https://api.cartesia.ai/models?capability=tts')!;
     expect(listCall[1].headers).toMatchObject({ Authorization: `Bearer ${SECRET}`, 'Cartesia-Version': '2026-08-14' });
@@ -194,7 +200,7 @@ describe('the voices of a server provider', () => {
   });
 
   it('say so when the company can\'t list voices here, or didn\'t answer', async () => {
-    db.findFirst.mockResolvedValue(row({ adapter: 'deepgram', name: 'Deepgram', speech: true }));
+    db.findFirst.mockResolvedValue(row({ adapter: 'soniox', name: 'Soniox', speech: true }));
     const none = await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx());
     expect(none.status).toBe(409);
     db.findFirst.mockResolvedValue(row());

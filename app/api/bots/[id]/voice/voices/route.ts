@@ -36,7 +36,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (!parsed.success) return json(request, { error: parsed.error.issues[0]?.message ?? 'Invalid request' }, 400);
     return json(request, await listBotVoices(id, parsed.data.source));
   } catch (error) {
-    if (error instanceof VoiceListRefused) return json(request, { error: error.message }, error.status);
+    if (error instanceof VoiceListRefused) return json(request, { error: error.message, ...(error.code ? { code: error.code } : {}) }, error.status);
     return toolsFailure(request, error, 'listing the voices');
   }
 }
