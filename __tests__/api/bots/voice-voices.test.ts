@@ -156,10 +156,10 @@ describe('Universe AI\'s voices', () => {
   });
 
   it('say so when the company is one whose voices can\'t be listed', async () => {
-    providers = [provider({ defaultSpeech: true, adapter: 'deepgram', name: 'Deepgram' })];
+    providers = [provider({ defaultSpeech: true, adapter: 'soniox', name: 'Soniox' })];
     const response = await voices();
     expect(response.status).toBe(409);
-    expect((await response.json()).error).toBe('Deepgram’s voices can’t be listed here.');
+    expect((await response.json()).error).toBe('Soniox’s voices can’t be listed here.');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
@@ -334,6 +334,35 @@ describe('Cartesia\'s voices', () => {
     lends = [];
     expect((await preview('c1')).status).toBe(404);
     expect((await getPreview(new NextRequest('http://localhost:3333/x', { method: 'GET' }), { params: Promise.resolve({ id: 'bot-1', voiceId: 'c1' }) })).status).toBe(400);
+  });
+});
+
+describe('Deepgram\'s voices', () => {
+  const deepgram = () => key({ adapter: 'deepgram', name: 'Deepgram', models: [{ id: 'aura-2', label: 'Aura 2', kind: 'speech' }] });
+  const answer = {
+    stt: [{ name: 'general', canonical_name: 'nova-3-general' }],
+    tts: [
+      { name: 'thalia', canonical_name: 'aura-2-thalia-en', architecture: 'aura-2', languages: ['en', 'en-US'], metadata: { accent: 'American', age: 'Adult', tags: ['clear', 'confident'], sample: 'https://static.deepgram.com/samples/thalia.wav' } },
+      { name: 'celeste', canonical_name: 'aura-2-celeste-es', architecture: 'aura-2', languages: ['es'], metadata: { sample: 'http://insecure.example.com/celeste.wav' } },
+    ],
+  };
+
+  beforeEach(() => {
+    providers = [deepgram()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(answer));
+  });
+
+  it('are every speaking voice in one answer, each its own model, with a public sample, the key as a token', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toEqual([
+      { voiceId: 'aura-2-thalia-en', name: 'thalia', description: 'American, Adult, clear', languages: ['en'], previewUrl: 'https://static.deepgram.com/samples/thalia.wav', providerId: 'key-1', model: 'aura-2', talk: false },
+      { voiceId: 'aura-2-celeste-es', name: 'celeste', description: '', languages: ['es'], previewUrl: null, providerId: 'key-1', model: 'aura-2', talk: false },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.deepgram.com/v1/models');
+    expect(init.headers).toMatchObject({ Authorization: `Token ${SECRET}` });
   });
 });
 

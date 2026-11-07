@@ -136,7 +136,7 @@ describe('adding a key', () => {
 
   it.each([
     ['a company that isn’t on the list', { adapter: 'unknown-co', speech: true, apiKey: 'sk-secret-key-9f2a' }],
-    ['a job the company doesn’t do', { adapter: 'deepgram', speech: true, apiKey: 'sk-secret-key-9f2a' }],
+    ['a job the company doesn’t do', { adapter: 'soniox', speech: true, apiKey: 'sk-secret-key-9f2a' }],
     ['a key that does nothing', { adapter: 'elevenlabs', apiKey: 'sk-secret-key-9f2a' }],
     ['a key that is too short', { adapter: 'elevenlabs', speech: true, apiKey: 'short' }],
     ['a model for a job the key doesn’t do', { adapter: 'elevenlabs', speech: true, apiKey: 'sk-secret-key-9f2a', models: [{ id: 'a', kind: 'recognition' }] }],
@@ -219,8 +219,8 @@ describe('the list', () => {
         account: expect.objectContaining({ regions: expect.arrayContaining([expect.objectContaining({ id: 'eu-north-1' })]), keyId: expect.objectContaining({ label: 'Access key ID' }), keyLabel: 'Secret access key' }),
       }),
       expect.objectContaining({ adapter: 'azure', label: 'Azure OpenAI', recognition: false, speech: false, talk: true, account: expect.objectContaining({ address: expect.objectContaining({ label: 'Endpoint' }), typedModel: expect.objectContaining({ label: 'Deployment name', kind: 'talk' }) }) }),
-      expect.objectContaining({ adapter: 'cartesia', account: null, label: 'Cartesia', recognition: false, speech: true }),
-      expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: false, logo: 'deepgram' }),
+      expect.objectContaining({ adapter: 'cartesia', label: 'Cartesia', recognition: true, speech: true }),
+      expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: true, logo: 'deepgram' }),
       expect.objectContaining({ adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true, logo: 'elevenlabs', docs: 'https://elevenlabs.io/docs' }),
       expect.objectContaining({ adapter: 'fish', label: 'Fish Audio', recognition: false, speech: true, logo: 'fish-audio' }),
       expect.objectContaining({ adapter: 'google', label: 'Google', recognition: false, speech: false, talk: true, logo: 'google' }),
@@ -229,13 +229,15 @@ describe('the list', () => {
       expect.objectContaining({ adapter: 'openai', label: 'OpenAI', recognition: false, speech: false, talk: true, logo: 'openai' }),
       expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: false }),
       expect.objectContaining({ adapter: 'xai', label: 'xAI', recognition: false, speech: false, talk: true, logo: 'xai' }),
+      // The speech server on a person's own computer is last, and is not a company (game #1874)
+      expect.objectContaining({ adapter: 'openai-compatible', label: 'Any OpenAI-compatible speech server', ownServer: expect.any(Object) }),
     ]);
     // Its line says only the jobs Universe runs for it, the same neutral shape for every company
     expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual([
       'Talks live. Uses your AWS account, in the region you pick.',
       'Talks live. Uses your Azure OpenAI resource.',
-      'Speaks. Uses your account at cartesia.ai.',
-      'Listens. Uses your account at deepgram.com.',
+      'Listens and speaks. Uses your account at cartesia.ai.',
+      'Listens and speaks. Uses your account at deepgram.com.',
       'Listens and speaks. Uses your account at elevenlabs.io.',
       'Speaks. Uses your account at fish.audio.',
       'Talks live. Uses your account at aistudio.google.com.',
@@ -243,6 +245,7 @@ describe('the list', () => {
       'Talks live. Uses your account at platform.openai.com.',
       'Listens. Uses your account at soniox.com.',
       'Talks live. Uses your account at console.x.ai.',
+      'Speaches, Kokoro-FastAPI, your own Whisper: anything that answers /v1/audio.',
     ]);
     expect(JSON.stringify(body)).not.toContain('apiKeyEncrypted');
   });

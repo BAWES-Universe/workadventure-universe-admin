@@ -50,6 +50,26 @@ export function useVoiceCompanies() {
  * wants an API key, and has no regions. It wants an address only when its keys live at the person's own one (Azure).
  */
 export function voiceCompanyKind(company: VoiceKeyCompany): AiKeyKindInfo {
+  // A speech server on the person's own computer is drawn like a chat server there: the plug, an https address, an optional key
+  if (company.ownServer) {
+    return {
+      kind: company.adapter,
+      label: company.label,
+      group: 'own-computer',
+      benefit: company.benefit,
+      plainIcon: 'plug',
+      steps: company.ownServer.steps,
+      providerType: 'openai',
+      address: 'required',
+      apiKey: 'optional',
+      protocol: 'openai',
+      auth: 'bearer',
+      typedEndpointSuffix: '',
+      keyCheck: { type: 'models' },
+      modelId: 'as-is',
+      tier: 'named',
+    };
+  }
   return {
     kind: company.adapter,
     label: company.label,
