@@ -732,12 +732,11 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     jobs: {
       speech: {
         // Text to speech with Octave, one streamed request per reply (POST /v0/tts/stream/json), as Pipecat's HumeTTSService does.
-        // Hume has no model list a key can read; Octave 2 is its current model (https://dev.hume.ai/docs/text-to-speech-tts/overview)
+        // Hume has no model list a key can read. Octave 2 is its current model (https://dev.hume.ai/docs/text-to-speech-tts/overview)
+        // and the one Pipecat asks for with a voice. Octave 1 isn't offered: Hume tells per voice which Octave models it speaks
+        // (compatible_octave_models), so a voice picked for Octave 2 may not speak in Octave 1
         host: 'api.hume.ai',
-        models: [
-          { id: 'octave-2', label: 'Octave 2' },
-          { id: 'octave-1', label: 'Octave 1' },
-        ],
+        models: [{ id: 'octave-2', label: 'Octave 2' }],
         // GET /v0/tts/voices: the account's own voices, then Hume's library, page by page from page 0
         voices: {
           path: '/v0/tts/voices?page_size={size}&page_number={page}',
@@ -770,7 +769,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     benefit: '{does}. Uses your account at dev.meta.ai.',
     step: 'On dev.meta.ai, create a Model API key.',
     docs: 'https://dev.meta.ai/docs/api-reference/voice/realtime',
-    // The Model API's model list, free with the key as a bearer
+    // The Model API's model list (GET https://api.meta.ai/v1/models, https://dev.meta.ai/docs/models), free with the key as a bearer
     check: { url: 'https://api.meta.ai/v1/models', header: 'Authorization', prefix: 'Bearer ' },
   }),
   company({
