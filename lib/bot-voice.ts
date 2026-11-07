@@ -189,6 +189,16 @@ async function payersOf(profile: VoiceProfile | null) {
   return { paidBy, parts };
 }
 
+/**
+ * The server's own providers the live version names (#840). A bot can stay on one that is no longer Universe AI's default (the
+ * operator switched company), so the bot page must not read it as a key that is no longer lent.
+ */
+async function serverProvidersIn(profile: VoiceProfile | null): Promise<string[]> {
+  if (!profile) return [];
+  const rows = await prisma.voiceProvider.findMany({ where: { id: { in: [...new Set([profile.recognition.providerId, profile.speech.providerId])] }, ownerId: null }, select: { id: true } });
+  return rows.map((row) => row.id);
+}
+
 const revisionView = (row: { number: number; profile: Prisma.JsonValue; note: string | null; publishedById: string | null; publishedAt: Date }) => ({
   number: row.number,
   profile: row.profile,
@@ -218,6 +228,7 @@ export async function readBotVoice(botId: string) {
     enabled: bot.voiceEnabled,
     universeAllows: bot.room.world.universe.allowVoiceBots,
     ...(await payersOf(parsed?.success ? parsed.data : null)),
+    serverProviderIds: await serverProvidersIn(parsed?.success ? parsed.data : null),
     revision: bot.voiceRevision,
     draft: { profile: readDraft(bot.voiceDraft?.profile), updatedAt: bot.voiceDraft?.updatedAt ?? null },
     revisions,

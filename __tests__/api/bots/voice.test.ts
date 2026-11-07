@@ -78,7 +78,7 @@ const fakeDb = () => {
       findMany: async ({ where }: { where: Row }) =>
         providers
           // By id, the lent keys of a maker (the `lends` filter is answered by the join below), or the server's own providers
-          .filter((p) => (where.id ? where.id.in.includes(p.id) : where.lends ? p.ownerId === where.ownerId : matches({ ownerId: null, ...p }, where)))
+          .filter((p) => (where.id ? where.id.in.includes(p.id) && (where.ownerId === undefined || (p.ownerId ?? null) === where.ownerId) : where.lends ? p.ownerId === where.ownerId : matches({ ownerId: null, ...p }, where)))
           .map((p) => ({ ownerId: null, createdAt: new Date('2026-10-30T10:00:00Z'), adapter: 'x', apiKeyLast4: null, ...p, lends: lends.filter((l) => l.providerId === p.id && l.universeId === 'uni-1') })),
     },
   };
@@ -168,6 +168,7 @@ describe('a bot that has never had voice', () => {
       universeAllows: true,
       paidBy: 'universe-ai',
       parts: { recognition: 'universe-ai', speech: 'universe-ai' },
+      serverProviderIds: [],
       revision: null,
       draft: { profile: {}, updatedAt: null },
       revisions: [],
@@ -375,7 +376,10 @@ describe('a bot that speaks on a key its maker lent', () => {
       paidBy: 'mixed',
       parts: { recognition: 'universe-ai', speech: 'owner' },
     });
-    expect((await (await call(getVoice, 'GET')).json()).paidBy).toBe('mixed');
+    const read = await (await call(getVoice, 'GET')).json();
+    expect(read.paidBy).toBe('mixed');
+    // The bot page tells the server's own providers from keys by these, not by Universe AI's default alone (#840)
+    expect(read.serverProviderIds).toEqual(['ears']);
   });
 
   it('says the owner pays for both when both parts are on lent keys', async () => {
