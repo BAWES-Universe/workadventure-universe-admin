@@ -657,6 +657,22 @@ describe('Neuphonic\'s voices', () => {
     expect(url).toBe('https://api.neuphonic.com/voices');
     expect(init.headers).toMatchObject({ 'X-API-KEY': SECRET });
   });
+
+  it('are read by whichever id field the answer carries', async () => {
+    fetchMock.mockImplementation(async () =>
+      json({
+        data: {
+          voices: [
+            { id: 'v-1', name: 'Holly', tags: [], lang_code: 'en' },
+            { voice_id: 'v-2', name: 'Amira', tags: [], lang_code: 'ar' },
+          ],
+        },
+      })
+    );
+    const response = await voices('part=speech&source=key-1');
+    expect(response.status).toBe(200);
+    expect((await response.json()).map((voice: Row) => voice.voiceId)).toEqual(['v-1', 'v-2']);
+  });
 });
 
 describe('Resemble\'s voices', () => {
