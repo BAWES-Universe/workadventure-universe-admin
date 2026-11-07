@@ -67,9 +67,14 @@ export function followUniverseAi(profile: VoiceProfile, providers: Map<string, V
     const choice = profile[part];
     const provider = providers.get(choice.providerId);
     if (!provider || provider.ownerId !== null) return choice;
-    // A bot that talks live follows the provider's first talking model, for both parts, so they keep naming the same one
+    // A bot that talks live follows the provider's first talking model, for both parts, so they keep naming the same one. So does a
+    // bot whose talking model was taken off: both parts still name one model, and the provider no longer lists it for the job
     const models = readModels(provider.models);
-    const kind = talksLive(profile, models) ? 'talk' : part;
+    const talked =
+      profile.recognition.providerId === profile.speech.providerId &&
+      profile.recognition.model === profile.speech.model &&
+      !models.some((model) => model.kind === part && model.id === choice.model);
+    const kind = talksLive(profile, models) || (talked && models.some((model) => model.kind === 'talk')) ? 'talk' : part;
     const current = models.find((model) => model.kind === kind);
     return current && current.id !== choice.model ? { ...choice, model: current.id } : choice;
   };

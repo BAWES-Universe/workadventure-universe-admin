@@ -111,6 +111,14 @@ describe('a bot that talks live', () => {
     expect(followed.speech).toEqual({ providerId: 'oa', model: 'gpt-realtime-2.1', voiceId: 'marin', voiceName: 'Marin' });
     expect(profileProblem(followed, providers(server))).toBeNull();
   });
+
+  it('on a server provider moves a bot whose talking model was taken off to the talking model it lists now', () => {
+    const server = provider({ id: 'oa', ownerId: null, models: [{ id: 'gpt-realtime-3', kind: 'talk' }] });
+    const followed = followUniverseAi(talking('gpt-realtime-2.1-mini'), providers(server));
+    expect(followed.recognition).toEqual({ providerId: 'oa', model: 'gpt-realtime-3' });
+    expect(followed.speech).toEqual({ providerId: 'oa', model: 'gpt-realtime-3', voiceId: 'marin', voiceName: 'Marin' });
+    expect(profileProblem(followed, providers(server))).toBeNull();
+  });
 });
 
 describe('a provider with a talking model', () => {
