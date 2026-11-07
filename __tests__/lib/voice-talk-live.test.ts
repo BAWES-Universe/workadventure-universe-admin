@@ -48,10 +48,14 @@ const talking = (model = 'gpt-realtime-2.1'): VoiceProfile => ({
 });
 
 describe('the OpenAI entry', () => {
-  it('talks live only, with its realtime models and its fixed voices, ranked nowhere', () => {
+  it('listens and talks live, with its hearing and realtime models and its fixed voices, ranked nowhere', () => {
     const openai = voiceKeyCompanyInfo('openai');
-    expect(openai?.does).toEqual({ recognition: false, speech: false, talk: true });
+    // Hearing only besides talking live: OpenAI's own speaking is not offered (#1900)
+    expect(openai?.does).toEqual({ recognition: true, speech: false, talk: true });
     expect(openai?.models).toEqual([
+      { id: 'gpt-realtime-whisper', label: 'GPT Realtime Whisper', kind: 'recognition' },
+      { id: 'gpt-transcribe', label: 'GPT Transcribe', kind: 'recognition' },
+      { id: 'gpt-live-transcribe', label: 'GPT Live Transcribe', kind: 'recognition' },
       { id: 'gpt-realtime-2.1', label: 'GPT Realtime 2.1', kind: 'talk' },
       { id: 'gpt-realtime-2.1-mini', label: 'GPT Realtime 2.1 mini', kind: 'talk' },
     ]);

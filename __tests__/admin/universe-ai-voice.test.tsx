@@ -298,6 +298,7 @@ describe('New voice provider', () => {
       'CartesiaListens and speaks. Uses your account at cartesia.ai.',
       'DeepgramListens and speaks. Uses your account at deepgram.com.',
       'ElevenLabsListens and speaks. Uses your account at elevenlabs.io.',
+      'OpenAIListens and talks live. Uses your account at platform.openai.com.',
       'SonioxListens and speaks. Uses your account at soniox.com.',
     ]);
     expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks', 'SonioxListens and speaks']);
