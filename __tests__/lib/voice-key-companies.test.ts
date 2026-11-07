@@ -3,7 +3,7 @@
  * everything else (what it does, its starting models, the jobs it is listed under, the address the bot server calls) follows from
  * them. The company stand-in below does both jobs, as Soniox, ElevenLabs, Cartesia and Deepgram will: no real call is made.
  */
-import { TYPED_MODEL, VOICE_KEY_COMPANIES, accountAddress, companyHost, companyJobs, voiceKeyCompanyInfo, type VoiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { AWS_KEY, TYPED_MODEL, VOICE_KEY_COMPANIES, accountAddress, accountRegion, companyHost, companyJobs, voiceKeyCompanyInfo, type VoiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { listCompanyModels } from '@/lib/voice-key-check';
 
 jest.mock('@/lib/db', () => ({ prisma: {} }));
@@ -117,5 +117,36 @@ describe('a key at the person’s own address (Azure)', () => {
     expect(azure.jobs.talk?.fixedVoices?.[0]).toEqual({ id: 'marin', name: 'Marin' });
     expect(azure.check).toEqual({ url: '{address}/openai/v1/models', header: 'api-key', prefix: '' });
     expect(JSON.stringify(azure)).not.toMatch(/recommend/i);
+  });
+});
+
+describe('AWS: a key in two parts, made per region (#1910)', () => {
+  const aws = voiceKeyCompanyInfo('aws')!;
+
+  it('talks live with Nova 2 Sonic and its 16 voices, in the four regions that run it, checked by a signed call', () => {
+    expect(aws.does).toEqual({ recognition: false, speech: false, talk: true });
+    expect(aws.models).toEqual([{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }]);
+    const voices = aws.jobs.talk?.fixedVoices ?? [];
+    expect(voices).toHaveLength(16);
+    expect(new Set(voices.map((voice) => voice.id)).size).toBe(16);
+    expect(voices[0]).toEqual({ id: 'tiffany', name: 'Tiffany' });
+    expect(aws.account?.regions?.map((region) => region.id)).toEqual(['us-east-1', 'us-west-2', 'eu-north-1', 'ap-northeast-1']);
+    for (const region of aws.account?.regions ?? []) expect(region.host).toBe(`bedrock-runtime.${region.id}.amazonaws.com`);
+    expect(aws.check.sign).toEqual({ service: 'sts' });
+    expect(aws.check.url).toBe('https://sts.{region}.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15');
+    expect(JSON.stringify(aws)).not.toMatch(/recommend/i);
+  });
+
+  it('takes only one of its own regions', () => {
+    expect(accountRegion(aws, 'eu-north-1')).toBe('eu-north-1');
+    for (const wrong of ['eu-west-1', '', ' us-east-1', 'us-east-1.evil.com', 42, undefined]) expect(accountRegion(aws, wrong)).toBeNull();
+    expect(accountRegion(voiceKeyCompanyInfo('openai')!, 'us-east-1')).toBeNull();
+  });
+
+  it('keeps a long-term key as its ID, a colon, then its secret', () => {
+    expect(AWS_KEY.test('AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY')).toBe(true);
+    for (const wrong of ['wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'ASIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', 'AKIAIOSFODNN7EXAMPLE:', 'AKIAIOSFODNN7EXAMPLE:short', 'AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI K7MDENG/bPxRfiCYEXAMPLEKEY']) {
+      expect(AWS_KEY.test(wrong)).toBe(false);
+    }
   });
 });

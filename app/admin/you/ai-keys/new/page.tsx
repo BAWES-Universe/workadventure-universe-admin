@@ -18,6 +18,7 @@ import { VOICE_JOB_TITLES } from '../../../components/ds/voice-model-picker';
 import { AiKeyFailure, aiKeyError, aiKeyFailureText } from '../../../hooks/use-ai-keys';
 import { useVoiceCompanies, voiceCompanyKind } from '../../../hooks/use-voice-keys';
 import type { VoiceModel } from '@/lib/voice-providers';
+import { joinKey } from '@/lib/voice-key-companies';
 import { OWN_SPEECH_ADAPTER, OWN_SPEECH_NAME } from '@/lib/voice-own-constants';
 import { openLinkInGame, useLinksOpeningInGame } from '../../../components/orbit-bridge';
 
@@ -123,6 +124,8 @@ export default function AddAiKeyPage() {
   const [showMore, setShowMore] = useState(false);
   const [address, setAddress] = useState('');
   const [apiKey, setApiKey] = useState('');
+  // The shown part of a key in two parts (AWS: the access key ID)
+  const [keyId, setKeyId] = useState('');
   const [models, setModels] = useState<Models>({ status: 'none' });
   const [model, setModel] = useState<string | null>(null);
   // For a server that lists models without saying what they do: what the person picked for each
@@ -167,6 +170,7 @@ export default function AddAiKeyPage() {
       // A key or address typed for one provider is never sent to another
       setAddress('');
       setApiKey('');
+      setKeyId('');
       changed();
     }
     goToStep('setup');
@@ -180,6 +184,7 @@ export default function AddAiKeyPage() {
       setRegion(null);
       setAddress('');
       setApiKey('');
+      setKeyId('');
       changed();
     }
     goToStep('setup');
@@ -206,7 +211,11 @@ export default function AddAiKeyPage() {
     !!info &&
     (!info.regions || region !== null) &&
     (info.address !== 'required' || address.trim() !== '') &&
-    (info.apiKey !== 'required' || apiKey.trim() !== '');
+    (info.apiKey !== 'required' || apiKey.trim() !== '') &&
+    (!account?.keyId || keyId.trim() !== '');
+
+  // A key in two parts (AWS) goes as one: the access key ID, a colon, the secret
+  const voiceKey = account?.keyId ? joinKey(keyId, apiKey) : apiKey;
 
   async function loadModels() {
     if (!info) return;
@@ -220,7 +229,7 @@ export default function AddAiKeyPage() {
         const response = await authenticatedFetch('/api/me/voice-keys/check', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ adapter: voiceInfo.kind, apiKey, ...(ownSpeech || account?.address ? { address } : {}) }),
+          body: JSON.stringify({ adapter: voiceInfo.kind, apiKey: voiceKey, ...(ownSpeech || account?.address ? { address } : {}), ...(account?.regions && region ? { region } : {}) }),
         });
         const data: { ok?: boolean; models?: VoiceModel[]; typed?: boolean; error?: string; voices?: number | null; unsure?: string[] } = await response.json().catch(() => ({}));
         if (mine !== latestLoad.current) return;
@@ -288,13 +297,14 @@ export default function AddAiKeyPage() {
                 adapter: info.kind,
                 name,
                 // A server with no key sends none
-                ...(apiKey.trim() ? { apiKey } : {}),
+                ...(voiceKey.trim() ? { apiKey: voiceKey } : {}),
                 ...(ownSpeech ? { address } : {}),
                 // A talking model listens and speaks in one (game #1910)
                 recognition: picked.some((entry) => entry.kind === 'recognition' || entry.kind === 'talk'),
                 speech: picked.some((entry) => entry.kind === 'speech' || entry.kind === 'talk'),
                 models: picked,
                 ...(account?.address ? { endpoint: address.trim() } : {}),
+                ...(account?.regions && region ? { region } : {}),
               })
             : JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey, ...(model ? { model: model.trim() } : {}), name }),
       });
@@ -426,11 +436,11 @@ export default function AddAiKeyPage() {
                   />
                 ))}
               </div>
-              <p className={FIELD_HINT}>A key only works in the region it was made in.</p>
+              <p className={FIELD_HINT}>{account?.regions ? `Where ${info.label} runs your voice. Pick one near the people talking with your bots.` : 'A key only works in the region it was made in.'}</p>
             </Part>
           )}
 
-          <Part n={part++} title={own ? 'Paste its address' : 'Paste your key'}>
+          <Part n={part++} title={own ? 'Paste its address' : account?.keyId ? 'Paste your access key' : 'Paste your key'}>
             {info.address !== 'none' && (
               <div className="grid gap-1.5">
                 <Label htmlFor="ai-key-address">{account?.address?.label ?? (info.address === 'optional' ? 'Your own NIM address (optional)' : 'Address')}</Label>
@@ -456,14 +466,30 @@ export default function AddAiKeyPage() {
                 </p>
               </div>
             )}
+            {account?.keyId && (
+              <div className="grid gap-1.5">
+                <Label htmlFor="ai-key-id">{account.keyId.label}</Label>
+                <Input
+                  id="ai-key-id"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  placeholder={account.keyId.example}
+                  value={keyId}
+                  onChange={(event) => { setKeyId(event.target.value); changed(); }}
+                  className="h-11 rounded-xl"
+                />
+                <p className={FIELD_HINT}>{account.keyId.hint}</p>
+              </div>
+            )}
             <div className="grid gap-1.5">
-              <Label htmlFor="ai-key-secret">{info.apiKey === 'optional' ? 'API key, if your server asks for one' : 'API key'}</Label>
+              <Label htmlFor="ai-key-secret">{account?.keyLabel ?? (info.apiKey === 'optional' ? 'API key, if your server asks for one' : 'API key')}</Label>
               <Input
                 id="ai-key-secret"
                 type="password"
                 autoComplete="off"
                 spellCheck={false}
-                placeholder={info.apiKey === 'optional' ? 'Leave empty if none' : 'Paste your key'}
+                placeholder={info.apiKey === 'optional' ? 'Leave empty if none' : account?.keyLabel ? `Paste your ${account.keyLabel.toLowerCase()}` : 'Paste your key'}
                 value={apiKey}
                 onChange={(event) => { setApiKey(event.target.value); changed(); }}
                 className="h-11 rounded-xl"

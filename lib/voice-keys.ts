@@ -5,7 +5,7 @@ import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { lendAccess, parseLendModels } from '@/lib/ai-key-lend';
 import { readModels, voiceProviderProblem, type VoiceModel } from '@/lib/voice-providers';
 import { lendModelId } from '@/lib/voice-lend-model';
-import { TYPED_MODEL, VOICE_KEY_COMPANIES, accountAddress, modelDoes, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { AWS_KEY, TYPED_MODEL, VOICE_KEY_COMPANIES, accountAddress, accountRegion, modelDoes, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { checkVoiceKeyLimits, readVoiceKeyLimits, savedVoiceKeyLimits, VOICE_KEY_LIMIT_NAMES, type VoiceKeyLimitValues } from '@/lib/voice-limit-values';
@@ -33,7 +33,13 @@ export interface VoiceKeyCompany {
   step: string;
   docs: string;
   /** What a key needs besides the key (Azure: the resource's address, and the deployment name typed as its model); null for none. */
-  account: { address?: { label: string; example: string; hint: string }; typedModel?: { title: string; label: string; hint: string; kind: 'recognition' | 'speech' | 'talk' } } | null;
+  account: {
+    address?: { label: string; example: string; hint: string };
+    typedModel?: { title: string; label: string; hint: string; kind: 'recognition' | 'speech' | 'talk' };
+    regions?: { id: string; label: string; host: string }[];
+    keyId?: { label: string; example: string; hint: string };
+    keyLabel?: string;
+  } | null;
   /**
    * Set for the one entry that is a speech server on the person's own computer, not a company (game #1874): it is added with an
    * https address and an optional key, and these are its setup steps. Absent for every company.
@@ -70,6 +76,9 @@ export async function voiceKeyCompanies(): Promise<VoiceKeyCompany[]> {
         ? {
             ...(info.account.address ? { address: { label: info.account.address.label, example: info.account.address.example, hint: info.account.address.hint } } : {}),
             ...(info.account.typedModel ? { typedModel: info.account.typedModel } : {}),
+            ...(info.account.regions ? { regions: info.account.regions } : {}),
+            ...(info.account.keyId ? { keyId: info.account.keyId } : {}),
+            ...(info.account.keyLabel ? { keyLabel: info.account.keyLabel } : {}),
           }
         : null,
     };
@@ -120,6 +129,8 @@ export const createVoiceKeySchema = z
     models: fields.models.default([]),
     /** The person's own account address, for a company whose keys live there (Azure: the resource's endpoint). */
     endpoint: z.string().trim().max(500).optional(),
+    /** The region picked, for a company whose keys are made per region (AWS). */
+    region: z.string().trim().max(50).optional(),
   })
   .strict();
 
@@ -317,7 +328,9 @@ export async function createVoiceKey(ownerId: string, input: z.infer<typeof crea
   if (!company) throw new VoiceKeyRefused('Pick a speech company from the list');
   const own = isOwnSpeechAdapter(company.adapter);
   // What is saved for the key: a company's own address is fixed, an own server's is the one typed (checked public, and saved as its origin with /v1)
+  const info = voiceKeyCompanyInfo(input.adapter);
   let endpoint: string | null = null;
+  let region: string | null = null;
   let apiKey: string | null = null;
   if (own) {
     const typed = ownSpeechEndpoint(input.address);
@@ -339,13 +352,21 @@ export async function createVoiceKey(ownerId: string, input: z.infer<typeof crea
     }
     apiKey = input.apiKey;
     // A key that lives at the person's own account address (Azure) keeps that address, checked; no other company key has one
-    const info = voiceKeyCompanyInfo(input.adapter);
     if (info?.account?.address) {
       endpoint = accountAddress(info, input.endpoint);
       if (!endpoint) throw new VoiceKeyRefused(`Paste your ${info.account.address.label.toLowerCase()} as it is, like ${info.account.address.example}`);
     } else if (input.endpoint !== undefined) {
       throw new VoiceKeyRefused(`${company.label} keys don’t take an address`);
     }
+    // A key made per region (AWS) keeps the region picked, one of the company's own; no other key has one
+    if (info?.account?.regions) {
+      region = accountRegion(info, input.region);
+      if (!region) throw new VoiceKeyRefused('Pick the region');
+    } else if (input.region !== undefined) {
+      throw new VoiceKeyRefused(`${company.label} keys don’t take a region`);
+    }
+    // A key in two parts (AWS) is kept as one: the access key ID, a colon, the secret
+    if (info?.account?.keyId && !AWS_KEY.test(input.apiKey)) throw new VoiceKeyRefused(`Paste the ${info.account.keyId.label.toLowerCase()} and the ${(info.account.keyLabel ?? 'key').toLowerCase()} as AWS shows them`);
   }
   if (input.models.some((model) => model.kind === 'talk') && !company.talk) throw new VoiceKeyRefused(`${company.label} doesn’t talk live`);
   checkTypedModel(input.adapter, input.models);
@@ -358,6 +379,7 @@ export async function createVoiceKey(ownerId: string, input: z.infer<typeof crea
       // A person's own key is on from the start: it only reaches bots they made, in universes they lend it to
       enabled: true,
       endpoint,
+      region,
       apiKeyEncrypted: apiKey ? encryptApiKey(apiKey) : null,
       apiKeyLast4: apiKey && !own ? apiKey.slice(-4) : null,
       models: input.models as Prisma.InputJsonValue,
@@ -419,6 +441,9 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
   await prisma.$transaction(async (tx) => {
     const row = await tx.voiceProvider.findFirst({ where: { id, ownerId } });
     if (!row) throw new VoiceKeyRefused('Key not found', 404);
+    // A key in two parts (AWS) is replaced whole: the access key ID, a colon, the secret
+    const keyId = voiceKeyCompanyInfo(row.adapter)?.account?.keyId;
+    if (input.apiKey !== undefined && keyId && !AWS_KEY.test(input.apiKey)) throw new VoiceKeyRefused(`Paste the ${keyId.label.toLowerCase()}, a colon, then the secret`);
     const models = input.models ?? readModels(row.models);
     const refused = problem({ recognition: row.recognition, speech: row.speech, models });
     if (refused) throw new VoiceKeyRefused(refused);
