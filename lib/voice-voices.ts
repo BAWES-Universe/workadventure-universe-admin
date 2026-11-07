@@ -259,13 +259,24 @@ async function listFromSpec(call: Call, spec: VoiceListSpec, speechModels: strin
         if (more === false || (typeof more !== 'boolean' && voices.length < PAGE_SIZE)) break;
         continue;
       }
-      const token = (answer as Record<string, unknown>)[spec.paging.next];
+      const given = (answer as Record<string, unknown>)[spec.paging.next];
+      const token = spec.paging.nextIsLink ? linkParam(given, spec.paging.param) : given;
       // With no `more`, the token itself says there is another page (Mistral)
       if ((spec.paging.more && more !== true) || typeof token !== 'string' || token === '') break;
       next = token;
     }
   }
   return out.slice(0, MAX_VOICES);
+}
+
+/** The value of `param` in a next page's address, or null: the address itself is never followed. */
+function linkParam(link: unknown, param: string): string | null {
+  if (typeof link !== 'string' || link === '') return null;
+  try {
+    return new URL(link).searchParams.get(param);
+  } catch {
+    return null;
+  }
 }
 
 type Cached = { at: number; voices: Listed[] };
