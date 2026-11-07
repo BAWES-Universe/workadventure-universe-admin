@@ -115,6 +115,14 @@ describe('Load models for a voice key', () => {
     expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(200);
     answer(401, '{"err_code":"INVALID_AUTH","err_msg":"Invalid credentials."}');
     expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(422);
+    // OpenAI answers a restricted key without the models permission with a 403 naming the scope; any other 403 is still refused
+    findMany.mockResolvedValue([{ adapter: 'openai', name: 'OpenAI', recognition: true, speech: true, models: [{ id: 'm', kind: 'speech' }] }]);
+    answer(403, '{"error":{"message":"You have insufficient permissions for this operation. Missing scopes: api.model.read."}}');
+    expect((await send({ adapter: 'openai', apiKey: KEY })).status).toBe(200);
+    answer(403, '{"error":{"message":"You are not allowed to sample from this model"}}');
+    expect((await send({ adapter: 'openai', apiKey: KEY })).status).toBe(422);
+    answer(401, '{"error":{"code":"invalid_api_key"}}');
+    expect((await send({ adapter: 'openai', apiKey: KEY })).status).toBe(422);
   });
 
   it('Fish Audio: asks its free credit call, lists its models, and refuses a wrong key with its own name', async () => {

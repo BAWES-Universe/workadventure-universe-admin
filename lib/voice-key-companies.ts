@@ -302,8 +302,9 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     benefit: '{does}. Uses your account at platform.openai.com.',
     step: 'On platform.openai.com, open API keys and create a key.',
     docs: 'https://platform.openai.com/docs',
-    // GET /v1/models lists the models the key may use: free, and a wrong key is 401
-    check: { url: 'https://api.openai.com/v1/models', header: 'Authorization', prefix: 'Bearer ' },
+    // GET /v1/models lists the models the key may use: free, and a wrong key is 401. A restricted key without the models permission
+    // is a working key that gets 403 naming the missing scope
+    check: { url: 'https://api.openai.com/v1/models', header: 'Authorization', prefix: 'Bearer ', alsoAccepted: { status: 403, includes: 'api.model.read' } },
   }),
   company({
     adapter: 'soniox',

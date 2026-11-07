@@ -56,7 +56,7 @@ describe('the OpenAI entry', () => {
       { id: 'gpt-realtime-2.1-mini', label: 'GPT Realtime 2.1 mini', kind: 'talk' },
     ]);
     expect(openai?.jobs.talk?.fixedVoices?.map((voice) => voice.id)).toEqual(['marin', 'cedar', 'alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse']);
-    expect(openai?.check).toEqual({ url: 'https://api.openai.com/v1/models', header: 'Authorization', prefix: 'Bearer ' });
+    expect(openai?.check).toEqual({ url: 'https://api.openai.com/v1/models', header: 'Authorization', prefix: 'Bearer ', alsoAccepted: { status: 403, includes: 'api.model.read' } });
     expect(JSON.stringify(openai)).not.toMatch(/recommend/i);
   });
 });
