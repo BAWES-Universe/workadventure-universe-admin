@@ -191,6 +191,21 @@ describe('Change what Universe AI speaks with', () => {
     expect(within(sheet).queryByText('Recommended')).toBeNull();
   });
 
+  it('keeps each voice in its own row, a long description cut to two lines and the languages to one', async () => {
+    render(<VoiceSection />);
+    fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
+    const sheet = await screen.findByRole('dialog');
+    const list = await within(sheet).findByTestId('voice-list');
+    // A grid list inside the sheet squeezed its rows on a short screen, so long descriptions ran over the next voice
+    expect(list.className).not.toMatch(/\bgrid\b/);
+    const description = within(list).getByText('Calm and clear.');
+    expect(description.className).toContain('line-clamp-2');
+    expect(description.getAttribute('title')).toBe('Calm and clear.');
+    const languages = description.nextElementSibling as HTMLElement;
+    expect(languages.className).toContain('line-clamp-1');
+    expect(languages.getAttribute('title')).toBe(languages.textContent);
+  });
+
   it('says that bots on the company it moves away from stay there', async () => {
     render(<VoiceSection />);
     fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
@@ -294,13 +309,14 @@ describe('New voice provider', () => {
     // Every company is offered the same way, in alphabetical order, with the same neutral line: none is marked Recommended or praised
     // A company that listens and speaks is under both, with the same line (#844)
     expect(within(listens).getAllByRole('radio').map((card) => card.textContent)).toEqual([
+      'AssemblyAIListens. Uses your account at assemblyai.com.',
       'CartesiaListens and speaks. Uses your account at cartesia.ai.',
       'DeepgramListens and speaks. Uses your account at deepgram.com.',
       'ElevenLabsListens and speaks. Uses your account at elevenlabs.io.',
-      'SonioxListens. Uses your account at soniox.com.',
+      'SonioxListens and speaks. Uses your account at soniox.com.',
       'ZoomListens and talks live. Talking live is in English. Uses your Zoom AI Services account.',
     ]);
-    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks']);
+    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks', 'SonioxListens and speaks']);
     expect(screen.queryByText('Recommended')).toBeNull();
     fireEvent.click(within(speaks).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByRole('heading', { name: 'Set up ElevenLabs' })).toBeTruthy();
@@ -325,7 +341,7 @@ describe('New voice provider', () => {
 
   it('adds the provider on, with its key, its models and the job its company does', async () => {
     render(<NewVoiceProviderPage />);
-    fireEvent.click(screen.getByRole('radio', { name: /^Soniox/ }));
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Soniox/ }));
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'soniox-key-1234' } });
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
     await screen.findByText('Soniox knows this key. Nothing was spoken, so nothing was paid.');
@@ -435,7 +451,7 @@ describe('New voice provider, models the company lists (#840)', () => {
 describe('New voice provider, Enter in a model field', () => {
   it('adds the model being typed and does not submit the form', async () => {
     render(<NewVoiceProviderPage />);
-    fireEvent.click(screen.getByRole('radio', { name: /^Soniox/ }));
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Soniox/ }));
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'soniox-key-1234' } });
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
     await screen.findByText('Soniox knows this key. Nothing was spoken, so nothing was paid.');
