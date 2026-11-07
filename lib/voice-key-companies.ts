@@ -24,6 +24,8 @@
  * - deepgram: GET /v1/projects, Authorization: Token. A key without projects:read (scoped to other jobs) is answered 403, not
  *   401: Deepgram knows the key, so that counts as accepted. A wrong key is 401.
  * - cartesia: GET /voices?limit=1, Authorization: Bearer with the Cartesia-Version header the reference lists.
+ * - assemblyai: GET /v2/transcript?limit=1, Authorization with the key as it is (no Bearer). It lists the account's own past
+ *   transcripts: nothing is transcribed. A wrong key is 401.
  * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
  *   free account with no credit still has the answer, and that is fine: the free model needs none.
  * - azure: GET {address}/openai/v1/models on the person's own resource, api-key.
@@ -185,6 +187,25 @@ const company = (entry: VoiceKeyCompanyEntry): VoiceKeyCompanyInfo => ({
 
 // In alphabetical order by name, so the list ranks no company over another
 export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
+  company({
+    adapter: 'assemblyai',
+    label: 'AssemblyAI',
+    jobs: {
+      recognition: {
+        // Universal Streaming (/v3/ws). AssemblyAI has no model list, so its streaming models are typed; universal-3-6-pro is its default
+        host: 'streaming.assemblyai.com',
+        models: [
+          { id: 'universal-3-6-pro', label: 'Universal-3.6 Pro' },
+          { id: 'universal-streaming-multilingual', label: 'Universal Streaming Multilingual' },
+          { id: 'universal-streaming-english', label: 'Universal Streaming English' },
+        ],
+      },
+    },
+    benefit: '{does}. Uses your account at assemblyai.com.',
+    step: 'On assemblyai.com, open your dashboard, then API Keys, and copy a key.',
+    docs: 'https://www.assemblyai.com/docs',
+    check: { url: 'https://api.assemblyai.com/v2/transcript?limit=1', header: 'Authorization', prefix: '' },
+  }),
   company({
     adapter: 'azure',
     label: 'Azure OpenAI',
