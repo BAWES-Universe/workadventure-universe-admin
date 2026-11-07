@@ -32,6 +32,7 @@
  * - fal: GET https://api.fal.ai/v1/account/billing, Authorization: Key. Free (it reads the account's name). A key without the
  *   billing permission (the usual API key) is answered 403, not 401: fal knows the key, so that counts as accepted.
  * - gladia: GET /v2/live?limit=1, x-gladia-key. It lists the account's past live sessions: nothing is transcribed. A wrong key is 401.
+ * - gradium: GET /api/usages/credits, x-api-key. Free (it reads the account's credit), nothing is generated.
  * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
  *   free account with no credit still has the answer, and that is fine: the free model needs none.
  */
@@ -445,6 +446,40 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On app.gladia.io, open API keys and create a key.',
     docs: 'https://docs.gladia.io',
     check: { url: 'https://api.gladia.io/v2/live?limit=1', header: 'x-gladia-key', prefix: '' },
+  }),
+  company({
+    adapter: 'gradium',
+    label: 'Gradium',
+    jobs: {
+      recognition: {
+        // Live speech to text over a socket (/api/speech/asr). "default" is Gradium's current model
+        // (https://docs.gradium.ai/api-reference/endpoint/stt-websocket). It hears English, French, German, Spanish and Portuguese
+        host: 'api.gradium.ai',
+        models: [{ id: 'default', label: 'Gradium (current)' }],
+      },
+      speech: {
+        // Text to speech over a socket (/api/speech/tts). "default" is the current model; "gradium-tts-beta" follows its betas
+        host: 'api.gradium.ai',
+        models: [
+          { id: 'default', label: 'Gradium TTS (current)' },
+          { id: 'gradium-tts-beta', label: 'Gradium TTS beta' },
+        ],
+        // GET /api/voices/ with the catalog: the account's own voices first, then Gradium's, in one answer that is the list itself
+        voices: {
+          path: '/api/voices/?include_catalog=true&limit=1000',
+          list: '',
+          paging: { kind: 'none' },
+          id: 'uid',
+          name: 'name',
+          description: ['description', 'tags[].value'],
+          languages: ['language'],
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at gradium.ai.',
+    step: 'On gradium.ai, open your account, then API keys, and create a key.',
+    docs: 'https://docs.gradium.ai',
+    check: { url: 'https://api.gradium.ai/api/usages/credits', header: 'x-api-key', prefix: '' },
   }),
   company({
     adapter: 'soniox',

@@ -546,6 +546,31 @@ describe('CAMB.AI\'s voices', () => {
   });
 });
 
+describe('Gradium\'s voices', () => {
+  const gradium = () => key({ adapter: 'gradium', name: 'Gradium', models: [{ id: 'default', label: 'Gradium TTS (current)', kind: 'speech' }] });
+  const answer = [
+    { uid: 'own-1', name: 'My voice', description: null, is_catalog: false, language: 'fr', tags: [] },
+    { uid: '_6Aslh2DxfmnRLmP', name: 'Emma', description: 'Warm and clear', is_catalog: true, language: 'en', tags: [{ category: 'use_case', value: 'Narration' }] },
+  ];
+
+  beforeEach(() => {
+    providers = [gradium()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(answer));
+  });
+
+  it('are the account\'s own and Gradium\'s catalog in one answer, with the key in x-api-key', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.languages])).toEqual([
+      ['own-1', 'My voice', '', ['fr']],
+      ['_6Aslh2DxfmnRLmP', 'Emma', 'Warm and clear', ['en']],
+    ]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.gradium.ai/api/voices/?include_catalog=true&limit=1000');
+    expect(init.headers).toMatchObject({ 'x-api-key': SECRET });
+  });
+});
+
 describe('languageCode', () => {
   it('keeps the language of a code and drops anything that isn\'t one', () => {
     expect([languageCode('en-GB'), languageCode('AR_kw'), languageCode('ara'), languageCode('English'), languageCode(''), languageCode(7)]).toEqual(['en', 'ar', 'ara', null, null, null]);
