@@ -136,7 +136,7 @@ describe('adding a key', () => {
 
   it.each([
     ['a company that isn’t on the list', { adapter: 'unknown-co', speech: true, apiKey: 'sk-secret-key-9f2a' }],
-    ['a job the company doesn’t do', { adapter: 'deepgram', speech: true, apiKey: 'sk-secret-key-9f2a' }],
+    ['a job the company doesn’t do', { adapter: 'soniox', speech: true, apiKey: 'sk-secret-key-9f2a' }],
     ['a key that does nothing', { adapter: 'elevenlabs', apiKey: 'sk-secret-key-9f2a' }],
     ['a key that is too short', { adapter: 'elevenlabs', speech: true, apiKey: 'short' }],
     ['a model for a job the key doesn’t do', { adapter: 'elevenlabs', speech: true, apiKey: 'sk-secret-key-9f2a', models: [{ id: 'a', kind: 'recognition' }] }],
@@ -162,7 +162,7 @@ describe('the list', () => {
     // plus what a provider the server has on does (ElevenLabs also listens here, since the stand-in server has one that does)
     expect(body.companies).toEqual([
       expect.objectContaining({ adapter: 'cartesia', label: 'Cartesia', recognition: true, speech: true }),
-      expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: false, logo: 'deepgram' }),
+      expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: true, logo: 'deepgram' }),
       expect.objectContaining({ adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true, logo: 'elevenlabs', docs: 'https://elevenlabs.io/docs' }),
       expect.objectContaining({ adapter: 'fish', label: 'Fish Audio', recognition: false, speech: true, logo: 'fish-audio' }),
       expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: false }),
@@ -170,7 +170,7 @@ describe('the list', () => {
     // Its line says only the jobs Universe runs for it, the same neutral shape for every company
     expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual([
       'Listens and speaks. Uses your account at cartesia.ai.',
-      'Listens. Uses your account at deepgram.com.',
+      'Listens and speaks. Uses your account at deepgram.com.',
       'Listens and speaks. Uses your account at elevenlabs.io.',
       'Speaks. Uses your account at fish.audio.',
       'Listens. Uses your account at soniox.com.',

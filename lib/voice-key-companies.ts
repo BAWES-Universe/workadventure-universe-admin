@@ -70,9 +70,9 @@ export interface VoiceListSpec {
   /**
    * How the next page is asked for: a token the answer gives (`token`) or the last voice's id (`after`), sent as `param`, while
    * `more` says there is more; or a page number (`page`, from 1, in the path) while `more` says so, or, when the company doesn't
-   * say, while a page is full.
+   * say, while a page is full. `none`: the whole list comes in one answer.
    */
-  paging: { kind: 'token' | 'after'; param: string; next: string; more: string } | { kind: 'page'; more?: string };
+  paging: { kind: 'token' | 'after'; param: string; next: string; more: string } | { kind: 'page'; more?: string } | { kind: 'none' };
   /** Asked one after the other, each added to `path` (Fish: the person's own voices, then the public library). A voice met twice is kept once. */
   passes?: string[];
   /** A voice is kept only when each of these fields, when the company sends it, has this value. */
@@ -194,6 +194,22 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
         host: 'api.deepgram.com',
         models: [{ id: 'nova-3', label: 'Nova 3' }],
         modelList: { url: 'https://api.deepgram.com/v1/models', list: 'stt', id: 'canonical_name', where: { streaming: true }, languages: 'languages' },
+      },
+      speech: {
+        host: 'api.deepgram.com',
+        // A Deepgram voice is its own model (aura-2-thalia-en): the game sends the voice picked, and the model names its family
+        models: [{ id: 'aura-2', label: 'Aura 2' }],
+        // GET /v1/models: every voice in one answer, each with its languages and a public sample
+        voices: {
+          path: '/v1/models',
+          list: 'tts',
+          paging: { kind: 'none' },
+          id: 'canonical_name',
+          name: 'name',
+          description: [{ join: ['metadata.accent', 'metadata.age', 'metadata.tags[]'] }],
+          languages: ['languages[]'],
+          preview: 'metadata.sample',
+        },
       },
     },
     logo: 'deepgram',

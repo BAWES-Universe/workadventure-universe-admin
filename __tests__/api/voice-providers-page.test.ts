@@ -198,7 +198,7 @@ describe('the voices of a server provider', () => {
   });
 
   it('say so when the company can\'t list voices here, or didn\'t answer', async () => {
-    db.findFirst.mockResolvedValue(row({ adapter: 'deepgram', name: 'Deepgram', speech: true }));
+    db.findFirst.mockResolvedValue(row({ adapter: 'soniox', name: 'Soniox', speech: true }));
     const none = await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx());
     expect(none.status).toBe(409);
     db.findFirst.mockResolvedValue(row());

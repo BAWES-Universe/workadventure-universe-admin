@@ -170,7 +170,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
     let next: string | null = null;
     for (let page = 1; out.length < MAX_VOICES && page <= MAX_PAGES; page++) {
       const query = [spec.path.replace('{size}', String(PAGE_SIZE)).replace('{page}', String(page)), pass].filter(Boolean).join('&');
-      const paged = spec.paging.kind !== 'page' && next !== null ? `${spec.paging.param}=${encodeURIComponent(next)}` : '';
+      const paged = (spec.paging.kind === 'token' || spec.paging.kind === 'after') && next !== null ? `${spec.paging.param}=${encodeURIComponent(next)}` : '';
       const answer = await getJson(call, [query, paged].filter(Boolean).join('&'));
       if (typeof answer !== 'object' || answer === null) throw unreadable(call);
       const voices = (answer as Record<string, unknown>)[spec.list];
@@ -194,6 +194,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
           previewNeedsKey: spec.previewNeedsKey === true,
         });
       }
+      if (spec.paging.kind === 'none') break;
       const more = spec.paging.more ? (answer as Record<string, unknown>)[spec.paging.more] : undefined;
       if (spec.paging.kind === 'page') {
         // The list says when it ends; a full page is the sign there may be more when it doesn't

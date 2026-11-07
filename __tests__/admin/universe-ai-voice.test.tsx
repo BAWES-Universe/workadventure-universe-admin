@@ -295,10 +295,10 @@ describe('New voice provider', () => {
     // A company that listens and speaks is under both, with the same line (#844)
     expect(within(listens).getAllByRole('radio').map((card) => card.textContent)).toEqual([
       'CartesiaListens and speaks. Uses your account at cartesia.ai.',
-      'DeepgramListens. Uses your account at deepgram.com.',
+      'DeepgramListens and speaks. Uses your account at deepgram.com.',
       'SonioxListens. Uses your account at soniox.com.',
     ]);
-    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['CartesiaListens and speaks', 'ElevenLabsSpeaks', 'Fish AudioSpeaks']);
+    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsSpeaks', 'Fish AudioSpeaks']);
     expect(screen.queryByText('Recommended')).toBeNull();
     fireEvent.click(within(speaks).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByRole('heading', { name: 'Set up ElevenLabs' })).toBeTruthy();
@@ -453,7 +453,7 @@ describe('New voice provider, a key the company turns away', () => {
   async function setUp(address: string | null) {
     checkAnswer = { ok: false, body: { error: 'Deepgram turned this key away. Check that you copied all of it.' } };
     render(<NewVoiceProviderPage />);
-    fireEvent.click(screen.getByRole('radio', { name: /^Deepgram/ }));
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Deepgram/ }));
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'regional-key-1234' } });
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
     await screen.findByText('Deepgram turned this key away. Check that you copied all of it.');
