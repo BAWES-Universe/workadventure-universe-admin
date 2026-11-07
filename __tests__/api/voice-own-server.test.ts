@@ -12,13 +12,13 @@ import { lendAccess } from '@/lib/ai-key-lend';
 import { AddressError, checkPublicHttpsUrl, safeGet } from '@/lib/ai-key-fetch';
 import { prisma } from '@/lib/db';
 import { decryptApiKey } from '@/lib/encryption';
-import { effectiveBotVoice } from '@/lib/bot-voice';
+import { effectiveBotVoice, ownServerLentToBot } from '@/lib/bot-voice';
 import { clearVoiceListCache, listBotVoices } from '@/lib/voice-voices';
 import { describeVoice } from '@/app/admin/you/ai-keys/voice-key-text';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
-jest.mock('@/lib/bot-voice', () => ({ effectiveBotVoice: jest.fn() }));
+jest.mock('@/lib/bot-voice', () => ({ effectiveBotVoice: jest.fn(), ownServerLentToBot: jest.fn() }));
 jest.mock('@/lib/ai-key-lend', () => ({ ...jest.requireActual('@/lib/ai-key-lend'), lendAccess: jest.fn() }));
 jest.mock('@/lib/ai-key-fetch', () => ({ ...jest.requireActual('@/lib/ai-key-fetch'), checkPublicHttpsUrl: jest.fn(), safeGet: jest.fn() }));
 jest.mock('@/lib/db', () => ({
@@ -309,6 +309,62 @@ describe('serving the credentials of an own speech server', () => {
   it('still refuses any other provider that has no key', async () => {
     db.voiceProvider.findUnique.mockResolvedValue({ ...serverRow, adapter: 'elevenlabs', endpoint: null });
     expect((await ask()).status).toBe(400);
+  });
+
+  describe('for a hello before voice is on', () => {
+    const askHello = (query = '?botId=b1&hello=1') =>
+      credentials(new NextRequest(`http://localhost:3333/api/voice/providers/k1/credentials${query}`, { headers: { Authorization: 'Bearer service-secret' } }), { params: Promise.resolve({ id: 'k1' }) });
+
+    beforeEach(() => {
+      db.voiceProvider.findUnique.mockResolvedValue(serverRow);
+      // No profile names the server yet: the bot does not speak
+      (effectiveBotVoice as jest.Mock).mockResolvedValue({ speaks: false, profile: null });
+    });
+
+    it('serves the server while it is lent to the bot’s universe, though voice is off', async () => {
+      (ownServerLentToBot as jest.Mock).mockResolvedValue(true);
+      const response = await askHello();
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ adapter: 'openai-compatible', endpoint: 'https://speech.example.com/v1', keyless: true });
+      expect(ownServerLentToBot).toHaveBeenCalledWith(serverRow, 'b1');
+    });
+
+    it('does not serve it when it is not lent there, or the bot is not its owner’s', async () => {
+      (ownServerLentToBot as jest.Mock).mockResolvedValue(false);
+      expect((await askHello()).status).toBe(404);
+    });
+
+    it('is not served without asking for a hello, or without a bot', async () => {
+      (ownServerLentToBot as jest.Mock).mockResolvedValue(true);
+      expect((await askHello('?botId=b1')).status).toBe(404);
+      expect((await askHello('?hello=1')).status).toBe(404);
+      expect(ownServerLentToBot).not.toHaveBeenCalledWith(expect.anything(), null);
+    });
+  });
+});
+
+describe('whether a speech server is lent to a bot’s universe, for a hello before voice is on', () => {
+  const { ownServerLentToBot: real } = jest.requireActual('@/lib/bot-voice') as typeof import('@/lib/bot-voice');
+  const own = { id: 'k1', ownerId: 'u-1', adapter: 'openai-compatible' };
+  beforeEach(() => {
+    db.bot.findUnique.mockResolvedValue({ createdById: 'u-1', room: { world: { universeId: 'uni1' } } });
+    (db.voiceKeyLend as Mocks).findUnique = jest.fn().mockResolvedValue({ id: 'lend1' });
+  });
+
+  it('is so for the maker’s own server that is lent to the universe', async () => {
+    expect(await real(own, 'b1')).toBe(true);
+    expect((db.voiceKeyLend as Mocks).findUnique).toHaveBeenCalledWith({ where: { providerId_universeId: { providerId: 'k1', universeId: 'uni1' } }, select: { id: true } });
+  });
+
+  it('is not so for a company’s key, a server of someone else’s, a server not lent here, or an owner who lost access', async () => {
+    expect(await real({ ...own, adapter: 'elevenlabs' }, 'b1')).toBe(false);
+    expect(await real({ ...own, ownerId: null }, 'b1')).toBe(false);
+    expect(await real({ ...own, ownerId: 'u-2' }, 'b1')).toBe(false);
+    (db.voiceKeyLend as Mocks).findUnique.mockResolvedValue(null);
+    expect(await real(own, 'b1')).toBe(false);
+    (db.voiceKeyLend as Mocks).findUnique.mockResolvedValue({ id: 'lend1' });
+    (lendAccess as jest.Mock).mockResolvedValue(false);
+    expect(await real(own, 'b1')).toBe(false);
   });
 });
 
