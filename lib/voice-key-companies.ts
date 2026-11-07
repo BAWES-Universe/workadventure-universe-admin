@@ -106,7 +106,8 @@ export interface VoiceListSpec {
 
 /** A company with no voice list to ask (Groq): its voices as its own docs name them, the same for every key. */
 export interface FixedVoices {
-  fixed: { id: string; name: string; description?: string; languages: string[] }[];
+  /** `model`: the one speaking model the voice belongs to, when the company ties each voice to a model (Groq's Orpheus). */
+  fixed: { id: string; name: string; description?: string; languages: string[]; model?: string }[];
 }
 
 /** One job a company does: its own address for it, the models a key starts with, and where it lists models and voices. */
@@ -513,8 +514,8 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
         // Groq has no voice list to ask: these are the voices its Orpheus page names
         voices: {
           fixed: [
-            ...['Autumn', 'Diana', 'Hannah', 'Austin', 'Daniel', 'Troy'].map((name) => ({ id: name.toLowerCase(), name, description: 'Orpheus English', languages: ['en'] })),
-            ...['Abdullah', 'Fahad', 'Sultan', 'Lulwa', 'Noura', 'Aisha'].map((name) => ({ id: name.toLowerCase(), name, description: 'Orpheus Arabic (Saudi)', languages: ['ar'] })),
+            ...['Autumn', 'Diana', 'Hannah', 'Austin', 'Daniel', 'Troy'].map((name) => ({ id: name.toLowerCase(), name, description: 'Orpheus English', languages: ['en'], model: 'canopylabs/orpheus-v1-english' })),
+            ...['Abdullah', 'Fahad', 'Sultan', 'Lulwa', 'Noura', 'Aisha'].map((name) => ({ id: name.toLowerCase(), name, description: 'Orpheus Arabic (Saudi)', languages: ['ar'], model: 'canopylabs/orpheus-arabic-saudi' })),
           ],
         },
       },
@@ -574,6 +575,12 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
 
 export const voiceKeyCompanyInfo = (adapter: unknown): VoiceKeyCompanyInfo | null =>
   VOICE_KEY_COMPANIES.find((entry) => entry.adapter === adapter) ?? null;
+
+/** The one speaking model a voice belongs to, when the company ties each voice to a model (Groq's Orpheus), or undefined. */
+export const fixedVoiceModel = (adapter: unknown, voiceId: string): string | undefined => {
+  const voices = voiceKeyCompanyInfo(adapter)?.jobs.speech?.voices;
+  return voices && 'fixed' in voices ? voices.fixed.find((voice) => voice.id === voiceId)?.model : undefined;
+};
 
 /** What a company's line says it does, from the jobs Universe's own providers of it run. */
 export const voiceDoesLine = ({ recognition, speech }: { recognition: boolean; speech: boolean }) =>
