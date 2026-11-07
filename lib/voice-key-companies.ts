@@ -11,7 +11,8 @@
  * Adding a company, or a job to one, is one entry here plus its connector in the game, never `if (adapter === ...)` in the logic.
  *
  * `modelList` is where a company lists a job's models (GET, the same key header): Soniox GET /v1/models (real-time ones), Deepgram
- * GET /v1/models (streaming listening ones), ElevenLabs GET /v1/models (speaking ones), Cartesia GET /models?capability=stt|tts. Fish
+ * GET /v1/models (streaming listening ones), ElevenLabs GET /v1/models (speaking ones), Cartesia GET /models?capability=stt|tts, Soniox
+ * GET /v1/tts-models (speaking ones). Fish
  * Audio has no such list, so its models are typed on New voice provider. `voices` is where a speaking job lists its voices
  * (lib/voice-voices.ts reads every company's the same way).
  *
@@ -29,6 +30,8 @@
  * - async: POST /voices with { limit: 1 }, x-api-key and version: v1. It lists voices: nothing is spoken. A wrong key is 401.
  * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
  *   free account with no credit still has the answer, and that is fine: the free model needs none.
+ * - azure: GET {address}/openai/v1/models on the person's own resource, api-key.
+ * - google: GET /v1beta/models, x-goog-api-key (a wrong key is 400 API_KEY_INVALID).
  * - openai: GET /v1/models, Authorization: Bearer.
  * - xai: GET /v1/tts/voices, Authorization: Bearer (lists the built-in voices; a wrong key is 401).
  */
@@ -75,8 +78,10 @@ export interface VoiceListSpec {
   path: string;
   /** Set when the company lists its voices with a POST: this JSON body, a `'{size}'` value being the page size (Async). */
   body?: Record<string, unknown>;
-  /** The field holding the voices. */
+  /** The field holding the voices; `a[].b[]` gathers them from inside a list (Soniox lists voices inside each model). */
   list: string;
+  /** The host voices are listed at, when it isn't the job's own (Soniox speaks at tts-rt.soniox.com, lists at api.soniox.com). */
+  host?: string;
   /**
    * How the next page is asked for: a token the answer gives (`token`) or the last voice's id (`after`), sent as `param`, while
    * `more` says there is more; or a page number (`page`, from 1, in the path) while `more` says so, or, when the company doesn't
@@ -118,6 +123,35 @@ export interface VoiceCompanyJob {
   fixedVoices?: FixedVoice[];
 }
 
+/**
+ * What a key needs besides the key, for a company whose keys live at the person's own address (Azure: their resource), with the
+ * model named as they deployed it. Each is one more field on Add a key, in its own words.
+ */
+export interface VoiceKeyAccount {
+  /**
+   * The address of the person's own account. Only an https address on one of `hosts` (host endings) is taken, so the key only
+   * ever goes to the company. It is kept as its origin (scheme and host), the address the bot server calls.
+   */
+  address?: { label: string; example: string; hint: string; hosts: string[] };
+  /** The model is typed, as the person named it at the company (Azure: the deployment name), for this job. */
+  typedModel?: { title: string; label: string; hint: string; kind: VoiceCompanyJobName };
+  /** The regions a key may be in, one picked on Add a key (AWS), each with the host the bot server calls there. */
+  regions?: { id: string; label: string; host: string }[];
+  /** A key in two parts (AWS): this one shown as typed (the access key ID), the other kept secret like any key. */
+  keyId?: { label: string; example: string; hint: string };
+  /** What the secret part is called, when not "API key" (AWS: "Secret access key"). */
+  keyLabel?: string;
+}
+
+/**
+ * An AWS key as kept and sent on: the access key ID, a colon, then the secret access key. Only long-term keys (AKIA): a
+ * temporary key needs a session token too, which nothing here keeps.
+ */
+export const AWS_KEY = /^AKIA[A-Z0-9]{12,124}:[A-Za-z0-9/+=]{20,128}$/;
+
+/** A key in two parts kept as one: the ID part, a colon, the secret part (AWS). */
+export const joinKey = (keyId: string, secret: string) => `${keyId.trim()}:${secret.trim()}`;
+
 /** One company, everything about it in one place. */
 export interface VoiceKeyCompanyEntry {
   adapter: string;
@@ -137,7 +171,9 @@ export interface VoiceKeyCompanyEntry {
   step: string;
   /** Where to read about the company and get a key. */
   docs: string;
+  account?: VoiceKeyAccount;
   check: {
+    /** `{address}` stands for the person's own address, for a company with one (`account.address`). */
     url: string;
     /** The header the key goes in, and what comes before it there (`Bearer `, `Token `, or nothing). */
     header: string;
@@ -151,6 +187,13 @@ export interface VoiceKeyCompanyEntry {
      * and when `includes` is given, only with that text in the answer.
      */
     alsoAccepted?: { status: number; includes?: string };
+    /** An answer other than 401 or 403 that still means the key is wrong (Google: 400 with API_KEY_INVALID), only with that text. */
+    alsoRefused?: { status: number; includes: string };
+    /**
+     * The call is signed with the key instead of carrying it (AWS Signature Version 4, for this service), in the region picked
+     * (`{region}` in the url). Neither part of the key is ever sent.
+     */
+    sign?: { service: string };
   };
 }
 
@@ -221,6 +264,98 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On async.com, open your account settings, then API keys, and create a key.',
     docs: 'https://docs.async.com',
     check: { url: 'https://api.async.com/voices', header: 'x-api-key', prefix: '', headers: { version: 'v1' }, body: { limit: 1 } },
+  }),
+  company({
+    adapter: 'aws',
+    label: 'AWS',
+    jobs: {
+      talk: {
+        // The region picked on Add a key names the host: bedrock-runtime.<region>.amazonaws.com
+        host: 'bedrock-runtime.us-east-1.amazonaws.com',
+        // From Bedrock's Nova 2 Sonic model card (7 Nov 2026): in us-east-1, us-west-2, eu-north-1 and ap-northeast-1 only
+        models: [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic' }],
+        // AWS has no call that lists Nova Sonic voices: these are the voices its language table lists, in that order. Tiffany and
+        // Matthew speak every language Nova Sonic does; Kiara and Arjun speak Indian English and Hindi
+        fixedVoices: [
+          { id: 'tiffany', name: 'Tiffany' },
+          { id: 'matthew', name: 'Matthew' },
+          { id: 'amy', name: 'Amy' },
+          { id: 'olivia', name: 'Olivia' },
+          { id: 'kiara', name: 'Kiara' },
+          { id: 'arjun', name: 'Arjun' },
+          { id: 'ambre', name: 'Ambre' },
+          { id: 'florian', name: 'Florian' },
+          { id: 'beatrice', name: 'Beatrice' },
+          { id: 'lorenzo', name: 'Lorenzo' },
+          { id: 'tina', name: 'Tina' },
+          { id: 'lennart', name: 'Lennart' },
+          { id: 'lupe', name: 'Lupe' },
+          { id: 'carlos', name: 'Carlos' },
+          { id: 'carolina', name: 'Carolina' },
+          { id: 'leo', name: 'Leo' },
+        ],
+      },
+    },
+    benefit: '{does}. Uses your AWS account, in the region you pick.',
+    step: 'In the AWS console, open IAM and create an access key for a user allowed bedrock:InvokeModelWithBidirectionalStream.',
+    docs: 'https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-2-sonic.html',
+    account: {
+      regions: [
+        { id: 'us-east-1', label: 'US East (N. Virginia)', host: 'bedrock-runtime.us-east-1.amazonaws.com' },
+        { id: 'us-west-2', label: 'US West (Oregon)', host: 'bedrock-runtime.us-west-2.amazonaws.com' },
+        { id: 'eu-north-1', label: 'Europe (Stockholm)', host: 'bedrock-runtime.eu-north-1.amazonaws.com' },
+        { id: 'ap-northeast-1', label: 'Asia Pacific (Tokyo)', host: 'bedrock-runtime.ap-northeast-1.amazonaws.com' },
+      ],
+      keyId: { label: 'Access key ID', example: 'AKIA…', hint: 'Shown next to the secret when you create the access key. It starts with AKIA.' },
+      keyLabel: 'Secret access key',
+    },
+    // STS GetCallerIdentity answers any valid key, needs no permission and is free; a wrong key is 403. The call is signed, so
+    // neither part of the key leaves Universe
+    check: { url: 'https://sts.{region}.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15', header: 'Authorization', prefix: '', sign: { service: 'sts' } },
+  }),
+  company({
+    adapter: 'azure',
+    label: 'Azure OpenAI',
+    jobs: {
+      talk: {
+        // The person's own resource address is always typed (`account.address`): there is no one host for every key
+        host: 'openai.azure.com',
+        // Typed: an Azure model is called by the name it was deployed under
+        models: [],
+        // The same realtime voices as OpenAI's, from Azure's realtime docs
+        fixedVoices: [
+          { id: 'marin', name: 'Marin' },
+          { id: 'cedar', name: 'Cedar' },
+          { id: 'alloy', name: 'Alloy' },
+          { id: 'ash', name: 'Ash' },
+          { id: 'ballad', name: 'Ballad' },
+          { id: 'coral', name: 'Coral' },
+          { id: 'echo', name: 'Echo' },
+          { id: 'sage', name: 'Sage' },
+          { id: 'shimmer', name: 'Shimmer' },
+          { id: 'verse', name: 'Verse' },
+        ],
+      },
+    },
+    benefit: '{does}. Uses your Azure OpenAI resource.',
+    step: 'In the Azure portal, open your Azure OpenAI resource, deploy gpt-realtime-2.1 or gpt-realtime-2.1-mini, then copy Key 1 and the Endpoint from Keys and Endpoint.',
+    docs: 'https://learn.microsoft.com/azure/foundry/openai/how-to/realtime-audio-websockets',
+    account: {
+      address: {
+        label: 'Endpoint',
+        example: 'https://your-resource.openai.azure.com',
+        hint: 'From Keys and Endpoint on your resource. It ends in openai.azure.com, cognitiveservices.azure.com or services.ai.azure.com.',
+        hosts: ['.openai.azure.com', '.cognitiveservices.azure.com', '.services.ai.azure.com'],
+      },
+      typedModel: {
+        title: 'Name its deployment',
+        label: 'Deployment name',
+        hint: 'The name you gave the gpt-realtime deployment, as Azure shows it under Deployments.',
+        kind: 'talk',
+      },
+    },
+    // GET /openai/v1/models on the person's own resource: free, and a wrong key is 401
+    check: { url: '{address}/openai/v1/models', header: 'api-key', prefix: '' },
   }),
   company({
     adapter: 'cartesia',
@@ -360,6 +495,61 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     check: { url: 'https://api.fish.audio/wallet/self/api-credit', header: 'Authorization', prefix: 'Bearer ' },
   }),
   company({
+    adapter: 'google',
+    label: 'Google',
+    jobs: {
+      talk: {
+        host: 'generativelanguage.googleapis.com',
+        // From Google's Live API docs (7 Nov 2026): the older live models shut on 17 Nov 2026
+        models: [{ id: 'gemini-3.8-live', label: 'Gemini 3.8 Live' }],
+        // Google has no call that lists live voices: these are the 30 prebuilt voices its speech docs list, in that order
+        fixedVoices: [
+          { id: 'Zephyr', name: 'Zephyr' },
+          { id: 'Puck', name: 'Puck' },
+          { id: 'Charon', name: 'Charon' },
+          { id: 'Kore', name: 'Kore' },
+          { id: 'Fenrir', name: 'Fenrir' },
+          { id: 'Leda', name: 'Leda' },
+          { id: 'Orus', name: 'Orus' },
+          { id: 'Aoede', name: 'Aoede' },
+          { id: 'Callirrhoe', name: 'Callirrhoe' },
+          { id: 'Autonoe', name: 'Autonoe' },
+          { id: 'Enceladus', name: 'Enceladus' },
+          { id: 'Iapetus', name: 'Iapetus' },
+          { id: 'Umbriel', name: 'Umbriel' },
+          { id: 'Algieba', name: 'Algieba' },
+          { id: 'Despina', name: 'Despina' },
+          { id: 'Erinome', name: 'Erinome' },
+          { id: 'Algenib', name: 'Algenib' },
+          { id: 'Rasalgethi', name: 'Rasalgethi' },
+          { id: 'Laomedeia', name: 'Laomedeia' },
+          { id: 'Achernar', name: 'Achernar' },
+          { id: 'Alnilam', name: 'Alnilam' },
+          { id: 'Schedar', name: 'Schedar' },
+          { id: 'Gacrux', name: 'Gacrux' },
+          { id: 'Pulcherrima', name: 'Pulcherrima' },
+          { id: 'Achird', name: 'Achird' },
+          { id: 'Zubenelgenubi', name: 'Zubenelgenubi' },
+          { id: 'Vindemiatrix', name: 'Vindemiatrix' },
+          { id: 'Sadachbia', name: 'Sadachbia' },
+          { id: 'Sadaltager', name: 'Sadaltager' },
+          { id: 'Sulafat', name: 'Sulafat' },
+        ],
+      },
+    },
+    logo: 'google',
+    benefit: '{does}. Uses your account at aistudio.google.com.',
+    step: 'In Google AI Studio, open Get API key and create a key.',
+    docs: 'https://ai.google.dev/gemini-api/docs',
+    // GET /v1beta/models lists the models the key may use: free. Google answers a wrong key 400 with API_KEY_INVALID, not 401
+    check: {
+      url: 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1',
+      header: 'x-goog-api-key',
+      prefix: '',
+      alsoRefused: { status: 400, includes: 'API_KEY_INVALID' },
+    },
+  }),
+  company({
     adapter: 'openai',
     label: 'OpenAI',
     jobs: {
@@ -402,6 +592,23 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
         // stt-rt-v6: stt-rt-v5 is removed on 15 Dec 2026 and stt-rt-v4 is only its alias
         models: [{ id: 'stt-rt-v6', label: 'Soniox real-time v6' }],
         modelList: { url: 'https://api.soniox.com/v1/models', list: 'models', id: 'id', label: 'name', where: { transcription_mode: 'real_time' }, aliasOf: 'aliased_model_id', languages: 'languages' },
+      },
+      speech: {
+        host: 'tts-rt.soniox.com',
+        // tts-rt-v2: the model Pipecat's Soniox service starts on
+        models: [{ id: 'tts-rt-v2', label: 'Soniox TTS v2' }],
+        modelList: { url: 'https://api.soniox.com/v1/tts-models', list: 'models', id: 'id', label: 'name', aliasOf: 'aliased_model_id', languages: 'languages' },
+        // GET /v1/tts-models: every model with its voices, in one answer. A voice is named by its id; there are no samples
+        voices: {
+          host: 'api.soniox.com',
+          path: '/v1/tts-models',
+          list: 'models[].voices[]',
+          paging: { kind: 'none' },
+          id: 'id',
+          name: 'id',
+          description: ['description', 'gender'],
+          languages: [],
+        },
       },
     },
     benefit: '{does}. Uses your account at soniox.com.',
@@ -496,3 +703,34 @@ export const companyHost = (adapter: string, job?: VoiceCompanyJobName): string 
   if (!info) return undefined;
   return info.jobs[job ?? companyJobs(info)[0]]?.host;
 };
+
+/**
+ * The person's own account address for a company that has one, as kept: its https origin. Null when it is not an https address on
+ * one of the company's hosts (the key only ever goes there), with no user, password or port.
+ */
+export function accountAddress(info: Pick<VoiceKeyCompanyEntry, 'account'>, typed: unknown): string | null {
+  const spec = info.account?.address;
+  if (!spec || typeof typed !== 'string') return null;
+  let url: URL;
+  try {
+    url = new URL(typed.trim());
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port) return null;
+  const host = url.hostname.toLowerCase();
+  // A host name is letters, digits, dots and dashes: anything else ($, ', &) would read as more than a host further on
+  if (!/^[a-z0-9.-]+$/.test(host)) return null;
+  if (!spec.hosts.some((ending) => host.endsWith(ending) && host.length > ending.length)) return null;
+  return `https://${host}`;
+}
+
+/** A model name a person typed (an Azure deployment name): letters, digits, dot, dash and underscore, up to 64. */
+export const TYPED_MODEL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** The region a person picked for a company whose keys are made per region (AWS), when it is one of the company's own. */
+export function accountRegion(info: Pick<VoiceKeyCompanyEntry, 'account'>, picked: unknown): string | null {
+  const regions = info.account?.regions;
+  if (!regions || typeof picked !== 'string') return null;
+  return regions.find((region) => region.id === picked)?.id ?? null;
+}

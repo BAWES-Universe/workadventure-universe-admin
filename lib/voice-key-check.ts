@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { KEY_CHARACTERS, KEY_LOOKS_WRONG } from '@/lib/ai-key-models';
-import { companyJobs, voiceKeyCompanyInfo, type VoiceCompanyJobName, type VoiceKeyCompanyInfo, type VoiceModelListSpec } from '@/lib/voice-key-companies';
+import { signAwsGet } from '@/lib/aws-sign';
+import { accountAddress, accountRegion, AWS_KEY, companyJobs, voiceKeyCompanyInfo, type VoiceCompanyJobName, type VoiceKeyCompanyInfo, type VoiceModelListSpec } from '@/lib/voice-key-companies';
 import { readModels, type VoiceModel } from '@/lib/voice-providers';
 
 /**
@@ -14,19 +15,33 @@ import { readModels, type VoiceModel } from '@/lib/voice-providers';
 export const CHECK_TIMEOUT_MS = 8_000;
 
 export type VoiceKeyLoad =
-  | { ok: true; models: VoiceModel[] }
+  /** `typed`: the company accepted the key, and its model is typed as the person named it (the catalog's `account.typedModel`). */
+  | { ok: true; models: VoiceModel[]; typed?: boolean }
   | { ok: false; reason: 'refused' | 'unreachable' | 'bad-request' | 'no-models'; message: string };
 
 /** What the company said about the key: accepted, turned it away, or nothing useful (so "try again"). */
 type Verdict = 'accepted' | 'refused' | 'unreachable';
 
-async function ask(company: VoiceKeyCompanyInfo, apiKey: string): Promise<Verdict> {
+async function ask(company: VoiceKeyCompanyInfo, apiKey: string, address: string | null, region: string | null = null): Promise<Verdict> {
   const { check } = company;
+  // The person's own address and region only ever come checked (accountAddress, accountRegion): the company's own
+  let url = address ? check.url.replace('{address}', () => address) : check.url;
+  url = region ? url.replace('{region}', () => region) : url;
+  if (url.includes('{address}') || url.includes('{region}')) return 'unreachable';
   let response: Response | undefined;
   try {
-    response = await fetch(check.url, {
+    let auth: Record<string, string>;
+    if (check.sign) {
+      // Signed with the key (AWS): the ID and a signature go, never the secret
+      const split = apiKey.indexOf(':');
+      if (!region || split < 0) return 'unreachable';
+      auth = signAwsGet(new URL(url), { accessKeyId: apiKey.slice(0, split), secretAccessKey: apiKey.slice(split + 1) }, { region, service: check.sign.service });
+    } else {
+      auth = { [check.header]: `${check.prefix}${apiKey}` };
+    }
+    response = await fetch(url, {
       method: check.body ? 'POST' : 'GET',
-      headers: { Accept: 'application/json', ...(check.body ? { 'Content-Type': 'application/json' } : {}), ...check.headers, [check.header]: `${check.prefix}${apiKey}` },
+      headers: { Accept: 'application/json', ...(check.body ? { 'Content-Type': 'application/json' } : {}), ...check.headers, ...auth },
       ...(check.body ? { body: JSON.stringify(check.body) } : {}),
       // A redirect would carry the key somewhere the catalog never named
       redirect: 'manual',
@@ -39,6 +54,10 @@ async function ask(company: VoiceKeyCompanyInfo, apiKey: string): Promise<Verdic
       if (wanted === undefined) return 'accepted';
       const text = (await response.text().catch(() => '')).slice(0, 2000);
       if (text.includes(wanted)) return 'accepted';
+    }
+    if (check.alsoRefused && response.status === check.alsoRefused.status) {
+      const text = (await response.text().catch(() => '')).slice(0, 2000);
+      if (text.includes(check.alsoRefused.includes)) return 'refused';
     }
     return response.status === 401 || response.status === 403 ? 'refused' : 'unreachable';
   } catch {
@@ -77,15 +96,23 @@ export async function serverVoiceModels(adapter: string): Promise<VoiceModel[]> 
  * Checks a pasted key with its company and, when the company accepts it, answers with the models to list. `enabled` is the
  * adapters the caller may add (lib/voice-keys.ts, voiceKeyCompanies): every company in the catalog.
  */
-export async function loadVoiceKeyModels(adapter: unknown, apiKey: unknown, enabled: string[]): Promise<VoiceKeyLoad> {
+export async function loadVoiceKeyModels(adapter: unknown, apiKey: unknown, enabled: string[], typedAddress?: unknown, pickedRegion?: unknown): Promise<VoiceKeyLoad> {
   const company = voiceKeyCompanyInfo(adapter);
   if (!company || !enabled.includes(company.adapter)) return { ok: false, reason: 'bad-request', message: 'Pick a speech company from the list.' };
+  const address = company.account?.address ? accountAddress(company, typedAddress) : null;
+  if (company.account?.address && !address) {
+    return { ok: false, reason: 'bad-request', message: `Paste your ${company.account.address.label.toLowerCase()} as it is, like ${company.account.address.example}.` };
+  }
+  const region = company.account?.regions ? accountRegion(company, pickedRegion) : null;
+  if (company.account?.regions && !region) return { ok: false, reason: 'bad-request', message: 'Pick the region first.' };
   const key = typeof apiKey === 'string' ? apiKey.trim() : '';
   if (!key) return { ok: false, reason: 'bad-request', message: `Paste your ${company.label} key first.` };
-  if (!KEY_CHARACTERS.test(key)) return { ok: false, reason: 'bad-request', message: KEY_LOOKS_WRONG };
-  const verdict = await ask(company, key);
+  if (!KEY_CHARACTERS.test(key) || (company.account?.keyId && !AWS_KEY.test(key))) return { ok: false, reason: 'bad-request', message: KEY_LOOKS_WRONG };
+  const verdict = await ask(company, key, address, region);
   if (verdict === 'refused') return { ok: false, reason: 'refused', message: `${company.label} didn’t accept that key. Check it and paste it again.` };
   if (verdict === 'unreachable') return { ok: false, reason: 'unreachable', message: `Couldn’t reach ${company.label}. Try again in a moment.` };
+  // Its model is typed as the person named it, once the company accepted the key
+  if (company.account?.typedModel) return { ok: true, models: [], typed: true };
   const models = await serverVoiceModels(company.adapter);
   if (models.length === 0) return { ok: false, reason: 'no-models', message: `${company.label} has no models set up here yet.` };
   return { ok: true, models };
@@ -179,13 +206,16 @@ export async function listCompanyModels(company: VoiceKeyCompanyInfo, apiKey: st
  * which companies people may add. For a super admin setting up Universe's own key (#792): nothing is spoken or heard, so nothing is
  * billed. The key is sent only to the company's own fixed address and is never logged or returned.
  */
-export async function checkVoiceKeyWithCompany(adapter: unknown, apiKey: unknown): Promise<{ ok: true } | { ok: false; reason: 'refused' | 'unreachable' | 'bad-request'; message: string }> {
+export async function checkVoiceKeyWithCompany(adapter: unknown, apiKey: unknown, pickedRegion?: unknown): Promise<{ ok: true } | { ok: false; reason: 'refused' | 'unreachable' | 'bad-request'; message: string }> {
   const company = voiceKeyCompanyInfo(adapter);
   if (!company) return { ok: false, reason: 'bad-request', message: 'Pick a speech company from the list.' };
   const key = typeof apiKey === 'string' ? apiKey.trim() : '';
   if (!key) return { ok: false, reason: 'bad-request', message: `Paste the ${company.label} key first.` };
-  if (!KEY_CHARACTERS.test(key)) return { ok: false, reason: 'bad-request', message: KEY_LOOKS_WRONG };
-  const verdict = await ask(company, key);
+  if (!KEY_CHARACTERS.test(key) || (company.account?.keyId && !AWS_KEY.test(key))) return { ok: false, reason: 'bad-request', message: KEY_LOOKS_WRONG };
+  // A company whose keys are made per region (AWS) is asked in the provider's own region; its key is the ID, a colon, the secret
+  const region = company.account?.regions ? accountRegion(company, pickedRegion) : null;
+  if (company.account?.regions && !region) return { ok: false, reason: 'bad-request', message: 'Pick the region first.' };
+  const verdict = await ask(company, key, null, region);
   if (verdict === 'refused') return { ok: false, reason: 'refused', message: `${company.label} turned this key away. Check that you copied all of it.` };
   if (verdict === 'unreachable') return { ok: false, reason: 'unreachable', message: `Couldn’t reach ${company.label}. Try again in a moment.` };
   return { ok: true };
