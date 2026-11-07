@@ -96,6 +96,11 @@ export interface VoiceListSpec {
    * voices belong to that model. A voice met under two models is kept once, with both.
    */
   perModel?: { model: string; path: string }[];
+  /**
+   * Each entry of `list` is one model's group of voices (Together AI: `{model, voices: [...]}`): `voices` names the field holding
+   * the group's voices and `model` the field naming its model. A voice met in two groups is kept once, with both models.
+   */
+  groups?: { voices: string; model: string };
   /** A voice is kept only when each of these fields, when the company sends it, has this value. */
   keep?: Record<string, string>;
   /**
@@ -869,6 +874,43 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     docs: 'https://docs.speechmatics.com',
     // The account's batch jobs, free to read with the same key as a bearer
     check: { url: 'https://asr.api.speechmatics.com/v2/jobs?limit=1', header: 'Authorization', prefix: 'Bearer ' },
+  }),
+  company({
+    adapter: 'together',
+    label: 'Together AI',
+    jobs: {
+      recognition: {
+        // Live hearing over Together's realtime socket (wss://api.together.ai/v1/realtime), as Pipecat's TogetherSTTService does.
+        // Whisper Large v3 is Pipecat's default (https://docs.together.ai)
+        host: 'api.together.ai',
+        models: [{ id: 'openai/whisper-large-v3', label: 'Whisper Large v3' }],
+      },
+      speech: {
+        // Text to speech, one streamed request per reply (POST /v1/audio/speech). Kokoro is Pipecat's default, Orpheus the
+        // other model Pipecat names
+        host: 'api.together.ai',
+        models: [
+          { id: 'hexgrad/Kokoro-82M', label: 'Kokoro 82M' },
+          { id: 'canopylabs/orpheus-3b-0.1-ft', label: 'Orpheus 3B' },
+        ],
+        // GET /v1/voices: one group of voices for each model, each voice used by its name
+        voices: {
+          path: '/v1/voices',
+          list: 'data',
+          groups: { voices: 'voices', model: 'model' },
+          paging: { kind: 'none' },
+          id: 'name',
+          name: 'name',
+          description: [],
+          languages: [],
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at together.ai.',
+    step: 'On api.together.ai, open Settings, then API Keys, and create a key.',
+    docs: 'https://docs.together.ai',
+    // The voice list, free with the key as a bearer
+    check: { url: 'https://api.together.ai/v1/voices', header: 'Authorization', prefix: 'Bearer ' },
   }),
 ];
 

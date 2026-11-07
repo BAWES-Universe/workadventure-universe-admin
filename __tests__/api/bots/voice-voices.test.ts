@@ -802,6 +802,44 @@ describe('Speechmatics\' voices', () => {
   });
 });
 
+describe('Together AI\'s voices', () => {
+  const together = (models: string[]) => key({ adapter: 'together', name: 'Together', models: models.map((id) => ({ id, label: id, kind: 'speech' })) });
+  const groups = {
+    data: [
+      { model: 'hexgrad/Kokoro-82M', voices: [{ id: 'v1', name: 'af_heart' }, { id: 'v2', name: 'am_adam' }] },
+      { model: 'canopylabs/orpheus-3b-0.1-ft', voices: [{ id: 'v3', name: 'tara' }] },
+      { model: 'cartesia/sonic-2', voices: [{ id: 'v4', name: 'af_heart' }] },
+    ],
+  };
+
+  beforeEach(() => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(groups));
+  });
+
+  it('are read model by model from one list, each by its name, and only for the models the key has', async () => {
+    providers = [together(['hexgrad/Kokoro-82M'])];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.model])).toEqual([
+      ['af_heart', 'af_heart', 'hexgrad/Kokoro-82M'],
+      ['am_adam', 'am_adam', 'hexgrad/Kokoro-82M'],
+    ]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.together.ai/v1/voices');
+    expect(init.headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+
+    clearVoiceListCache();
+    providers = [together(['canopylabs/orpheus-3b-0.1-ft'])];
+    expect((await (await voices('part=speech&source=key-1')).json()).map((voice: Row) => [voice.voiceId, voice.model])).toEqual([['tara', 'canopylabs/orpheus-3b-0.1-ft']]);
+  });
+
+  it('is a list that can\'t be read when a group holds no voices list', async () => {
+    providers = [together(['hexgrad/Kokoro-82M'])];
+    fetchMock.mockImplementation(async () => json({ data: [{ model: 'hexgrad/Kokoro-82M', voices: 'none' }] }));
+    expect((await voices('part=speech&source=key-1')).status).toBe(502);
+  });
+});
+
 describe('Groq\'s voices', () => {
   const ENGLISH = { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' };
   const ARABIC = { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' };

@@ -169,6 +169,15 @@ function descriptionOf(voice: unknown, choices: VoiceListSpec['description']): s
 
 const unreadable = (call: Call) => new VoiceListRefused(`${call.company.label} sent a voice list that can’t be read.`, 502);
 
+/** One model's group of voices (Together AI), each voice with the group's model; a group that isn't one can't be read. */
+function groupVoices(call: Call, groups: NonNullable<VoiceListSpec['groups']>, group: unknown): { voice: unknown; groupModel: string | undefined }[] {
+  if (typeof group !== 'object' || group === null) throw unreadable(call);
+  const voices = (group as Record<string, unknown>)[groups.voices];
+  if (!Array.isArray(voices)) throw unreadable(call);
+  const model = clean((group as Record<string, unknown>)[groups.model], 255);
+  return voices.map((voice) => ({ voice, groupModel: model || undefined }));
+}
+
 /**
  * Lists a company's voices from its catalog spec (lib/voice-key-companies.ts, `jobs.speech.voices`), the same way for every company:
  * page after page while the company says there are more, up to MAX_VOICES, each voice read from the fields the spec names. A page
@@ -192,7 +201,9 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
       // An empty `list`: the answer is the list itself (CAMB.AI); `a.b`: a field inside a field (Neuphonic's data.voices)
       const voices = spec.list === '' ? answer : spec.list.split('.').reduce<unknown>((at, field) => (typeof at === 'object' && at !== null ? (at as Record<string, unknown>)[field] : undefined), answer);
       if (!Array.isArray(voices)) throw unreadable(call);
-      for (const voice of voices) {
+      // Grouped by model (Together AI): each group's voices, each with the group's model
+      const entries = spec.groups ? voices.flatMap((group) => groupVoices(call, spec.groups!, group)) : voices.map((voice) => ({ voice, groupModel: undefined }));
+      for (const { voice, groupModel } of entries) {
         if (typeof voice !== 'object' || voice === null) throw unreadable(call);
         // A whole-number id (CAMB.AI) is kept as its digits
         const rawId = (voice as Record<string, unknown>)[spec.id];
@@ -202,7 +213,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
         if (spec.keep && Object.entries(spec.keep).some(([field, wanted]) => fields[field] != null && fields[field] !== wanted)) continue;
         // A voice the company lists once for each model it speaks in (Rime), or with all of them (Speechify), is kept once, with
         // every model it has
-        const models = runModel ? [runModel] : spec.model ? [...new Set(valuesAt(voice, spec.model).map((entry) => clean(entry, 255)).filter(Boolean))] : [];
+        const models = runModel ? [runModel] : groupModel ? [groupModel] : spec.model ? [...new Set(valuesAt(voice, spec.model).map((entry) => clean(entry, 255)).filter(Boolean))] : [];
         if (seen.has(id)) {
           const kept = models.length ? out.find((entry) => entry.voiceId === id) : undefined;
           for (const model of models) if (kept?.models && !kept.models.includes(model)) kept.models.push(model);
