@@ -68,7 +68,11 @@ of a key from `lentKeys`. Answers
 
 in the company's order. `languages` are lowercase codes without region, as the company lists them (empty when it does not say). `model` is
 the speaking model to use with the voice: the first one the source lists, and for a key the first the lend allows. `providerId` and
-`model` go in the draft's `speech` with `voiceId` and `voiceName`.
+`model` go in the draft's `speech` with `voiceId` and `voiceName`. `talk` is true when `model` is a talking model (#1910).
+
+`part=talk` lists a talking model's voices instead (a 409 when the source has none). With `part=speech`, a key whose only speaking is
+a talking model gives that model's voices; a key with both (Amazon Polly and Nova Sonic) gives its speaking voices, and its talking
+voices only with `part=talk`. A sample behind the key keeps the part in its path.
 
 - **Who:** Manage bots for this bot, as the other routes. A key is listed only when the bot's maker owns it, has lent it to the bot's
   universe and may still lend there: anything else is a 404 ("Voice key not found."), so a key's existence is never confirmed.

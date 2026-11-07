@@ -345,7 +345,7 @@ interface Source {
  * belongs to the bot's maker, is lent to the bot's universe and that the maker may still lend there (the rule that decides
  * whose keys a bot speaks on, lib/bot-voice.ts). Anything else reads as "not found", so a key's existence is never confirmed.
  */
-async function sourceFor(botId: string, source: string): Promise<Source> {
+async function sourceFor(botId: string, source: string, part: BotVoicePart = 'speech'): Promise<Source> {
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { createdById: true, room: { select: { world: { select: { universeId: true } } } } } });
   if (!bot) throw new BotSettingsError(404, 'Bot not found');
   const universeId = bot.room.world.universeId;
@@ -363,19 +363,23 @@ async function sourceFor(botId: string, source: string): Promise<Source> {
     if (!provider || !bot.createdById || !(await lendAccess(bot.createdById, universeId))) throw new VoiceListRefused('Voice key not found.', 404);
   }
   const allowed = provider.lends?.length ? readLendModels(provider.lends[0].models) : null;
-  // A speaking model first; a key whose only speaking is a talking model (game #1910) gives that one
+  // A speaking model first; a key whose only speaking is a talking model (game #1910) gives that one. Asked for the talking voices,
+  // only a talking model: a key with both (Amazon Polly and Nova Sonic) lists each kind's own voices
   const usable = readModels(provider.models).filter((entry) => !allowed || allowed.includes(lendModelId(entry)));
-  const model = usable.find((entry) => entry.kind === 'speech') ?? usable.find((entry) => entry.kind === 'talk');
-  if (!model) throw new VoiceListRefused(`${provider.name} has no speaking model set up here.`, 409);
+  const model = part === 'talk' ? usable.find((entry) => entry.kind === 'talk') : (usable.find((entry) => entry.kind === 'speech') ?? usable.find((entry) => entry.kind === 'talk'));
+  if (!model) throw new VoiceListRefused(`${provider.name} has no ${part === 'talk' ? 'talking' : 'speaking'} model set up here.`, 409);
   return { provider, model: model.id, talk: model.kind === 'talk', models: usable.filter((entry) => entry.kind === model.kind).map((entry) => entry.id) };
 }
 
-const previewPath = (botId: string, source: string, voiceId: string) =>
-  `/api/bots/${encodeURIComponent(botId)}/voice/voices/${encodeURIComponent(voiceId)}/preview?source=${encodeURIComponent(source)}`;
+/** Which voices a bot's maker asks for: the speaking ones (a talking model's when the key only talks live), or the talking ones. */
+export type BotVoicePart = 'speech' | 'talk';
 
-/** The speaking voices of one source (`universe-ai` or a voice key's id) for a bot, in the order the company lists them. */
-export async function listBotVoices(botId: string, source: string): Promise<VoiceChoice[]> {
-  const { provider, model, talk, models } = await sourceFor(botId, source);
+const previewPath = (botId: string, source: string, voiceId: string, part: BotVoicePart) =>
+  `/api/bots/${encodeURIComponent(botId)}/voice/voices/${encodeURIComponent(voiceId)}/preview?source=${encodeURIComponent(source)}${part === 'talk' ? '&part=talk' : ''}`;
+
+/** The speaking (or talking) voices of one source (`universe-ai` or a voice key's id) for a bot, in the order the company lists them. */
+export async function listBotVoices(botId: string, source: string, part: BotVoicePart = 'speech'): Promise<VoiceChoice[]> {
+  const { provider, model, talk, models } = await sourceFor(botId, source, part);
   const listed = await listedFor(provider, talk ? 'talk' : 'speech');
   // A voice tied to models (Amazon Polly's engines) comes with the first of them set up and allowed here, and not at all when none is
   return listed.flatMap((voice) => {
@@ -387,7 +391,7 @@ export async function listBotVoices(botId: string, source: string): Promise<Voic
         name: voice.name,
         description: voice.description,
         languages: voice.languages,
-        previewUrl: !voice.preview ? null : voice.previewNeedsKey ? previewPath(botId, source, voice.voiceId) : voice.preview,
+        previewUrl: !voice.preview ? null : voice.previewNeedsKey ? previewPath(botId, source, voice.voiceId, part) : voice.preview,
         providerId: provider.id,
         model: own,
         talk,
@@ -466,8 +470,8 @@ async function readCapped(response: Response, max: number): Promise<ArrayBuffer 
  * One voice's free sample, fetched for a company that keeps it behind the key. The address is the one the company's own list
  * named (never one the caller sends), and the key goes only to that company's address.
  */
-export async function fetchVoiceSample(botId: string, source: string, voiceId: string): Promise<VoiceSample> {
-  const { provider, talk } = await sourceFor(botId, source);
+export async function fetchVoiceSample(botId: string, source: string, voiceId: string, part: BotVoicePart = 'speech'): Promise<VoiceSample> {
+  const { provider, talk } = await sourceFor(botId, source, part);
   return sampleFor(provider, voiceId, talk ? 'talk' : 'speech');
 }
 

@@ -528,6 +528,20 @@ describe('AWS Polly\'s voices (#1886)', () => {
     expect(list[0]).toEqual(expect.objectContaining({ voiceId: 'tiffany', model: 'amazon.nova-2-sonic-v1:0', talk: true }));
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('gives Nova Sonic’s own voices when asked for the talking ones of a key that also speaks with Polly', async () => {
+    providers = [aws([{ id: 'generative', kind: 'speech' }, { id: 'amazon.nova-2-sonic-v1:0', kind: 'talk' }])];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    const talking = await voices('part=talk&source=key-1');
+    expect(talking.status).toBe(200);
+    const list = await talking.json();
+    expect(list[0]).toEqual(expect.objectContaining({ voiceId: 'tiffany', model: 'amazon.nova-2-sonic-v1:0', talk: true }));
+    expect(list.every((voice: Row) => voice.talk === true)).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+    // A key with no talking model has no talking voices
+    providers = [aws([{ id: 'generative', kind: 'speech' }])];
+    expect((await voices('part=talk&source=key-1')).status).toBe(409);
+  });
 });
 
 describe('Azure AI Speech\'s voices (#1875)', () => {
