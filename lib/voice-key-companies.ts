@@ -1171,8 +1171,9 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     benefit: '{does}. Uses your account at speechify.ai.',
     step: 'On platform.speechify.ai, open API Keys and create a key.',
     docs: 'https://docs.speechify.ai',
-    // One voice from the voice list, free with the key as a bearer
-    check: { url: 'https://api.speechify.ai/v1/voices?limit=1', header: 'Authorization', prefix: 'Bearer ' },
+    // One voice from the voice list, free with the key as a bearer. The API version is pinned, as the bot server pins it for
+    // speaking (Pipecat's SPEECHIFY_API_VERSION), so the list and the check read the answer shape speaking was built for
+    check: { url: 'https://api.speechify.ai/v1/voices?limit=1', header: 'Authorization', prefix: 'Bearer ', headers: { 'Speechify-Version': '2026-09-30' } },
   }),
   company({
     adapter: 'xai',

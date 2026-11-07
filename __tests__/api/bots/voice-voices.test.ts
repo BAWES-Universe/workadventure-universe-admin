@@ -826,7 +826,8 @@ describe('Speechify\'s voices', () => {
       ['henry', 'Henry', '', ['en'], null, 'simba-3.0'],
     ]);
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(Object.keys(pages));
-    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+    // Every page asks for the API version speaking was built for
+    for (const [, init] of fetchMock.mock.calls) expect(init.headers).toMatchObject({ Authorization: `Bearer ${SECRET}`, 'Speechify-Version': '2026-09-30' });
   });
 
   it('leave out a voice that has none of the key\'s models', async () => {
