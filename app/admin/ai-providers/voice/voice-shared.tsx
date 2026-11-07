@@ -14,7 +14,8 @@ import { Label } from '@/components/ui/label';
 import { VOICE_KEY_COMPANIES, companyJobs, voiceKeyCompanyInfo, type VoiceCompanyJobName } from '@/lib/voice-key-companies';
 import type { VoiceModel } from '@/lib/voice-providers';
 
-export type VoiceJob = VoiceCompanyJobName;
+/** The jobs a server provider is set up for. Talking models (game #1910) run on people's own keys; Universe AI on one comes later. */
+export type VoiceJob = Exclude<VoiceCompanyJobName, 'talk'>;
 
 /** A server voice provider as GET /api/admin/voice-providers gives it (never the key). */
 export interface ServerVoiceProvider {
@@ -37,7 +38,9 @@ export interface ServerVoiceProvider {
 }
 
 /** The jobs each company does in Universe (the game's connectors), from its catalog entry: a company that listens and speaks is under both. */
-export const COMPANY_JOBS: Record<string, VoiceJob[]> = Object.fromEntries(VOICE_KEY_COMPANIES.map((company) => [company.adapter, companyJobs(company)] as const));
+export const COMPANY_JOBS: Record<string, VoiceJob[]> = Object.fromEntries(
+  VOICE_KEY_COMPANIES.map((company) => [company.adapter, companyJobs(company).filter((job): job is VoiceJob => job !== 'talk')] as const),
+);
 
 export const JOBS: { job: VoiceJob; word: string; ing: string }[] = [
   { job: 'recognition', word: 'Listens', ing: 'listening' },

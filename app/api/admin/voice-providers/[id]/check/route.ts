@@ -33,7 +33,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     } catch {
       return NextResponse.json({ error: `${row.name}’s key can’t be read. Replace it.` }, { status: 409 });
     }
-    const result = await checkVoiceKeyWithCompany(row.adapter, key);
+    const result = await checkVoiceKeyWithCompany(row.adapter, key, row.region);
     return result.ok ? NextResponse.json({ ok: true }) : NextResponse.json({ error: result.message }, { status: STATUS[result.reason] });
   } catch (error) {
     console.error('[VoiceProviders] Check key failed:', error instanceof Error ? error.message : 'unknown');
