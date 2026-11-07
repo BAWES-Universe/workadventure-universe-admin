@@ -136,6 +136,8 @@ export default function AddAiKeyPage() {
   }, [step]);
 
   const voiceInfo = voiceKinds.find((entry) => entry.kind === voiceAdapter) ?? null;
+  // What a voice key needs besides the key (Azure: its resource's address, and its deployment typed as the model)
+  const account = (companies.result.status === 'ready' ? companies.result.items : []).find((entry) => entry.adapter === voiceAdapter)?.account ?? null;
   const info = voiceInfo ?? kindInfo(kind);
   const name = typedName ?? (info ? `My ${info.label}` : '');
   // The picked type stays on screen whatever is typed in the search
@@ -209,11 +211,13 @@ export default function AddAiKeyPage() {
         const response = await authenticatedFetch('/api/me/voice-keys/check', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ adapter: voiceInfo.kind, apiKey }),
+          body: JSON.stringify({ adapter: voiceInfo.kind, apiKey, ...(account?.address ? { address } : {}) }),
         });
-        const data: { ok?: boolean; models?: VoiceModel[]; error?: string } = await response.json().catch(() => ({}));
+        const data: { ok?: boolean; models?: VoiceModel[]; typed?: boolean; error?: string } = await response.json().catch(() => ({}));
         if (mine !== latestLoad.current) return;
-        if (response.ok && data.ok && Array.isArray(data.models)) setModels({ status: 'voice', models: data.models });
+        // The company took the key; its model is typed as the person named it there (an Azure deployment)
+        if (response.ok && data.ok && data.typed) setModels({ status: 'typed' });
+        else if (response.ok && data.ok && Array.isArray(data.models)) setModels({ status: 'voice', models: data.models });
         else setModels({ status: 'failed', message: response.status === 401 ? 'Sign in again, then try again.' : (data.error ?? 'That didn’t work. Try again.') });
         return;
       }
@@ -247,11 +251,22 @@ export default function AddAiKeyPage() {
     setSaving(true);
     setFailure(null);
     try {
-      const response = await authenticatedFetch(models.status === 'voice' ? '/api/me/voice-keys' : '/api/me/ai-keys', {
+      // A voice key with its model typed (an Azure deployment): that one model, of the company's job, at the person's own address
+      const typedVoice = voiceInfo && models.status === 'typed' && account?.typedModel ? account.typedModel : null;
+      const response = await authenticatedFetch(models.status === 'voice' || typedVoice ? '/api/me/voice-keys' : '/api/me/ai-keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:
-          models.status === 'voice'
+        body: typedVoice
+          ? JSON.stringify({
+              adapter: info.kind,
+              name,
+              apiKey,
+              endpoint: address.trim(),
+              recognition: typedVoice.kind !== 'speech',
+              speech: typedVoice.kind !== 'recognition',
+              models: [{ id: (model ?? '').trim(), label: (model ?? '').trim(), kind: typedVoice.kind }],
+            })
+          : models.status === 'voice'
             ? JSON.stringify({
                 adapter: info.kind,
                 name,
@@ -260,6 +275,7 @@ export default function AddAiKeyPage() {
                 recognition: models.models.some((entry) => entry.kind === 'recognition' || entry.kind === 'talk'),
                 speech: models.models.some((entry) => entry.kind === 'speech' || entry.kind === 'talk'),
                 models: models.models,
+                ...(account?.address ? { endpoint: address.trim() } : {}),
               })
             : JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey, ...(model ? { model: model.trim() } : {}), name }),
       });
@@ -391,20 +407,26 @@ export default function AddAiKeyPage() {
           <Part n={part++} title={own ? 'Paste its address' : 'Paste your key'}>
             {info.address !== 'none' && (
               <div className="grid gap-1.5">
-                <Label htmlFor="ai-key-address">{info.address === 'optional' ? 'Your own NIM address (optional)' : 'Address'}</Label>
+                <Label htmlFor="ai-key-address">{account?.address?.label ?? (info.address === 'optional' ? 'Your own NIM address (optional)' : 'Address')}</Label>
                 <Input
                   id="ai-key-address"
                   type="url"
                   inputMode="url"
                   autoComplete="off"
-                  placeholder="https://lm.example.com"
+                  placeholder={account?.address?.example ?? 'https://lm.example.com'}
                   value={address}
                   onChange={(event) => { setAddress(event.target.value); changed(); }}
                   className="h-11 rounded-xl"
                 />
                 <p className={FIELD_HINT}>
-                  Must start with https:// and be reachable from the internet. Private network addresses are refused.
-                  {own && ' A quick tunnel’s address changes each time cloudflared restarts; a named Cloudflare tunnel keeps one.'}
+                  {account?.address ? (
+                    account.address.hint
+                  ) : (
+                    <>
+                      Must start with https:// and be reachable from the internet. Private network addresses are refused.
+                      {own && ' A quick tunnel’s address changes each time cloudflared restarts; a named Cloudflare tunnel keeps one.'}
+                    </>
+                  )}
                 </p>
               </div>
             )}
@@ -428,12 +450,18 @@ export default function AddAiKeyPage() {
             <div className="grid gap-2" aria-live="polite">
               <Button type="button" variant="outline" className="h-11" disabled={!canLoad || models.status === 'loading'} onClick={() => void loadModels()}>
                 <Download aria-hidden="true" />
-                {models.status === 'loading' ? 'Loading…' : 'Load models'}
+                {models.status === 'loading' ? (account?.typedModel ? 'Checking…' : 'Loading…') : account?.typedModel ? 'Check key' : 'Load models'}
               </Button>
-              {models.status === 'none' && <p className={FIELD_HINT}>Loads {info.label}’s models, which also checks that it answers.</p>}
+              {models.status === 'none' && <p className={FIELD_HINT}>{account?.typedModel ? `Checks that ${info.label} takes the key.` : `Loads ${info.label}’s models, which also checks that it answers.`}</p>}
               {models.status === 'failed' && (
                 <p role="alert" className="text-sm text-[#fca5a5]">
                   {models.message}
+                </p>
+              )}
+              {models.status === 'typed' && account?.typedModel && (
+                <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                  <Check size={16} aria-hidden="true" className="text-[#4ade80]" />
+                  It answered. {info.label} took the key.
                 </p>
               )}
               {(models.status === 'ready' || models.status === 'voice') && (
@@ -445,11 +473,11 @@ export default function AddAiKeyPage() {
             </div>
           </Part>
 
-          <Part n={part++} title={models.status === 'typed' ? 'Name its model' : 'Its models'}>
+          <Part n={part++} title={models.status === 'typed' ? (account?.typedModel?.title ?? 'Name its model') : 'Its models'}>
             {!loaded && <p className={FIELD_HINT}>{info.label}’s models show here once they load.</p>}
             {models.status === 'typed' && (
               <div className="grid gap-1.5">
-                <Label htmlFor="ai-key-model-name">Model name</Label>
+                <Label htmlFor="ai-key-model-name">{account?.typedModel?.label ?? 'Model name'}</Label>
                 <Input
                   id="ai-key-model-name"
                   autoComplete="off"
@@ -461,7 +489,9 @@ export default function AddAiKeyPage() {
                   className="h-11 rounded-xl"
                 />
                 <p className={FIELD_HINT}>
-                  {info.label} doesn’t share a list of its models. Type the name as {info.label} writes it. Add key checks it with one tiny reply.
+                  {account?.typedModel
+                    ? account.typedModel.hint
+                    : `${info.label} doesn’t share a list of its models. Type the name as ${info.label} writes it. Add key checks it with one tiny reply.`}
                 </p>
               </div>
             )}

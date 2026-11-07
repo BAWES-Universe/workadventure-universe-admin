@@ -3,7 +3,7 @@
  * everything else (what it does, its starting models, the jobs it is listed under, the address the bot server calls) follows from
  * them. The company stand-in below does both jobs, as Soniox, ElevenLabs, Cartesia and Deepgram will: no real call is made.
  */
-import { VOICE_KEY_COMPANIES, companyHost, companyJobs, voiceKeyCompanyInfo, type VoiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { TYPED_MODEL, VOICE_KEY_COMPANIES, accountAddress, companyHost, companyJobs, voiceKeyCompanyInfo, type VoiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { listCompanyModels } from '@/lib/voice-key-check';
 
 jest.mock('@/lib/db', () => ({ prisma: {} }));
@@ -43,7 +43,8 @@ describe('the voice company catalog', () => {
     for (const entry of VOICE_KEY_COMPANIES) {
       expect(entry.does).toEqual({ recognition: Boolean(entry.jobs.recognition), speech: Boolean(entry.jobs.speech), talk: Boolean(entry.jobs.talk) });
       expect(entry.models).toEqual(companyJobs(entry).flatMap((job) => entry.jobs[job]!.models.map((model) => ({ ...model, kind: job }))));
-      for (const job of companyJobs(entry)) expect(entry.jobs[job]!.models.length).toBeGreaterThan(0);
+      // A job whose model is typed (an Azure deployment) starts with none; every other job has its starting models
+      for (const job of companyJobs(entry)) if (entry.account?.typedModel?.kind !== job) expect(entry.jobs[job]!.models.length).toBeGreaterThan(0);
     }
     expect(voiceKeyCompanyInfo('soniox')?.does).toEqual({ recognition: true, speech: false, talk: false });
     expect(voiceKeyCompanyInfo('fish')?.models.map((model) => model.kind)).toEqual(['speech', 'speech']);
@@ -89,5 +90,32 @@ describe('the models a company lists for one job', () => {
     expect((await listCompanyModels(both, 'k'))?.map((model) => model.kind)).toEqual(['recognition', 'recognition']);
     expect(await listCompanyModels(voiceKeyCompanyInfo('fish')!, 'k', 'speech')).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a key at the person’s own address (Azure)', () => {
+  const azure = voiceKeyCompanyInfo('azure')!;
+  it('keeps an https address on one of the company’s hosts as its origin, and nothing else', () => {
+    expect(accountAddress(azure, 'https://My-Res.openai.azure.com/openai/v1/')).toBe('https://my-res.openai.azure.com');
+    expect(accountAddress(azure, ' https://my-res.cognitiveservices.azure.com ')).toBe('https://my-res.cognitiveservices.azure.com');
+    expect(accountAddress(azure, 'https://my-res.services.ai.azure.com')).toBe('https://my-res.services.ai.azure.com');
+    for (const wrong of ['http://my-res.openai.azure.com', 'https://openai.azure.com', 'https://my-res.openai.azure.com.evil.com', 'https://x.example.com', 'https://u:p@my-res.openai.azure.com', 'https://my-res.openai.azure.com:444', 'nope', 42]) {
+      expect(accountAddress(azure, wrong)).toBeNull();
+    }
+    expect(accountAddress(voiceKeyCompanyInfo('openai')!, 'https://my-res.openai.azure.com')).toBeNull();
+  });
+
+  it('takes a deployment name the way Azure allows one', () => {
+    for (const ok of ['realtime', 'gpt-realtime-2.1', 'my_deploy.1']) expect(TYPED_MODEL.test(ok)).toBe(true);
+    for (const wrong of ['', 'has space', '-lead', 'a'.repeat(65), 'a/b']) expect(TYPED_MODEL.test(wrong)).toBe(false);
+  });
+
+  it('talks live with a typed deployment, OpenAI’s realtime voices, and a free check on the person’s own resource', () => {
+    expect(azure.does).toEqual({ recognition: false, speech: false, talk: true });
+    expect(azure.models).toEqual([]);
+    expect(azure.account?.typedModel?.kind).toBe('talk');
+    expect(azure.jobs.talk?.fixedVoices?.[0]).toEqual({ id: 'marin', name: 'Marin' });
+    expect(azure.check).toEqual({ url: '{address}/openai/v1/models', header: 'api-key', prefix: '' });
+    expect(JSON.stringify(azure)).not.toMatch(/recommend/i);
   });
 });

@@ -141,11 +141,34 @@ describe('adding a key', () => {
     ['a key that is too short', { adapter: 'elevenlabs', speech: true, apiKey: 'short' }],
     ['a model for a job the key doesn’t do', { adapter: 'elevenlabs', speech: true, apiKey: 'sk-secret-key-9f2a', models: [{ id: 'a', kind: 'recognition' }] }],
     ['a field it doesn’t know (an endpoint, a default)', { adapter: 'elevenlabs', speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://x.example.com' }],
+    ['an Azure key with no endpoint', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, endpoint: undefined }],
+    ['an Azure endpoint somewhere else', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, endpoint: 'https://my-res.example.com' }],
+    ['an Azure endpoint on plain http', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, endpoint: 'http://my-res.openai.azure.com' }],
+    ['an Azure endpoint with a port', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, endpoint: 'https://my-res.openai.azure.com:8443' }],
+    ['an Azure key with no deployment', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, models: [] }],
+    ['an Azure key with two deployments', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, models: [{ id: 'a', kind: 'talk' }, { id: 'b', kind: 'talk' }] }],
+    ['an Azure deployment name with a space', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, models: [{ id: 'my deployment', kind: 'talk' }] }],
     ['a default', { adapter: 'elevenlabs', speech: true, apiKey: 'sk-secret-key-9f2a', defaultSpeech: true }],
   ])('refuses %s', async (_name, body) => {
     withProviders();
     expect((await call(create, 'POST', body)).status).toBe(400);
     expect(db.voiceProvider.create).not.toHaveBeenCalled();
+  });
+
+  it('keeps an Azure key’s own endpoint, as its origin, and its deployment as its one talking model', async () => {
+    withProviders();
+    db.voiceProvider.create.mockImplementation(async ({ data }) => key({ ...data, id: 'k1', createdAt: new Date('2026-11-07T10:00:00Z'), lends: [] }));
+    const response = await call(create, 'POST', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, endpoint: 'https://My-Res.openai.azure.com/openai/v1/' });
+    expect(response.status).toBe(201);
+    const { data } = db.voiceProvider.create.mock.calls[0][0];
+    expect(data).toMatchObject({ adapter: 'azure', name: 'Azure OpenAI', recognition: true, speech: true, endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] });
+  });
+
+  it('gives no other company’s key an endpoint', async () => {
+    withProviders();
+    db.voiceProvider.create.mockImplementation(async ({ data }) => key({ ...data, id: 'k1', createdAt: new Date('2026-11-07T10:00:00Z'), lends: [] }));
+    await call(create, 'POST', { adapter: 'elevenlabs', speech: true, apiKey: 'sk-secret-key-9f2a', models: [{ id: 'flash', kind: 'speech' }] });
+    expect(db.voiceProvider.create.mock.calls[0][0].data.endpoint).toBeNull();
   });
 });
 
@@ -161,7 +184,9 @@ describe('the list', () => {
     // Every company in the catalog, in its order, with no server setup: named and described by the catalog, doing what it says
     // plus what a provider the server has on does (ElevenLabs also listens here, since the stand-in server has one that does)
     expect(body.companies).toEqual([
-      expect.objectContaining({ adapter: 'cartesia', label: 'Cartesia', recognition: false, speech: true }),
+      // A key at the person's own Azure resource, with its deployment typed as its model
+      expect.objectContaining({ adapter: 'azure', label: 'Azure OpenAI', recognition: false, speech: false, talk: true, account: expect.objectContaining({ address: expect.objectContaining({ label: 'Endpoint' }), typedModel: expect.objectContaining({ label: 'Deployment name', kind: 'talk' }) }) }),
+      expect.objectContaining({ adapter: 'cartesia', account: null, label: 'Cartesia', recognition: false, speech: true }),
       expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: false, logo: 'deepgram' }),
       expect.objectContaining({ adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true, logo: 'elevenlabs', docs: 'https://elevenlabs.io/docs' }),
       expect.objectContaining({ adapter: 'fish', label: 'Fish Audio', recognition: false, speech: true, logo: 'fish-audio' }),
@@ -172,6 +197,7 @@ describe('the list', () => {
     ]);
     // Its line says only the jobs Universe runs for it, the same neutral shape for every company
     expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual([
+      'Talks live. Uses your Azure OpenAI resource.',
       'Speaks. Uses your account at cartesia.ai.',
       'Listens. Uses your account at deepgram.com.',
       'Listens and speaks. Uses your account at elevenlabs.io.',

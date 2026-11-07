@@ -5,7 +5,7 @@ import { encryptApiKey } from '@/lib/encryption';
 import { lendAccess, parseLendModels } from '@/lib/ai-key-lend';
 import { readModels, voiceProviderProblem, type VoiceModel } from '@/lib/voice-providers';
 import { lendModelId } from '@/lib/voice-lend-model';
-import { VOICE_KEY_COMPANIES, modelDoes, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { TYPED_MODEL, VOICE_KEY_COMPANIES, accountAddress, modelDoes, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { checkVoiceKeyLimits, readVoiceKeyLimits, savedVoiceKeyLimits, VOICE_KEY_LIMIT_NAMES, type VoiceKeyLimitValues } from '@/lib/voice-limit-values';
@@ -31,6 +31,8 @@ export interface VoiceKeyCompany {
   benefit: string;
   step: string;
   docs: string;
+  /** What a key needs besides the key (Azure: the resource's address, and the deployment name typed as its model); null for none. */
+  account: { address?: { label: string; example: string; hint: string }; typedModel?: { title: string; label: string; hint: string; kind: 'recognition' | 'speech' | 'talk' } } | null;
 }
 
 /**
@@ -58,6 +60,12 @@ export async function voiceKeyCompanies(): Promise<VoiceKeyCompany[]> {
       benefit: info.benefit.replace('{does}', voiceDoesLine(does)),
       step: info.step,
       docs: info.docs,
+      account: info.account
+        ? {
+            ...(info.account.address ? { address: { label: info.account.address.label, example: info.account.address.example, hint: info.account.address.hint } } : {}),
+            ...(info.account.typedModel ? { typedModel: info.account.typedModel } : {}),
+          }
+        : null,
     };
   });
 }
@@ -81,6 +89,8 @@ export const createVoiceKeySchema = z
     speech: z.boolean().default(false),
     apiKey: fields.apiKey,
     models: fields.models.default([]),
+    /** The person's own account address, for a company whose keys live there (Azure: the resource's endpoint). */
+    endpoint: z.string().trim().max(500).optional(),
   })
   .strict();
 
@@ -261,6 +271,20 @@ export async function createVoiceKey(ownerId: string, input: z.infer<typeof crea
     throw new VoiceKeyRefused(`${company.label} doesn’t do ${input.recognition && !can.recognition ? 'listening' : 'speaking'}`);
   }
   if (input.models.some((model) => model.kind === 'talk') && !company.talk) throw new VoiceKeyRefused(`${company.label} doesn’t talk live`);
+  // A key that lives at the person's own address keeps that address, checked; no other key has one
+  const info = voiceKeyCompanyInfo(input.adapter);
+  let endpoint: string | null = null;
+  if (info?.account?.address) {
+    endpoint = accountAddress(info, input.endpoint);
+    if (!endpoint) throw new VoiceKeyRefused(`Paste your ${info.account.address.label.toLowerCase()} as it is, like ${info.account.address.example}`);
+  } else if (input.endpoint !== undefined) {
+    throw new VoiceKeyRefused(`${company.label} keys don’t take an address`);
+  }
+  // A model typed as the person named it (an Azure deployment): one, of the company's job, named the way the company allows
+  const typed = info?.account?.typedModel;
+  if (typed && (input.models.length !== 1 || input.models[0].kind !== typed.kind || !TYPED_MODEL.test(input.models[0].id))) {
+    throw new VoiceKeyRefused(`Type the ${typed.label.toLowerCase()}: letters, digits, dots, dashes and underscores, up to 64`);
+  }
   const row = await prisma.voiceProvider.create({
     data: {
       adapter: input.adapter,
@@ -272,6 +296,7 @@ export async function createVoiceKey(ownerId: string, input: z.infer<typeof crea
       apiKeyEncrypted: encryptApiKey(input.apiKey),
       apiKeyLast4: input.apiKey.slice(-4),
       models: input.models as Prisma.InputJsonValue,
+      endpoint,
       ownerId,
       createdById: ownerId,
     },
