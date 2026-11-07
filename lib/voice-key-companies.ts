@@ -1313,10 +1313,10 @@ export const voiceDoesLine = ({ recognition, speech, talk = false }: { recogniti
   return line.charAt(0).toUpperCase() + line.slice(1);
 };
 
-/** The company ties each voice to the models it speaks in (Groq's Orpheus, Rime, Smallest AI): a voice can't be moved to any other model. */
+/** The company ties each voice to the models it speaks in (Groq's Orpheus, Rime, Smallest AI, Together): a voice can't be moved to any other model. */
 export const voicesTiedToModels = (adapter: unknown): boolean => {
   const job = voiceKeyCompanyInfo(adapter)?.jobs.speech;
-  return !!job && (!!job.fixedVoices?.some((voice) => voice.model) || !!job.voices?.model || !!job.voices?.perModel);
+  return !!job && (!!job.fixedVoices?.some((voice) => voice.model) || !!job.voices?.model || !!job.voices?.perModel || !!job.voices?.groups);
 };
 
 /** Whether a model can be used for a job: one of that job's own, or a talking model, which listens and speaks in one. */
