@@ -72,12 +72,12 @@ the speaking model to use with the voice: the first one the source lists, and fo
 
 - **Who:** Manage bots for this bot, as the other routes. A key is listed only when the bot's maker owns it, has lent it to the bot's
   universe and may still lend there: anything else is a 404 ("Voice key not found."), so a key's existence is never confirmed.
-- **Companies:** ElevenLabs and Cartesia. Others (Deepgram and Soniox only listen) answer 409 "…voices can't be listed here.". Part
+- **Companies:** ElevenLabs, Cartesia and Fish Audio (its own voices first, then the public library by score; a voice must be for speaking and finished training; its samples are public addresses). Others (Deepgram and Soniox only listen) answer 409 "…voices can't be listed here.". Part
   `recognition` is a 400: there are no voices to pick for listening.
 - **Errors:** 409 when Universe AI has no voice set up on the server, or the source has no speaking model; 502 when the company turns the key
   away or does not answer (the line says which; never the key).
 - **Cache:** per provider for 10 minutes, dropped when the key or address is replaced. Failures are not cached. At most 1000 voices.
-- **Samples:** `previewUrl` is the company's own public address when it has one (ElevenLabs), else the Orbit path
+- **Samples:** `previewUrl` is the company's own public address when it has one (ElevenLabs, Fish Audio), else the Orbit path
   `GET /api/bots/:id/voice/voices/:voiceId/preview?source=…` when the company only serves a sample with the key (Cartesia). That route
   fetches the sample from the address the company's own list named (never one in the request) with the key, and answers the audio (up to
   2 MB, cached privately for a day); like the list it needs the person's session, so the game fetches it the way it fetches the list and

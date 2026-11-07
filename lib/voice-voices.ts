@@ -73,7 +73,7 @@ interface Call {
   headers: Record<string, string>;
 }
 
-const BASES: Record<string, string> = { elevenlabs: 'https://api.elevenlabs.io', cartesia: 'https://api.cartesia.ai' };
+const BASES: Record<string, string> = { elevenlabs: 'https://api.elevenlabs.io', cartesia: 'https://api.cartesia.ai', fish: 'https://api.fish.audio' };
 
 /** The primary language code of "en-GB", "ar_KW" or "ara", or null when it doesn't look like one. */
 export function languageCode(value: unknown): string | null {
@@ -217,8 +217,57 @@ async function listCartesia(call: Call): Promise<Listed[]> {
   return out;
 }
 
+const fishPage = z.object({
+  items: z.array(
+    z
+      .object({
+        _id: z.string().min(1).max(255),
+        type: z.string().nullish(),
+        state: z.string().nullish(),
+        title: z.string().optional(),
+        description: z.string().nullish(),
+        languages: z.array(z.string()).nullish(),
+        samples: z.array(z.object({ audio: z.string().nullish() }).passthrough()).nullish(),
+      })
+      .passthrough()
+  ),
+  total: z.number().nullish(),
+  has_more: z.boolean().nullish(),
+});
+
+/**
+ * Fish Audio: GET /model, 100 a page. The person's own voices first (`self=true`), then the public library by score, up to
+ * MAX_VOICES in all. Only a voice that speaks (`type` tts) and is finished training (`state` trained) is kept. A sample is a
+ * public address, so the key never goes with it.
+ */
+async function listFish(call: Call): Promise<Listed[]> {
+  const out: Listed[] = [];
+  const seen = new Set<string>();
+  for (const own of [true, false]) {
+    for (let page = 1; out.length < MAX_VOICES && page <= MAX_PAGES; page++) {
+      const parsed = fishPage.safeParse(await getJson(call, `/model?page_size=${PAGE_SIZE}&page_number=${page}&sort_by=score&self=${own}`));
+      if (!parsed.success) throw new VoiceListRefused(`${call.company.label} sent a voice list that can’t be read.`, 502);
+      for (const voice of parsed.data.items) {
+        if ((voice.type && voice.type !== 'tts') || (voice.state && voice.state !== 'trained') || seen.has(voice._id)) continue;
+        seen.add(voice._id);
+        out.push({
+          voiceId: voice._id,
+          name: clean(voice.title, 255) || voice._id,
+          description: clean(voice.description, 300),
+          languages: languagesOf(voice.languages ?? []),
+          preview: httpsUrl(voice.samples?.find((sample) => httpsUrl(sample.audio))?.audio),
+          previewNeedsKey: false,
+        });
+      }
+      // The list says when it ends; a full page is the sign there may be more when it doesn't
+      if (parsed.data.has_more === false || (parsed.data.has_more == null && parsed.data.items.length < PAGE_SIZE)) break;
+    }
+  }
+  return out.slice(0, MAX_VOICES);
+}
+
 /** The companies whose voices can be listed. Data, not a branch: add a company by adding its entry. */
-const LISTERS: Record<string, (call: Call) => Promise<Listed[]>> = { elevenlabs: listElevenLabs, cartesia: listCartesia };
+const LISTERS: Record<string, (call: Call) => Promise<Listed[]>> = { elevenlabs: listElevenLabs, cartesia: listCartesia, fish: listFish };
 
 type Cached = { at: number; voices: Listed[] };
 const cache = new Map<string, Cached>();
