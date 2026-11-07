@@ -300,9 +300,9 @@ describe('New voice provider', () => {
       'ElevenLabsListens and speaks. Uses your account at elevenlabs.io.',
       'falListens. Uses your account at fal.ai.',
       'GladiaListens. Uses your account at gladia.io.',
-      'SonioxListens. Uses your account at soniox.com.',
+      'SonioxListens and speaks. Uses your account at soniox.com.',
     ]);
-    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['AsyncSpeaks', 'BlandSpeaks', 'CAMB', 'CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks']);
+    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['AsyncSpeaks', 'BlandSpeaks', 'CAMB', 'CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks', 'SonioxListens and speaks']);
     expect(screen.queryByText('Recommended')).toBeNull();
     fireEvent.click(within(speaks).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByRole('heading', { name: 'Set up ElevenLabs' })).toBeTruthy();
@@ -327,7 +327,7 @@ describe('New voice provider', () => {
 
   it('adds the provider on, with its key, its models and the job its company does', async () => {
     render(<NewVoiceProviderPage />);
-    fireEvent.click(screen.getByRole('radio', { name: /^Soniox/ }));
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Soniox/ }));
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'soniox-key-1234' } });
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
     await screen.findByText('Soniox knows this key. Nothing was spoken, so nothing was paid.');
@@ -437,7 +437,7 @@ describe('New voice provider, models the company lists (#840)', () => {
 describe('New voice provider, Enter in a model field', () => {
   it('adds the model being typed and does not submit the form', async () => {
     render(<NewVoiceProviderPage />);
-    fireEvent.click(screen.getByRole('radio', { name: /^Soniox/ }));
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Soniox/ }));
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'soniox-key-1234' } });
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
     await screen.findByText('Soniox knows this key. Nothing was spoken, so nothing was paid.');
