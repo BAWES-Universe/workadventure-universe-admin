@@ -64,11 +64,17 @@ describe('the OpenAI entry', () => {
 describe('the Google entry', () => {
   it('talks live only, with Gemini 3.8 Live and its 30 prebuilt voices', () => {
     const google = voiceKeyCompanyInfo('google');
-    expect(google?.does).toEqual({ recognition: false, speech: false, talk: true });
-    expect(google?.models).toEqual([{ id: 'gemini-3.8-live', label: 'Gemini 3.8 Live', kind: 'talk' }]);
+    // Gemini text to speech besides talking live (#1891)
+    expect(google?.does).toEqual({ recognition: false, speech: true, talk: true });
+    expect(google?.models).toEqual([
+      { id: 'gemini-3.8-flash-tts', label: 'Gemini 3.8 Flash TTS', kind: 'speech' },
+      { id: 'gemini-3.8-flash-lite-tts', label: 'Gemini 3.8 Flash-Lite TTS', kind: 'speech' },
+      { id: 'gemini-3.8-live', label: 'Gemini 3.8 Live', kind: 'talk' },
+    ]);
     const voices = google?.jobs.talk?.fixedVoices ?? [];
     expect(voices).toHaveLength(30);
     expect(new Set(voices.map((voice) => voice.id)).size).toBe(30);
+    expect(google?.jobs.speech?.fixedVoices).toEqual(voices);
     expect(google?.check.header).toBe('x-goog-api-key');
     expect(google?.check.alsoRefused).toEqual({ status: 400, includes: 'API_KEY_INVALID' });
     expect(JSON.stringify(google)).not.toMatch(/recommend/i);

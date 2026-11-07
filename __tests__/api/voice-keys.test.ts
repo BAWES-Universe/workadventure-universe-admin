@@ -191,7 +191,7 @@ describe('the list', () => {
       expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: true, logo: 'deepgram' }),
       expect.objectContaining({ adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true, logo: 'elevenlabs', docs: 'https://elevenlabs.io/docs' }),
       expect.objectContaining({ adapter: 'fish', label: 'Fish Audio', recognition: false, speech: true, logo: 'fish-audio' }),
-      expect.objectContaining({ adapter: 'google', label: 'Google', recognition: false, speech: false, talk: true, logo: 'google' }),
+      expect.objectContaining({ adapter: 'google', label: 'Google', recognition: false, speech: true, talk: true, logo: 'google' }),
       // A talking model listens and speaks in one (game #1910)
       expect.objectContaining({ adapter: 'openai', label: 'OpenAI', recognition: false, speech: false, talk: true, logo: 'openai' }),
       expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: true }),
@@ -207,7 +207,7 @@ describe('the list', () => {
       'Listens and speaks. Uses your account at deepgram.com.',
       'Listens and speaks. Uses your account at elevenlabs.io.',
       'Speaks. Uses your account at fish.audio.',
-      'Talks live. Uses your account at aistudio.google.com.',
+      'Speaks and talks live. Uses your account at aistudio.google.com.',
       'Talks live. Uses your account at platform.openai.com.',
       'Listens and speaks. Uses your account at soniox.com.',
       'Listens, speaks and talks live. Uses your account at console.x.ai.',

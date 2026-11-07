@@ -188,6 +188,40 @@ const company = (entry: VoiceKeyCompanyEntry): VoiceKeyCompanyInfo => ({
   models: VOICE_COMPANY_JOBS.flatMap((kind) => (entry.jobs[kind]?.models ?? []).map((model) => ({ ...model, kind }))),
 });
 
+/** Google's 30 prebuilt voices, in the order its speech docs list them: Google has no call that lists them. */
+const GOOGLE_VOICES: FixedVoice[] = [
+  { id: 'Zephyr', name: 'Zephyr' },
+  { id: 'Puck', name: 'Puck' },
+  { id: 'Charon', name: 'Charon' },
+  { id: 'Kore', name: 'Kore' },
+  { id: 'Fenrir', name: 'Fenrir' },
+  { id: 'Leda', name: 'Leda' },
+  { id: 'Orus', name: 'Orus' },
+  { id: 'Aoede', name: 'Aoede' },
+  { id: 'Callirrhoe', name: 'Callirrhoe' },
+  { id: 'Autonoe', name: 'Autonoe' },
+  { id: 'Enceladus', name: 'Enceladus' },
+  { id: 'Iapetus', name: 'Iapetus' },
+  { id: 'Umbriel', name: 'Umbriel' },
+  { id: 'Algieba', name: 'Algieba' },
+  { id: 'Despina', name: 'Despina' },
+  { id: 'Erinome', name: 'Erinome' },
+  { id: 'Algenib', name: 'Algenib' },
+  { id: 'Rasalgethi', name: 'Rasalgethi' },
+  { id: 'Laomedeia', name: 'Laomedeia' },
+  { id: 'Achernar', name: 'Achernar' },
+  { id: 'Alnilam', name: 'Alnilam' },
+  { id: 'Schedar', name: 'Schedar' },
+  { id: 'Gacrux', name: 'Gacrux' },
+  { id: 'Pulcherrima', name: 'Pulcherrima' },
+  { id: 'Achird', name: 'Achird' },
+  { id: 'Zubenelgenubi', name: 'Zubenelgenubi' },
+  { id: 'Vindemiatrix', name: 'Vindemiatrix' },
+  { id: 'Sadachbia', name: 'Sadachbia' },
+  { id: 'Sadaltager', name: 'Sadaltager' },
+  { id: 'Sulafat', name: 'Sulafat' },
+];
+
 /** xAI's built-in voices, Eve (its default) first, then as its text to speech docs list them. Every one speaks every language. */
 const XAI_VOICES: FixedVoice[] = [
   { id: 'eve', name: 'Eve' },
@@ -426,43 +460,22 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'google',
     label: 'Google',
     jobs: {
+      speech: {
+        // Gemini text to speech on the Gemini API, one streamed request per reply (POST /v1beta/models/{model}:streamGenerateContent),
+        // as Pipecat's GeminiTTSService does with an API key. These are the two Gemini 3.8 models Pipecat names for the Gemini API;
+        // the 3.1 preview shuts on 17 Nov 2026 (#1891)
+        host: 'generativelanguage.googleapis.com',
+        models: [
+          { id: 'gemini-3.8-flash-tts', label: 'Gemini 3.8 Flash TTS' },
+          { id: 'gemini-3.8-flash-lite-tts', label: 'Gemini 3.8 Flash-Lite TTS' },
+        ],
+        fixedVoices: GOOGLE_VOICES,
+      },
       talk: {
         host: 'generativelanguage.googleapis.com',
         // From Google's Live API docs (7 Nov 2026): the older live models shut on 17 Nov 2026
         models: [{ id: 'gemini-3.8-live', label: 'Gemini 3.8 Live' }],
-        // Google has no call that lists live voices: these are the 30 prebuilt voices its speech docs list, in that order
-        fixedVoices: [
-          { id: 'Zephyr', name: 'Zephyr' },
-          { id: 'Puck', name: 'Puck' },
-          { id: 'Charon', name: 'Charon' },
-          { id: 'Kore', name: 'Kore' },
-          { id: 'Fenrir', name: 'Fenrir' },
-          { id: 'Leda', name: 'Leda' },
-          { id: 'Orus', name: 'Orus' },
-          { id: 'Aoede', name: 'Aoede' },
-          { id: 'Callirrhoe', name: 'Callirrhoe' },
-          { id: 'Autonoe', name: 'Autonoe' },
-          { id: 'Enceladus', name: 'Enceladus' },
-          { id: 'Iapetus', name: 'Iapetus' },
-          { id: 'Umbriel', name: 'Umbriel' },
-          { id: 'Algieba', name: 'Algieba' },
-          { id: 'Despina', name: 'Despina' },
-          { id: 'Erinome', name: 'Erinome' },
-          { id: 'Algenib', name: 'Algenib' },
-          { id: 'Rasalgethi', name: 'Rasalgethi' },
-          { id: 'Laomedeia', name: 'Laomedeia' },
-          { id: 'Achernar', name: 'Achernar' },
-          { id: 'Alnilam', name: 'Alnilam' },
-          { id: 'Schedar', name: 'Schedar' },
-          { id: 'Gacrux', name: 'Gacrux' },
-          { id: 'Pulcherrima', name: 'Pulcherrima' },
-          { id: 'Achird', name: 'Achird' },
-          { id: 'Zubenelgenubi', name: 'Zubenelgenubi' },
-          { id: 'Vindemiatrix', name: 'Vindemiatrix' },
-          { id: 'Sadachbia', name: 'Sadachbia' },
-          { id: 'Sadaltager', name: 'Sadaltager' },
-          { id: 'Sulafat', name: 'Sulafat' },
-        ],
+        fixedVoices: GOOGLE_VOICES,
       },
     },
     logo: 'google',
