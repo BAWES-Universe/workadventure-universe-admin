@@ -317,6 +317,7 @@ export default function AddAiKeyPage() {
             {companies.result.status === 'error' && <LoadError label="the voice companies" retry={companies.retry} />}
             {voice.length > 0 && <div className="grid gap-2" data-testid="kinds-voice">
               <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">For voice, with an API key</h3>
+              <p className={FIELD_HINT} data-testid="voice-one-key-hint">A company that listens and speaks needs one key for a bot’s whole voice. You can also mix: one company listens, another speaks.</p>
               {voice.map((entry) => (
                 <KindCard key={entry.kind} info={entry} picked={voiceAdapter === entry.kind} onPick={() => pickVoice(entry.kind)} />
               ))}
@@ -465,6 +466,13 @@ export default function AddAiKeyPage() {
             )}
             {models.status === 'voice' && (
               <>
+                {/* One key from a company that listens and speaks is a bot's whole voice (#1911) */}
+                {models.models.some((entry) => entry.kind === 'recognition') && models.models.some((entry) => entry.kind === 'speech') && (
+                  <p className="flex items-start gap-2 rounded-2xl border border-foreground/10 bg-foreground/[.04] px-3.5 py-2.5 text-[13px]" data-testid="voice-one-key">
+                    <Check size={16} aria-hidden="true" className="mt-0.5 shrink-0 text-[#4ade80]" />
+                    <span>This key listens and speaks, so it’s all a bot needs. On a bot’s Voice row you can still split: listen with one company, speak with another.</span>
+                  </p>
+                )}
                 <p className={FIELD_HINT}>Nothing to pick here. Each bot picks one of these on its own page. When you lend the key, you can limit which ones bots there may use.</p>
                 {(['recognition', 'speech'] as const).map((job) => {
                   const list = models.models.filter((entry) => entry.kind === job);
