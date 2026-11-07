@@ -44,6 +44,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         region: row.region,
         models: row.models,
         apiKeyEncrypted: row.apiKeyEncrypted,
+        // Said out loud, so the bot server never takes a missing key for a mistake: only a speech server with no key is served without one
+        ...(row.apiKeyEncrypted ? {} : { keyless: true }),
       },
       { headers: { 'Cache-Control': 'no-store' } }
     );

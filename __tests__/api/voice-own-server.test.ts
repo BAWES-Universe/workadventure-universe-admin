@@ -278,7 +278,7 @@ describe('serving the credentials of an own speech server', () => {
     db.voiceProvider.findUnique.mockResolvedValue(serverRow);
     const response = await ask();
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ adapter: 'openai-compatible', endpoint: 'https://speech.example.com/v1', apiKeyEncrypted: null });
+    expect(await response.json()).toMatchObject({ adapter: 'openai-compatible', endpoint: 'https://speech.example.com/v1', apiKeyEncrypted: null, keyless: true });
   });
 
   it('still refuses any other provider that has no key', async () => {
