@@ -64,7 +64,7 @@ export async function serverVoiceModels(adapter: string): Promise<VoiceModel[]> 
   const seen = new Map<string, VoiceModel>();
   for (const row of rows) {
     for (const model of readModels(row.models)) {
-      if (!row[model.kind]) continue;
+      if (model.kind === 'talk' ? !(row.recognition && row.speech) : !row[model.kind]) continue;
       const id = `${model.kind}:${model.id}`;
       if (!seen.has(id)) seen.set(id, model);
     }

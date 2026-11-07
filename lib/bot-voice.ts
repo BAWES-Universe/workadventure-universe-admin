@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import { BotSettingsError } from '@/lib/bot-access-settings';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels, universeAiDefaults } from '@/lib/voice-providers';
+import { modelDoes, talksLive } from '@/lib/voice-key-companies';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
 import { isOwnSpeechAdapter } from '@/lib/voice-own-server';
 import { claimVoiceKeyTry, healthOf, tryIsDue } from '@/lib/voice-key-health';
@@ -67,7 +68,15 @@ export function followUniverseAi(profile: VoiceProfile, providers: Map<string, V
     const choice = profile[part];
     const provider = providers.get(choice.providerId);
     if (!provider || provider.ownerId !== null) return choice;
-    const current = readModels(provider.models).find((model) => model.kind === part);
+    // A bot that talks live follows the provider's first talking model, for both parts, so they keep naming the same one. So does a
+    // bot whose talking model was taken off: both parts still name one model, and the provider no longer lists it for the job
+    const models = readModels(provider.models);
+    const talked =
+      profile.recognition.providerId === profile.speech.providerId &&
+      profile.recognition.model === profile.speech.model &&
+      !models.some((model) => model.kind === part && model.id === choice.model);
+    const kind = talksLive(profile, models) || (talked && models.some((model) => model.kind === 'talk')) ? 'talk' : part;
+    const current = models.find((model) => model.kind === kind);
     return current && current.id !== choice.model ? { ...choice, model: current.id } : choice;
   };
   const recognition = follow('recognition');
@@ -111,9 +120,15 @@ export function profileProblem(profile: VoiceProfile, providers: Map<string, Voi
     if (!provider[part]) return `${provider.name} doesn't do ${job}`;
     // A speech server on a person's own computer may have no key (game #1874)
     if (!provider.apiKeyEncrypted && !isOwnSpeechAdapter(provider.adapter)) return `${provider.name} has no key`;
-    if (!readModels(provider.models).some((model) => model.kind === part && model.id === choice.model)) return `${provider.name} doesn't list the model ${choice.model} for ${job}`;
+    const models = readModels(provider.models);
+    const model = models.find((entry) => modelDoes(entry, part) && entry.id === choice.model && (entry.kind === part || talksLive(profile, models)));
+    if (!model) {
+      // A talking model listens and speaks in one: it is named for both or for neither (game #1910)
+      if (models.some((entry) => entry.kind === 'talk' && entry.id === choice.model)) return `${provider.name}'s ${choice.model} talks live, so it must be named for both listening and speaking`;
+      return `${provider.name} doesn't list the model ${choice.model} for ${job}`;
+    }
     const allowed = lent.get(provider.id);
-    if (allowed && !allowed.includes(lendModelId({ kind: part, id: choice.model }))) return `${provider.name} isn't lent to this universe for the model ${choice.model}`;
+    if (allowed && !allowed.includes(lendModelId(model))) return `${provider.name} isn't lent to this universe for the model ${choice.model}`;
   }
   return null;
 }

@@ -39,6 +39,11 @@ export interface VoiceChoice {
   providerId: string;
   /** The speaking model to use with this voice: the first one the source lists (and the lend allows). */
   model: string;
+  /**
+   * The model is a talking model (game #1910): it listens and speaks in one, so a bot that picks this voice names it for both
+   * listening and speaking.
+   */
+  talk: boolean;
 }
 
 /** A voice as a company listed it. `preview` is the company's address for the sample, `previewNeedsKey` whether it wants the key. */
@@ -219,14 +224,18 @@ const cache = new Map<string, Cached>();
 /** For tests: forgets every list. */
 export const clearVoiceListCache = () => cache.clear();
 
+/** The job whose voices a provider's bots pick from: speaking, or talking (game #1910) for a company that only talks live. */
+const voiceJobOf = (company: VoiceKeyCompanyInfo | null) => (company?.jobs.speech ? company.jobs.speech : company?.jobs.talk);
+
 /** Where a source's calls go and how they are signed: the company's own address, the key in its one header. */
 function callFor(provider: VoiceProvider): Call & { spec: VoiceListSpec } {
   const company = voiceKeyCompanyInfo(provider.adapter);
-  const spec = company?.jobs.speech?.voices;
-  if (!company || !spec) throw new VoiceListRefused(`${company?.label ?? provider.name}’s voices can’t be listed here.`, 409);
+  const job = voiceJobOf(company);
+  const spec = job?.voices;
+  if (!company || !job || !spec) throw new VoiceListRefused(`${company?.label ?? provider.name}’s voices can’t be listed here.`, 409);
   if (!provider.apiKeyEncrypted) throw new VoiceListRefused(`${provider.name} has no key.`, 409);
   // The server's own provider may name another address (a proxy); a person's key never does
-  const base = (provider.ownerId === null && provider.endpoint ? provider.endpoint : `https://${company.jobs.speech!.host}`).replace(/\/+$/, '');
+  const base = (provider.ownerId === null && provider.endpoint ? provider.endpoint : `https://${job.host}`).replace(/\/+$/, '');
   const { check } = company;
   let key: string;
   try {
@@ -263,6 +272,9 @@ async function listOwnVoices(provider: VoiceProvider): Promise<Listed[]> {
 }
 
 async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
+  // A company with no list call (OpenAI's talking voices) has its voices in the catalog: nothing to call, nothing to cache
+  const fixed = voiceJobOf(voiceKeyCompanyInfo(provider.adapter))?.fixedVoices;
+  if (fixed) return fixed.map((voice) => ({ voiceId: voice.id, name: voice.name, description: '', languages: [], preview: null, previewNeedsKey: false }));
   // A new key or address is a new row version, so it is never served an older list
   const id = `${provider.id}:${provider.updatedAt.getTime()}`;
   const hit = cache.get(id);
@@ -290,6 +302,7 @@ async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
 interface Source {
   provider: VoiceProvider;
   model: string;
+  talk: boolean;
 }
 
 /**
@@ -315,9 +328,11 @@ async function sourceFor(botId: string, source: string): Promise<Source> {
     if (!provider || !bot.createdById || !(await lendAccess(bot.createdById, universeId))) throw new VoiceListRefused('Voice key not found.', 404);
   }
   const allowed = provider.lends?.length ? readLendModels(provider.lends[0].models) : null;
-  const model = readModels(provider.models).find((entry) => entry.kind === 'speech' && (!allowed || allowed.includes(lendModelId(entry))));
+  // A speaking model first; a key whose only speaking is a talking model (game #1910) gives that one
+  const usable = readModels(provider.models).filter((entry) => !allowed || allowed.includes(lendModelId(entry)));
+  const model = usable.find((entry) => entry.kind === 'speech') ?? usable.find((entry) => entry.kind === 'talk');
   if (!model) throw new VoiceListRefused(`${provider.name} has no speaking model set up here.`, 409);
-  return { provider, model: model.id };
+  return { provider, model: model.id, talk: model.kind === 'talk' };
 }
 
 const previewPath = (botId: string, source: string, voiceId: string) =>
@@ -325,7 +340,7 @@ const previewPath = (botId: string, source: string, voiceId: string) =>
 
 /** The speaking voices of one source (`universe-ai` or a voice key's id) for a bot, in the order the company lists them. */
 export async function listBotVoices(botId: string, source: string): Promise<VoiceChoice[]> {
-  const { provider, model } = await sourceFor(botId, source);
+  const { provider, model, talk } = await sourceFor(botId, source);
   const listed = await listedFor(provider);
   return listed.map((voice) => ({
     voiceId: voice.voiceId,
@@ -335,6 +350,7 @@ export async function listBotVoices(botId: string, source: string): Promise<Voic
     previewUrl: !voice.preview ? null : voice.previewNeedsKey ? previewPath(botId, source, voice.voiceId) : voice.preview,
     providerId: provider.id,
     model,
+    talk,
   }));
 }
 
