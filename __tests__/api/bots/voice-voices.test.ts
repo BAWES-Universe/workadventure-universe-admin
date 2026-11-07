@@ -485,6 +485,34 @@ describe('Async\'s voices', () => {
   });
 });
 
+describe('Bland\'s voices', () => {
+  const bland = () => key({ adapter: 'bland', name: 'Bland', models: [{ id: 'btts-3', label: 'Bland TTS v3', kind: 'speech' }] });
+  const answer = {
+    voices: [
+      { id: 'b1', name: 'Karen', description: 'Mature, calm', public: true, tags: ['english', 'support'], service: 'BTTS_V3' },
+      { id: 'b2', name: 'My clone', description: null, public: false, tags: ['arabic'], service: 'BTTS_V3' },
+    ],
+  };
+
+  beforeEach(() => {
+    providers = [bland()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(answer));
+  });
+
+  it('are every voice in one answer, with the key as a bearer', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.model])).toEqual([
+      ['b1', 'Karen', 'Mature, calm', 'btts-3'],
+      ['b2', 'My clone', 'arabic', 'btts-3'],
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.bland.ai/v1/voices');
+    expect(init.headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+  });
+});
+
 describe('languageCode', () => {
   it('keeps the language of a code and drops anything that isn\'t one', () => {
     expect([languageCode('en-GB'), languageCode('AR_kw'), languageCode('ara'), languageCode('English'), languageCode(''), languageCode(7)]).toEqual(['en', 'ar', 'ara', null, null, null]);
