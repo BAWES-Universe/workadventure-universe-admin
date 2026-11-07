@@ -191,6 +191,21 @@ describe('Change what Universe AI speaks with', () => {
     expect(within(sheet).queryByText('Recommended')).toBeNull();
   });
 
+  it('keeps each voice in its own row, a long description cut to two lines and the languages to one', async () => {
+    render(<VoiceSection />);
+    fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
+    const sheet = await screen.findByRole('dialog');
+    const list = await within(sheet).findByTestId('voice-list');
+    // A grid list inside the sheet squeezed its rows on a short screen, so long descriptions ran over the next voice
+    expect(list.className).not.toMatch(/\bgrid\b/);
+    const description = within(list).getByText('Calm and clear.');
+    expect(description.className).toContain('line-clamp-2');
+    expect(description.getAttribute('title')).toBe('Calm and clear.');
+    const languages = description.nextElementSibling as HTMLElement;
+    expect(languages.className).toContain('line-clamp-1');
+    expect(languages.getAttribute('title')).toBe(languages.textContent);
+  });
+
   it('says that bots on the company it moves away from stay there', async () => {
     render(<VoiceSection />);
     fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));

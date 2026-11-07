@@ -237,16 +237,19 @@ describe('the list', () => {
       expect.objectContaining({ adapter: 'mistral', label: 'Mistral', recognition: true, speech: true }),
       expect.objectContaining({ adapter: 'neuphonic', label: 'Neuphonic', recognition: false, speech: true }),
       // A talking model listens and speaks in one (game #1910)
+      expect.objectContaining({ adapter: 'inworld', label: 'Inworld', recognition: false, speech: false, talk: true, account: null }),
       expect.objectContaining({ adapter: 'openai', label: 'OpenAI', recognition: false, speech: false, talk: true, logo: 'openai' }),
       expect.objectContaining({ adapter: 'resemble', label: 'Resemble AI', recognition: false, speech: true }),
       expect.objectContaining({ adapter: 'rime', label: 'Rime', recognition: false, speech: true }),
       expect.objectContaining({ adapter: 'sarvam', label: 'Sarvam AI', recognition: true, speech: true }),
       expect.objectContaining({ adapter: 'smallest', label: 'Smallest AI', recognition: true, speech: true }),
       expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: true }),
+      expect.objectContaining({ adapter: 'ultravox', label: 'Ultravox', recognition: false, speech: false, talk: true, account: null }),
       expect.objectContaining({ adapter: 'speechify', label: 'Speechify', recognition: false, speech: true }),
       expect.objectContaining({ adapter: 'speechmatics', label: 'Speechmatics', recognition: true, speech: true }),
       expect.objectContaining({ adapter: 'together', label: 'Together AI', recognition: true, speech: true }),
       expect.objectContaining({ adapter: 'xai', label: 'xAI', recognition: false, speech: false, talk: true, logo: 'xai' }),
+      expect.objectContaining({ adapter: 'zoom', label: 'Zoom', recognition: false, speech: false, talk: true, account: null }),
       // The speech server on a person's own computer is last, and is not a company (game #1874)
       expect.objectContaining({ adapter: 'openai-compatible', label: 'Any OpenAI-compatible speech server', ownServer: expect.any(Object) }),
     ]);
@@ -265,6 +268,7 @@ describe('the list', () => {
       'Speaks. Uses your account at fish.audio.',
       'Listens. Uses your account at gladia.io.',
       'Talks live. Uses your account at aistudio.google.com.',
+      'Talks live. Uses your account at inworld.ai.',
       'Listens and speaks. Uses your account at gradium.ai.',
       'Listens and speaks. Uses your account at groq.com.',
       'Speaks. Uses your account at hume.ai.',
@@ -277,10 +281,12 @@ describe('the list', () => {
       'Listens and speaks. Uses your account at sarvam.ai.',
       'Listens and speaks. Uses your account at smallest.ai.',
       'Listens and speaks. Uses your account at soniox.com.',
+      'Talks live. Uses your account at ultravox.ai.',
       'Speaks. Uses your account at speechify.ai.',
       'Listens and speaks. Uses your account at speechmatics.com.',
       'Listens and speaks. Uses your account at together.ai.',
       'Talks live. Uses your account at console.x.ai.',
+      'Talks live, in English. Uses your Zoom AI Services account.',
       'Speaches, Kokoro-FastAPI, your own Whisper: anything that answers /v1/audio.',
     ]);
     expect(JSON.stringify(body)).not.toContain('apiKeyEncrypted');
