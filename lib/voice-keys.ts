@@ -32,32 +32,32 @@ export interface VoiceKeyCompany {
 }
 
 /**
- * The speech companies a person can add a key for: the catalog's companies (lib/voice-key-companies.ts) that have at least one of the
- * server's own providers on (lib/voice-providers.ts), so a super admin decides what Universe supports and a company with no
- * adapter behind it can't be added. One entry per company, named and described as the catalog does, doing whatever any of its
- * providers does.
+ * The speech companies a person can add a key for: every company in the catalog (lib/voice-key-companies.ts), with no setup by a
+ * super admin. One entry per company, named and described as the catalog does, doing what the catalog says it does plus whatever
+ * a provider the server has switched on for it does (so an operator who runs a company's other job is still covered).
  */
 export async function voiceKeyCompanies(): Promise<VoiceKeyCompany[]> {
   const rows = await prisma.voiceProvider.findMany({
     where: { enabled: true, ownerId: null },
     select: { adapter: true, recognition: true, speech: true },
   });
-  const does = new Map<string, { recognition: boolean; speech: boolean }>();
-  for (const row of rows) {
-    const known = does.get(row.adapter) ?? { recognition: false, speech: false };
-    known.recognition ||= row.recognition;
-    known.speech ||= row.speech;
-    does.set(row.adapter, known);
-  }
-  return VOICE_KEY_COMPANIES.filter((info) => does.has(info.adapter)).map((info) => ({
-    adapter: info.adapter,
-    label: info.label,
-    ...does.get(info.adapter)!,
-    logo: info.logo ?? null,
-    benefit: info.benefit.replace('{does}', voiceDoesLine(does.get(info.adapter)!)),
-    step: info.step,
-    docs: info.docs,
-  }));
+  return VOICE_KEY_COMPANIES.map((info) => {
+    const does = { ...info.does };
+    for (const row of rows) {
+      if (row.adapter !== info.adapter) continue;
+      does.recognition ||= row.recognition;
+      does.speech ||= row.speech;
+    }
+    return {
+      adapter: info.adapter,
+      label: info.label,
+      ...does,
+      logo: info.logo ?? null,
+      benefit: info.benefit.replace('{does}', voiceDoesLine(does)),
+      step: info.step,
+      docs: info.docs,
+    };
+  });
 }
 
 const modelSchema = z.object({

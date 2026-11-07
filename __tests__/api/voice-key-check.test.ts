@@ -146,8 +146,8 @@ describe('Load models for a voice key', () => {
     expect(CHECK_TIMEOUT_MS).toBeLessThanOrEqual(10_000);
   });
 
-  it('refuses a company that is not in the catalog, or that the server has not turned on, without calling anyone', async () => {
-    for (const adapter of ['unknown-co', 'soniox', undefined, 5]) {
+  it('refuses a company that is not in the catalog without calling anyone', async () => {
+    for (const adapter of ['unknown-co', undefined, 5]) {
       const response = await send({ adapter, apiKey: KEY });
       expect(response.status).toBe(400);
     }
@@ -162,10 +162,25 @@ describe('Load models for a voice key', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('says so when the company has no models set up', async () => {
+  it('needs no setup by a super admin: a company the server has no provider for starts with the catalog\'s own models', async () => {
     findMany.mockImplementation(async ({ where }: { where: { adapter?: string } }) => (where.adapter ? [] : serverRows));
+    for (const [adapter, models] of [
+      ['soniox', [{ id: 'stt-rt-v6', label: 'Soniox real-time v6', kind: 'recognition' }]],
+      ['deepgram', [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }]],
+      ['cartesia', [{ id: 'sonic-3.6', label: 'Sonic 3.6', kind: 'speech' }]],
+      ['fish', [{ id: 's2.1-pro-free', label: 'S2.1 Pro (free)', kind: 'speech' }, { id: 's2.1-pro', label: 'S2.1 Pro', kind: 'speech' }]],
+      ['elevenlabs', [{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }, { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }]],
+    ] as const) {
+      answer(200);
+      const response = await send({ adapter, apiKey: KEY });
+      expect([adapter, response.status, await response.json()]).toEqual([adapter, 200, { ok: true, models }]);
+    }
+  });
+
+  it('lists the server\'s own models instead of the catalog\'s when it has a provider for the company', async () => {
     answer(200);
-    expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(409);
+    const response = await send({ adapter: 'cartesia', apiKey: KEY });
+    expect(await response.json()).toEqual({ ok: true, models: [{ id: 'sonic-3', kind: 'speech' }] });
   });
 
   it('never returns or logs the key', async () => {
