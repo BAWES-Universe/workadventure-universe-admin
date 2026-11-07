@@ -351,10 +351,10 @@ describe('New voice provider', () => {
 });
 
 describe('New voice provider, models the company lists (#840)', () => {
-  it('lists the company\'s models after Check key to tick, with no id to type, and the first ticked is where bots start', async () => {
+  it('lists the company\'s models after Check key to tick, each with what the company says, one that works ticked already', async () => {
     checkAnswer = {
       ok: true,
-      body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }, { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' }] },
+      body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech', note: '2 languages · Fast.' }, { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' }] },
     };
     render(<NewVoiceProviderPage />);
     fireEvent.click(screen.getByRole('radio', { name: /^ElevenLabs/ }));
@@ -364,16 +364,23 @@ describe('New voice provider, models the company lists (#840)', () => {
     expect(await screen.findByText('ElevenLabs knows this key and lists 2 models for it. Nothing was spoken, so nothing was paid.')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Add a model' })).toBeNull();
     const add = screen.getByRole('button', { name: 'Add provider' });
-    expect(add.hasAttribute('disabled')).toBe(true);
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Eleven v3' }));
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Eleven Flash v2.5' }));
-    expect(screen.getByRole('checkbox', { name: 'Eleven v3' }).getAttribute('aria-checked')).toBe('true');
+    // The models Universe starts ElevenLabs keys on come first, the first one ticked already, so it can be added as it is
+    const boxes = screen.getAllByRole('checkbox');
+    expect(boxes.map((box) => box.textContent)).toEqual([
+      'Eleven v4 Turboeleven_v4_turbo',
+      'Eleven Flash v2.5eleven_flash_v2_5 · 2 languages · Fast.',
+      'Eleven v3eleven_v3',
+    ]);
+    expect(boxes[0].getAttribute('aria-checked')).toBe('true');
+    expect(add.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(screen.getByRole('checkbox', { name: /^Eleven v3/ }));
     fireEvent.click(add);
     await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/ai-providers'));
     const post = calls.find((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers');
+    // Only the model is saved, never the company's line about it
     expect(post?.body?.models).toEqual([
+      { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' },
       { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' },
-      { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' },
     ]);
   });
 

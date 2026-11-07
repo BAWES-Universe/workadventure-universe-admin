@@ -93,13 +93,39 @@ export async function loadVoiceKeyModels(adapter: unknown, apiKey: unknown, enab
 /** The most models one company's list may give: more is not a list a person can tick through. */
 export const MAX_LISTED_MODELS = 100;
 
+/** A model a company lists, with a short line from what the company says about it, to help choose (never saved). */
+export type ListedVoiceModel = VoiceModel & { note?: string };
+
+/** The language codes a model says it covers: plain codes, or `{ code }` / `{ language_id }` objects. */
+function languagesOf(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => (typeof entry === 'string' ? entry : typeof entry === 'object' && entry !== null ? ((entry as Record<string, unknown>).code ?? (entry as Record<string, unknown>).language_id) : null))
+    .filter((code): code is string => typeof code === 'string' && code.trim() !== '')
+    .map((code) => code.trim());
+}
+
+/** One line about a model from the company's own fields: what it always points to, its languages, its own description. */
+function noteOf(spec: NonNullable<VoiceKeyCompanyInfo['modelList']>, fields: Record<string, unknown>, languages: string[]): string | undefined {
+  const parts: string[] = [];
+  const alias = spec.aliasOf && typeof fields[spec.aliasOf] === 'string' ? (fields[spec.aliasOf] as string).trim() : '';
+  if (alias) parts.push(`Always the same as ${alias}`);
+  if (languages.length === 1) parts.push(`1 language (${languages[0]})`);
+  else if (languages.length > 1) parts.push(`${languages.length} languages`);
+  const about = spec.about && typeof fields[spec.about] === 'string' ? (fields[spec.about] as string).replace(/\s+/g, ' ').trim() : '';
+  if (about) parts.push(about.length > 160 ? `${about.slice(0, 157).trimEnd()}…` : about);
+  return parts.length > 0 ? parts.join(' · ').slice(0, 300) : undefined;
+}
+
 /**
- * The models a company lists for a key, kept to the ones Universe can run for the company's job (Orbit #840: an operator ticks them instead
- * of typing ids). One free GET to the company's own fixed address with the same key header as the check: nothing is heard or
- * spoken. Null when the company has no list (`modelList` absent from its catalog entry), or the list can't be read: then the models
- * are typed, as before. Each id once, in the company's order.
+ * The models a company lists for a key, kept to the ones Universe can run for the company's job (Orbit #840: an operator ticks them
+ * instead of typing ids), each with a short line from what the company says about it (what it points to, its languages, its
+ * own description) so a person can choose. One free GET to the company's own fixed address with the same key header as the check:
+ * nothing is heard or spoken. Null when the company has no list (`modelList` absent from its catalog entry), or the list can't be
+ * read: then the models are typed, as before. Each id once, in the company's order; a model listed once per language has its
+ * languages added up.
  */
-export async function listCompanyModels(company: VoiceKeyCompanyInfo, apiKey: string): Promise<VoiceModel[] | null> {
+export async function listCompanyModels(company: VoiceKeyCompanyInfo, apiKey: string): Promise<ListedVoiceModel[] | null> {
   const spec = company.modelList;
   // Each company's connector does one job here, and its list is kept to that job
   const kind: VoiceModel['kind'] = company.does.speech ? 'speech' : 'recognition';
@@ -117,19 +143,27 @@ export async function listCompanyModels(company: VoiceKeyCompanyInfo, apiKey: st
     const body: unknown = await response.json();
     const list = spec.list ? (body as Record<string, unknown> | null)?.[spec.list] : body;
     if (!Array.isArray(list)) return null;
-    const seen = new Set<string>();
-    const models: VoiceModel[] = [];
+    const found = new Map<string, { label: string; fields: Record<string, unknown>; languages: Set<string> }>();
     for (const entry of list) {
       if (typeof entry !== 'object' || entry === null) continue;
       const fields = entry as Record<string, unknown>;
       if (spec.where && !Object.entries(spec.where).every(([field, value]) => fields[field] === value)) continue;
       const id = typeof fields[spec.id] === 'string' ? (fields[spec.id] as string).trim() : '';
-      if (!id || id.length > 255 || seen.has(id)) continue;
-      seen.add(id);
+      if (!id || id.length > 255) continue;
+      const languages = spec.languages ? languagesOf(fields[spec.languages]) : [];
+      const seen = found.get(id);
+      if (seen) {
+        for (const code of languages) seen.languages.add(code);
+        continue;
+      }
+      if (found.size >= MAX_LISTED_MODELS) continue;
       const label = spec.label && typeof fields[spec.label] === 'string' ? (fields[spec.label] as string).trim().slice(0, 255) : '';
-      models.push({ id, ...(label && label !== id ? { label } : {}), kind });
-      if (models.length >= MAX_LISTED_MODELS) break;
+      found.set(id, { label, fields, languages: new Set(languages) });
     }
+    const models = [...found.entries()].map(([id, { label, fields, languages }]): ListedVoiceModel => {
+      const note = noteOf(spec, fields, [...languages]);
+      return { id, ...(label && label !== id ? { label } : {}), kind, ...(note ? { note } : {}) };
+    });
     return models.length > 0 ? models : null;
   } catch {
     // Nothing from the error is kept: it could carry the address with the key's header

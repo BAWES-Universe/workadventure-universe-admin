@@ -92,20 +92,21 @@ describe('Check key', () => {
   it('then reads the company\'s own list of models, kept to the ones Universe runs for its job (#840)', async () => {
     const lists: Record<string, unknown> = {
       'https://api.elevenlabs.io/v1/models': [
-        { model_id: 'eleven_flash_v2_5', name: 'Eleven Flash v2.5', can_do_text_to_speech: true },
+        { model_id: 'eleven_flash_v2_5', name: 'Eleven Flash v2.5', can_do_text_to_speech: true, description: 'Fast,   low latency.', languages: [{ language_id: 'en', name: 'English' }, { language_id: 'ar', name: 'Arabic' }] },
         { model_id: 'eleven_english_sts_v2', name: 'Eleven English v2', can_do_text_to_speech: false },
         { model_id: 'eleven_v3', name: 'Eleven v3', can_do_text_to_speech: true },
       ],
       'https://api.soniox.com/v1/models': {
         models: [
-          { id: 'stt-rt-v4', name: 'Speech-to-Text Real-time v4', transcription_mode: 'real_time' },
+          { id: 'stt-rt-v4', name: 'Speech-to-Text Real-time v4', transcription_mode: 'real_time', aliased_model_id: null, languages: [{ code: 'en', name: 'English' }] },
+          { id: 'stt-rt-preview', name: 'Speech-to-Text Real-time Preview', transcription_mode: 'real_time', aliased_model_id: 'stt-rt-v4', languages: [{ code: 'en' }, { code: 'ar' }, { code: 'de' }] },
           { id: 'stt-async-v4', name: 'Speech-to-Text Async v4', transcription_mode: 'async' },
         ],
       },
       'https://api.deepgram.com/v1/models': {
         stt: [
-          { name: 'general', canonical_name: 'nova-3-general', streaming: true },
-          { name: 'general', canonical_name: 'nova-3-general', streaming: true },
+          { name: 'general', canonical_name: 'nova-3-general', streaming: true, languages: ['en', 'en-US'] },
+          { name: 'general', canonical_name: 'nova-3-general', streaming: true, languages: ['es', 'en'] },
           { name: 'whisper', canonical_name: 'whisper-large', streaming: false },
         ],
         tts: [{ name: 'asteria', canonical_name: 'aura-asteria-en' }],
@@ -114,12 +115,17 @@ describe('Check key', () => {
     };
     fetchMock.mockImplementation(async (url: string) => json(lists[url] ?? {}));
     const models = async (adapter: string) => (await (await post(checkPasted, { adapter, apiKey: SECRET })).json()).models;
+    // Each with a line from what the company says about it, to help choose: its languages and its own description
     expect(await models('elevenlabs')).toEqual([
-      { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' },
+      { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech', note: '2 languages · Fast, low latency.' },
       { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' },
     ]);
-    expect(await models('soniox')).toEqual([{ id: 'stt-rt-v4', label: 'Speech-to-Text Real-time v4', kind: 'recognition' }]);
-    expect(await models('deepgram')).toEqual([{ id: 'nova-3-general', kind: 'recognition' }]);
+    expect(await models('soniox')).toEqual([
+      { id: 'stt-rt-v4', label: 'Speech-to-Text Real-time v4', kind: 'recognition', note: '1 language (en)' },
+      { id: 'stt-rt-preview', label: 'Speech-to-Text Real-time Preview', kind: 'recognition', note: 'Always the same as stt-rt-v4 · 3 languages' },
+    ]);
+    // Listed once per language: one model, its languages added up
+    expect(await models('deepgram')).toEqual([{ id: 'nova-3-general', kind: 'recognition', note: '3 languages' }]);
     expect(await models('cartesia')).toEqual([{ id: 'sonic-3', kind: 'speech' }]);
     // The list goes with the same key header as the check, to the company's own address, and is never followed elsewhere
     const listCall = fetchMock.mock.calls.find(([url]) => url === 'https://api.cartesia.ai/models?capability=tts')!;

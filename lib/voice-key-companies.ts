@@ -67,6 +67,10 @@ export interface VoiceKeyCompanyInfo {
     id: string;
     label?: string;
     where?: Record<string, string | boolean>;
+    /** Fields that help a person choose, shown under the model (never saved): the model it always points to, the languages it covers, the company's own description of it. */
+    aliasOf?: string;
+    languages?: string;
+    about?: string;
   };
   check: {
     url: string;
@@ -94,7 +98,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     benefit: '{does}. Uses your account at cartesia.ai.',
     step: 'On play.cartesia.ai, open API keys and create a key.',
     docs: 'https://docs.cartesia.ai',
-    modelList: { url: 'https://api.cartesia.ai/models?capability=tts', list: 'data', id: 'id', where: { capability: 'tts' } },
+    modelList: { url: 'https://api.cartesia.ai/models?capability=tts', list: 'data', id: 'id', where: { capability: 'tts' }, languages: 'supported_languages' },
     check: { url: 'https://api.cartesia.ai/voices?limit=1', header: 'Authorization', prefix: 'Bearer ', headers: { 'Cartesia-Version': '2026-08-14' } },
   },
   {
@@ -106,7 +110,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     benefit: '{does}. Uses your account at deepgram.com.',
     step: 'On deepgram.com, open API Keys and create a key.',
     docs: 'https://developers.deepgram.com',
-    modelList: { url: 'https://api.deepgram.com/v1/models', list: 'stt', id: 'canonical_name', where: { streaming: true } },
+    modelList: { url: 'https://api.deepgram.com/v1/models', list: 'stt', id: 'canonical_name', where: { streaming: true }, languages: 'languages' },
     check: { url: 'https://api.deepgram.com/v1/projects', header: 'Authorization', prefix: 'Token ', alsoAccepted: { status: 403 } },
   },
   {
@@ -122,7 +126,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     benefit: '{does}. Uses your account at elevenlabs.io.',
     step: 'On elevenlabs.io, open Developers, then API keys, and create a key.',
     docs: 'https://elevenlabs.io/docs',
-    modelList: { url: 'https://api.elevenlabs.io/v1/models', id: 'model_id', label: 'name', where: { can_do_text_to_speech: true } },
+    modelList: { url: 'https://api.elevenlabs.io/v1/models', id: 'model_id', label: 'name', where: { can_do_text_to_speech: true }, languages: 'languages', about: 'description' },
     check: { url: 'https://api.elevenlabs.io/v1/user', header: 'xi-api-key', prefix: '', alsoAccepted: { status: 401, includes: 'missing_permissions' } },
   },
   {
@@ -149,7 +153,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     benefit: '{does}. Uses your account at soniox.com.',
     step: 'On console.soniox.com, open API Keys and create a key.',
     docs: 'https://soniox.com/docs',
-    modelList: { url: 'https://api.soniox.com/v1/models', list: 'models', id: 'id', label: 'name', where: { transcription_mode: 'real_time' } },
+    modelList: { url: 'https://api.soniox.com/v1/models', list: 'models', id: 'id', label: 'name', where: { transcription_mode: 'real_time' }, aliasOf: 'aliased_model_id', languages: 'languages' },
     check: { url: 'https://api.soniox.com/v1/models', header: 'Authorization', prefix: 'Bearer ' },
   },
 ];

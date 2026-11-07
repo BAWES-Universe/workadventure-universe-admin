@@ -34,7 +34,8 @@ const jobOf = (info: VoiceKeyCompanyInfo): VoiceJob => COMPANY_JOBS[info.adapter
 const benefitOf = (info: VoiceKeyCompanyInfo) => info.benefit.replace('{does}', jobOf(info) === 'recognition' ? 'Listens' : 'Speaks');
 
 /** `listed`: the models the company lists for its job, to tick (null: it has no list, or it couldn't be read, so they are typed). */
-type Check = { status: 'none' } | { status: 'checking' } | { status: 'ok'; listed: VoiceModel[] | null } | { status: 'refused'; message: string };
+type Listed = VoiceModel & { note?: string };
+type Check = { status: 'none' } | { status: 'checking' } | { status: 'ok'; listed: Listed[] | null } | { status: 'refused'; message: string };
 
 /**
  * New voice provider (#792): one company Universe AI can listen or speak with, on Universe's own key. Two steps like Add a key:
@@ -89,8 +90,13 @@ export default function NewVoiceProviderPage() {
       setCheck({ status: 'refused', message: answer.error });
       return;
     }
-    const listed = (answer.data as { models?: unknown } | null)?.models;
-    setCheck({ status: 'ok', listed: Array.isArray(listed) && listed.length > 0 ? (listed as VoiceModel[]) : null });
+    const found = (answer.data as { models?: unknown } | null)?.models;
+    const listed = Array.isArray(found) && found.length > 0 ? (found as Listed[]) : null;
+    setCheck({ status: 'ok', listed });
+    // Like Pipecat's services, a working model is ticked from the start: the one Universe starts this company's keys on. Nothing
+    // picked by hand is replaced.
+    const start = listed ? info.models[0] : undefined;
+    if (start) setModels((now) => (now.length > 0 ? now : [{ id: start.id, label: start.label, kind: start.kind }]));
   }
 
   const addressProblem =
@@ -102,6 +108,15 @@ export default function NewVoiceProviderPage() {
   // The models the company listed for the key, to tick; typed instead when it has no list, the list couldn't be read, or the company
   // turned the key away (it may still be added for an address typed under Its own address)
   const listed = check.status === 'ok' ? check.listed : null;
+  // The models to tick: the ones Universe starts this company's keys on first (with the company's line when it lists them too), then
+  // the rest of the company's list
+  const options: Listed[] | null =
+    listed && info
+      ? [
+          ...info.models.map((known) => ({ ...known, ...(listed.find((entry) => entry.id === known.id)?.note ? { note: listed.find((entry) => entry.id === known.id)!.note } : {}) })),
+          ...listed.filter((entry) => !info.models.some((known) => known.id === entry.id)),
+        ]
+      : null;
   const typing = !info?.modelList || (check.status === 'ok' && !listed) || check.status === 'refused';
 
   async function add() {
@@ -221,17 +236,19 @@ export default function NewVoiceProviderPage() {
             </div>
           </Part>
           <Part n={3} title="Its models">
-            {listed ? (
+            {options ? (
               <>
                 <p className={FIELD_HINT}>
-                  {info.label} lists these. Tick the ones bots may use: bots on Universe AI, and people’s own {info.label} keys, can use only those. The first you tick is what bots start on.
+                  {info.label} lists these, each with what {info.label} says about it. One that works is ticked already. Tick more to let bots pick between them: bots on Universe AI, and people’s own {info.label} keys, can use only the ticked ones. The first ticked is what bots start on.
                 </p>
                 <VoiceModelPicker
-                  models={listed}
+                  models={options}
                   mode="many"
+                  detailed
                   label={`${info.label} models`}
                   picked={models.map(lendModelId)}
-                  onChange={(ids) => setModels(ids.flatMap((id) => listed.filter((entry) => lendModelId(entry) === id)))}
+                  // What is saved is the model only: the line about it is the company's, read again whenever the list is
+                  onChange={(ids) => setModels(ids.flatMap((id) => options.filter((entry) => lendModelId(entry) === id).map(({ id: modelId, label, kind }) => ({ id: modelId, ...(label ? { label } : {}), kind }))))}
                 />
               </>
             ) : typing ? (
