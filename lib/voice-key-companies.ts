@@ -555,6 +555,23 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     check: { url: 'https://api.hume.ai/v0/tts/voices?provider=CUSTOM_VOICE&page_size=1', header: 'X-Hume-Api-Key', prefix: '' },
   }),
   company({
+    adapter: 'meta',
+    label: 'Meta',
+    jobs: {
+      recognition: {
+        // Muse Voice live hearing over a socket (wss://api.meta.ai/v1/asr/realtime), the key in its first message
+        // (https://dev.meta.ai/docs/api-reference/voice/realtime). Billed by the second of audio
+        host: 'api.meta.ai',
+        models: [{ id: 'muse-voice-transcribe-1.0', label: 'Muse Voice Transcribe 1.0' }],
+      },
+    },
+    benefit: '{does}. Uses your account at dev.meta.ai.',
+    step: 'On dev.meta.ai, create a Model API key.',
+    docs: 'https://dev.meta.ai/docs/api-reference/voice/realtime',
+    // The Model API's model list, free with the key as a bearer
+    check: { url: 'https://api.meta.ai/v1/models', header: 'Authorization', prefix: 'Bearer ' },
+  }),
+  company({
     adapter: 'soniox',
     label: 'Soniox',
     jobs: {
