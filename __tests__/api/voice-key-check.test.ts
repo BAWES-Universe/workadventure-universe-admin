@@ -169,7 +169,7 @@ describe('Load models for a voice key', () => {
       ['deepgram', [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }, { id: 'aura-2', label: 'Aura 2', kind: 'speech' }]],
       ['cartesia', [{ id: 'ink-whisper', label: 'Ink Whisper', kind: 'recognition' }, { id: 'sonic-3.6', label: 'Sonic 3.6', kind: 'speech' }]],
       ['fish', [{ id: 's2.1-pro-free', label: 'S2.1 Pro (free)', kind: 'speech' }, { id: 's2.1-pro', label: 'S2.1 Pro', kind: 'speech' }]],
-      ['elevenlabs', [{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }, { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }]],
+      ['elevenlabs', [{ id: 'scribe_v2_realtime', label: 'Scribe v2 Realtime', kind: 'recognition' }, { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }, { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }]],
     ] as const) {
       answer(200);
       const response = await send({ adapter, apiKey: KEY });

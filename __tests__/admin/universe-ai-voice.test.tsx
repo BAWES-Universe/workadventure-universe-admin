@@ -296,9 +296,10 @@ describe('New voice provider', () => {
     expect(within(listens).getAllByRole('radio').map((card) => card.textContent)).toEqual([
       'CartesiaListens and speaks. Uses your account at cartesia.ai.',
       'DeepgramListens and speaks. Uses your account at deepgram.com.',
+      'ElevenLabsListens and speaks. Uses your account at elevenlabs.io.',
       'SonioxListens. Uses your account at soniox.com.',
     ]);
-    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsSpeaks', 'Fish AudioSpeaks']);
+    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks']);
     expect(screen.queryByText('Recommended')).toBeNull();
     fireEvent.click(within(speaks).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByRole('heading', { name: 'Set up ElevenLabs' })).toBeTruthy();
@@ -380,7 +381,7 @@ describe('New voice provider, models the company lists (#840)', () => {
       body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech', note: '2 languages · Fast.' }, { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' }] },
     };
     render(<NewVoiceProviderPage />);
-    fireEvent.click(screen.getByRole('radio', { name: /^ElevenLabs/ }));
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Speaks' })).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByText('Check the key and ElevenLabs’s models show here to tick.')).toBeTruthy();
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk_0000000000000000a1b2' } });
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));

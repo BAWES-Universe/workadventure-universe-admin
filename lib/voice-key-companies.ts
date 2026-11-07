@@ -222,6 +222,12 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'elevenlabs',
     label: 'ElevenLabs',
     jobs: {
+      recognition: {
+        host: 'api.elevenlabs.io',
+        // Scribe v2 Realtime: ElevenLabs' real-time listening model. Its model list (GET /v1/models) holds speaking models only, so
+        // listening models are typed
+        models: [{ id: 'scribe_v2_realtime', label: 'Scribe v2 Realtime' }],
+      },
       speech: {
         host: 'api.elevenlabs.io',
         // eleven_v4_turbo: ElevenLabs' recommended real-time model, served over its Text to Dialogue socket (game #1848)
