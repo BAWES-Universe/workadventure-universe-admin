@@ -118,6 +118,15 @@ describe('Load models for a voice key', () => {
     },
   );
 
+  it('says Google refused a key it answers 400 API_KEY_INVALID, and counts any other 400 as not reached', async () => {
+    answer(400, '{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}');
+    const refused = await send({ adapter: 'google', apiKey: KEY });
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toEqual({ error: 'Google didn’t accept that key. Check it and paste it again.' });
+    answer(400, '{"error":{"code":400,"status":"FAILED_PRECONDITION"}}');
+    expect((await send({ adapter: 'google', apiKey: KEY })).status).toBe(502);
+  });
+
   it('says the company refused the key for a 401 or 403, and lists nothing', async () => {
     for (const status of [401, 403]) {
       answer(status);
