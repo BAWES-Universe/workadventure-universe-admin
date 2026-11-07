@@ -1,41 +1,75 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { exchangeOidcAccessToken, SessionExchangeError } from '@/lib/oidc-session-exchange';
 import { getPlayOrigin, requestOrigin } from '@/lib/origin-policy';
+import { isAllowedMobileOrigin } from '../mobile-redirect';
 
 export const runtime = 'nodejs';
 
-function corsResponse(request: Request, body: unknown, status = 200) {
-  const result = status === 204 ? new NextResponse(null, { status }) : NextResponse.json(body, { status });
+interface CorsPayload {
+  body: unknown;
+  status?: number;
+}
+
+/**
+ * Resolves the allowed CORS origin for session exchange: either the configured
+ * Universe play origin or an allowlisted native mobile/Capacitor origin.
+ */
+function resolveAllowedOrigin(request: Request): string | null {
+  const rawOrigin = request.headers.get('origin')?.trim() ?? '';
+  if (!rawOrigin) {
+    return null;
+  }
+  if (isAllowedMobileOrigin(rawOrigin)) {
+    return rawOrigin;
+  }
+  if (requestOrigin(request) === getPlayOrigin()) {
+    return getPlayOrigin();
+  }
+  return null;
+}
+
+function corsResponse(request: Request, payload: CorsPayload): NextResponse {
+  const status = payload.status ?? 200;
+  const result = status === 204 ? new NextResponse(null, { status }) : NextResponse.json(payload.body, { status });
   result.headers.set('Cache-Control', 'no-store');
   result.headers.set('Vary', 'Origin');
-  if (requestOrigin(request) === getPlayOrigin()) {
-    result.headers.set('Access-Control-Allow-Origin', getPlayOrigin());
+  const allowedOrigin = resolveAllowedOrigin(request);
+  if (allowedOrigin) {
+    result.headers.set('Access-Control-Allow-Origin', allowedOrigin);
     result.headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
     result.headers.set('Access-Control-Allow-Headers', 'Authorization');
   }
   return result;
 }
 
-function hasAllowedOrigin(request: Request): boolean {
-  return requestOrigin(request) === getPlayOrigin();
+function extractBearerToken(request: Request): string {
+  const authorization = request.headers.get('authorization') ?? '';
+  return authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
 }
 
 export async function OPTIONS(request: NextRequest) {
-  return corsResponse(request, {}, hasAllowedOrigin(request) ? 204 : 403);
+  const allowed = resolveAllowedOrigin(request) !== null;
+  return corsResponse(request, { body: {}, status: allowed ? 204 : 403 });
 }
 
 export async function POST(request: NextRequest) {
-  if (!hasAllowedOrigin(request)) return corsResponse(request, { error: 'Origin not allowed' }, 403);
+  if (!resolveAllowedOrigin(request)) {
+    return corsResponse(request, { body: { error: 'Origin not allowed' }, status: 403 });
+  }
 
-  const authorization = request.headers.get('authorization');
-  const accessToken = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
-  if (!accessToken) return corsResponse(request, { error: 'Missing access token' }, 400);
+  const accessToken = extractBearerToken(request);
+  if (!accessToken) {
+    return corsResponse(request, { body: { error: 'Missing access token' }, status: 400 });
+  }
 
   try {
-    return corsResponse(request, await exchangeOidcAccessToken(accessToken));
+    const exchanged = await exchangeOidcAccessToken(accessToken);
+    return corsResponse(request, { body: exchanged });
   } catch (error) {
-    if (error instanceof SessionExchangeError) return corsResponse(request, { error: error.message }, error.status);
+    if (error instanceof SessionExchangeError) {
+      return corsResponse(request, { body: { error: error.message }, status: error.status });
+    }
     console.error('[Session Exchange] Failed:', error);
-    return corsResponse(request, { error: 'Internal server error' }, 500);
+    return corsResponse(request, { body: { error: 'Internal server error' }, status: 500 });
   }
 }
