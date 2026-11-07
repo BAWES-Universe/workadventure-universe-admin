@@ -216,14 +216,25 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
         if (more === false || (typeof more !== 'boolean' && voices.length < PAGE_SIZE)) break;
         continue;
       }
-      const token = (answer as Record<string, unknown>)[spec.paging.next];
-      if (more !== true || typeof token !== 'string' || token === '') break;
+      const given = (answer as Record<string, unknown>)[spec.paging.next];
+      const token = spec.paging.nextIsLink ? linkParam(given, spec.paging.param) : given;
+      if ((spec.paging.more && more !== true) || typeof token !== 'string' || token === '') break;
       next = token;
     }
   }
   // A list that reaches the cap may hold more than is offered: said in the logs, so it's seen when a company's list outgrows it
   if (out.length >= MAX_VOICES) console.warn(`[voices] ${host} lists ${out.length > MAX_VOICES ? out.length : 'at least ' + MAX_VOICES} voices; the first ${MAX_VOICES} are offered`);
   return out.slice(0, MAX_VOICES);
+}
+
+/** The value of `param` in a next page's address, or null: the address itself is never followed. */
+function linkParam(link: unknown, param: string): string | null {
+  if (typeof link !== 'string' || link === '') return null;
+  try {
+    return new URL(link).searchParams.get(param);
+  } catch {
+    return null;
+  }
 }
 
 type Cached = { at: number; voices: Listed[] };
