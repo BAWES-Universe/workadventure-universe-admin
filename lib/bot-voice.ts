@@ -5,6 +5,7 @@ import { BotSettingsError } from '@/lib/bot-access-settings';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels, universeAiDefaults } from '@/lib/voice-providers';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
+import { isOwnSpeechAdapter } from '@/lib/voice-own-server';
 import { claimVoiceKeyTry, healthOf, tryIsDue } from '@/lib/voice-key-health';
 import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits, servedVoiceLimits } from '@/lib/voice-limits';
@@ -108,7 +109,8 @@ export function profileProblem(profile: VoiceProfile, providers: Map<string, Voi
     if (!provider) return `The provider chosen for ${job} doesn't exist`;
     if (!provider.enabled) return `${provider.name} is off`;
     if (!provider[part]) return `${provider.name} doesn't do ${job}`;
-    if (!provider.apiKeyEncrypted) return `${provider.name} has no key`;
+    // A speech server on a person's own computer may have no key (game #1874)
+    if (!provider.apiKeyEncrypted && !isOwnSpeechAdapter(provider.adapter)) return `${provider.name} has no key`;
     if (!readModels(provider.models).some((model) => model.kind === part && model.id === choice.model)) return `${provider.name} doesn't list the model ${choice.model} for ${job}`;
     const allowed = lent.get(provider.id);
     if (allowed && !allowed.includes(lendModelId({ kind: part, id: choice.model }))) return `${provider.name} isn't lent to this universe for the model ${choice.model}`;
