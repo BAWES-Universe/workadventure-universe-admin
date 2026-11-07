@@ -27,6 +27,7 @@
  * - assemblyai: GET /v2/transcript?limit=1, Authorization with the key as it is (no Bearer). It lists the account's own past
  *   transcripts: nothing is transcribed. A wrong key is 401.
  * - async: POST /voices with { limit: 1 }, x-api-key and version: v1. It lists voices: nothing is spoken. A wrong key is 401.
+ * - bland: GET /v1/voices, Authorization: Bearer. It lists voices: nothing is spoken.
  * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
  *   free account with no credit still has the answer, and that is fine: the free model needs none.
  */
@@ -208,6 +209,35 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On async.com, open your account settings, then API keys, and create a key.',
     docs: 'https://docs.async.com',
     check: { url: 'https://api.async.com/voices', header: 'x-api-key', prefix: '', headers: { version: 'v1' }, body: { limit: 1 } },
+  }),
+  company({
+    adapter: 'bland',
+    label: 'Bland',
+    jobs: {
+      speech: {
+        // Text to speech, one streamed request per reply (POST /v2/tts). A Bland voice sets its own model, so the model here
+        // only names the family; Bland has no model list a key can read for free (https://docs.bland.ai/tts/voices)
+        host: 'api.bland.ai',
+        models: [
+          { id: 'btts-3', label: 'Bland TTS v3' },
+          { id: 'btts-2', label: 'Bland TTS v2' },
+        ],
+        // GET /v1/voices: Bland's built-in voices, the account's own clones, and library voices it added, in one answer
+        voices: {
+          path: '/v1/voices',
+          list: 'voices',
+          paging: { kind: 'none' },
+          id: 'id',
+          name: 'name',
+          description: ['description', 'tags[]'],
+          languages: [],
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at bland.ai.',
+    step: 'On app.bland.ai, open Settings, then API keys, and copy your key.',
+    docs: 'https://docs.bland.ai/tts/welcome',
+    check: { url: 'https://api.bland.ai/v1/voices', header: 'Authorization', prefix: 'Bearer ' },
   }),
   company({
     adapter: 'cartesia',
