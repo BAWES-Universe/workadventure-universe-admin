@@ -17,7 +17,7 @@ import { LoadError, PageHeader } from '../../../components/ds';
 import { AiKeyFailure, aiKeyError, aiKeyFailureText } from '../../../hooks/use-ai-keys';
 import { useVoiceCompanies, voiceCompanyKind } from '../../../hooks/use-voice-keys';
 import type { VoiceModel } from '@/lib/voice-providers';
-import { OWN_SPEECH_ADAPTER, OWN_SPEECH_NAME } from '@/lib/voice-own-server';
+import { OWN_SPEECH_ADAPTER, OWN_SPEECH_NAME } from '@/lib/voice-own-constants';
 import { openLinkInGame, useLinksOpeningInGame } from '../../../components/orbit-bridge';
 
 type Models = { status: 'none' } | { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'voice'; models: VoiceModel[]; voices?: number | null; unsure?: string[] } | { status: 'failed'; message: string } | { status: 'typed' };

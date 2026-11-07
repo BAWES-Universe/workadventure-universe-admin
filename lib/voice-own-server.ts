@@ -1,6 +1,7 @@
 import { ADDRESS_PROBLEM_TEXT, AddressError, checkPublicHttpsUrl, parsePublicHttpsUrl, safeGet, type CheckedAddress } from '@/lib/ai-key-fetch';
 import { KEY_CHARACTERS, KEY_LOOKS_WRONG } from '@/lib/ai-key-models';
 import type { VoiceModel } from '@/lib/voice-providers';
+import { OWN_SPEECH_ADAPTER, OWN_SPEECH_LABEL, OWN_SPEECH_NAME } from '@/lib/voice-own-constants';
 
 /**
  * A speech server a person runs on their own computer (game #1874), reached through an https address such as a cloudflared tunnel,
@@ -18,10 +19,7 @@ import type { VoiceModel } from '@/lib/voice-providers';
  * `automatic-speech-recognition` or `text-to-speech`). When a model doesn't say, the person picks. Nothing is guessed from a model's name.
  */
 
-/** The adapter the game's worker runs this with. */
-export const OWN_SPEECH_ADAPTER = 'openai-compatible';
-export const OWN_SPEECH_LABEL = 'Any OpenAI-compatible speech server';
-export const OWN_SPEECH_NAME = 'My speech server';
+export { OWN_SPEECH_ADAPTER, OWN_SPEECH_LABEL, OWN_SPEECH_NAME };
 
 /** Starts at the address a person pastes; kept as `<origin>/v1`. */
 export const isOwnSpeechAdapter = (adapter: unknown): adapter is typeof OWN_SPEECH_ADAPTER => adapter === OWN_SPEECH_ADAPTER;
