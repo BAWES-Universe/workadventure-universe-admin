@@ -988,6 +988,18 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
 export const voiceKeyCompanyInfo = (adapter: unknown): VoiceKeyCompanyInfo | null =>
   VOICE_KEY_COMPANIES.find((entry) => entry.adapter === adapter) ?? null;
 
+/** The one speaking model a voice belongs to, when the company ties each voice to a model (Groq's Orpheus), or undefined. */
+export const fixedVoiceModel = (adapter: unknown, voiceId: string): string | undefined => {
+  const voices = voiceKeyCompanyInfo(adapter)?.jobs.speech?.voices;
+  return voices && 'fixed' in voices ? voices.fixed.find((voice) => voice.id === voiceId)?.model : undefined;
+};
+
+/** The company ties each voice to the models it speaks in (Groq's Orpheus, Rime, Smallest AI): a voice can't be moved to any other model. */
+export const voicesTiedToModels = (adapter: unknown): boolean => {
+  const voices = voiceKeyCompanyInfo(adapter)?.jobs.speech?.voices;
+  return !!voices && ('fixed' in voices ? voices.fixed.some((voice) => voice.model) : !!voices.model || !!voices.perModel);
+};
+
 /** What a company's line says it does, from the jobs Universe's own providers of it run. */
 export const voiceDoesLine = ({ recognition, speech }: { recognition: boolean; speech: boolean }) =>
   recognition && speech ? 'Listens and speaks' : recognition ? 'Listens' : 'Speaks';
