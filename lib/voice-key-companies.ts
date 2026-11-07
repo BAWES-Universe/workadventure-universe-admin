@@ -119,8 +119,11 @@ export interface VoiceListSpec {
    * listing names (Speechify): the voice is kept once, with every model it has.
    */
   model?: string;
-  /** The field holding a voice's id: text, or a whole number kept as its digits (CAMB.AI). */
-  id: string;
+  /**
+   * The field holding a voice's id: text, or a whole number kept as its digits (CAMB.AI). Several: the first one a voice has
+   * (Neuphonic's answer has carried both `voice_id` and `id`; its SDKs read one each).
+   */
+  id: string | string[];
   name: string;
   /** The first of these that says something: a field, or several fields joined with commas. */
   description: (string | { join: string[] })[];
@@ -944,7 +947,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
           path: '/voices',
           list: 'data.voices',
           paging: { kind: 'none' },
-          id: 'voice_id',
+          id: ['voice_id', 'id'],
           name: 'name',
           description: [{ join: ['tags[]'] }],
           languages: ['lang_code'],
@@ -1245,8 +1248,9 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     benefit: '{does}. Uses your account at speechify.ai.',
     step: 'On platform.speechify.ai, open API Keys and create a key.',
     docs: 'https://docs.speechify.ai',
-    // One voice from the voice list, free with the key as a bearer
-    check: { url: 'https://api.speechify.ai/v1/voices?limit=1', header: 'Authorization', prefix: 'Bearer ' },
+    // One voice from the voice list, free with the key as a bearer. The API version is pinned, as the bot server pins it for
+    // speaking (Pipecat's SPEECHIFY_API_VERSION), so the list and the check read the answer shape speaking was built for
+    check: { url: 'https://api.speechify.ai/v1/voices?limit=1', header: 'Authorization', prefix: 'Bearer ', headers: { 'Speechify-Version': '2026-09-30' } },
   }),
   company({
     adapter: 'speechmatics',

@@ -2,6 +2,7 @@ import type { Prisma, VoiceProvider } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { encryptApiKey } from '@/lib/encryption';
+import { voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 
 /**
  * Voice providers (#740): the speech companies a super admin sets up for the whole server. Each can listen (recognition),
@@ -171,6 +172,15 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
     const row = await tx.voiceProvider.findUnique({ where: { id } });
     if (!row || row.ownerId !== null) throw new VoiceProviderRefused('Voice provider not found', 404);
     const changesCompany = input.adapter !== undefined && input.adapter !== row.adapter;
+    // A company that lists each voice for the models it speaks (Rime) had the starting voice picked for the starting model, the
+    // first speaking one, which is the model Universe AI lends it with (borrowUniverseAi): a new starting model drops the voice
+    // unless a new one comes with the change, so a voice is never lent with a model it doesn't speak
+    const startingModel = (models: VoiceModel[]) => models.find((entry) => entry.kind === 'speech')?.id;
+    const changesStartingModel =
+      input.models !== undefined &&
+      !!voiceKeyCompanyInfo(input.adapter ?? row.adapter)?.jobs.speech?.voices?.model &&
+      startingModel(input.models) !== startingModel(readModels(row.models));
+    const dropsVoice = changesCompany || changesStartingModel;
     const next = {
       recognition: input.recognition ?? row.recognition,
       speech: input.speech ?? row.speech,
@@ -181,11 +191,11 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
       endpoint: input.endpoint === undefined ? row.endpoint : input.endpoint,
       // The name goes with its voice: a new voice id without a name drops the old name, and no voice has no name
       // A voice belongs to its company: a provider moved to another adapter loses it unless a new one comes with the change
-      defaultVoiceId: input.defaultVoiceId === undefined ? (changesCompany ? null : row.defaultVoiceId) : input.defaultVoiceId,
+      defaultVoiceId: input.defaultVoiceId === undefined ? (dropsVoice ? null : row.defaultVoiceId) : input.defaultVoiceId,
       defaultVoiceName:
         input.defaultVoiceName !== undefined
           ? input.defaultVoiceName
-          : (input.defaultVoiceId !== undefined && input.defaultVoiceId !== row.defaultVoiceId) || (input.defaultVoiceId === undefined && changesCompany)
+          : (input.defaultVoiceId !== undefined && input.defaultVoiceId !== row.defaultVoiceId) || (input.defaultVoiceId === undefined && dropsVoice)
             ? null
             : row.defaultVoiceName,
       hasKey: input.apiKey === undefined ? Boolean(row.apiKeyEncrypted) : input.apiKey !== null,
@@ -208,7 +218,7 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
         enabled: next.enabled,
         defaultRecognition: next.defaultRecognition,
         defaultSpeech: next.defaultSpeech,
-        ...(input.defaultVoiceId !== undefined || input.defaultVoiceName !== undefined || (changesCompany && row.defaultVoiceId)
+        ...(input.defaultVoiceId !== undefined || input.defaultVoiceName !== undefined || (dropsVoice && row.defaultVoiceId)
           ? { defaultVoiceId: next.defaultVoiceId, defaultVoiceName: next.defaultVoiceId ? next.defaultVoiceName : null }
           : {}),
       },
