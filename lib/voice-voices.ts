@@ -55,6 +55,8 @@ interface Listed {
   languages: string[];
   preview: string | null;
   previewNeedsKey: boolean;
+  /** The speaking models this voice speaks in, when the company ties voices to models (Amazon Polly's engines): one of them is used. */
+  models?: string[];
 }
 
 /** A source that can't be listed, with the line that says why (shown as it is). */
@@ -204,6 +206,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
           // A sample served with the key must be at the company's own address: the key never goes to one a listing names
           preview: sample && (!spec.previewNeedsKey || new URL(sample).host === host) ? sample : null,
           previewNeedsKey: spec.previewNeedsKey === true,
+          ...(spec.models ? { models: valuesAt(voice, spec.models).filter((entry): entry is string => typeof entry === 'string') } : {}),
         });
       }
       if (spec.paging.kind === 'none') break;
@@ -331,6 +334,8 @@ interface Source {
   provider: VoiceProvider;
   model: string;
   talk: boolean;
+  /** Every model of the same kind set up and allowed here, first to last: a voice tied to models (Amazon Polly) takes the first it speaks in. */
+  models: string[];
 }
 
 /**
@@ -360,7 +365,7 @@ async function sourceFor(botId: string, source: string): Promise<Source> {
   const usable = readModels(provider.models).filter((entry) => !allowed || allowed.includes(lendModelId(entry)));
   const model = usable.find((entry) => entry.kind === 'speech') ?? usable.find((entry) => entry.kind === 'talk');
   if (!model) throw new VoiceListRefused(`${provider.name} has no speaking model set up here.`, 409);
-  return { provider, model: model.id, talk: model.kind === 'talk' };
+  return { provider, model: model.id, talk: model.kind === 'talk', models: usable.filter((entry) => entry.kind === model.kind).map((entry) => entry.id) };
 }
 
 const previewPath = (botId: string, source: string, voiceId: string) =>
@@ -368,18 +373,25 @@ const previewPath = (botId: string, source: string, voiceId: string) =>
 
 /** The speaking voices of one source (`universe-ai` or a voice key's id) for a bot, in the order the company lists them. */
 export async function listBotVoices(botId: string, source: string): Promise<VoiceChoice[]> {
-  const { provider, model, talk } = await sourceFor(botId, source);
+  const { provider, model, talk, models } = await sourceFor(botId, source);
   const listed = await listedFor(provider, talk ? 'talk' : 'speech');
-  return listed.map((voice) => ({
-    voiceId: voice.voiceId,
-    name: voice.name,
-    description: voice.description,
-    languages: voice.languages,
-    previewUrl: !voice.preview ? null : voice.previewNeedsKey ? previewPath(botId, source, voice.voiceId) : voice.preview,
-    providerId: provider.id,
-    model,
-    talk,
-  }));
+  // A voice tied to models (Amazon Polly's engines) comes with the first of them set up and allowed here, and not at all when none is
+  return listed.flatMap((voice) => {
+    const own = voice.models ? models.find((id) => voice.models!.includes(id)) : model;
+    if (!own) return [];
+    return [
+      {
+        voiceId: voice.voiceId,
+        name: voice.name,
+        description: voice.description,
+        languages: voice.languages,
+        previewUrl: !voice.preview ? null : voice.previewNeedsKey ? previewPath(botId, source, voice.voiceId) : voice.preview,
+        providerId: provider.id,
+        model: own,
+        talk,
+      },
+    ];
+  });
 }
 
 export interface VoiceSample {
@@ -482,13 +494,18 @@ const serverPreviewPath = (providerId: string, voiceId: string) => `/api/admin/v
  */
 export async function listServerVoices(providerId: string): Promise<ServerVoiceChoice[]> {
   const provider = await serverSpeaker(providerId);
-  return (await listedFor(provider)).map((voice) => ({
-    voiceId: voice.voiceId,
-    name: voice.name,
-    description: voice.description,
-    languages: voice.languages,
-    previewUrl: !voice.preview ? null : voice.previewNeedsKey ? serverPreviewPath(provider.id, voice.voiceId) : voice.preview,
-  }));
+  // A voice tied to models (Amazon Polly's engines) is offered only when it speaks in the provider's starting model, the one a
+  // borrowed starting voice uses (borrowUniverseAi)
+  const starting = readModels(provider.models).find((entry) => entry.kind === 'speech')?.id;
+  return (await listedFor(provider))
+    .filter((voice) => !voice.models || (starting !== undefined && voice.models.includes(starting)))
+    .map((voice) => ({
+      voiceId: voice.voiceId,
+      name: voice.name,
+      description: voice.description,
+      languages: voice.languages,
+      previewUrl: !voice.preview ? null : voice.previewNeedsKey ? serverPreviewPath(provider.id, voice.voiceId) : voice.preview,
+    }));
 }
 
 /** One voice's free sample from a server provider that keeps it behind its key. */

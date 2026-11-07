@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { BotSettingsError } from '@/lib/bot-access-settings';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels, universeAiDefaults } from '@/lib/voice-providers';
-import { modelDoes, talksLive } from '@/lib/voice-key-companies';
+import { modelDoes, talksLive, voicesTiedToModels } from '@/lib/voice-key-companies';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
 import { isOwnSpeechAdapter } from '@/lib/voice-own-server';
 import { claimVoiceKeyTry, healthOf, tryIsDue } from '@/lib/voice-key-health';
@@ -76,6 +76,9 @@ export function followUniverseAi(profile: VoiceProfile, providers: Map<string, V
       profile.recognition.model === profile.speech.model &&
       !models.some((model) => model.kind === part && model.id === choice.model);
     const kind = talksLive(profile, models) || (talked && models.some((model) => model.kind === 'talk')) ? 'talk' : part;
+    // A voice tied to models (Amazon Polly's engines) keeps the one it was published on while the provider lists it. When it
+    // doesn't, the published one stays, so profileProblem says so rather than the voice going to a model it can't speak in
+    if (kind === 'speech' && voicesTiedToModels(provider.adapter)) return choice;
     const current = models.find((model) => model.kind === kind);
     return current && current.id !== choice.model ? { ...choice, model: current.id } : choice;
   };

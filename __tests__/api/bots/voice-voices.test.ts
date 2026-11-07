@@ -496,8 +496,8 @@ describe('AWS Polly\'s voices (#1886)', () => {
     lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
     fetchMock.mockImplementation(async () => json(polly));
     const list = await (await voices('part=speech&source=key-1')).json();
+    // Hala speaks with the neural engine only, which this key doesn't have
     expect(list.map((voice: Row) => [voice.voiceId, voice.description, voice.languages, voice.model, voice.talk])).toEqual([
-      ['Hala', 'Female, Gulf Arabic', ['ar'], 'generative', false],
       ['Joanna', 'Female, US English', ['en', 'es'], 'generative', false],
     ]);
     const [url, init] = fetchMock.mock.calls[0];
@@ -505,6 +505,17 @@ describe('AWS Polly\'s voices (#1886)', () => {
     const headers = (init as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE\/\d{8}\/eu-north-1\/polly\/aws4_request, SignedHeaders=host;x-amz-date, Signature=[0-9a-f]{64}$/);
     expect(JSON.stringify(init)).not.toContain('wJalrXUtnFEMI');
+  });
+
+  it('gives each voice the first engine set up on the key that it speaks with', async () => {
+    providers = [aws([{ id: 'generative', kind: 'speech' }, { id: 'neural', kind: 'speech' }])];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(polly));
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.model])).toEqual([
+      ['Hala', 'neural'],
+      ['Joanna', 'generative'],
+    ]);
   });
 
   it('gives Nova Sonic’s own voices, without calling AWS, when the key only talks live', async () => {

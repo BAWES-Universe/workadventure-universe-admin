@@ -94,6 +94,8 @@ export interface VoiceListSpec {
   passes?: string[];
   /** A voice is kept only when each of these fields, when the company sends it, has this value. */
   keep?: Record<string, string>;
+  /** The field listing the speaking models a voice speaks in (Amazon Polly's engines, `SupportedEngines[]`): only those are used with it. */
+  models?: string;
   id: string;
   name: string;
   /** The first of these that says something: a field, or several fields joined with commas. */
@@ -267,6 +269,8 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
           name: 'Name',
           description: [{ join: ['Gender', 'LanguageName'] }],
           languages: ['LanguageCode', 'AdditionalLanguageCodes[]'],
+          // Each voice works with some engines only (Joanna with all four, Danielle without standard…)
+          models: 'SupportedEngines[]',
         },
       },
       talk: {
@@ -744,6 +748,12 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
 
 export const voiceKeyCompanyInfo = (adapter: unknown): VoiceKeyCompanyInfo | null =>
   VOICE_KEY_COMPANIES.find((entry) => entry.adapter === adapter) ?? null;
+
+/** The company ties each voice to the models it speaks in (Amazon Polly's engines): a voice can't be moved to any other model. */
+export const voicesTiedToModels = (adapter: unknown): boolean => {
+  const voices = voiceKeyCompanyInfo(adapter)?.jobs.speech?.voices;
+  return !!voices && !!voices.models;
+};
 
 /** What a company's line says it does, from the jobs Universe's own providers of it run: "Listens and speaks", "Talks live"… */
 export const voiceDoesLine = ({ recognition, speech, talk = false }: { recognition: boolean; speech: boolean; talk?: boolean }) => {
