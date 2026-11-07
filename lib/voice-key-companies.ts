@@ -104,7 +104,8 @@ export interface VoiceListSpec {
 
 /** A company with no voice list to ask (Groq): its voices as its own docs name them, the same for every key. */
 export interface FixedVoices {
-  fixed: { id: string; name: string; description?: string; languages: string[] }[];
+  /** `model`: the one speaking model the voice belongs to, when the company ties each voice to a model (Groq's Orpheus). */
+  fixed: { id: string; name: string; description?: string; languages: string[]; model?: string }[];
 }
 
 /** One job a company does: its own address for it, the models a key starts with, and where it lists models and voices. */
@@ -511,8 +512,8 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
         // Groq has no voice list to ask: these are the voices its Orpheus page names
         voices: {
           fixed: [
-            ...['Autumn', 'Diana', 'Hannah', 'Austin', 'Daniel', 'Troy'].map((name) => ({ id: name.toLowerCase(), name, description: 'Orpheus English', languages: ['en'] })),
-            ...['Abdullah', 'Fahad', 'Sultan', 'Lulwa', 'Noura', 'Aisha'].map((name) => ({ id: name.toLowerCase(), name, description: 'Orpheus Arabic (Saudi)', languages: ['ar'] })),
+            ...['Autumn', 'Diana', 'Hannah', 'Austin', 'Daniel', 'Troy'].map((name) => ({ id: name.toLowerCase(), name, description: 'Orpheus English', languages: ['en'], model: 'canopylabs/orpheus-v1-english' })),
+            ...['Abdullah', 'Fahad', 'Sultan', 'Lulwa', 'Noura', 'Aisha'].map((name) => ({ id: name.toLowerCase(), name, description: 'Orpheus Arabic (Saudi)', languages: ['ar'], model: 'canopylabs/orpheus-arabic-saudi' })),
           ],
         },
       },
