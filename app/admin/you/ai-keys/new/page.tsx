@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type React from 'react';
 import { useRouter } from 'next/navigation';
-import { Check, Download, ExternalLink, KeyRound } from 'lucide-react';
+import { Check, Download, ExternalLink, KeyRound, ShieldCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { PickCard, Radio } from '@/components/ui/choice';
 import { Input } from '@/components/ui/input';
@@ -449,7 +449,7 @@ export default function AddAiKeyPage() {
             </div>
             <div className="grid gap-2" aria-live="polite">
               <Button type="button" variant="outline" className="h-11" disabled={!canLoad || models.status === 'loading'} onClick={() => void loadModels()}>
-                <Download aria-hidden="true" />
+                {account?.typedModel ? <ShieldCheck aria-hidden="true" /> : <Download aria-hidden="true" />}
                 {models.status === 'loading' ? (account?.typedModel ? 'Checking…' : 'Loading…') : account?.typedModel ? 'Check key' : 'Load models'}
               </Button>
               {models.status === 'none' && <p className={FIELD_HINT}>{account?.typedModel ? `Checks that ${info.label} takes the key.` : `Loads ${info.label}’s models, which also checks that it answers.`}</p>}
