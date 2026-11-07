@@ -811,10 +811,10 @@ export const fixedVoiceModel = (adapter: unknown, voiceId: string): string | und
   return voices && 'fixed' in voices ? voices.fixed.find((voice) => voice.id === voiceId)?.model : undefined;
 };
 
-/** The company ties each voice to the models it speaks in (Groq's Orpheus, Rime): a voice can't be moved to any other model. */
+/** The company ties each voice to the models it speaks in (Groq's Orpheus, Rime, Smallest AI): a voice can't be moved to any other model. */
 export const voicesTiedToModels = (adapter: unknown): boolean => {
   const voices = voiceKeyCompanyInfo(adapter)?.jobs.speech?.voices;
-  return !!voices && ('fixed' in voices ? voices.fixed.some((voice) => voice.model) : !!voices.model);
+  return !!voices && ('fixed' in voices ? voices.fixed.some((voice) => voice.model) : !!voices.model || !!voices.perModel);
 };
 
 /** What a company's line says it does, from the jobs Universe's own providers of it run. */

@@ -174,12 +174,14 @@ const unreadable = (call: Call) => new VoiceListRefused(`${call.company.label} s
  * page after page while the company says there are more, up to MAX_VOICES, each voice read from the fields the spec names. A page
  * that isn't a list, or a voice without an id, is a list that can't be read.
  */
-async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> {
+async function listFromSpec(call: Call, spec: VoiceListSpec, speechModels: string[] = []): Promise<Listed[]> {
   const out: Listed[] = [];
   const seen = new Set<string>();
   const host = new URL(call.base).host;
+  // Only the models set up on the key are asked for (Smallest AI): a model the account can't use may be refused, and its
+  // voices couldn't be spoken here anyway
   const runs = spec.perModel
-    ? spec.perModel.map((run) => ({ path: run.path, pass: '', model: run.model }))
+    ? spec.perModel.filter((run) => speechModels.includes(run.model)).map((run) => ({ path: run.path, pass: '', model: run.model }))
     : (spec.passes ?? ['']).map((pass) => ({ path: spec.path, pass, model: undefined }));
   for (const { path, pass, model: runModel } of runs) {
     let next: string | null = null;
@@ -310,7 +312,8 @@ async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
     } else {
       const call = callFor(provider);
       // A lister stops at its page limit, but never trusts that: no more than MAX_VOICES are kept or sent on
-      voices = (await listFromSpec(call, call.spec)).slice(0, MAX_VOICES);
+      const speechModels = readModels(provider.models).filter((entry) => entry.kind === 'speech').map((entry) => entry.id);
+      voices = (await listFromSpec(call, call.spec, speechModels)).slice(0, MAX_VOICES);
     }
   } catch (error) {
     if (error instanceof Unreadable) throw new VoiceListRefused(`${isOwnSpeechAdapter(provider.adapter) ? OWN_SPEECH_LABEL : (voiceKeyCompanyInfo(provider.adapter)?.label ?? provider.name)} sent a voice list that can’t be read.`, 502);
