@@ -117,7 +117,7 @@ describe('Check key', () => {
     fetchMock.mockImplementation(async (url: string) => json(lists[url] ?? {}));
     const models = async (adapter: string, job?: string) => (await (await post(checkPasted, { adapter, apiKey: SECRET, job })).json()).models;
     // Each with a line from what the company says about it, to help choose: its languages and its own description
-    expect(await models('elevenlabs')).toEqual([
+    expect(await models('elevenlabs', 'speech')).toEqual([
       { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech', note: '2 languages · Fast, low latency.' },
       { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' },
     ]);
@@ -127,6 +127,8 @@ describe('Check key', () => {
     ]);
     // Listed once per language: one model, its languages added up
     expect(await models('deepgram')).toEqual([{ id: 'nova-3-general', kind: 'recognition', note: '3 languages' }]);
+    // ElevenLabs lists no listening models: those are typed
+    expect(await models('elevenlabs', 'recognition')).toBeNull();
     // A company that listens and speaks lists each job's models from that job's own list (#844); its first job when none is named
     expect(await models('cartesia', 'speech')).toEqual([{ id: 'sonic-3', kind: 'speech' }]);
     expect(await models('cartesia', 'recognition')).toEqual([{ id: 'ink-whisper', kind: 'recognition' }]);
