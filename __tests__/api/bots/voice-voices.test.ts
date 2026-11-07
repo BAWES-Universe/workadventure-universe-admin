@@ -481,6 +481,41 @@ describe('languageCode', () => {
   });
 });
 
+describe('AWS Polly\'s voices (#1886)', () => {
+  const AWS_KEY = 'AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+  const aws = (models: Row[]) => key({ adapter: 'aws', name: 'My AWS', region: 'eu-north-1', recognition: true, speech: true, apiKeyEncrypted: encryptApiKey(AWS_KEY), models });
+  const polly = {
+    Voices: [
+      { Id: 'Hala', Name: 'Hala', Gender: 'Female', LanguageCode: 'ar-AE', LanguageName: 'Gulf Arabic', SupportedEngines: ['neural'] },
+      { Id: 'Joanna', Name: 'Joanna', Gender: 'Female', LanguageCode: 'en-US', LanguageName: 'US English', AdditionalLanguageCodes: ['es-US'], SupportedEngines: ['generative', 'neural', 'standard'] },
+    ],
+  };
+
+  it('lists them signed in the key’s own region, sending the ID and a signature but never the secret', async () => {
+    providers = [aws([{ id: 'generative', kind: 'speech' }, { id: 'amazon.nova-2-sonic-v1:0', kind: 'talk' }])];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(polly));
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.description, voice.languages, voice.model, voice.talk])).toEqual([
+      ['Hala', 'Female, Gulf Arabic', ['ar'], 'generative', false],
+      ['Joanna', 'Female, US English', ['en', 'es'], 'generative', false],
+    ]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://polly.eu-north-1.amazonaws.com/v1/voices?IncludeAdditionalLanguageCodes=true');
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE\/\d{8}\/eu-north-1\/polly\/aws4_request, SignedHeaders=host;x-amz-date, Signature=[0-9a-f]{64}$/);
+    expect(JSON.stringify(init)).not.toContain('wJalrXUtnFEMI');
+  });
+
+  it('gives Nova Sonic’s own voices, without calling AWS, when the key only talks live', async () => {
+    providers = [aws([{ id: 'amazon.nova-2-sonic-v1:0', kind: 'talk' }])];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list[0]).toEqual(expect.objectContaining({ voiceId: 'tiffany', model: 'amazon.nova-2-sonic-v1:0', talk: true }));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('a key with a talking model (game #1910)', () => {
   const openai = (models: Row[] = [{ id: 'gpt-realtime-2.1', kind: 'talk' }, { id: 'gpt-realtime-2.1-mini', kind: 'talk' }]) =>
     key({ adapter: 'openai', name: 'My OpenAI', recognition: true, speech: true, models });

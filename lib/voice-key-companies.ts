@@ -77,8 +77,13 @@ export interface VoiceListSpec {
   path: string;
   /** The field holding the voices; `a[].b[]` gathers them from inside a list (Soniox lists voices inside each model). */
   list: string;
-  /** The host voices are listed at, when it isn't the job's own (Soniox speaks at tts-rt.soniox.com, lists at api.soniox.com). */
+  /**
+   * The host voices are listed at, when it isn't the job's own (Soniox speaks at tts-rt.soniox.com, lists at api.soniox.com).
+   * `{region}` is the provider's region, for a list read in the key's own region (AWS).
+   */
   host?: string;
+  /** The list is asked for signed with the key (AWS Signature Version 4, for this service) in the provider's region, never sent the key. */
+  sign?: { service: string };
   /**
    * How the next page is asked for: a token the answer gives (`token`) or the last voice's id (`after`), sent as `param`, while
    * `more` says there is more; or a page number (`page`, from 1, in the path) while `more` says so, or, when the company doesn't
@@ -233,6 +238,35 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'aws',
     label: 'AWS',
     jobs: {
+      recognition: {
+        // Live hearing with Amazon Transcribe's streaming socket, signed with the key, as Pipecat's AWSTranscribeSTTService does. The
+        // region picked names the host: transcribestreaming.<region>.amazonaws.com. Transcribe names no model (#1886)
+        host: 'transcribestreaming.us-east-1.amazonaws.com',
+        models: [{ id: 'amazon-transcribe', label: 'Amazon Transcribe' }],
+      },
+      speech: {
+        // Text to speech with Amazon Polly (POST /v1/speech), signed with the key, as Pipecat's AWSPollyTTSService does. Each model is
+        // one of Polly's engines; the region picked names the host: polly.<region>.amazonaws.com
+        host: 'polly.us-east-1.amazonaws.com',
+        models: [
+          { id: 'generative', label: 'Polly Generative' },
+          { id: 'neural', label: 'Polly Neural' },
+          { id: 'long-form', label: 'Polly Long-Form' },
+          { id: 'standard', label: 'Polly Standard' },
+        ],
+        // GET /v1/voices (DescribeVoices), signed, in the key's region: every voice in one answer
+        voices: {
+          host: 'polly.{region}.amazonaws.com',
+          sign: { service: 'polly' },
+          path: '/v1/voices?IncludeAdditionalLanguageCodes=true',
+          list: 'Voices',
+          paging: { kind: 'none' },
+          id: 'Id',
+          name: 'Name',
+          description: [{ join: ['Gender', 'LanguageName'] }],
+          languages: ['LanguageCode', 'AdditionalLanguageCodes[]'],
+        },
+      },
       talk: {
         // The region picked on Add a key names the host: bedrock-runtime.<region>.amazonaws.com
         host: 'bedrock-runtime.us-east-1.amazonaws.com',
@@ -261,7 +295,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
       },
     },
     benefit: '{does}. Uses your AWS account, in the region you pick.',
-    step: 'In the AWS console, open IAM and create an access key for a user allowed bedrock:InvokeModelWithBidirectionalStream.',
+    step: 'In the AWS console, open IAM and create an access key for a user allowed what you use: transcribe:StartStreamTranscriptionWebSocket to listen, polly:SynthesizeSpeech and polly:DescribeVoices to speak, bedrock:InvokeModelWithBidirectionalStream to talk live.',
     docs: 'https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-2-sonic.html',
     account: {
       regions: [

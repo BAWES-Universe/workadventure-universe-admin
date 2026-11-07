@@ -127,7 +127,17 @@ describe('Load models for a voice key', () => {
       answer(200);
       const response = await send({ adapter: 'aws', apiKey: AWS, region: 'eu-north-1' });
       expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ ok: true, models: [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }] });
+      expect(await response.json()).toEqual({
+        ok: true,
+        models: [
+          { id: 'amazon-transcribe', label: 'Amazon Transcribe', kind: 'recognition' },
+          { id: 'generative', label: 'Polly Generative', kind: 'speech' },
+          { id: 'neural', label: 'Polly Neural', kind: 'speech' },
+          { id: 'long-form', label: 'Polly Long-Form', kind: 'speech' },
+          { id: 'standard', label: 'Polly Standard', kind: 'speech' },
+          { id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' },
+        ],
+      });
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toBe('https://sts.eu-north-1.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15');
       expect(init.method).toBe('GET');

@@ -214,8 +214,8 @@ describe('the list', () => {
       expect.objectContaining({
         adapter: 'aws',
         label: 'AWS',
-        recognition: false,
-        speech: false,
+        recognition: true,
+        speech: true,
         talk: true,
         account: expect.objectContaining({ regions: expect.arrayContaining([expect.objectContaining({ id: 'eu-north-1' })]), keyId: expect.objectContaining({ label: 'Access key ID' }), keyLabel: 'Secret access key' }),
       }),
@@ -235,7 +235,7 @@ describe('the list', () => {
     // Its line says only the jobs Universe runs for it, the same neutral shape for every company
     expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual([
       'Listens. Uses your account at assemblyai.com.',
-      'Talks live. Uses your AWS account, in the region you pick.',
+      'Listens, speaks and talks live. Uses your AWS account, in the region you pick.',
       'Talks live. Uses your Azure OpenAI resource.',
       'Listens and speaks. Uses your account at cartesia.ai.',
       'Listens and speaks. Uses your account at deepgram.com.',
