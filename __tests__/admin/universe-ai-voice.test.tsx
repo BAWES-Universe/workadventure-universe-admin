@@ -298,6 +298,7 @@ describe('New voice provider', () => {
       'DeepgramListens and speaks. Uses your account at deepgram.com.',
       'ElevenLabsListens and speaks. Uses your account at elevenlabs.io.',
       'SonioxListens. Uses your account at soniox.com.',
+      'ZoomListens and talks live. Talking live is in English. Uses your Zoom AI Services account.',
     ]);
     expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks']);
     expect(screen.queryByText('Recommended')).toBeNull();
