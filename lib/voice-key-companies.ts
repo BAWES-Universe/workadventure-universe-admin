@@ -78,7 +78,7 @@ export interface VoiceListSpec {
   path: string;
   /** Set when the company lists its voices with a POST: this JSON body, a `'{size}'` value being the page size (Async). */
   body?: Record<string, unknown>;
-  /** The field holding the voices, or '' when the answer is the list itself (CAMB.AI). */
+  /** The field holding the voices (`a.b` for a field inside a field: Neuphonic), or '' when the answer is the list itself (CAMB.AI). */
   list: string;
   /**
    * How the next page is asked for: a token the answer gives (`token`) or the last voice's id (`after`), sent as `param`, while
@@ -601,6 +601,32 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On console.mistral.ai, open API Keys and create a key.',
     docs: 'https://docs.mistral.ai/capabilities/audio/',
     check: { url: 'https://api.mistral.ai/v1/models', header: 'Authorization', prefix: 'Bearer ' },
+  }),
+  company({
+    adapter: 'neuphonic',
+    label: 'Neuphonic',
+    jobs: {
+      speech: {
+        // Text to speech, one streamed request per reply (POST /sse/speak/{language}), as Pipecat's NeuphonicHttpTTSService does.
+        // Neuphonic has no model to pick: the voice sets it (its own SDK, @neuphonic/neuphonic-js 0.10.2), so this only names it
+        host: 'api.neuphonic.com',
+        models: [{ id: 'neuphonic', label: 'Neuphonic TTS' }],
+        // GET /voices: Neuphonic's voices and the account's own clones in one answer, each with its language
+        voices: {
+          path: '/voices',
+          list: 'data.voices',
+          paging: { kind: 'none' },
+          id: 'voice_id',
+          name: 'name',
+          description: [{ join: ['tags[]'] }],
+          languages: ['lang_code'],
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at neuphonic.com.',
+    step: 'On app.neuphonic.com, open API Keys and create a key.',
+    docs: 'https://docs.neuphonic.com',
+    check: { url: 'https://api.neuphonic.com/voices', header: 'X-API-KEY', prefix: '' },
   }),
   company({
     adapter: 'soniox',
