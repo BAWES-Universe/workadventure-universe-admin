@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/db';
 import { KEY_CHARACTERS, KEY_LOOKS_WRONG } from '@/lib/ai-key-models';
-import { companyJobs, voiceKeyCompanyInfo, type VoiceCompanyJobName, type VoiceKeyCompanyInfo, type VoiceModelListSpec } from '@/lib/voice-key-companies';
+import { accountAddress, companyJobs, voiceKeyCompanyInfo, type VoiceCompanyJobName, type VoiceKeyCompanyInfo, type VoiceModelListSpec } from '@/lib/voice-key-companies';
 import { readModels, type VoiceModel } from '@/lib/voice-providers';
 
 /**
@@ -14,17 +14,21 @@ import { readModels, type VoiceModel } from '@/lib/voice-providers';
 export const CHECK_TIMEOUT_MS = 8_000;
 
 export type VoiceKeyLoad =
-  | { ok: true; models: VoiceModel[] }
+  /** `typed`: the company accepted the key, and its model is typed as the person named it (the catalog's `account.typedModel`). */
+  | { ok: true; models: VoiceModel[]; typed?: boolean }
   | { ok: false; reason: 'refused' | 'unreachable' | 'bad-request' | 'no-models'; message: string };
 
 /** What the company said about the key: accepted, turned it away, or nothing useful (so "try again"). */
 type Verdict = 'accepted' | 'refused' | 'unreachable';
 
-async function ask(company: VoiceKeyCompanyInfo, apiKey: string): Promise<Verdict> {
+async function ask(company: VoiceKeyCompanyInfo, apiKey: string, address: string | null): Promise<Verdict> {
   const { check } = company;
+  // The person's own address only ever comes checked (accountAddress): https, on the company's own hosts
+  const url = address ? check.url.replace('{address}', () => address) : check.url;
+  if (url.includes('{address}')) return 'unreachable';
   let response: Response | undefined;
   try {
-    response = await fetch(check.url, {
+    response = await fetch(url, {
       method: 'GET',
       headers: { Accept: 'application/json', ...check.headers, [check.header]: `${check.prefix}${apiKey}` },
       // A redirect would carry the key somewhere the catalog never named
@@ -76,15 +80,21 @@ export async function serverVoiceModels(adapter: string): Promise<VoiceModel[]> 
  * Checks a pasted key with its company and, when the company accepts it, answers with the models to list. `enabled` is the
  * adapters the caller may add (lib/voice-keys.ts, voiceKeyCompanies): every company in the catalog.
  */
-export async function loadVoiceKeyModels(adapter: unknown, apiKey: unknown, enabled: string[]): Promise<VoiceKeyLoad> {
+export async function loadVoiceKeyModels(adapter: unknown, apiKey: unknown, enabled: string[], typedAddress?: unknown): Promise<VoiceKeyLoad> {
   const company = voiceKeyCompanyInfo(adapter);
   if (!company || !enabled.includes(company.adapter)) return { ok: false, reason: 'bad-request', message: 'Pick a speech company from the list.' };
+  const address = company.account?.address ? accountAddress(company, typedAddress) : null;
+  if (company.account?.address && !address) {
+    return { ok: false, reason: 'bad-request', message: `Paste your ${company.account.address.label.toLowerCase()} as it is, like ${company.account.address.example}.` };
+  }
   const key = typeof apiKey === 'string' ? apiKey.trim() : '';
   if (!key) return { ok: false, reason: 'bad-request', message: `Paste your ${company.label} key first.` };
   if (!KEY_CHARACTERS.test(key)) return { ok: false, reason: 'bad-request', message: KEY_LOOKS_WRONG };
-  const verdict = await ask(company, key);
+  const verdict = await ask(company, key, address);
   if (verdict === 'refused') return { ok: false, reason: 'refused', message: `${company.label} didn’t accept that key. Check it and paste it again.` };
   if (verdict === 'unreachable') return { ok: false, reason: 'unreachable', message: `Couldn’t reach ${company.label}. Try again in a moment.` };
+  // Its model is typed as the person named it, once the company accepted the key
+  if (company.account?.typedModel) return { ok: true, models: [], typed: true };
   const models = await serverVoiceModels(company.adapter);
   if (models.length === 0) return { ok: false, reason: 'no-models', message: `${company.label} has no models set up here yet.` };
   return { ok: true, models };
@@ -184,7 +194,7 @@ export async function checkVoiceKeyWithCompany(adapter: unknown, apiKey: unknown
   const key = typeof apiKey === 'string' ? apiKey.trim() : '';
   if (!key) return { ok: false, reason: 'bad-request', message: `Paste the ${company.label} key first.` };
   if (!KEY_CHARACTERS.test(key)) return { ok: false, reason: 'bad-request', message: KEY_LOOKS_WRONG };
-  const verdict = await ask(company, key);
+  const verdict = await ask(company, key, null);
   if (verdict === 'refused') return { ok: false, reason: 'refused', message: `${company.label} turned this key away. Check that you copied all of it.` };
   if (verdict === 'unreachable') return { ok: false, reason: 'unreachable', message: `Couldn’t reach ${company.label}. Try again in a moment.` };
   return { ok: true };

@@ -28,6 +28,7 @@
  *   transcripts: nothing is transcribed. A wrong key is 401.
  * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
  *   free account with no credit still has the answer, and that is fine: the free model needs none.
+ * - azure: GET {address}/openai/v1/models on the person's own resource, api-key.
  * - openai: GET /v1/models, Authorization: Bearer.
  * - xai: GET /v1/tts/voices, Authorization: Bearer (lists the built-in voices; a wrong key is 401).
  */
@@ -115,6 +116,20 @@ export interface VoiceCompanyJob {
   fixedVoices?: FixedVoice[];
 }
 
+/**
+ * What a key needs besides the key, for a company whose keys live at the person's own address (Azure: their resource), with the
+ * model named as they deployed it. Each is one more field on Add a key, in its own words.
+ */
+export interface VoiceKeyAccount {
+  /**
+   * The address of the person's own account. Only an https address on one of `hosts` (host endings) is taken, so the key only
+   * ever goes to the company. It is kept as its origin (scheme and host), the address the bot server calls.
+   */
+  address?: { label: string; example: string; hint: string; hosts: string[] };
+  /** The model is typed, as the person named it at the company (Azure: the deployment name), for this job. */
+  typedModel?: { title: string; label: string; hint: string; kind: VoiceCompanyJobName };
+}
+
 /** One company, everything about it in one place. */
 export interface VoiceKeyCompanyEntry {
   adapter: string;
@@ -134,7 +149,9 @@ export interface VoiceKeyCompanyEntry {
   step: string;
   /** Where to read about the company and get a key. */
   docs: string;
+  account?: VoiceKeyAccount;
   check: {
+    /** `{address}` stands for the person's own address, for a company with one (`account.address`). */
     url: string;
     /** The header the key goes in, and what comes before it there (`Bearer `, `Token `, or nothing). */
     header: string;
@@ -185,6 +202,50 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On assemblyai.com, open your dashboard, then API Keys, and copy a key.',
     docs: 'https://www.assemblyai.com/docs',
     check: { url: 'https://api.assemblyai.com/v2/transcript?limit=1', header: 'Authorization', prefix: '' },
+  }),
+  company({
+    adapter: 'azure',
+    label: 'Azure OpenAI',
+    jobs: {
+      talk: {
+        // The person's own resource address is always typed (`account.address`): there is no one host for every key
+        host: 'openai.azure.com',
+        // Typed: an Azure model is called by the name it was deployed under
+        models: [],
+        // The same realtime voices as OpenAI's, from Azure's realtime docs
+        fixedVoices: [
+          { id: 'marin', name: 'Marin' },
+          { id: 'cedar', name: 'Cedar' },
+          { id: 'alloy', name: 'Alloy' },
+          { id: 'ash', name: 'Ash' },
+          { id: 'ballad', name: 'Ballad' },
+          { id: 'coral', name: 'Coral' },
+          { id: 'echo', name: 'Echo' },
+          { id: 'sage', name: 'Sage' },
+          { id: 'shimmer', name: 'Shimmer' },
+          { id: 'verse', name: 'Verse' },
+        ],
+      },
+    },
+    benefit: '{does}. Uses your Azure OpenAI resource.',
+    step: 'In the Azure portal, open your Azure OpenAI resource, deploy gpt-realtime-2.1 or gpt-realtime-2.1-mini, then copy Key 1 and the Endpoint from Keys and Endpoint.',
+    docs: 'https://learn.microsoft.com/azure/foundry/openai/how-to/realtime-audio-websockets',
+    account: {
+      address: {
+        label: 'Endpoint',
+        example: 'https://your-resource.openai.azure.com',
+        hint: 'From Keys and Endpoint on your resource. It ends in openai.azure.com, cognitiveservices.azure.com or services.ai.azure.com.',
+        hosts: ['.openai.azure.com', '.cognitiveservices.azure.com', '.services.ai.azure.com'],
+      },
+      typedModel: {
+        title: 'Name its deployment',
+        label: 'Deployment name',
+        hint: 'The name you gave the gpt-realtime deployment, as Azure shows it under Deployments.',
+        kind: 'talk',
+      },
+    },
+    // GET /openai/v1/models on the person's own resource: free, and a wrong key is 401
+    check: { url: '{address}/openai/v1/models', header: 'api-key', prefix: '' },
   }),
   company({
     adapter: 'cartesia',
@@ -460,3 +521,27 @@ export const companyHost = (adapter: string, job?: VoiceCompanyJobName): string 
   if (!info) return undefined;
   return info.jobs[job ?? companyJobs(info)[0]]?.host;
 };
+
+/**
+ * The person's own account address for a company that has one, as kept: its https origin. Null when it is not an https address on
+ * one of the company's hosts (the key only ever goes there), with no user, password or port.
+ */
+export function accountAddress(info: Pick<VoiceKeyCompanyEntry, 'account'>, typed: unknown): string | null {
+  const spec = info.account?.address;
+  if (!spec || typeof typed !== 'string') return null;
+  let url: URL;
+  try {
+    url = new URL(typed.trim());
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port) return null;
+  const host = url.hostname.toLowerCase();
+  // A host name is letters, digits, dots and dashes: anything else ($, ', &) would read as more than a host further on
+  if (!/^[a-z0-9.-]+$/.test(host)) return null;
+  if (!spec.hosts.some((ending) => host.endsWith(ending) && host.length > ending.length)) return null;
+  return `https://${host}`;
+}
+
+/** A model name a person typed (an Azure deployment name): letters, digits, dot, dash and underscore, up to 64. */
+export const TYPED_MODEL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;

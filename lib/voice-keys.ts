@@ -5,7 +5,7 @@ import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { lendAccess, parseLendModels } from '@/lib/ai-key-lend';
 import { readModels, voiceProviderProblem, type VoiceModel } from '@/lib/voice-providers';
 import { lendModelId } from '@/lib/voice-lend-model';
-import { VOICE_KEY_COMPANIES, modelDoes, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { TYPED_MODEL, VOICE_KEY_COMPANIES, accountAddress, modelDoes, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { checkVoiceKeyLimits, readVoiceKeyLimits, savedVoiceKeyLimits, VOICE_KEY_LIMIT_NAMES, type VoiceKeyLimitValues } from '@/lib/voice-limit-values';
@@ -32,6 +32,8 @@ export interface VoiceKeyCompany {
   benefit: string;
   step: string;
   docs: string;
+  /** What a key needs besides the key (Azure: the resource's address, and the deployment name typed as its model); null for none. */
+  account: { address?: { label: string; example: string; hint: string }; typedModel?: { title: string; label: string; hint: string; kind: 'recognition' | 'speech' | 'talk' } } | null;
   /**
    * Set for the one entry that is a speech server on the person's own computer, not a company (game #1874): it is added with an
    * https address and an optional key, and these are its setup steps. Absent for every company.
@@ -64,6 +66,12 @@ export async function voiceKeyCompanies(): Promise<VoiceKeyCompany[]> {
       benefit: info.benefit.replace('{does}', voiceDoesLine(does)),
       step: info.step,
       docs: info.docs,
+      account: info.account
+        ? {
+            ...(info.account.address ? { address: { label: info.account.address.label, example: info.account.address.example, hint: info.account.address.hint } } : {}),
+            ...(info.account.typedModel ? { typedModel: info.account.typedModel } : {}),
+          }
+        : null,
     };
   });
   // The own speech server is not a company: it comes last, and the page shows it in a group of its own. What it does is up to the server.
@@ -78,6 +86,7 @@ export async function voiceKeyCompanies(): Promise<VoiceKeyCompany[]> {
       talk: false,
       logo: null,
       benefit: OWN_SPEECH_ENTRY.benefit,
+      account: null,
       step: '',
       docs: '',
       ownServer: { steps: OWN_SPEECH_ENTRY.steps.map((step) => ({ ...step })) },
@@ -109,6 +118,8 @@ export const createVoiceKeySchema = z
     apiKey: fields.ownApiKey.optional(),
     address: fields.address.optional(),
     models: fields.models.default([]),
+    /** The person's own account address, for a company whose keys live there (Azure: the resource's endpoint). */
+    endpoint: z.string().trim().max(500).optional(),
   })
   .strict();
 
@@ -291,6 +302,14 @@ const owned = (id: string, ownerId: string) => prisma.voiceProvider.findFirst({ 
 const problem = (draft: { recognition: boolean; speech: boolean; models: VoiceModel[] }) =>
   voiceProviderProblem({ ...draft, enabled: true, defaultRecognition: false, defaultSpeech: false, hasKey: true });
 
+/** A model typed as the person named it (an Azure deployment): one, of the company's job, named the way the company allows. */
+function checkTypedModel(adapter: string, models: VoiceModel[]): void {
+  const typed = voiceKeyCompanyInfo(adapter)?.account?.typedModel;
+  if (typed && (models.length !== 1 || models[0].kind !== typed.kind || !TYPED_MODEL.test(models[0].id))) {
+    throw new VoiceKeyRefused(`Type the ${typed.label.toLowerCase()}: letters, digits, dots, dashes and underscores, up to 64`);
+  }
+}
+
 export async function createVoiceKey(ownerId: string, input: z.infer<typeof createVoiceKeySchema>): Promise<VoiceKeySummary> {
   const refused = problem(input);
   if (refused) throw new VoiceKeyRefused(refused);
@@ -319,8 +338,17 @@ export async function createVoiceKey(ownerId: string, input: z.infer<typeof crea
       throw new VoiceKeyRefused(`${company.label} doesn’t do ${input.recognition && !can.recognition ? 'listening' : 'speaking'}`);
     }
     apiKey = input.apiKey;
+    // A key that lives at the person's own account address (Azure) keeps that address, checked; no other company key has one
+    const info = voiceKeyCompanyInfo(input.adapter);
+    if (info?.account?.address) {
+      endpoint = accountAddress(info, input.endpoint);
+      if (!endpoint) throw new VoiceKeyRefused(`Paste your ${info.account.address.label.toLowerCase()} as it is, like ${info.account.address.example}`);
+    } else if (input.endpoint !== undefined) {
+      throw new VoiceKeyRefused(`${company.label} keys don’t take an address`);
+    }
   }
   if (input.models.some((model) => model.kind === 'talk') && !company.talk) throw new VoiceKeyRefused(`${company.label} doesn’t talk live`);
+  checkTypedModel(input.adapter, input.models);
   const row = await prisma.voiceProvider.create({
     data: {
       adapter: input.adapter,
@@ -394,6 +422,7 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
     const models = input.models ?? readModels(row.models);
     const refused = problem({ recognition: row.recognition, speech: row.speech, models });
     if (refused) throw new VoiceKeyRefused(refused);
+    if (input.models !== undefined) checkTypedModel(row.adapter, models);
     // Only what the owner changed is kept: a value picked that is the server's own now is dropped, so it follows the server from then on.
     // Only the names sent are looked at: a limit saved earlier that happens to equal the server's today stays saved
     let voiceLimits: Prisma.InputJsonValue | typeof Prisma.DbNull | undefined;

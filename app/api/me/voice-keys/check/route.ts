@@ -17,10 +17,11 @@ export async function OPTIONS(request: NextRequest) {
 const STATUS = { refused: 422, unreachable: 502, 'bad-request': 400, 'no-models': 409 } as const;
 
 /**
- * POST /api/me/voice-keys/check { adapter, apiKey } - "Load models" for a voice key (#749): one free, authenticated call to the
+ * POST /api/me/voice-keys/check { adapter, apiKey, address? } - "Load models" for a voice key (#749): one free, authenticated call to the
  * company with the pasted key, to see that it accepts it. Nothing is saved, transcribed or spoken, so nothing is billed, and the
  * key is never logged or returned. Answers 200 `{ ok: true, models }`, the models the server's own providers for that company list
- * (`[{ id, label?, kind: "recognition" | "speech" }]`, each kind and id once), or `{ error }` with a plain sentence: 422 the company
+ * (`[{ id, label?, kind: "recognition" | "speech" | "talk" }]`, each kind and id once; none and `typed: true` for a company whose
+ * model is typed, like an Azure deployment, checked on the person's own `address`), or `{ error }` with a plain sentence: 422 the company
  * didn't accept the key, 502 it couldn't be reached (timeout or any other answer), 400 the company or key isn't usable, 409 the
  * company has no models set up, 429 too many tries (the same limit as the text keys' checks).
  *
@@ -43,9 +44,9 @@ export async function POST(request: NextRequest) {
       if (!own.ok) return respond(request, { error: own.message }, STATUS[own.reason]);
       return respond(request, { ok: true, models: own.models, unsure: own.unsure, voices: own.voices });
     }
-    const result = await loadVoiceKeyModels(input.adapter, input.apiKey, (await voiceKeyCompanies()).map((company) => company.adapter));
+    const result = await loadVoiceKeyModels(input.adapter, input.apiKey, (await voiceKeyCompanies()).map((company) => company.adapter), input.address);
     if (!result.ok) return respond(request, { error: result.message }, STATUS[result.reason]);
-    return respond(request, { ok: true, models: result.models });
+    return respond(request, { ok: true, models: result.models, ...(result.typed ? { typed: true } : {}) });
   } catch (error) {
     console.error('[VoiceKeys] Load models failed:', error instanceof Error ? error.message : 'unknown');
     return respond(request, { error: 'Something went wrong on our side. Try again.' }, 500);

@@ -85,9 +85,11 @@ describe('Load models for a voice key', () => {
   it.each(VOICE_KEY_COMPANIES.map((company) => [company.adapter, company]))('%s: a GET to its own address with the key in one header and nothing billed', async (adapter, company) => {
     findMany.mockResolvedValue([{ adapter, name: company.label, recognition: true, speech: true, models: [{ id: 'm', kind: 'speech' }] }]);
     answer(200);
-    expect((await send({ adapter, apiKey: KEY })).status).toBe(200);
+    // A company whose keys live at the person's own address (Azure) is asked there
+    const address = company.account?.address ? 'https://my-resource.openai.azure.com' : undefined;
+    expect((await send({ adapter, apiKey: KEY, ...(address ? { address } : {}) })).status).toBe(200);
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe(company.check.url);
+    expect(url).toBe(company.check.url.replace('{address}', address ?? ''));
     expect(new URL(url).protocol).toBe('https:');
     expect(init.method).toBe('GET');
     expect(init.body).toBeUndefined();
@@ -95,6 +97,26 @@ describe('Load models for a voice key', () => {
     expect(init.headers[company.check.header]).toBe(`${company.check.prefix}${KEY}`);
     expect(Object.values(init.headers).filter((value) => String(value).includes(KEY))).toHaveLength(1);
   });
+
+  it('checks an Azure key on the person’s own resource, then asks for the deployment to be typed', async () => {
+    answer(200);
+    const response = await send({ adapter: 'azure', apiKey: KEY, address: 'https://My-Res.openai.azure.com/openai/v1' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, models: [], typed: true });
+    expect(fetchMock.mock.calls[0][0]).toBe('https://my-res.openai.azure.com/openai/v1/models');
+    expect(fetchMock.mock.calls[0][1].headers['api-key']).toBe(KEY);
+  });
+
+  it.each([undefined, '', 'my-res', 'http://my-res.openai.azure.com', 'https://evil.example.com', 'https://openai.azure.com', 'https://my-res.openai.azure.com.evil.com', 'https://u:p@my-res.openai.azure.com'])(
+    'never sends an Azure key to %p',
+    async (address) => {
+      answer(200);
+      const response = await send({ adapter: 'azure', apiKey: KEY, address });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'Paste your endpoint as it is, like https://your-resource.openai.azure.com.' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
 
   it('says the company refused the key for a 401 or 403, and lists nothing', async () => {
     for (const status of [401, 403]) {
