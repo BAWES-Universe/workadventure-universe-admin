@@ -17,7 +17,8 @@ const NAME = /^[a-z0-9][a-z0-9-]{0,48}$/;
 const modelSchema = z.object({
   id: z.string().trim().min(1, 'A model needs an id').max(255),
   label: z.string().trim().max(255).optional(),
-  kind: z.enum(['recognition', 'speech']),
+  // talk: a talking model, which listens and speaks in one (game #1910)
+  kind: z.enum(['recognition', 'speech', 'talk']),
 });
 
 export type VoiceModel = z.infer<typeof modelSchema>;
@@ -122,7 +123,8 @@ type Draft = Pick<VoiceProvider, 'recognition' | 'speech' | 'enabled' | 'default
 /** Why a provider can't be saved like this, or null. A default must be enabled, hold its key and do its job. */
 export function voiceProviderProblem(draft: Draft): string | null {
   if (!draft.recognition && !draft.speech) return 'A provider must listen, speak, or both';
-  if (draft.models.some((model) => !draft[model.kind])) return 'A model can only be listed for what the provider does';
+  // A talking model listens and speaks in one, so it is listed only for a provider that does both
+  if (draft.models.some((model) => (model.kind === 'talk' ? !(draft.recognition && draft.speech) : !draft[model.kind]))) return 'A model can only be listed for what the provider does';
   if (draft.defaultVoiceId && !draft.speech) return 'Only a provider that speaks can have a default voice';
   if (draft.defaultVoiceName && !draft.defaultVoiceId) return 'A default voice name needs the default voice';
   // A speaking call and the list of voices go to the address over https, so a websocket address is for a provider that only listens
