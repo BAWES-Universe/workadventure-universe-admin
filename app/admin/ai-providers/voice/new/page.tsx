@@ -102,7 +102,7 @@ export default function NewVoiceProviderPage() {
   // The models the company listed for the key, to tick; typed instead when it has no list, the list couldn't be read, or the company
   // turned the key away (it may still be added for an address typed under Its own address)
   const listed = check.status === 'ok' ? check.listed : null;
-  const typing = !info?.models || (check.status === 'ok' && !listed) || check.status === 'refused';
+  const typing = !info?.modelList || (check.status === 'ok' && !listed) || check.status === 'refused';
 
   async function add() {
     if (!info || !canAdd) return;
@@ -205,7 +205,7 @@ export default function NewVoiceProviderPage() {
               </Button>
               {check.status === 'none' && (
                 <p className={FIELD_HINT}>
-                  Asks {info.label} if it knows the key{info.models ? ' and which models it has' : ''}. Nothing is spoken or heard, so nothing is paid.
+                  Asks {info.label} if it knows the key{info.modelList ? ' and which models it has' : ''}. Nothing is spoken or heard, so nothing is paid.
                   {address.trim() !== '' && ` The check goes to ${info.label}’s own address, not the one under Its own address.`}
                 </p>
               )}
@@ -237,13 +237,28 @@ export default function NewVoiceProviderPage() {
             ) : typing ? (
               <>
                 <p className={FIELD_HINT}>
-                  {info.models
+                  {info.modelList
                     ? check.status === 'refused'
-                      ? `Type each model as ${info.label} writes it.`
-                      : `Couldn’t read ${info.label}’s list of models, so type each as ${info.label} writes it.`
-                    : `${info.label} doesn’t share a list of its models, so type each as ${info.label} writes it.`}{' '}
+                      ? `Tick the models Universe knows for ${info.label}, or type one as ${info.label} writes it.`
+                      : `Couldn’t read ${info.label}’s list of models. Tick the ones Universe knows for it, or type one as ${info.label} writes it.`
+                    : `${info.label} doesn’t share a list of its models. Tick the ones Universe knows for it, or type one as ${info.label} writes it.`}{' '}
                   Bots on Universe AI, and people’s own {info.label} keys, can use only the models listed here. The first one is what bots start on.
                 </p>
+                {info.models.length > 0 && (
+                  <VoiceModelPicker
+                    models={info.models}
+                    mode="many"
+                    label={`${info.label} models`}
+                    picked={models.map(lendModelId)}
+                    onChange={(ids) =>
+                      // Ticking keeps a typed model where it is; a model ticked off goes, one ticked on goes last
+                      setModels([
+                        ...models.filter((model) => ids.includes(lendModelId(model)) || !info.models.some((known) => lendModelId(known) === lendModelId(model))),
+                        ...info.models.filter((known) => ids.includes(lendModelId(known)) && !models.some((model) => lendModelId(model) === lendModelId(known))),
+                      ])
+                    }
+                  />
+                )}
                 <ModelRows models={models} jobs={[job]} onChange={setModels} disabled={saving} />
               </>
             ) : (

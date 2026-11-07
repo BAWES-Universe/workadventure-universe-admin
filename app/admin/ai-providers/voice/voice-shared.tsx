@@ -11,7 +11,7 @@ import { Check, Plus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { VOICE_KEY_COMPANIES, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import type { VoiceModel } from '@/lib/voice-providers';
 
 export type VoiceJob = 'recognition' | 'speech';
@@ -37,7 +37,9 @@ export interface ServerVoiceProvider {
 }
 
 /** The companies a super admin can add, grouped by what each does in Universe (the game's connectors: Soniox and Deepgram listen, ElevenLabs, Cartesia and Fish Audio speak). */
-export const COMPANY_JOBS: Record<string, VoiceJob> = { soniox: 'recognition', deepgram: 'recognition', elevenlabs: 'speech', cartesia: 'speech', fish: 'speech' };
+export const COMPANY_JOBS: Record<string, VoiceJob> = Object.fromEntries(
+  VOICE_KEY_COMPANIES.map((company) => [company.adapter, company.does.speech ? 'speech' : 'recognition'] as const)
+);
 
 /** The company's own address, as the bot server calls it when nothing else is typed. */
 export const COMPANY_HOST: Record<string, string> = { soniox: 'stt-rt.soniox.com', deepgram: 'api.deepgram.com', elevenlabs: 'api.elevenlabs.io', cartesia: 'api.cartesia.ai', fish: 'api.fish.audio' };

@@ -64,6 +64,8 @@ beforeEach(() => {
 });
 
 const patches = () => calls.filter((call) => call.method === 'PATCH');
+// The models on a provider's list (the ticks Universe offers are model rows too)
+const listedRows = () => screen.queryAllByTestId('model-row').filter((row) => row.tagName === 'LI');
 
 describe('the Voice part', () => {
   it('says what Universe AI listens and speaks with, lists the providers with their bots, and names the companies people can add keys for', async () => {
@@ -309,7 +311,7 @@ describe('New voice provider', () => {
     fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'eleven_flash_v2_5' } });
     fireEvent.change(screen.getByLabelText('Name people see (optional)'), { target: { value: 'Flash v2.5' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
-    expect(screen.getAllByTestId('model-row')).toHaveLength(1);
+    expect(listedRows()).toHaveLength(1);
     expect(add.hasAttribute('disabled')).toBe(false);
     // A key changed after the check has to be checked again
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk_0000000000000000zzzz' } });
@@ -375,11 +377,26 @@ describe('New voice provider, models the company lists (#840)', () => {
     ]);
   });
 
-  it('asks for the models to be typed for a company that shares no list', async () => {
+  it('offers the models Universe knows to tick, or one to type, for a company that shares no list', async () => {
     render(<NewVoiceProviderPage />);
     fireEvent.click(screen.getByRole('radio', { name: /^Fish Audio/ }));
-    expect(screen.getByText(/Fish Audio doesn’t share a list of its models, so type each as Fish Audio writes it\./)).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Add a model' })).toBeTruthy();
+    expect(screen.getByText(/Fish Audio doesn’t share a list of its models\. Tick the ones Universe knows for it, or type one as Fish Audio writes it\./)).toBeTruthy();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'S2.1 Pro' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 's2-pro' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'S2.1 Pro (free)' }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'fish-key-12345678' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await screen.findByText('Fish Audio knows this key. Nothing was spoken, so nothing was paid.');
+    fireEvent.click(screen.getByRole('button', { name: 'Add provider' }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/ai-providers'));
+    const post = calls.find((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers');
+    expect(post?.body?.models).toEqual([
+      { id: 's2.1-pro', label: 'S2.1 Pro', kind: 'speech' },
+      { id: 's2-pro', kind: 'speech' },
+      { id: 's2.1-pro-free', label: 'S2.1 Pro (free)', kind: 'speech' },
+    ]);
   });
 });
 
@@ -393,11 +410,11 @@ describe('New voice provider, Enter in a model field', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
     fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'stt-rt-v6' } });
     fireEvent.keyDown(screen.getByLabelText('Model id'), { key: 'Enter' });
-    await waitFor(() => expect(screen.getAllByTestId('model-row')).toHaveLength(1));
+    await waitFor(() => expect(listedRows()).toHaveLength(1));
     fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
     fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'second' } });
     fireEvent.keyDown(screen.getByLabelText('Name people see (optional)'), { key: 'Enter' });
-    await waitFor(() => expect(screen.getAllByTestId('model-row')).toHaveLength(2));
+    await waitFor(() => expect(listedRows()).toHaveLength(2));
     expect(calls.some((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers')).toBe(false);
   });
 });

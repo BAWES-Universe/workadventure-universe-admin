@@ -3,13 +3,15 @@
  * the name the bot server runs a provider with (lowercase, exactly as the server's own voice providers name it). Free of server
  * code, so the Add a key page and the routes read the same entries.
  *
- * Which of them a person can add is still the super admin's call (lib/voice-keys.ts, voiceKeyCompanies): only a company with at
- * least one enabled server provider is offered, and what it listens and speaks with is what those providers list. Everything
- * else about a company is data here, one entry each, never `if (adapter === ...)` in the logic.
+ * Every company here is offered to everyone, with no setup by a super admin (lib/voice-keys.ts, voiceKeyCompanies): what it does
+ * (`does`) and the models a key starts with (`models`) are data in its entry. If the server has its own provider for a company
+ * switched on (the one Universe AI runs on), that provider's job and model list are used instead of the entry's models, so an
+ * operator can keep them current without a deploy. Everything else about a company is data here, one entry each, never
+ * `if (adapter === ...)` in the logic.
  *
- * `models` is where a company lists its models (GET, the same key header): Soniox GET /v1/models (real-time ones), Deepgram GET
+ * `modelList` is where a company lists its models (GET, the same key header): Soniox GET /v1/models (real-time ones), Deepgram GET
  * /v1/models (streaming listening ones), ElevenLabs GET /v1/models (speaking ones), Cartesia GET /models?capability=tts. Fish Audio
- * has no such list, so its models are typed.
+ * has no such list, so its models are typed on New voice provider.
  *
  * `check` is the one free, authenticated call "Load models" makes with a pasted key, to see that the company accepts it. It lists
  * something or returns the account's own details: nothing is transcribed or spoken, so nothing is billed. Chosen from each
@@ -23,9 +25,23 @@
  * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
  *   free account with no credit still has the answer, and that is fine: the free model needs none.
  */
+/** A model a key can be used with, as the bot server calls it. The first one of a job is the one a bot starts on. */
+export interface VoiceKeyCompanyModel {
+  id: string;
+  label: string;
+  kind: 'recognition' | 'speech';
+}
+
 export interface VoiceKeyCompanyInfo {
   adapter: string;
   label: string;
+  /** What the game's connector for this company does: listens, speaks, or both. */
+  does: { recognition: boolean; speech: boolean };
+  /**
+   * The models a key for this company starts with, checked against the company's own docs on 7 Nov 2026. Used when the server
+   * has no provider of its own for the company with models listed.
+   */
+  models: VoiceKeyCompanyModel[];
   /** The provider's logo: a file in `public/ai-providers/` without `.svg`. Absent when we have none; then a chip is drawn. */
   logo?: string;
   /**
@@ -40,14 +56,12 @@ export interface VoiceKeyCompanyInfo {
   /** Where to read about the company and get a key. */
   docs: string;
   /**
-   * Where the company lists its models, read with the same key header as `check` (free: nothing is heard or spoken). Absent for a
-   * company with no list (Fish Audio picks its model by name only), so its models are typed. `list` is the field holding the list
-   * (none: the answer is the list), `id` and `label` the fields of one model, and `where` what a model must say to be one Universe
-   * can run for the company's job (real-time listening, or speaking).
+   * Where the company lists its models, read with the same key header as `check` (free: nothing is heard or spoken), so a super
+   * admin ticks models on New voice provider instead of typing ids. Absent for a company with no list (Fish Audio picks its model by
+   * name only). `list` is the field holding the list (none: the answer is the list), `id` and `label` the fields of one model, and
+   * `where` what a model must say to be one Universe can run for the company's job (real-time listening, or speaking).
    */
-  models?: {
-    /** The job the listed models do in Universe (the game's connector for this company does only that one). */
-    kind: 'recognition' | 'speech';
+  modelList?: {
     url: string;
     list?: string;
     id: string;
@@ -74,35 +88,52 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
   {
     adapter: 'cartesia',
     label: 'Cartesia',
+    does: { recognition: false, speech: true },
+    // sonic-3.6 follows Cartesia's latest stable snapshot
+    models: [{ id: 'sonic-3.6', label: 'Sonic 3.6', kind: 'speech' }],
     benefit: '{does}. Uses your account at cartesia.ai.',
     step: 'On play.cartesia.ai, open API keys and create a key.',
     docs: 'https://docs.cartesia.ai',
-    models: { kind: 'speech', url: 'https://api.cartesia.ai/models?capability=tts', list: 'data', id: 'id', where: { capability: 'tts' } },
+    modelList: { url: 'https://api.cartesia.ai/models?capability=tts', list: 'data', id: 'id', where: { capability: 'tts' } },
     check: { url: 'https://api.cartesia.ai/voices?limit=1', header: 'Authorization', prefix: 'Bearer ', headers: { 'Cartesia-Version': '2026-08-14' } },
   },
   {
     adapter: 'deepgram',
     label: 'Deepgram',
+    does: { recognition: true, speech: false },
+    models: [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }],
     logo: 'deepgram',
     benefit: '{does}. Uses your account at deepgram.com.',
     step: 'On deepgram.com, open API Keys and create a key.',
     docs: 'https://developers.deepgram.com',
-    models: { kind: 'recognition', url: 'https://api.deepgram.com/v1/models', list: 'stt', id: 'canonical_name', where: { streaming: true } },
+    modelList: { url: 'https://api.deepgram.com/v1/models', list: 'stt', id: 'canonical_name', where: { streaming: true } },
     check: { url: 'https://api.deepgram.com/v1/projects', header: 'Authorization', prefix: 'Token ', alsoAccepted: { status: 403 } },
   },
   {
     adapter: 'elevenlabs',
     label: 'ElevenLabs',
+    does: { recognition: false, speech: true },
+    // eleven_v4_turbo: ElevenLabs' recommended real-time model, served over its Text to Dialogue socket (game #1848)
+    models: [
+      { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' },
+      { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' },
+    ],
     logo: 'elevenlabs',
     benefit: '{does}. Uses your account at elevenlabs.io.',
     step: 'On elevenlabs.io, open Developers, then API keys, and create a key.',
     docs: 'https://elevenlabs.io/docs',
-    models: { kind: 'speech', url: 'https://api.elevenlabs.io/v1/models', id: 'model_id', label: 'name', where: { can_do_text_to_speech: true } },
+    modelList: { url: 'https://api.elevenlabs.io/v1/models', id: 'model_id', label: 'name', where: { can_do_text_to_speech: true } },
     check: { url: 'https://api.elevenlabs.io/v1/user', header: 'xi-api-key', prefix: '', alsoAccepted: { status: 401, includes: 'missing_permissions' } },
   },
   {
     adapter: 'fish',
     label: 'Fish Audio',
+    does: { recognition: false, speech: true },
+    // s2.1-pro-free costs nothing (fair use, no speed guarantee); s2.1-pro is billed by Fish per byte of text
+    models: [
+      { id: 's2.1-pro-free', label: 'S2.1 Pro (free)', kind: 'speech' },
+      { id: 's2.1-pro', label: 'S2.1 Pro', kind: 'speech' },
+    ],
     logo: 'fish-audio',
     benefit: '{does}. Uses your account at fish.audio.',
     step: 'On fish.audio, open API Keys and create a key.',
@@ -112,10 +143,13 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
   {
     adapter: 'soniox',
     label: 'Soniox',
+    does: { recognition: true, speech: false },
+    // stt-rt-v6: stt-rt-v5 is removed on 15 Dec 2026 and stt-rt-v4 is only its alias
+    models: [{ id: 'stt-rt-v6', label: 'Soniox real-time v6', kind: 'recognition' }],
     benefit: '{does}. Uses your account at soniox.com.',
     step: 'On console.soniox.com, open API Keys and create a key.',
     docs: 'https://soniox.com/docs',
-    models: { kind: 'recognition', url: 'https://api.soniox.com/v1/models', list: 'models', id: 'id', label: 'name', where: { transcription_mode: 'real_time' } },
+    modelList: { url: 'https://api.soniox.com/v1/models', list: 'models', id: 'id', label: 'name', where: { transcription_mode: 'real_time' } },
     check: { url: 'https://api.soniox.com/v1/models', header: 'Authorization', prefix: 'Bearer ' },
   },
 ];

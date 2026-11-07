@@ -51,7 +51,8 @@ async function ask(company: VoiceKeyCompanyInfo, apiKey: string): Promise<Verdic
 
 /**
  * The models a company's key may be used with: the union of what the server's own providers for that adapter that are on list,
- * one entry per kind and id (the first listing's label wins), kept to what each provider does.
+ * one entry per kind and id (the first listing's label wins), kept to what each provider does. A server with none listed for the
+ * company gives the catalog's own starting models, so a company is never without any.
  */
 export async function serverVoiceModels(adapter: string): Promise<VoiceModel[]> {
   const rows = await prisma.voiceProvider.findMany({
@@ -67,13 +68,13 @@ export async function serverVoiceModels(adapter: string): Promise<VoiceModel[]> 
       if (!seen.has(id)) seen.set(id, model);
     }
   }
-  return [...seen.values()];
+  if (seen.size > 0) return [...seen.values()];
+  return (voiceKeyCompanyInfo(adapter)?.models ?? []).map((model) => ({ ...model }));
 }
 
 /**
  * Checks a pasted key with its company and, when the company accepts it, answers with the models to list. `enabled` is the
- * adapters the caller may add (lib/voice-keys.ts, voiceKeyCompanies): a company the super admin has not turned on is refused
- * before any call is made.
+ * adapters the caller may add (lib/voice-keys.ts, voiceKeyCompanies): every company in the catalog.
  */
 export async function loadVoiceKeyModels(adapter: unknown, apiKey: unknown, enabled: string[]): Promise<VoiceKeyLoad> {
   const company = voiceKeyCompanyInfo(adapter);
@@ -95,11 +96,13 @@ export const MAX_LISTED_MODELS = 100;
 /**
  * The models a company lists for a key, kept to the ones Universe can run for the company's job (Orbit #840: an operator ticks them instead
  * of typing ids). One free GET to the company's own fixed address with the same key header as the check: nothing is heard or
- * spoken. Null when the company has no list (`models` absent from its catalog entry), or the list can't be read: then the models
+ * spoken. Null when the company has no list (`modelList` absent from its catalog entry), or the list can't be read: then the models
  * are typed, as before. Each id once, in the company's order.
  */
 export async function listCompanyModels(company: VoiceKeyCompanyInfo, apiKey: string): Promise<VoiceModel[] | null> {
-  const spec = company.models;
+  const spec = company.modelList;
+  // Each company's connector does one job here, and its list is kept to that job
+  const kind: VoiceModel['kind'] = company.does.speech ? 'speech' : 'recognition';
   if (!spec) return null;
   let response: Response | undefined;
   try {
@@ -124,7 +127,7 @@ export async function listCompanyModels(company: VoiceKeyCompanyInfo, apiKey: st
       if (!id || id.length > 255 || seen.has(id)) continue;
       seen.add(id);
       const label = spec.label && typeof fields[spec.label] === 'string' ? (fields[spec.label] as string).trim().slice(0, 255) : '';
-      models.push({ id, ...(label && label !== id ? { label } : {}), kind: spec.kind });
+      models.push({ id, ...(label && label !== id ? { label } : {}), kind });
       if (models.length >= MAX_LISTED_MODELS) break;
     }
     return models.length > 0 ? models : null;
