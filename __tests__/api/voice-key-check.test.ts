@@ -290,7 +290,7 @@ describe('Load models for a voice key', () => {
       ['together', [{ id: 'openai/whisper-large-v3', label: 'Whisper Large v3', kind: 'recognition' }, { id: 'hexgrad/Kokoro-82M', label: 'Kokoro 82M', kind: 'speech' }, { id: 'canopylabs/orpheus-3b-0.1-ft', label: 'Orpheus 3B', kind: 'speech' }]],
       ['nvidia', [{ id: 'nemotron-asr-streaming', label: 'Nemotron ASR Streaming', kind: 'recognition' }, { id: 'magpie-tts-multilingual', label: 'Magpie TTS Multilingual', kind: 'speech' }]],
       ['rime', [{ id: 'coda', label: 'Coda', kind: 'speech' }, { id: 'mistv3', label: 'Mist v3', kind: 'speech' }, { id: 'mistv2', label: 'Mist v2', kind: 'speech' }]],
-      ['hume', [{ id: 'octave-2', label: 'Octave 2', kind: 'speech' }, { id: 'octave-1', label: 'Octave 1', kind: 'speech' }]],
+      ['hume', [{ id: 'octave-2', label: 'Octave 2', kind: 'speech' }]],
       ['bland', [{ id: 'btts-3', label: 'Bland TTS v3', kind: 'speech' }, { id: 'btts-2', label: 'Bland TTS v2', kind: 'speech' }]],
       ['assemblyai', [{ id: 'universal-3-6-pro', label: 'Universal-3.6 Pro', kind: 'recognition' }, { id: 'universal-streaming-multilingual', label: 'Universal Streaming Multilingual', kind: 'recognition' }, { id: 'universal-streaming-english', label: 'Universal Streaming English', kind: 'recognition' }]],
       ['deepgram', [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }, { id: 'aura-2', label: 'Aura 2', kind: 'speech' }]],
