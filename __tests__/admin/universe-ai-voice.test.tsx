@@ -97,17 +97,40 @@ describe('the Voice part', () => {
     expect(patches()[0]).toMatchObject({ url: '/api/admin/voice-providers/v-deepgram', body: { enabled: true } });
   });
 
-  it('asks before switching a company off, and says how many bots go to text', async () => {
+  it('asks before switching a company off, and says its bots speak as Universe AI\'s current voice while it is off', async () => {
     render(<VoiceSection />);
     fireEvent.click(await screen.findByRole('button', { name: 'Disable Cartesia' }));
     const sheet = await screen.findByRole('dialog');
     expect(within(sheet).getByRole('heading', { name: 'Disable Cartesia?' })).toBeTruthy();
-    expect(sheet.textContent).toContain('2 bots use Cartesia. They answer in text');
+    const speak = within(sheet).getByTestId('off-speech');
+    expect(speak.textContent).toContain('They speak as Aria on ElevenLabs');
+    expect(speak.textContent).toContain('What Universe AI speaks with now');
+    expect(speak.textContent).toContain(
+      '2 bots speak with Cartesia. While it’s off, they speak as Aria on ElevenLabs, so none goes quiet. Turn Cartesia on again and they get their own voices back. A maker can pick another voice any time.'
+    );
+    expect(within(sheet).queryByTestId('off-recognition')).toBeNull();
     expect(sheet.textContent).toContain('People can’t add a Cartesia key while no Cartesia provider is on.');
     expect(patches()).toHaveLength(0);
     fireEvent.click(within(sheet).getByRole('button', { name: 'Disable' }));
     await waitFor(() => expect(patches()).toHaveLength(1));
     expect(patches()[0].body).toEqual({ enabled: false });
+  });
+
+  it('says the bots answer in text when Universe AI has no starting voice to lend them', async () => {
+    providers = [soniox(), { ...eleven(), defaultVoiceId: null, defaultVoiceName: null }, cartesia(), deepgram()];
+    render(<VoiceSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Disable Cartesia' }));
+    const speak = within(await screen.findByRole('dialog')).getByTestId('off-speech');
+    expect(speak.textContent).toBe('2 bots speak with Cartesia. They answer in text until it’s on again, or until their makers pick another voice.');
+  });
+
+  it('says a listening company\'s bot listens with Universe AI\'s current company while it is off', async () => {
+    providers = [soniox(), eleven(), cartesia(), { ...deepgram(), enabled: true, bots: { recognition: 1, speech: 0, total: 1 } }];
+    render(<VoiceSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Disable Deepgram' }));
+    const listen = within(await screen.findByRole('dialog')).getByTestId('off-recognition');
+    expect(listen.textContent).toContain('It listens with Soniox');
+    expect(listen.textContent).toContain('1 bot listens with Deepgram. While it’s off, it listens with Soniox. Turn Deepgram on again and it listens with it again.');
   });
 
   it('doesn\'t say people lose a company\'s key when another provider of it is still on', async () => {

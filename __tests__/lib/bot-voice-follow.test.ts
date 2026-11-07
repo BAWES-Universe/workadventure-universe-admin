@@ -4,7 +4,7 @@
  * picked. Nothing here calls a provider.
  */
 import type { VoiceProvider } from '@prisma/client';
-import { effectiveBotVoice, followUniverseAi, profileProblem, publishVoiceDraft, rollBackVoice, type VoiceProfile } from '@/lib/bot-voice';
+import { borrowUniverseAi, effectiveBotVoice, followUniverseAi, profileProblem, publishVoiceDraft, rollBackVoice, type VoiceProfile } from '@/lib/bot-voice';
 import { prisma } from '@/lib/db';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { BotSettingsError } from '@/lib/bot-access-settings';
@@ -133,6 +133,46 @@ describe('followUniverseAi', () => {
   });
 });
 
+describe('borrowUniverseAi (#840)', () => {
+  const cartesia = provider({ id: 'cart', adapter: 'cartesia', name: 'Cartesia', enabled: false, models: [{ id: 'sonic-3', kind: 'speech' }] });
+  const deepgram = provider({ id: 'dg', adapter: 'deepgram', name: 'Deepgram', recognition: true, speech: false, enabled: false, models: [{ id: 'nova-3', kind: 'recognition' }] });
+  const defaultEars = provider({ ...ears, defaultRecognition: true });
+  const defaultMouth = provider({ ...mouth, defaultSpeech: true, defaultVoiceId: 'aria', defaultVoiceName: 'Aria' });
+  const onCartesia = profile({ speech: { providerId: 'cart', model: 'sonic-3', voiceId: 'katie', voiceName: 'Katie' } });
+
+  it('lets a part on a company that is off speak as Universe AI\'s current voice, on its starting model', () => {
+    const borrowed = borrowUniverseAi(onCartesia, providers(defaultEars, defaultMouth, cartesia));
+    expect(borrowed.speech).toEqual({ providerId: 'eleven', model: 'eleven_v4_turbo', voiceId: 'aria', voiceName: 'Aria' });
+    expect(borrowed.recognition).toBe(onCartesia.recognition);
+    expect(borrowed.expression).toBe('natural');
+  });
+
+  it('lets a listening part on a company that is off listen with Universe AI\'s current company', () => {
+    const onDeepgram = profile({ recognition: { providerId: 'dg', model: 'nova-3' } });
+    expect(borrowUniverseAi(onDeepgram, providers(defaultEars, defaultMouth, deepgram)).recognition).toEqual({ providerId: 'soniox', model: 'stt-rt-v6' });
+  });
+
+  it('gives the bot its own voice back once the company is on again: nothing was saved', () => {
+    const on = provider({ ...cartesia, enabled: true });
+    expect(borrowUniverseAi(onCartesia, providers(defaultEars, defaultMouth, on))).toBe(onCartesia);
+  });
+
+  it('borrows nothing when Universe AI has no starting voice, so the bot stays in text', () => {
+    const noVoice = provider({ ...defaultMouth, defaultVoiceId: null, defaultVoiceName: null });
+    expect(borrowUniverseAi(onCartesia, providers(defaultEars, noVoice, cartesia))).toBe(onCartesia);
+  });
+
+  it('borrows nothing when no provider is the default for the job', () => {
+    expect(borrowUniverseAi(onCartesia, providers(defaultEars, mouth, cartesia))).toBe(onCartesia);
+  });
+
+  it('never moves a part on a person\'s lent key, even when that key is off', () => {
+    const offKey = provider({ ...theirKey, enabled: false });
+    const own = profile({ speech: { providerId: 'k1', model: 'eleven_flash_v2_5', voiceId: 'sarah' } });
+    expect(borrowUniverseAi(own, providers(defaultEars, defaultMouth, offKey))).toBe(own);
+  });
+});
+
 describe('what the bot server and the publish and roll back routes see', () => {
   const bot = (changes: Record<string, unknown> = {}) => ({
     voiceEnabled: true,
@@ -181,6 +221,25 @@ describe('what the bot server and the publish and roll back routes see', () => {
     expect(active.reason).toBeNull();
     expect(active.profile?.speech.model).toBe('eleven_v4_turbo');
     expect(active.parts.speech).toBe('owner');
+  });
+
+  it('serves a bot on a company that is off with Universe AI\'s current voice, and Universe AI pays', async () => {
+    const off = provider({ id: 'cart', adapter: 'cartesia', name: 'Cartesia', enabled: false, models: [{ id: 'sonic-3', kind: 'speech' }] });
+    const now = provider({ ...mouth, defaultSpeech: true, defaultVoiceId: 'aria', defaultVoiceName: 'Aria' });
+    db.botVoiceRevision.findUnique.mockResolvedValue({ number: 1, profile: profile({ speech: { providerId: 'cart', model: 'sonic-3', voiceId: 'katie' } }) });
+    rows(ears, now, off);
+    const active = await effectiveBotVoice('b1');
+    expect(active.speaks).toBe(true);
+    expect(active.reason).toBeNull();
+    expect(active.profile?.speech).toEqual({ providerId: 'eleven', model: 'eleven_v4_turbo', voiceId: 'aria', voiceName: 'Aria' });
+    expect(active.parts.speech).toBe('universe-ai');
+  });
+
+  it('keeps a bot on a company that is off in text when Universe AI has no starting voice', async () => {
+    const off = provider({ id: 'cart', adapter: 'cartesia', name: 'Cartesia', enabled: false, models: [{ id: 'sonic-3', kind: 'speech' }] });
+    db.botVoiceRevision.findUnique.mockResolvedValue({ number: 1, profile: profile({ speech: { providerId: 'cart', model: 'sonic-3', voiceId: 'katie' } }) });
+    rows(ears, provider({ ...mouth, defaultSpeech: true }), off);
+    expect((await effectiveBotVoice('b1')).reason).toBe('provider');
   });
 
   it('still says "provider" when a provider lists no model for the job', async () => {

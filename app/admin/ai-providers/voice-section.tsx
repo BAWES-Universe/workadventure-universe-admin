@@ -29,6 +29,7 @@ import {
   callOrbit,
   companyLabel,
   defaultChangeLine,
+  offJobs,
   doesLine,
   logoOf,
   modelName,
@@ -448,7 +449,7 @@ function OffSheet({ provider, providers, onClose, onSaved }: { provider: ServerV
   const { addToast } = useToast();
   // People can add a company's key while any provider of it is on
   const stillOn = provider ? providers.some((other) => other.id !== provider.id && other.adapter === provider.adapter && other.enabled) : true;
-  const used = provider ? botsOn(provider) : 0;
+  const jobs = provider ? offJobs(provider, providers) : [];
   const company = provider ? companyLabel(provider.adapter) : '';
   async function disable() {
     if (!provider) return;
@@ -466,10 +467,21 @@ function OffSheet({ provider, providers, onClose, onSaved }: { provider: ServerV
   }
   return (
     <FormSheet open={provider !== null} onOpenChange={(next) => !next && !busy && onClose()} title={provider ? `Disable ${provider.name}?` : 'Disable?'}>
-      <p className="text-sm text-muted-foreground">
-        {used > 0 ? `${bots(used)} ${used === 1 ? 'uses' : 'use'} ${provider?.name}. ${used === 1 ? 'It answers' : 'They answer'} in text until it’s on again, or until their maker picks another voice. ` : ''}
-        {stillOn ? '' : `People can’t add a ${company} key while no ${company} provider is on.`}
-      </p>
+      {jobs.map((each) => (
+        <div key={each.job} className="grid gap-3" data-testid={`off-${each.job}`}>
+          {each.to && (
+            <div className="flex items-center gap-3 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 py-3">
+              <ProviderLogo info={logoOf(each.to.adapter)} />
+              <span className="grid min-w-0 gap-0.5">
+                <span className="text-[15px] font-semibold">{each.job === 'speech' ? `${each.count === 1 ? 'It speaks' : 'They speak'} as ${each.voice} on ${each.to.name}` : `${each.count === 1 ? 'It listens' : 'They listen'} with ${each.to.name}`}</span>
+                <span className="text-[13px] text-muted-foreground">{each.job === 'speech' ? 'What Universe AI speaks with now' : 'What Universe AI listens with now'}</span>
+              </span>
+            </div>
+          )}
+          <p className="text-sm text-muted-foreground">{each.line}</p>
+        </div>
+      ))}
+      {!stillOn && <p className="text-sm text-muted-foreground">{`People can’t add a ${company} key while no ${company} provider is on.`}</p>}
       {failure && <Refused>{failure}</Refused>}
       <SheetButtons go="Disable" busy={busy} onClose={onClose} onGo={() => void disable()} />
     </FormSheet>
