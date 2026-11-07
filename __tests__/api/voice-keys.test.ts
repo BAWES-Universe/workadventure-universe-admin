@@ -184,6 +184,7 @@ describe('the list', () => {
     // Every company in the catalog, in its order, with no server setup: named and described by the catalog, doing what it says
     // plus what a provider the server has on does (ElevenLabs also listens here, since the stand-in server has one that does)
     expect(body.companies).toEqual([
+      expect.objectContaining({ adapter: 'assemblyai', label: 'AssemblyAI', recognition: true, speech: false }),
       // A key at the person's own Azure resource, with its deployment typed as its model
       expect.objectContaining({ adapter: 'azure', label: 'Azure OpenAI', recognition: false, speech: false, talk: true, account: expect.objectContaining({ address: expect.objectContaining({ label: 'Endpoint' }), typedModel: expect.objectContaining({ label: 'Deployment name', kind: 'talk' }) }) }),
       expect.objectContaining({ adapter: 'cartesia', label: 'Cartesia', recognition: true, speech: true }),
@@ -199,6 +200,7 @@ describe('the list', () => {
     ]);
     // Its line says only the jobs Universe runs for it, the same neutral shape for every company
     expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual([
+      'Listens. Uses your account at assemblyai.com.',
       'Talks live. Uses your Azure OpenAI resource.',
       'Listens and speaks. Uses your account at cartesia.ai.',
       'Listens and speaks. Uses your account at deepgram.com.',
