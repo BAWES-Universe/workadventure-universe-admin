@@ -787,6 +787,21 @@ describe('Speechify\'s voices', () => {
   });
 });
 
+describe('Speechmatics\' voices', () => {
+  it('are the four its docs name, with no call made', async () => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    providers = [key({ adapter: 'speechmatics', name: 'Speechmatics', models: [{ id: 'speechmatics', label: 'TTS', kind: 'speech' }] })];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.description, voice.languages, voice.model])).toEqual([
+      ['sarah', 'Female, UK English', ['en'], 'speechmatics'],
+      ['theo', 'Male, UK English', ['en'], 'speechmatics'],
+      ['megan', 'Female, US English', ['en'], 'speechmatics'],
+      ['jack', 'Male, US English', ['en'], 'speechmatics'],
+    ]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('Groq\'s voices', () => {
   const ENGLISH = { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' };
   const ARABIC = { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' };

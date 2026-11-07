@@ -838,6 +838,38 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     // One voice from the voice list, free with the key as a bearer
     check: { url: 'https://api.speechify.ai/v1/voices?limit=1', header: 'Authorization', prefix: 'Bearer ' },
   }),
+  company({
+    adapter: 'speechmatics',
+    label: 'Speechmatics',
+    jobs: {
+      recognition: {
+        // Live hearing over Speechmatics' agent socket (wss://eu2.rt.speechmatics.com/v2/agent), as Pipecat's SpeechmaticsSTTService
+        // does. Linden 1 is the agent socket's model and Pipecat's default (https://docs.speechmatics.com)
+        host: 'eu2.rt.speechmatics.com',
+        models: [{ id: 'linden-1', label: 'Linden 1' }],
+      },
+      speech: {
+        // Text to speech, one streamed request per reply (POST /generate/{voice}), as Pipecat's SpeechmaticsTTSService does.
+        // Speechmatics names no model; its speech is in preview, English only
+        host: 'preview.tts.speechmatics.com',
+        models: [{ id: 'speechmatics', label: 'Speechmatics TTS (preview)' }],
+        // Speechmatics has no list of its voices to ask: these are the four its docs name
+        voices: {
+          fixed: [
+            { id: 'sarah', name: 'Sarah', description: 'Female, UK English', languages: ['en'] },
+            { id: 'theo', name: 'Theo', description: 'Male, UK English', languages: ['en'] },
+            { id: 'megan', name: 'Megan', description: 'Female, US English', languages: ['en'] },
+            { id: 'jack', name: 'Jack', description: 'Male, US English', languages: ['en'] },
+          ],
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at speechmatics.com.',
+    step: 'On portal.speechmatics.com, open Settings, then API Keys, and create a key.',
+    docs: 'https://docs.speechmatics.com',
+    // The account's batch jobs, free to read with the same key as a bearer
+    check: { url: 'https://asr.api.speechmatics.com/v2/jobs?limit=1', header: 'Authorization', prefix: 'Bearer ' },
+  }),
 ];
 
 export const voiceKeyCompanyInfo = (adapter: unknown): VoiceKeyCompanyInfo | null =>
