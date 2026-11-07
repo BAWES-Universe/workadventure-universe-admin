@@ -651,6 +651,36 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     // GET /v1/tts/voices lists the built-in voices: free, and a wrong key is 401
     check: { url: 'https://api.x.ai/v1/tts/voices', header: 'Authorization', prefix: 'Bearer ' },
   }),
+  company({
+    adapter: 'zoom',
+    label: 'Zoom',
+    jobs: {
+      talk: {
+        host: 'api.zoom.us',
+        // Zoom's Voice Agent in live mode thinks with its built-in gemma-4, from Zoom's AI Services docs (7 Nov 2026). It writes
+        // down English only, and is told the Mind's words as the only thing it says
+        models: [{ id: 'gemma-4', label: 'Gemma 4' }],
+        // Zoom has no call that lists voices: these are the voices its live mode docs list, Jenna first (its default)
+        fixedVoices: [
+          { id: 'jenna', name: 'Jenna' },
+          { id: 'alex', name: 'Alex' },
+          { id: 'ariel', name: 'Ariel' },
+          { id: 'ava', name: 'Ava' },
+          { id: 'brooke', name: 'Brooke' },
+          { id: 'hazel', name: 'Hazel' },
+          { id: 'mark', name: 'Mark' },
+          { id: 'reid', name: 'Reid' },
+          { id: 'scott', name: 'Scott' },
+          { id: 'tony', name: 'Tony' },
+        ],
+      },
+    },
+    benefit: '{does}, in English. Uses your Zoom AI Services account.',
+    step: 'In Zoom’s Platform Studio, open AI Services, then API keys, and create a key.',
+    docs: 'https://developers.zoom.us/docs/ai-services/voice-agent/',
+    // GET /v2/aiservices/scribe/jobs lists the account's transcription jobs: free, with the same AI Services key
+    check: { url: 'https://api.zoom.us/v2/aiservices/scribe/jobs?page_size=1', header: 'Authorization', prefix: 'Bearer ' },
+  }),
 ];
 
 export const voiceKeyCompanyInfo = (adapter: unknown): VoiceKeyCompanyInfo | null =>

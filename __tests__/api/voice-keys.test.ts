@@ -230,6 +230,7 @@ describe('the list', () => {
       expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: false }),
       expect.objectContaining({ adapter: 'ultravox', label: 'Ultravox', recognition: false, speech: false, talk: true, account: null }),
       expect.objectContaining({ adapter: 'xai', label: 'xAI', recognition: false, speech: false, talk: true, logo: 'xai' }),
+      expect.objectContaining({ adapter: 'zoom', label: 'Zoom', recognition: false, speech: false, talk: true, account: null }),
       // The speech server on a person's own computer is last, and is not a company (game #1874)
       expect.objectContaining({ adapter: 'openai-compatible', label: 'Any OpenAI-compatible speech server', ownServer: expect.any(Object) }),
     ]);
@@ -247,6 +248,7 @@ describe('the list', () => {
       'Listens. Uses your account at soniox.com.',
       'Talks live. Uses your account at ultravox.ai.',
       'Talks live. Uses your account at console.x.ai.',
+      'Talks live, in English. Uses your Zoom AI Services account.',
       'Speaches, Kokoro-FastAPI, your own Whisper: anything that answers /v1/audio.',
     ]);
     expect(JSON.stringify(body)).not.toContain('apiKeyEncrypted');

@@ -187,3 +187,15 @@ describe('a provider with a talking model', () => {
     expect(voiceProviderProblem({ ...draft, recognition: false, speech: true, models: [{ id: 'gpt-realtime-2.1', kind: 'talk' }] })).toBe('A model can only be listed for what the provider does');
   });
 });
+
+describe('the Zoom entry', () => {
+  it('talks live only, in English, with its built-in model and its ten listed voices, Jenna first, checked for free with Bearer', () => {
+    const zoom = voiceKeyCompanyInfo('zoom');
+    expect(zoom?.does).toEqual({ recognition: false, speech: false, talk: true });
+    expect(zoom?.models).toEqual([{ id: 'gemma-4', label: 'Gemma 4', kind: 'talk' }]);
+    expect(zoom?.jobs.talk?.fixedVoices?.map((voice) => voice.id)).toEqual(['jenna', 'alex', 'ariel', 'ava', 'brooke', 'hazel', 'mark', 'reid', 'scott', 'tony']);
+    expect(zoom?.jobs.talk?.voices).toBeUndefined();
+    expect(zoom?.check).toEqual({ url: 'https://api.zoom.us/v2/aiservices/scribe/jobs?page_size=1', header: 'Authorization', prefix: 'Bearer ' });
+    expect(JSON.stringify(zoom)).not.toMatch(/recommend/i);
+  });
+});
