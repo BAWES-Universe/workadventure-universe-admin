@@ -164,6 +164,8 @@ export async function transformBotToServerFormat(
     maxReplyTokens: bot.maxReplyTokens ?? null,
     maxSteps: bot.maxSteps ?? null,
     companionTextureId: bot.companionTextureId ?? null,
+    // The owner's voice switch: the bot server joins the bubble's audio (and the game shows the Voice button) only when it is true
+    voiceEnabled: bot.voiceEnabled === true,
   };
   
   // Include parsed AI provider data only if requested and user has permission
