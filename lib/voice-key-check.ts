@@ -51,7 +51,8 @@ async function ask(company: VoiceKeyCompanyInfo, apiKey: string): Promise<Verdic
 
 /**
  * The models a company's key may be used with: the union of what the server's own providers for that adapter that are on list,
- * one entry per kind and id (the first listing's label wins), kept to what each provider does.
+ * one entry per kind and id (the first listing's label wins), kept to what each provider does. A server with none listed for the
+ * company gives the catalog's own starting models, so a company is never without any.
  */
 export async function serverVoiceModels(adapter: string): Promise<VoiceModel[]> {
   const rows = await prisma.voiceProvider.findMany({
@@ -67,13 +68,13 @@ export async function serverVoiceModels(adapter: string): Promise<VoiceModel[]> 
       if (!seen.has(id)) seen.set(id, model);
     }
   }
-  return [...seen.values()];
+  if (seen.size > 0) return [...seen.values()];
+  return (voiceKeyCompanyInfo(adapter)?.models ?? []).map((model) => ({ ...model }));
 }
 
 /**
  * Checks a pasted key with its company and, when the company accepts it, answers with the models to list. `enabled` is the
- * adapters the caller may add (lib/voice-keys.ts, voiceKeyCompanies): a company the super admin has not turned on is refused
- * before any call is made.
+ * adapters the caller may add (lib/voice-keys.ts, voiceKeyCompanies): every company in the catalog.
  */
 export async function loadVoiceKeyModels(adapter: unknown, apiKey: unknown, enabled: string[]): Promise<VoiceKeyLoad> {
   const company = voiceKeyCompanyInfo(adapter);
