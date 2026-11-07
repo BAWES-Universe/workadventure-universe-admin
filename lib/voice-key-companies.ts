@@ -29,6 +29,7 @@
  * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
  *   free account with no credit still has the answer, and that is fine: the free model needs none.
  * - azure: GET {address}/openai/v1/models on the person's own resource, api-key.
+ * - google: GET /v1beta/models, x-goog-api-key (a wrong key is 400 API_KEY_INVALID).
  * - openai: GET /v1/models, Authorization: Bearer.
  * - xai: GET /v1/tts/voices, Authorization: Bearer (lists the built-in voices; a wrong key is 401).
  */
@@ -163,6 +164,8 @@ export interface VoiceKeyCompanyEntry {
      * and when `includes` is given, only with that text in the answer.
      */
     alsoAccepted?: { status: number; includes?: string };
+    /** An answer other than 401 or 403 that still means the key is wrong (Google: 400 with API_KEY_INVALID), only with that text. */
+    alsoRefused?: { status: number; includes: string };
   };
 }
 
@@ -383,6 +386,61 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On fish.audio, open API Keys and create a key.',
     docs: 'https://docs.fish.audio',
     check: { url: 'https://api.fish.audio/wallet/self/api-credit', header: 'Authorization', prefix: 'Bearer ' },
+  }),
+  company({
+    adapter: 'google',
+    label: 'Google',
+    jobs: {
+      talk: {
+        host: 'generativelanguage.googleapis.com',
+        // From Google's Live API docs (7 Nov 2026): the older live models shut on 17 Nov 2026
+        models: [{ id: 'gemini-3.8-live', label: 'Gemini 3.8 Live' }],
+        // Google has no call that lists live voices: these are the 30 prebuilt voices its speech docs list, in that order
+        fixedVoices: [
+          { id: 'Zephyr', name: 'Zephyr' },
+          { id: 'Puck', name: 'Puck' },
+          { id: 'Charon', name: 'Charon' },
+          { id: 'Kore', name: 'Kore' },
+          { id: 'Fenrir', name: 'Fenrir' },
+          { id: 'Leda', name: 'Leda' },
+          { id: 'Orus', name: 'Orus' },
+          { id: 'Aoede', name: 'Aoede' },
+          { id: 'Callirrhoe', name: 'Callirrhoe' },
+          { id: 'Autonoe', name: 'Autonoe' },
+          { id: 'Enceladus', name: 'Enceladus' },
+          { id: 'Iapetus', name: 'Iapetus' },
+          { id: 'Umbriel', name: 'Umbriel' },
+          { id: 'Algieba', name: 'Algieba' },
+          { id: 'Despina', name: 'Despina' },
+          { id: 'Erinome', name: 'Erinome' },
+          { id: 'Algenib', name: 'Algenib' },
+          { id: 'Rasalgethi', name: 'Rasalgethi' },
+          { id: 'Laomedeia', name: 'Laomedeia' },
+          { id: 'Achernar', name: 'Achernar' },
+          { id: 'Alnilam', name: 'Alnilam' },
+          { id: 'Schedar', name: 'Schedar' },
+          { id: 'Gacrux', name: 'Gacrux' },
+          { id: 'Pulcherrima', name: 'Pulcherrima' },
+          { id: 'Achird', name: 'Achird' },
+          { id: 'Zubenelgenubi', name: 'Zubenelgenubi' },
+          { id: 'Vindemiatrix', name: 'Vindemiatrix' },
+          { id: 'Sadachbia', name: 'Sadachbia' },
+          { id: 'Sadaltager', name: 'Sadaltager' },
+          { id: 'Sulafat', name: 'Sulafat' },
+        ],
+      },
+    },
+    logo: 'google',
+    benefit: '{does}. Uses your account at aistudio.google.com.',
+    step: 'In Google AI Studio, open Get API key and create a key.',
+    docs: 'https://ai.google.dev/gemini-api/docs',
+    // GET /v1beta/models lists the models the key may use: free. Google answers a wrong key 400 with API_KEY_INVALID, not 401
+    check: {
+      url: 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1',
+      header: 'x-goog-api-key',
+      prefix: '',
+      alsoRefused: { status: 400, includes: 'API_KEY_INVALID' },
+    },
   }),
   company({
     adapter: 'openai',

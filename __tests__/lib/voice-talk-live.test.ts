@@ -61,6 +61,20 @@ describe('the OpenAI entry', () => {
   });
 });
 
+describe('the Google entry', () => {
+  it('talks live only, with Gemini 3.8 Live and its 30 prebuilt voices', () => {
+    const google = voiceKeyCompanyInfo('google');
+    expect(google?.does).toEqual({ recognition: false, speech: false, talk: true });
+    expect(google?.models).toEqual([{ id: 'gemini-3.8-live', label: 'Gemini 3.8 Live', kind: 'talk' }]);
+    const voices = google?.jobs.talk?.fixedVoices ?? [];
+    expect(voices).toHaveLength(30);
+    expect(new Set(voices.map((voice) => voice.id)).size).toBe(30);
+    expect(google?.check.header).toBe('x-goog-api-key');
+    expect(google?.check.alsoRefused).toEqual({ status: 400, includes: 'API_KEY_INVALID' });
+    expect(JSON.stringify(google)).not.toMatch(/recommend/i);
+  });
+});
+
 describe('the xAI entry', () => {
   it('talks live only, with its Grok Voice models and its 28 built-in voices, Eve first', () => {
     const xai = voiceKeyCompanyInfo('xai');

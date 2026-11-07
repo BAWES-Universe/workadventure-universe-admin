@@ -43,6 +43,10 @@ async function ask(company: VoiceKeyCompanyInfo, apiKey: string, address: string
       const text = (await response.text().catch(() => '')).slice(0, 2000);
       if (text.includes(wanted)) return 'accepted';
     }
+    if (check.alsoRefused && response.status === check.alsoRefused.status) {
+      const text = (await response.text().catch(() => '')).slice(0, 2000);
+      if (text.includes(check.alsoRefused.includes)) return 'refused';
+    }
     return response.status === 401 || response.status === 403 ? 'refused' : 'unreachable';
   } catch {
     // Nothing from the error is kept: it could carry the address with the key's header
