@@ -11,7 +11,7 @@
  * Adding a company, or a job to one, is one entry here plus its connector in the game, never `if (adapter === ...)` in the logic.
  *
  * `modelList` is where a company lists a job's models (GET, the same key header): Soniox GET /v1/models (real-time ones), Deepgram
- * GET /v1/models (streaming listening ones), ElevenLabs GET /v1/models (speaking ones), Cartesia GET /models?capability=tts. Fish
+ * GET /v1/models (streaming listening ones), ElevenLabs GET /v1/models (speaking ones), Cartesia GET /models?capability=stt|tts. Fish
  * Audio has no such list, so its models are typed on New voice provider. `voices` is where a speaking job lists its voices
  * (lib/voice-voices.ts reads every company's the same way).
  *
@@ -156,6 +156,12 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'cartesia',
     label: 'Cartesia',
     jobs: {
+      recognition: {
+        host: 'api.cartesia.ai',
+        // ink-whisper: the one that takes a language; ink-2 and newer detect it
+        models: [{ id: 'ink-whisper', label: 'Ink Whisper' }],
+        modelList: { url: 'https://api.cartesia.ai/models?capability=stt', list: 'data', id: 'id', where: { capability: 'stt' } },
+      },
       speech: {
         host: 'api.cartesia.ai',
         // sonic-3.6 follows Cartesia's latest stable snapshot

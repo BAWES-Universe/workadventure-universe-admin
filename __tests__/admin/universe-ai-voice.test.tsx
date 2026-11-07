@@ -292,11 +292,13 @@ describe('New voice provider', () => {
     expect(['Soniox', 'Deepgram'].every((name) => within(listens).getByRole('radio', { name: new RegExp(`^${name}`) }))).toBe(true);
     expect(['ElevenLabs', 'Cartesia'].every((name) => within(speaks).getByRole('radio', { name: new RegExp(`^${name}`) }))).toBe(true);
     // Every company is offered the same way, in alphabetical order, with the same neutral line: none is marked Recommended or praised
+    // A company that listens and speaks is under both, with the same line (#844)
     expect(within(listens).getAllByRole('radio').map((card) => card.textContent)).toEqual([
+      'CartesiaListens and speaks. Uses your account at cartesia.ai.',
       'DeepgramListens. Uses your account at deepgram.com.',
       'SonioxListens. Uses your account at soniox.com.',
     ]);
-    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['CartesiaSpeaks', 'ElevenLabsSpeaks', 'Fish AudioSpeaks']);
+    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['CartesiaListens and speaks', 'ElevenLabsSpeaks', 'Fish AudioSpeaks']);
     expect(screen.queryByText('Recommended')).toBeNull();
     fireEvent.click(within(speaks).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByRole('heading', { name: 'Set up ElevenLabs' })).toBeTruthy();
@@ -346,6 +348,27 @@ describe('New voice provider', () => {
       apiKey: 'soniox-key-1234',
       models: [{ id: 'stt-rt-v6', kind: 'recognition' }],
       endpoint: 'wss://stt-rt.soniox.com/transcribe-websocket',
+    });
+  });
+
+  it('sets up the job picked for a company that listens and speaks, asking it for that job\'s models (#844)', async () => {
+    render(<NewVoiceProviderPage />);
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Cartesia/ }));
+    expect(screen.getByRole('heading', { name: 'Set up Cartesia' })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk_car_0000000000001234' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await screen.findByText('Cartesia knows this key. Nothing was spoken, so nothing was paid.');
+    expect(calls.find((call) => call.url === '/api/admin/voice-providers/check')?.body).toMatchObject({ adapter: 'cartesia', job: 'recognition' });
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'ink-whisper' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add provider' }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/ai-providers'));
+    expect(calls.find((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers')?.body).toMatchObject({
+      adapter: 'cartesia',
+      recognition: true,
+      speech: false,
+      models: [{ id: 'ink-whisper', kind: 'recognition' }],
     });
   });
 });
