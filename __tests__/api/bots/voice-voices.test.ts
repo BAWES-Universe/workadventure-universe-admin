@@ -630,6 +630,26 @@ describe('Neuphonic\'s voices', () => {
   });
 });
 
+describe('Resemble\'s voices', () => {
+  const resemble = () => key({ adapter: 'resemble', name: 'Resemble', models: [{ id: 'resemble', label: 'Resemble TTS', kind: 'speech' }] });
+  const full = Array.from({ length: 100 }, (_, i) => ({ uuid: `v-${i}`, name: `Voice ${i}`, default_language: 'en-US', supported_languages: ['en-US'] }));
+
+  beforeEach(() => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    let page = 0;
+    fetchMock.mockImplementation(async () => json(page++ === 0 ? { success: true, page: 1, num_pages: 2, items: full } : { success: true, page: 2, num_pages: 2, items: [{ uuid: 'v-ar', name: 'Noor', default_language: 'ar-SA', supported_languages: ['ar-SA', 'en-US'] }] }));
+  });
+
+  it('are read at app.resemble.ai page after page while a page is full, with the key as a bearer, not where it speaks', async () => {
+    providers = [resemble()];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toHaveLength(101);
+    expect(list[100]).toMatchObject({ voiceId: 'v-ar', name: 'Noor', languages: ['ar', 'en'], model: 'resemble' });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://app.resemble.ai/api/v2/voices?page=1&page_size=100', 'https://app.resemble.ai/api/v2/voices?page=2&page_size=100']);
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+  });
+});
+
 describe('Groq\'s voices', () => {
   const groq = () => key({ adapter: 'groq', name: 'Groq', models: [{ id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' }] });
 

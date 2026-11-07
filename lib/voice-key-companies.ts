@@ -74,6 +74,8 @@ export interface VoiceModelListSpec {
  * is typed.
  */
 export interface VoiceListSpec {
+  /** The host the list is at, when it is not the job's own (Resemble speaks at f.cluster.resemble.ai, lists at app.resemble.ai). */
+  host?: string;
   /** Path and query of one page, after the company's address. `{size}` is the page size, `{page}` the page number when paging by number. */
   path: string;
   /** Set when the company lists its voices with a POST: this JSON body, a `'{size}'` value being the page size (Async). */
@@ -627,6 +629,33 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On app.neuphonic.com, open API Keys and create a key.',
     docs: 'https://docs.neuphonic.com',
     check: { url: 'https://api.neuphonic.com/voices', header: 'X-API-KEY', prefix: '' },
+  }),
+  company({
+    adapter: 'resemble',
+    label: 'Resemble AI',
+    jobs: {
+      speech: {
+        // Text to speech, one streamed request per reply (POST https://f.cluster.resemble.ai/stream), open to every plan; Pipecat's
+        // ResembleAITTSService uses the socket, which Resemble keeps to Business plans. Resemble has no model to pick: the voice sets it
+        host: 'f.cluster.resemble.ai',
+        models: [{ id: 'resemble', label: 'Resemble TTS' }],
+        // GET /api/v2/voices: the account's voices, page by page while a page is full, each with its languages
+        voices: {
+          host: 'app.resemble.ai',
+          path: '/api/v2/voices?page={page}&page_size={size}',
+          list: 'items',
+          paging: { kind: 'page' },
+          id: 'uuid',
+          name: 'name',
+          description: [],
+          languages: ['default_language', 'supported_languages[]'],
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at resemble.ai.',
+    step: 'On app.resemble.ai, open Account, then API, and copy your API key.',
+    docs: 'https://docs.resemble.ai',
+    check: { url: 'https://app.resemble.ai/api/v2/voices?page=1&page_size=10', header: 'Authorization', prefix: 'Bearer ' },
   }),
   company({
     adapter: 'soniox',

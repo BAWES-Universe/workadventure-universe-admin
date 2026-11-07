@@ -231,7 +231,8 @@ function callFor(provider: VoiceProvider): Call & { spec: VoiceListSpec } {
   if (!company || !spec || 'fixed' in spec) throw new VoiceListRefused(`${company?.label ?? provider.name}’s voices can’t be listed here.`, 409);
   if (!provider.apiKeyEncrypted) throw new VoiceListRefused(`${provider.name} has no key.`, 409);
   // The server's own provider may name another address (a proxy); a person's key never does
-  const base = (provider.ownerId === null && provider.endpoint ? provider.endpoint : `https://${company.jobs.speech!.host}`).replace(/\/+$/, '');
+  // A list at its own host (Resemble) is always asked there: a proxy for speaking is not a voice list
+  const base = (spec.host ? `https://${spec.host}` : provider.ownerId === null && provider.endpoint ? provider.endpoint : `https://${company.jobs.speech!.host}`).replace(/\/+$/, '');
   const { check } = company;
   let key: string;
   try {
