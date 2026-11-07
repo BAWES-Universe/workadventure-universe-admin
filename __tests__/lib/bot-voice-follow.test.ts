@@ -155,6 +155,17 @@ describe('followUniverseAi', () => {
     expect(profileProblem(followUniverseAi(layla, providers(ears, codaOnly)), providers(ears, codaOnly))).toBe("Rime doesn't list the model mistv3 for speaking");
   });
 
+  it('keeps a Together voice on the model it was published on, since each of its voices belongs to one model', () => {
+    const together = provider({
+      id: 'together',
+      adapter: 'together',
+      name: 'Together AI',
+      models: [{ id: 'hexgrad/Kokoro-82M', kind: 'speech' }, { id: 'canopylabs/orpheus-3b-0.1-ft', kind: 'speech' }],
+    });
+    const tara = profile({ speech: { providerId: 'together', model: 'canopylabs/orpheus-3b-0.1-ft', voiceId: 'tara' } });
+    expect(followUniverseAi(tara, providers(ears, together)).speech).toEqual(tara.speech);
+  });
+
   it('leaves a provider that is missing to profileProblem', () => {
     expect(followUniverseAi(profile(), providers(ears))).toEqual(profile({ recognition: { providerId: 'soniox', model: 'stt-rt-v6' } }));
     expect(profileProblem(followUniverseAi(profile(), providers(ears)), providers(ears))).toBe("The provider chosen for speaking doesn't exist");
