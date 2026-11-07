@@ -49,6 +49,8 @@ interface Listed {
   languages: string[];
   preview: string | null;
   previewNeedsKey: boolean;
+  /** The one speaking model this voice belongs to, when the company ties voices to models (Groq). */
+  model?: string;
 }
 
 /** A source that can't be listed, with the line that says why (shown as it is). */
@@ -280,7 +282,15 @@ async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
       voices = (await listOwnVoices(provider)).slice(0, MAX_VOICES);
     } else if (listing && 'fixed' in listing) {
       // Named in the catalog: nothing is asked, and the key is never sent
-      voices = listing.fixed.map((voice) => ({ voiceId: voice.id, name: voice.name, description: voice.description ?? '', languages: voice.languages, preview: null, previewNeedsKey: false }));
+      voices = listing.fixed.map((voice) => ({
+        voiceId: voice.id,
+        name: voice.name,
+        description: voice.description ?? '',
+        languages: voice.languages,
+        preview: null,
+        previewNeedsKey: false,
+        ...(voice.model ? { model: voice.model } : {}),
+      }));
     } else {
       const call = callFor(provider);
       // A lister stops at its page limit, but never trusts that: no more than MAX_VOICES are kept or sent on
@@ -299,7 +309,10 @@ async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
 
 interface Source {
   provider: VoiceProvider;
+  /** The speaking model a bot starts on: the first one set up and allowed here. */
   model: string;
+  /** Every speaking model set up and allowed here. */
+  models: string[];
 }
 
 /**
@@ -325,9 +338,11 @@ async function sourceFor(botId: string, source: string): Promise<Source> {
     if (!provider || !bot.createdById || !(await lendAccess(bot.createdById, universeId))) throw new VoiceListRefused('Voice key not found.', 404);
   }
   const allowed = provider.lends?.length ? readLendModels(provider.lends[0].models) : null;
-  const model = readModels(provider.models).find((entry) => entry.kind === 'speech' && (!allowed || allowed.includes(lendModelId(entry))));
-  if (!model) throw new VoiceListRefused(`${provider.name} has no speaking model set up here.`, 409);
-  return { provider, model: model.id };
+  const models = readModels(provider.models)
+    .filter((entry) => entry.kind === 'speech' && (!allowed || allowed.includes(lendModelId(entry))))
+    .map((entry) => entry.id);
+  if (!models.length) throw new VoiceListRefused(`${provider.name} has no speaking model set up here.`, 409);
+  return { provider, model: models[0], models };
 }
 
 const previewPath = (botId: string, source: string, voiceId: string) =>
@@ -335,16 +350,17 @@ const previewPath = (botId: string, source: string, voiceId: string) =>
 
 /** The speaking voices of one source (`universe-ai` or a voice key's id) for a bot, in the order the company lists them. */
 export async function listBotVoices(botId: string, source: string): Promise<VoiceChoice[]> {
-  const { provider, model } = await sourceFor(botId, source);
+  const { provider, model, models } = await sourceFor(botId, source);
   const listed = await listedFor(provider);
-  return listed.map((voice) => ({
+  // A voice tied to one model (Groq) comes with that model, and only when that model is set up and allowed here
+  return listed.filter((voice) => !voice.model || models.includes(voice.model)).map((voice) => ({
     voiceId: voice.voiceId,
     name: voice.name,
     description: voice.description,
     languages: voice.languages,
     previewUrl: !voice.preview ? null : voice.previewNeedsKey ? previewPath(botId, source, voice.voiceId) : voice.preview,
     providerId: provider.id,
-    model,
+    model: voice.model ?? model,
   }));
 }
 
