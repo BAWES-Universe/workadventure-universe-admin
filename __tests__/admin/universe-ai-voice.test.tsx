@@ -294,6 +294,7 @@ describe('New voice provider', () => {
     // Every company is offered the same way, in alphabetical order, with the same neutral line: none is marked Recommended or praised
     // A company that listens and speaks is under both, with the same line (#844)
     expect(within(listens).getAllByRole('radio').map((card) => card.textContent)).toEqual([
+      'AssemblyAIListens. Uses your account at assemblyai.com.',
       'CartesiaListens and speaks. Uses your account at cartesia.ai.',
       'DeepgramListens and speaks. Uses your account at deepgram.com.',
       'ElevenLabsListens and speaks. Uses your account at elevenlabs.io.',

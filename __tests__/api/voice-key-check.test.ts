@@ -115,6 +115,14 @@ describe('Load models for a voice key', () => {
     expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(200);
     answer(401, '{"err_code":"INVALID_AUTH","err_msg":"Invalid credentials."}');
     expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(422);
+    // OpenAI answers a restricted key without the models permission with a 403 naming the scope; any other 403 is still refused
+    findMany.mockResolvedValue([{ adapter: 'openai', name: 'OpenAI', recognition: true, speech: true, models: [{ id: 'm', kind: 'speech' }] }]);
+    answer(403, '{"error":{"message":"You have insufficient permissions for this operation. Missing scopes: api.model.read."}}');
+    expect((await send({ adapter: 'openai', apiKey: KEY })).status).toBe(200);
+    answer(403, '{"error":{"message":"You are not allowed to sample from this model"}}');
+    expect((await send({ adapter: 'openai', apiKey: KEY })).status).toBe(422);
+    answer(401, '{"error":{"code":"invalid_api_key"}}');
+    expect((await send({ adapter: 'openai', apiKey: KEY })).status).toBe(422);
   });
 
   it('Fish Audio: asks its free credit call, lists its models, and refuses a wrong key with its own name', async () => {
@@ -126,6 +134,19 @@ describe('Load models for a voice key', () => {
     const refused = await send({ adapter: 'fish', apiKey: KEY });
     expect(refused.status).toBe(422);
     expect(await refused.json()).toEqual({ error: 'Fish Audio didn’t accept that key. Check it and paste it again.' });
+  });
+
+  it('AssemblyAI: lists past transcripts with the key as it is (no Bearer), so nothing is transcribed, and refuses a wrong key', async () => {
+    answer(200);
+    const accepted = await send({ adapter: 'assemblyai', apiKey: KEY });
+    expect((await accepted.json()).ok).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.assemblyai.com/v2/transcript?limit=1');
+    expect(init.headers.Authorization).toBe(KEY);
+    answer(401);
+    const refused = await send({ adapter: 'assemblyai', apiKey: KEY });
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toEqual({ error: 'AssemblyAI didn’t accept that key. Check it and paste it again.' });
   });
 
   it('says it could not be reached for a timeout, a dropped connection or any other answer', async () => {
@@ -166,6 +187,7 @@ describe('Load models for a voice key', () => {
     findMany.mockImplementation(async ({ where }: { where: { adapter?: string } }) => (where.adapter ? [] : serverRows));
     for (const [adapter, models] of [
       ['soniox', [{ id: 'stt-rt-v6', label: 'Soniox real-time v6', kind: 'recognition' }, { id: 'tts-rt-v2', label: 'Soniox TTS v2', kind: 'speech' }]],
+      ['assemblyai', [{ id: 'universal-3-6-pro', label: 'Universal-3.6 Pro', kind: 'recognition' }, { id: 'universal-streaming-multilingual', label: 'Universal Streaming Multilingual', kind: 'recognition' }, { id: 'universal-streaming-english', label: 'Universal Streaming English', kind: 'recognition' }]],
       ['deepgram', [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }, { id: 'aura-2', label: 'Aura 2', kind: 'speech' }]],
       ['cartesia', [{ id: 'ink-whisper', label: 'Ink Whisper', kind: 'recognition' }, { id: 'sonic-3.6', label: 'Sonic 3.6', kind: 'speech' }]],
       ['fish', [{ id: 's2.1-pro-free', label: 'S2.1 Pro (free)', kind: 'speech' }, { id: 's2.1-pro', label: 'S2.1 Pro', kind: 'speech' }]],

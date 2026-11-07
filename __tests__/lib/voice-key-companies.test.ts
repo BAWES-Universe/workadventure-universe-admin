@@ -22,7 +22,7 @@ const both: VoiceKeyCompanyInfo = {
     recognition: { host: 'listen.both.example', models: [{ id: 'ear-1', label: 'Ear 1' }], modelList: { url: 'https://api.both.example/models', list: 'stt', id: 'id' } },
     speech: { host: 'speak.both.example', models: [{ id: 'mouth-1', label: 'Mouth 1' }], modelList: { url: 'https://api.both.example/models', list: 'tts', id: 'id' } },
   },
-  does: { recognition: true, speech: true },
+  does: { recognition: true, speech: true, talk: false },
   models: [
     { id: 'ear-1', label: 'Ear 1', kind: 'recognition' },
     { id: 'mouth-1', label: 'Mouth 1', kind: 'speech' },
@@ -41,11 +41,11 @@ describe('the voice company catalog', () => {
 
   it('says what each company does, and its starting models with their job, from its jobs', () => {
     for (const entry of VOICE_KEY_COMPANIES) {
-      expect(entry.does).toEqual({ recognition: Boolean(entry.jobs.recognition), speech: Boolean(entry.jobs.speech) });
+      expect(entry.does).toEqual({ recognition: Boolean(entry.jobs.recognition), speech: Boolean(entry.jobs.speech), talk: Boolean(entry.jobs.talk) });
       expect(entry.models).toEqual(companyJobs(entry).flatMap((job) => entry.jobs[job]!.models.map((model) => ({ ...model, kind: job }))));
       for (const job of companyJobs(entry)) expect(entry.jobs[job]!.models.length).toBeGreaterThan(0);
     }
-    expect(voiceKeyCompanyInfo('fish')?.does).toEqual({ recognition: false, speech: true });
+    expect(voiceKeyCompanyInfo('fish')?.does).toEqual({ recognition: false, speech: true, talk: false });
     expect(voiceKeyCompanyInfo('fish')?.models.map((model) => model.kind)).toEqual(['speech', 'speech']);
   });
 
