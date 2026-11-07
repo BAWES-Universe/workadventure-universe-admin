@@ -354,6 +354,31 @@ describe('New voice provider', () => {
     });
   });
 
+  it('asks for the region and both parts of the key for a company whose keys are made per region (AWS)', async () => {
+    render(<NewVoiceProviderPage />);
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Speaks' })).getByRole('radio', { name: /^AWS/ }));
+    expect(screen.getByRole('heading', { name: 'Pick the region' })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Access key ID'), { target: { value: 'AKIAEXAMPLE' } });
+    fireEvent.change(screen.getByLabelText('Secret access key'), { target: { value: 'secret-1234' } });
+    // No check before a region is picked: the key only works in its own
+    expect(screen.getByRole('button', { name: 'Check key' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Region' })).getByRole('radio', { name: /^Europe \(Stockholm\)/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await screen.findByText('AWS knows this key. Nothing was spoken, so nothing was paid.');
+    expect(calls.find((call) => call.url === '/api/admin/voice-providers/check')?.body).toEqual({ adapter: 'aws', apiKey: 'AKIAEXAMPLE:secret-1234', job: 'speech', region: 'eu-north-1' });
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'neural' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add provider' }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/ai-providers'));
+    expect(calls.find((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers')?.body).toMatchObject({
+      adapter: 'aws',
+      apiKey: 'AKIAEXAMPLE:secret-1234',
+      region: 'eu-north-1',
+      speech: true,
+    });
+  });
+
   it('sets up the job picked for a company that listens and speaks, asking it for that job\'s models (#844)', async () => {
     render(<NewVoiceProviderPage />);
     fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Cartesia/ }));
