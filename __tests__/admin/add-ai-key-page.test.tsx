@@ -565,6 +565,10 @@ describe('Add a key for voice', () => {
       expect.stringContaining('Cartesia'),
     ]);
     expect(within(group).getAllByTestId('provider-logo')).toHaveLength(2);
+    // One line on how many keys a bot's voice needs (#1911)
+    expect(within(group).getByTestId('voice-one-key-hint').textContent).toBe(
+      'A company that listens and speaks needs one key for a bot’s whole voice. You can also mix: one company listens, another speaks.',
+    );
     const hosted = screen.getByText('Hosted, with an API key');
     expect(hosted.compareDocumentPosition(group) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     unmount();
@@ -609,6 +613,10 @@ describe('Add a key for voice', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/me/voice-keys/check', expect.objectContaining({ method: 'POST', body: JSON.stringify({ adapter: 'elevenlabs', apiKey: 'sk-elevenlabs-key' }) }));
     expect(fetchMock.mock.calls.some(([url]) => url === '/api/me/ai-keys/models')).toBe(false);
     expect(screen.getByText(/Nothing to pick here\. Each bot picks one of these on its own page/)).toBeTruthy();
+    // A key that listens and speaks is all a bot needs, and it can still be split on the bot (#1911)
+    expect(screen.getByTestId('voice-one-key').textContent).toBe(
+      'This key listens and speaks, so it’s all a bot needs. On a bot’s Voice row you can still split: listen with one company, speak with another.',
+    );
     expect(within(screen.getByTestId('voice-models-recognition')).getByText('Scribe v1')).toBeTruthy();
     // A model with no label is shown by its id
     expect(within(screen.getByTestId('voice-models-speech')).getAllByTestId('model-row').map((row) => row.textContent)).toEqual(['Eleven Flash v2.5', 'eleven_v3']);
@@ -642,6 +650,7 @@ describe('Add a key for voice', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
     expect(await screen.findByText(/It answered\. Soniox has 1 model\./)).toBeTruthy();
     expect(screen.queryByTestId('voice-models-speech')).toBeNull();
+    expect(screen.queryByTestId('voice-one-key')).toBeNull();
     fireEvent.click(addButton());
     await waitFor(() => expect(push).toHaveBeenCalled());
     expect(JSON.parse(fetchMock.mock.calls.at(-1)![1].body)).toMatchObject({ adapter: 'soniox', recognition: true, speech: false });
