@@ -1,4 +1,5 @@
 import type { VoiceKeySummary } from '@/lib/voice-keys';
+import { voiceDoesLine } from '@/lib/voice-key-companies';
 import { RECHECK_MINUTES } from '@/lib/key-recheck';
 import { count } from '../../components/ds';
 import { DOWN_PHRASE, names, sinceText } from './key-text';
@@ -7,9 +8,15 @@ import { DOWN_PHRASE, names, sinceText } from './key-text';
 
 export type VoiceLent = VoiceKeySummary['lentTo'][number];
 
-/** What a key does: "Listens", "Speaks" or "Listens and speaks". */
-export const voiceDoes = (key: Pick<VoiceKeySummary, 'recognition' | 'speech'>) =>
-  key.recognition && key.speech ? 'Listens and speaks' : key.recognition ? 'Listens' : 'Speaks';
+/**
+ * What a key does: "Listens", "Speaks", "Listens and speaks", or with a talking model (game #1910) "Talks live",
+ * "Listens and talks live"… A key that listens and speaks only through its talking model says only that.
+ */
+export const voiceDoes = (key: Pick<VoiceKeySummary, 'recognition' | 'speech' | 'models'>) => {
+  const has = (kind: string) => key.models.some((model) => model.kind === kind);
+  const talk = has('talk');
+  return voiceDoesLine(talk ? { recognition: has('recognition'), speech: has('speech'), talk } : { recognition: key.recognition, speech: key.speech });
+};
 
 /** "ElevenLabs · Listens and speaks · 5 models · ends in 7c1d" */
 export function describeVoice(key: VoiceKeySummary): string {

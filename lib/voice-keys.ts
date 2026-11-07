@@ -5,7 +5,7 @@ import { encryptApiKey } from '@/lib/encryption';
 import { lendAccess, parseLendModels } from '@/lib/ai-key-lend';
 import { readModels, voiceProviderProblem, type VoiceModel } from '@/lib/voice-providers';
 import { lendModelId } from '@/lib/voice-lend-model';
-import { VOICE_KEY_COMPANIES, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { VOICE_KEY_COMPANIES, modelDoes, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { checkVoiceKeyLimits, readVoiceKeyLimits, savedVoiceKeyLimits, VOICE_KEY_LIMIT_NAMES, type VoiceKeyLimitValues } from '@/lib/voice-limit-values';
@@ -24,6 +24,8 @@ export interface VoiceKeyCompany {
   label: string;
   recognition: boolean;
   speech: boolean;
+  /** It has a talking model, which listens and speaks in one (game #1910). */
+  talk: boolean;
   /** From the catalog (lib/voice-key-companies.ts): what the Add a key page shows for it. */
   logo: string | null;
   benefit: string;
@@ -63,7 +65,7 @@ export async function voiceKeyCompanies(): Promise<VoiceKeyCompany[]> {
 const modelSchema = z.object({
   id: z.string().trim().min(1, 'A model needs an id').max(255),
   label: z.string().trim().max(255).optional(),
-  kind: z.enum(['recognition', 'speech']),
+  kind: z.enum(['recognition', 'speech', 'talk']),
 });
 const fields = {
   name: z.string().trim().min(1, 'name is required').max(255),
@@ -196,7 +198,7 @@ async function summaries(rows: KeyRow[], ownerId: string): Promise<VoiceKeySumma
   return rows.map((row) => {
     const models = readModels(row.models);
     const label = (kind: 'recognition' | 'speech', id: string) => {
-      const found = models.find((model) => model.kind === kind && model.id === id);
+      const found = models.find((model) => modelDoes(model, kind) && model.id === id);
       return found ? found.label || found.id : id;
     };
     const botsIn = (universeId: string): BotOnKey[] =>
@@ -253,9 +255,12 @@ export async function createVoiceKey(ownerId: string, input: z.infer<typeof crea
   if (refused) throw new VoiceKeyRefused(refused);
   const company = (await voiceKeyCompanies()).find((entry) => entry.adapter === input.adapter);
   if (!company) throw new VoiceKeyRefused('Pick a speech company from the list');
-  if ((input.recognition && !company.recognition) || (input.speech && !company.speech)) {
-    throw new VoiceKeyRefused(`${company.label} doesn’t do ${input.recognition && !company.recognition ? 'listening' : 'speaking'}`);
+  // A company with a talking model listens and speaks with it (game #1910)
+  const can = { recognition: company.recognition || company.talk, speech: company.speech || company.talk };
+  if ((input.recognition && !can.recognition) || (input.speech && !can.speech)) {
+    throw new VoiceKeyRefused(`${company.label} doesn’t do ${input.recognition && !can.recognition ? 'listening' : 'speaking'}`);
   }
+  if (input.models.some((model) => model.kind === 'talk') && !company.talk) throw new VoiceKeyRefused(`${company.label} doesn’t talk live`);
   const row = await prisma.voiceProvider.create({
     data: {
       adapter: input.adapter,

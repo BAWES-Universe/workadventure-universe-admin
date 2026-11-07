@@ -31,14 +31,17 @@
 export interface VoiceKeyCompanyModel {
   id: string;
   label: string;
-  kind: 'recognition' | 'speech';
+  kind: VoiceCompanyJobName;
 }
 
 /**
- * A job a company does in Universe, named as the bot server's providers name it. Each is its own entry under `jobs`, so another
- * (a talking model that listens and speaks in one, game #1910) joins as one more key there.
+ * A job a company does in Universe, named as the bot server's providers name it. Each is its own entry under `jobs`.
+ *
+ * `talk` is a talking model (game #1910): one live model that listens and speaks in one, in place of a company that listens and
+ * one that speaks. The bot's own Mind still writes every answer: the talking model hears the person, and says the answer the Mind
+ * wrote in the voice the bot's maker picked. A bot on one names it for both listening and speaking (see `talksLive`).
  */
-export type VoiceCompanyJobName = 'recognition' | 'speech';
+export type VoiceCompanyJobName = 'recognition' | 'speech' | 'talk';
 
 /**
  * Where a company lists its models for one job, read with the same key header as `check` (free: nothing is heard or spoken), so a
@@ -89,6 +92,12 @@ export interface VoiceListSpec {
   previewNeedsKey?: boolean;
 }
 
+/** A voice a company offers but has no list call for (OpenAI's talking voices): the same for every key. */
+export interface FixedVoice {
+  id: string;
+  name: string;
+}
+
 /** One job a company does: its own address for it, the models a key starts with, and where it lists models and voices. */
 export interface VoiceCompanyJob {
   /** The company's own host for this job, as the bot server calls it when no address is typed. */
@@ -96,8 +105,10 @@ export interface VoiceCompanyJob {
   /** The models a key starts with, checked against the company's own docs on 7 Nov 2026. The first is the one a bot starts on. */
   models: { id: string; label: string }[];
   modelList?: VoiceModelListSpec;
-  /** Speaking only. */
+  /** Speaking and talking only. */
   voices?: VoiceListSpec;
+  /** Speaking and talking only, for a company with no list call: its voices, in the order the company's own docs list them. */
+  fixedVoices?: FixedVoice[];
 }
 
 /** One company, everything about it in one place. */
@@ -136,17 +147,17 @@ export interface VoiceKeyCompanyEntry {
 
 /** A company with what follows from its jobs filled in: what it does, and every job's starting models with their kind. */
 export interface VoiceKeyCompanyInfo extends VoiceKeyCompanyEntry {
-  does: { recognition: boolean; speech: boolean };
+  does: { recognition: boolean; speech: boolean; talk: boolean };
   /** Every job's starting models, listening first. Used when the server has no provider of its own for the company with models listed. */
   models: VoiceKeyCompanyModel[];
 }
 
 /** The jobs in the order they are shown and listed. */
-export const VOICE_COMPANY_JOBS: VoiceCompanyJobName[] = ['recognition', 'speech'];
+export const VOICE_COMPANY_JOBS: VoiceCompanyJobName[] = ['recognition', 'speech', 'talk'];
 
 const company = (entry: VoiceKeyCompanyEntry): VoiceKeyCompanyInfo => ({
   ...entry,
-  does: { recognition: Boolean(entry.jobs.recognition), speech: Boolean(entry.jobs.speech) },
+  does: { recognition: Boolean(entry.jobs.recognition), speech: Boolean(entry.jobs.speech), talk: Boolean(entry.jobs.talk) },
   models: VOICE_COMPANY_JOBS.flatMap((kind) => (entry.jobs[kind]?.models ?? []).map((model) => ({ ...model, kind }))),
 });
 
@@ -262,6 +273,39 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     check: { url: 'https://api.fish.audio/wallet/self/api-credit', header: 'Authorization', prefix: 'Bearer ' },
   }),
   company({
+    adapter: 'openai',
+    label: 'OpenAI',
+    jobs: {
+      talk: {
+        host: 'api.openai.com',
+        // gpt-realtime-2.1 and its mini, from OpenAI's model pages (7 Nov 2026). The older realtime snapshots shut on 20 Jan 2027.
+        models: [
+          { id: 'gpt-realtime-2.1', label: 'GPT Realtime 2.1' },
+          { id: 'gpt-realtime-2.1-mini', label: 'GPT Realtime 2.1 mini' },
+        ],
+        // OpenAI has no call that lists voices: these are the realtime voices its docs list
+        fixedVoices: [
+          { id: 'marin', name: 'Marin' },
+          { id: 'cedar', name: 'Cedar' },
+          { id: 'alloy', name: 'Alloy' },
+          { id: 'ash', name: 'Ash' },
+          { id: 'ballad', name: 'Ballad' },
+          { id: 'coral', name: 'Coral' },
+          { id: 'echo', name: 'Echo' },
+          { id: 'sage', name: 'Sage' },
+          { id: 'shimmer', name: 'Shimmer' },
+          { id: 'verse', name: 'Verse' },
+        ],
+      },
+    },
+    logo: 'openai',
+    benefit: '{does}. Uses your account at platform.openai.com.',
+    step: 'On platform.openai.com, open API keys and create a key.',
+    docs: 'https://platform.openai.com/docs',
+    // GET /v1/models lists the models the key may use: free, and a wrong key is 401
+    check: { url: 'https://api.openai.com/v1/models', header: 'Authorization', prefix: 'Bearer ' },
+  }),
+  company({
     adapter: 'soniox',
     label: 'Soniox',
     jobs: {
@@ -282,9 +326,27 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
 export const voiceKeyCompanyInfo = (adapter: unknown): VoiceKeyCompanyInfo | null =>
   VOICE_KEY_COMPANIES.find((entry) => entry.adapter === adapter) ?? null;
 
-/** What a company's line says it does, from the jobs Universe's own providers of it run. */
-export const voiceDoesLine = ({ recognition, speech }: { recognition: boolean; speech: boolean }) =>
-  recognition && speech ? 'Listens and speaks' : recognition ? 'Listens' : 'Speaks';
+/** What a company's line says it does, from the jobs Universe's own providers of it run: "Listens and speaks", "Talks live"… */
+export const voiceDoesLine = ({ recognition, speech, talk = false }: { recognition: boolean; speech: boolean; talk?: boolean }) => {
+  const jobs = [recognition && 'listens', speech && 'speaks', talk && 'talks live'].filter((job): job is string => Boolean(job));
+  const line = jobs.length > 1 ? `${jobs.slice(0, -1).join(', ')} and ${jobs[jobs.length - 1]}` : jobs[0] ?? 'speaks';
+  return line.charAt(0).toUpperCase() + line.slice(1);
+};
+
+/** Whether a model can be used for a job: one of that job's own, or a talking model, which listens and speaks in one. */
+export const modelDoes = (model: { kind: string }, part: 'recognition' | 'speech') => model.kind === part || model.kind === 'talk';
+
+/**
+ * Whether a bot's voice talks live (game #1910): listening and speaking name the same provider and the same talking model. A
+ * talking model is never named for only one of the two.
+ */
+export const talksLive = (
+  profile: { recognition: { providerId: string; model: string }; speech: { providerId: string; model: string } },
+  models: { id: string; kind: string }[],
+) =>
+  profile.recognition.providerId === profile.speech.providerId &&
+  profile.recognition.model === profile.speech.model &&
+  models.some((model) => model.kind === 'talk' && model.id === profile.speech.model);
 
 /** The jobs a company does, in the order they are shown. */
 export const companyJobs = (info: Pick<VoiceKeyCompanyEntry, 'jobs'>): VoiceCompanyJobName[] => VOICE_COMPANY_JOBS.filter((job) => info.jobs[job]);

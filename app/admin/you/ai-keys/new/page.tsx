@@ -14,6 +14,7 @@ import { useToast } from '@/components/ui/toast';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { AI_KEY_KINDS, kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 import { LoadError, PageHeader } from '../../../components/ds';
+import { VOICE_JOB_TITLES } from '../../../components/ds/voice-model-picker';
 import { AiKeyFailure, aiKeyError, aiKeyFailureText } from '../../../hooks/use-ai-keys';
 import { useVoiceCompanies, voiceCompanyKind } from '../../../hooks/use-voice-keys';
 import type { VoiceModel } from '@/lib/voice-providers';
@@ -255,8 +256,9 @@ export default function AddAiKeyPage() {
                 adapter: info.kind,
                 name,
                 apiKey,
-                recognition: models.models.some((entry) => entry.kind === 'recognition'),
-                speech: models.models.some((entry) => entry.kind === 'speech'),
+                // A talking model listens and speaks in one (game #1910)
+                recognition: models.models.some((entry) => entry.kind === 'recognition' || entry.kind === 'talk'),
+                speech: models.models.some((entry) => entry.kind === 'speech' || entry.kind === 'talk'),
                 models: models.models,
               })
             : JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey, ...(model ? { model: model.trim() } : {}), name }),
@@ -466,12 +468,12 @@ export default function AddAiKeyPage() {
             {models.status === 'voice' && (
               <>
                 <p className={FIELD_HINT}>Nothing to pick here. Each bot picks one of these on its own page. When you lend the key, you can limit which ones bots there may use.</p>
-                {(['recognition', 'speech'] as const).map((job) => {
+                {VOICE_JOB_TITLES.map(({ kind: job, title }) => {
                   const list = models.models.filter((entry) => entry.kind === job);
                   return (
                     list.length > 0 && (
                       <div key={job} className="grid gap-1.5" data-testid={`voice-models-${job}`}>
-                        <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{job === 'recognition' ? 'Listens' : 'Speaks'}</h3>
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{title}</h3>
                         <ul className="m-0 grid list-none gap-0 rounded-2xl border border-foreground/10 p-0">
                           {list.map((entry) => (
                             <li key={entry.id} className="flex min-h-11 items-center gap-2 border-t border-foreground/10 px-3 text-[15px] first:border-t-0" data-testid="model-row">

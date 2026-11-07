@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import { BotSettingsError } from '@/lib/bot-access-settings';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels, universeAiDefaults } from '@/lib/voice-providers';
+import { modelDoes, talksLive } from '@/lib/voice-key-companies';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
 import { claimVoiceKeyTry, healthOf, tryIsDue } from '@/lib/voice-key-health';
 import { startOfMonth } from '@/lib/ai-keys';
@@ -66,7 +67,10 @@ export function followUniverseAi(profile: VoiceProfile, providers: Map<string, V
     const choice = profile[part];
     const provider = providers.get(choice.providerId);
     if (!provider || provider.ownerId !== null) return choice;
-    const current = readModels(provider.models).find((model) => model.kind === part);
+    // A bot that talks live follows the provider's first talking model, for both parts, so they keep naming the same one
+    const models = readModels(provider.models);
+    const kind = talksLive(profile, models) ? 'talk' : part;
+    const current = models.find((model) => model.kind === kind);
     return current && current.id !== choice.model ? { ...choice, model: current.id } : choice;
   };
   const recognition = follow('recognition');
@@ -109,9 +113,15 @@ export function profileProblem(profile: VoiceProfile, providers: Map<string, Voi
     if (!provider.enabled) return `${provider.name} is off`;
     if (!provider[part]) return `${provider.name} doesn't do ${job}`;
     if (!provider.apiKeyEncrypted) return `${provider.name} has no key`;
-    if (!readModels(provider.models).some((model) => model.kind === part && model.id === choice.model)) return `${provider.name} doesn't list the model ${choice.model} for ${job}`;
+    const models = readModels(provider.models);
+    const model = models.find((entry) => modelDoes(entry, part) && entry.id === choice.model && (entry.kind === part || talksLive(profile, models)));
+    if (!model) {
+      // A talking model listens and speaks in one: it is named for both or for neither (game #1910)
+      if (models.some((entry) => entry.kind === 'talk' && entry.id === choice.model)) return `${provider.name}'s ${choice.model} talks live, so it must be named for both listening and speaking`;
+      return `${provider.name} doesn't list the model ${choice.model} for ${job}`;
+    }
     const allowed = lent.get(provider.id);
-    if (allowed && !allowed.includes(lendModelId({ kind: part, id: choice.model }))) return `${provider.name} isn't lent to this universe for the model ${choice.model}`;
+    if (allowed && !allowed.includes(lendModelId(model))) return `${provider.name} isn't lent to this universe for the model ${choice.model}`;
   }
   return null;
 }
