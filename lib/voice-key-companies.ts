@@ -98,7 +98,10 @@ export interface VoiceListSpec {
   perModel?: { model: string; path: string }[];
   /** A voice is kept only when each of these fields, when the company sends it, has this value. */
   keep?: Record<string, string>;
-  /** The field naming the one speaking model a voice is listed for (Rime lists each voice once a model): the voice is kept once, with every model it has. */
+  /**
+   * The field naming the speaking model a voice is listed for (Rime lists each voice once a model), or `a[].b` for every model one
+   * listing names (Speechify): the voice is kept once, with every model it has.
+   */
   model?: string;
   /** The field holding a voice's id: text, or a whole number kept as its digits (CAMB.AI). */
   id: string;
@@ -799,6 +802,41 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On console.soniox.com, open API Keys and create a key.',
     docs: 'https://soniox.com/docs',
     check: { url: 'https://api.soniox.com/v1/models', header: 'Authorization', prefix: 'Bearer ' },
+  }),
+  company({
+    adapter: 'speechify',
+    label: 'Speechify',
+    jobs: {
+      speech: {
+        // Text to speech, one streamed request per reply (POST /v1/audio/stream/with-timestamps), as Pipecat's
+        // SpeechifyHttpTTSService does. Simba 3.5 is Pipecat's default and speaks 48 languages; Simba 3.2 speaks English, Simba 3.0
+        // English, German, Spanish, French, Italian and Portuguese (https://docs.speechify.ai)
+        host: 'api.speechify.ai',
+        models: [
+          { id: 'simba-3.5', label: 'Simba 3.5' },
+          { id: 'simba-3.2', label: 'Simba 3.2 (English)' },
+          { id: 'simba-3.0', label: 'Simba 3.0' },
+        ],
+        // GET /v1/voices: the account's own voices and Speechify's shared ones, a page at a time by cursor. Each voice names the
+        // models it speaks with and the languages of each
+        voices: {
+          path: '/v1/voices?limit={size}',
+          list: 'voices',
+          paging: { kind: 'token', param: 'cursor', next: 'next_cursor', more: 'has_more' },
+          model: 'models[].name',
+          id: 'id',
+          name: 'display_name',
+          description: [{ join: ['tags[]'] }],
+          languages: ['locale', 'models[].languages[].locale'],
+          preview: 'preview_audio',
+        },
+      },
+    },
+    benefit: '{does}. Uses your account at speechify.ai.',
+    step: 'On platform.speechify.ai, open API Keys and create a key.',
+    docs: 'https://docs.speechify.ai',
+    // One voice from the voice list, free with the key as a bearer
+    check: { url: 'https://api.speechify.ai/v1/voices?limit=1', header: 'Authorization', prefix: 'Bearer ' },
   }),
 ];
 

@@ -200,11 +200,12 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
         if (typeof id !== 'string' || id.length === 0 || id.length > 255) throw unreadable(call);
         const fields = voice as Record<string, unknown>;
         if (spec.keep && Object.entries(spec.keep).some(([field, wanted]) => fields[field] != null && fields[field] !== wanted)) continue;
-        // A voice the company lists once for each model it speaks in (Rime) is kept once, with every model it has
-        const model = runModel ?? (spec.model ? textAt(voice, spec.model, 255) : '');
+        // A voice the company lists once for each model it speaks in (Rime), or with all of them (Speechify), is kept once, with
+        // every model it has
+        const models = runModel ? [runModel] : spec.model ? [...new Set(valuesAt(voice, spec.model).map((entry) => clean(entry, 255)).filter(Boolean))] : [];
         if (seen.has(id)) {
-          const kept = model ? out.find((entry) => entry.voiceId === id) : undefined;
-          if (kept?.models && !kept.models.includes(model)) kept.models.push(model);
+          const kept = models.length ? out.find((entry) => entry.voiceId === id) : undefined;
+          for (const model of models) if (kept?.models && !kept.models.includes(model)) kept.models.push(model);
           continue;
         }
         seen.add(id);
@@ -217,7 +218,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
           // A sample served with the key must be at the company's own address: the key never goes to one a listing names
           preview: sample && (!spec.previewNeedsKey || new URL(sample).host === host) ? sample : null,
           previewNeedsKey: spec.previewNeedsKey === true,
-          ...(model ? { models: [model] } : {}),
+          ...(models.length ? { models } : {}),
         });
       }
       if (spec.paging.kind === 'none') break;

@@ -204,6 +204,7 @@ describe('Load models for a voice key', () => {
       ['resemble', [{ id: 'resemble', label: 'Resemble TTS', kind: 'speech' }]],
       ['sarvam', [{ id: 'saaras:v4', label: 'Saaras v4', kind: 'recognition' }, { id: 'saaras:v3', label: 'Saaras v3', kind: 'recognition' }, { id: 'bulbul:v3', label: 'Bulbul v3', kind: 'speech' }, { id: 'bulbul:v4-flash', label: 'Bulbul v4 Flash', kind: 'speech' }]],
       ['smallest', [{ id: 'pulse', label: 'Pulse', kind: 'recognition' }, { id: 'pulse-2', label: 'Pulse 2 (English)', kind: 'recognition' }, { id: 'lightning_v3.1_pro', label: 'Lightning v3.1 Pro', kind: 'speech' }, { id: 'lightning_v3.1', label: 'Lightning v3.1', kind: 'speech' }]],
+      ['speechify', [{ id: 'simba-3.5', label: 'Simba 3.5', kind: 'speech' }, { id: 'simba-3.2', label: 'Simba 3.2 (English)', kind: 'speech' }, { id: 'simba-3.0', label: 'Simba 3.0', kind: 'speech' }]],
       ['rime', [{ id: 'coda', label: 'Coda', kind: 'speech' }, { id: 'mistv3', label: 'Mist v3', kind: 'speech' }, { id: 'mistv2', label: 'Mist v2', kind: 'speech' }]],
       ['hume', [{ id: 'octave-2', label: 'Octave 2', kind: 'speech' }, { id: 'octave-1', label: 'Octave 1', kind: 'speech' }]],
       ['bland', [{ id: 'btts-3', label: 'Bland TTS v3', kind: 'speech' }, { id: 'btts-2', label: 'Bland TTS v2', kind: 'speech' }]],

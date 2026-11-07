@@ -738,6 +738,55 @@ describe('Smallest AI\'s voices', () => {
   });
 });
 
+describe('Speechify\'s voices', () => {
+  const speechify = (models: string[]) => key({ adapter: 'speechify', name: 'Speechify', models: models.map((id) => ({ id, label: id, kind: 'speech' })) });
+  const pages: Record<string, unknown> = {
+    'https://api.speechify.ai/v1/voices?limit=100': {
+      voices: [
+        {
+          id: 'george',
+          display_name: 'George',
+          locale: 'en-US',
+          tags: ['timbre:deep', 'use-case:narration'],
+          preview_audio: 'https://storage.example.com/george.mp3',
+          models: [
+            { name: 'simba-3.0', languages: [{ locale: 'en-US' }] },
+            { name: 'simba-3.5', languages: [{ locale: 'en-US' }, { locale: 'ar-SA' }] },
+          ],
+        },
+      ],
+      has_more: true,
+      next_cursor: 'c 2',
+    },
+    'https://api.speechify.ai/v1/voices?limit=100&cursor=c%202': {
+      voices: [{ id: 'henry', display_name: 'Henry', locale: 'en-GB', tags: null, preview_audio: null, models: [{ name: 'simba-3.0', languages: [{ locale: 'en-GB' }] }] }],
+      has_more: false,
+      next_cursor: null,
+    },
+  };
+
+  beforeEach(() => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async (url: string) => json(pages[url]));
+  });
+
+  it('are read page by page by cursor, each voice with the first of its models the key has', async () => {
+    providers = [speechify(['simba-3.5', 'simba-3.0'])];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.languages, voice.previewUrl, voice.model])).toEqual([
+      ['george', 'George', 'timbre:deep, use-case:narration', ['en', 'ar'], 'https://storage.example.com/george.mp3', 'simba-3.5'],
+      ['henry', 'Henry', '', ['en'], null, 'simba-3.0'],
+    ]);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(Object.keys(pages));
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+  });
+
+  it('leave out a voice that has none of the key\'s models', async () => {
+    providers = [speechify(['simba-3.5'])];
+    expect((await (await voices('part=speech&source=key-1')).json()).map((voice: Row) => voice.voiceId)).toEqual(['george']);
+  });
+});
+
 describe('Groq\'s voices', () => {
   const ENGLISH = { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' };
   const ARABIC = { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' };
