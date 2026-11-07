@@ -260,6 +260,14 @@ const owned = (id: string, ownerId: string) => prisma.voiceProvider.findFirst({ 
 const problem = (draft: { recognition: boolean; speech: boolean; models: VoiceModel[] }) =>
   voiceProviderProblem({ ...draft, enabled: true, defaultRecognition: false, defaultSpeech: false, hasKey: true });
 
+/** A model typed as the person named it (an Azure deployment): one, of the company's job, named the way the company allows. */
+function checkTypedModel(adapter: string, models: VoiceModel[]): void {
+  const typed = voiceKeyCompanyInfo(adapter)?.account?.typedModel;
+  if (typed && (models.length !== 1 || models[0].kind !== typed.kind || !TYPED_MODEL.test(models[0].id))) {
+    throw new VoiceKeyRefused(`Type the ${typed.label.toLowerCase()}: letters, digits, dots, dashes and underscores, up to 64`);
+  }
+}
+
 export async function createVoiceKey(ownerId: string, input: z.infer<typeof createVoiceKeySchema>): Promise<VoiceKeySummary> {
   const refused = problem(input);
   if (refused) throw new VoiceKeyRefused(refused);
@@ -280,11 +288,7 @@ export async function createVoiceKey(ownerId: string, input: z.infer<typeof crea
   } else if (input.endpoint !== undefined) {
     throw new VoiceKeyRefused(`${company.label} keys don’t take an address`);
   }
-  // A model typed as the person named it (an Azure deployment): one, of the company's job, named the way the company allows
-  const typed = info?.account?.typedModel;
-  if (typed && (input.models.length !== 1 || input.models[0].kind !== typed.kind || !TYPED_MODEL.test(input.models[0].id))) {
-    throw new VoiceKeyRefused(`Type the ${typed.label.toLowerCase()}: letters, digits, dots, dashes and underscores, up to 64`);
-  }
+  checkTypedModel(input.adapter, input.models);
   const row = await prisma.voiceProvider.create({
     data: {
       adapter: input.adapter,
@@ -313,6 +317,7 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
     const models = input.models ?? readModels(row.models);
     const refused = problem({ recognition: row.recognition, speech: row.speech, models });
     if (refused) throw new VoiceKeyRefused(refused);
+    if (input.models !== undefined) checkTypedModel(row.adapter, models);
     // Only what the owner changed is kept: a value picked that is the server's own now is dropped, so it follows the server from then on.
     // Only the names sent are looked at: a limit saved earlier that happens to equal the server's today stays saved
     let voiceLimits: Prisma.InputJsonValue | typeof Prisma.DbNull | undefined;

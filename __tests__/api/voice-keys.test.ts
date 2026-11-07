@@ -432,6 +432,21 @@ describe('changing a key', () => {
     expect(db.voiceKeyLend.update).not.toHaveBeenCalled();
   });
 
+  it('holds an Azure key to one deployment, named the way Azure allows, when its model is changed', async () => {
+    const azure = key({ adapter: 'azure', recognition: true, speech: true, models: [{ id: 'realtime-prod', kind: 'talk' }] });
+    db.voiceKeyLend.findMany.mockResolvedValue([]);
+    for (const models of [[], [{ id: 'a', kind: 'talk' }, { id: 'b', kind: 'talk' }], [{ id: 'my deployment', kind: 'talk' }]]) {
+      db.voiceProvider.findFirst.mockResolvedValue(azure);
+      expect((await call(patch, 'PATCH', { models })).status).toBe(400);
+    }
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+    db.voiceProvider.findFirst.mockResolvedValue(azure);
+    expect((await call(patch, 'PATCH', { models: [{ id: 'realtime-2', kind: 'talk' }] })).status).toBe(200);
+    // A change that leaves the models alone is not held to it
+    db.voiceProvider.findFirst.mockResolvedValue(azure);
+    expect((await call(patch, 'PATCH', { name: 'Studio' })).status).toBe(200);
+  });
+
   it('refuses a model for a job the key doesn’t do', async () => {
     db.voiceProvider.findFirst.mockResolvedValue(key());
     expect((await call(patch, 'PATCH', { models: [{ id: 'a', kind: 'recognition' }] })).status).toBe(400);
