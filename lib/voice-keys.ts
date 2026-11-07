@@ -366,10 +366,18 @@ async function movedAddress(row: VoiceProvider, address: string): Promise<string
 export async function updateVoiceKey(ownerId: string, id: string, input: z.infer<typeof updateVoiceKeySchema>): Promise<VoiceKeySummary> {
   // The new address is asked outside the save: a slow server never holds the database
   let endpoint: string | undefined;
-  if (input.address !== undefined || (input.apiKey !== undefined && input.apiKey.length < 8)) {
+  if (input.address !== undefined || input.apiKey !== undefined) {
     const current = await prisma.voiceProvider.findFirst({ where: { id, ownerId } });
     if (!current) throw new VoiceKeyRefused('Key not found', 404);
-    if (input.apiKey !== undefined && input.apiKey.length < 8 && !isOwnSpeechAdapter(current.adapter)) throw new VoiceKeyRefused('apiKey looks too short');
+    if (input.apiKey !== undefined) {
+      // A company's key is at least 8 characters; an own server's may be short, but is held to what a header can carry, as when it was added
+      if (isOwnSpeechAdapter(current.adapter)) {
+        const key = ownSpeechKey(input.apiKey);
+        if (!key.ok) throw new VoiceKeyRefused(key.message);
+      } else if (input.apiKey.length < 8) {
+        throw new VoiceKeyRefused('apiKey looks too short');
+      }
+    }
     if (input.address !== undefined) endpoint = await movedAddress(current, input.address);
   }
   await prisma.$transaction(async (tx) => {

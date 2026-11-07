@@ -257,6 +257,17 @@ describe('changing the address of your own speech server', () => {
     expect(db.voiceProvider.update).not.toHaveBeenCalled();
   });
 
+  it('holds a changed key to what a header can carry, as when it was added', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(row());
+    for (const key of ['abc\ndef', 'clé-secrète', 'has a space', 'a'.repeat(513)]) {
+      expect((await send(patch, { apiKey: key }, 'PATCH')).status).toBe(400);
+    }
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+    // A short key is fine for an own server
+    expect((await send(patch, { apiKey: 'short1' }, 'PATCH')).status).toBe(200);
+    expect(db.voiceProvider.update.mock.calls[0][0].data).toHaveProperty('apiKeyEncrypted');
+  });
+
   it('is only for an own speech server', async () => {
     db.voiceProvider.findFirst.mockResolvedValue(row({ adapter: 'elevenlabs', endpoint: null }));
     const response = await send(patch, { address: 'https://new.example.com' }, 'PATCH');
