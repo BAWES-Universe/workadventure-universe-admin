@@ -29,6 +29,8 @@
  * - async: POST /voices with { limit: 1 }, x-api-key and version: v1. It lists voices: nothing is spoken. A wrong key is 401.
  * - bland: GET /v1/voices, Authorization: Bearer. It lists voices: nothing is spoken.
  * - camb: GET /apis/list-voices, x-api-key. It lists voices: nothing is spoken.
+ * - fal: GET https://api.fal.ai/v1/account/billing, Authorization: Key. Free (it reads the account's name). A key without the
+ *   billing permission (the usual API key) is answered 403, not 401: fal knows the key, so that counts as accepted.
  * - fish: GET /wallet/self/api-credit, Authorization: Bearer. Free (it reads the account's API credit, nothing is generated). A
  *   free account with no credit still has the answer, and that is fine: the free model needs none.
  */
@@ -374,6 +376,25 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     step: 'On elevenlabs.io, open Developers, then API keys, and create a key.',
     docs: 'https://elevenlabs.io/docs',
     check: { url: 'https://api.elevenlabs.io/v1/user', header: 'xi-api-key', prefix: '', alsoAccepted: { status: 401, includes: 'missing_permissions' } },
+  }),
+  company({
+    adapter: 'fal',
+    label: 'fal',
+    jobs: {
+      recognition: {
+        // Hearing by upload: each stretch of speech is sent as one file to fal's Whisper apps, as Pipecat's FalSTTService does.
+        // A model is the fal app it goes to. Wizper is fal's faster Whisper large v3 (https://fal.ai/models/fal-ai/wizper)
+        host: 'fal.run',
+        models: [
+          { id: 'fal-ai/wizper', label: 'Wizper (Whisper large v3)' },
+          { id: 'fal-ai/whisper', label: 'Whisper' },
+        ],
+      },
+    },
+    benefit: '{does}. Uses your account at fal.ai.',
+    step: 'On fal.ai, open your dashboard, then Keys, and create a key.',
+    docs: 'https://fal.ai/docs',
+    check: { url: 'https://api.fal.ai/v1/account/billing', header: 'Authorization', prefix: 'Key ', alsoAccepted: { status: 403 } },
   }),
   company({
     adapter: 'fish',
