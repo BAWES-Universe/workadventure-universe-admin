@@ -571,6 +571,23 @@ describe('Gradium\'s voices', () => {
   });
 });
 
+describe('Groq\'s voices', () => {
+  const groq = () => key({ adapter: 'groq', name: 'Groq', models: [{ id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' }] });
+
+  beforeEach(() => {
+    providers = [groq()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+  });
+
+  it('are the ones its docs name, with their language, and nothing is asked with the key', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toHaveLength(12);
+    expect(list[0]).toEqual({ voiceId: 'autumn', name: 'Autumn', description: 'Orpheus English', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 'canopylabs/orpheus-arabic-saudi' });
+    expect(list.find((voice: Row) => voice.voiceId === 'noura')).toMatchObject({ name: 'Noura', languages: ['ar'] });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('languageCode', () => {
   it('keeps the language of a code and drops anything that isn\'t one', () => {
     expect([languageCode('en-GB'), languageCode('AR_kw'), languageCode('ara'), languageCode('English'), languageCode(''), languageCode(7)]).toEqual(['en', 'ar', 'ara', null, null, null]);

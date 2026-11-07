@@ -301,9 +301,10 @@ describe('New voice provider', () => {
       'falListens. Uses your account at fal.ai.',
       'GladiaListens. Uses your account at gladia.io.',
       'GradiumListens and speaks. Uses your account at gradium.ai.',
+      'GroqListens and speaks. Uses your account at groq.com.',
       'SonioxListens. Uses your account at soniox.com.',
     ]);
-    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['AsyncSpeaks', 'BlandSpeaks', 'CAMB', 'CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks', 'GradiumListens and speaks']);
+    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['AsyncSpeaks', 'BlandSpeaks', 'CAMB', 'CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks', 'GradiumListens and speaks', 'GroqListens and speaks']);
     expect(screen.queryByText('Recommended')).toBeNull();
     fireEvent.click(within(speaks).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByRole('heading', { name: 'Set up ElevenLabs' })).toBeTruthy();

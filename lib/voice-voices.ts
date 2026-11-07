@@ -226,7 +226,7 @@ export const clearVoiceListCache = () => cache.clear();
 function callFor(provider: VoiceProvider): Call & { spec: VoiceListSpec } {
   const company = voiceKeyCompanyInfo(provider.adapter);
   const spec = company?.jobs.speech?.voices;
-  if (!company || !spec) throw new VoiceListRefused(`${company?.label ?? provider.name}’s voices can’t be listed here.`, 409);
+  if (!company || !spec || 'fixed' in spec) throw new VoiceListRefused(`${company?.label ?? provider.name}’s voices can’t be listed here.`, 409);
   if (!provider.apiKeyEncrypted) throw new VoiceListRefused(`${provider.name} has no key.`, 409);
   // The server's own provider may name another address (a proxy); a person's key never does
   const base = (provider.ownerId === null && provider.endpoint ? provider.endpoint : `https://${company.jobs.speech!.host}`).replace(/\/+$/, '');
@@ -272,8 +272,12 @@ async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.voices;
   let voices: Listed[];
   try {
+    const listing = voiceKeyCompanyInfo(provider.adapter)?.jobs.speech?.voices;
     if (isOwnSpeechAdapter(provider.adapter)) {
       voices = (await listOwnVoices(provider)).slice(0, MAX_VOICES);
+    } else if (listing && 'fixed' in listing) {
+      // Named in the catalog: nothing is asked, and the key is never sent
+      voices = listing.fixed.map((voice) => ({ voiceId: voice.id, name: voice.name, description: voice.description ?? '', languages: voice.languages, preview: null, previewNeedsKey: false }));
     } else {
       const call = callFor(provider);
       // A lister stops at its page limit, but never trusts that: no more than MAX_VOICES are kept or sent on
