@@ -121,7 +121,12 @@ const TASKS: Record<string, VoiceModel['kind']> = {
   tts: 'speech',
 };
 
-export const taskKind = (task: unknown): VoiceModel['kind'] | null => (typeof task === 'string' ? (TASKS[task.trim().toLowerCase()] ?? null) : null);
+// Own keys only, so a task named `constructor` is not known
+export const taskKind = (task: unknown): VoiceModel['kind'] | null => {
+  if (typeof task !== 'string') return null;
+  const key = task.trim().toLowerCase();
+  return Object.hasOwn(TASKS, key) ? TASKS[key] : null;
+};
 
 export type OwnSpeechLoad =
   | {
@@ -216,7 +221,9 @@ export async function listOwnSpeechVoices(endpoint: string, apiKey: string): Pro
   if (!answer.ok) {
     if (answer.reason === 'unreachable') return { ok: false, reason: 'unreachable', message: WORDS.unreachable };
     if (answer.reason === 'refused') return { ok: false, reason: 'refused', message: WORDS.refused };
-    // A status other than 200 (a server with no such list answers 404) or a list that can't be read: it has no list
+    // Busy (429) or down behind its tunnel (a cloudflared tunnel answers 502): try again, never "no list"
+    if (answer.reason === 'status' && (answer.status === 429 || (answer.status ?? 0) >= 500)) return { ok: false, reason: 'unreachable', message: WORDS.unreachable };
+    // Any other status (a server with no such list answers 404) or a list that can't be read: it has no list
     return { ok: true, voices: null };
   }
   const found = readVoices(answer.body);
