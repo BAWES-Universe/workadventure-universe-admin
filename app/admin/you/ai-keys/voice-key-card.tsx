@@ -1,6 +1,6 @@
 'use client';
 
-import { Bot, Globe, Plus, RefreshCw, X } from 'lucide-react';
+import { Bot, Globe, ListPlus, Plus, RefreshCw, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { VoiceKeySummary } from '@/lib/voice-keys';
 import { voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
@@ -20,6 +20,7 @@ export function VoiceKeyCard({
   keyItem: key,
   renaming,
   checking,
+  loadingModels,
   busy,
   onRename,
   onCancelRename,
@@ -30,10 +31,13 @@ export function VoiceKeyCard({
   onPull,
   onLimits,
   onChangeAddress,
+  onLoadModels,
 }: {
   keyItem: VoiceKeySummary;
   renaming: boolean;
   checking: boolean;
+  /** Its company is being asked again for the models it lists for the key. */
+  loadingModels: boolean;
   busy: boolean;
   onRename: () => void;
   onCancelRename: () => void;
@@ -44,10 +48,15 @@ export function VoiceKeyCard({
   onPull: (lent: VoiceLent) => void;
   onLimits: () => void;
   onChangeAddress: () => void;
+  onLoadModels: () => void;
 }) {
   const down = key.health.status === 'down';
   // A speech server on the person's own computer has the plug a chat server has; a company has its logo
-  const logo = { logo: voiceKeyCompanyInfo(key.adapter)?.logo, ...(key.address ? { plainIcon: 'plug' as const } : {}) };
+  const company = voiceKeyCompanyInfo(key.adapter);
+  const logo = { logo: company?.logo, ...(key.address ? { plainIcon: 'plug' as const } : {}) };
+  // A company's key lists what the company lists for it, read again here; an own server's models are read when its address changes,
+  // and a model typed as the person named it (an Azure deployment) has no list
+  const canLoadModels = Boolean(company) && !company?.account?.typedModel;
   return (
     <article
       className={`grid gap-4 rounded-2xl border bg-foreground/[.03] p-4 ${down ? 'border-[rgb(245_196_81/0.55)]' : 'border-foreground/10'}`}
@@ -142,6 +151,12 @@ export function VoiceKeyCard({
           <Plus aria-hidden="true" />
           Lend to a universe
         </Button>
+        {canLoadModels && (
+          <Button variant="outline" className="h-11 w-fit px-5" disabled={loadingModels} onClick={onLoadModels}>
+            <ListPlus aria-hidden="true" />
+            {loadingModels ? 'Loading…' : 'Load models'}
+          </Button>
+        )}
         {/* A tunnel gets a new address when it restarts: the key, its lends and its bots stay */}
         {key.address && (
           <Button variant="outline" className="h-11 w-fit px-5" onClick={onChangeAddress}>

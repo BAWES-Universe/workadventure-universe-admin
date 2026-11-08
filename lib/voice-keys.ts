@@ -10,6 +10,7 @@ import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { checkVoiceKeyLimits, readVoiceKeyLimits, savedVoiceKeyLimits, VOICE_KEY_LIMIT_NAMES, type VoiceKeyLimitValues } from '@/lib/voice-limit-values';
 import { healthOf, askForVoiceKeyTry, type VoiceKeyHealth } from '@/lib/voice-key-health';
+import { loadVoiceKeyModels } from '@/lib/voice-key-check';
 import { OWN_SPEECH_ENTRY, OWN_SPEECH_LABEL, OWN_SPEECH_NAME, checkOwnSpeechEndpoint, isOwnSpeechAdapter, loadOwnSpeechServer, ownSpeechEndpoint, ownSpeechKey, type OwnSpeechStep } from '@/lib/voice-own-server';
 
 /**
@@ -141,7 +142,7 @@ export const updateVoiceKeySchema = z
 
 /** A key that can't be saved or lent as asked, with the line that says why (shown as it is). */
 export class VoiceKeyRefused extends Error {
-  constructor(message: string, readonly status: 400 | 403 | 404 | 409 = 400) {
+  constructor(message: string, readonly status: 400 | 403 | 404 | 409 | 422 | 502 = 400) {
     super(message);
   }
 }
@@ -557,4 +558,33 @@ export async function checkVoiceKey(ownerId: string, id: string): Promise<VoiceK
   const fresh = await owned(id, ownerId);
   if (!fresh) throw new VoiceKeyRefused('Key not found', 404);
   return summary(fresh, ownerId);
+}
+
+/**
+ * "Load models" on a saved key: its company is asked again with the saved key, the same free calls as when it was added, and the
+ * models it lists now for what the key does that the key doesn't have yet are added. Nothing is taken off: a list cut short or a
+ * model the company stops listing never pulls a lend. Answers with the key and the models added (none when there are no new ones).
+ */
+export async function reloadVoiceKeyModels(ownerId: string, id: string): Promise<{ key: VoiceKeySummary; added: VoiceModel[] }> {
+  const row = await owned(id, ownerId);
+  if (!row) throw new VoiceKeyRefused('Key not found', 404);
+  const company = voiceKeyCompanyInfo(row.adapter);
+  // An own speech server's models are read again when its address changes; a model typed as the person named it (Azure) has no list
+  if (!company || company.account?.typedModel) throw new VoiceKeyRefused(`${companyName(row.adapter)} has no list of models to load again.`, 409);
+  if (!row.apiKeyEncrypted) throw new VoiceKeyRefused('This key can’t be read. Add it again.', 409);
+  let key: string;
+  try {
+    key = decryptApiKey(row.apiKeyEncrypted);
+  } catch {
+    throw new VoiceKeyRefused('This key can’t be read. Add it again.', 409);
+  }
+  const loaded = await loadVoiceKeyModels(row.adapter, key, [row.adapter], row.endpoint ?? undefined, row.region ?? undefined);
+  if (!loaded.ok) throw new VoiceKeyRefused(loaded.message, loaded.reason === 'refused' ? 422 : loaded.reason === 'unreachable' ? 502 : 409);
+  const has = readModels(row.models);
+  const known = new Set(has.map(lendModelId));
+  const doesJob = (model: VoiceModel) => (model.kind === 'talk' ? row.recognition && row.speech && Boolean(company.does.talk) : row[model.kind]);
+  // A key lists at most 200 models, as when it was added
+  const added = loaded.models.filter((model) => doesJob(model) && !known.has(lendModelId(model))).slice(0, Math.max(0, 200 - has.length));
+  if (added.length === 0) return { key: await summary(row, ownerId), added };
+  return { key: await updateVoiceKey(ownerId, id, { models: [...has, ...added] }), added };
 }

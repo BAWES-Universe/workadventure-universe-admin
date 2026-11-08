@@ -11,6 +11,7 @@ import { useToast } from '@/components/ui/toast';
 import { authenticatedFetch } from '@/lib/client-auth';
 import type { AiKeySummary } from '@/lib/ai-keys';
 import type { VoiceKeySummary } from '@/lib/voice-keys';
+import { voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { lendModelId } from '@/lib/voice-lend-model';
 import { LoadError, LoadingRows, PageHeader, count } from '../../components/ds';
 import { FormSheet } from '../../components/form-sheet';
@@ -139,6 +140,7 @@ export default function AiKeysPage() {
   const [movingSpeech, setMovingSpeech] = useState<VoiceKeySummary | null>(null);
   const [pulling, setPulling] = useState<{ key: AnyKey; lent: AnyLent } | null>(null);
   const [checking, setChecking] = useState<string | null>(null);
+  const [loadingModels, setLoadingModels] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
 
@@ -215,6 +217,25 @@ export default function AiKeysPage() {
     }
   }
 
+  /** "Load models" on a saved voice key: its company is asked again with the key, and the models it lists that are new are added. */
+  async function loadVoiceModels(key: VoiceKeySummary) {
+    setLoadingModels(key.id);
+    try {
+      const response = await authenticatedFetch(`/api/me/voice-keys/${encodeURIComponent(key.id)}/models`, { method: 'POST' });
+      const body = (await response.json().catch(() => null)) as { error?: string; key?: VoiceKeySummary; added?: unknown[] } | null;
+      if (!response.ok || !body?.key) throw new AiKeyFailure(aiKeyError(response.status, body?.error));
+      const fresh = body.key;
+      updateVoice((list) => list.map((entry) => (entry.id === key.id ? fresh : entry)));
+      const added = Array.isArray(body.added) ? body.added.length : 0;
+      const company = voiceKeyCompanyInfo(key.adapter)?.label ?? key.name;
+      addToast({ description: added > 0 ? `${count(added, 'new model', 'new models')} from ${company} added to ${key.name}` : `${company} lists no new models for ${key.name}`, variant: 'success', duration: 3000 });
+    } catch (error) {
+      addToast({ description: aiKeyFailureText(error), variant: 'error', duration: 4000 });
+    } finally {
+      setLoadingModels(null);
+    }
+  }
+
   async function chooseIfDown(key: AiKeySummary, ifDown: AiKeySummary['ifDown']) {
     setSaving(key.id);
     const before = key.ifDown;
@@ -268,6 +289,7 @@ export default function AiKeysPage() {
           keyItem={key}
           renaming={renaming === key.id}
           checking={checking === key.id}
+          loadingModels={loadingModels === key.id}
           busy={busy}
           onRename={() => setRenaming(key.id)}
           onCancelRename={() => setRenaming(null)}
@@ -281,6 +303,7 @@ export default function AiKeysPage() {
           onEditModels={(universeId) => setLending({ key, universeId })}
           onLimits={() => setVoiceLimitsFor(key.id)}
           onChangeAddress={() => setMovingSpeech(key)}
+          onLoadModels={() => void loadVoiceModels(key)}
           onPull={(lent) => {
             setFailure(null);
             if (lent.bots.length > 0) setPulling({ key, lent });
