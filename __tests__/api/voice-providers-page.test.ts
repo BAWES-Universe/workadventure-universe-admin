@@ -181,6 +181,27 @@ describe('Check key', () => {
     const own = await checkSaved(new NextRequest('http://localhost:3333/api/x', { method: 'POST' }), ctx());
     expect(own.status).toBe(409);
     expect((await own.json()).error).toBe('This provider uses its own address, so the company can\u2019t check its key.');
+    // The check, then the company's speaking list (unreadable here), and nothing for the others
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers with the models the company lists for the saved key, for the jobs the provider does', async () => {
+    fetchMock.mockImplementation(async (url: string) =>
+      url === 'https://api.elevenlabs.io/v1/models'
+        ? json([
+            { model_id: 'eleven_v4_turbo', name: 'Eleven v4 Turbo', can_do_text_to_speech: true, description: 'Fast' },
+            { model_id: 'eleven_english_sts_v2', can_do_text_to_speech: false },
+          ])
+        : json({}),
+    );
+    const saved = await checkSaved(new NextRequest('http://localhost:3333/api/x', { method: 'POST' }), ctx());
+    expect(await saved.json()).toEqual({ ok: true, models: [{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech', note: 'Fast' }] });
+    const list = fetchMock.mock.calls.find(([url]) => url === 'https://api.elevenlabs.io/v1/models');
+    expect(list?.[1].headers['xi-api-key']).toBe(SECRET);
+    // A company with no list for the job: only the check
+    fetchMock.mockClear();
+    db.findUnique.mockResolvedValue(row({ adapter: 'fish' }));
+    expect(await (await checkSaved(new NextRequest('http://localhost:3333/api/x', { method: 'POST' }), ctx())).json()).toEqual({ ok: true, models: null });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
