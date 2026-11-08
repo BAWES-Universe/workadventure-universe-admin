@@ -289,6 +289,13 @@ describe('Load models for a voice key', () => {
     expect(deepgram.models).toEqual([{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }, { id: 'aura-2', label: 'Aura 2', kind: 'speech' }]);
   });
 
+  it('leaves out what the company\'s own list leaves out (Deepgram Flux) even when a server provider lists it', async () => {
+    findMany.mockImplementation(async () => [{ adapter: 'deepgram', name: 'Deepgram', recognition: true, speech: false, models: [{ id: 'flux-general-en', kind: 'recognition' }, { id: 'nova-3', kind: 'recognition' }] }]);
+    answer(200);
+    const { models } = await (await send({ adapter: 'deepgram', apiKey: KEY })).json();
+    expect(models.map((model: { id: string }) => model.id)).toEqual(['nova-3', 'aura-2']);
+  });
+
   it('never returns or logs the key', async () => {
     const log = jest.spyOn(console, 'error');
     for (const respond of [() => answer(200), () => answer(401), () => fetchMock.mockRejectedValue(new Error(`failed with ${KEY}`))]) {

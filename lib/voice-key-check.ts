@@ -79,10 +79,13 @@ export async function serverVoiceModels(adapter: string): Promise<VoiceModel[]> 
     orderBy: [{ name: 'asc' }, { id: 'asc' }],
     select: { recognition: true, speech: true, models: true },
   });
+  const company = voiceKeyCompanyInfo(adapter);
   const seen = new Map<string, VoiceModel>();
   for (const row of rows) {
     for (const model of readModels(row.models)) {
       if (model.kind === 'talk' ? !(row.recognition && row.speech) : !row[model.kind]) continue;
+      // What the company's own list leaves out (Flux, which the game doesn't call yet) stays out of a key's list, whoever listed it
+      if (company?.jobs[model.kind]?.modelList?.leaveOut?.some((start) => model.id.startsWith(start))) continue;
       const id = `${model.kind}:${model.id}`;
       if (!seen.has(id)) seen.set(id, model);
     }
@@ -90,7 +93,7 @@ export async function serverVoiceModels(adapter: string): Promise<VoiceModel[]> 
   // A job the server has no provider for gives the catalog's own starting models for that job, so a key is never without a job its
   // company does (a server that only speaks with a company still lets a person's key of it listen)
   const jobsListed = new Set([...seen.values()].map((model) => model.kind));
-  for (const model of voiceKeyCompanyInfo(adapter)?.models ?? []) {
+  for (const model of company?.models ?? []) {
     const id = `${model.kind}:${model.id}`;
     if (!jobsListed.has(model.kind) && !seen.has(id)) seen.set(id, { ...model });
   }

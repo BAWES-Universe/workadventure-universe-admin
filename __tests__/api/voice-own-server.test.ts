@@ -397,8 +397,11 @@ describe('a bot’s Voice row for an own speech server', () => {
     await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 502, message: 'The server asked for a key, or didn’t accept the one you gave.' });
   });
 
-  it('says a busy server is down for now, never that it has no list', async () => {
+  it('says a busy or timed-out server is down for now, never that it has no list', async () => {
     server({ '/v1/audio/voices': answer(429, 'slow down') });
+    await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 502, code: undefined, message: 'It didn’t answer. Is the server running and the tunnel up?' });
+    clearVoiceListCache();
+    server({ '/v1/audio/voices': answer(408, 'request timeout') });
     await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 502, code: undefined, message: 'It didn’t answer. Is the server running and the tunnel up?' });
   });
 

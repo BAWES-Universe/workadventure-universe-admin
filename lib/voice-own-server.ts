@@ -221,8 +221,8 @@ export async function listOwnSpeechVoices(endpoint: string, apiKey: string): Pro
   if (!answer.ok) {
     if (answer.reason === 'unreachable') return { ok: false, reason: 'unreachable', message: WORDS.unreachable };
     if (answer.reason === 'refused') return { ok: false, reason: 'refused', message: WORDS.refused };
-    // Busy (429) or down behind its tunnel (a cloudflared tunnel answers 502): try again, never "no list"
-    if (answer.reason === 'status' && (answer.status === 429 || (answer.status ?? 0) >= 500)) return { ok: false, reason: 'unreachable', message: WORDS.unreachable };
+    // Timed out (408), busy (429) or down behind its tunnel (a cloudflared tunnel answers 502): try again, never "no list"
+    if (answer.reason === 'status' && (answer.status === 408 || answer.status === 429 || (answer.status ?? 0) >= 500)) return { ok: false, reason: 'unreachable', message: WORDS.unreachable };
     // Any other status (a server with no such list answers 404) or a list that can't be read: it has no list
     return { ok: true, voices: null };
   }
