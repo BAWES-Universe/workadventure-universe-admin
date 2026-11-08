@@ -194,6 +194,32 @@ describe('the voices of a server provider', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('https://api.elevenlabs.io/v2/voices?page_size=100');
   });
 
+  it('are only Groq\'s voices whose own model the provider lists, each with that model, and nothing is asked', async () => {
+    const groq = row({ adapter: 'groq', name: 'Groq', models: [{ id: 'canopylabs/orpheus-arabic-saudi', kind: 'speech' }] });
+    db.findFirst.mockResolvedValue(groq);
+    const list = (await (await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx())).json()).voices;
+    expect(list.map((voice: Row) => voice.voiceId)).toEqual(['abdullah', 'fahad', 'sultan', 'lulwa', 'noura', 'aisha']);
+    expect(list.every((voice: Row) => voice.model === 'canopylabs/orpheus-arabic-saudi')).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('are only the Rime voices that speak in the provider\'s starting model, which a borrowed starting voice uses', async () => {
+    fetchMock.mockResolvedValue(
+      json([
+        { speaker: 'astra', modelId: 'mistv2', lang: 'eng' },
+        { speaker: 'astra', modelId: 'coda', lang: 'eng' },
+        { speaker: 'layla', modelId: 'mistv3', lang: 'ara' },
+      ]),
+    );
+    db.findFirst.mockResolvedValue(row({ adapter: 'rime', name: 'Rime', models: [{ id: 'coda', kind: 'speech' }, { id: 'mistv3', kind: 'speech' }] }));
+    const list = (await (await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx())).json()).voices;
+    expect(list.map((voice: Row) => [voice.voiceId, voice.model])).toEqual([['astra', 'coda']]);
+    // The starting model being picked on the page, before it is saved: its voices, when the provider lists it
+    const picking = (model: string) => listVoices(new NextRequest(`http://localhost:3333/api/x?model=${model}`), ctx()).then((answer) => answer.json());
+    expect((await picking('mistv3')).voices.map((voice: Row) => [voice.voiceId, voice.model])).toEqual([['layla', 'mistv3']]);
+    expect((await picking('mistv2')).voices.map((voice: Row) => [voice.voiceId, voice.model])).toEqual([['astra', 'coda']]);
+  });
+
   it('are only the Polly voices that speak with the provider\'s starting engine, which a borrowed starting voice uses', async () => {
     fetchMock.mockResolvedValue(
       json({

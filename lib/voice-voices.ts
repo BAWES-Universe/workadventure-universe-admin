@@ -55,7 +55,7 @@ interface Listed {
   languages: string[];
   preview: string | null;
   previewNeedsKey: boolean;
-  /** The speaking models this voice speaks in, when the company ties voices to models (Amazon Polly's engines): one of them is used. */
+  /** The speaking models this voice belongs to, when the company ties voices to models (Groq's Orpheus, Rime, Amazon Polly's engines): one of them is used. */
   models?: string[];
 }
 
@@ -85,11 +85,17 @@ interface Call {
   sign?: (url: URL) => Record<string, string>;
 }
 
-/** The primary language code of "en-GB", "ar_KW" or "ara", or null when it doesn't look like one. */
+/** Three-letter codes (ISO 639-2, as Rime lists them) of languages that have a two-letter one. */
+const TWO_LETTER: Record<string, string> = {
+  ara: 'ar', chi: 'zh', deu: 'de', dut: 'nl', eng: 'en', fra: 'fr', fre: 'fr', ger: 'de', hin: 'hi', ita: 'it', jpn: 'ja',
+  kor: 'ko', nld: 'nl', por: 'pt', rus: 'ru', spa: 'es', tur: 'tr', zho: 'zh',
+};
+
+/** The primary language code of "en-GB", "ar_KW" or "ara" ("ar"), or null when it doesn't look like one. */
 export function languageCode(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const primary = value.trim().toLowerCase().split(/[-_]/)[0];
-  return /^[a-z]{2,3}$/.test(primary) ? primary : null;
+  return /^[a-z]{2,3}$/.test(primary) ? (TWO_LETTER[primary] ?? primary) : null;
 }
 
 const languagesOf = (...values: unknown[]): string[] => [...new Set(values.flat().map(languageCode).filter((code): code is string => code !== null))];
@@ -108,13 +114,14 @@ const clean = (value: unknown, max: number) => (typeof value === 'string' ? valu
 /** A company that answered with something other than a list, a rejection or a failure to reach it. */
 class Unreadable extends Error {}
 
-async function getJson(call: Call, path: string): Promise<unknown> {
+async function getJson(call: Call, path: string, body?: Record<string, unknown>): Promise<unknown> {
   let response: Response;
   try {
     const url = `${call.base}${path}`;
     response = await fetch(url, {
-      method: 'GET',
-      headers: { Accept: 'application/json', ...(call.sign ? call.sign(new URL(url)) : call.headers) },
+      method: body ? 'POST' : 'GET',
+      headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}), ...(call.sign ? call.sign(new URL(url)) : call.headers) },
+      ...(body ? { body: JSON.stringify(body) } : {}),
       // A redirect would carry the key somewhere the catalog never named
       redirect: 'manual',
       signal: AbortSignal.timeout(LIST_TIMEOUT_MS),
@@ -130,11 +137,18 @@ async function getJson(call: Call, path: string): Promise<unknown> {
     if (response.status === 401 || response.status === 403) throw new VoiceListRefused(`${call.company.label} didn’t accept the key.`, 502);
     throw new VoiceListRefused(`Couldn’t reach ${call.company.label}. Try again in a moment.`, 502);
   }
+  let answer: unknown;
   try {
-    return await response.json();
+    answer = await response.json();
   } catch {
     throw new Unreadable();
   }
+  // A company that answers a wrong key with a 200 and says so inside (MiniMax: base_resp.status_code 1004 or 2049), read the way
+  // the key check reads it
+  const refusedWhen = call.company.check.refusedWhen;
+  const code = refusedWhen ? valuesAt(answer, refusedWhen.field)[0] : undefined;
+  if (refusedWhen && typeof code === 'number' && refusedWhen.codes.includes(code)) throw new VoiceListRefused(`${call.company.label} didn’t accept the key.`, 502);
+  return answer;
 }
 
 /** Every value at a path into a voice: `a.b` a field inside a field, `a[].b` that field of every entry of a list. */
@@ -162,7 +176,8 @@ const textAt = (value: unknown, path: string, max: number) => clean(valuesAt(val
 /** A voice's description: the first of the spec's choices that says something. */
 function descriptionOf(voice: unknown, choices: VoiceListSpec['description']): string {
   for (const choice of choices) {
-    const text = typeof choice === 'string' ? textAt(voice, choice, 300) : choice.join.map((path) => textAt(voice, path, 60)).filter(Boolean).join(', ');
+    // Joined, a list (`tags[]`) gives every entry, not only its first
+    const text = typeof choice === 'string' ? textAt(voice, choice, 300) : clean(choice.join.flatMap((path) => (path.includes('[]') ? valuesAt(voice, path) : valuesAt(voice, path).slice(0, 1)).map((entry) => (typeof entry === 'string' ? clean(entry, 60) : ''))).filter(Boolean).join(', '), 300);
     if (text) return text;
   }
   return '';
@@ -170,33 +185,65 @@ function descriptionOf(voice: unknown, choices: VoiceListSpec['description']): s
 
 const unreadable = (call: Call) => new VoiceListRefused(`${call.company.label} sent a voice list that can’t be read.`, 502);
 
+/** One model's group of voices (Together AI), each voice with the group's model; a group that isn't one can't be read. */
+function groupVoices(call: Call, groups: NonNullable<VoiceListSpec['groups']>, group: unknown): { voice: unknown; groupModel: string | undefined }[] {
+  if (typeof group !== 'object' || group === null) throw unreadable(call);
+  const voices = (group as Record<string, unknown>)[groups.voices];
+  if (!Array.isArray(voices)) throw unreadable(call);
+  const model = clean((group as Record<string, unknown>)[groups.model], 255);
+  return voices.map((voice) => ({ voice, groupModel: model || undefined }));
+}
+
 /**
  * Lists a company's voices from its catalog spec (lib/voice-key-companies.ts, `jobs.speech.voices`), the same way for every company:
  * page after page while the company says there are more, up to MAX_VOICES, each voice read from the fields the spec names. A page
  * that isn't a list, or a voice without an id, is a list that can't be read.
  */
-async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> {
+async function listFromSpec(call: Call, spec: VoiceListSpec, speechModels: string[] = []): Promise<Listed[]> {
   const out: Listed[] = [];
   const seen = new Set<string>();
   const host = new URL(call.base).host;
-  for (const pass of spec.passes ?? ['']) {
+  // Only the models set up on the key are asked for (Smallest AI): a model the account can't use may be refused, and its
+  // voices couldn't be spoken here anyway
+  const runs = spec.perModel
+    ? spec.perModel.filter((run) => speechModels.includes(run.model)).map((run) => ({ path: run.path, pass: '', model: run.model }))
+    : (spec.passes ?? ['']).map((pass) => ({ path: spec.path, pass, model: undefined }));
+  for (const { path, pass, model: runModel } of runs) {
     let next: string | null = null;
     for (let page = 1; out.length < MAX_VOICES && page <= MAX_PAGES; page++) {
-      const query = [spec.path.replace('{size}', String(PAGE_SIZE)).replace('{page}', String(page)), pass].filter(Boolean).join('&');
+      const query = [path.replace('{size}', String(PAGE_SIZE)).replace('{page}', String(spec.paging.kind === 'page' && spec.paging.first === 0 ? page - 1 : page)), pass].filter(Boolean).join('&');
       const paged = (spec.paging.kind === 'token' || spec.paging.kind === 'after') && next !== null ? `${spec.paging.param}=${encodeURIComponent(next)}` : '';
-      const answer = await getJson(call, [query, paged].filter(Boolean).join('&'));
+      const body = spec.body ? Object.fromEntries(Object.entries(spec.body).map(([field, value]) => [field, value === '{size}' ? PAGE_SIZE : value])) : undefined;
+      const answer = await getJson(call, [query, paged].filter(Boolean).join('&'), body);
       if (typeof answer !== 'object' || answer === null) throw unreadable(call);
-      // An empty `list`: the answer is the list itself (Azure AI Speech)
-      const voices = spec.list === '' ? answer : spec.list.endsWith('[]') ? valuesAt(answer, spec.list) : (answer as Record<string, unknown>)[spec.list];
-      if (!Array.isArray(voices)) throw unreadable(call);
-      for (const voice of voices) {
+      // An empty `list`: the answer is the list itself (CAMB.AI, Azure AI Speech); `a[].b[]`: gathered from inside a list (Soniox); `a.b`: a field
+      // inside a field (Neuphonic's data.voices)
+      const at = (path: string) => path.split('.').reduce<unknown>((value, field) => (typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[field] : undefined), answer);
+      const first = spec.list === '' ? answer : spec.list.endsWith('[]') ? valuesAt(answer, spec.list) : at(spec.list);
+      if (!Array.isArray(first)) throw unreadable(call);
+      // More voices in other fields of the same answer (MiniMax's cloned and designed voices): one that is absent holds none
+      const others = (spec.alsoLists ?? []).map((path) => at(path) ?? []);
+      if (others.some((list) => !Array.isArray(list))) throw unreadable(call);
+      const voices = [...first, ...(others as unknown[][]).flat()];
+      // Grouped by model (Together AI): each group's voices, each with the group's model
+      const entries = spec.groups ? voices.flatMap((group) => groupVoices(call, spec.groups!, group)) : voices.map((voice) => ({ voice, groupModel: undefined }));
+      for (const { voice, groupModel } of entries) {
         if (typeof voice !== 'object' || voice === null) throw unreadable(call);
-        const id = (voice as Record<string, unknown>)[spec.id];
+        // A whole-number id (CAMB.AI) is kept as its digits
+        const rawId = (Array.isArray(spec.id) ? spec.id : [spec.id]).map((field) => (voice as Record<string, unknown>)[field]).find((value) => value != null && value !== '');
+        const id = typeof rawId === 'number' && Number.isSafeInteger(rawId) && rawId >= 0 ? String(rawId) : rawId;
         if (typeof id !== 'string' || id.length === 0 || id.length > 255) throw unreadable(call);
         const fields = voice as Record<string, unknown>;
         if (spec.keep && Object.entries(spec.keep).some(([field, wanted]) => fields[field] != null && fields[field] !== wanted)) continue;
         if (spec.leaveOut?.some((start) => id.startsWith(start))) continue;
-        if (seen.has(id)) continue;
+        // A voice the company lists once for each model it speaks in (Rime), or with all of them (Speechify), is kept once, with
+        // every model it has
+        const models = runModel ? [runModel] : groupModel ? [groupModel] : spec.model ? [...new Set(valuesAt(voice, spec.model).map((entry) => clean(entry, 255)).filter(Boolean))] : [];
+        if (seen.has(id)) {
+          const kept = models.length ? out.find((entry) => entry.voiceId === id) : undefined;
+          for (const model of models) if (kept?.models && !kept.models.includes(model)) kept.models.push(model);
+          continue;
+        }
         seen.add(id);
         const sample = (spec.preview ? valuesAt(voice, spec.preview) : []).map(httpsUrl).find((url): url is string => url !== null) ?? null;
         out.push({
@@ -207,7 +254,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
           // A sample served with the key must be at the company's own address: the key never goes to one a listing names
           preview: sample && (!spec.previewNeedsKey || new URL(sample).host === host) ? sample : null,
           previewNeedsKey: spec.previewNeedsKey === true,
-          ...(spec.models ? { models: valuesAt(voice, spec.models).filter((entry): entry is string => typeof entry === 'string') } : {}),
+          ...(models.length ? { models } : {}),
         });
       }
       if (spec.paging.kind === 'none') break;
@@ -219,6 +266,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
       }
       const given = (answer as Record<string, unknown>)[spec.paging.next];
       const token = spec.paging.nextIsLink ? linkParam(given, spec.paging.param) : given;
+      // With no `more`, the token itself says there is another page (Mistral)
       if ((spec.paging.more && more !== true) || typeof token !== 'string' || token === '') break;
       next = token;
     }
@@ -267,7 +315,7 @@ function callFor(provider: VoiceProvider, voiceJob: VoiceJob): Call & { spec: Vo
   if (!company || !job || !spec) throw new VoiceListRefused(`${company?.label ?? provider.name}’s voices can’t be listed here.`, 409);
   if (!provider.apiKeyEncrypted) throw new VoiceListRefused(`${provider.name} has no key.`, 409);
   // The server's own provider may name another address (a proxy); a person's key never does
-  // A list kept at another host than the job's is always read there
+  // A list kept at another host than the job's (Resemble) is always read there: a proxy for speaking is not a voice list
   // A list read in the provider's own region (AWS signed with the key, Azure AI Speech) is read at the company's host for it
   const inRegion = Boolean(spec.sign) || Boolean(spec.host?.includes('{region}'));
   const region = inRegion ? accountRegion(company, provider.region) : null;
@@ -319,7 +367,17 @@ async function listOwnVoices(provider: VoiceProvider): Promise<Listed[]> {
 async function listedFor(provider: VoiceProvider, job: VoiceJob = speakingJob(provider)): Promise<Listed[]> {
   // A company with no list call (OpenAI's talking voices) has its voices in the catalog: nothing to call, nothing to cache
   const fixed = voiceJobOf(voiceKeyCompanyInfo(provider.adapter), job)?.fixedVoices;
-  if (fixed) return fixed.map((voice) => ({ voiceId: voice.id, name: voice.name, description: '', languages: [], preview: null, previewNeedsKey: false }));
+  if (fixed) {
+    return fixed.map((voice) => ({
+      voiceId: voice.id,
+      name: voice.name,
+      description: voice.description ?? '',
+      languages: voice.languages ?? [],
+      preview: null,
+      previewNeedsKey: false,
+      ...(voice.model ? { models: [voice.model] } : {}),
+    }));
+  }
   // A new key or address is a new row version, so it is never served an older list
   const id = `${provider.id}:${provider.updatedAt.getTime()}:${job}`;
   const hit = cache.get(id);
@@ -331,7 +389,8 @@ async function listedFor(provider: VoiceProvider, job: VoiceJob = speakingJob(pr
     } else {
       const call = callFor(provider, job);
       // A lister stops at its page limit, but never trusts that: no more than MAX_VOICES are kept or sent on
-      voices = (await listFromSpec(call, call.spec)).slice(0, MAX_VOICES);
+      const speechModels = readModels(provider.models).filter((entry) => entry.kind === 'speech').map((entry) => entry.id);
+      voices = (await listFromSpec(call, call.spec, speechModels)).slice(0, MAX_VOICES);
     }
   } catch (error) {
     if (error instanceof Unreadable) throw new VoiceListRefused(`${isOwnSpeechAdapter(provider.adapter) ? OWN_SPEECH_LABEL : (voiceKeyCompanyInfo(provider.adapter)?.label ?? provider.name)} sent a voice list that can’t be read.`, 502);
@@ -346,9 +405,10 @@ async function listedFor(provider: VoiceProvider, job: VoiceJob = speakingJob(pr
 
 interface Source {
   provider: VoiceProvider;
+  /** The speaking model a bot starts on: the first one set up and allowed here. */
   model: string;
   talk: boolean;
-  /** Every model of the same kind set up and allowed here, first to last: a voice tied to models (Amazon Polly) takes the first it speaks in. */
+  /** Every model of the same kind set up and allowed here, first to last: a voice tied to models (Groq, Rime, Amazon Polly) takes the first it speaks in. */
   models: string[];
 }
 
@@ -393,23 +453,20 @@ const previewPath = (botId: string, source: string, voiceId: string, part: BotVo
 export async function listBotVoices(botId: string, source: string, part: BotVoicePart = 'speech'): Promise<VoiceChoice[]> {
   const { provider, model, talk, models } = await sourceFor(botId, source, part);
   const listed = await listedFor(provider, talk ? 'talk' : 'speech');
-  // A voice tied to models (Amazon Polly's engines) comes with the first of them set up and allowed here, and not at all when none is
+  // A voice tied to models (Groq, Rime, Amazon Polly's engines) comes with the first of them set up and allowed here, and not at all when none is
   return listed.flatMap((voice) => {
     const own = voice.models ? models.find((id) => voice.models!.includes(id)) : model;
-    if (!own) return [];
-    return [
-      {
-        voiceId: voice.voiceId,
-        name: voice.name,
-        description: voice.description,
-        languages: voice.languages,
-        previewUrl: !voice.preview ? null : voice.previewNeedsKey ? previewPath(botId, source, voice.voiceId, part) : voice.preview,
-        providerId: provider.id,
-        model: own,
-        talk,
-      },
-    ];
-  });
+    return own ? [{ ...voice, own }] : [];
+  }).map((voice) => ({
+    voiceId: voice.voiceId,
+    name: voice.name,
+    description: voice.description,
+    languages: voice.languages,
+    previewUrl: !voice.preview ? null : voice.previewNeedsKey ? previewPath(botId, source, voice.voiceId, part) : voice.preview,
+    providerId: provider.id,
+    model: voice.own,
+    talk,
+  }));
 }
 
 export interface VoiceSample {
@@ -494,6 +551,8 @@ export interface ServerVoiceChoice {
   description: string;
   languages: string[];
   previewUrl: string | null;
+  /** The speaking model the voice speaks in as the starting voice, when the company ties voices to models (Groq's Orpheus, Rime). */
+  model?: string;
 }
 
 /** The server's own speaking provider that a super admin looks at (never a person's key): anything else reads as not found. */
@@ -510,20 +569,32 @@ const serverPreviewPath = (providerId: string, voiceId: string) => `/api/admin/v
  * that is not the default yet, so a super admin hears a company's voices before choosing it. Free: the company's own list, nothing
  * spoken. Cached like the bot page's list.
  */
-export async function listServerVoices(providerId: string): Promise<ServerVoiceChoice[]> {
+export async function listServerVoices(providerId: string, startingModel?: string): Promise<ServerVoiceChoice[]> {
   const provider = await serverSpeaker(providerId);
-  // A voice tied to models (Amazon Polly's engines) is offered only when it speaks in the provider's starting model, the one a
-  // borrowed starting voice uses (borrowUniverseAi)
-  const starting = readModels(provider.models).find((entry) => entry.kind === 'speech')?.id;
-  return (await listedFor(provider))
-    .filter((voice) => !voice.models || (starting !== undefined && voice.models.includes(starting)))
-    .map((voice) => ({
-      voiceId: voice.voiceId,
-      name: voice.name,
-      description: voice.description,
-      languages: voice.languages,
-      previewUrl: !voice.preview ? null : voice.previewNeedsKey ? serverPreviewPath(provider.id, voice.voiceId) : voice.preview,
-    }));
+  const listed = readModels(provider.models).filter((entry) => entry.kind === 'speech').map((entry) => entry.id);
+  // The Universe AI page asks for the voices of the starting model being picked, before it is saved: one the provider lists
+  // comes first, as it will once saved
+  const models = startingModel && listed.includes(startingModel) ? [startingModel, ...listed.filter((id) => id !== startingModel)] : listed;
+  const named = !!voiceKeyCompanyInfo(provider.adapter)?.jobs.speech?.fixedVoices;
+  // A voice tied to models is offered only with the model it would speak in as the starting voice (borrowUniverseAi): its own
+  // model when the catalog names it (Groq's Orpheus) and the provider lists it, or else the provider's starting model when the
+  // voice speaks in it (Rime)
+  const speaksWith = (voice: Listed) =>
+    !voice.models ? undefined : named ? models.find((id) => voice.models!.includes(id)) : models[0] && voice.models.includes(models[0]) ? models[0] : undefined;
+  return (await listedFor(provider)).flatMap((voice) => {
+    const model = speaksWith(voice);
+    if (voice.models && !model) return [];
+    return [
+      {
+        voiceId: voice.voiceId,
+        name: voice.name,
+        description: voice.description,
+        languages: voice.languages,
+        previewUrl: !voice.preview ? null : voice.previewNeedsKey ? serverPreviewPath(provider.id, voice.voiceId) : voice.preview,
+        ...(model ? { model } : {}),
+      },
+    ];
+  });
 }
 
 /** One voice's free sample from a server provider that keeps it behind its key. */
