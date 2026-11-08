@@ -219,6 +219,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec, speechModels: strin
         if (typeof id !== 'string' || id.length === 0 || id.length > 255) throw unreadable(call);
         const fields = voice as Record<string, unknown>;
         if (spec.keep && Object.entries(spec.keep).some(([field, wanted]) => fields[field] != null && fields[field] !== wanted)) continue;
+        if (spec.leaveOut?.some((start) => id.startsWith(start))) continue;
         // A voice the company lists once for each model it speaks in (Rime), or with all of them (Speechify), is kept once, with
         // every model it has
         const models = runModel ? [runModel] : groupModel ? [groupModel] : spec.model ? [...new Set(valuesAt(voice, spec.model).map((entry) => clean(entry, 255)).filter(Boolean))] : [];
