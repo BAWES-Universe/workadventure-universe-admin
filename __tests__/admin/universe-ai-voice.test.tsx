@@ -398,6 +398,7 @@ describe('New voice provider', () => {
       'SpeechmaticsListens and speaks. Uses your account at speechmatics.com.',
       'Together AIListens and speaks. Uses your account at together.ai.',
       'xAIListens, speaks and talks live. Uses your account at console.x.ai.',
+      'ZoomListens and talks live. Talking live is in English. Uses your Zoom AI Services account.',
     ]);
     expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['AsyncSpeaks', 'AWSListens, speaks and talks live', 'Azure AI SpeechListens and speaks', 'BlandSpeaks', 'CAMB', 'CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks', 'GoogleSpeaks and talks live', 'GradiumListens and speaks', 'GroqListens and speaks', 'HumeSpeaks', 'MiniMaxSpeaks', 'MistralListens and speaks', 'NeuphonicSpeaks', 'NVIDIAListens and speaks', 'Resemble AISpeaks', 'RimeSpeaks', 'Sarvam AIListens and speaks', 'Smallest AIListens and speaks', 'SonioxListens and speaks', 'SpeechifySpeaks', 'SpeechmaticsListens and speaks', 'Together AIListens and speaks', 'xAIListens, speaks and talks live']);
     expect(screen.queryByText('Recommended')).toBeNull();

@@ -1632,6 +1632,15 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'zoom',
     label: 'Zoom',
     jobs: {
+      recognition: {
+        // Live hearing with Scribe (wss://api.zoom.us/v2/aiservices/scribe/live), as Pipecat's ZoomAISTTService does, with the same AI
+        // Services key. Scribe Multilingual hears ten languages; Whisper hears 26 more locales (Zoom's Scribe docs, 7 Nov 2026, #1908)
+        host: 'api.zoom.us',
+        models: [
+          { id: 'zoom-scribe-multilingual', label: 'Scribe Multilingual' },
+          { id: 'whisper', label: 'Whisper' },
+        ],
+      },
       talk: {
         host: 'api.zoom.us',
         // Zoom's Voice Agent in live mode thinks with its built-in gemma-4, from Zoom's AI Services docs (7 Nov 2026). It writes
@@ -1652,7 +1661,8 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
         ],
       },
     },
-    benefit: '{does}, in English. Uses your Zoom AI Services account.',
+    // Scribe hears many languages; the Voice Agent talks live in English only
+    benefit: '{does}. Talking live is in English. Uses your Zoom AI Services account.',
     step: 'In Zoom’s Platform Studio, open AI Services, then API keys, and create a key.',
     docs: 'https://developers.zoom.us/docs/ai-services/voice-agent/',
     // GET /v2/aiservices/scribe/jobs lists the account's transcription jobs: free, with the same AI Services key
