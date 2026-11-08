@@ -275,6 +275,24 @@ describe('Change what Universe AI speaks with', () => {
     expect(patches()[0].body).not.toHaveProperty('defaultVoiceId');
   });
 
+  it('says the voice picked is not one of a newly picked model\u2019s voices, so saving drops it in plain sight', async () => {
+    voicesAnswer = { ok: true, body: { voices: [{ voiceId: 'sarah', name: 'Sarah', description: '', languages: [], previewUrl: null }] } };
+    render(<VoiceSection />);
+    fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
+    const sheet = await screen.findByRole('dialog');
+    await within(sheet).findByTestId('voice-list');
+    // Aria is the saved voice but not in this model's list either: on the model it starts on, it stays picked and nothing is said
+    expect(within(sheet).queryByTestId('voice-not-listed')).toBeNull();
+    await pickModel(sheet, /Multilingual v2/);
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith('?model=eleven_multilingual_v2'))).toBe(true));
+    await within(sheet).findByTestId('voice-list');
+    expect((await within(sheet).findByTestId('voice-not-listed')).textContent).toBe('Multilingual v2 doesn\u2019t speak the voice picked. Pick one here, or bots start with the first voice ElevenLabs lists.');
+    expect(within(sheet).queryByText('No voice picked: bots start with the first voice ElevenLabs lists.')).toBeNull();
+    // Picking one of its voices clears it
+    fireEvent.click(within(within(sheet).getByTestId('voice-list')).getByRole('radio', { name: /Sarah/ }));
+    expect(within(sheet).queryByTestId('voice-not-listed')).toBeNull();
+  });
+
   it('searches the voices and says so when none match', async () => {
     render(<VoiceSection />);
     fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));

@@ -321,7 +321,11 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
   // The voice that is picked stays on screen however the list is searched
   const rows = pickedVoice && !shown.includes(pickedVoice) ? [pickedVoice, ...shown] : shown;
   const voiceChanged = voiceId !== (picked?.defaultVoiceId ?? null);
-  const unchanged = !picked || (picked.defaultSpeech && modelId === startingModel(picked, 'speech')?.id && !voiceChanged);
+  const modelChanged = Boolean(picked && modelId && modelId !== startingModel(picked, 'speech')?.id);
+  const unchanged = !picked || (picked.defaultSpeech && !modelChanged && !voiceChanged);
+  // A newly picked model that doesn't list the voice picked can't keep it: saving drops it, so the sheet says so
+  const pickedModel = models.find((model) => model.id === modelId);
+  const voiceNotListed = modelChanged && voices.status === 'ready' && voiceId !== null && !pickedVoice;
   const company = picked ? companyLabel(picked.adapter) : '';
 
   return (
@@ -413,12 +417,17 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
               {matching.length > SHOWN_VOICES && <p className={FIELD_HINT}>Showing {SHOWN_VOICES} of {matching.length.toLocaleString('en')}. Search to narrow them.</p>}
               {samples.failed && <Refused>{samples.failed}</Refused>}
               {voiceId === null && <p className={FIELD_HINT}>No voice picked: bots start with the first voice {company} lists.</p>}
+              {voiceNotListed && (
+                <p className={FIELD_HINT} role="status" data-testid="voice-not-listed">
+                  {pickedModel ? modelName(pickedModel) : 'This model'} doesn’t speak the voice picked. Pick one here, or bots start with the first voice {company} lists.
+                </p>
+              )}
             </>
           )}
         </div>
       )}
       <p className={FIELD_HINT} data-testid="speak-change-line">
-        {defaultChangeLine(providers, picked, 'speech', Boolean(picked && modelId && modelId !== startingModel(picked, 'speech')?.id))}
+        {defaultChangeLine(providers, picked, 'speech', modelChanged)}
       </p>
       {failure && <Refused>{failure}</Refused>}
       <SheetButtons
@@ -436,7 +445,7 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
               models: withStartingModel(picked.models, 'speech', modelId),
               // Only a voice listed for the model picked is saved: a new starting model of a company that lists voices per model
               // drops the old voice unless it is sent again from that model's list
-              ...(pickedVoice && (voiceChanged || modelId !== startingModel(picked, 'speech')?.id) ? { defaultVoiceId: pickedVoice.voiceId, defaultVoiceName: pickedVoice.name } : {}),
+              ...(pickedVoice && (voiceChanged || modelChanged) ? { defaultVoiceId: pickedVoice.voiceId, defaultVoiceName: pickedVoice.name } : {}),
             },
             `Universe AI speaks with ${picked.name}`
           );
