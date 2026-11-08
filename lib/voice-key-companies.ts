@@ -112,8 +112,6 @@ export interface VoiceListSpec {
   keep?: Record<string, string>;
   /** Voice ids starting with any of these are left out: voices Universe can't speak with yet (Deepgram's Flux voices). */
   leaveOut?: string[];
-  /** The field holding a voice's id: text, or a whole number kept as its digits (CAMB.AI). */
-  id: string;
   /**
    * The field holding a voice's id: text, or a whole number kept as its digits (CAMB.AI). Several: the first one a voice has
    * (Neuphonic's answer has carried both `voice_id` and `id`; its SDKs read one each).
