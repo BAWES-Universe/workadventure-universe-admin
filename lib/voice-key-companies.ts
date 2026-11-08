@@ -122,8 +122,6 @@ export interface VoiceListSpec {
   keep?: Record<string, string>;
   /** Voice ids starting with any of these are left out: voices Universe can't speak with yet (Deepgram's Flux voices). */
   leaveOut?: string[];
-  /** The field holding a voice's id: text, or a whole number kept as its digits (CAMB.AI). */
-  id: string;
   /** The field naming the one speaking model a voice is listed for (Rime lists each voice once a model): the voice is kept once, with every model it has. */
   /**
    * The field naming the speaking model a voice is listed for (Rime lists each voice once a model), or `a[].b` for every model one
