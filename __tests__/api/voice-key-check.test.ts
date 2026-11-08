@@ -1,6 +1,6 @@
 /**
  * "Load models" for a voice key (#749): one free, authenticated call to the company with the pasted key, then the models the
- * server's own providers for that company list. The key goes only to the company's own address and is never logged or returned.
+ * company itself lists for the key where it has a list, otherwise the ones the server's own providers for that company list. The key goes only to the company's own address and is never logged or returned.
  * The company is a stand-in: no real call is made.
  */
 import { NextRequest } from 'next/server';
@@ -67,7 +67,7 @@ describe('Load models for a voice key', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('asks the company once, then lists the server providers’ models: each kind and id once, exactly as listed', async () => {
+  it('asks the company, and when its own list can’t be read lists the server providers’ models: each kind and id once, exactly as listed', async () => {
     answer(200);
     const response = await send({ adapter: 'elevenlabs', apiKey: KEY });
     expect(response.status).toBe(200);
@@ -79,7 +79,67 @@ describe('Load models for a voice key', () => {
         { id: 'eleven_v3', kind: 'speech' },
       ],
     });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The check, then the company's own speaking list (unreadable here)
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  describe('the company’s own list for the key', () => {
+    // The company answers the check, then each list it has, by address
+    const company = (lists: Record<string, unknown>) =>
+      fetchMock.mockImplementation(async (url: string) => {
+        const list = Object.entries(lists).find(([start]) => url.startsWith(start));
+        return list ? { status: 200, json: async () => list[1], text: async () => '' } : { status: 200, text: async () => '' };
+      });
+
+    it('gives the models the company lists for a job it lists, and the server’s for a job it has no list for', async () => {
+      company({
+        'https://api.elevenlabs.io/v1/models': [
+          { model_id: 'eleven_v4_turbo', name: 'Eleven v4 Turbo', can_do_text_to_speech: true, description: 'Fast' },
+          { model_id: 'eleven_flash_v2_5', name: 'Eleven Flash v2.5', can_do_text_to_speech: true },
+          { model_id: 'eleven_english_sts_v2', name: 'Speech to speech', can_do_text_to_speech: false },
+        ],
+      });
+      const response = await send({ adapter: 'elevenlabs', apiKey: KEY });
+      expect(await response.json()).toEqual({
+        ok: true,
+        models: [
+          { id: 'scribe_v1', label: 'Scribe v1', kind: 'recognition' },
+          { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' },
+          { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' },
+        ],
+      });
+      // The list is read with the same key, at the company's own address only
+      const listCall = fetchMock.mock.calls.find(([url]) => url === 'https://api.elevenlabs.io/v1/models');
+      expect(listCall?.[1]).toEqual(expect.objectContaining({ method: 'GET', redirect: 'manual', headers: expect.objectContaining({ 'xi-api-key': KEY }) }));
+      expect(fetchMock.mock.calls.every(([url]) => String(url).startsWith('https://api.elevenlabs.io/'))).toBe(true);
+    });
+
+    it('lists a job the server has no provider for straight from the company', async () => {
+      company({
+        'https://api.cartesia.ai/models?capability=stt': { data: [{ id: 'ink-whisper', capability: 'stt' }] },
+        'https://api.cartesia.ai/models?capability=tts': { data: [{ id: 'sonic-3', capability: 'tts' }, { id: 'sonic-turbo', capability: 'tts' }] },
+      });
+      const response = await send({ adapter: 'cartesia', apiKey: KEY });
+      expect((await response.json()).models).toEqual([
+        { id: 'sonic-3', kind: 'speech' },
+        { id: 'sonic-turbo', kind: 'speech' },
+        { id: 'ink-whisper', kind: 'recognition' },
+      ]);
+    });
+
+    it('leaves out what Universe can’t run yet, like Deepgram’s Flux', async () => {
+      company({
+        'https://api.deepgram.com/v1/models': {
+          stt: [
+            { canonical_name: 'nova-3', streaming: true },
+            { canonical_name: 'flux-general-en', streaming: true },
+            { canonical_name: 'whisper-large', streaming: false },
+          ],
+        },
+      });
+      const response = await send({ adapter: 'deepgram', apiKey: KEY });
+      expect((await response.json()).models.filter((model: { kind: string }) => model.kind === 'recognition')).toEqual([{ id: 'nova-3', kind: 'recognition' }]);
+    });
   });
 
   it.each(VOICE_KEY_COMPANIES.filter((company) => !company.check.sign).map((company) => [company.adapter, company]))('%s: a GET to its own address with the key in one header and nothing billed', async (adapter, company) => {
