@@ -392,6 +392,7 @@ describe('New voice provider', () => {
       'MetaListens. Uses your account at dev.meta.ai.',
       'MistralListens and speaks. Uses your account at mistral.ai.',
       'NVIDIAListens and speaks. Uses your account at build.nvidia.com.',
+      'OpenAIListens and talks live. Uses your account at platform.openai.com.',
       'Sarvam AIListens and speaks. Uses your account at sarvam.ai.',
       'Smallest AIListens and speaks. Uses your account at smallest.ai.',
       'SonioxListens and speaks. Uses your account at soniox.com.',

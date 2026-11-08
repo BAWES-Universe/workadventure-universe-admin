@@ -1241,6 +1241,17 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'openai',
     label: 'OpenAI',
     jobs: {
+      recognition: {
+        // Live hearing over the realtime socket in transcription mode (wss://api.openai.com/v1/realtime?intent=transcription), as
+        // Pipecat's OpenAIRealtimeSTTService does. GPT Realtime Whisper is Pipecat's default; GPT Transcribe and GPT Live Transcribe
+        // are the other models Pipecat names (#1900)
+        host: 'api.openai.com',
+        models: [
+          { id: 'gpt-realtime-whisper', label: 'GPT Realtime Whisper' },
+          { id: 'gpt-transcribe', label: 'GPT Transcribe' },
+          { id: 'gpt-live-transcribe', label: 'GPT Live Transcribe' },
+        ],
+      },
       talk: {
         host: 'api.openai.com',
         // gpt-realtime-2.1 and its mini, from OpenAI's model pages (7 Nov 2026). The older realtime snapshots shut on 20 Jan 2027.
