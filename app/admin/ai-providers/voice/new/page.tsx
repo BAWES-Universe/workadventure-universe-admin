@@ -215,7 +215,7 @@ export default function NewVoiceProviderPage() {
             </div>
           </div>
           <Part n={part++} title={`Get Universe’s ${info.label} key`}>
-            <div className="grid gap-1 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 py-3 text-[13px]">{info.step}</div>
+            <div className="grid gap-1 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 py-3 text-[13px] [overflow-wrap:anywhere]">{info.step}</div>
           </Part>
           {account?.regions && (
             <Part n={part++} title="Pick the region">
