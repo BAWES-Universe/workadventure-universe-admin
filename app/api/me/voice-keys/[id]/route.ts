@@ -15,7 +15,7 @@ export async function OPTIONS(request: NextRequest) {
 }
 
 /**
- * PATCH /api/me/voice-keys/:id { name?, apiKey?, models?, limits? } - changes only what it names, on the caller's own key. A new
+ * PATCH /api/me/voice-keys/:id { name?, apiKey?, models?, takenOff?, limits? } - changes only what it names, on the caller's own key. A new
  * `apiKey` replaces the saved one. A model taken off the key is taken off every lend that named it. `limits` is
  * `{ turnSeconds?, replyCharacters?, replySeconds?, listenMinutesPerDay? }` (#783): each a whole number inside its range, for bots that use the key; only
  * what is named changes, and a value that is the server's own is dropped so it follows the server. Answers with the key. Someone else's key,

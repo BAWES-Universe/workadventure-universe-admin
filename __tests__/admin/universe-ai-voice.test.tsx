@@ -550,7 +550,7 @@ describe('a voice provider\u2019s page, after CodeRabbit\u2019s findings on the 
     patchAnswer = { ok: true, body: { provider: {} } };
     fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
     await waitFor(() => expect(screen.queryByLabelText('Model id')).toBeNull());
-    expect(patches().at(-1)?.body).toEqual({ models: [{ id: 'sonic-3', label: 'Sonic 3', kind: 'speech' }, { id: 'sonic-4', label: 'Sonic 4', kind: 'speech' }] });
+    expect(patches().at(-1)?.body).toEqual({ models: [{ id: 'sonic-3', label: 'Sonic 3', kind: 'speech' }, { id: 'sonic-4', label: 'Sonic 4', kind: 'speech' }], takenOff: [] });
   });
 
   it('checks the default\u2019s last model against the list just saved, not the one from before it', async () => {
@@ -559,6 +559,8 @@ describe('a voice provider\u2019s page, after CodeRabbit\u2019s findings on the 
     holdList = true;
     fireEvent.click(screen.getByRole('button', { name: 'Take Flash v2.5 off' }));
     await waitFor(() => expect(patches()).toHaveLength(1));
+    // Only the one taken off is named, so a model the company's list added meanwhile is kept and this one stays off
+    expect(patches()[0].body?.takenOff).toEqual(['speech:eleven_flash_v2_5']);
     await waitFor(() => expect(screen.getAllByTestId('model-row')).toHaveLength(1));
     fireEvent.click(screen.getByRole('button', { name: 'Take Multilingual v2 off' }));
     expect(await screen.findByText(/keeps a speaking model/)).toBeTruthy();

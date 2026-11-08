@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { useToast } from '@/components/ui/toast';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import type { VoiceModel } from '@/lib/voice-providers';
+import { lendModelId } from '@/lib/voice-lend-model';
 import { companyHost, listedModelJobs } from '@/lib/voice-key-companies';
 import { LoadError, LoadingRows, PageHeader, SettingSwitch, Settings } from '../../../components/ds';
 import { ProviderLogo } from '../../../components/ds/provider-logo';
@@ -193,7 +194,9 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
       }
     }
     setBusy(true);
-    const refused = await change({ models });
+    // The ones this page showed and no longer has are taken off and stay off; one the company's list added meanwhile is kept
+    const takenOff = provider!.models.map(lendModelId).filter((id) => !models.some((model) => lendModelId(model) === id));
+    const refused = await change({ models, takenOff });
     setBusy(false);
     if (refused) setProblem(refused);
     return !refused;

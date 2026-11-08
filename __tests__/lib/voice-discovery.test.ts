@@ -6,7 +6,7 @@ import type { VoiceProvider } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { listCompanyModels } from '@/lib/voice-key-check';
 import { DISCOVERY_REFRESH_MS, discoverVoiceModels, forgetDiscovery } from '@/lib/voice-discovery';
-import { hiddenAfter, readHiddenModels } from '@/lib/voice-hidden-models';
+import { modelChange, readHiddenModels } from '@/lib/voice-hidden-models';
 
 jest.mock('@/lib/encryption', () => ({ decryptApiKey: jest.fn((value: string) => value.replace(/^enc:/, '')) }));
 jest.mock('@/lib/voice-key-check', () => ({ listCompanyModels: jest.fn() }));
@@ -131,10 +131,18 @@ describe('models taken off by hand', () => {
     { id: 'a', kind: 'speech' as const },
     { id: 'b', kind: 'speech' as const },
   ];
-  it('remembers a model taken off and forgets one added back', () => {
-    expect(hiddenAfter(before, [before[0]], null)).toEqual(['speech:b']);
-    expect(hiddenAfter([before[0]], before, ['speech:b'])).toBeNull();
-    expect(hiddenAfter(before, before, ['speech:c'])).toEqual(['speech:c']);
+  it('keeps a model taken off off, and forgets it when it is added back', () => {
+    expect(modelChange(before, [before[0]], ['speech:b'], null)).toEqual({ models: [before[0]], hidden: ['speech:b'] });
+    expect(modelChange([before[0]], before, [], ['speech:b'])).toEqual({ models: before, hidden: null });
+    expect(modelChange(before, before, [], ['speech:c']).hidden).toEqual(['speech:c']);
+  });
+  it('keeps a model the company added while the page was open, instead of taking it off', () => {
+    // The page showed a and b; the company's list added c meanwhile; b is taken off on the page
+    const now = [...before, { id: 'c', kind: 'speech' as const }];
+    expect(modelChange(now, [before[0]], ['speech:b'], null)).toEqual({ models: [before[0], { id: 'c', kind: 'speech' }], hidden: ['speech:b'] });
+  });
+  it('without the ones taken off named, replaces the models and keeps nothing new off', () => {
+    expect(modelChange(before, [before[0]], undefined, null)).toEqual({ models: [before[0]], hidden: null });
   });
   it('reads only text entries', () => {
     expect(readHiddenModels(['speech:a', 3, null])).toEqual(['speech:a']);

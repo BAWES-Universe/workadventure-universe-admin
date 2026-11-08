@@ -2,7 +2,7 @@ import { Prisma, type VoiceProvider } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { encryptApiKey } from '@/lib/encryption';
-import { hiddenAfter } from '@/lib/voice-hidden-models';
+import { modelChange } from '@/lib/voice-hidden-models';
 
 /**
  * Voice providers (#740): the speech companies a super admin sets up for the whole server. Each can listen (recognition),
@@ -73,6 +73,8 @@ export const updateVoiceProviderSchema = z
     region: fields.region,
     apiKey: fields.apiKey,
     models: fields.models,
+    // The models taken off by hand in this change ("kind:id"): kept off when the company's list is read again
+    takenOff: z.array(z.string().min(1).max(300)).max(1000),
     defaultRecognition: fields.defaultRecognition,
     defaultSpeech: fields.defaultSpeech,
     defaultVoiceId: fields.defaultVoiceId,
@@ -175,13 +177,15 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
     const row = await tx.voiceProvider.findUnique({ where: { id } });
     if (!row || row.ownerId !== null) throw new VoiceProviderRefused('Voice provider not found', 404);
     const changesCompany = input.adapter !== undefined && input.adapter !== row.adapter;
+    // A model the company's list added while the page was open is kept, not taken off with the ones named
+    const changed = input.models !== undefined ? modelChange(readModels(row.models), input.models, input.takenOff, row.hiddenModels) : null;
     const next = {
       recognition: input.recognition ?? row.recognition,
       speech: input.speech ?? row.speech,
       enabled: input.enabled ?? row.enabled,
       defaultRecognition: input.defaultRecognition ?? row.defaultRecognition,
       defaultSpeech: input.defaultSpeech ?? row.defaultSpeech,
-      models: input.models ?? readModels(row.models),
+      models: changed?.models ?? readModels(row.models),
       endpoint: input.endpoint === undefined ? row.endpoint : input.endpoint,
       // The name goes with its voice: a new voice id without a name drops the old name, and no voice has no name
       // A voice belongs to its company: a provider moved to another adapter loses it unless a new one comes with the change
@@ -207,9 +211,7 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
         ...(input.region !== undefined ? { region: input.region } : {}),
         ...(input.apiKey === undefined ? {} : input.apiKey === null ? { apiKeyEncrypted: null, apiKeyLast4: null } : { apiKeyEncrypted: encryptApiKey(input.apiKey), apiKeyLast4: input.apiKey.slice(-4) }),
         // A model taken off by hand stays off when the company's list is read again; one added back by hand comes back
-        ...(input.models !== undefined
-          ? { models: input.models as Prisma.InputJsonValue, hiddenModels: (hiddenAfter(readModels(row.models), input.models, row.hiddenModels) ?? Prisma.DbNull) as Prisma.InputJsonValue }
-          : {}),
+        ...(changed ? { models: changed.models as Prisma.InputJsonValue, hiddenModels: (changed.hidden ?? Prisma.DbNull) as Prisma.InputJsonValue } : {}),
         recognition: next.recognition,
         speech: next.speech,
         enabled: next.enabled,

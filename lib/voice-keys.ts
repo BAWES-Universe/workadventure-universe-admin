@@ -5,7 +5,7 @@ import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { lendAccess, parseLendModels } from '@/lib/ai-key-lend';
 import { readModels, voiceProviderProblem, type VoiceModel } from '@/lib/voice-providers';
 import { lendModelId } from '@/lib/voice-lend-model';
-import { hiddenAfter } from '@/lib/voice-hidden-models';
+import { modelChange } from '@/lib/voice-hidden-models';
 import { AWS_KEY, TYPED_MODEL, VOICE_KEY_COMPANIES, accountAddress, accountRegion, modelDoes, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits } from '@/lib/voice-limits';
@@ -136,7 +136,7 @@ export const createVoiceKeySchema = z
   .strict();
 
 export const updateVoiceKeySchema = z
-  .object({ name: fields.name, apiKey: fields.ownApiKey.min(1, 'apiKey looks too short'), models: fields.models, limits: z.record(z.string(), z.unknown()), address: fields.address })
+  .object({ name: fields.name, apiKey: fields.ownApiKey.min(1, 'apiKey looks too short'), models: fields.models, takenOff: z.array(z.string().min(1).max(300)).max(1000), limits: z.record(z.string(), z.unknown()), address: fields.address })
   .partial()
   .strict();
 
@@ -445,7 +445,9 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
     // A key in two parts (AWS) is replaced whole: the access key ID, a colon, the secret
     const keyId = voiceKeyCompanyInfo(row.adapter)?.account?.keyId;
     if (input.apiKey !== undefined && keyId && !AWS_KEY.test(input.apiKey)) throw new VoiceKeyRefused(`Paste the ${keyId.label.toLowerCase()}, a colon, then the secret`);
-    const models = input.models ?? readModels(row.models);
+    // A model the company's list added while the page was open is kept, not taken off with the ones named
+    const changed = input.models !== undefined ? modelChange(readModels(row.models), input.models, input.takenOff, row.hiddenModels) : null;
+    const models = changed?.models ?? readModels(row.models);
     const refused = problem({ recognition: row.recognition, speech: row.speech, models });
     if (refused) throw new VoiceKeyRefused(refused);
     // As when it was added: a talking model only on a key from a company that talks live (an own server never does)
@@ -474,7 +476,7 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
         // A new address is a new connection: tried at once too
         ...(endpoint !== undefined ? { endpoint, ...CLEAN_HEALTH } : {}),
         // A model taken off by hand stays off when the company's list is read again; one added back by hand comes back
-        ...(input.models !== undefined ? { models: input.models as Prisma.InputJsonValue, hiddenModels: (hiddenAfter(readModels(row.models), input.models, row.hiddenModels) ?? Prisma.DbNull) as Prisma.InputJsonValue } : {}),
+        ...(changed ? { models: changed.models as Prisma.InputJsonValue, hiddenModels: (changed.hidden ?? Prisma.DbNull) as Prisma.InputJsonValue } : {}),
         ...(voiceLimits !== undefined ? { voiceLimits } : {}),
       },
     });

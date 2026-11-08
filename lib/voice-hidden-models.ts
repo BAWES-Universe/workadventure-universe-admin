@@ -1,23 +1,23 @@
 import { lendModelId } from '@/lib/voice-lend-model';
 import type { VoiceModel } from '@/lib/voice-providers';
 
-/**
- * The models taken off a voice provider by hand, as "kind:id" (voice discovery, 8 Nov 2026): the company's own list fills the rest
- * in on its own (lib/voice-discovery.ts), and these stay off. Free of server code.
- */
+/** The models taken off by hand, as kept ("kind:id"); anything else in the column is left out. */
 export function readHiddenModels(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string' && entry.length <= 300) : [];
 }
 
 /**
- * The hidden list after a hand change of the models: a model taken off is hidden, one added back is not. Null when none are hidden.
+ * The models and the ones kept off after a change to a provider's models. Only the models named in `takenOff` ("kind:id") are kept
+ * off: the company's list never adds those back. A model the provider has that the change doesn't mention, one the company's list
+ * added while the page was open, is kept at the end rather than taken off. A model added back by hand comes off the hidden list.
+ * Without `takenOff` the change replaces the models as sent and nothing new is kept off.
  */
-export function hiddenAfter(before: VoiceModel[], after: VoiceModel[], hidden: unknown): string[] | null {
-  const kept = new Set(after.map(lendModelId));
-  const had = new Set(before.map(lendModelId));
-  const next = new Set(readHiddenModels(hidden));
-  for (const id of had) if (!kept.has(id)) next.add(id);
+export function modelChange(before: VoiceModel[], sent: VoiceModel[], takenOff: string[] | undefined, hidden: unknown): { models: VoiceModel[]; hidden: string[] | null } {
+  const off = new Set(takenOff ?? []);
+  const named = new Set(sent.map(lendModelId));
+  const models = takenOff === undefined ? sent : [...sent, ...before.filter((model) => !named.has(lendModelId(model)) && !off.has(lendModelId(model)))];
+  const kept = new Set(models.map(lendModelId));
+  const next = new Set([...readHiddenModels(hidden), ...off]);
   for (const id of kept) next.delete(id);
-  return next.size > 0 ? [...next] : null;
+  return { models, hidden: next.size > 0 ? [...next] : null };
 }
-
