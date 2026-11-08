@@ -36,6 +36,7 @@ const OWNER = { userId: 'owner', name: 'Khalid', email: null, woka: [], joinedAt
 let calls: { url: string; method: string; body?: Record<string, unknown> }[] = [];
 let memberRoles: { roleId: string; allWorlds: boolean; worldIds: string[] }[] = [];
 let can = { giveRoleIds: ['r-admin', 'r-editor', 'r-acct'], giveWorlds: 'all' as 'all' | string[], widen: true, remove: true };
+let invitationsList: unknown[] = [];
 let failNextRole = false;
 let failBasics = false;
 let staleList: ((value: unknown) => void) | null = null;
@@ -44,6 +45,7 @@ beforeEach(() => {
   fetchMock.mockReset();
   replace.mockReset();
   calls = [];
+  invitationsList = [];
   failNextRole = false;
   failBasics = false;
   staleList = null;
@@ -59,7 +61,7 @@ beforeEach(() => {
     if (url === '/api/admin/universes/u1') return ok({ id: 'u1', name: 'BAWES', ownerId: 'owner', worlds: [{ id: 'hq', name: 'HQ' }, { id: 'campus', name: 'Campus' }] });
     if (url.endsWith('/u1/roles')) return ok({ roles: ROLES });
     if (url.endsWith('/u1/me')) return ok({ inviteWorlds: 'all' });
-    if (url.endsWith('/u1/invitations') && method === 'GET') return ok({ invitations: [], canCancel: false });
+    if (url.endsWith('/u1/invitations') && method === 'GET') return ok({ invitations: invitationsList, canCancel: invitationsList.some((item) => (item as { canCancel: boolean }).canCancel) });
     if (url.includes('/u1/members?') && url.includes('cursor=c2')) return new Promise((resolve) => { staleList = resolve; });
     if (url.includes('/u1/members?')) return ok({ members: MEMBERS, total: 2, owner: OWNER, nextCursor: null });
     if (url.includes('/roles/')) {
@@ -99,6 +101,18 @@ describe('universe Members page', () => {
     const roles = await screen.findByRole('link', { name: /Roles & permissions/ });
     expect(roles.getAttribute('href')).toBe('/admin/universes/u1/roles');
     expect(await screen.findByRole('button', { name: 'Invite member' })).toBeTruthy();
+  });
+
+  it('lists every pending invitation, with Cancel invite only on the ones this person may take back', async () => {
+    const invite = (id: string, name: string, canCancel: boolean) => ({
+      id, userId: id, name, invitedBy: { userId: 'owner', name: 'Khalid' }, invitedAt: '2026-10-17T10:00:00Z', roleIds: [], worlds: everywhere, canCancel,
+    });
+    invitationsList = [invite('mine', 'Jana', true), invite('wider', 'Omar', false)];
+    wrap(<UniverseMembersPage />);
+    const section = await screen.findByRole('region', { name: /Pending invitations/ });
+    expect(within(section).getByText('Jana')).toBeTruthy();
+    expect(within(section).getByText('Omar')).toBeTruthy();
+    expect(within(section).getAllByRole('button', { name: 'Cancel invite' })).toHaveLength(1);
   });
 
   it('asks the server for one world when the world filter comes in the address', async () => {

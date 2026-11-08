@@ -107,9 +107,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 /** The most invitations listed at once, newest first. */
 const LISTED = 200;
 
-// GET /api/admin/universes/[id]/invitations - Invitations still waiting for an answer, newest first. Each person sees the
-// invitations they could send or take back: ones that name only worlds where they may invite and remove people (an
-// every-world invitation needs that permission everywhere). For everyone else the list is empty.
+// GET /api/admin/universes/[id]/invitations - Invitations still waiting for an answer, newest first. Anyone who may invite
+// and remove people in some world sees every one of the universe's pending invitations, whoever sent them and however many
+// worlds they name, so the people who run a universe all see the same list. Each one says whether this viewer may take it
+// back (Invite and remove in every world it names). For everyone else the list is empty.
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
@@ -120,26 +121,17 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const where = worldsAllowing(access, 'INVITE_AND_REMOVE');
     if (where !== 'all' && where.length === 0) return NextResponse.json({ invitations: [], canCancel: false });
 
-    // Someone who may invite only in some worlds gets just the invitations that start in one of them (an invitation's
-    // world is always one it gives, and never a deleted one), and the newest 200 are counted after the rule below, so
-    // older ones of theirs are never pushed out by invitations elsewhere
     const rows = await prisma.membershipInvitation.findMany({
-      where: {
-        status: 'pending',
-        OR: [{ universeId: id }, { world: { universeId: id } }],
-        ...(where === 'all' ? {} : { allWorlds: false, worldId: { in: where } }),
-      },
+      where: { status: 'pending', OR: [{ universeId: id }, { world: { universeId: id } }] },
       include: {
         // Never the invitee's email: they may not have shared it, and a name is all the list needs
         invitedUser: { select: { id: true, name: true } },
         invitedBy: { select: { id: true, name: true } },
       },
       orderBy: { invitedAt: 'desc' },
-      ...(where === 'all' ? { take: LISTED } : {}),
+      take: LISTED,
     });
-    // The rule that cancelling uses, so everything listed can be taken back
-    const mine = rows.filter((row) => allows(access, 'INVITE_AND_REMOVE', invitationReach(row))).slice(0, LISTED);
-    const invitations = mine.map((row) => ({
+    const invitations = rows.map((row) => ({
       id: row.id,
       userId: row.invitedUser.id,
       name: row.invitedUser.name,
@@ -149,8 +141,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       // An invitation from before roles names one world and a tag: they join as a Member there
       worlds: row.universeId ? { allWorlds: row.allWorlds, worldIds: row.worldIds } : { allWorlds: false, worldIds: [row.worldId] },
       tags: row.tags,
+      // The rule that cancelling uses, so the button shows only where it will work
+      canCancel: allows(access, 'INVITE_AND_REMOVE', invitationReach(row)),
     }));
-    return NextResponse.json({ invitations: await withWokas(invitations), canCancel: invitations.length > 0 });
+    return NextResponse.json({ invitations: await withWokas(invitations), canCancel: invitations.some((invitation) => invitation.canCancel) });
   } catch (error) {
     return failed(error, 'list invitations');
   }
