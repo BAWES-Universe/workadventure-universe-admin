@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { PickCard, Radio } from '@/components/ui/choice';
 import { useToast } from '@/components/ui/toast';
-import { VOICE_KEY_COMPANIES, companyHost, voiceDoesLine, type VoiceKeyCompanyInfo, type VoiceKeyCompanyModel } from '@/lib/voice-key-companies';
+import { VOICE_KEY_COMPANIES, companyHost, joinKey, voiceDoesLine, type VoiceKeyCompanyInfo, type VoiceKeyCompanyModel } from '@/lib/voice-key-companies';
 import type { VoiceModel } from '@/lib/voice-providers';
 import { PageHeader } from '../../../components/ds';
 import { ProviderLogo } from '../../../components/ds/provider-logo';
@@ -51,6 +51,10 @@ export default function NewVoiceProviderPage() {
   // The job this provider is set up for: a company that listens and speaks is picked under one of them
   const [job, setJob] = useState<VoiceJob>('speech');
   const [apiKey, setApiKey] = useState('');
+  // A company whose keys are made per region (AWS, Azure AI Speech) is checked and spoken with in the region picked here
+  const [region, setRegion] = useState<string | null>(null);
+  // The first part of a key in two parts (AWS's access key ID), shown as typed
+  const [keyId, setKeyId] = useState('');
   const [check, setCheck] = useState<Check>({ status: 'none' });
   const [models, setModels] = useState<VoiceModel[]>([]);
   const [typedName, setTypedName] = useState<string | null>(null);
@@ -66,6 +70,11 @@ export default function NewVoiceProviderPage() {
   const known = info ? startingModels(info, job) : [];
   const modelList = info?.jobs[job]?.modelList;
   const name = typedName ?? info?.label ?? '';
+  const account = info?.account;
+  // The key as it is checked and kept: AWS's is the access key ID, a colon, then the secret
+  const fullKey = account?.keyId ? joinKey(keyId, apiKey) : apiKey.trim();
+  const keyTyped = apiKey.trim() !== '' && (!account?.keyId || keyId.trim() !== '');
+  const regionPicked = !account?.regions || region !== null;
   const wssAllowed = job === 'recognition';
 
   function pick(next: string, nextJob: VoiceJob) {
@@ -75,6 +84,8 @@ export default function NewVoiceProviderPage() {
       setJob(nextJob);
       // A key typed for one company is never sent to another
       setApiKey('');
+      setKeyId('');
+      setRegion(null);
       setCheck({ status: 'none' });
       setModels([]);
       setTypedName(null);
@@ -89,7 +100,7 @@ export default function NewVoiceProviderPage() {
     if (!info) return;
     const mine = ++latest.current;
     setCheck({ status: 'checking' });
-    const answer = await callOrbit('POST', '/api/admin/voice-providers/check', { adapter: info.adapter, apiKey, job });
+    const answer = await callOrbit('POST', '/api/admin/voice-providers/check', { adapter: info.adapter, apiKey: fullKey, job, ...(account?.regions && region ? { region } : {}) });
     if (mine !== latest.current) return;
     if (!answer.ok) {
       setCheck({ status: 'refused', message: answer.error });
@@ -98,10 +109,12 @@ export default function NewVoiceProviderPage() {
     const found = (answer.data as { models?: unknown } | null)?.models;
     const listed = Array.isArray(found) && found.length > 0 ? (found as Listed[]) : null;
     setCheck({ status: 'ok', listed });
-    // Like Pipecat's services, a working model is ticked from the start: the one Universe starts this company's keys on. Nothing
-    // picked by hand is replaced.
-    const start = listed ? known[0] : undefined;
-    if (start) setModels((now) => (now.length > 0 ? now : [{ id: start.id, label: start.label, kind: start.kind }]));
+    // Every model the company lists is ticked from the start, the one Universe starts this company's keys on first: new ones the
+    // company adds later show up on their own too. Nothing picked by hand is replaced.
+    if (listed) {
+      const all = [...known, ...listed.filter((entry) => !known.some((model) => model.id === entry.id))];
+      setModels((now) => (now.length > 0 ? now : all.map(({ id, label, kind }) => ({ id, ...(label ? { label } : {}), kind }))));
+    }
   }
 
   const addressProblem =
@@ -109,7 +122,7 @@ export default function NewVoiceProviderPage() {
   // The check asks the company's own address only. A key that is valid only at an address typed under Its own address can be turned away
   // there, so with an address typed a turned-away key may still be added; with none typed the key has to pass.
   const keyChecked = check.status === 'ok' || (check.status === 'refused' && address.trim() !== '' && !addressProblem);
-  const canAdd = keyChecked && models.length > 0 && name.trim() !== '' && !addressProblem;
+  const canAdd = keyChecked && regionPicked && models.length > 0 && name.trim() !== '' && !addressProblem;
   // The models the company listed for the key, to tick; typed instead when it has no list, the list couldn't be read, or the company
   // turned the key away (it may still be added for an address typed under Its own address)
   const listed = check.status === 'ok' ? check.listed : null;
@@ -135,8 +148,11 @@ export default function NewVoiceProviderPage() {
       recognition: job === 'recognition',
       speech: job === 'speech',
       enabled: true,
-      apiKey: apiKey.trim(),
+      apiKey: fullKey,
+      ...(account?.regions && region ? { region } : {}),
       models,
+      // The listed ones left unticked stay off when the company's list fills in the rest on its own
+      ...(options ? { hiddenModels: options.map(lendModelId).filter((id) => !models.some((model) => lendModelId(model) === id)) } : {}),
       ...(address.trim() ? { endpoint: address.trim() } : {}),
     });
     if (!answer.ok) {
@@ -148,6 +164,8 @@ export default function NewVoiceProviderPage() {
     router.push('/admin/ai-providers');
   }
 
+  // Parts count on from 1: the region comes only for a company whose keys are made per region
+  let part = 1;
   return (
     <div className="grid gap-6" data-testid="new-voice-provider">
       <PageHeader icon={<KeyRound size={30} aria-hidden="true" />} title="New voice provider">
@@ -196,18 +214,61 @@ export default function NewVoiceProviderPage() {
               </Button>
             </div>
           </div>
-          <Part n={1} title={`Get Universe’s ${info.label} key`}>
-            <div className="grid gap-1 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 py-3 text-[13px]">{info.step}</div>
+          <Part n={part++} title={`Get Universe’s ${info.label} key`}>
+            <div className="grid gap-1 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 py-3 text-[13px] [overflow-wrap:anywhere]">{info.step}</div>
           </Part>
-          <Part n={2} title="Paste the key">
+          {account?.regions && (
+            <Part n={part++} title="Pick the region">
+              <div role="radiogroup" aria-label="Region" className="grid gap-2 sm:grid-cols-2">
+                {account.regions.map((entry) => (
+                  <PickCard
+                    key={entry.id}
+                    role="radio"
+                    picked={region === entry.id}
+                    onClick={() => {
+                      if (entry.id === region) return;
+                      latest.current += 1;
+                      setRegion(entry.id);
+                      setCheck({ status: 'none' });
+                    }}
+                    indicator={<Radio checked={region === entry.id} />}
+                    title={entry.label}
+                    description={entry.host}
+                  />
+                ))}
+              </div>
+              <p className={FIELD_HINT}>{account.regionHint ?? 'A key only works in the region it was made in.'}</p>
+            </Part>
+          )}
+          <Part n={part++} title={account?.keyId ? 'Paste the access key' : 'Paste the key'}>
+            {account?.keyId && (
+              <div className="grid gap-1.5">
+                <Label htmlFor="voice-key-id">{account.keyId.label}</Label>
+                <Input
+                  id="voice-key-id"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  placeholder={account.keyId.example}
+                  value={keyId}
+                  onChange={(event) => {
+                    latest.current += 1;
+                    setKeyId(event.target.value);
+                    setCheck({ status: 'none' });
+                  }}
+                  className="h-11 rounded-xl"
+                />
+                <p className={FIELD_HINT}>{account.keyId.hint}</p>
+              </div>
+            )}
             <div className="grid gap-1.5">
-              <Label htmlFor="voice-key">API key</Label>
+              <Label htmlFor="voice-key">{account?.keyLabel ?? 'API key'}</Label>
               <Input
                 id="voice-key"
                 type="password"
                 autoComplete="off"
                 spellCheck={false}
-                placeholder="Paste the key"
+                placeholder={account?.keyLabel ? `Paste the ${account.keyLabel.toLowerCase()}` : 'Paste the key'}
                 value={apiKey}
                 onChange={(event) => {
                   latest.current += 1;
@@ -219,7 +280,7 @@ export default function NewVoiceProviderPage() {
               <p className={FIELD_HINT}>Stored encrypted. Nobody sees it again, not even you.</p>
             </div>
             <div className="grid gap-2" aria-live="polite">
-              <Button type="button" variant="outline" className="h-11" disabled={apiKey.trim() === '' || check.status === 'checking'} onClick={() => void checkKey()}>
+              <Button type="button" variant="outline" className="h-11" disabled={!keyTyped || !regionPicked || check.status === 'checking'} onClick={() => void checkKey()}>
                 <ShieldCheck aria-hidden="true" />
                 {check.status === 'checking' ? 'Checking…' : 'Check key'}
               </Button>
@@ -240,11 +301,11 @@ export default function NewVoiceProviderPage() {
               )}
             </div>
           </Part>
-          <Part n={3} title="Its models">
+          <Part n={part++} title="Its models">
             {options ? (
               <>
                 <p className={FIELD_HINT}>
-                  {info.label} lists these, each with what {info.label} says about it. One that works is ticked already. Tick more to let bots pick between them: bots on Universe AI, and people’s own {info.label} keys, can use only the ticked ones. The first ticked is what bots start on.
+                  {info.label} lists these for this key, each with what {info.label} says about it, and all are on. Untick any bots shouldn’t use and it stays off. New ones {info.label} adds later show up by themselves. The first ticked is what bots start on.
                 </p>
                 <VoiceModelPicker
                   models={options}
@@ -287,7 +348,7 @@ export default function NewVoiceProviderPage() {
               <p className={FIELD_HINT}>Check the key and {info.label}’s models show here to tick.</p>
             )}
           </Part>
-          <Part n={4} title="Name it">
+          <Part n={part++} title="Name it">
             <Input aria-label="Name" value={name} maxLength={255} onChange={(event) => setTypedName(event.target.value)} className="h-11 rounded-xl" />
             <p className={FIELD_HINT}>Shown here and on bot pages.</p>
           </Part>

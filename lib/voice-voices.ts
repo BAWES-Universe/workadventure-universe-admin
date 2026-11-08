@@ -5,7 +5,8 @@ import { BotSettingsError } from '@/lib/bot-access-settings';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels } from '@/lib/voice-providers';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
-import { voiceKeyCompanyInfo, type VoiceKeyCompanyInfo, type VoiceListSpec } from '@/lib/voice-key-companies';
+import { accountRegion, voiceKeyCompanyInfo, type VoiceKeyCompanyInfo, type VoiceListSpec } from '@/lib/voice-key-companies';
+import { signAwsGet } from '@/lib/aws-sign';
 import { OWN_SPEECH_LABEL, isOwnSpeechAdapter, listOwnSpeechVoices } from '@/lib/voice-own-server';
 
 /**
@@ -54,7 +55,7 @@ interface Listed {
   languages: string[];
   preview: string | null;
   previewNeedsKey: boolean;
-  /** The speaking models this voice belongs to, when the company ties voices to models (Groq's Orpheus, Rime): one of them is used. */
+  /** The speaking models this voice belongs to, when the company ties voices to models (Groq's Orpheus, Rime, Amazon Polly's engines): one of them is used. */
   models?: string[];
 }
 
@@ -80,6 +81,8 @@ interface Call {
   /** The company's address with no trailing slash. */
   base: string;
   headers: Record<string, string>;
+  /** Signs each call with the key instead of sending it (AWS): the headers for that one address. */
+  sign?: (url: URL) => Record<string, string>;
 }
 
 /** Three-letter codes (ISO 639-2, as Rime lists them) of languages that have a two-letter one. */
@@ -114,9 +117,10 @@ class Unreadable extends Error {}
 async function getJson(call: Call, path: string, body?: Record<string, unknown>): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetch(`${call.base}${path}`, {
+    const url = `${call.base}${path}`;
+    response = await fetch(url, {
       method: body ? 'POST' : 'GET',
-      headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}), ...call.headers },
+      headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}), ...(call.sign ? call.sign(new URL(url)) : call.headers) },
       ...(body ? { body: JSON.stringify(body) } : {}),
       // A redirect would carry the key somewhere the catalog never named
       redirect: 'manual',
@@ -212,7 +216,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec, speechModels: strin
       const body = spec.body ? Object.fromEntries(Object.entries(spec.body).map(([field, value]) => [field, value === '{size}' ? PAGE_SIZE : value])) : undefined;
       const answer = await getJson(call, [query, paged].filter(Boolean).join('&'), body);
       if (typeof answer !== 'object' || answer === null) throw unreadable(call);
-      // An empty `list`: the answer is the list itself (CAMB.AI); `a[].b[]`: gathered from inside a list (Soniox); `a.b`: a field
+      // An empty `list`: the answer is the list itself (CAMB.AI, Azure AI Speech); `a[].b[]`: gathered from inside a list (Soniox); `a.b`: a field
       // inside a field (Neuphonic's data.voices)
       const at = (path: string) => path.split('.').reduce<unknown>((value, field) => (typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[field] : undefined), answer);
       const first = spec.list === '' ? answer : spec.list.endsWith('[]') ? valuesAt(answer, spec.list) : at(spec.list);
@@ -267,6 +271,8 @@ async function listFromSpec(call: Call, spec: VoiceListSpec, speechModels: strin
       next = token;
     }
   }
+  // A list that reaches the cap may hold more than is offered: said in the logs, so it's seen when a company's list outgrows it
+  if (out.length >= MAX_VOICES) console.warn(`[voices] ${host} lists ${out.length > MAX_VOICES ? out.length : 'at least ' + MAX_VOICES} voices; the first ${MAX_VOICES} are offered`);
   return out.slice(0, MAX_VOICES);
 }
 
@@ -286,25 +292,52 @@ const cache = new Map<string, Cached>();
 /** For tests: forgets every list. */
 export const clearVoiceListCache = () => cache.clear();
 
-/** The job whose voices a provider's bots pick from: speaking, or talking (game #1910) for a company that only talks live. */
-const voiceJobOf = (company: VoiceKeyCompanyInfo | null) => (company?.jobs.speech ? company.jobs.speech : company?.jobs.talk);
+/** Which voices are listed: the ones a bot speaks with, or the ones it talks live with (game #1910). */
+export type VoicePart = 'speech' | 'talk';
+
+type VoiceJob = 'speech' | 'talk';
+
+/**
+ * The job whose voices a provider's bots pick from: the one of the model they speak with. A company that both speaks and talks live
+ * (AWS: Polly and Nova Sonic) has other voices for each; one that only talks live gives its talking voices (game #1910).
+ */
+const voiceJobOf = (company: VoiceKeyCompanyInfo | null, job: VoiceJob = 'speech') =>
+  job === 'talk' ? (company?.jobs.talk ?? company?.jobs.speech) : (company?.jobs.speech ?? company?.jobs.talk);
+
+/** The job a provider speaks with when nothing else says: speaking if it has a speaking model, otherwise talking live. */
+const speakingJob = (provider: VoiceProvider): VoiceJob => {
+  const models = readModels(provider.models);
+  return models.some((entry) => entry.kind === 'speech') || !models.some((entry) => entry.kind === 'talk') ? 'speech' : 'talk';
+};
 
 /** Where a source's calls go and how they are signed: the company's own address, the key in its one header. */
-function callFor(provider: VoiceProvider): Call & { spec: VoiceListSpec } {
+function callFor(provider: VoiceProvider, voiceJob: VoiceJob): Call & { spec: VoiceListSpec } {
   const company = voiceKeyCompanyInfo(provider.adapter);
-  const job = voiceJobOf(company);
+  const job = voiceJobOf(company, voiceJob);
   const spec = job?.voices;
   if (!company || !job || !spec) throw new VoiceListRefused(`${company?.label ?? provider.name}’s voices can’t be listed here.`, 409);
   if (!provider.apiKeyEncrypted) throw new VoiceListRefused(`${provider.name} has no key.`, 409);
   // The server's own provider may name another address (a proxy); a person's key never does
   // A list kept at another host than the job's (Resemble) is always read there: a proxy for speaking is not a voice list
-  const base = (spec.host ? `https://${spec.host}` : provider.ownerId === null && provider.endpoint ? provider.endpoint : `https://${job.host}`).replace(/\/+$/, '');
+  // A list read in the provider's own region (AWS signed with the key, Azure AI Speech) is read at the company's host for it
+  const inRegion = Boolean(spec.sign) || Boolean(spec.host?.includes('{region}'));
+  const region = inRegion ? accountRegion(company, provider.region) : null;
+  if (inRegion && !region) throw new VoiceListRefused(`${provider.name} has no region picked.`, 409);
+  const host = spec.host && region ? spec.host.replace('{region}', region) : spec.host;
+  const base = (host ? `https://${host}` : provider.ownerId === null && provider.endpoint ? provider.endpoint : `https://${job.host}`).replace(/\/+$/, '');
   const { check } = company;
   let key: string;
   try {
     key = decryptApiKey(provider.apiKeyEncrypted);
   } catch {
     throw new VoiceListRefused(`${provider.name}’s key can’t be read.`, 409);
+  }
+  if (spec.sign && region) {
+    const split = key.indexOf(':');
+    if (split <= 0) throw new VoiceListRefused(`${provider.name}’s key can’t be read.`, 409);
+    const parts = { accessKeyId: key.slice(0, split), secretAccessKey: key.slice(split + 1) };
+    const scope = { region, service: spec.sign.service };
+    return { company, spec, base, headers: {}, sign: (url) => signAwsGet(url, parts, scope) };
   }
   return { company, spec, base, headers: { ...check.headers, [check.header]: `${check.prefix}${key}` } };
 }
@@ -334,9 +367,9 @@ async function listOwnVoices(provider: VoiceProvider): Promise<Listed[]> {
   return voices.map(({ voiceId }) => ({ voiceId, name: voiceId, description: '', languages: [], preview: null, previewNeedsKey: false }));
 }
 
-async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
+async function listedFor(provider: VoiceProvider, job: VoiceJob = speakingJob(provider)): Promise<Listed[]> {
   // A company with no list call (OpenAI's talking voices) has its voices in the catalog: nothing to call, nothing to cache
-  const fixed = voiceJobOf(voiceKeyCompanyInfo(provider.adapter))?.fixedVoices;
+  const fixed = voiceJobOf(voiceKeyCompanyInfo(provider.adapter), job)?.fixedVoices;
   if (fixed) {
     return fixed.map((voice) => ({
       voiceId: voice.id,
@@ -349,7 +382,7 @@ async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
     }));
   }
   // A new key or address is a new row version, so it is never served an older list
-  const id = `${provider.id}:${provider.updatedAt.getTime()}`;
+  const id = `${provider.id}:${provider.updatedAt.getTime()}:${job}`;
   const hit = cache.get(id);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.voices;
   let voices: Listed[];
@@ -357,7 +390,7 @@ async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
     if (isOwnSpeechAdapter(provider.adapter)) {
       voices = (await listOwnVoices(provider)).slice(0, MAX_VOICES);
     } else {
-      const call = callFor(provider);
+      const call = callFor(provider, job);
       // A lister stops at its page limit, but never trusts that: no more than MAX_VOICES are kept or sent on
       const speechModels = readModels(provider.models).filter((entry) => entry.kind === 'speech').map((entry) => entry.id);
       voices = (await listFromSpec(call, call.spec, speechModels)).slice(0, MAX_VOICES);
@@ -378,7 +411,7 @@ interface Source {
   /** The speaking model a bot starts on: the first one set up and allowed here. */
   model: string;
   talk: boolean;
-  /** Every model of the same kind set up and allowed here, first to last: a voice tied to one model (Groq) is offered only with it. */
+  /** Every model of the same kind set up and allowed here, first to last: a voice tied to models (Groq, Rime, Amazon Polly) takes the first it speaks in. */
   models: string[];
 }
 
@@ -387,7 +420,7 @@ interface Source {
  * belongs to the bot's maker, is lent to the bot's universe and that the maker may still lend there (the rule that decides
  * whose keys a bot speaks on, lib/bot-voice.ts). Anything else reads as "not found", so a key's existence is never confirmed.
  */
-async function sourceFor(botId: string, source: string): Promise<Source> {
+async function sourceFor(botId: string, source: string, part: VoicePart = 'speech'): Promise<Source> {
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { createdById: true, room: { select: { world: { select: { universeId: true } } } } } });
   if (!bot) throw new BotSettingsError(404, 'Bot not found');
   const universeId = bot.room.world.universeId;
@@ -405,21 +438,22 @@ async function sourceFor(botId: string, source: string): Promise<Source> {
     if (!provider || !bot.createdById || !(await lendAccess(bot.createdById, universeId))) throw new VoiceListRefused('Voice key not found.', 404);
   }
   const allowed = provider.lends?.length ? readLendModels(provider.lends[0].models) : null;
-  // A speaking model first; a key whose only speaking is a talking model (game #1910) gives that one
+  // Speaking: a speaking model first, and a key whose only speaking is a talking model (game #1910) gives that one. Talking:
+  // only a talking model, so a key that both speaks and talks live (xAI, AWS with Polly and Nova Sonic) lists each kind's own voices
   const usable = readModels(provider.models).filter((entry) => !allowed || allowed.includes(lendModelId(entry)));
-  const model = usable.find((entry) => entry.kind === 'speech') ?? usable.find((entry) => entry.kind === 'talk');
-  if (!model) throw new VoiceListRefused(`${provider.name} has no speaking model set up here.`, 409);
+  const model = part === 'talk' ? usable.find((entry) => entry.kind === 'talk') : (usable.find((entry) => entry.kind === 'speech') ?? usable.find((entry) => entry.kind === 'talk'));
+  if (!model) throw new VoiceListRefused(`${provider.name} has no ${part === 'talk' ? 'talking' : 'speaking'} model set up here.`, 409);
   return { provider, model: model.id, talk: model.kind === 'talk', models: usable.filter((entry) => entry.kind === model.kind).map((entry) => entry.id) };
 }
 
-const previewPath = (botId: string, source: string, voiceId: string) =>
-  `/api/bots/${encodeURIComponent(botId)}/voice/voices/${encodeURIComponent(voiceId)}/preview?source=${encodeURIComponent(source)}`;
+const previewPath = (botId: string, source: string, voiceId: string, part: VoicePart) =>
+  `/api/bots/${encodeURIComponent(botId)}/voice/voices/${encodeURIComponent(voiceId)}/preview?source=${encodeURIComponent(source)}${part === 'talk' ? '&part=talk' : ''}`;
 
-/** The speaking voices of one source (`universe-ai` or a voice key's id) for a bot, in the order the company lists them. */
-export async function listBotVoices(botId: string, source: string): Promise<VoiceChoice[]> {
-  const { provider, model, talk, models } = await sourceFor(botId, source);
-  const listed = await listedFor(provider);
-  // A voice tied to models (Groq, Rime) comes with the first of them set up and allowed here, and not at all when none is
+/** The speaking (or talking) voices of one source (`universe-ai` or a voice key's id) for a bot, in the order the company lists them. */
+export async function listBotVoices(botId: string, source: string, part: VoicePart = 'speech'): Promise<VoiceChoice[]> {
+  const { provider, model, talk, models } = await sourceFor(botId, source, part);
+  const listed = await listedFor(provider, talk ? 'talk' : 'speech');
+  // A voice tied to models (Groq, Rime, Amazon Polly's engines) comes with the first of them set up and allowed here, and not at all when none is
   return listed.flatMap((voice) => {
     const own = voice.models ? models.find((id) => voice.models!.includes(id)) : model;
     return own ? [{ ...voice, own }] : [];
@@ -428,7 +462,7 @@ export async function listBotVoices(botId: string, source: string): Promise<Voic
     name: voice.name,
     description: voice.description,
     languages: voice.languages,
-    previewUrl: !voice.preview ? null : voice.previewNeedsKey ? previewPath(botId, source, voice.voiceId) : voice.preview,
+    previewUrl: !voice.preview ? null : voice.previewNeedsKey ? previewPath(botId, source, voice.voiceId, part) : voice.preview,
     providerId: provider.id,
     model: voice.own,
     talk,
@@ -441,10 +475,10 @@ export interface VoiceSample {
 }
 
 /** One voice's sample from the company, for a provider already found: the address is the one the company's own list named. */
-async function sampleFor(provider: VoiceProvider, voiceId: string): Promise<VoiceSample> {
-  const voice = (await listedFor(provider)).find((entry) => entry.voiceId === voiceId);
+async function sampleFor(provider: VoiceProvider, voiceId: string, job: VoiceJob = speakingJob(provider)): Promise<VoiceSample> {
+  const voice = (await listedFor(provider, job)).find((entry) => entry.voiceId === voiceId);
   if (!voice?.preview) throw new VoiceListRefused('That voice has no sample.', 404);
-  const call = callFor(provider);
+  const call = callFor(provider, job);
   let response: Response;
   try {
     response = await fetch(voice.preview, {
@@ -505,9 +539,9 @@ async function readCapped(response: Response, max: number): Promise<ArrayBuffer 
  * One voice's free sample, fetched for a company that keeps it behind the key. The address is the one the company's own list
  * named (never one the caller sends), and the key goes only to that company's address.
  */
-export async function fetchVoiceSample(botId: string, source: string, voiceId: string): Promise<VoiceSample> {
-  const { provider } = await sourceFor(botId, source);
-  return sampleFor(provider, voiceId);
+export async function fetchVoiceSample(botId: string, source: string, voiceId: string, part: VoicePart = 'speech'): Promise<VoiceSample> {
+  const { provider, talk } = await sourceFor(botId, source, part);
+  return sampleFor(provider, voiceId, talk ? 'talk' : 'speech');
 }
 
 /** What the Universe AI page shows for one voice of a server provider. */

@@ -1711,6 +1711,9 @@ model VoiceProvider {
   // The limits its owner changed for bots that use their key (#783): only the values they set (turnSeconds, replyCharacters, replySeconds,
   // listenMinutesPerDay); anything not there follows the server's voice limits. Null = none changed.
   voiceLimits        Json?    @map("voice_limits")
+  // The models taken off by hand (["kind:id"]): the company's own list is read with the key and every model it lists is added on its
+  // own, except these. Adding one back by hand takes it off this list. Null = none taken off.
+  hiddenModels       Json?    @map("hidden_models")
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 

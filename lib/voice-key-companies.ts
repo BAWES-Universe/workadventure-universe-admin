@@ -98,8 +98,11 @@ export interface VoiceListSpec {
   list: string;
   /** More fields in the same answer holding voices (MiniMax: the account's cloned and designed voices). One that is absent holds none. */
   alsoLists?: string[];
-  /** The host voices are listed at, when it isn't the job's own (Soniox speaks at tts-rt.soniox.com, lists at api.soniox.com; Resemble speaks at f.cluster.resemble.ai, lists at app.resemble.ai). */
+  /** The host voices are listed at, when it isn't the job's own (Soniox speaks at tts-rt.soniox.com, lists at api.soniox.com; Resemble speaks at f.cluster.resemble.ai, lists at app.resemble.ai).
+   * `{region}` is the provider's region, for a list read in the key's own region (AWS, Azure AI Speech). */
   host?: string;
+  /** The list is asked for signed with the key (AWS Signature Version 4, for this service) in the provider's region, never sent the key. */
+  sign?: { service: string };
   /**
    * How the next page is asked for: a token the answer gives (`token`) or the last voice's id (`after`), sent as `param`, while
    * `more` says there is more (or, for a company with no such field, while there is a token: Mistral); or a page number (`page`, from 1,
@@ -183,8 +186,10 @@ export interface VoiceKeyAccount {
   address?: { label: string; example: string; hint: string; hosts: string[] };
   /** The model is typed, as the person named it at the company (Azure: the deployment name), for this job. */
   typedModel?: { title: string; label: string; hint: string; kind: VoiceCompanyJobName };
-  /** The regions a key may be in, one picked on Add a key (AWS), each with the host the bot server calls there. */
+  /** The regions a key may be in, one picked on Add a key (AWS, Azure AI Speech), each with the host the bot server calls there. */
   regions?: { id: string; label: string; host: string }[];
+  /** What to pick by, under the regions, when the key only works in the region it was made in (Azure AI Speech). */
+  regionHint?: string;
   /** A key in two parts (AWS): this one shown as typed (the access key ID), the other kept secret like any key. */
   keyId?: { label: string; example: string; hint: string };
   /** What the secret part is called, when not "API key" (AWS: "Secret access key"). */
@@ -266,6 +271,72 @@ const company = (entry: VoiceKeyCompanyEntry): VoiceKeyCompanyInfo => ({
   does: { recognition: Boolean(entry.jobs.recognition), speech: Boolean(entry.jobs.speech), talk: Boolean(entry.jobs.talk) },
   models: VOICE_COMPANY_JOBS.flatMap((kind) => (entry.jobs[kind]?.models ?? []).map((model) => ({ ...model, kind }))),
 });
+
+/** Google's 30 prebuilt voices, in the order its speech docs list them: Google has no call that lists them. */
+const GOOGLE_VOICES: FixedVoice[] = [
+  { id: 'Zephyr', name: 'Zephyr' },
+  { id: 'Puck', name: 'Puck' },
+  { id: 'Charon', name: 'Charon' },
+  { id: 'Kore', name: 'Kore' },
+  { id: 'Fenrir', name: 'Fenrir' },
+  { id: 'Leda', name: 'Leda' },
+  { id: 'Orus', name: 'Orus' },
+  { id: 'Aoede', name: 'Aoede' },
+  { id: 'Callirrhoe', name: 'Callirrhoe' },
+  { id: 'Autonoe', name: 'Autonoe' },
+  { id: 'Enceladus', name: 'Enceladus' },
+  { id: 'Iapetus', name: 'Iapetus' },
+  { id: 'Umbriel', name: 'Umbriel' },
+  { id: 'Algieba', name: 'Algieba' },
+  { id: 'Despina', name: 'Despina' },
+  { id: 'Erinome', name: 'Erinome' },
+  { id: 'Algenib', name: 'Algenib' },
+  { id: 'Rasalgethi', name: 'Rasalgethi' },
+  { id: 'Laomedeia', name: 'Laomedeia' },
+  { id: 'Achernar', name: 'Achernar' },
+  { id: 'Alnilam', name: 'Alnilam' },
+  { id: 'Schedar', name: 'Schedar' },
+  { id: 'Gacrux', name: 'Gacrux' },
+  { id: 'Pulcherrima', name: 'Pulcherrima' },
+  { id: 'Achird', name: 'Achird' },
+  { id: 'Zubenelgenubi', name: 'Zubenelgenubi' },
+  { id: 'Vindemiatrix', name: 'Vindemiatrix' },
+  { id: 'Sadachbia', name: 'Sadachbia' },
+  { id: 'Sadaltager', name: 'Sadaltager' },
+  { id: 'Sulafat', name: 'Sulafat' },
+];
+
+/** xAI's built-in voices, Eve (its default) first, then as its text to speech docs list them. Every one speaks every language. */
+const XAI_VOICES: FixedVoice[] = [
+  { id: 'eve', name: 'Eve' },
+  { id: 'ara', name: 'Ara' },
+  { id: 'leo', name: 'Leo' },
+  { id: 'rex', name: 'Rex' },
+  { id: 'sal', name: 'Sal' },
+  { id: 'carina', name: 'Carina' },
+  { id: 'zagan', name: 'Zagan' },
+  { id: 'helix', name: 'Helix' },
+  { id: 'orion', name: 'Orion' },
+  { id: 'luna', name: 'Luna' },
+  { id: 'iris', name: 'Iris' },
+  { id: 'altair', name: 'Altair' },
+  { id: 'zenith', name: 'Zenith' },
+  { id: 'perseus', name: 'Perseus' },
+  { id: 'helios', name: 'Helios' },
+  { id: 'lux', name: 'Lux' },
+  { id: 'kepler', name: 'Kepler' },
+  { id: 'rigel', name: 'Rigel' },
+  { id: 'cosmo', name: 'Cosmo' },
+  { id: 'celeste', name: 'Celeste' },
+  { id: 'ursa', name: 'Ursa' },
+  { id: 'sirius', name: 'Sirius' },
+  { id: 'lumen', name: 'Lumen' },
+  { id: 'castor', name: 'Castor' },
+  { id: 'naksh', name: 'Naksh' },
+  { id: 'atlas', name: 'Atlas' },
+  { id: 'aurora', name: 'Aurora' },
+  { id: 'liora', name: 'Liora' },
+];
 
 /**
  * Bulbul v4 Flash's speakers, by the language each speaks (enhi: Hindi and English mixed), as Sarvam's voices page lists them
@@ -432,6 +503,37 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'aws',
     label: 'AWS',
     jobs: {
+      recognition: {
+        // Live hearing with Amazon Transcribe's streaming socket, signed with the key, as Pipecat's AWSTranscribeSTTService does. The
+        // region picked names the host: transcribestreaming.<region>.amazonaws.com. Transcribe names no model (#1886)
+        host: 'transcribestreaming.us-east-1.amazonaws.com',
+        models: [{ id: 'amazon-transcribe', label: 'Amazon Transcribe' }],
+      },
+      speech: {
+        // Text to speech with Amazon Polly (POST /v1/speech), signed with the key, as Pipecat's AWSPollyTTSService does. Each model is
+        // one of Polly's engines; the region picked names the host: polly.<region>.amazonaws.com
+        host: 'polly.us-east-1.amazonaws.com',
+        models: [
+          { id: 'generative', label: 'Polly Generative' },
+          { id: 'neural', label: 'Polly Neural' },
+          { id: 'long-form', label: 'Polly Long-Form' },
+          { id: 'standard', label: 'Polly Standard' },
+        ],
+        // GET /v1/voices (DescribeVoices), signed, in the key's region: every voice in one answer
+        voices: {
+          host: 'polly.{region}.amazonaws.com',
+          sign: { service: 'polly' },
+          path: '/v1/voices?IncludeAdditionalLanguageCodes=true',
+          list: 'Voices',
+          paging: { kind: 'none' },
+          id: 'Id',
+          name: 'Name',
+          description: [{ join: ['Gender', 'LanguageName'] }],
+          languages: ['LanguageCode', 'AdditionalLanguageCodes[]'],
+          // Each voice works with some engines only (Joanna with all four, Danielle without standard…)
+          model: 'SupportedEngines[]',
+        },
+      },
       talk: {
         // The region picked on Add a key names the host: bedrock-runtime.<region>.amazonaws.com
         host: 'bedrock-runtime.us-east-1.amazonaws.com',
@@ -460,7 +562,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
       },
     },
     benefit: '{does}. Uses your AWS account, in the region you pick.',
-    step: 'In the AWS console, open IAM and create an access key for a user allowed bedrock:InvokeModelWithBidirectionalStream.',
+    step: 'In the AWS console, open IAM and create an access key for a user allowed what you use: transcribe:StartStreamTranscriptionWebSocket to listen, polly:SynthesizeSpeech and polly:DescribeVoices to speak, bedrock:InvokeModelWithBidirectionalStream to talk live.',
     docs: 'https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-2-sonic.html',
     account: {
       regions: [
@@ -475,6 +577,79 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     // STS GetCallerIdentity answers any valid key, needs no permission and is free; a wrong key is 403. The call is signed, so
     // neither part of the key leaves Universe
     check: { url: 'https://sts.{region}.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15', header: 'Authorization', prefix: '', sign: { service: 'sts' } },
+  }),
+  company({
+    adapter: 'azure-speech',
+    label: 'Azure AI Speech',
+    jobs: {
+      recognition: {
+        // Real-time hearing over the Speech service's own socket in the region picked (<region>.stt.speech.microsoft.com), as
+        // Pipecat's AzureSTTService does through the Speech SDK (#1875). The service names no model
+        host: 'eastus.stt.speech.microsoft.com',
+        models: [{ id: 'azure-stt', label: 'Real-time speech to text' }],
+      },
+      speech: {
+        // Streamed text to speech (POST /cognitiveservices/v1) in the region picked, as Pipecat's AzureHttpTTSService does. The
+        // voice picked names the voice family (Neural, HD), so there is one model
+        host: 'eastus.tts.speech.microsoft.com',
+        models: [{ id: 'azure-tts', label: 'Text to speech' }],
+        // GET /cognitiveservices/voices/list in the key's region: every voice in one answer, the answer itself the list
+        voices: {
+          host: '{region}.tts.speech.microsoft.com',
+          path: '/cognitiveservices/voices/list',
+          list: '',
+          paging: { kind: 'none' },
+          id: 'ShortName',
+          name: 'DisplayName',
+          description: [{ join: ['Gender', 'LocaleName'] }],
+          languages: ['Locale', 'SecondaryLocaleList[]'],
+        },
+      },
+    },
+    benefit: '{does}. Uses your Azure Speech resource, in the region you pick.',
+    step: 'In the Azure portal, create a Speech resource, then copy Key 1 and its Location/Region from Keys and Endpoint.',
+    docs: 'https://learn.microsoft.com/azure/ai-services/speech-service/',
+    account: {
+      // Azure's Speech regions (learn.microsoft.com/azure/ai-services/speech-service/regions, 7 Nov 2026)
+      regionHint: 'Pick the region your Speech resource is in. Azure shows it as Location/Region next to the key, and the key only works there.',
+      regions: [
+        { id: 'eastus', label: 'East US', host: 'eastus.tts.speech.microsoft.com' },
+        { id: 'eastus2', label: 'East US 2', host: 'eastus2.tts.speech.microsoft.com' },
+        { id: 'centralus', label: 'Central US', host: 'centralus.tts.speech.microsoft.com' },
+        { id: 'northcentralus', label: 'North Central US', host: 'northcentralus.tts.speech.microsoft.com' },
+        { id: 'southcentralus', label: 'South Central US', host: 'southcentralus.tts.speech.microsoft.com' },
+        { id: 'westcentralus', label: 'West Central US', host: 'westcentralus.tts.speech.microsoft.com' },
+        { id: 'westus', label: 'West US', host: 'westus.tts.speech.microsoft.com' },
+        { id: 'westus2', label: 'West US 2', host: 'westus2.tts.speech.microsoft.com' },
+        { id: 'westus3', label: 'West US 3', host: 'westus3.tts.speech.microsoft.com' },
+        { id: 'canadacentral', label: 'Canada Central', host: 'canadacentral.tts.speech.microsoft.com' },
+        { id: 'canadaeast', label: 'Canada East', host: 'canadaeast.tts.speech.microsoft.com' },
+        { id: 'brazilsouth', label: 'Brazil South', host: 'brazilsouth.tts.speech.microsoft.com' },
+        { id: 'northeurope', label: 'North Europe', host: 'northeurope.tts.speech.microsoft.com' },
+        { id: 'westeurope', label: 'West Europe', host: 'westeurope.tts.speech.microsoft.com' },
+        { id: 'uksouth', label: 'UK South', host: 'uksouth.tts.speech.microsoft.com' },
+        { id: 'ukwest', label: 'UK West', host: 'ukwest.tts.speech.microsoft.com' },
+        { id: 'francecentral', label: 'France Central', host: 'francecentral.tts.speech.microsoft.com' },
+        { id: 'germanywestcentral', label: 'Germany West Central', host: 'germanywestcentral.tts.speech.microsoft.com' },
+        { id: 'italynorth', label: 'Italy North', host: 'italynorth.tts.speech.microsoft.com' },
+        { id: 'norwayeast', label: 'Norway East', host: 'norwayeast.tts.speech.microsoft.com' },
+        { id: 'swedencentral', label: 'Sweden Central', host: 'swedencentral.tts.speech.microsoft.com' },
+        { id: 'switzerlandnorth', label: 'Switzerland North', host: 'switzerlandnorth.tts.speech.microsoft.com' },
+        { id: 'switzerlandwest', label: 'Switzerland West', host: 'switzerlandwest.tts.speech.microsoft.com' },
+        { id: 'uaenorth', label: 'UAE North', host: 'uaenorth.tts.speech.microsoft.com' },
+        { id: 'qatarcentral', label: 'Qatar Central', host: 'qatarcentral.tts.speech.microsoft.com' },
+        { id: 'southafricanorth', label: 'South Africa North', host: 'southafricanorth.tts.speech.microsoft.com' },
+        { id: 'centralindia', label: 'Central India', host: 'centralindia.tts.speech.microsoft.com' },
+        { id: 'eastasia', label: 'East Asia', host: 'eastasia.tts.speech.microsoft.com' },
+        { id: 'southeastasia', label: 'Southeast Asia', host: 'southeastasia.tts.speech.microsoft.com' },
+        { id: 'japaneast', label: 'Japan East', host: 'japaneast.tts.speech.microsoft.com' },
+        { id: 'japanwest', label: 'Japan West', host: 'japanwest.tts.speech.microsoft.com' },
+        { id: 'koreacentral', label: 'Korea Central', host: 'koreacentral.tts.speech.microsoft.com' },
+        { id: 'australiaeast', label: 'Australia East', host: 'australiaeast.tts.speech.microsoft.com' },
+      ],
+    },
+    // The voice list in the key's region: free, and a wrong key is 401
+    check: { url: 'https://{region}.tts.speech.microsoft.com/cognitiveservices/voices/list', header: 'Ocp-Apim-Subscription-Key', prefix: '' },
   }),
   company({
     adapter: 'azure',
@@ -758,43 +933,22 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'google',
     label: 'Google',
     jobs: {
+      speech: {
+        // Gemini text to speech on the Gemini API, one streamed request per reply (POST /v1beta/models/{model}:streamGenerateContent),
+        // as Pipecat's GeminiTTSService does with an API key. These are the two Gemini 3.8 models Pipecat names for the Gemini API;
+        // the 3.1 preview shuts on 17 Nov 2026 (#1891)
+        host: 'generativelanguage.googleapis.com',
+        models: [
+          { id: 'gemini-3.8-flash-tts', label: 'Gemini 3.8 Flash TTS' },
+          { id: 'gemini-3.8-flash-lite-tts', label: 'Gemini 3.8 Flash-Lite TTS' },
+        ],
+        fixedVoices: GOOGLE_VOICES,
+      },
       talk: {
         host: 'generativelanguage.googleapis.com',
         // From Google's Live API docs (7 Nov 2026): the older live models shut on 17 Nov 2026
         models: [{ id: 'gemini-3.8-live', label: 'Gemini 3.8 Live' }],
-        // Google has no call that lists live voices: these are the 30 prebuilt voices its speech docs list, in that order
-        fixedVoices: [
-          { id: 'Zephyr', name: 'Zephyr' },
-          { id: 'Puck', name: 'Puck' },
-          { id: 'Charon', name: 'Charon' },
-          { id: 'Kore', name: 'Kore' },
-          { id: 'Fenrir', name: 'Fenrir' },
-          { id: 'Leda', name: 'Leda' },
-          { id: 'Orus', name: 'Orus' },
-          { id: 'Aoede', name: 'Aoede' },
-          { id: 'Callirrhoe', name: 'Callirrhoe' },
-          { id: 'Autonoe', name: 'Autonoe' },
-          { id: 'Enceladus', name: 'Enceladus' },
-          { id: 'Iapetus', name: 'Iapetus' },
-          { id: 'Umbriel', name: 'Umbriel' },
-          { id: 'Algieba', name: 'Algieba' },
-          { id: 'Despina', name: 'Despina' },
-          { id: 'Erinome', name: 'Erinome' },
-          { id: 'Algenib', name: 'Algenib' },
-          { id: 'Rasalgethi', name: 'Rasalgethi' },
-          { id: 'Laomedeia', name: 'Laomedeia' },
-          { id: 'Achernar', name: 'Achernar' },
-          { id: 'Alnilam', name: 'Alnilam' },
-          { id: 'Schedar', name: 'Schedar' },
-          { id: 'Gacrux', name: 'Gacrux' },
-          { id: 'Pulcherrima', name: 'Pulcherrima' },
-          { id: 'Achird', name: 'Achird' },
-          { id: 'Zubenelgenubi', name: 'Zubenelgenubi' },
-          { id: 'Vindemiatrix', name: 'Vindemiatrix' },
-          { id: 'Sadachbia', name: 'Sadachbia' },
-          { id: 'Sadaltager', name: 'Sadaltager' },
-          { id: 'Sulafat', name: 'Sulafat' },
-        ],
+        fixedVoices: GOOGLE_VOICES,
       },
     },
     logo: 'google',
@@ -1455,6 +1609,19 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'xai',
     label: 'xAI',
     jobs: {
+      recognition: {
+        // Live hearing over xAI's speech to text socket (wss://api.x.ai/v1/stt), as Pipecat's XAISTTService does. Grok Voice
+        // Transcribe 2.0 is xAI's default and the one model its docs name (#1907)
+        host: 'api.x.ai',
+        models: [{ id: 'grok-voice-transcribe-2.0', label: 'Grok Voice Transcribe 2.0' }],
+      },
+      speech: {
+        // Text to speech, one request per reply (POST /v1/tts), as Pipecat's XAIHttpTTSService does. xAI names no model for it:
+        // this id only tells it apart from the talking models
+        host: 'api.x.ai',
+        models: [{ id: 'grok-tts', label: 'Grok Text to Speech' }],
+        fixedVoices: XAI_VOICES,
+      },
       talk: {
         host: 'api.x.ai',
         // From xAI's voice agent docs (7 Nov 2026): grok-voice-latest always points to the current model, grok-voice-3.0 stays put
@@ -1462,37 +1629,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
           { id: 'grok-voice-latest', label: 'Grok Voice (latest)' },
           { id: 'grok-voice-3.0', label: 'Grok Voice 3.0' },
         ],
-        // xAI's built-in voices, Eve (its default) first, then as its text to speech docs list them. Every one speaks every language.
-        fixedVoices: [
-          { id: 'eve', name: 'Eve' },
-          { id: 'ara', name: 'Ara' },
-          { id: 'leo', name: 'Leo' },
-          { id: 'rex', name: 'Rex' },
-          { id: 'sal', name: 'Sal' },
-          { id: 'carina', name: 'Carina' },
-          { id: 'zagan', name: 'Zagan' },
-          { id: 'helix', name: 'Helix' },
-          { id: 'orion', name: 'Orion' },
-          { id: 'luna', name: 'Luna' },
-          { id: 'iris', name: 'Iris' },
-          { id: 'altair', name: 'Altair' },
-          { id: 'zenith', name: 'Zenith' },
-          { id: 'perseus', name: 'Perseus' },
-          { id: 'helios', name: 'Helios' },
-          { id: 'lux', name: 'Lux' },
-          { id: 'kepler', name: 'Kepler' },
-          { id: 'rigel', name: 'Rigel' },
-          { id: 'cosmo', name: 'Cosmo' },
-          { id: 'celeste', name: 'Celeste' },
-          { id: 'ursa', name: 'Ursa' },
-          { id: 'sirius', name: 'Sirius' },
-          { id: 'lumen', name: 'Lumen' },
-          { id: 'castor', name: 'Castor' },
-          { id: 'naksh', name: 'Naksh' },
-          { id: 'atlas', name: 'Atlas' },
-          { id: 'aurora', name: 'Aurora' },
-          { id: 'liora', name: 'Liora' },
-        ],
+        fixedVoices: XAI_VOICES,
       },
     },
     logo: 'xai',
@@ -1506,6 +1643,15 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'zoom',
     label: 'Zoom',
     jobs: {
+      recognition: {
+        // Live hearing with Scribe (wss://api.zoom.us/v2/aiservices/scribe/live), as Pipecat's ZoomAISTTService does, with the same AI
+        // Services key. Scribe Multilingual hears ten languages; Whisper hears 26 more locales (Zoom's Scribe docs, 7 Nov 2026, #1908)
+        host: 'api.zoom.us',
+        models: [
+          { id: 'zoom-scribe-multilingual', label: 'Scribe Multilingual' },
+          { id: 'whisper', label: 'Whisper' },
+        ],
+      },
       talk: {
         host: 'api.zoom.us',
         // Zoom's Voice Agent in live mode thinks with its built-in gemma-4, from Zoom's AI Services docs (7 Nov 2026). It writes
@@ -1526,7 +1672,8 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
         ],
       },
     },
-    benefit: '{does}, in English. Uses your Zoom AI Services account.',
+    // Scribe hears many languages; the Voice Agent talks live in English only
+    benefit: '{does}. Talking live is in English. Uses your Zoom AI Services account.',
     step: 'In Zoom’s Platform Studio, open AI Services, then API keys, and create a key.',
     docs: 'https://developers.zoom.us/docs/ai-services/voice-agent/',
     // GET /v2/aiservices/scribe/jobs lists the account's transcription jobs: free, with the same AI Services key
@@ -1571,6 +1718,16 @@ export const talksLive = (
 
 /** The jobs a company does, in the order they are shown. */
 export const companyJobs = (info: Pick<VoiceKeyCompanyEntry, 'jobs'>): VoiceCompanyJobName[] => VOICE_COMPANY_JOBS.filter((job) => info.jobs[job]);
+
+/**
+ * The jobs whose models fill in on their own from the company's list (voice discovery): the jobs the provider does that its company
+ * lists models for. None for a provider at its own address, or a company where the model is typed as the person named it (Azure).
+ */
+export const listedModelJobs = (row: { adapter: string; recognition: boolean; speech: boolean; endpoint?: string | null }): VoiceCompanyJobName[] => {
+  const company = voiceKeyCompanyInfo(row.adapter);
+  if (!company || row.endpoint || company.account?.typedModel) return [];
+  return companyJobs(company).filter((job) => (job === 'talk' ? row.recognition && row.speech : row[job]) && company.jobs[job]?.modelList);
+};
 
 /** The company's own host for a job (its first job when none is named), as the bot server calls it when no address is typed. */
 export const companyHost = (adapter: string, job?: VoiceCompanyJobName): string | undefined => {
