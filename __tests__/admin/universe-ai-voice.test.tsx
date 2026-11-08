@@ -68,7 +68,7 @@ const patches = () => calls.filter((call) => call.method === 'PATCH');
 const listedRows = () => screen.queryAllByTestId('model-row').filter((row) => row.tagName === 'LI');
 
 describe('the Voice part', () => {
-  it('says what Universe AI listens and speaks with, lists the providers with their bots, and names the companies people can add keys for', async () => {
+  it('says what Universe AI listens and speaks with, lists the providers with their bots, and says people can add a key for any company', async () => {
     render(<VoiceSection />);
     const listen = await screen.findByTestId('default-listen');
     expect(within(listen).getByText('Soniox · Real-time v3')).toBeTruthy();
@@ -76,20 +76,21 @@ describe('the Voice part', () => {
     expect(screen.getByText('Default for listening')).toBeTruthy();
     expect(screen.getByText('Default for speaking')).toBeTruthy();
     expect(screen.getByText(/Listens · Real-time v3 · key ••••9f3c · 14 bots/)).toBeTruthy();
-    expect(screen.getByTestId('people-line').textContent).toContain('Soniox, ElevenLabs, Cartesia');
-    expect(screen.getByTestId('people-line').textContent).not.toContain('Deepgram');
+    // Every company in the catalog is offered to people, whatever is on here (lib/voice-keys.ts voiceKeyCompanies)
+    expect(screen.getByTestId('people-line').textContent).toBe('People can add their own voice key for any company, whatever is on here.');
     // A default has no Disable; one that isn't the default has Disable (on) or Enable (off)
     expect(screen.queryByRole('button', { name: 'Disable Soniox' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Disable Cartesia' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Enable Deepgram' })).toBeTruthy();
   });
 
-  it('says there is no voice yet, for bots and for people\'s own keys, when no provider is set up', async () => {
+  it('says there is no voice yet for bots, and that people can still add their own key, when no provider is set up', async () => {
     providers = [];
     render(<VoiceSection />);
     const empty = await screen.findByTestId('voice-empty');
     expect(empty.textContent).toContain('Universe AI has no voice yet');
-    expect(empty.textContent).toContain('nobody can add a voice key of their own');
+    expect(empty.textContent).toContain('People can still add a voice key of their own.');
+    expect(empty.textContent).not.toContain('nobody can add');
   });
 
   it('switches a company on with one tap', async () => {
@@ -111,7 +112,8 @@ describe('the Voice part', () => {
       '2 bots speak with Cartesia. While it’s off, they speak as Aria on ElevenLabs, so none goes quiet. Turn Cartesia on again and they get their own voices back. A maker can pick another voice any time.'
     );
     expect(within(sheet).queryByTestId('off-recognition')).toBeNull();
-    expect(sheet.textContent).toContain('People can’t add a Cartesia key while no Cartesia provider is on.');
+    // People can add a Cartesia key whatever is on here, so the sheet doesn't say they can't
+    expect(sheet.textContent).not.toContain('People can’t add');
     expect(patches()).toHaveLength(0);
     fireEvent.click(within(sheet).getByRole('button', { name: 'Disable' }));
     await waitFor(() => expect(patches()).toHaveLength(1));
@@ -135,12 +137,6 @@ describe('the Voice part', () => {
     expect(listen.textContent).toContain('1 bot listens with Deepgram. While it’s off, it listens with Soniox. Turn Deepgram on again and it listens with it again.');
   });
 
-  it('doesn\'t say people lose a company\'s key when another provider of it is still on', async () => {
-    providers = [soniox(), eleven(), cartesia(), { ...cartesia(), id: 'v-cartesia-2', name: 'Cartesia EU' }];
-    render(<VoiceSection />);
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Disable Cartesia' }))[0]);
-    expect((await screen.findByRole('dialog')).textContent).not.toContain('People can’t add');
-  });
 });
 
 describe('Change what Universe AI listens with', () => {
@@ -269,18 +265,23 @@ describe('Change what Universe AI speaks with', () => {
 });
 
 describe('what a change of Universe AI\u2019s company or model does to bots', () => {
-  type Counted = Parameters<typeof defaultChangeLine>[1] & object;
+  type Counted = Parameters<typeof defaultChangeLine>[0][number];
   const as = (row: Row) => row as unknown as Counted;
   const rows = [soniox(), { ...deepgram(), bots: { recognition: 3, speech: 0, total: 3 } }, eleven(), cartesia()].map(as);
   it('moves the bots already on the picked provider to a new model, and says they keep their voices', () => {
     expect(defaultChangeLine(rows, as(eleven()), 'speech', true)).toBe(
       'Bots that turn voice on from now start with it. The 12 bots speaking with ElevenLabs move to this model and keep their voices. The 2 bots speaking with Cartesia stay on Cartesia.'
     );
-    expect(defaultChangeLine(rows, as(soniox()), 'recognition', true)).toBe('Bots that turn voice on from now listen with it. The 14 bots listening with Soniox move to this model. The 3 bots listening with Deepgram stay on Deepgram.');
+    // Deepgram is off, so its bots borrow Universe AI's default: the new one
+    expect(defaultChangeLine(rows, as(soniox()), 'recognition', true)).toBe('Bots that turn voice on from now listen with it. The 14 bots listening with Soniox move to this model. The 3 bots on Deepgram listen with it while Deepgram is off.');
   });
   it('says nothing moves when the model stays, and counts one bot as a bot', () => {
     expect(defaultChangeLine(rows, as(eleven()), 'speech', false)).toBe('Bots that turn voice on from now start with it. The 2 bots speaking with Cartesia stay on Cartesia.');
     expect(defaultChangeLine([as({ ...cartesia(), bots: { recognition: 0, speech: 1, total: 1 } })], as(eleven()), 'speech', false)).toBe('Bots that turn voice on from now start with it. The 1 bot speaking with Cartesia stays on Cartesia.');
+  });
+  it('says the bots on a provider that is off use the new default while it is off', () => {
+    expect(defaultChangeLine([as({ ...cartesia(), enabled: false })], as(eleven()), 'speech', false)).toBe('Bots that turn voice on from now start with it. The 2 bots on Cartesia speak with it while Cartesia is off.');
+    expect(defaultChangeLine([as({ ...cartesia(), enabled: false, bots: { recognition: 0, speech: 1, total: 1 } })], as(eleven()), 'speech', false)).toBe('Bots that turn voice on from now start with it. The 1 bot on Cartesia speaks with it while Cartesia is off.');
   });
 });
 
@@ -569,13 +570,17 @@ describe('a voice provider\u2019s page, after CodeRabbit\u2019s findings on the 
     expect(patches()).toHaveLength(1);
   });
 
-  it('warns that people can\u2019t add a company key before turning off the last provider of it, and turns it off only on Disable', async () => {
+  it('says where its bots borrow a voice while it is off, as the list does, and turns it off only on Disable', async () => {
     await open('v-cartesia');
+    expect(screen.getByText('Bots and people’s own keys can use it. Off, its bots borrow Universe AI’s current default until it’s on again.')).toBeTruthy();
     fireEvent.click(screen.getByRole('switch', { name: 'On' }));
     const sheet = await screen.findByRole('dialog');
     expect(within(sheet).getByRole('heading', { name: 'Disable Cartesia?' })).toBeTruthy();
-    expect(sheet.textContent).toContain('2 bots use Cartesia. They answer in text');
-    expect(sheet.textContent).toContain('People can\u2019t add a Cartesia key while no Cartesia provider is on.');
+    expect(within(sheet).getByTestId('off-speech').textContent).toContain(
+      '2 bots speak with Cartesia. While it’s off, they speak as Aria on ElevenLabs, so none goes quiet. Turn Cartesia on again and they get their own voices back.',
+    );
+    expect(sheet.textContent).not.toContain('answer in text');
+    expect(sheet.textContent).not.toContain('People can’t add');
     expect(patches()).toHaveLength(0);
     fireEvent.click(within(sheet).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
@@ -586,8 +591,8 @@ describe('a voice provider\u2019s page, after CodeRabbit\u2019s findings on the 
     expect(patches()[0]).toMatchObject({ url: '/api/admin/voice-providers/v-cartesia', body: { enabled: false } });
   });
 
-  it('turns off at once when another provider of the company is still on', async () => {
-    providers = [soniox(), eleven(), cartesia(), { ...cartesia(), id: 'v-cartesia-2', name: 'Cartesia EU' }];
+  it('turns off at once when no bot uses it', async () => {
+    providers = [soniox(), eleven(), { ...cartesia(), bots: { recognition: 0, speech: 0, total: 0 } }];
     await open('v-cartesia');
     fireEvent.click(screen.getByRole('switch', { name: 'On' }));
     await waitFor(() => expect(patches()).toHaveLength(1));

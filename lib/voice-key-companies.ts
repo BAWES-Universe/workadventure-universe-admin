@@ -70,6 +70,11 @@ export interface VoiceModelListSpec {
   id: string;
   label?: string;
   where?: Record<string, string | boolean>;
+  /**
+   * Model ids starting with any of these are left out: models the company lists that Universe can't run yet (Deepgram's Flux
+   * models need another address, not built or tested with a real key yet).
+   */
+  leaveOut?: string[];
   /** Fields that help a person choose, shown under the model (never saved): the model it always points to, the languages it covers, the company's own description of it. */
   aliasOf?: string;
   languages?: string;
@@ -105,6 +110,10 @@ export interface VoiceListSpec {
   passes?: string[];
   /** A voice is kept only when each of these fields, when the company sends it, has this value. */
   keep?: Record<string, string>;
+  /** Voice ids starting with any of these are left out: voices Universe can't speak with yet (Deepgram's Flux voices). */
+  leaveOut?: string[];
+  /** The field holding a voice's id: text, or a whole number kept as its digits (CAMB.AI). */
+  id: string;
   /** The field naming the one speaking model a voice is listed for (Rime lists each voice once a model): the voice is kept once, with every model it has. */
   model?: string;
   /**
@@ -482,7 +491,8 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
       recognition: {
         host: 'api.deepgram.com',
         models: [{ id: 'nova-3', label: 'Nova 3' }],
-        modelList: { url: 'https://api.deepgram.com/v1/models', list: 'stt', id: 'canonical_name', where: { streaming: true }, languages: 'languages' },
+        // Flux models listen at another address (/v2/listen) that the game doesn't call yet: left out until tested with a real key
+        modelList: { url: 'https://api.deepgram.com/v1/models', list: 'stt', id: 'canonical_name', where: { streaming: true }, leaveOut: ['flux'], languages: 'languages' },
       },
       speech: {
         host: 'api.deepgram.com',
@@ -493,6 +503,8 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
           path: '/v1/models',
           list: 'tts',
           paging: { kind: 'none' },
+          // Flux voices speak at another address (/v2/speak) that the game doesn't call yet: left out until tested with a real key
+          leaveOut: ['flux'],
           id: 'canonical_name',
           name: 'name',
           description: [{ join: ['metadata.accent', 'metadata.age', 'metadata.tags[]'] }],
