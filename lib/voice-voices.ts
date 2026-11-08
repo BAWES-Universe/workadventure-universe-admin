@@ -203,6 +203,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
         if (typeof id !== 'string' || id.length === 0 || id.length > 255) throw unreadable(call);
         const fields = voice as Record<string, unknown>;
         if (spec.keep && Object.entries(spec.keep).some(([field, wanted]) => fields[field] != null && fields[field] !== wanted)) continue;
+        if (spec.leaveOut?.some((start) => id.startsWith(start))) continue;
         // A voice the company lists once for each model it speaks in (Rime) is kept once, with every model it has
         const model = spec.model ? textAt(voice, spec.model, 255) : '';
         if (seen.has(id)) {
