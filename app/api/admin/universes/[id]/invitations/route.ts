@@ -121,16 +121,29 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const where = worldsAllowing(access, 'INVITE_AND_REMOVE');
     if (where !== 'all' && where.length === 0) return NextResponse.json({ invitations: [], canCancel: false });
 
-    const rows = await prisma.membershipInvitation.findMany({
-      where: { status: 'pending', OR: [{ universeId: id }, { world: { universeId: id } }] },
+    const query = {
       include: {
         // Never the invitee's email: they may not have shared it, and a name is all the list needs
         invitedUser: { select: { id: true, name: true } },
         invitedBy: { select: { id: true, name: true } },
       },
-      orderBy: { invitedAt: 'desc' },
+      orderBy: { invitedAt: 'desc' as const },
       take: LISTED,
-    });
+    };
+    const inUniverse = { status: 'pending', OR: [{ universeId: id }, { world: { universeId: id } }] };
+    const [newest, theirs] = await Promise.all([
+      prisma.membershipInvitation.findMany({ ...query, where: inUniverse }),
+      // Someone who may invite only in some worlds also gets the newest 200 that start in one of theirs (an invitation's
+      // world is always one it gives, and never a deleted one), so more than 200 newer invitations elsewhere never push
+      // out the ones they can take back
+      where === 'all'
+        ? Promise.resolve([])
+        : prisma.membershipInvitation.findMany({ ...query, where: { ...inUniverse, allWorlds: false, worldId: { in: where } } }),
+    ]);
+    const seen = new Set<string>();
+    const rows = [...newest, ...theirs]
+      .filter((row) => !seen.has(row.id) && !!seen.add(row.id))
+      .sort((a, b) => b.invitedAt.getTime() - a.invitedAt.getTime());
     const invitations = rows.map((row) => ({
       id: row.id,
       userId: row.invitedUser.id,

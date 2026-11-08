@@ -370,6 +370,10 @@ describe('invitations list and cancel', () => {
     expect(scoped.invitations.map((invitation: { id: string }) => invitation.id)).toEqual(['inv-campus', 'inv-hq', 'inv-all', 'inv-old']);
     expect(scoped.invitations.filter((invitation: { canCancel: boolean }) => invitation.canCancel).map((invitation: { id: string }) => invitation.id)).toEqual(['inv-hq']);
     expect(scoped.canCancel).toBe(true);
+    // A second query asks for the ones that start in their worlds, so 200 newer elsewhere can't push them out
+    expect(db.membershipInvitation.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ allWorlds: false, worldId: { in: ['hq'] } }), take: 200 }),
+    );
 
     asViewer('inviter');
     const everywhere = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
