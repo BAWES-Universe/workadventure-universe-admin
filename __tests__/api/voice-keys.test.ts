@@ -540,6 +540,14 @@ describe('changing a key', () => {
     expect(db.voiceProvider.update).not.toHaveBeenCalled();
   });
 
+  it('refuses a talking model on a key from a company that doesn’t talk live, as when it was added', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(key({ adapter: 'elevenlabs', recognition: true, speech: true, models: [{ id: 'scribe_v2_realtime', kind: 'recognition' }, { id: 'eleven_flash_v2_5', kind: 'speech' }] }));
+    const response = await call(patch, 'PATCH', { models: [{ id: 'scribe_v2_realtime', kind: 'recognition' }, { id: 'eleven_flash_v2_5', kind: 'speech' }, { id: 'live', kind: 'talk' }] });
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe('ElevenLabs doesn’t talk live');
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+  });
+
   it('removes only the caller’s own key', async () => {
     db.voiceProvider.deleteMany.mockResolvedValue({ count: 1 });
     expect((await call(remove, 'DELETE')).status).toBe(200);

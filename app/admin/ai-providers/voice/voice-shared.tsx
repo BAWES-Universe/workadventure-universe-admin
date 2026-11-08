@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { VOICE_KEY_COMPANIES, companyJobs, voiceKeyCompanyInfo, type VoiceCompanyJobName } from '@/lib/voice-key-companies';
 import type { VoiceModel } from '@/lib/voice-providers';
+import { ProviderLogo } from '../../components/ds/provider-logo';
 
 /** The jobs a server provider is set up for. Talking models (game #1910) run on people's own keys; Universe AI on one comes later. */
 export type VoiceJob = Exclude<VoiceCompanyJobName, 'talk'>;
@@ -70,9 +71,15 @@ export function withStartingModel(models: VoiceModel[], job: VoiceJob, id: strin
 /**
  * What saving a company and model as Universe AI's default does to bots, for the line under the Change sheets. New bots start
  * with it. Bots already on that same provider move to the picked model (lib/bot-voice.ts followUniverseAi) and keep their voice;
- * bots on another of the server's providers stay there, since a voice belongs to its company.
+ * bots on another of the server's providers that is on stay there, since a voice belongs to its company. Bots on one that is off
+ * borrow Universe AI's current default (lib/bot-voice.ts borrowUniverseAi), so they use the new one while it is off.
  */
-export function defaultChangeLine(providers: Pick<ServerVoiceProvider, 'id' | 'name' | 'bots'>[], picked: Pick<ServerVoiceProvider, 'id' | 'name' | 'bots'> | null, job: VoiceJob, modelChanged: boolean): string {
+export function defaultChangeLine(
+  providers: Pick<ServerVoiceProvider, 'id' | 'name' | 'bots' | 'enabled'>[],
+  picked: Pick<ServerVoiceProvider, 'id' | 'name' | 'bots'> | null,
+  job: VoiceJob,
+  modelChanged: boolean,
+): string {
   const start = job === 'recognition' ? 'Bots that turn voice on from now listen with it.' : 'Bots that turn voice on from now start with it.';
   const lines = [start];
   const here = picked ? picked.bots[job] : 0;
@@ -83,7 +90,12 @@ export function defaultChangeLine(providers: Pick<ServerVoiceProvider, 'id' | 'n
   const elsewhere = providers.filter((provider) => provider.id !== picked?.id && provider.bots[job] > 0);
   for (const provider of elsewhere) {
     const count = provider.bots[job];
-    lines.push(`The ${bots(count)} ${job === 'recognition' ? 'listening' : 'speaking'} with ${provider.name} ${count === 1 ? 'stays' : 'stay'} on ${provider.name}.`);
+    const one = count === 1;
+    lines.push(
+      provider.enabled
+        ? `The ${bots(count)} ${job === 'recognition' ? 'listening' : 'speaking'} with ${provider.name} ${one ? 'stays' : 'stay'} on ${provider.name}.`
+        : `The ${bots(count)} on ${provider.name} ${job === 'recognition' ? (one ? 'listens' : 'listen') : one ? 'speaks' : 'speak'} with it while ${provider.name} is off.`,
+    );
   }
   return lines.join(' ');
 }
@@ -120,6 +132,28 @@ export function offJobs(provider: Pick<ServerVoiceProvider, 'id' | 'name' | 'bot
         : `${lead} While it’s off, ${they} ${one ? 'speaks' : 'speak'} as ${voice} on ${now.name}, so none goes quiet. Turn ${provider.name} on again and ${one ? 'it gets its own voice' : 'they get their own voices'} back. A maker can pick another voice any time.`;
     return [{ job, count, to: { id: now.id, adapter: now.adapter, name: now.name }, voice, line }];
   });
+}
+
+/** What the Disable sheets say for each job: where the bots on the provider borrow from while it is off, and the line. */
+export function OffJobRows({ jobs }: { jobs: OffJob[] }) {
+  return (
+    <>
+      {jobs.map((each) => (
+        <div key={each.job} className="grid gap-3" data-testid={`off-${each.job}`}>
+          {each.to && (
+            <div className="flex items-center gap-3 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 py-3">
+              <ProviderLogo info={logoOf(each.to.adapter)} />
+              <span className="grid min-w-0 gap-0.5">
+                <span className="text-[15px] font-semibold">{each.job === 'speech' ? `${each.count === 1 ? 'It speaks' : 'They speak'} as ${each.voice} on ${each.to.name}` : `${each.count === 1 ? 'It listens' : 'They listen'} with ${each.to.name}`}</span>
+                <span className="text-[13px] text-muted-foreground">{each.job === 'speech' ? 'What Universe AI speaks with now' : 'What Universe AI listens with now'}</span>
+              </span>
+            </div>
+          )}
+          <p className="text-sm text-muted-foreground">{each.line}</p>
+        </div>
+      ))}
+    </>
+  );
 }
 
 export const bots = (value: number) => `${value.toLocaleString('en')} ${value === 1 ? 'bot' : 'bots'}`;
