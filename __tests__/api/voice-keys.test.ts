@@ -237,6 +237,7 @@ describe('the list', () => {
       expect.objectContaining({ adapter: 'mistral', label: 'Mistral', recognition: true, speech: true }),
       // A talking model listens and speaks in one (game #1910)
       expect.objectContaining({ adapter: 'inworld', label: 'Inworld', recognition: false, speech: false, talk: true, account: null }),
+      expect.objectContaining({ adapter: 'meta', label: 'Meta', recognition: true, speech: false }),
       expect.objectContaining({ adapter: 'openai', label: 'OpenAI', recognition: false, speech: false, talk: true, logo: 'openai' }),
       expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: true }),
       expect.objectContaining({ adapter: 'ultravox', label: 'Ultravox', recognition: false, speech: false, talk: true, account: null }),
@@ -266,6 +267,7 @@ describe('the list', () => {
       'Listens. Uses your account at dev.meta.ai.',
       'Listens and speaks. Uses your account at mistral.ai.',
       'Talks live. Uses your account at inworld.ai.',
+      'Listens. Uses your account at dev.meta.ai.',
       'Talks live. Uses your account at platform.openai.com.',
       'Listens and speaks. Uses your account at soniox.com.',
       'Talks live. Uses your account at ultravox.ai.',
