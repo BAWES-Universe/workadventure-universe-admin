@@ -172,13 +172,15 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
     const row = await tx.voiceProvider.findUnique({ where: { id } });
     if (!row || row.ownerId !== null) throw new VoiceProviderRefused('Voice provider not found', 404);
     const changesCompany = input.adapter !== undefined && input.adapter !== row.adapter;
-    // A company that lists each voice for the models it speaks (Rime) had the starting voice picked for the starting model, the
-    // first speaking one, which is the model Universe AI lends it with (borrowUniverseAi): a new starting model drops the voice
-    // unless a new one comes with the change, so a voice is never lent with a model it doesn't speak
+    // A company that lists each voice for the models it speaks (Rime's field, Smallest AI's page per model, Together's model
+    // groups) had the starting voice picked for the starting model, the first speaking one, which is the model Universe AI lends
+    // it with (borrowUniverseAi): a new starting model drops the voice unless a new one comes with the change, so a voice is
+    // never lent with a model it doesn't speak
     const startingModel = (models: VoiceModel[]) => models.find((entry) => entry.kind === 'speech')?.id;
+    const listed = voiceKeyCompanyInfo(input.adapter ?? row.adapter)?.jobs.speech?.voices;
     const changesStartingModel =
       input.models !== undefined &&
-      !!voiceKeyCompanyInfo(input.adapter ?? row.adapter)?.jobs.speech?.voices?.model &&
+      !!(listed?.model || listed?.perModel || listed?.groups) &&
       startingModel(input.models) !== startingModel(readModels(row.models));
     const dropsVoice = changesCompany || changesStartingModel;
     const next = {

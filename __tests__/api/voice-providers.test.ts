@@ -214,6 +214,19 @@ describe('super admin routes', () => {
     expect(db.update.mock.calls[3][0].data).not.toHaveProperty('defaultVoiceId');
   });
 
+  it('drop the default voice on a new starting model for companies that list voices by model page or in model groups (Smallest AI, Together)', async () => {
+    db.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => row(data));
+    const cases = [
+      { adapter: 'smallest', first: { id: 'lightning_v3.1_pro', label: 'Lightning v3.1 Pro', kind: 'speech' }, next: { id: 'lightning_v3.1', label: 'Lightning v3.1', kind: 'speech' } },
+      { adapter: 'together', first: { id: 'hexgrad/Kokoro-82M', label: 'Kokoro 82M', kind: 'speech' }, next: { id: 'canopylabs/orpheus-3b-0.1-ft', label: 'Orpheus 3B', kind: 'speech' } },
+    ];
+    for (const [index, { adapter, first, next }] of cases.entries()) {
+      db.findUnique.mockResolvedValue(row({ adapter, defaultSpeech: true, models: [first], defaultVoiceId: 'v1', defaultVoiceName: 'Voice one' }));
+      await call(patchAdmin, 'PATCH', { models: [next, first] });
+      expect(db.update.mock.calls[index][0].data).toMatchObject({ defaultVoiceId: null, defaultVoiceName: null });
+    }
+  });
+
   it('turn down a default voice on a provider that doesn\'t speak, a name with no voice, and an empty voice', async () => {
     // No models listed, so the only thing wrong is the voice (a speaking model on a provider that doesn't speak would be refused first)
     db.findUnique.mockResolvedValue(row({ speech: false, models: [] }));
