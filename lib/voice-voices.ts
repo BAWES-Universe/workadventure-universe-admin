@@ -535,9 +535,12 @@ const serverPreviewPath = (providerId: string, voiceId: string) => `/api/admin/v
  * that is not the default yet, so a super admin hears a company's voices before choosing it. Free: the company's own list, nothing
  * spoken. Cached like the bot page's list.
  */
-export async function listServerVoices(providerId: string): Promise<ServerVoiceChoice[]> {
+export async function listServerVoices(providerId: string, startingModel?: string): Promise<ServerVoiceChoice[]> {
   const provider = await serverSpeaker(providerId);
-  const models = readModels(provider.models).filter((entry) => entry.kind === 'speech').map((entry) => entry.id);
+  const listed = readModels(provider.models).filter((entry) => entry.kind === 'speech').map((entry) => entry.id);
+  // The Universe AI page asks for the voices of the starting model being picked, before it is saved: one the provider lists
+  // comes first, as it will once saved
+  const models = startingModel && listed.includes(startingModel) ? [startingModel, ...listed.filter((id) => id !== startingModel)] : listed;
   const named = !!voiceKeyCompanyInfo(provider.adapter)?.jobs.speech?.fixedVoices;
   // A voice tied to models is offered only with the model it would speak in as the starting voice (borrowUniverseAi): its own
   // model when the catalog names it (Groq's Orpheus) and the provider lists it, or else the provider's starting model when the

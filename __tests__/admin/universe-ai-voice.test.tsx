@@ -24,7 +24,7 @@ jest.mock('@/lib/client-auth', () => ({
     calls.push({ method, url, body: init?.body ? JSON.parse(init.body) : null });
     const answer = (ok: boolean, body: unknown, status = ok ? 200 : 400) => Promise.resolve({ ok, status, json: () => Promise.resolve(body) });
     if (url === '/api/admin/voice-providers' && method === 'GET') return holdList ? new Promise(() => {}) : answer(true, { providers });
-    if (url.endsWith('/voices')) return answer(voicesAnswer.ok, voicesAnswer.body, voicesAnswer.status);
+    if (url.split('?')[0].endsWith('/voices')) return answer(voicesAnswer.ok, voicesAnswer.body, voicesAnswer.status);
     if (method === 'PATCH') return answer(patchAnswer.ok, patchAnswer.body);
     if (url === '/api/admin/voice-providers/check') return answer(checkAnswer.ok, checkAnswer.body);
     if (url === '/api/admin/voice-providers' && method === 'POST') return answer(true, { provider: {} }, 201);
@@ -64,6 +64,13 @@ beforeEach(() => {
 });
 
 const patches = () => calls.filter((call) => call.method === 'PATCH');
+// Picks a model in the sheet's model menu (jsdom has no pointer capture or scrolling, which the menu asks for)
+async function pickModel(sheet: HTMLElement, name: RegExp) {
+  Object.assign(Element.prototype, { hasPointerCapture: () => false, releasePointerCapture: () => undefined, scrollIntoView: () => undefined });
+  fireEvent.keyDown(within(sheet).getByRole('combobox'), { key: 'Enter' });
+  fireEvent.click(await screen.findByRole('option', { name }));
+}
+
 // The models on a provider's list (the ticks Universe offers are model rows too)
 const listedRows = () => screen.queryAllByTestId('model-row').filter((row) => row.tagName === 'LI');
 
@@ -176,7 +183,7 @@ describe('Change what Universe AI speaks with', () => {
     fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
     const sheet = await screen.findByRole('dialog');
     const list = await within(sheet).findByTestId('voice-list');
-    expect(calls.some((call) => call.url === '/api/admin/voice-providers/v-eleven/voices')).toBe(true);
+    expect(calls.some((call) => call.url === '/api/admin/voice-providers/v-eleven/voices?model=eleven_flash_v2_5')).toBe(true);
     expect(within(sheet).getByText('Samples come from ElevenLabs, free.')).toBeTruthy();
     expect(within(sheet).getByRole('searchbox', { name: 'Search voices' }).getAttribute('placeholder')).toBe('Search 2 voices');
     expect(within(list).getByRole('radio', { name: /Aria/ }).getAttribute('aria-checked')).toBe('true');
@@ -222,6 +229,33 @@ describe('Change what Universe AI speaks with', () => {
     fireEvent.click(save);
     await waitFor(() => expect(patches()).toHaveLength(1));
     expect(patches()[0]).toMatchObject({ url: '/api/admin/voice-providers/v-eleven', body: { defaultSpeech: true, defaultVoiceId: 'sarah', defaultVoiceName: 'Sarah' } });
+  });
+
+  it('lists the voices of the speaking model picked, and saves the voice again with a new model only from that model\'s list', async () => {
+    render(<VoiceSection />);
+    fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
+    const sheet = await screen.findByRole('dialog');
+    await within(sheet).findByTestId('voice-list');
+    await pickModel(sheet, /Multilingual v2/);
+    await waitFor(() => expect(calls.some((call) => call.url === '/api/admin/voice-providers/v-eleven/voices?model=eleven_multilingual_v2')).toBe(true));
+    await within(sheet).findByTestId('voice-list');
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    // Aria is in the new model's list, so it is sent again with the model and stays the starting voice
+    expect(patches()[0].body).toMatchObject({ defaultVoiceId: 'aria', defaultVoiceName: 'Aria' });
+  });
+
+  it('does not save a voice that the speaking model picked does not list', async () => {
+    voicesAnswer = { ok: true, body: { voices: [{ voiceId: 'sarah', name: 'Sarah', description: '', languages: [], previewUrl: null }] } };
+    render(<VoiceSection />);
+    fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
+    const sheet = await screen.findByRole('dialog');
+    await within(sheet).findByTestId('voice-list');
+    await pickModel(sheet, /Multilingual v2/);
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith('?model=eleven_multilingual_v2'))).toBe(true));
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0].body).not.toHaveProperty('defaultVoiceId');
   });
 
   it('searches the voices and says so when none match', async () => {

@@ -214,6 +214,10 @@ describe('the voices of a server provider', () => {
     db.findFirst.mockResolvedValue(row({ adapter: 'rime', name: 'Rime', models: [{ id: 'coda', kind: 'speech' }, { id: 'mistv3', kind: 'speech' }] }));
     const list = (await (await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx())).json()).voices;
     expect(list.map((voice: Row) => [voice.voiceId, voice.model])).toEqual([['astra', 'coda']]);
+    // The starting model being picked on the page, before it is saved: its voices, when the provider lists it
+    const picking = (model: string) => listVoices(new NextRequest(`http://localhost:3333/api/x?model=${model}`), ctx()).then((answer) => answer.json());
+    expect((await picking('mistv3')).voices.map((voice: Row) => [voice.voiceId, voice.model])).toEqual([['layla', 'mistv3']]);
+    expect((await picking('mistv2')).voices.map((voice: Row) => [voice.voiceId, voice.model])).toEqual([['astra', 'coda']]);
   });
 
   it('are not listed for a provider that isn\'t there, doesn\'t speak, or is somebody\'s own key', async () => {

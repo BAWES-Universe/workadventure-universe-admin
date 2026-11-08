@@ -295,19 +295,21 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // The voices of whichever company is picked, from the company's own free list
+  // The voices of whichever company is picked, from the company's own free list, for the speaking model picked: a company that
+  // lists each voice for the models it speaks (Rime) offers only the voices of that model
   useEffect(() => {
     if (!open || !pickedId) return;
     let current = true;
     setVoices({ status: 'loading' });
-    void callOrbit<{ voices: Voice[] }>('GET', `/api/admin/voice-providers/${encodeURIComponent(pickedId)}/voices`).then((answer) => {
+    const forModel = modelId ? `?model=${encodeURIComponent(modelId)}` : '';
+    void callOrbit<{ voices: Voice[] }>('GET', `/api/admin/voice-providers/${encodeURIComponent(pickedId)}/voices${forModel}`).then((answer) => {
       if (!current) return;
       setVoices(answer.ok ? { status: 'ready', voices: answer.data.voices } : { status: 'failed', message: answer.error });
     });
     return () => {
       current = false;
     };
-  }, [open, pickedId]);
+  }, [open, pickedId, modelId]);
 
   const picked = candidates.find((provider) => provider.id === pickedId) ?? null;
   const models = picked ? picked.models.filter((model) => model.kind === 'speech') : [];
@@ -432,7 +434,9 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
             {
               defaultSpeech: true,
               models: withStartingModel(picked.models, 'speech', modelId),
-              ...(voiceId !== null && voiceChanged ? { defaultVoiceId: voiceId, defaultVoiceName: pickedVoice?.name ?? null } : {}),
+              // Only a voice listed for the model picked is saved: a new starting model of a company that lists voices per model
+              // drops the old voice unless it is sent again from that model's list
+              ...(pickedVoice && (voiceChanged || modelId !== startingModel(picked, 'speech')?.id) ? { defaultVoiceId: pickedVoice.voiceId, defaultVoiceName: pickedVoice.name } : {}),
             },
             `Universe AI speaks with ${picked.name}`
           );
