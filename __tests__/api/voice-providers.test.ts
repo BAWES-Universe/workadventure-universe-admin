@@ -196,6 +196,37 @@ describe('super admin routes', () => {
     expect(db.update.mock.calls[2][0].data).not.toHaveProperty('defaultVoiceId');
   });
 
+  it('drop the default voice when a company that lists voices per model gets a new starting model, unless a new voice comes with it', async () => {
+    const MIST = { id: 'mistv2', label: 'Mist v2', kind: 'speech' };
+    const CODA = { id: 'coda', label: 'Coda', kind: 'speech' };
+    db.findUnique.mockResolvedValue(row({ adapter: 'rime', defaultSpeech: true, models: [MIST], defaultVoiceId: 'cove', defaultVoiceName: 'Cove' }));
+    db.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => row(data));
+    await call(patchAdmin, 'PATCH', { models: [CODA, MIST] });
+    expect(db.update.mock.calls[0][0].data).toMatchObject({ defaultVoiceId: null, defaultVoiceName: null });
+    await call(patchAdmin, 'PATCH', { models: [CODA, MIST], defaultVoiceId: 'astra', defaultVoiceName: 'Astra' });
+    expect(db.update.mock.calls[1][0].data).toMatchObject({ defaultVoiceId: 'astra', defaultVoiceName: 'Astra' });
+    // The same starting model, another added after it: the voice stays
+    await call(patchAdmin, 'PATCH', { models: [MIST, CODA] });
+    expect(db.update.mock.calls[2][0].data).not.toHaveProperty('defaultVoiceId');
+    // A company whose voices speak every model keeps its voice whatever the starting model
+    db.findUnique.mockResolvedValue(row({ defaultSpeech: true, defaultVoiceId: 'nora', defaultVoiceName: 'Nora' }));
+    await call(patchAdmin, 'PATCH', { models: [{ id: 'm2', label: 'Model two', kind: 'speech' }] });
+    expect(db.update.mock.calls[3][0].data).not.toHaveProperty('defaultVoiceId');
+  });
+
+  it('drop the default voice on a new starting model for companies that list voices by model page or in model groups (Smallest AI, Together)', async () => {
+    db.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => row(data));
+    const cases = [
+      { adapter: 'smallest', first: { id: 'lightning_v3.1_pro', label: 'Lightning v3.1 Pro', kind: 'speech' }, next: { id: 'lightning_v3.1', label: 'Lightning v3.1', kind: 'speech' } },
+      { adapter: 'together', first: { id: 'hexgrad/Kokoro-82M', label: 'Kokoro 82M', kind: 'speech' }, next: { id: 'canopylabs/orpheus-3b-0.1-ft', label: 'Orpheus 3B', kind: 'speech' } },
+    ];
+    for (const [index, { adapter, first, next }] of cases.entries()) {
+      db.findUnique.mockResolvedValue(row({ adapter, defaultSpeech: true, models: [first], defaultVoiceId: 'v1', defaultVoiceName: 'Voice one' }));
+      await call(patchAdmin, 'PATCH', { models: [next, first] });
+      expect(db.update.mock.calls[index][0].data).toMatchObject({ defaultVoiceId: null, defaultVoiceName: null });
+    }
+  });
+
   it('turn down a default voice on a provider that doesn\'t speak, a name with no voice, and an empty voice', async () => {
     // No models listed, so the only thing wrong is the voice (a speaking model on a provider that doesn't speak would be refused first)
     db.findUnique.mockResolvedValue(row({ speech: false, models: [] }));

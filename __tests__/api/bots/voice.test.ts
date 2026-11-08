@@ -179,6 +179,17 @@ describe('a bot that has never had voice', () => {
     });
   });
 
+  it("starts Universe AI's Groq voice on its own model, and offers no starting voice when that model is off the provider", async () => {
+    const ENGLISH = { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' };
+    const ARABIC = { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' };
+    providers = [voice({ adapter: 'groq', defaultSpeech: true, defaultVoiceId: 'noura', defaultVoiceName: 'Noura', models: [ENGLISH, ARABIC] })];
+    const both = (await (await call(getVoice, 'GET')).json()).universeAi.speech;
+    expect(both).toMatchObject({ model: ARABIC.id, defaultVoice: { voiceId: 'noura', voiceName: 'Noura' } });
+    providers = [voice({ adapter: 'groq', defaultSpeech: true, defaultVoiceId: 'noura', defaultVoiceName: 'Noura', models: [ENGLISH] })];
+    const englishOnly = (await (await call(getVoice, 'GET')).json()).universeAi.speech;
+    expect(englishOnly).toMatchObject({ model: ENGLISH.id, defaultVoice: null });
+  });
+
   it('says what Universe AI starts from: its default providers, their first model, and the voice a super admin set', async () => {
     providers = [
       provider({ defaultRecognition: true, models: [{ id: 'nova', label: 'Nova', kind: 'recognition' }, { id: 'nova-2', kind: 'recognition' }] }),
