@@ -13,6 +13,7 @@ import { getSessionUser } from '@/lib/auth-session';
 import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { prisma } from '@/lib/db';
+import { effectiveBotVoice } from '@/lib/bot-voice';
 import { POST as reportKeyCall } from '@/app/api/voice/providers/[id]/health/route';
 import { GET as getCredentials } from '@/app/api/voice/providers/[id]/credentials/route';
 import { matches, applyData } from '../../helpers/voice-provider-rows';
@@ -77,7 +78,7 @@ const fakeDb = () => {
       findMany: async ({ where }: { where: Row }) =>
         providers
           // By id, the lent keys of a maker (the `lends` filter is answered by the join below), or the server's own providers
-          .filter((p) => (where.id ? where.id.in.includes(p.id) : where.lends ? p.ownerId === where.ownerId : matches({ ownerId: null, ...p }, where)))
+          .filter((p) => (where.id ? where.id.in.includes(p.id) && (where.ownerId === undefined || (p.ownerId ?? null) === where.ownerId) : where.lends ? p.ownerId === where.ownerId : matches({ ownerId: null, ...p }, where)))
           .map((p) => ({ ownerId: null, createdAt: new Date('2026-10-30T10:00:00Z'), adapter: 'x', apiKeyLast4: null, ...p, lends: lends.filter((l) => l.providerId === p.id && l.universeId === 'uni-1') })),
     },
   };
@@ -167,6 +168,7 @@ describe('a bot that has never had voice', () => {
       universeAllows: true,
       paidBy: 'universe-ai',
       parts: { recognition: 'universe-ai', speech: 'universe-ai' },
+      serverProviderIds: [],
       revision: null,
       draft: { profile: {}, updatedAt: null },
       revisions: [],
@@ -374,7 +376,10 @@ describe('a bot that speaks on a key its maker lent', () => {
       paidBy: 'mixed',
       parts: { recognition: 'universe-ai', speech: 'owner' },
     });
-    expect((await (await call(getVoice, 'GET')).json()).paidBy).toBe('mixed');
+    const read = await (await call(getVoice, 'GET')).json();
+    expect(read.paidBy).toBe('mixed');
+    // The bot page tells the server's own providers from keys by these, not by Universe AI's default alone (#840)
+    expect(read.serverProviderIds).toEqual(['ears']);
   });
 
   it('says the owner pays for both when both parts are on lent keys', async () => {
@@ -549,7 +554,7 @@ describe('the voice limits a bot\'s spoken turn runs under', () => {
 
   it('are the server\'s when the bot speaks on the server\'s own providers, the recommended ones when nothing was saved', async () => {
     await published();
-    expect((await active()).limits).toEqual({ textReserveShare: 6, guestVoiceReplies: 3, turnSeconds: 180, replyCharacters: 600, replySeconds: 60, listenMinutesPerDay: 60, followUpSeconds: 30 });
+    expect((await active()).limits).toEqual({ textReserveShare: 6, guestVoiceReplies: 3, turnSeconds: 180, replyCharacters: 600, replySeconds: 60, listenMinutesPerDay: 60, followUpSeconds: 30, voicesShownFirst: 5 });
     savedVoiceLimits = { revision: 2, limits: { turnSeconds: 120, replyCharacters: 900 } };
     expect((await active()).limits).toMatchObject({ turnSeconds: 120, replyCharacters: 900, replySeconds: 60 });
   });
@@ -565,7 +570,7 @@ describe('the voice limits a bot\'s spoken turn runs under', () => {
     const { limits } = await active();
     // Listening: turn length and minutes a day from the listening key. Speaking: reply length from the speaking key.
     // The listening key's reply value and the speaking key's turn value are not theirs to set.
-    expect(limits).toEqual({ textReserveShare: 6, guestVoiceReplies: 3, turnSeconds: 60, listenMinutesPerDay: 15, replyCharacters: 300, replySeconds: 90, followUpSeconds: 45 });
+    expect(limits).toEqual({ textReserveShare: 6, guestVoiceReplies: 3, turnSeconds: 60, listenMinutesPerDay: 15, replyCharacters: 300, replySeconds: 90, followUpSeconds: 45, voicesShownFirst: 5 });
   });
 
   it('follow the server for a value the key\'s owner never changed, and for a part on the server\'s own provider', async () => {
@@ -576,6 +581,16 @@ describe('the voice limits a bot\'s spoken turn runs under', () => {
     // A value that is not a whole number inside its range is ignored
     providers[1].voiceLimits = { replySeconds: 9999, replyCharacters: 'many' };
     expect((await active()).limits).toMatchObject({ replyCharacters: 600, replySeconds: 60 });
+  });
+
+  it('are still the lent listening key\'s own while that key is Down, when read for the daily listening count (#1859)', async () => {
+    providers = [provider(own({ voiceLimits: { listenMinutesPerDay: 15 }, downSince: new Date('2026-10-30T10:30:00Z'), downReason: 'credit', downPart: 'recognition' })), voice()];
+    lends = [lend('ears')];
+    await published();
+    // Read with the key's health, a Down key reads as key-down with no profile, so the server's limit stands in for the key's
+    expect(await effectiveBotVoice('bot-1', { ignoreSwitch: true })).toMatchObject({ reason: 'key-down', limits: { listenMinutesPerDay: 60 } });
+    // Read for the count, the key's own limit applies whatever the key's health
+    expect((await effectiveBotVoice('bot-1', { ignoreSwitch: true, ignoreKeyHealth: true })).limits).toMatchObject({ listenMinutesPerDay: 15 });
   });
 
   it('are given when the bot does not speak too', async () => {

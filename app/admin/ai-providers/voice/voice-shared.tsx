@@ -11,10 +11,12 @@ import { Check, Plus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { VOICE_KEY_COMPANIES, companyJobs, voiceKeyCompanyInfo, type VoiceCompanyJobName } from '@/lib/voice-key-companies';
 import type { VoiceModel } from '@/lib/voice-providers';
+import { ProviderLogo } from '../../components/ds/provider-logo';
 
-export type VoiceJob = 'recognition' | 'speech';
+/** The jobs a server provider is set up for. Talking models (game #1910) run on people's own keys; Universe AI on one comes later. */
+export type VoiceJob = Exclude<VoiceCompanyJobName, 'talk'>;
 
 /** A server voice provider as GET /api/admin/voice-providers gives it (never the key). */
 export interface ServerVoiceProvider {
@@ -36,11 +38,10 @@ export interface ServerVoiceProvider {
   bots: { recognition: number; speech: number; total: number };
 }
 
-/** The companies a super admin can add, grouped by what each does in Universe (the game's connectors: Soniox and Deepgram listen, ElevenLabs and Cartesia speak). */
-export const COMPANY_JOBS: Record<string, VoiceJob> = { soniox: 'recognition', deepgram: 'recognition', elevenlabs: 'speech', cartesia: 'speech' };
-
-/** The company's own address, as the bot server calls it when nothing else is typed. */
-export const COMPANY_HOST: Record<string, string> = { soniox: 'stt-rt.soniox.com', deepgram: 'api.deepgram.com', elevenlabs: 'api.elevenlabs.io', cartesia: 'api.cartesia.ai' };
+/** The jobs each company does in Universe (the game's connectors), from its catalog entry: a company that listens and speaks is under both. */
+export const COMPANY_JOBS: Record<string, VoiceJob[]> = Object.fromEntries(
+  VOICE_KEY_COMPANIES.map((company) => [company.adapter, companyJobs(company).filter((job): job is VoiceJob => job !== 'talk')] as const),
+);
 
 export const JOBS: { job: VoiceJob; word: string; ing: string }[] = [
   { job: 'recognition', word: 'Listens', ing: 'listening' },
@@ -65,6 +66,94 @@ export function withStartingModel(models: VoiceModel[], job: VoiceJob, id: strin
   if (!picked) return models;
   const first = models.findIndex((model) => model.kind === job);
   return [...models.slice(0, first), picked, ...models.slice(first).filter((model) => model !== picked)];
+}
+
+/**
+ * What saving a company and model as Universe AI's default does to bots, for the line under the Change sheets. New bots start
+ * with it. Bots already on that same provider move to the picked model (lib/bot-voice.ts followUniverseAi) and keep their voice;
+ * bots on another of the server's providers that is on stay there, since a voice belongs to its company. Bots on one that is off
+ * borrow Universe AI's current default (lib/bot-voice.ts borrowUniverseAi), so they use the new one while it is off.
+ */
+export function defaultChangeLine(
+  providers: Pick<ServerVoiceProvider, 'id' | 'name' | 'bots' | 'enabled'>[],
+  picked: Pick<ServerVoiceProvider, 'id' | 'name' | 'bots'> | null,
+  job: VoiceJob,
+  modelChanged: boolean,
+): string {
+  const start = job === 'recognition' ? 'Bots that turn voice on from now listen with it.' : 'Bots that turn voice on from now start with it.';
+  const lines = [start];
+  const here = picked ? picked.bots[job] : 0;
+  if (picked && here > 0 && modelChanged) {
+    const move = here === 1 ? 'moves' : 'move';
+    lines.push(job === 'recognition' ? `The ${bots(here)} listening with ${picked.name} ${move} to this model.` : `The ${bots(here)} speaking with ${picked.name} ${move} to this model and ${here === 1 ? 'keeps its voice' : 'keep their voices'}.`);
+  }
+  const elsewhere = providers.filter((provider) => provider.id !== picked?.id && provider.bots[job] > 0);
+  for (const provider of elsewhere) {
+    const count = provider.bots[job];
+    const one = count === 1;
+    lines.push(
+      provider.enabled
+        ? `The ${bots(count)} ${job === 'recognition' ? 'listening' : 'speaking'} with ${provider.name} ${one ? 'stays' : 'stay'} on ${provider.name}.`
+        : `The ${bots(count)} on ${provider.name} ${job === 'recognition' ? (one ? 'listens' : 'listen') : one ? 'speaks' : 'speak'} with it while ${provider.name} is off.`,
+    );
+  }
+  return lines.join(' ');
+}
+
+/** What turning a provider off does to the bots on it, for one job: where they borrow from (null: they answer in text), and the line. */
+export interface OffJob {
+  job: VoiceJob;
+  count: number;
+  to: Pick<ServerVoiceProvider, 'id' | 'adapter' | 'name'> | null;
+  voice: string | null;
+  line: string;
+}
+
+/**
+ * For the Disable sheet (#840): bots on a provider that is turned off borrow what Universe AI uses now for the job (lib/bot-voice.ts
+ * borrowUniverseAi) and get their own back when it is on again. Speaking borrows only when Universe AI has a starting voice; with
+ * none, or no usable default for the job, they answer in text until it is on again.
+ */
+export function offJobs(provider: Pick<ServerVoiceProvider, 'id' | 'name' | 'bots'>, providers: ServerVoiceProvider[]): OffJob[] {
+  return JOBS.flatMap(({ job }): OffJob[] => {
+    const count = provider.bots[job];
+    if (count === 0) return [];
+    const one = count === 1;
+    const now = providers.find((other) => other.id !== provider.id && other.enabled && other.hasKey && (job === 'recognition' ? other.defaultRecognition : other.defaultSpeech) && startingModel(other, job));
+    const voice = job === 'speech' ? (now?.defaultVoiceId ? (now.defaultVoiceName ?? 'its starting voice') : null) : null;
+    const lead = `${bots(count)} ${job === 'recognition' ? (one ? 'listens' : 'listen') : one ? 'speaks' : 'speak'} with ${provider.name}.`;
+    if (!now || (job === 'speech' && !voice)) {
+      return [{ job, count, to: null, voice: null, line: `${lead} ${one ? 'It answers' : 'They answer'} in text until it’s on again, or until ${one ? 'its maker picks' : 'their makers pick'} another voice.` }];
+    }
+    const they = one ? 'it' : 'they';
+    const line =
+      job === 'recognition'
+        ? `${lead} While it’s off, ${they} ${one ? 'listens' : 'listen'} with ${now.name}. Turn ${provider.name} on again and ${they} ${one ? 'listens' : 'listen'} with it again.`
+        : `${lead} While it’s off, ${they} ${one ? 'speaks' : 'speak'} as ${voice} on ${now.name}, so none goes quiet. Turn ${provider.name} on again and ${one ? 'it gets its own voice' : 'they get their own voices'} back. A maker can pick another voice any time.`;
+    return [{ job, count, to: { id: now.id, adapter: now.adapter, name: now.name }, voice, line }];
+  });
+}
+
+/** What the Disable sheets say for each job: where the bots on the provider borrow from while it is off, and the line. */
+export function OffJobRows({ jobs }: { jobs: OffJob[] }) {
+  return (
+    <>
+      {jobs.map((each) => (
+        <div key={each.job} className="grid gap-3" data-testid={`off-${each.job}`}>
+          {each.to && (
+            <div className="flex items-center gap-3 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 py-3">
+              <ProviderLogo info={logoOf(each.to.adapter)} />
+              <span className="grid min-w-0 gap-0.5">
+                <span className="text-[15px] font-semibold">{each.job === 'speech' ? `${each.count === 1 ? 'It speaks' : 'They speak'} as ${each.voice} on ${each.to.name}` : `${each.count === 1 ? 'It listens' : 'They listen'} with ${each.to.name}`}</span>
+                <span className="text-[13px] text-muted-foreground">{each.job === 'speech' ? 'What Universe AI speaks with now' : 'What Universe AI listens with now'}</span>
+              </span>
+            </div>
+          )}
+          <p className="text-sm text-muted-foreground">{each.line}</p>
+        </div>
+      ))}
+    </>
+  );
 }
 
 export const bots = (value: number) => `${value.toLocaleString('en')} ${value === 1 ? 'bot' : 'bots'}`;

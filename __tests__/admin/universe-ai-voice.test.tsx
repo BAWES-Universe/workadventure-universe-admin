@@ -39,11 +39,11 @@ import { VoiceSection } from '@/app/admin/ai-providers/voice-section';
 import NewVoiceProviderPage from '@/app/admin/ai-providers/voice/new/page';
 import VoiceProviderPage from '@/app/admin/ai-providers/voice/[id]/page';
 import { voiceServerLimits } from '@/app/admin/components/limits';
-import { withStartingModel } from '@/app/admin/ai-providers/voice/voice-shared';
+import { defaultChangeLine, withStartingModel } from '@/app/admin/ai-providers/voice/voice-shared';
 import { VOICE_LIMITS_RECOMMENDED } from '@/lib/voice-limit-values';
 
 const provider = (changes: Row): Row => ({ region: null, endpoint: null, hasKey: true, defaultRecognition: false, defaultSpeech: false, defaultVoiceId: null, defaultVoiceName: null, bots: { recognition: 0, speech: 0, total: 0 }, ...changes });
-const soniox = () => provider({ id: 'v-soniox', adapter: 'soniox', name: 'Soniox', recognition: true, speech: false, enabled: true, apiKeyLast4: '9f3c', models: [{ id: 'stt-rt-v3', label: 'Real-time v3', kind: 'recognition' }], defaultRecognition: true, bots: { recognition: 14, speech: 0, total: 14 } });
+const soniox = () => provider({ id: 'v-soniox', adapter: 'soniox', name: 'Soniox', recognition: true, speech: false, enabled: true, apiKeyLast4: '9f3c', models: [{ id: 'stt-rt-v6', label: 'Real-time v3', kind: 'recognition' }], defaultRecognition: true, bots: { recognition: 14, speech: 0, total: 14 } });
 const eleven = () =>
   provider({ id: 'v-eleven', adapter: 'elevenlabs', name: 'ElevenLabs', recognition: false, speech: true, enabled: true, apiKeyLast4: 'a1b2', models: [{ id: 'eleven_flash_v2_5', label: 'Flash v2.5', kind: 'speech' }, { id: 'eleven_multilingual_v2', label: 'Multilingual v2', kind: 'speech' }], defaultSpeech: true, defaultVoiceId: 'aria', defaultVoiceName: 'Aria', bots: { recognition: 0, speech: 12, total: 12 } });
 const cartesia = () => provider({ id: 'v-cartesia', adapter: 'cartesia', name: 'Cartesia', recognition: false, speech: true, enabled: true, apiKeyLast4: '77de', models: [{ id: 'sonic-3', label: 'Sonic 3', kind: 'speech' }], bots: { recognition: 0, speech: 2, total: 2 } });
@@ -64,9 +64,11 @@ beforeEach(() => {
 });
 
 const patches = () => calls.filter((call) => call.method === 'PATCH');
+// The models on a provider's list (the ticks Universe offers are model rows too)
+const listedRows = () => screen.queryAllByTestId('model-row').filter((row) => row.tagName === 'LI');
 
 describe('the Voice part', () => {
-  it('says what Universe AI listens and speaks with, lists the providers with their bots, and names the companies people can add keys for', async () => {
+  it('says what Universe AI listens and speaks with, lists the providers with their bots, and says people can add a key for any company', async () => {
     render(<VoiceSection />);
     const listen = await screen.findByTestId('default-listen');
     expect(within(listen).getByText('Soniox · Real-time v3')).toBeTruthy();
@@ -74,20 +76,21 @@ describe('the Voice part', () => {
     expect(screen.getByText('Default for listening')).toBeTruthy();
     expect(screen.getByText('Default for speaking')).toBeTruthy();
     expect(screen.getByText(/Listens · Real-time v3 · key ••••9f3c · 14 bots/)).toBeTruthy();
-    expect(screen.getByTestId('people-line').textContent).toContain('Soniox, ElevenLabs, Cartesia');
-    expect(screen.getByTestId('people-line').textContent).not.toContain('Deepgram');
+    // Every company in the catalog is offered to people, whatever is on here (lib/voice-keys.ts voiceKeyCompanies)
+    expect(screen.getByTestId('people-line').textContent).toBe('People can add their own voice key for any company, whatever is on here.');
     // A default has no Disable; one that isn't the default has Disable (on) or Enable (off)
     expect(screen.queryByRole('button', { name: 'Disable Soniox' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Disable Cartesia' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Enable Deepgram' })).toBeTruthy();
   });
 
-  it('says there is no voice yet, for bots and for people\'s own keys, when no provider is set up', async () => {
+  it('says there is no voice yet for bots, and that people can still add their own key, when no provider is set up', async () => {
     providers = [];
     render(<VoiceSection />);
     const empty = await screen.findByTestId('voice-empty');
     expect(empty.textContent).toContain('Universe AI has no voice yet');
-    expect(empty.textContent).toContain('nobody can add a voice key of their own');
+    expect(empty.textContent).toContain('People can still add a voice key of their own.');
+    expect(empty.textContent).not.toContain('nobody can add');
   });
 
   it('switches a company on with one tap', async () => {
@@ -97,25 +100,43 @@ describe('the Voice part', () => {
     expect(patches()[0]).toMatchObject({ url: '/api/admin/voice-providers/v-deepgram', body: { enabled: true } });
   });
 
-  it('asks before switching a company off, and says how many bots go to text', async () => {
+  it('asks before switching a company off, and says its bots speak as Universe AI\'s current voice while it is off', async () => {
     render(<VoiceSection />);
     fireEvent.click(await screen.findByRole('button', { name: 'Disable Cartesia' }));
     const sheet = await screen.findByRole('dialog');
     expect(within(sheet).getByRole('heading', { name: 'Disable Cartesia?' })).toBeTruthy();
-    expect(sheet.textContent).toContain('2 bots use Cartesia. They answer in text');
-    expect(sheet.textContent).toContain('People can’t add a Cartesia key while no Cartesia provider is on.');
+    const speak = within(sheet).getByTestId('off-speech');
+    expect(speak.textContent).toContain('They speak as Aria on ElevenLabs');
+    expect(speak.textContent).toContain('What Universe AI speaks with now');
+    expect(speak.textContent).toContain(
+      '2 bots speak with Cartesia. While it’s off, they speak as Aria on ElevenLabs, so none goes quiet. Turn Cartesia on again and they get their own voices back. A maker can pick another voice any time.'
+    );
+    expect(within(sheet).queryByTestId('off-recognition')).toBeNull();
+    // People can add a Cartesia key whatever is on here, so the sheet doesn't say they can't
+    expect(sheet.textContent).not.toContain('People can’t add');
     expect(patches()).toHaveLength(0);
     fireEvent.click(within(sheet).getByRole('button', { name: 'Disable' }));
     await waitFor(() => expect(patches()).toHaveLength(1));
     expect(patches()[0].body).toEqual({ enabled: false });
   });
 
-  it('doesn\'t say people lose a company\'s key when another provider of it is still on', async () => {
-    providers = [soniox(), eleven(), cartesia(), { ...cartesia(), id: 'v-cartesia-2', name: 'Cartesia EU' }];
+  it('says the bots answer in text when Universe AI has no starting voice to lend them', async () => {
+    providers = [soniox(), { ...eleven(), defaultVoiceId: null, defaultVoiceName: null }, cartesia(), deepgram()];
     render(<VoiceSection />);
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Disable Cartesia' }))[0]);
-    expect((await screen.findByRole('dialog')).textContent).not.toContain('People can’t add');
+    fireEvent.click(await screen.findByRole('button', { name: 'Disable Cartesia' }));
+    const speak = within(await screen.findByRole('dialog')).getByTestId('off-speech');
+    expect(speak.textContent).toBe('2 bots speak with Cartesia. They answer in text until it’s on again, or until their makers pick another voice.');
   });
+
+  it('says a listening company\'s bot listens with Universe AI\'s current company while it is off', async () => {
+    providers = [soniox(), eleven(), cartesia(), { ...deepgram(), enabled: true, bots: { recognition: 1, speech: 0, total: 1 } }];
+    render(<VoiceSection />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Disable Deepgram' }));
+    const listen = within(await screen.findByRole('dialog')).getByTestId('off-recognition');
+    expect(listen.textContent).toContain('It listens with Soniox');
+    expect(listen.textContent).toContain('1 bot listens with Deepgram. While it’s off, it listens with Soniox. Turn Deepgram on again and it listens with it again.');
+  });
+
 });
 
 describe('Change what Universe AI listens with', () => {
@@ -129,7 +150,12 @@ describe('Change what Universe AI listens with', () => {
     expect(deepgramCard.textContent).toContain('Disabled. Enable it to pick it.');
     expect((within(sheet).getByRole('radio', { name: /Soniox/ }) as HTMLButtonElement).getAttribute('aria-checked')).toBe('true');
     expect(within(sheet).getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
-    expect(sheet.textContent).toContain('The 14 bots that already listen keep what they have.');
+    // Nothing changes yet, and no bot listens with another company, so the line names only new bots
+    expect(screen.getByTestId('default-listen').textContent).toContain('A bot that turns voice on starts with this. Bots on Soniox listen with this model too.');
+    expect(screen.getByTestId('default-speak').textContent).toContain('A bot that turns voice on starts with this voice. Bots on ElevenLabs speak with this model too, in their own voices.');
+    expect(within(sheet).getByTestId('listen-change-line').textContent).toBe('Bots that turn voice on from now listen with it.');
+    // Every company that can listen is offered the same way: none is marked Recommended
+    expect(within(sheet).queryByText('Recommended')).toBeNull();
   });
 
   it('makes a company the default for listening with the model it starts on, first in its list', async () => {
@@ -157,7 +183,31 @@ describe('Change what Universe AI speaks with', () => {
     // A voice with a sample has a Play button; one without has none
     expect(within(list).getByRole('button', { name: 'Play Aria' })).toBeTruthy();
     expect(within(list).queryByRole('button', { name: 'Play Sarah' })).toBeNull();
-    expect(sheet.textContent).toContain('The 14 bots that already speak keep the voice they have.');
+    expect(within(sheet).getByTestId('speak-change-line').textContent).toBe('Bots that turn voice on from now start with it. The 2 bots speaking with Cartesia stay on Cartesia.');
+    expect(within(sheet).queryByText('Recommended')).toBeNull();
+  });
+
+  it('keeps each voice in its own row, a long description cut to two lines and the languages to one', async () => {
+    render(<VoiceSection />);
+    fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
+    const sheet = await screen.findByRole('dialog');
+    const list = await within(sheet).findByTestId('voice-list');
+    // A grid list inside the sheet squeezed its rows on a short screen, so long descriptions ran over the next voice
+    expect(list.className).not.toMatch(/\bgrid\b/);
+    const description = within(list).getByText('Calm and clear.');
+    expect(description.className).toContain('line-clamp-2');
+    expect(description.getAttribute('title')).toBe('Calm and clear.');
+    const languages = description.nextElementSibling as HTMLElement;
+    expect(languages.className).toContain('line-clamp-1');
+    expect(languages.getAttribute('title')).toBe(languages.textContent);
+  });
+
+  it('says that bots on the company it moves away from stay there', async () => {
+    render(<VoiceSection />);
+    fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
+    const sheet = await screen.findByRole('dialog');
+    fireEvent.click(within(sheet).getByRole('radio', { name: /Cartesia/ }));
+    expect(within(sheet).getByTestId('speak-change-line').textContent).toBe('Bots that turn voice on from now start with it. The 12 bots speaking with ElevenLabs stay on ElevenLabs.');
   });
 
   it('saves a new starting voice with its name, and only then', async () => {
@@ -214,6 +264,27 @@ describe('Change what Universe AI speaks with', () => {
   });
 });
 
+describe('what a change of Universe AI\u2019s company or model does to bots', () => {
+  type Counted = Parameters<typeof defaultChangeLine>[0][number];
+  const as = (row: Row) => row as unknown as Counted;
+  const rows = [soniox(), { ...deepgram(), bots: { recognition: 3, speech: 0, total: 3 } }, eleven(), cartesia()].map(as);
+  it('moves the bots already on the picked provider to a new model, and says they keep their voices', () => {
+    expect(defaultChangeLine(rows, as(eleven()), 'speech', true)).toBe(
+      'Bots that turn voice on from now start with it. The 12 bots speaking with ElevenLabs move to this model and keep their voices. The 2 bots speaking with Cartesia stay on Cartesia.'
+    );
+    // Deepgram is off, so its bots borrow Universe AI's default: the new one
+    expect(defaultChangeLine(rows, as(soniox()), 'recognition', true)).toBe('Bots that turn voice on from now listen with it. The 14 bots listening with Soniox move to this model. The 3 bots on Deepgram listen with it while Deepgram is off.');
+  });
+  it('says nothing moves when the model stays, and counts one bot as a bot', () => {
+    expect(defaultChangeLine(rows, as(eleven()), 'speech', false)).toBe('Bots that turn voice on from now start with it. The 2 bots speaking with Cartesia stay on Cartesia.');
+    expect(defaultChangeLine([as({ ...cartesia(), bots: { recognition: 0, speech: 1, total: 1 } })], as(eleven()), 'speech', false)).toBe('Bots that turn voice on from now start with it. The 1 bot speaking with Cartesia stays on Cartesia.');
+  });
+  it('says the bots on a provider that is off use the new default while it is off', () => {
+    expect(defaultChangeLine([as({ ...cartesia(), enabled: false })], as(eleven()), 'speech', false)).toBe('Bots that turn voice on from now start with it. The 2 bots on Cartesia speak with it while Cartesia is off.');
+    expect(defaultChangeLine([as({ ...cartesia(), enabled: false, bots: { recognition: 0, speech: 1, total: 1 } })], as(eleven()), 'speech', false)).toBe('Bots that turn voice on from now start with it. The 1 bot on Cartesia speaks with it while Cartesia is off.');
+  });
+});
+
 describe('the model Universe AI starts a bot on', () => {
   it('is the first one the provider lists for the job, so picking one moves it to the front of its own job only', () => {
     const models = [
@@ -236,6 +307,17 @@ describe('New voice provider', () => {
     const speaks = screen.getByRole('radiogroup', { name: 'Speaks' });
     expect(['Soniox', 'Deepgram'].every((name) => within(listens).getByRole('radio', { name: new RegExp(`^${name}`) }))).toBe(true);
     expect(['ElevenLabs', 'Cartesia'].every((name) => within(speaks).getByRole('radio', { name: new RegExp(`^${name}`) }))).toBe(true);
+    // Every company is offered the same way, in alphabetical order, with the same neutral line: none is marked Recommended or praised
+    // A company that listens and speaks is under both, with the same line (#844)
+    expect(within(listens).getAllByRole('radio').map((card) => card.textContent)).toEqual([
+      'AssemblyAIListens. Uses your account at assemblyai.com.',
+      'CartesiaListens and speaks. Uses your account at cartesia.ai.',
+      'DeepgramListens and speaks. Uses your account at deepgram.com.',
+      'ElevenLabsListens and speaks. Uses your account at elevenlabs.io.',
+      'SonioxListens and speaks. Uses your account at soniox.com.',
+    ]);
+    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks', 'SonioxListens and speaks']);
+    expect(screen.queryByText('Recommended')).toBeNull();
     fireEvent.click(within(speaks).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByRole('heading', { name: 'Set up ElevenLabs' })).toBeTruthy();
     const add = screen.getByRole('button', { name: 'Add provider' });
@@ -249,7 +331,7 @@ describe('New voice provider', () => {
     fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'eleven_flash_v2_5' } });
     fireEvent.change(screen.getByLabelText('Name people see (optional)'), { target: { value: 'Flash v2.5' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
-    expect(screen.getAllByTestId('model-row')).toHaveLength(1);
+    expect(listedRows()).toHaveLength(1);
     expect(add.hasAttribute('disabled')).toBe(false);
     // A key changed after the check has to be checked again
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk_0000000000000000zzzz' } });
@@ -259,12 +341,12 @@ describe('New voice provider', () => {
 
   it('adds the provider on, with its key, its models and the job its company does', async () => {
     render(<NewVoiceProviderPage />);
-    fireEvent.click(screen.getByRole('radio', { name: /^Soniox/ }));
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Soniox/ }));
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'soniox-key-1234' } });
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
     await screen.findByText('Soniox knows this key. Nothing was spoken, so nothing was paid.');
     fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
-    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'stt-rt-v3' } });
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'stt-rt-v6' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
     // Soniox listens on a websocket address, which is allowed here
     fireEvent.click(screen.getByRole('button', { name: 'Its own address' }));
@@ -282,27 +364,105 @@ describe('New voice provider', () => {
       speech: false,
       enabled: true,
       apiKey: 'soniox-key-1234',
-      models: [{ id: 'stt-rt-v3', kind: 'recognition' }],
+      models: [{ id: 'stt-rt-v6', kind: 'recognition' }],
       endpoint: 'wss://stt-rt.soniox.com/transcribe-websocket',
     });
+  });
+
+  it('sets up the job picked for a company that listens and speaks, asking it for that job\'s models (#844)', async () => {
+    render(<NewVoiceProviderPage />);
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Cartesia/ }));
+    expect(screen.getByRole('heading', { name: 'Set up Cartesia' })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk_car_0000000000001234' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await screen.findByText('Cartesia knows this key. Nothing was spoken, so nothing was paid.');
+    expect(calls.find((call) => call.url === '/api/admin/voice-providers/check')?.body).toMatchObject({ adapter: 'cartesia', job: 'recognition' });
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'ink-whisper' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add provider' }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/ai-providers'));
+    expect(calls.find((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers')?.body).toMatchObject({
+      adapter: 'cartesia',
+      recognition: true,
+      speech: false,
+      models: [{ id: 'ink-whisper', kind: 'recognition' }],
+    });
+  });
+});
+
+describe('New voice provider, models the company lists (#840)', () => {
+  it('lists the company\'s models after Check key to tick, each with what the company says, one that works ticked already', async () => {
+    checkAnswer = {
+      ok: true,
+      body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech', note: '2 languages · Fast.' }, { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' }] },
+    };
+    render(<NewVoiceProviderPage />);
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Speaks' })).getByRole('radio', { name: /^ElevenLabs/ }));
+    expect(screen.getByText('Check the key and ElevenLabs’s models show here to tick.')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk_0000000000000000a1b2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    expect(await screen.findByText('ElevenLabs knows this key and lists 2 models for it. Nothing was spoken, so nothing was paid.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Add a model' })).toBeNull();
+    const add = screen.getByRole('button', { name: 'Add provider' });
+    // The models Universe starts ElevenLabs keys on come first, the first one ticked already, so it can be added as it is
+    const boxes = screen.getAllByRole('checkbox');
+    expect(boxes.map((box) => box.textContent)).toEqual([
+      'Eleven v4 Turboeleven_v4_turbo',
+      'Eleven Flash v2.5eleven_flash_v2_5 · 2 languages · Fast.',
+      'Eleven v3eleven_v3',
+    ]);
+    expect(boxes[0].getAttribute('aria-checked')).toBe('true');
+    expect(add.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(screen.getByRole('checkbox', { name: /^Eleven v3/ }));
+    fireEvent.click(add);
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/ai-providers'));
+    const post = calls.find((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers');
+    // Only the model is saved, never the company's line about it
+    expect(post?.body?.models).toEqual([
+      { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' },
+      { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' },
+    ]);
+  });
+
+  it('offers the models Universe knows to tick, or one to type, for a company that shares no list', async () => {
+    render(<NewVoiceProviderPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Fish Audio/ }));
+    expect(screen.getByText(/Fish Audio doesn’t share a list of its models\. Tick the ones Universe knows for it, or type one as Fish Audio writes it\./)).toBeTruthy();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'S2.1 Pro' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 's2-pro' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'S2.1 Pro (free)' }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'fish-key-12345678' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await screen.findByText('Fish Audio knows this key. Nothing was spoken, so nothing was paid.');
+    fireEvent.click(screen.getByRole('button', { name: 'Add provider' }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/ai-providers'));
+    const post = calls.find((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers');
+    expect(post?.body?.models).toEqual([
+      { id: 's2.1-pro', label: 'S2.1 Pro', kind: 'speech' },
+      { id: 's2-pro', kind: 'speech' },
+      { id: 's2.1-pro-free', label: 'S2.1 Pro (free)', kind: 'speech' },
+    ]);
   });
 });
 
 describe('New voice provider, Enter in a model field', () => {
   it('adds the model being typed and does not submit the form', async () => {
     render(<NewVoiceProviderPage />);
-    fireEvent.click(screen.getByRole('radio', { name: /^Soniox/ }));
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Soniox/ }));
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'soniox-key-1234' } });
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
     await screen.findByText('Soniox knows this key. Nothing was spoken, so nothing was paid.');
     fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
-    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'stt-rt-v3' } });
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'stt-rt-v6' } });
     fireEvent.keyDown(screen.getByLabelText('Model id'), { key: 'Enter' });
-    await waitFor(() => expect(screen.getAllByTestId('model-row')).toHaveLength(1));
+    await waitFor(() => expect(listedRows()).toHaveLength(1));
     fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
     fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'second' } });
     fireEvent.keyDown(screen.getByLabelText('Name people see (optional)'), { key: 'Enter' });
-    await waitFor(() => expect(screen.getAllByTestId('model-row')).toHaveLength(2));
+    await waitFor(() => expect(listedRows()).toHaveLength(2));
     expect(calls.some((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers')).toBe(false);
   });
 });
@@ -311,7 +471,7 @@ describe('New voice provider, a key the company turns away', () => {
   async function setUp(address: string | null) {
     checkAnswer = { ok: false, body: { error: 'Deepgram turned this key away. Check that you copied all of it.' } };
     render(<NewVoiceProviderPage />);
-    fireEvent.click(screen.getByRole('radio', { name: /^Deepgram/ }));
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Listens' })).getByRole('radio', { name: /^Deepgram/ }));
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'regional-key-1234' } });
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
     await screen.findByText('Deepgram turned this key away. Check that you copied all of it.');
@@ -404,13 +564,17 @@ describe('a voice provider\u2019s page, after CodeRabbit\u2019s findings on the 
     expect(patches()).toHaveLength(1);
   });
 
-  it('warns that people can\u2019t add a company key before turning off the last provider of it, and turns it off only on Disable', async () => {
+  it('says where its bots borrow a voice while it is off, as the list does, and turns it off only on Disable', async () => {
     await open('v-cartesia');
+    expect(screen.getByText('Bots and people’s own keys can use it. Off, its bots borrow Universe AI’s current default until it’s on again.')).toBeTruthy();
     fireEvent.click(screen.getByRole('switch', { name: 'On' }));
     const sheet = await screen.findByRole('dialog');
     expect(within(sheet).getByRole('heading', { name: 'Disable Cartesia?' })).toBeTruthy();
-    expect(sheet.textContent).toContain('2 bots use Cartesia. They answer in text');
-    expect(sheet.textContent).toContain('People can\u2019t add a Cartesia key while no Cartesia provider is on.');
+    expect(within(sheet).getByTestId('off-speech').textContent).toContain(
+      '2 bots speak with Cartesia. While it’s off, they speak as Aria on ElevenLabs, so none goes quiet. Turn Cartesia on again and they get their own voices back.',
+    );
+    expect(sheet.textContent).not.toContain('answer in text');
+    expect(sheet.textContent).not.toContain('People can’t add');
     expect(patches()).toHaveLength(0);
     fireEvent.click(within(sheet).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
@@ -421,8 +585,8 @@ describe('a voice provider\u2019s page, after CodeRabbit\u2019s findings on the 
     expect(patches()[0]).toMatchObject({ url: '/api/admin/voice-providers/v-cartesia', body: { enabled: false } });
   });
 
-  it('turns off at once when another provider of the company is still on', async () => {
-    providers = [soniox(), eleven(), cartesia(), { ...cartesia(), id: 'v-cartesia-2', name: 'Cartesia EU' }];
+  it('turns off at once when no bot uses it', async () => {
+    providers = [soniox(), eleven(), { ...cartesia(), bots: { recognition: 0, speech: 0, total: 0 } }];
     await open('v-cartesia');
     fireEvent.click(screen.getByRole('switch', { name: 'On' }));
     await waitFor(() => expect(patches()).toHaveLength(1));
@@ -475,7 +639,7 @@ describe('the voice limits', () => {
 
   it('are the 7 from #740, the four a key can change first, each with its recommended value', () => {
     const rows = voiceServerLimits({ ...VOICE_LIMITS_RECOMMENDED }, { signedIn: 30, guest: 10 });
-    expect(rows.map((row) => row.id)).toEqual(['turnSeconds', 'replyCharacters', 'replySeconds', 'listenMinutesPerDay', 'followUpSeconds', 'textReserveShare', 'guestVoiceReplies']);
+    expect(rows.map((row) => row.id)).toEqual(['turnSeconds', 'replyCharacters', 'replySeconds', 'listenMinutesPerDay', 'followUpSeconds', 'voicesShownFirst', 'textReserveShare', 'guestVoiceReplies']);
     for (const row of rows) {
       expect(row.value).toBe(row.recommended);
       expect(row.options.some((option) => option.value === row.value)).toBe(true);

@@ -136,16 +136,64 @@ describe('adding a key', () => {
 
   it.each([
     ['a company that isn’t on the list', { adapter: 'unknown-co', speech: true, apiKey: 'sk-secret-key-9f2a' }],
-    ['a job the company doesn’t do', { adapter: 'deepgram', speech: true, apiKey: 'sk-secret-key-9f2a' }],
+    ['a job the company doesn’t do', { adapter: 'fish', recognition: true, apiKey: 'sk-secret-key-9f2a' }],
     ['a key that does nothing', { adapter: 'elevenlabs', apiKey: 'sk-secret-key-9f2a' }],
     ['a key that is too short', { adapter: 'elevenlabs', speech: true, apiKey: 'short' }],
     ['a model for a job the key doesn’t do', { adapter: 'elevenlabs', speech: true, apiKey: 'sk-secret-key-9f2a', models: [{ id: 'a', kind: 'recognition' }] }],
     ['a field it doesn’t know (an endpoint, a default)', { adapter: 'elevenlabs', speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://x.example.com' }],
+    ['an Azure key with no endpoint', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, endpoint: undefined }],
+    ['an Azure endpoint somewhere else', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, endpoint: 'https://my-res.example.com' }],
+    ['an Azure endpoint on plain http', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, endpoint: 'http://my-res.openai.azure.com' }],
+    ['an Azure endpoint with a port', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, endpoint: 'https://my-res.openai.azure.com:8443' }],
+    ['an Azure key with no deployment', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, models: [] }],
+    ['an Azure key with two deployments', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, models: [{ id: 'a', kind: 'talk' }, { id: 'b', kind: 'talk' }] }],
+    ['an Azure deployment name with a space', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, models: [{ id: 'my deployment', kind: 'talk' }] }],
+    ['an AWS key with no region', { ...{ adapter: 'aws', recognition: true, speech: true, apiKey: 'AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', region: 'eu-north-1', models: [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }] }, region: undefined }],
+    ['an AWS region AWS has no Nova Sonic in', { ...{ adapter: 'aws', recognition: true, speech: true, apiKey: 'AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', region: 'eu-north-1', models: [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }] }, region: 'eu-west-1' }],
+    ['an AWS secret with no access key ID', { ...{ adapter: 'aws', recognition: true, speech: true, apiKey: 'AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', region: 'eu-north-1', models: [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }] }, apiKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' }],
+    ['an AWS temporary key, which needs a session token', { ...{ adapter: 'aws', recognition: true, speech: true, apiKey: 'AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', region: 'eu-north-1', models: [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }] }, apiKey: 'ASIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' }],
+    ['a region on a key not made per region', { adapter: 'elevenlabs', speech: true, apiKey: 'sk-secret-key-9f2a', region: 'eu-north-1' }],
     ['a default', { adapter: 'elevenlabs', speech: true, apiKey: 'sk-secret-key-9f2a', defaultSpeech: true }],
   ])('refuses %s', async (_name, body) => {
     withProviders();
     expect((await call(create, 'POST', body)).status).toBe(400);
     expect(db.voiceProvider.create).not.toHaveBeenCalled();
+  });
+
+  it('keeps an Azure key’s own endpoint, as its origin, and its deployment as its one talking model', async () => {
+    withProviders();
+    db.voiceProvider.create.mockImplementation(async ({ data }) => key({ ...data, id: 'k1', createdAt: new Date('2026-11-07T10:00:00Z'), lends: [] }));
+    const response = await call(create, 'POST', { ...{ adapter: 'azure', recognition: true, speech: true, apiKey: 'sk-secret-key-9f2a', endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] }, endpoint: 'https://My-Res.openai.azure.com/openai/v1/' });
+    expect(response.status).toBe(201);
+    const { data } = db.voiceProvider.create.mock.calls[0][0];
+    expect(data).toMatchObject({ adapter: 'azure', name: 'Azure OpenAI', recognition: true, speech: true, endpoint: 'https://my-res.openai.azure.com', models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }] });
+  });
+
+  it('keeps an AWS key whole, its access key ID and secret as one, in the region picked', async () => {
+    withProviders();
+    db.voiceProvider.create.mockImplementation(async ({ data }) => key({ ...data, id: 'k1', createdAt: new Date('2026-11-07T10:00:00Z'), lends: [] }));
+    const response = await call(create, 'POST', { adapter: 'aws', recognition: true, speech: true, apiKey: 'AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', region: 'eu-north-1', models: [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }] });
+    expect(response.status).toBe(201);
+    const { data } = db.voiceProvider.create.mock.calls[0][0];
+    expect(data).toMatchObject({ adapter: 'aws', name: 'AWS', region: 'eu-north-1', endpoint: null, apiKeyLast4: 'EKEY', models: [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }] });
+    expect(decryptApiKey(data.apiKeyEncrypted)).toBe('AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY');
+    expect(JSON.stringify(await response.json())).not.toContain('wJalrXUtnFEMI');
+  });
+
+  it('replaces an AWS key only whole: the access key ID, a colon, then the secret', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(key({ adapter: 'aws', region: 'eu-north-1', recognition: true, speech: true, models: [{ id: 'amazon.nova-2-sonic-v1:0', kind: 'talk' }] }));
+    expect((await call(patch, 'PATCH', { apiKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' })).status).toBe(400);
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+    expect((await call(patch, 'PATCH', { apiKey: 'AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' })).status).toBe(200);
+    expect(db.voiceProvider.update.mock.calls[0][0].data.apiKeyLast4).toBe('EKEY');
+  });
+
+  it('gives no other company’s key an endpoint or a region', async () => {
+    withProviders();
+    db.voiceProvider.create.mockImplementation(async ({ data }) => key({ ...data, id: 'k1', createdAt: new Date('2026-11-07T10:00:00Z'), lends: [] }));
+    await call(create, 'POST', { adapter: 'elevenlabs', speech: true, apiKey: 'sk-secret-key-9f2a', models: [{ id: 'flash', kind: 'speech' }] });
+    expect(db.voiceProvider.create.mock.calls[0][0].data.endpoint).toBeNull();
+    expect(db.voiceProvider.create.mock.calls[0][0].data.region).toBeNull();
   });
 });
 
@@ -158,13 +206,53 @@ describe('the list', () => {
     expect(body.keys).toEqual([
       expect.objectContaining({ id: 'k1', company: 'ElevenLabs', last4: '9f2a', lentTo: [{ universeId: 'uni1', universeName: 'Sales', ownedByYou: true, models: ['speech:flash'], bots: [] }], month: { voiceReplies: 0 }, limits: expect.any(Object) }),
     ]);
-    // Named and described by the catalog, in its order, doing what the server's providers for each do
+    // Every company in the catalog, in its order, with no server setup: named and described by the catalog, doing what it says
+    // plus what a provider the server has on does (ElevenLabs also listens here, since the stand-in server has one that does)
     expect(body.companies).toEqual([
+      expect.objectContaining({ adapter: 'assemblyai', label: 'AssemblyAI', recognition: true, speech: false }),
+      // A key at the person's own Azure resource, with its deployment typed as its model
+      expect.objectContaining({
+        adapter: 'aws',
+        label: 'AWS',
+        recognition: false,
+        speech: false,
+        talk: true,
+        account: expect.objectContaining({ regions: expect.arrayContaining([expect.objectContaining({ id: 'eu-north-1' })]), keyId: expect.objectContaining({ label: 'Access key ID' }), keyLabel: 'Secret access key' }),
+      }),
+      expect.objectContaining({ adapter: 'azure', label: 'Azure OpenAI', recognition: false, speech: false, talk: true, account: expect.objectContaining({ address: expect.objectContaining({ label: 'Endpoint' }), typedModel: expect.objectContaining({ label: 'Deployment name', kind: 'talk' }) }) }),
+      expect.objectContaining({ adapter: 'cartesia', label: 'Cartesia', recognition: true, speech: true }),
+      expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: true, logo: 'deepgram' }),
       expect.objectContaining({ adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true, logo: 'elevenlabs', docs: 'https://elevenlabs.io/docs' }),
-      expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: false, logo: 'deepgram' }),
+      expect.objectContaining({ adapter: 'fish', label: 'Fish Audio', recognition: false, speech: true, logo: 'fish-audio' }),
+      expect.objectContaining({ adapter: 'google', label: 'Google', recognition: false, speech: false, talk: true, logo: 'google' }),
+      // A talking model listens and speaks in one (game #1910)
+      expect.objectContaining({ adapter: 'inworld', label: 'Inworld', recognition: false, speech: false, talk: true, account: null }),
+      expect.objectContaining({ adapter: 'openai', label: 'OpenAI', recognition: false, speech: false, talk: true, logo: 'openai' }),
+      expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: true }),
+      expect.objectContaining({ adapter: 'ultravox', label: 'Ultravox', recognition: false, speech: false, talk: true, account: null }),
+      expect.objectContaining({ adapter: 'xai', label: 'xAI', recognition: false, speech: false, talk: true, logo: 'xai' }),
+      expect.objectContaining({ adapter: 'zoom', label: 'Zoom', recognition: false, speech: false, talk: true, account: null }),
+      // The speech server on a person's own computer is last, and is not a company (game #1874)
+      expect.objectContaining({ adapter: 'openai-compatible', label: 'Any OpenAI-compatible speech server', ownServer: expect.any(Object) }),
     ]);
-    // Its line says only the jobs Universe runs for it
-    expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual(['Listens and speaks, with thousands of voices.', 'Listens. Known for fast listening.']);
+    // Its line says only the jobs Universe runs for it, the same neutral shape for every company
+    expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual([
+      'Listens. Uses your account at assemblyai.com.',
+      'Talks live. Uses your AWS account, in the region you pick.',
+      'Talks live. Uses your Azure OpenAI resource.',
+      'Listens and speaks. Uses your account at cartesia.ai.',
+      'Listens and speaks. Uses your account at deepgram.com.',
+      'Listens and speaks. Uses your account at elevenlabs.io.',
+      'Speaks. Uses your account at fish.audio.',
+      'Talks live. Uses your account at aistudio.google.com.',
+      'Talks live. Uses your account at inworld.ai.',
+      'Talks live. Uses your account at platform.openai.com.',
+      'Listens and speaks. Uses your account at soniox.com.',
+      'Talks live. Uses your account at ultravox.ai.',
+      'Talks live. Uses your account at console.x.ai.',
+      'Talks live, in English. Uses your Zoom AI Services account.',
+      'Speaches, Kokoro-FastAPI, your own Whisper: anything that answers /v1/audio.',
+    ]);
     expect(JSON.stringify(body)).not.toContain('apiKeyEncrypted');
   });
 
@@ -391,9 +479,32 @@ describe('changing a key', () => {
     expect(db.voiceKeyLend.update).not.toHaveBeenCalled();
   });
 
+  it('holds an Azure key to one deployment, named the way Azure allows, when its model is changed', async () => {
+    const azure = key({ adapter: 'azure', recognition: true, speech: true, models: [{ id: 'realtime-prod', kind: 'talk' }] });
+    db.voiceKeyLend.findMany.mockResolvedValue([]);
+    for (const models of [[], [{ id: 'a', kind: 'talk' }, { id: 'b', kind: 'talk' }], [{ id: 'my deployment', kind: 'talk' }]]) {
+      db.voiceProvider.findFirst.mockResolvedValue(azure);
+      expect((await call(patch, 'PATCH', { models })).status).toBe(400);
+    }
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+    db.voiceProvider.findFirst.mockResolvedValue(azure);
+    expect((await call(patch, 'PATCH', { models: [{ id: 'realtime-2', kind: 'talk' }] })).status).toBe(200);
+    // A change that leaves the models alone is not held to it
+    db.voiceProvider.findFirst.mockResolvedValue(azure);
+    expect((await call(patch, 'PATCH', { name: 'Studio' })).status).toBe(200);
+  });
+
   it('refuses a model for a job the key doesn’t do', async () => {
     db.voiceProvider.findFirst.mockResolvedValue(key());
     expect((await call(patch, 'PATCH', { models: [{ id: 'a', kind: 'recognition' }] })).status).toBe(400);
+    expect(db.voiceProvider.update).not.toHaveBeenCalled();
+  });
+
+  it('refuses a talking model on a key from a company that doesn’t talk live, as when it was added', async () => {
+    db.voiceProvider.findFirst.mockResolvedValue(key({ adapter: 'elevenlabs', recognition: true, speech: true, models: [{ id: 'scribe_v2_realtime', kind: 'recognition' }, { id: 'eleven_flash_v2_5', kind: 'speech' }] }));
+    const response = await call(patch, 'PATCH', { models: [{ id: 'scribe_v2_realtime', kind: 'recognition' }, { id: 'eleven_flash_v2_5', kind: 'speech' }, { id: 'live', kind: 'talk' }] });
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe('ElevenLabs doesn’t talk live');
     expect(db.voiceProvider.update).not.toHaveBeenCalled();
   });
 

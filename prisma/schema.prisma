@@ -853,6 +853,7 @@ model Bot {
   voiceRevisions BotVoiceRevision[]
   voiceKeyUsage  VoiceKeyUsage[]
   voiceReplyUses VoiceReplyUse[]
+  voiceListenUses VoiceListenUse[]
 
   @@index([roomId])
   @@map("bots")
@@ -1109,6 +1110,22 @@ model VoiceReplyUse {
   @@unique([botId, turnId])
   @@index([personKey, createdAt])
   @@map("voice_reply_uses")
+}
+
+// Seconds a bot listened for its name in a day, all the people near it together (game #1859). One row per bot and UTC day; the bot
+// server adds the audio of group speech that was not said to the bot, and the day's limit is the voice limit "listen minutes a day"
+// (#740, or the one a lent listening key sets, #783). Old days are never read again.
+model VoiceListenUse {
+  botId     String   @map("bot_id")
+  // The UTC day, as a date
+  day       DateTime @db.Date
+  seconds   Int      @default(0)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@id([botId, day])
+  @@map("voice_listen_uses")
 }
 
 // Someone reached a reply limit on a bot (game #1159, Orbit #491): once per person, limit and window. The bot page counts

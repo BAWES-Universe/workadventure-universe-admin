@@ -5,7 +5,7 @@
  * companies people can add their own voice key for.
  */
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { AudioLines, Ear, Info, Loader2, Pause, Play, Plus, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -26,6 +26,9 @@ import {
   botsOn,
   callOrbit,
   companyLabel,
+  defaultChangeLine,
+  OffJobRows,
+  offJobs,
   doesLine,
   logoOf,
   modelName,
@@ -89,6 +92,7 @@ function ModelSelect({ label, models, value, onChange }: { label: string; models
   );
 }
 
+
 /** Why a provider can't be picked as the default for a job, or null. */
 function whyNot(provider: ServerVoiceProvider, job: VoiceJob): string | null {
   if (!provider.enabled) return 'Disabled. Enable it to pick it.';
@@ -147,7 +151,6 @@ function ListenSheet({ open, providers, onClose, onSaved }: SheetProps) {
   const picked = candidates.find((provider) => provider.id === pickedId) ?? null;
   const models = picked ? picked.models.filter((model) => model.kind === 'recognition') : [];
   const unchanged = !picked || (picked.defaultRecognition && modelId === startingModel(picked, 'recognition')?.id);
-  const already = providers.reduce((total, provider) => total + provider.bots.recognition, 0);
   return (
     <FormSheet open={open} onOpenChange={(next) => !next && !busy && onClose()} title="Universe AI listens with">
       <div role="radiogroup" aria-label="Company" className="grid gap-2">
@@ -174,8 +177,8 @@ function ListenSheet({ open, providers, onClose, onSaved }: SheetProps) {
         {candidates.length === 0 && <p className={FIELD_HINT}>No voice provider listens yet. Add one first.</p>}
       </div>
       {picked && modelId && <ModelSelect label="Listening model" models={models.map((model) => ({ id: model.id, name: modelName(model) }))} value={modelId} onChange={setModelId} />}
-      <p className={FIELD_HINT}>
-        Bots that turn voice on from now listen with it. {already > 0 ? `The ${bots(already)} that already listen keep what they have.` : 'Bots that already listen keep what they have.'}
+      <p className={FIELD_HINT} data-testid="listen-change-line">
+        {defaultChangeLine(providers, picked, 'recognition', Boolean(picked && modelId && modelId !== startingModel(picked, 'recognition')?.id))}
       </p>
       {failure && <Refused>{failure}</Refused>}
       <SheetButtons
@@ -317,7 +320,6 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
   const rows = pickedVoice && !shown.includes(pickedVoice) ? [pickedVoice, ...shown] : shown;
   const voiceChanged = voiceId !== (picked?.defaultVoiceId ?? null);
   const unchanged = !picked || (picked.defaultSpeech && modelId === startingModel(picked, 'speech')?.id && !voiceChanged);
-  const already = providers.reduce((total, provider) => total + provider.bots.speech, 0);
   const company = picked ? companyLabel(picked.adapter) : '';
 
   return (
@@ -367,7 +369,7 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
                 <Input type="search" aria-label="Search voices" placeholder={`Search ${all.length.toLocaleString('en')} voices`} value={find} onChange={(event) => setFind(event.target.value)} className="h-11 rounded-full pl-10" />
               </div>
               <p className={FIELD_HINT}>Samples come from {company}, free.</p>
-              <div role="radiogroup" aria-label="Voice" className="grid max-h-[300px] gap-0 overflow-auto rounded-2xl border border-foreground/10" data-testid="voice-list">
+              <div role="radiogroup" aria-label="Voice" className="max-h-[300px] overflow-auto rounded-2xl border border-foreground/10" data-testid="voice-list">
                 {rows.map((voice) => {
                   const isPicked = voice.voiceId === voiceId;
                   const languages = voice.languages.map(languageName).join(', ');
@@ -377,7 +379,16 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
                         <Radio checked={isPicked} />
                         <span className="grid min-w-0 flex-1">
                           <strong className="text-[15px] font-semibold [overflow-wrap:anywhere]">{voice.name}</strong>
-                          <span className="text-xs text-muted-foreground">{[voice.description, languages].filter(Boolean).join(' ')}</span>
+                          {voice.description && (
+                            <span className="line-clamp-2 text-xs text-muted-foreground" title={voice.description}>
+                              {voice.description}
+                            </span>
+                          )}
+                          {languages && (
+                            <span className="line-clamp-1 text-xs text-muted-foreground" title={languages}>
+                              {languages}
+                            </span>
+                          )}
                         </span>
                       </button>
                       {voice.previewUrl ? (
@@ -404,8 +415,8 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
           )}
         </div>
       )}
-      <p className={FIELD_HINT}>
-        Bots that turn voice on from now start with it. {already > 0 ? `The ${bots(already)} that already speak keep the voice they have.` : 'Bots that already speak keep the voice they have.'}
+      <p className={FIELD_HINT} data-testid="speak-change-line">
+        {defaultChangeLine(providers, picked, 'speech', Boolean(picked && modelId && modelId !== startingModel(picked, 'speech')?.id))}
       </p>
       {failure && <Refused>{failure}</Refused>}
       <SheetButtons
@@ -435,10 +446,7 @@ function OffSheet({ provider, providers, onClose, onSaved }: { provider: ServerV
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const { addToast } = useToast();
-  // People can add a company's key while any provider of it is on
-  const stillOn = provider ? providers.some((other) => other.id !== provider.id && other.adapter === provider.adapter && other.enabled) : true;
-  const used = provider ? botsOn(provider) : 0;
-  const company = provider ? companyLabel(provider.adapter) : '';
+  const jobs = provider ? offJobs(provider, providers) : [];
   async function disable() {
     if (!provider) return;
     setBusy(true);
@@ -455,25 +463,20 @@ function OffSheet({ provider, providers, onClose, onSaved }: { provider: ServerV
   }
   return (
     <FormSheet open={provider !== null} onOpenChange={(next) => !next && !busy && onClose()} title={provider ? `Disable ${provider.name}?` : 'Disable?'}>
-      <p className="text-sm text-muted-foreground">
-        {used > 0 ? `${bots(used)} ${used === 1 ? 'uses' : 'use'} ${provider?.name}. ${used === 1 ? 'It answers' : 'They answer'} in text until it’s on again, or until their maker picks another voice. ` : ''}
-        {stillOn ? '' : `People can’t add a ${company} key while no ${company} provider is on.`}
-      </p>
+      <OffJobRows jobs={jobs} />
       {failure && <Refused>{failure}</Refused>}
       <SheetButtons go="Disable" busy={busy} onClose={onClose} onGo={() => void disable()} />
     </FormSheet>
   );
 }
 
-/** Design A: the defaults, the providers, and which companies people can add keys for. */
+/** Design A: the defaults and the providers. People can add their own key for any company in the catalog, whatever is on here. */
 export function VoiceSection() {
   const { providers, failed, loading, reload } = useVoiceProviders();
   const { addToast } = useToast();
   const [sheet, setSheet] = useState<'listen' | 'speak' | null>(null);
   const [off, setOff] = useState<ServerVoiceProvider | null>(null);
   const [toggling, setToggling] = useState<string | null>(null);
-
-  const companies = useMemo(() => Array.from(new Set((providers ?? []).filter((provider) => provider.enabled).map((provider) => companyLabel(provider.adapter)))), [providers]);
 
   async function enable(provider: ServerVoiceProvider) {
     setToggling(provider.id);
@@ -500,7 +503,7 @@ export function VoiceSection() {
       ) : providers.length === 0 ? (
         <div className="grid gap-3 rounded-[14px] border border-border bg-card p-4" data-testid="voice-empty">
           <strong className="text-[15px]">Universe AI has no voice yet</strong>
-          <p className="text-sm text-muted-foreground">Bots on Universe AI answer in text, and nobody can add a voice key of their own. Add one company that listens and one that speaks.</p>
+          <p className="text-sm text-muted-foreground">Bots on Universe AI answer in text until it has one. Add one company that listens and one that speaks. People can still add a voice key of their own.</p>
           <Button asChild variant="outline" className="h-11 w-fit px-5">
             <Link href="/admin/ai-providers/voice/new">
               <Plus className="mr-2 h-4 w-4" />
@@ -517,7 +520,7 @@ export function VoiceSection() {
               icon={<Ear size={22} aria-hidden="true" />}
               label="Universe AI listens with"
               value={listener ? `${listener.name} · ${modelName(startingModel(listener, 'recognition') ?? { id: 'no model', kind: 'recognition' })}` : 'Nothing yet'}
-              hint={listener ? 'A bot that turns voice on starts with this. Bots that already listen keep theirs.' : 'Bots can’t turn voice on with Universe AI until a company listens for it.'}
+              hint={listener ? `A bot that turns voice on starts with this. Bots on ${listener.name} listen with this model too.` : 'Bots can’t turn voice on with Universe AI until a company listens for it.'}
               disabled={loading}
               onChange={() => setSheet('listen')}
             />
@@ -530,8 +533,8 @@ export function VoiceSection() {
                 !speaker
                   ? 'Bots can’t turn voice on with Universe AI until a company speaks for it.'
                   : speaker.defaultVoiceId
-                    ? 'A bot that turns voice on starts with this voice. Bots that have a voice keep theirs.'
-                    : `No starting voice picked: a bot that turns voice on starts with the first voice ${speaker.name} lists. Bots that have a voice keep theirs.`
+                    ? `A bot that turns voice on starts with this voice. Bots on ${speaker.name} speak with this model too, in their own voices.`
+                    : `No starting voice picked: a bot that turns voice on starts with the first voice ${speaker.name} lists. Bots on ${speaker.name} speak with this model too, in their own voices.`
               }
               disabled={loading}
               onChange={() => setSheet('speak')}
@@ -571,7 +574,7 @@ export function VoiceSection() {
           </div>
           <p className="flex items-start gap-1.5 text-[13px] text-muted-foreground" data-testid="people-line">
             <Info size={14} aria-hidden="true" className="mt-0.5 shrink-0" />
-            {companies.length > 0 ? `People can add their own voice key for the companies that are on here: ${companies.join(', ')}.` : 'No company is on here, so people can’t add a voice key of their own.'}
+            People can add their own voice key for any company, whatever is on here.
           </p>
         </>
       )}

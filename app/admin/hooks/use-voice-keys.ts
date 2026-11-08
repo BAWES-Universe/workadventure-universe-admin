@@ -47,9 +47,29 @@ export function useVoiceCompanies() {
 
 /**
  * A speech company drawn like a provider on Add a key: the same card in step 1 and the same setup card in step 2. It is hosted,
- * wants an API key and no address, and has no regions.
+ * wants an API key, and has no regions. It wants an address only when its keys live at the person's own one (Azure).
  */
 export function voiceCompanyKind(company: VoiceKeyCompany): AiKeyKindInfo {
+  // A speech server on the person's own computer is drawn like a chat server there: the plug, an https address, an optional key
+  if (company.ownServer) {
+    return {
+      kind: company.adapter,
+      label: company.label,
+      group: 'own-computer',
+      benefit: company.benefit,
+      plainIcon: 'plug',
+      steps: company.ownServer.steps,
+      providerType: 'openai',
+      address: 'required',
+      apiKey: 'optional',
+      protocol: 'openai',
+      auth: 'bearer',
+      typedEndpointSuffix: '',
+      keyCheck: { type: 'models' },
+      modelId: 'as-is',
+      tier: 'named',
+    };
+  }
   return {
     kind: company.adapter,
     label: company.label,
@@ -59,7 +79,8 @@ export function voiceCompanyKind(company: VoiceKeyCompany): AiKeyKindInfo {
     plainIcon: 'chip',
     steps: [{ text: company.step }],
     providerType: 'openai',
-    address: 'none',
+    address: company.account?.address ? 'required' : 'none',
+    ...(company.account?.regions ? { regions: company.account.regions.map((region) => ({ id: region.id, label: region.label, base: `https://${region.host}` })) } : {}),
     apiKey: 'required',
     docs: company.docs,
     protocol: 'openai',

@@ -4,7 +4,9 @@ import { prisma } from '@/lib/db';
 import { BotSettingsError } from '@/lib/bot-access-settings';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels, universeAiDefaults } from '@/lib/voice-providers';
+import { modelDoes, talksLive } from '@/lib/voice-key-companies';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
+import { isOwnSpeechAdapter } from '@/lib/voice-own-server';
 import { claimVoiceKeyTry, healthOf, tryIsDue } from '@/lib/voice-key-health';
 import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits, servedVoiceLimits } from '@/lib/voice-limits';
@@ -15,7 +17,8 @@ import { LISTENING_KEY_LIMITS, SPEAKING_KEY_LIMITS, readVoiceKeyLimits, savedVoi
  * revisions of it. A bot speaks with the revision named in `bots.voice_revision`: publishing makes a new revision and rolling
  * back names an earlier one, so a revision never changes once it is published.
  *
- * The profile names the providers by id (lib/voice-providers.ts) with an exact model for each, and the voice. A provider is
+ * The profile names the providers by id (lib/voice-providers.ts) with a model for each, and the voice (a part on one of the server's
+ * own providers speaks with that provider's current model, see followUniverseAi). A provider is
  * one a super admin runs, so Universe AI pays, or a key (lib/voice-keys.ts) that the bot's maker lent to its universe, so the
  * maker pays; the person talking never does. A bot never speaks on anyone else's key, and when the key stops being usable
  * (pulled, deleted, a model taken off it, its owner no longer able to manage bots there) the bot carries on in text.
@@ -53,6 +56,59 @@ const readDraft = (value: unknown) => {
 /** For a key that is lent: the models the lend allows (as "kind:id"), or null for all of them. */
 type Lends = Map<string, string[] | null>;
 
+/**
+ * A part that runs on one of the server's own providers (Universe AI) uses the model that provider starts from for the job, which
+ * is the first one it lists, whatever model the bot was turned on with: a super admin moving Universe AI to a newer model of the same
+ * company moves every such bot with it, and a model taken off no longer silences them. The voice and the company stay as published.
+ * A part on a person's lent key keeps the model its maker picked (their key, their choice). A provider that lists no model for the
+ * job leaves the published one, so `profileProblem` still says so.
+ */
+export function followUniverseAi(profile: VoiceProfile, providers: Map<string, VoiceProvider>): VoiceProfile {
+  const follow = <P extends 'recognition' | 'speech'>(part: P): VoiceProfile[P] => {
+    const choice = profile[part];
+    const provider = providers.get(choice.providerId);
+    if (!provider || provider.ownerId !== null) return choice;
+    // A bot that talks live follows the provider's first talking model, for both parts, so they keep naming the same one. So does a
+    // bot whose talking model was taken off: both parts still name one model, and the provider no longer lists it for the job
+    const models = readModels(provider.models);
+    const talked =
+      profile.recognition.providerId === profile.speech.providerId &&
+      profile.recognition.model === profile.speech.model &&
+      !models.some((model) => model.kind === part && model.id === choice.model);
+    const kind = talksLive(profile, models) || (talked && models.some((model) => model.kind === 'talk')) ? 'talk' : part;
+    const current = models.find((model) => model.kind === kind);
+    return current && current.id !== choice.model ? { ...choice, model: current.id } : choice;
+  };
+  const recognition = follow('recognition');
+  const speech = follow('speech');
+  return recognition === profile.recognition && speech === profile.speech ? profile : { ...profile, recognition, speech };
+}
+
+/**
+ * A part that runs on one of the server's own providers that a super admin turned off borrows what Universe AI uses now for that
+ * job (#840): Universe AI's default provider with its starting model and, for speaking, its starting voice. Nothing is saved, so
+ * when the provider is on again the bot has its own voice back, and its maker can pick another voice any time. A part on a lent
+ * key never borrows (the maker pays for that one), and nothing is borrowed when Universe AI has no usable default for the job, or
+ * no starting voice to speak with: then the bot answers in text as before. `providers` must hold the server's defaults
+ * (providersFor loads them).
+ */
+export function borrowUniverseAi(profile: VoiceProfile, providers: Map<string, VoiceProvider>): VoiceProfile {
+  const borrow = <P extends 'recognition' | 'speech'>(part: P): VoiceProfile[P] => {
+    const choice = profile[part];
+    const own = providers.get(choice.providerId);
+    if (!own || own.ownerId !== null || own.enabled) return choice;
+    const now = [...providers.values()].find((row) => row.ownerId === null && row.enabled && row[part] && (part === 'recognition' ? row.defaultRecognition : row.defaultSpeech));
+    const model = now?.apiKeyEncrypted ? readModels(now.models).find((entry) => entry.kind === part) : undefined;
+    if (!now || !model) return choice;
+    if (part === 'recognition') return { providerId: now.id, model: model.id } as VoiceProfile[P];
+    if (!now.defaultVoiceId) return choice;
+    return { providerId: now.id, model: model.id, voiceId: now.defaultVoiceId, ...(now.defaultVoiceName ? { voiceName: now.defaultVoiceName } : {}) } as VoiceProfile[P];
+  };
+  const recognition = borrow('recognition');
+  const speech = borrow('speech');
+  return recognition === profile.recognition && speech === profile.speech ? profile : { ...profile, recognition, speech };
+}
+
 /** The first reason a finished profile can't be used with the providers as they are now, or null. */
 export function profileProblem(profile: VoiceProfile, providers: Map<string, VoiceProvider>, lent: Lends = new Map()): string | null {
   for (const part of ['recognition', 'speech'] as const) {
@@ -62,10 +118,17 @@ export function profileProblem(profile: VoiceProfile, providers: Map<string, Voi
     if (!provider) return `The provider chosen for ${job} doesn't exist`;
     if (!provider.enabled) return `${provider.name} is off`;
     if (!provider[part]) return `${provider.name} doesn't do ${job}`;
-    if (!provider.apiKeyEncrypted) return `${provider.name} has no key`;
-    if (!readModels(provider.models).some((model) => model.kind === part && model.id === choice.model)) return `${provider.name} doesn't list the model ${choice.model} for ${job}`;
+    // A speech server on a person's own computer may have no key (game #1874)
+    if (!provider.apiKeyEncrypted && !isOwnSpeechAdapter(provider.adapter)) return `${provider.name} has no key`;
+    const models = readModels(provider.models);
+    const model = models.find((entry) => modelDoes(entry, part) && entry.id === choice.model && (entry.kind === part || talksLive(profile, models)));
+    if (!model) {
+      // A talking model listens and speaks in one: it is named for both or for neither (game #1910)
+      if (models.some((entry) => entry.kind === 'talk' && entry.id === choice.model)) return `${provider.name}'s ${choice.model} talks live, so it must be named for both listening and speaking`;
+      return `${provider.name} doesn't list the model ${choice.model} for ${job}`;
+    }
     const allowed = lent.get(provider.id);
-    if (allowed && !allowed.includes(lendModelId({ kind: part, id: choice.model }))) return `${provider.name} isn't lent to this universe for the model ${choice.model}`;
+    if (allowed && !allowed.includes(lendModelId(model))) return `${provider.name} isn't lent to this universe for the model ${choice.model}`;
   }
   return null;
 }
@@ -83,9 +146,24 @@ async function homeOf(botId: string): Promise<Home> {
 }
 
 /**
+ * Whether a speech server of the bot's maker (game #1874) is lent to the bot's universe, so a voice name typed for it can be heard
+ * before voice is on ("Hear <name> say hello" on the Voice row's first screen, when no profile names the server yet). Only a speech
+ * server on a person's own computer, only for a bot its owner made, and only while the lend and the owner's access to the universe
+ * stand: the same rules a bot that speaks with it is held to.
+ */
+export async function ownServerLentToBot(provider: Pick<VoiceProvider, 'id' | 'ownerId' | 'adapter'>, botId: string): Promise<boolean> {
+  if (!provider.ownerId || !isOwnSpeechAdapter(provider.adapter)) return false;
+  const home = await homeOf(botId);
+  if (home.createdById !== provider.ownerId) return false;
+  const lend = await prisma.voiceKeyLend.findUnique({ where: { providerId_universeId: { providerId: provider.id, universeId: home.universeId } }, select: { id: true } });
+  return lend !== null && Boolean(await lendAccess(provider.ownerId, home.universeId));
+}
+
+/**
  * The providers a profile may use for this bot: the server's own, and a key only when the bot's maker owns it, lent it to
  * this universe, and still owns the universe or has Manage bots in it (the same rules as a text key). Anything else is left
- * out, so the profile reads as naming a provider that doesn't exist.
+ * out, so the profile reads as naming a provider that doesn't exist. When a part names a server provider that is off, the server's
+ * providers that are on come too, so it can borrow Universe AI's current default (borrowUniverseAi).
  */
 async function providersFor(profile: VoiceProfile, home: Home): Promise<{ providers: Map<string, VoiceProvider>; lent: Lends }> {
   const ids = [...new Set([profile.recognition.providerId, profile.speech.providerId])];
@@ -102,6 +180,10 @@ async function providersFor(profile: VoiceProfile, home: Home): Promise<{ provid
       providers.set(row.id, row);
       lent.set(row.id, readLendModels(lends[0].models));
     }
+  }
+  // A part on a server provider that is off borrows Universe AI's current default: load the server's providers that are on
+  if ([...providers.values()].some((row) => row.ownerId === null && !row.enabled)) {
+    for (const row of await prisma.voiceProvider.findMany({ where: { ownerId: null, enabled: true } })) if (!providers.has(row.id)) providers.set(row.id, row);
   }
   return { providers, lent };
 }
@@ -138,6 +220,16 @@ async function payersOf(profile: VoiceProfile | null) {
   return { paidBy, parts };
 }
 
+/**
+ * The server's own providers the live version names (#840). A bot can stay on one that is no longer Universe AI's default (the
+ * operator switched company), so the bot page must not read it as a key that is no longer lent.
+ */
+async function serverProvidersIn(profile: VoiceProfile | null): Promise<string[]> {
+  if (!profile) return [];
+  const rows = await prisma.voiceProvider.findMany({ where: { id: { in: [...new Set([profile.recognition.providerId, profile.speech.providerId])] }, ownerId: null }, select: { id: true } });
+  return rows.map((row) => row.id);
+}
+
 const revisionView = (row: { number: number; profile: Prisma.JsonValue; note: string | null; publishedById: string | null; publishedAt: Date }) => ({
   number: row.number,
   profile: row.profile,
@@ -167,6 +259,7 @@ export async function readBotVoice(botId: string) {
     enabled: bot.voiceEnabled,
     universeAllows: bot.room.world.universe.allowVoiceBots,
     ...(await payersOf(parsed?.success ? parsed.data : null)),
+    serverProviderIds: await serverProvidersIn(parsed?.success ? parsed.data : null),
     revision: bot.voiceRevision,
     draft: { profile: readDraft(bot.voiceDraft?.profile), updatedAt: bot.voiceDraft?.updatedAt ?? null },
     revisions,
@@ -233,7 +326,7 @@ export async function publishVoiceDraft(botId: string, note: string | null, user
       throw new BotSettingsError(400, `The voice profile isn't finished: ${issue?.path.join('.') || 'profile'} is ${issue?.code === 'invalid_type' ? 'missing' : 'not valid'}`);
     }
     const { providers, lent } = await providersFor(parsed.data, await homeOf(botId));
-    const problem = profileProblem(parsed.data, providers, lent);
+    const problem = profileProblem(followUniverseAi(parsed.data, providers), providers, lent);
     if (problem) throw new BotSettingsError(409, problem);
     const last = await tx.botVoiceRevision.findFirst({ where: { botId }, orderBy: { number: 'desc' }, select: { number: true } });
     const number = (last?.number ?? 0) + 1;
@@ -251,7 +344,7 @@ export async function rollBackVoice(botId: string, number: number) {
     const parsed = voiceProfileSchema.safeParse(revision.profile);
     if (!parsed.success) throw new BotSettingsError(409, 'That revision can\'t be read');
     const { providers, lent } = await providersFor(parsed.data, await homeOf(botId));
-    const problem = profileProblem(parsed.data, providers, lent);
+    const problem = profileProblem(followUniverseAi(parsed.data, providers), providers, lent);
     if (problem) throw new BotSettingsError(409, problem);
     await tx.bot.update({ where: { id: botId }, data: { voiceRevision: number } });
   });
@@ -327,11 +420,14 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
   const parsed = revision ? voiceProfileSchema.safeParse(revision.profile) : null;
   if (!revision || !parsed?.success) return result('no-profile');
   const { providers, lent } = await providersFor(parsed.data, { createdById: bot.createdById, universeId: bot.room.world.universeId });
-  if (profileProblem(parsed.data, providers, lent)) return result('provider', revision.number);
+  // A bot on Universe AI speaks with the models Universe AI uses now, not the ones it was turned on with, and a part on a
+  // company a super admin turned off borrows what Universe AI uses now until it is on again
+  const profile = borrowUniverseAi(followUniverseAi(parsed.data, providers), providers);
+  if (profileProblem(profile, providers, lent)) return result('provider', revision.number);
   if (!options.ignoreKeyHealth) {
-    const ids = [...new Set([parsed.data.recognition.providerId, parsed.data.speech.providerId])];
+    const ids = [...new Set([profile.recognition.providerId, profile.speech.providerId])];
     // A key that went Down on one job holds back only a bot that uses it for that job
-    const usedFor = (id: string) => (['recognition', 'speech'] as const).filter((part) => parsed.data[part].providerId === id);
+    const usedFor = (id: string) => (['recognition', 'speech'] as const).filter((part) => profile[part].providerId === id);
     const down = ids
       .map((id) => providers.get(id))
       .filter((row): row is VoiceProvider => Boolean(row && row.ownerId !== null && row.downSince && (!row.downPart || usedFor(row.id).includes(row.downPart as 'recognition' | 'speech'))));
@@ -346,5 +442,5 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
       if (!mayTry) return result('key-down', revision.number, null, healthOf([...down].sort((a, b) => a.downSince!.getTime() - b.downSince!.getTime())[0]));
     }
   }
-  return result(null, revision.number, parsed.data, null, providers);
+  return result(null, revision.number, profile, null, providers);
 }

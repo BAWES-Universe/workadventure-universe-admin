@@ -4,10 +4,13 @@ import type { VoiceModel } from '@/lib/voice-providers';
 import { lendModelId } from '@/lib/voice-lend-model';
 import { Tick } from './model-picker';
 
-const GROUPS = [
+/** A voice key's models by job, in the order they are shown. A talking model (game #1910) listens and speaks in one. */
+export const VOICE_JOB_TITLES = [
   { kind: 'recognition', title: 'Listens' },
   { kind: 'speech', title: 'Speaks' },
+  { kind: 'talk', title: 'Talks live (listens and speaks in one)' },
 ] as const;
+const GROUPS = VOICE_JOB_TITLES;
 
 /**
  * A voice key's models under Listens and Speaks (#749). `browse` lists them; `many` ticks the ones a lend allows, each named as
@@ -19,12 +22,16 @@ export function VoiceModelPicker({
   picked = [],
   onChange,
   label,
+  detailed = false,
 }: {
-  models: VoiceModel[];
+  /** `note`: a short line from what the company says about the model, shown under it with its id when `detailed`. */
+  models: (VoiceModel & { note?: string })[];
   mode: 'browse' | 'many';
   picked?: string[];
   onChange?: (picked: string[]) => void;
   label: string;
+  /** Show each model's id and note under its name, to help choose between models the company lists (New voice provider). */
+  detailed?: boolean;
 }) {
   const on = new Set(picked);
   function toggle(id: string) {
@@ -61,7 +68,16 @@ export function VoiceModelPicker({
                     }`}
                     data-testid="model-row"
                   >
-                    <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{text}</span>
+                    {detailed ? (
+                      <span className="grid min-w-0 flex-1 gap-0.5">
+                        <span className="[overflow-wrap:anywhere]">{text}</span>
+                        {(model.label || model.note) && (
+                          <span className="text-xs font-normal text-muted-foreground [overflow-wrap:anywhere]">{[model.label ? model.id : null, model.note].filter(Boolean).join(' · ')}</span>
+                        )}
+                      </span>
+                    ) : (
+                      <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{text}</span>
+                    )}
                     <Tick on={picked} />
                   </button>
                 );

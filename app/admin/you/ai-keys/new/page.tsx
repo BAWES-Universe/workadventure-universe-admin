@@ -3,9 +3,9 @@
 import { useEffect, useRef, useState } from 'react';
 import type React from 'react';
 import { useRouter } from 'next/navigation';
-import { Check, Download, ExternalLink, KeyRound } from 'lucide-react';
+import { Check, Download, ExternalLink, KeyRound, ShieldCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { PickCard, Radio } from '@/components/ui/choice';
+import { PickCard, Radio, Segmented } from '@/components/ui/choice';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { ProviderLogo } from '../../../components/ds/provider-logo';
@@ -14,12 +14,15 @@ import { useToast } from '@/components/ui/toast';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { AI_KEY_KINDS, kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 import { LoadError, PageHeader } from '../../../components/ds';
+import { VOICE_JOB_TITLES } from '../../../components/ds/voice-model-picker';
 import { AiKeyFailure, aiKeyError, aiKeyFailureText } from '../../../hooks/use-ai-keys';
 import { useVoiceCompanies, voiceCompanyKind } from '../../../hooks/use-voice-keys';
 import type { VoiceModel } from '@/lib/voice-providers';
+import { joinKey } from '@/lib/voice-key-companies';
+import { OWN_SPEECH_ADAPTER, OWN_SPEECH_NAME } from '@/lib/voice-own-constants';
 import { openLinkInGame, useLinksOpeningInGame } from '../../../components/orbit-bridge';
 
-type Models = { status: 'none' } | { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'voice'; models: VoiceModel[] } | { status: 'failed'; message: string } | { status: 'typed' };
+type Models = { status: 'none' } | { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'voice'; models: VoiceModel[]; voices?: number | null; unsure?: string[] } | { status: 'failed'; message: string } | { status: 'typed' };
 
 const FIELD_HINT = 'text-[13px] text-muted-foreground';
 /** More providers than this and a search box appears. */
@@ -110,7 +113,10 @@ export default function AddAiKeyPage() {
   // A speech company for voice (#749), picked instead of a provider: its adapter
   const [voiceAdapter, setVoiceAdapter] = useState<string | null>(null);
   const companies = useVoiceCompanies();
-  const voiceKinds = (companies.result.status === 'ready' ? companies.result.items : []).map(voiceCompanyKind);
+  const allVoiceKinds = (companies.result.status === 'ready' ? companies.result.items : []).map(voiceCompanyKind);
+  // A speech server on the person's own computer is not a company: it has its own group (game #1874)
+  const voiceKinds = allVoiceKinds.filter((entry) => entry.group !== 'own-computer');
+  const ownSpeechKinds = allVoiceKinds.filter((entry) => entry.group === 'own-computer');
   // Two steps on one page: pick a provider, then set it up. Change goes back to the list with the pick kept.
   const [step, setStep] = useState<'pick' | 'setup'>('pick');
   const [region, setRegion] = useState<string | null>(null);
@@ -118,8 +124,12 @@ export default function AddAiKeyPage() {
   const [showMore, setShowMore] = useState(false);
   const [address, setAddress] = useState('');
   const [apiKey, setApiKey] = useState('');
+  // The shown part of a key in two parts (AWS: the access key ID)
+  const [keyId, setKeyId] = useState('');
   const [models, setModels] = useState<Models>({ status: 'none' });
   const [model, setModel] = useState<string | null>(null);
+  // For a server that lists models without saying what they do: what the person picked for each
+  const [marks, setMarks] = useState<Record<string, VoiceModel['kind']>>({});
   const [typedName, setTypedName] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -134,9 +144,12 @@ export default function AddAiKeyPage() {
     stepHeading.current?.focus();
   }, [step]);
 
-  const voiceInfo = voiceKinds.find((entry) => entry.kind === voiceAdapter) ?? null;
+  const voiceInfo = allVoiceKinds.find((entry) => entry.kind === voiceAdapter) ?? null;
+  const ownSpeech = voiceAdapter === OWN_SPEECH_ADAPTER;
+  // What a voice key needs besides the key (Azure: its resource's address, and its deployment typed as the model)
+  const account = (companies.result.status === 'ready' ? companies.result.items : []).find((entry) => entry.adapter === voiceAdapter)?.account ?? null;
   const info = voiceInfo ?? kindInfo(kind);
-  const name = typedName ?? (info ? `My ${info.label}` : '');
+  const name = typedName ?? (ownSpeech ? OWN_SPEECH_NAME : info ? `My ${info.label}` : '');
   // The picked type stays on screen whatever is typed in the search
   const needle = find.trim().toLowerCase();
   const matches = (entry: AiKeyKindInfo) => entry.kind === (voiceAdapter ?? kind) || !needle || `${entry.label} ${entry.benefit}`.toLowerCase().includes(needle);
@@ -144,6 +157,7 @@ export default function AddAiKeyPage() {
   const ownComputer = shown.filter((entry) => entry.group === 'own-computer');
   const hosted = shown.filter((entry) => entry.group === 'hosted' && entry.tier === 'named');
   const voice = voiceKinds.filter(matches);
+  const ownSpeechShown = ownSpeechKinds.filter(matches);
   const more = shown.filter((entry) => entry.tier === 'more');
   const moreCount = AI_KEY_KINDS.filter((entry) => entry.tier === 'more').length;
 
@@ -156,6 +170,7 @@ export default function AddAiKeyPage() {
       // A key or address typed for one provider is never sent to another
       setAddress('');
       setApiKey('');
+      setKeyId('');
       changed();
     }
     goToStep('setup');
@@ -169,6 +184,7 @@ export default function AddAiKeyPage() {
       setRegion(null);
       setAddress('');
       setApiKey('');
+      setKeyId('');
       changed();
     }
     goToStep('setup');
@@ -187,6 +203,7 @@ export default function AddAiKeyPage() {
     latestLoad.current += 1;
     setModels({ status: 'none' });
     setModel(null);
+    setMarks({});
     setFailure(null);
   }
 
@@ -194,7 +211,11 @@ export default function AddAiKeyPage() {
     !!info &&
     (!info.regions || region !== null) &&
     (info.address !== 'required' || address.trim() !== '') &&
-    (info.apiKey !== 'required' || apiKey.trim() !== '');
+    (info.apiKey !== 'required' || apiKey.trim() !== '') &&
+    (!account?.keyId || keyId.trim() !== '');
+
+  // A key in two parts (AWS) goes as one: the access key ID, a colon, the secret
+  const voiceKey = account?.keyId ? joinKey(keyId, apiKey) : apiKey;
 
   async function loadModels() {
     if (!info) return;
@@ -208,11 +229,13 @@ export default function AddAiKeyPage() {
         const response = await authenticatedFetch('/api/me/voice-keys/check', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ adapter: voiceInfo.kind, apiKey }),
+          body: JSON.stringify({ adapter: voiceInfo.kind, apiKey: voiceKey, ...(ownSpeech || account?.address ? { address } : {}), ...(account?.regions && region ? { region } : {}) }),
         });
-        const data: { ok?: boolean; models?: VoiceModel[]; error?: string } = await response.json().catch(() => ({}));
+        const data: { ok?: boolean; models?: VoiceModel[]; typed?: boolean; error?: string; voices?: number | null; unsure?: string[] } = await response.json().catch(() => ({}));
         if (mine !== latestLoad.current) return;
-        if (response.ok && data.ok && Array.isArray(data.models)) setModels({ status: 'voice', models: data.models });
+        // The company took the key; its model is typed as the person named it there (an Azure deployment)
+        if (response.ok && data.ok && data.typed) setModels({ status: 'typed' });
+        else if (response.ok && data.ok && Array.isArray(data.models)) setModels({ status: 'voice', models: data.models, voices: data.voices ?? null, unsure: Array.isArray(data.unsure) ? data.unsure : [] });
         else setModels({ status: 'failed', message: response.status === 401 ? 'Sign in again, then try again.' : (data.error ?? 'That didn’t work. Try again.') });
         return;
       }
@@ -239,25 +262,57 @@ export default function AddAiKeyPage() {
   }
 
   // A listed provider needs at least one model for the key's check; a provider with no list needs its model typed
-  const canAdd = models.status === 'ready' || models.status === 'voice' ? models.models.length > 0 : models.status === 'typed' && !!model && model.trim() !== '';
+  // A server's models that it didn't say a job for each need the person's pick first
+  const unsure = models.status === 'voice' ? (models.unsure ?? []) : [];
+  // Own keys only: a model a server names `constructor` is not already picked
+  const markOf = (id: string) => (Object.hasOwn(marks, id) ? marks[id] : undefined);
+  const marked = unsure.flatMap((id) => {
+    const kind = markOf(id);
+    return kind ? [{ id, kind }] : [];
+  });
+  const picked: VoiceModel[] = models.status === 'voice' ? [...models.models, ...marked] : [];
+  // A key that can be split between two companies on a bot: it has a model that only listens and one that only speaks
+  const splits = picked.some((entry) => entry.kind === 'recognition') && picked.some((entry) => entry.kind === 'speech');
+  const canAdd =
+    models.status === 'voice'
+      ? picked.length > 0 && unsure.every((id) => markOf(id))
+      : models.status === 'ready'
+        ? models.models.length > 0
+        : models.status === 'typed' && !!model && model.trim() !== '';
 
   async function add() {
     if (!info || !canAdd) return;
     setSaving(true);
     setFailure(null);
     try {
-      const response = await authenticatedFetch(models.status === 'voice' ? '/api/me/voice-keys' : '/api/me/ai-keys', {
+      // A voice key with its model typed (an Azure deployment): that one model, of the company's job, at the person's own address
+      const typedVoice = voiceInfo && models.status === 'typed' && account?.typedModel ? account.typedModel : null;
+      const response = await authenticatedFetch(models.status === 'voice' || typedVoice ? '/api/me/voice-keys' : '/api/me/ai-keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:
-          models.status === 'voice'
+        body: typedVoice
+          ? JSON.stringify({
+              adapter: info.kind,
+              name,
+              apiKey,
+              endpoint: address.trim(),
+              recognition: typedVoice.kind !== 'speech',
+              speech: typedVoice.kind !== 'recognition',
+              models: [{ id: (model ?? '').trim(), label: (model ?? '').trim(), kind: typedVoice.kind }],
+            })
+          : models.status === 'voice'
             ? JSON.stringify({
                 adapter: info.kind,
                 name,
-                apiKey,
-                recognition: models.models.some((entry) => entry.kind === 'recognition'),
-                speech: models.models.some((entry) => entry.kind === 'speech'),
-                models: models.models,
+                // A server with no key sends none
+                ...(voiceKey.trim() ? { apiKey: voiceKey } : {}),
+                ...(ownSpeech ? { address } : {}),
+                // A talking model listens and speaks in one (game #1910)
+                recognition: picked.some((entry) => entry.kind === 'recognition' || entry.kind === 'talk'),
+                speech: picked.some((entry) => entry.kind === 'speech' || entry.kind === 'talk'),
+                models: picked,
+                ...(account?.address ? { endpoint: address.trim() } : {}),
+                ...(account?.regions && region ? { region } : {}),
               })
             : JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey, ...(model ? { model: model.trim() } : {}), name }),
       });
@@ -301,7 +356,7 @@ export default function AddAiKeyPage() {
             />
           )}
           <div role="radiogroup" aria-label="Provider" className="grid gap-4">
-            {shown.length === 0 && voice.length === 0 && <p className={FIELD_HINT}>No provider matches that. “Any OpenAI-compatible server” takes any address that speaks the OpenAI format.</p>}
+            {shown.length === 0 && voice.length === 0 && ownSpeechShown.length === 0 && <p className={FIELD_HINT}>No provider matches that. “Any OpenAI-compatible server” takes any address that speaks the OpenAI format.</p>}
             {ownComputer.length > 0 && <div className="grid gap-2">
               <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">On your own computer</h3>
               {ownComputer.map((entry) => (
@@ -315,8 +370,15 @@ export default function AddAiKeyPage() {
               ))}
             </div>}
             {companies.result.status === 'error' && <LoadError label="the voice companies" retry={companies.retry} />}
+            {ownSpeechShown.length > 0 && <div className="grid gap-2" data-testid="kinds-own-speech">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">For voice, on your own computer</h3>
+              {ownSpeechShown.map((entry) => (
+                <KindCard key={entry.kind} info={entry} picked={voiceAdapter === entry.kind} onPick={() => pickVoice(entry.kind)} />
+              ))}
+            </div>}
             {voice.length > 0 && <div className="grid gap-2" data-testid="kinds-voice">
               <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">For voice, with an API key</h3>
+              <p className={FIELD_HINT} data-testid="voice-one-key-hint">A company that listens and speaks needs one key for a bot’s whole voice. You can also mix: one company listens, another speaks.</p>
               {voice.map((entry) => (
                 <KindCard key={entry.kind} info={entry} picked={voiceAdapter === entry.kind} onPick={() => pickVoice(entry.kind)} />
               ))}
@@ -382,38 +444,60 @@ export default function AddAiKeyPage() {
                   />
                 ))}
               </div>
-              <p className={FIELD_HINT}>A key only works in the region it was made in.</p>
+              <p className={FIELD_HINT}>{account?.regions ? `Where ${info.label} runs your voice. Pick one near the people talking with your bots.` : 'A key only works in the region it was made in.'}</p>
             </Part>
           )}
 
-          <Part n={part++} title={own ? 'Paste its address' : 'Paste your key'}>
+          <Part n={part++} title={own ? 'Paste its address' : account?.keyId ? 'Paste your access key' : 'Paste your key'}>
             {info.address !== 'none' && (
               <div className="grid gap-1.5">
-                <Label htmlFor="ai-key-address">{info.address === 'optional' ? 'Your own NIM address (optional)' : 'Address'}</Label>
+                <Label htmlFor="ai-key-address">{account?.address?.label ?? (info.address === 'optional' ? 'Your own NIM address (optional)' : 'Address')}</Label>
                 <Input
                   id="ai-key-address"
                   type="url"
                   inputMode="url"
                   autoComplete="off"
-                  placeholder="https://lm.example.com"
+                  placeholder={ownSpeech ? 'https://speech.example.com' : (account?.address?.example ?? 'https://lm.example.com')}
                   value={address}
                   onChange={(event) => { setAddress(event.target.value); changed(); }}
                   className="h-11 rounded-xl"
                 />
                 <p className={FIELD_HINT}>
-                  Must start with https:// and be reachable from the internet. Private network addresses are refused.
-                  {own && ' A quick tunnel’s address changes each time cloudflared restarts; a named Cloudflare tunnel keeps one.'}
+                  {account?.address ? (
+                    account.address.hint
+                  ) : (
+                    <>
+                      Must start with https:// and be reachable from the internet. Private network addresses are refused.
+                      {own && ' A quick tunnel’s address changes each time cloudflared restarts; a named Cloudflare tunnel keeps one.'}
+                    </>
+                  )}
                 </p>
               </div>
             )}
+            {account?.keyId && (
+              <div className="grid gap-1.5">
+                <Label htmlFor="ai-key-id">{account.keyId.label}</Label>
+                <Input
+                  id="ai-key-id"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  placeholder={account.keyId.example}
+                  value={keyId}
+                  onChange={(event) => { setKeyId(event.target.value); changed(); }}
+                  className="h-11 rounded-xl"
+                />
+                <p className={FIELD_HINT}>{account.keyId.hint}</p>
+              </div>
+            )}
             <div className="grid gap-1.5">
-              <Label htmlFor="ai-key-secret">{info.apiKey === 'optional' ? 'API key, if your server asks for one' : 'API key'}</Label>
+              <Label htmlFor="ai-key-secret">{account?.keyLabel ?? (info.apiKey === 'optional' ? 'API key, if your server asks for one' : 'API key')}</Label>
               <Input
                 id="ai-key-secret"
                 type="password"
                 autoComplete="off"
                 spellCheck={false}
-                placeholder={info.apiKey === 'optional' ? 'Leave empty if none' : 'Paste your key'}
+                placeholder={info.apiKey === 'optional' ? 'Leave empty if none' : account?.keyLabel ? `Paste your ${account.keyLabel.toLowerCase()}` : 'Paste your key'}
                 value={apiKey}
                 onChange={(event) => { setApiKey(event.target.value); changed(); }}
                 className="h-11 rounded-xl"
@@ -425,29 +509,35 @@ export default function AddAiKeyPage() {
             </div>
             <div className="grid gap-2" aria-live="polite">
               <Button type="button" variant="outline" className="h-11" disabled={!canLoad || models.status === 'loading'} onClick={() => void loadModels()}>
-                <Download aria-hidden="true" />
-                {models.status === 'loading' ? 'Loading…' : 'Load models'}
+                {account?.typedModel ? <ShieldCheck aria-hidden="true" /> : <Download aria-hidden="true" />}
+                {models.status === 'loading' ? (account?.typedModel ? 'Checking…' : 'Loading…') : account?.typedModel ? 'Check key' : 'Load models'}
               </Button>
-              {models.status === 'none' && <p className={FIELD_HINT}>Loads {info.label}’s models, which also checks that it answers.</p>}
+              {models.status === 'none' && <p className={FIELD_HINT}>{account?.typedModel ? `Checks that ${info.label} takes the key.` : `Loads ${ownSpeech ? 'your server’s' : `${info.label}’s`} models, which also checks that it answers.`}</p>}
               {models.status === 'failed' && (
                 <p role="alert" className="text-sm text-[#fca5a5]">
                   {models.message}
                 </p>
               )}
+              {models.status === 'typed' && account?.typedModel && (
+                <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                  <Check size={16} aria-hidden="true" className="text-[#4ade80]" />
+                  It answered. {info.label} took the key.
+                </p>
+              )}
               {(models.status === 'ready' || models.status === 'voice') && (
                 <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
                   <Check size={16} aria-hidden="true" className="text-[#4ade80]" />
-                  It answered. {info.label} has {models.models.length} {models.models.length === 1 ? 'model' : 'models'}{makerCount > 1 ? ` from ${makerCount} makers` : ''}.
+                  It answered. {ownSpeech ? 'Your server' : info.label} has {models.status === 'voice' ? models.models.length + unsure.length : models.models.length} {(models.status === 'voice' ? models.models.length + unsure.length : models.models.length) === 1 ? 'model' : 'models'}{makerCount > 1 ? ` from ${makerCount} makers` : ''}.
                 </p>
               )}
             </div>
           </Part>
 
-          <Part n={part++} title={models.status === 'typed' ? 'Name its model' : 'Its models'}>
-            {!loaded && <p className={FIELD_HINT}>{info.label}’s models show here once they load.</p>}
+          <Part n={part++} title={models.status === 'typed' ? (account?.typedModel?.title ?? 'Name its model') : ownSpeech ? 'What it does' : 'Its models'}>
+            {!loaded && <p className={FIELD_HINT}>{ownSpeech ? 'What your server listens and speaks with shows here once it answers.' : `${info.label}’s models show here once they load.`}</p>}
             {models.status === 'typed' && (
               <div className="grid gap-1.5">
-                <Label htmlFor="ai-key-model-name">Model name</Label>
+                <Label htmlFor="ai-key-model-name">{account?.typedModel?.label ?? 'Model name'}</Label>
                 <Input
                   id="ai-key-model-name"
                   autoComplete="off"
@@ -459,19 +549,34 @@ export default function AddAiKeyPage() {
                   className="h-11 rounded-xl"
                 />
                 <p className={FIELD_HINT}>
-                  {info.label} doesn’t share a list of its models. Type the name as {info.label} writes it. Add key checks it with one tiny reply.
+                  {account?.typedModel
+                    ? account.typedModel.hint
+                    : `${info.label} doesn’t share a list of its models. Type the name as ${info.label} writes it. Add key checks it with one tiny reply.`}
                 </p>
               </div>
             )}
             {models.status === 'voice' && (
               <>
-                <p className={FIELD_HINT}>Nothing to pick here. Each bot picks one of these on its own page. When you lend the key, you can limit which ones bots there may use.</p>
-                {(['recognition', 'speech'] as const).map((job) => {
-                  const list = models.models.filter((entry) => entry.kind === job);
+                {/* One key from a company that listens and speaks is a bot's whole voice (#1911); a talking model does both (game #1910) */}
+                {picked.some((entry) => entry.kind === 'recognition' || entry.kind === 'talk') && picked.some((entry) => entry.kind === 'speech' || entry.kind === 'talk') && (
+                  <p className="flex items-start gap-2 rounded-2xl border border-foreground/10 bg-foreground/[.04] px-3.5 py-2.5 text-[13px]" data-testid="voice-one-key">
+                    <Check size={16} aria-hidden="true" className="mt-0.5 shrink-0 text-[#4ade80]" />
+                    <span>
+                      {splits
+                        ? `${ownSpeech ? 'This server listens and speaks' : 'This key listens and speaks'}, so it’s all a bot needs. On a bot’s Voice row you can still split: listen with one company, speak with another.`
+                        : // A talking model can't be split (lib/bot-voice.ts profileProblem): a bot names it for both jobs
+                          'This key talks live, so it’s all a bot needs. A bot on it listens and speaks with the same model.'}
+                    </span>
+                  </p>
+                )}
+                {unsure.length === 0 && <p className={FIELD_HINT}>Nothing to pick here. Each bot picks one of these on its own page. When you lend the key, you can limit which ones bots there may use.</p>}
+                {VOICE_JOB_TITLES.map(({ kind: job, title }) => {
+                  const list = picked.filter((entry) => entry.kind === job);
                   return (
                     list.length > 0 && (
                       <div key={job} className="grid gap-1.5" data-testid={`voice-models-${job}`}>
-                        <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{job === 'recognition' ? 'Listens' : 'Speaks'}</h3>
+                        <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{title}</h3>
+                        {ownSpeech && job === 'recognition' && <p className={FIELD_HINT} data-testid="own-speech-pause">It hears a person once they pause, so no words show while they talk.</p>}
                         <ul className="m-0 grid list-none gap-0 rounded-2xl border border-foreground/10 p-0">
                           {list.map((entry) => (
                             <li key={entry.id} className="flex min-h-11 items-center gap-2 border-t border-foreground/10 px-3 text-[15px] first:border-t-0" data-testid="model-row">
@@ -479,10 +584,38 @@ export default function AddAiKeyPage() {
                             </li>
                           ))}
                         </ul>
+                        {ownSpeech && job === 'speech' && (
+                          <p className={FIELD_HINT} data-testid="own-speech-voices">
+                            {models.voices ? `${models.voices} voices from your server. Each bot picks one on its Voice row.` : 'Your server doesn’t list its voices. Each bot types its voice’s name on its Voice row.'}
+                          </p>
+                        )}
                       </div>
                     )
                   );
                 })}
+                {unsure.length > 0 && (
+                  <div className="grid gap-1.5" data-testid="own-speech-unsure">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Listens or speaks?</h3>
+                    <p className={FIELD_HINT}>Your server lists these models without saying what they do. Pick for each one; bots pick between them later.</p>
+                    <ul className="m-0 grid list-none gap-0 rounded-2xl border border-foreground/10 p-0">
+                      {unsure.map((id) => (
+                        <li key={id} className="grid gap-2 border-t border-foreground/10 px-3 py-2 text-[15px] first:border-t-0 sm:flex sm:items-center" data-testid="unsure-row">
+                          <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{id}</span>
+                          <Segmented
+                            aria-label={`What ${id} does`}
+                            className="sm:w-[220px]"
+                            value={markOf(id) ?? ('' as VoiceModel['kind'])}
+                            onChange={(next) => setMarks((all) => ({ ...all, [id]: next }))}
+                            options={[
+                              { value: 'recognition', label: 'Listens' },
+                              { value: 'speech', label: 'Speaks' },
+                            ]}
+                          />
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </>
             )}
             {models.status === 'ready' && (

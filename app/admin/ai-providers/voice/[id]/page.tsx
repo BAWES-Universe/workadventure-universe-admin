@@ -8,17 +8,18 @@ import { Input } from '@/components/ui/input';
 import { useToast } from '@/components/ui/toast';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import type { VoiceModel } from '@/lib/voice-providers';
+import { companyHost } from '@/lib/voice-key-companies';
 import { LoadError, LoadingRows, PageHeader, SettingSwitch, Settings } from '../../../components/ds';
 import { ProviderLogo } from '../../../components/ds/provider-logo';
 import { FormSheet } from '../../../components/form-sheet';
 import { EnabledPill } from '../../components/provider-state';
 import {
   Answered,
-  COMPANY_HOST,
   Caption,
   DefaultPills,
   FIELD_HINT,
   ModelRows,
+  OffJobRows,
   Refused,
   bots,
   botsOn,
@@ -27,6 +28,7 @@ import {
   doesLine,
   logoOf,
   modelName,
+  offJobs,
   startingModel,
   type ServerVoiceProvider,
   type VoiceJob,
@@ -167,9 +169,9 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
 
   const isDefault = provider.defaultRecognition || provider.defaultSpeech;
   const company = companyLabel(provider.adapter);
-  const own = COMPANY_HOST[provider.adapter];
-  // People can add a company's key while any provider of it is on
-  const stillOn = all.some((other) => other.id !== id && other.adapter === provider.adapter && other.enabled);
+  const own = companyHost(provider.adapter, provider.recognition ? 'recognition' : 'speech');
+  // What turning it off does to its bots, as the Disable sheet on the list says (#840)
+  const offLines = offJobs(provider, all);
   const jobs: VoiceJob[] = [...(provider.recognition ? (['recognition'] as const) : []), ...(provider.speech ? (['speech'] as const) : [])];
 
   const used = [
@@ -270,11 +272,11 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
           <SettingSwitch
             id="enabled"
             label="On"
-            hint="Bots and people’s own keys can use it. Off, its bots answer in text."
+            hint="Bots and people’s own keys can use it. Off, its bots borrow Universe AI’s current default until it’s on again."
             checked={provider.enabled}
             disabled={busy}
-            // The last provider of a company that is on takes people's way to add that company's key with it: said first, as on the list
-            onChange={(next) => (next || stillOn ? void setEnabled(next) : setTurningOff(true))}
+            // A provider that bots use says what happens to them first, as on the list
+            onChange={(next) => (next || offLines.length === 0 ? void setEnabled(next) : setTurningOff(true))}
           />
         </Settings>
       )}
@@ -389,10 +391,7 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
         )}
       </section>
       <FormSheet open={turningOff} onOpenChange={(open) => !open && !busy && setTurningOff(false)} title={`Disable ${provider.name}?`}>
-        <p className="text-sm text-muted-foreground">
-          {botsOn(provider) > 0 ? `${bots(botsOn(provider))} ${botsOn(provider) === 1 ? 'uses' : 'use'} ${provider.name}. ${botsOn(provider) === 1 ? 'It answers' : 'They answer'} in text until it’s on again, or until their maker picks another voice. ` : ''}
-          People can’t add a {company} key while no {company} provider is on.
-        </p>
+        <OffJobRows jobs={offLines} />
         {problem && <Refused>{problem}</Refused>}
         <div className="flex justify-end gap-2">
           <Button variant="outline" className="h-11 px-5" disabled={busy} onClick={() => setTurningOff(false)}>
@@ -406,7 +405,7 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
       <FormSheet open={deleting} onOpenChange={(open) => !open && !busy && setDeleting(false)} title={`Delete ${provider.name}?`}>
         <p className="text-sm text-muted-foreground">
           {botsOn(provider) > 0 ? `Its ${bots(botsOn(provider))} answer in text until their maker picks another voice. ` : ''}
-          Its key is deleted with it. {stillOn ? '' : `People can’t add a ${company} key while no ${company} provider is on.`}
+          Its key is deleted with it.
         </p>
         {problem && <Refused>{problem}</Refused>}
         <div className="flex justify-end gap-2">

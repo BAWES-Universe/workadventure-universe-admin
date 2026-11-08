@@ -24,6 +24,7 @@ import { AiKeyFailure, aiKeyError, aiKeyFailureText, useAiKeys } from '../../hoo
 import { RenameButton, RenameKey } from './rename-key';
 import { DOWN_PHRASE, StatusPill, names, sinceText } from './key-text';
 import { VoiceKeyCard } from './voice-key-card';
+import { ChangeSpeechAddress } from './change-speech-address';
 import { repliesInText, type VoiceLent } from './voice-key-text';
 import { VoiceModelPicker } from '../../components/ds/voice-model-picker';
 import { isVoiceKey, useVoiceKeys } from '../../hooks/use-voice-keys';
@@ -134,6 +135,8 @@ export default function AiKeysPage() {
   const [failure, setFailure] = useState<string | null>(null);
   const [lending, setLending] = useState<{ key: AnyKey; universeId?: string } | null>(null);
   const [editing, setEditing] = useState<AiKeySummary | null>(null);
+  // The own speech server whose address is being changed (game #1874)
+  const [movingSpeech, setMovingSpeech] = useState<VoiceKeySummary | null>(null);
   const [pulling, setPulling] = useState<{ key: AnyKey; lent: AnyLent } | null>(null);
   const [checking, setChecking] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
@@ -277,6 +280,7 @@ export default function AiKeysPage() {
           onLend={() => setLending({ key })}
           onEditModels={(universeId) => setLending({ key, universeId })}
           onLimits={() => setVoiceLimitsFor(key.id)}
+          onChangeAddress={() => setMovingSpeech(key)}
           onPull={(lent) => {
             setFailure(null);
             if (lent.bots.length > 0) setPulling({ key, lent });
@@ -554,6 +558,16 @@ export default function AiKeysPage() {
         onSaved={(key) => {
           setEditing(null);
           retry();
+          addToast({ description: `${key.name} now uses the new address`, variant: 'success', duration: 2500 });
+        }}
+      />
+
+      <ChangeSpeechAddress
+        target={movingSpeech}
+        onClose={() => setMovingSpeech(null)}
+        onSaved={(key) => {
+          setMovingSpeech(null);
+          updateVoice((list) => list.map((entry) => (entry.id === key.id ? key : entry)));
           addToast({ description: `${key.name} now uses the new address`, variant: 'success', duration: 2500 });
         }}
       />

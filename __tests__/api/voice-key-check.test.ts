@@ -25,6 +25,7 @@ const serverRows = [
   { adapter: 'elevenlabs', name: 'ElevenLabs EU', recognition: false, speech: true, models: [{ id: 'eleven_flash_v2_5', label: 'Flash (EU)', kind: 'speech' }, { id: 'eleven_v3', kind: 'speech' }, { id: 'scribe_v1', kind: 'recognition' }] },
   { adapter: 'deepgram', name: 'Deepgram', recognition: true, speech: false, models: [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }] },
   { adapter: 'cartesia', name: 'Cartesia', recognition: false, speech: true, models: [{ id: 'sonic-3', kind: 'speech' }] },
+  { adapter: 'fish', name: 'Fish Audio', recognition: false, speech: true, models: [{ id: 's2.1-pro-free', label: 'S2.1 Pro (free)', kind: 'speech' }, { id: 's2.1-pro', kind: 'speech' }] },
 ];
 
 const send = (body: unknown) =>
@@ -81,18 +82,91 @@ describe('Load models for a voice key', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it.each(VOICE_KEY_COMPANIES.map((company) => [company.adapter, company]))('%s: a GET to its own address with the key in one header and nothing billed', async (adapter, company) => {
+  it.each(VOICE_KEY_COMPANIES.filter((company) => !company.check.sign).map((company) => [company.adapter, company]))('%s: a GET to its own address with the key in one header and nothing billed', async (adapter, company) => {
     findMany.mockResolvedValue([{ adapter, name: company.label, recognition: true, speech: true, models: [{ id: 'm', kind: 'speech' }] }]);
     answer(200);
-    expect((await send({ adapter, apiKey: KEY })).status).toBe(200);
+    // A company whose keys live at the person's own address (Azure) is asked there
+    const address = company.account?.address ? 'https://my-resource.openai.azure.com' : undefined;
+    expect((await send({ adapter, apiKey: KEY, ...(address ? { address } : {}) })).status).toBe(200);
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe(company.check.url);
+    expect(url).toBe(company.check.url.replace('{address}', address ?? ''));
     expect(new URL(url).protocol).toBe('https:');
     expect(init.method).toBe('GET');
     expect(init.body).toBeUndefined();
     expect(init.redirect).toBe('manual');
     expect(init.headers[company.check.header]).toBe(`${company.check.prefix}${KEY}`);
     expect(Object.values(init.headers).filter((value) => String(value).includes(KEY))).toHaveLength(1);
+  });
+
+  it('checks an Azure key on the person’s own resource, then asks for the deployment to be typed', async () => {
+    answer(200);
+    const response = await send({ adapter: 'azure', apiKey: KEY, address: 'https://My-Res.openai.azure.com/openai/v1' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, models: [], typed: true });
+    expect(fetchMock.mock.calls[0][0]).toBe('https://my-res.openai.azure.com/openai/v1/models');
+    expect(fetchMock.mock.calls[0][1].headers['api-key']).toBe(KEY);
+  });
+
+  it.each([undefined, '', 'my-res', 'http://my-res.openai.azure.com', 'https://evil.example.com', 'https://openai.azure.com', 'https://my-res.openai.azure.com.evil.com', 'https://u:p@my-res.openai.azure.com'])(
+    'never sends an Azure key to %p',
+    async (address) => {
+      answer(200);
+      const response = await send({ adapter: 'azure', apiKey: KEY, address });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'Paste your endpoint as it is, like https://your-resource.openai.azure.com.' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  describe('AWS: a key in two parts, made per region (#1910)', () => {
+    const ID = 'AKIAIOSFODNN7EXAMPLE';
+    const SECRET = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+    const AWS = `${ID}:${SECRET}`;
+
+    it('signs a free STS call in the region picked: the ID and a signature go, never the secret', async () => {
+      answer(200);
+      const response = await send({ adapter: 'aws', apiKey: AWS, region: 'eu-north-1' });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true, models: [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }] });
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe('https://sts.eu-north-1.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15');
+      expect(init.method).toBe('GET');
+      expect(init.redirect).toBe('manual');
+      expect(init.headers.Authorization).toMatch(new RegExp(`^AWS4-HMAC-SHA256 Credential=${ID}/\\d{8}/eu-north-1/sts/aws4_request, SignedHeaders=host;x-amz-date, Signature=[0-9a-f]{64}$`));
+      expect(init.headers['x-amz-date']).toMatch(/^\d{8}T\d{6}Z$/);
+      expect(JSON.stringify(init)).not.toContain(SECRET);
+    });
+
+    it('says AWS refused a key it answers 403', async () => {
+      answer(403, '<ErrorResponse><Error><Code>InvalidClientTokenId</Code></Error></ErrorResponse>');
+      const response = await send({ adapter: 'aws', apiKey: AWS, region: 'us-east-1' });
+      expect(response.status).toBe(422);
+      expect(await response.json()).toEqual({ error: 'AWS didn’t accept that key. Check it and paste it again.' });
+    });
+
+    it.each([undefined, '', 'eu-west-1', 'us-east-1.evil.com'])('asks for a region first, and calls no one, for %p', async (region) => {
+      answer(200);
+      const response = await send({ adapter: 'aws', apiKey: AWS, region });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'Pick the region first.' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it.each([SECRET, `${ID}:`, `:${SECRET}`, `ASIAIOSFODNN7EXAMPLE:${SECRET}`, `${ID}:${SECRET}:x`])('refuses a key not in two parts, without calling anyone (%p)', async (apiKey) => {
+      answer(200);
+      const response = await send({ adapter: 'aws', apiKey, region: 'us-east-1' });
+      expect(response.status).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it('says Google refused a key it answers 400 API_KEY_INVALID, and counts any other 400 as not reached', async () => {
+    answer(400, '{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}');
+    const refused = await send({ adapter: 'google', apiKey: KEY });
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toEqual({ error: 'Google didn’t accept that key. Check it and paste it again.' });
+    answer(400, '{"error":{"code":400,"status":"FAILED_PRECONDITION"}}');
+    expect((await send({ adapter: 'google', apiKey: KEY })).status).toBe(502);
   });
 
   it('says the company refused the key for a 401 or 403, and lists nothing', async () => {
@@ -114,6 +188,38 @@ describe('Load models for a voice key', () => {
     expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(200);
     answer(401, '{"err_code":"INVALID_AUTH","err_msg":"Invalid credentials."}');
     expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(422);
+    // OpenAI answers a restricted key without the models permission with a 403 naming the scope; any other 403 is still refused
+    findMany.mockResolvedValue([{ adapter: 'openai', name: 'OpenAI', recognition: true, speech: true, models: [{ id: 'm', kind: 'speech' }] }]);
+    answer(403, '{"error":{"message":"You have insufficient permissions for this operation. Missing scopes: api.model.read."}}');
+    expect((await send({ adapter: 'openai', apiKey: KEY })).status).toBe(200);
+    answer(403, '{"error":{"message":"You are not allowed to sample from this model"}}');
+    expect((await send({ adapter: 'openai', apiKey: KEY })).status).toBe(422);
+    answer(401, '{"error":{"code":"invalid_api_key"}}');
+    expect((await send({ adapter: 'openai', apiKey: KEY })).status).toBe(422);
+  });
+
+  it('Fish Audio: asks its free credit call, lists its models, and refuses a wrong key with its own name', async () => {
+    answer(200);
+    const accepted = await send({ adapter: 'fish', apiKey: KEY });
+    expect(await accepted.json()).toEqual({ ok: true, models: [{ id: 's2.1-pro-free', label: 'S2.1 Pro (free)', kind: 'speech' }, { id: 's2.1-pro', kind: 'speech' }] });
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.fish.audio/wallet/self/api-credit');
+    answer(401);
+    const refused = await send({ adapter: 'fish', apiKey: KEY });
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toEqual({ error: 'Fish Audio didn’t accept that key. Check it and paste it again.' });
+  });
+
+  it('AssemblyAI: lists past transcripts with the key as it is (no Bearer), so nothing is transcribed, and refuses a wrong key', async () => {
+    answer(200);
+    const accepted = await send({ adapter: 'assemblyai', apiKey: KEY });
+    expect((await accepted.json()).ok).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.assemblyai.com/v2/transcript?limit=1');
+    expect(init.headers.Authorization).toBe(KEY);
+    answer(401);
+    const refused = await send({ adapter: 'assemblyai', apiKey: KEY });
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toEqual({ error: 'AssemblyAI didn’t accept that key. Check it and paste it again.' });
   });
 
   it('says it could not be reached for a timeout, a dropped connection or any other answer', async () => {
@@ -134,8 +240,8 @@ describe('Load models for a voice key', () => {
     expect(CHECK_TIMEOUT_MS).toBeLessThanOrEqual(10_000);
   });
 
-  it('refuses a company that is not in the catalog, or that the server has not turned on, without calling anyone', async () => {
-    for (const adapter of ['unknown-co', 'soniox', undefined, 5]) {
+  it('refuses a company that is not in the catalog without calling anyone', async () => {
+    for (const adapter of ['unknown-co', undefined, 5]) {
       const response = await send({ adapter, apiKey: KEY });
       expect(response.status).toBe(400);
     }
@@ -150,10 +256,44 @@ describe('Load models for a voice key', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('says so when the company has no models set up', async () => {
+  it('needs no setup by a super admin: a company the server has no provider for starts with the catalog\'s own models', async () => {
     findMany.mockImplementation(async ({ where }: { where: { adapter?: string } }) => (where.adapter ? [] : serverRows));
+    for (const [adapter, models] of [
+      ['soniox', [{ id: 'stt-rt-v6', label: 'Soniox real-time v6', kind: 'recognition' }, { id: 'tts-rt-v2', label: 'Soniox TTS v2', kind: 'speech' }]],
+      ['assemblyai', [{ id: 'universal-3-6-pro', label: 'Universal-3.6 Pro', kind: 'recognition' }, { id: 'universal-streaming-multilingual', label: 'Universal Streaming Multilingual', kind: 'recognition' }, { id: 'universal-streaming-english', label: 'Universal Streaming English', kind: 'recognition' }]],
+      ['deepgram', [{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }, { id: 'aura-2', label: 'Aura 2', kind: 'speech' }]],
+      ['cartesia', [{ id: 'ink-whisper', label: 'Ink Whisper', kind: 'recognition' }, { id: 'sonic-3.6', label: 'Sonic 3.6', kind: 'speech' }]],
+      ['fish', [{ id: 's2.1-pro-free', label: 'S2.1 Pro (free)', kind: 'speech' }, { id: 's2.1-pro', label: 'S2.1 Pro', kind: 'speech' }]],
+      ['elevenlabs', [{ id: 'scribe_v2_realtime', label: 'Scribe v2 Realtime', kind: 'recognition' }, { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }, { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }]],
+    ] as const) {
+      answer(200);
+      const response = await send({ adapter, apiKey: KEY });
+      expect([adapter, response.status, await response.json()]).toEqual([adapter, 200, { ok: true, models }]);
+    }
+  });
+
+  it('lists the server\'s own models instead of the catalog\'s for each job the server has a provider for', async () => {
     answer(200);
-    expect((await send({ adapter: 'deepgram', apiKey: KEY })).status).toBe(409);
+    const response = await send({ adapter: 'elevenlabs', apiKey: KEY });
+    const { models } = await response.json();
+    expect(models.map((model: { id: string }) => model.id)).toEqual(['scribe_v1', 'eleven_flash_v2_5', 'eleven_v3']);
+  });
+
+  it('gives the catalog\'s starting models for a job the server has no provider for, after the server\'s own', async () => {
+    answer(200);
+    const response = await send({ adapter: 'cartesia', apiKey: KEY });
+    expect(await response.json()).toEqual({ ok: true, models: [{ id: 'sonic-3', kind: 'speech' }, { id: 'ink-whisper', label: 'Ink Whisper', kind: 'recognition' }] });
+    // The same for a company the server only listens with: its key still speaks
+    answer(200);
+    const deepgram = await (await send({ adapter: 'deepgram', apiKey: KEY })).json();
+    expect(deepgram.models).toEqual([{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }, { id: 'aura-2', label: 'Aura 2', kind: 'speech' }]);
+  });
+
+  it('leaves out what the company\'s own list leaves out (Deepgram Flux) even when a server provider lists it', async () => {
+    findMany.mockImplementation(async () => [{ adapter: 'deepgram', name: 'Deepgram', recognition: true, speech: false, models: [{ id: 'flux-general-en', kind: 'recognition' }, { id: 'nova-3', kind: 'recognition' }] }]);
+    answer(200);
+    const { models } = await (await send({ adapter: 'deepgram', apiKey: KEY })).json();
+    expect(models.map((model: { id: string }) => model.id)).toEqual(['nova-3', 'aura-2']);
   });
 
   it('never returns or logs the key', async () => {

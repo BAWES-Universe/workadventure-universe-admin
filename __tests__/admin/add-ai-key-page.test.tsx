@@ -565,6 +565,10 @@ describe('Add a key for voice', () => {
       expect.stringContaining('Cartesia'),
     ]);
     expect(within(group).getAllByTestId('provider-logo')).toHaveLength(2);
+    // One line on how many keys a bot's voice needs (#1911)
+    expect(within(group).getByTestId('voice-one-key-hint').textContent).toBe(
+      'A company that listens and speaks needs one key for a bot’s whole voice. You can also mix: one company listens, another speaks.',
+    );
     const hosted = screen.getByText('Hosted, with an API key');
     expect(hosted.compareDocumentPosition(group) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     unmount();
@@ -609,11 +613,94 @@ describe('Add a key for voice', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/me/voice-keys/check', expect.objectContaining({ method: 'POST', body: JSON.stringify({ adapter: 'elevenlabs', apiKey: 'sk-elevenlabs-key' }) }));
     expect(fetchMock.mock.calls.some(([url]) => url === '/api/me/ai-keys/models')).toBe(false);
     expect(screen.getByText(/Nothing to pick here\. Each bot picks one of these on its own page/)).toBeTruthy();
+    // A key that listens and speaks is all a bot needs, and it can still be split on the bot (#1911)
+    expect(screen.getByTestId('voice-one-key').textContent).toBe(
+      'This key listens and speaks, so it’s all a bot needs. On a bot’s Voice row you can still split: listen with one company, speak with another.',
+    );
     expect(within(screen.getByTestId('voice-models-recognition')).getByText('Scribe v1')).toBeTruthy();
     // A model with no label is shown by its id
     expect(within(screen.getByTestId('voice-models-speech')).getAllByTestId('model-row').map((row) => row.textContent)).toEqual(['Eleven Flash v2.5', 'eleven_v3']);
     expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('My ElevenLabs');
     expect(screen.getByText('Shown here, and under Voice for the bots that use it.')).toBeTruthy();
+  });
+
+  it('asks an Azure key for its endpoint, checks the key there, then takes the deployment name as its one talking model', async () => {
+    const account = {
+      address: { label: 'Endpoint', example: 'https://your-resource.openai.azure.com', hint: 'From Keys and Endpoint on your resource.' },
+      typedModel: { title: 'Name its deployment', label: 'Deployment name', hint: 'The name you gave the gpt-realtime deployment.', kind: 'talk' },
+    };
+    voiceCompanies = [company('azure', 'Azure OpenAI', { recognition: false, speech: false, talk: true, account })];
+    render(<AddAiKeyPage />);
+    fireEvent.click(await screen.findByRole('radio', { name: /^Azure OpenAI/ }));
+    const endpoint = screen.getByLabelText('Endpoint') as HTMLInputElement;
+    expect(endpoint.placeholder).toBe('https://your-resource.openai.azure.com');
+    expect(screen.getByText('From Keys and Endpoint on your resource.')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'azure-key-123456' } });
+    // No check without the endpoint
+    expect((screen.getByRole('button', { name: 'Check key' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(endpoint, { target: { value: 'https://my-res.openai.azure.com' } });
+    fetchMock.mockImplementation((url: string) => (url === '/api/me/voice-keys/check' ? json({ ok: true, models: [], typed: true }) : json({ key: { id: 'vk-new' } })));
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    expect(await screen.findByText(/It answered\. Azure OpenAI took the key\./)).toBeTruthy();
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ adapter: 'azure', apiKey: 'azure-key-123456', address: 'https://my-res.openai.azure.com' });
+    expect(screen.getByRole('heading', { name: /Name its deployment/ })).toBeTruthy();
+    expect((addButton() as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText('Deployment name'), { target: { value: 'realtime-prod' } });
+    fireEvent.click(addButton());
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/you/ai-keys'));
+    const [url, init] = fetchMock.mock.calls.at(-1)!;
+    expect(url).toBe('/api/me/voice-keys');
+    expect(JSON.parse(init.body)).toEqual({
+      adapter: 'azure',
+      name: 'My Azure OpenAI',
+      apiKey: 'azure-key-123456',
+      endpoint: 'https://my-res.openai.azure.com',
+      recognition: true,
+      speech: true,
+      models: [{ id: 'realtime-prod', label: 'realtime-prod', kind: 'talk' }],
+    });
+  });
+
+  it('asks an AWS key for its region, its access key ID and its secret, and sends the key as one, in that region', async () => {
+    const account = {
+      regions: [
+        { id: 'us-east-1', label: 'US East (N. Virginia)', host: 'bedrock-runtime.us-east-1.amazonaws.com' },
+        { id: 'eu-north-1', label: 'Europe (Stockholm)', host: 'bedrock-runtime.eu-north-1.amazonaws.com' },
+      ],
+      keyId: { label: 'Access key ID', example: 'AKIA…', hint: 'It starts with AKIA.' },
+      keyLabel: 'Secret access key',
+    };
+    const nova = [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }];
+    voiceCompanies = [company('aws', 'AWS', { recognition: false, speech: false, talk: true, account })];
+    render(<AddAiKeyPage />);
+    fireEvent.click(await screen.findByRole('radio', { name: /^AWS/ }));
+    expect(screen.getByRole('heading', { name: /Pick the region/ })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: /Paste your access key/ })).toBeTruthy();
+    expect((screen.getByLabelText('Access key ID') as HTMLInputElement).placeholder).toBe('AKIA…');
+    fireEvent.change(screen.getByLabelText('Access key ID'), { target: { value: ' AKIAIOSFODNN7EXAMPLE ' } });
+    fireEvent.change(screen.getByLabelText('Secret access key'), { target: { value: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' } });
+    // No check without the region
+    expect((screen.getByRole('button', { name: 'Load models' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('radio', { name: /Europe \(Stockholm\)/ }));
+    fetchMock.mockImplementation((url: string) => (url === '/api/me/voice-keys/check' ? json({ ok: true, models: nova }) : json({ key: { id: 'vk-new' } })));
+    fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
+    await screen.findByText(/It answered/);
+    // A talking model can't be split between two companies on a bot, so the page doesn't offer that
+    expect(screen.getByTestId('voice-one-key').textContent).toBe('This key talks live, so it’s all a bot needs. A bot on it listens and speaks with the same model.');
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ adapter: 'aws', apiKey: 'AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', region: 'eu-north-1' });
+    fireEvent.click(addButton());
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/you/ai-keys'));
+    const [url, init] = fetchMock.mock.calls.at(-1)!;
+    expect(url).toBe('/api/me/voice-keys');
+    expect(JSON.parse(init.body)).toEqual({
+      adapter: 'aws',
+      name: 'My AWS',
+      apiKey: 'AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      recognition: true,
+      speech: true,
+      models: nova,
+      region: 'eu-north-1',
+    });
   });
 
   it('adds a voice key with what it listens and speaks, then goes back to the AI keys page', async () => {
@@ -642,6 +729,7 @@ describe('Add a key for voice', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
     expect(await screen.findByText(/It answered\. Soniox has 1 model\./)).toBeTruthy();
     expect(screen.queryByTestId('voice-models-speech')).toBeNull();
+    expect(screen.queryByTestId('voice-one-key')).toBeNull();
     fireEvent.click(addButton());
     await waitFor(() => expect(push).toHaveBeenCalled());
     expect(JSON.parse(fetchMock.mock.calls.at(-1)![1].body)).toMatchObject({ adapter: 'soniox', recognition: true, speech: false });
@@ -675,5 +763,117 @@ describe('Add a key for voice', () => {
     change();
     fireEvent.click(screen.getByRole('radio', { name: /^Claude/ }));
     expect((screen.getByLabelText('API key') as HTMLInputElement).value).toBe('');
+  });
+});
+
+describe('Add a key for your own speech server', () => {
+  const own = {
+    adapter: 'openai-compatible',
+    label: 'Any OpenAI-compatible speech server',
+    recognition: true,
+    speech: true,
+    logo: null,
+    benefit: 'Speaches, Kokoro-FastAPI, your own Whisper: anything that answers /v1/audio.',
+    step: '',
+    docs: '',
+    ownServer: {
+      steps: [
+        { text: 'Start the server. Speaches listens and speaks (port 8000); Kokoro-FastAPI speaks (port 8880). For Speaches:', code: 'docker run -p 8000:8000 ghcr.io/speaches-ai/speaches:latest-cpu' },
+        { text: 'Make it reachable from the web. Run (use 8880 for Kokoro-FastAPI):', code: 'cloudflared tunnel --url http://localhost:8000' },
+        { text: 'Paste the https address it prints below, and a key if the server asks for one.' },
+      ],
+    },
+  };
+  const hosted = { adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true, logo: null, benefit: 'Listens and speaks. About ElevenLabs.', step: 'On elevenlabs.example.com, create a key.', docs: 'https://elevenlabs.example.com/docs' };
+  const pickOwn = async () => {
+    voiceCompanies = [hosted, own];
+    render(<AddAiKeyPage />);
+    fireEvent.click(await screen.findByRole('radio', { name: /^Any OpenAI-compatible speech server/ }));
+  };
+  const load = async (answer: unknown, ok = true) => {
+    fireEvent.change(screen.getByLabelText('Address'), { target: { value: 'https://speech.example.com' } });
+    fetchMock.mockImplementation((url: string) => (url === '/api/me/voice-keys/check' ? json(answer, ok) : json({ key: { id: 'vk-new' } })));
+    fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
+  };
+
+  it('has its own group above the voice companies, and it is not listed among them', async () => {
+    voiceCompanies = [hosted, own];
+    render(<AddAiKeyPage />);
+    const group = await screen.findByTestId('kinds-own-speech');
+    expect(within(group).getByRole('heading', { name: 'For voice, on your own computer' })).toBeTruthy();
+    expect(within(group).getAllByRole('radio')).toHaveLength(1);
+    expect(within(screen.getByTestId('kinds-voice')).queryByRole('radio', { name: /OpenAI-compatible/ })).toBeNull();
+    expect(group.compareDocumentPosition(screen.getByTestId('kinds-voice')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Nothing recommends it
+    expect(screen.queryByText(/Recommended/i)).toBeNull();
+  });
+
+  it('is set up like a chat server: its commands, an https address, an optional key, and a default name', async () => {
+    await pickOwn();
+    expect(screen.getByRole('heading', { name: 'Start your server' })).toBeTruthy();
+    expect(screen.getByText('docker run -p 8000:8000 ghcr.io/speaches-ai/speaches:latest-cpu')).toBeTruthy();
+    expect(screen.getByText('cloudflared tunnel --url http://localhost:8000')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Paste its address' })).toBeTruthy();
+    expect((screen.getByLabelText('Address') as HTMLInputElement).placeholder).toBe('https://speech.example.com');
+    expect(screen.getByLabelText('API key, if your server asks for one')).toBeTruthy();
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('My speech server');
+    expect((screen.getByRole('button', { name: 'Load models' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('loads what the server does, says it hears after a pause and how many voices it lists, and adds it with its address and no key', async () => {
+    await pickOwn();
+    const models = [{ id: 'whisper-small', kind: 'recognition' }, { id: 'kokoro', kind: 'speech' }];
+    await load({ ok: true, models, unsure: [], voices: 67 });
+    expect(await screen.findByText(/It answered\. Your server has 2 models\./)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'What it does' })).toBeTruthy();
+    expect(screen.getByTestId('own-speech-pause').textContent).toBe('It hears a person once they pause, so no words show while they talk.');
+    expect(screen.getByTestId('own-speech-voices').textContent).toBe('67 voices from your server. Each bot picks one on its Voice row.');
+    expect(screen.getByTestId('voice-one-key').textContent).toContain('This server listens and speaks');
+    expect(fetchMock).toHaveBeenCalledWith('/api/me/voice-keys/check', expect.objectContaining({ body: JSON.stringify({ adapter: 'openai-compatible', apiKey: '', address: 'https://speech.example.com' }) }));
+    fireEvent.click(addButton());
+    await waitFor(() => expect(push).toHaveBeenCalled());
+    expect(JSON.parse(fetchMock.mock.calls.at(-1)![1].body)).toEqual({ adapter: 'openai-compatible', name: 'My speech server', address: 'https://speech.example.com', recognition: true, speech: true, models });
+  });
+
+  it('says when the server lists no voices', async () => {
+    await pickOwn();
+    await load({ ok: true, models: [{ id: 'kokoro', kind: 'speech' }], unsure: [], voices: null });
+    expect((await screen.findByTestId('own-speech-voices')).textContent).toBe('Your server doesn’t list its voices. Each bot types its voice’s name on its Voice row.');
+    expect(screen.queryByTestId('own-speech-pause')).toBeNull();
+  });
+
+  it('asks which job each model does when the server doesn’t say, and keeps Add key off until every one has a pick', async () => {
+    await pickOwn();
+    await load({ ok: true, models: [], unsure: ['tts-1', 'whisper-1'], voices: null });
+    const unsure = await screen.findByTestId('own-speech-unsure');
+    expect(within(unsure).getByRole('heading', { name: 'Listens or speaks?' })).toBeTruthy();
+    expect(within(unsure).getAllByTestId('unsure-row')).toHaveLength(2);
+    expect((addButton() as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(within(within(unsure).getAllByTestId('unsure-row')[0]).getByRole('radio', { name: 'Speaks' }));
+    expect((addButton() as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(within(within(unsure).getAllByTestId('unsure-row')[1]).getByRole('radio', { name: 'Listens' }));
+    expect((addButton() as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(addButton());
+    await waitFor(() => expect(push).toHaveBeenCalled());
+    expect(JSON.parse(fetchMock.mock.calls.at(-1)![1].body)).toMatchObject({
+      recognition: true,
+      speech: true,
+      models: [{ id: 'tts-1', kind: 'speech' }, { id: 'whisper-1', kind: 'recognition' }],
+    });
+  });
+
+  it('forgets the picks when the address changes', async () => {
+    await pickOwn();
+    await load({ ok: true, models: [], unsure: ['tts-1'], voices: null });
+    await screen.findByTestId('own-speech-unsure');
+    fireEvent.change(screen.getByLabelText('Address'), { target: { value: 'https://other.example.com' } });
+    expect(screen.queryByTestId('own-speech-unsure')).toBeNull();
+  });
+
+  it('shows what is wrong in the words the server gave, and keeps Add key off', async () => {
+    await pickOwn();
+    await load({ error: 'That address points to a private network, so Universe can’t reach it.' }, false);
+    expect((await screen.findByRole('alert')).textContent).toBe('That address points to a private network, so Universe can’t reach it.');
+    expect((addButton() as HTMLButtonElement).disabled).toBe(true);
   });
 });

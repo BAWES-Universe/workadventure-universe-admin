@@ -691,7 +691,7 @@ function withCurrent(steps: LimitOption[], value: number, label: (value: number)
 }
 
 /**
- * The 7 voice limits a super admin sets for every voice bot (#740, shown under Limits in #792): the four a key's owner can also
+ * The 8 voice limits a super admin sets for every voice bot (#740, shown under Limits in #792): the four a key's owner can also
  * change on their key, then how long a person can keep talking without the bot's name, the share of replies kept for text and how
  * many voice replies a guest gets. `fair` is the fair usage window the last two are measured in.
  */
@@ -726,6 +726,18 @@ export function voiceServerLimits(values: VoiceLimits, fair: { signedIn: number;
         { value: 15, label: '15 seconds', meaning: 'Quick back and forth.' },
         { value: 30, label: '30 seconds', meaning: 'A natural pace.' },
         { value: 60, label: '1 minute', meaning: 'A relaxed chat. The bot listens longer.' },
+      ],
+    }),
+    own('voicesShownFirst', {
+      id: 'voicesShownFirst',
+      label: 'Voices shown first',
+      hint: 'How many voices a maker hears first when they give a bot a voice. The rest are behind “All voices”.',
+      unit: 'voices',
+      name: (value) => `${value} ${value === 1 ? 'voice' : 'voices'}`,
+      steps: [
+        { value: 3, label: '3 voices', meaning: 'A short list.' },
+        { value: 5, label: '5 voices', meaning: 'Enough to hear a few.' },
+        { value: 8, label: '8 voices', meaning: 'A longer list to scroll.' },
       ],
     }),
     own('textReserveShare', {

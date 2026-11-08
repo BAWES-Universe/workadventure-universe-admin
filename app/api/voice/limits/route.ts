@@ -11,7 +11,7 @@ export const runtime = 'nodejs';
  * every save, and the voice replies they leave in today's fair usage windows. Read by the game with no deploy needed when a
  * default changes.
  * Response: { revision, limits: { textReserveShare, guestVoiceReplies, turnSeconds, replyCharacters, replySeconds,
- * listenMinutesPerDay, followUpSeconds }, window: { hours, signedIn: { replies, textReserve, voiceReplies }, guest: { ... } } }.
+ * listenMinutesPerDay, followUpSeconds, voicesShownFirst }, window: { hours, signedIn: { replies, textReserve, voiceReplies }, guest: { ... } } }.
  *
  * Auth: service token only.
  */

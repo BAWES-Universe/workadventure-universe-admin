@@ -1,4 +1,5 @@
 import type { VoiceKeySummary } from '@/lib/voice-keys';
+import { voiceDoesLine } from '@/lib/voice-key-companies';
 import { RECHECK_MINUTES } from '@/lib/key-recheck';
 import { count } from '../../components/ds';
 import { DOWN_PHRASE, names, sinceText } from './key-text';
@@ -7,13 +8,23 @@ import { DOWN_PHRASE, names, sinceText } from './key-text';
 
 export type VoiceLent = VoiceKeySummary['lentTo'][number];
 
-/** What a key does: "Listens", "Speaks" or "Listens and speaks". */
-export const voiceDoes = (key: Pick<VoiceKeySummary, 'recognition' | 'speech'>) =>
-  key.recognition && key.speech ? 'Listens and speaks' : key.recognition ? 'Listens' : 'Speaks';
+/**
+ * What a key does: "Listens", "Speaks", "Listens and speaks", or with a talking model (game #1910) "Talks live",
+ * "Listens and talks live"… A key that listens and speaks only through its talking model says only that.
+ */
+export const voiceDoes = (key: Pick<VoiceKeySummary, 'recognition' | 'speech' | 'models'>) => {
+  const has = (kind: string) => key.models.some((model) => model.kind === kind);
+  const talk = has('talk');
+  return voiceDoesLine(talk ? { recognition: has('recognition'), speech: has('speech'), talk } : { recognition: key.recognition, speech: key.speech });
+};
 
-/** "ElevenLabs · Listens and speaks · 5 models · ends in 7c1d" */
+/**
+ * "ElevenLabs · Listens and speaks · 5 models · ends in 7c1d". A speech server on the person's own computer shows its address where
+ * a company's key shows its last four, and not the company line (its name says what it is): "Listens and speaks · 3 models · speech.example.com".
+ */
 export function describeVoice(key: VoiceKeySummary): string {
-  return [key.company, voiceDoes(key), count(key.models.length, 'model', 'models'), key.last4 ? `ends in ${key.last4}` : null].filter(Boolean).join(' · ');
+  const where = key.address ?? (key.last4 ? `ends in ${key.last4}` : null);
+  return [key.address ? null : key.company, voiceDoes(key), count(key.models.length, 'model', 'models'), where].filter(Boolean).join(' · ');
 }
 
 /** The bots on a key across the universes it is lent to, once each. */
@@ -27,7 +38,7 @@ export function repliesInText(bots: string[]): string {
 /** The sentence under a Down voice key: since when, why, what its bots do meanwhile, and how often it is tried again. */
 export function voiceDownText(key: VoiceKeySummary): string {
   const meanwhile = repliesInText(voiceBotNames(key));
-  return `Down since ${sinceText(key.health.downSince ?? new Date().toISOString())}: ${key.company} ${DOWN_PHRASE[key.health.downReason ?? 'stopped']}.${meanwhile ? ` ${meanwhile}` : ''} Universe checks again, at most every ${RECHECK_MINUTES} minutes, whenever a bot needs it, and switches back as soon as the key answers.`;
+  return `Down since ${sinceText(key.health.downSince ?? new Date().toISOString())}: ${key.address ?? key.company} ${DOWN_PHRASE[key.health.downReason ?? 'stopped']}.${meanwhile ? ` ${meanwhile}` : ''} Universe checks again, at most every ${RECHECK_MINUTES} minutes, whenever a bot needs it, and switches back as soon as the key answers.`;
 }
 
 /** The line under "If this is down" for a voice key: there is no other voice to move to. */

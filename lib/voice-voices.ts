@@ -1,12 +1,12 @@
 import type { VoiceProvider } from '@prisma/client';
-import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { decryptApiKey } from '@/lib/encryption';
 import { BotSettingsError } from '@/lib/bot-access-settings';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels } from '@/lib/voice-providers';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
-import { voiceKeyCompanyInfo, type VoiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { voiceKeyCompanyInfo, type VoiceKeyCompanyInfo, type VoiceListSpec } from '@/lib/voice-key-companies';
+import { OWN_SPEECH_LABEL, isOwnSpeechAdapter, listOwnSpeechVoices } from '@/lib/voice-own-server';
 
 /**
  * The voices a bot's maker can pick from on the bot page (game #1668): the speaking voices of one source, which is Universe AI
@@ -15,8 +15,9 @@ import { voiceKeyCompanyInfo, type VoiceKeyCompanyInfo } from '@/lib/voice-key-c
  * (and for fetching a sample the company keeps behind the key), sent only to the company's fixed address, and is never logged
  * or returned.
  *
- * Which company lists how is one entry per adapter in LISTERS. A company that speaks but has no entry (or one that only listens)
- * answers "can't list voices", it never errors out of the page. The lists are cached per provider for a while, since they
+ * How a company lists its voices is data in its catalog entry (`jobs.speech.voices`, lib/voice-key-companies.ts), read by one
+ * lister for every company. A company with no voice list (or one that only listens) answers "can't list voices", it never errors
+ * out of the page. The lists are cached per provider for a while, since they
  * change rarely and are free to read; the cache is dropped when the provider row changes (a new key, a new endpoint).
  */
 
@@ -38,6 +39,11 @@ export interface VoiceChoice {
   providerId: string;
   /** The speaking model to use with this voice: the first one the source lists (and the lend allows). */
   model: string;
+  /**
+   * The model is a talking model (game #1910): it listens and speaks in one, so a bot that picks this voice names it for both
+   * listening and speaking.
+   */
+  talk: boolean;
 }
 
 /** A voice as a company listed it. `preview` is the company's address for the sample, `previewNeedsKey` whether it wants the key. */
@@ -52,7 +58,8 @@ interface Listed {
 
 /** A source that can't be listed, with the line that says why (shown as it is). */
 export class VoiceListRefused extends Error {
-  constructor(message: string, readonly status: 404 | 409 | 502 = 409) {
+  /** `code` names a case a screen answers in its own way; it is sent next to the line, never instead of it. */
+  constructor(message: string, readonly status: 404 | 409 | 502 = 409, readonly code?: 'no_voice_list') {
     super(message);
   }
 }
@@ -72,8 +79,6 @@ interface Call {
   base: string;
   headers: Record<string, string>;
 }
-
-const BASES: Record<string, string> = { elevenlabs: 'https://api.elevenlabs.io', cartesia: 'https://api.cartesia.ai' };
 
 /** The primary language code of "en-GB", "ar_KW" or "ara", or null when it doesn't look like one. */
 export function languageCode(value: unknown): string | null {
@@ -126,99 +131,102 @@ async function getJson(call: Call, path: string): Promise<unknown> {
   }
 }
 
-const elevenlabsPage = z.object({
-  voices: z.array(
-    z
-      .object({
-        voice_id: z.string().min(1).max(255),
-        name: z.string().optional(),
-        description: z.string().nullish(),
-        labels: z.record(z.string(), z.unknown()).nullish(),
-        preview_url: z.string().nullish(),
-        verified_languages: z.array(z.object({ language: z.string().nullish(), locale: z.string().nullish() }).passthrough()).nullish(),
-      })
-      .passthrough()
-  ),
-  has_more: z.boolean().nullish(),
-  next_page_token: z.string().nullish(),
-});
-
-/** ElevenLabs: GET /v2/voices, 100 a page, `next_page_token` while `has_more`. A voice's sample is a public address. */
-async function listElevenLabs(call: Call): Promise<Listed[]> {
-  const out: Listed[] = [];
-  let token: string | null = null;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const parsed = elevenlabsPage.safeParse(await getJson(call, `/v2/voices?page_size=${PAGE_SIZE}${token ? `&next_page_token=${encodeURIComponent(token)}` : ''}`));
-    if (!parsed.success) throw new VoiceListRefused(`${call.company.label} sent a voice list that can’t be read.`, 502);
-    for (const voice of parsed.data.voices) {
-      const labels = voice.labels ?? {};
-      const label = (name: string) => clean(labels[name], 60);
-      // The company's own description, else what it labels the voice with
-      const description = clean(voice.description, 300) || [label('descriptive'), label('accent'), label('gender'), label('age')].filter(Boolean).join(', ');
-      out.push({
-        voiceId: voice.voice_id,
-        name: clean(voice.name, 255) || voice.voice_id,
-        description,
-        languages: languagesOf(
-          (voice.verified_languages ?? []).flatMap((entry) => [entry.language, entry.locale]),
-          labels.language
-        ),
-        preview: httpsUrl(voice.preview_url),
-        previewNeedsKey: false,
-      });
+/** Every value at a path into a voice: `a.b` a field inside a field, `a[].b` that field of every entry of a list. */
+function valuesAt(value: unknown, path: string): unknown[] {
+  let current: unknown[] = [value];
+  for (const part of path.split('.')) {
+    const many = part.endsWith('[]');
+    const name = many ? part.slice(0, -2) : part;
+    const next: unknown[] = [];
+    for (const item of current) {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
+      const field = name === '' ? item : (item as Record<string, unknown>)[name];
+      if (field === undefined || field === null) continue;
+      if (many) {
+        if (Array.isArray(field)) next.push(...field);
+      } else next.push(field);
     }
-    if (!parsed.data.has_more || !parsed.data.next_page_token) break;
-    token = parsed.data.next_page_token;
+    current = next;
   }
-  return out;
+  return current;
 }
 
-const cartesiaPage = z.object({
-  data: z.array(
-    z
-      .object({
-        id: z.string().min(1).max(255),
-        name: z.string().optional(),
-        description: z.string().nullish(),
-        tagline: z.string().nullish(),
-        language: z.string().nullish(),
-        accents: z.array(z.object({ locale: z.string().nullish() }).passthrough()).nullish(),
-        preview_file_url: z.string().nullish(),
-      })
-      .passthrough()
-  ),
-  has_more: z.boolean().nullish(),
-  next_page: z.string().nullish(),
-});
+const textAt = (value: unknown, path: string, max: number) => clean(valuesAt(value, path).find((entry) => typeof entry === 'string'), max);
 
-/** Cartesia: GET /voices, 100 a page, `starting_after` the last id while `has_more`. A sample is only served with the key. */
-async function listCartesia(call: Call): Promise<Listed[]> {
+/** A voice's description: the first of the spec's choices that says something. */
+function descriptionOf(voice: unknown, choices: VoiceListSpec['description']): string {
+  for (const choice of choices) {
+    const text = typeof choice === 'string' ? textAt(voice, choice, 300) : choice.join.map((path) => textAt(voice, path, 60)).filter(Boolean).join(', ');
+    if (text) return text;
+  }
+  return '';
+}
+
+const unreadable = (call: Call) => new VoiceListRefused(`${call.company.label} sent a voice list that can’t be read.`, 502);
+
+/**
+ * Lists a company's voices from its catalog spec (lib/voice-key-companies.ts, `jobs.speech.voices`), the same way for every company:
+ * page after page while the company says there are more, up to MAX_VOICES, each voice read from the fields the spec names. A page
+ * that isn't a list, or a voice without an id, is a list that can't be read.
+ */
+async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> {
   const out: Listed[] = [];
-  let after: string | null = null;
+  const seen = new Set<string>();
   const host = new URL(call.base).host;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const parsed = cartesiaPage.safeParse(await getJson(call, `/voices?limit=${PAGE_SIZE}&expand%5B%5D=preview_file_url${after ? `&starting_after=${encodeURIComponent(after)}` : ''}`));
-    if (!parsed.success) throw new VoiceListRefused(`${call.company.label} sent a voice list that can’t be read.`, 502);
-    for (const voice of parsed.data.data) {
-      // The key goes only to the company's own address, never to one a listing names
-      const preview = httpsUrl(voice.preview_file_url);
-      out.push({
-        voiceId: voice.id,
-        name: clean(voice.name, 255) || voice.id,
-        description: clean(voice.description, 300) || clean(voice.tagline, 60),
-        languages: languagesOf(voice.language, (voice.accents ?? []).map((accent) => accent.locale)),
-        preview: preview && new URL(preview).host === host ? preview : null,
-        previewNeedsKey: true,
-      });
+  for (const pass of spec.passes ?? ['']) {
+    let next: string | null = null;
+    for (let page = 1; out.length < MAX_VOICES && page <= MAX_PAGES; page++) {
+      const query = [spec.path.replace('{size}', String(PAGE_SIZE)).replace('{page}', String(page)), pass].filter(Boolean).join('&');
+      const paged = (spec.paging.kind === 'token' || spec.paging.kind === 'after') && next !== null ? `${spec.paging.param}=${encodeURIComponent(next)}` : '';
+      const answer = await getJson(call, [query, paged].filter(Boolean).join('&'));
+      if (typeof answer !== 'object' || answer === null) throw unreadable(call);
+      const voices = spec.list.endsWith('[]') ? valuesAt(answer, spec.list) : (answer as Record<string, unknown>)[spec.list];
+      if (!Array.isArray(voices)) throw unreadable(call);
+      for (const voice of voices) {
+        if (typeof voice !== 'object' || voice === null) throw unreadable(call);
+        const id = (voice as Record<string, unknown>)[spec.id];
+        if (typeof id !== 'string' || id.length === 0 || id.length > 255) throw unreadable(call);
+        const fields = voice as Record<string, unknown>;
+        if (spec.keep && Object.entries(spec.keep).some(([field, wanted]) => fields[field] != null && fields[field] !== wanted)) continue;
+        if (spec.leaveOut?.some((start) => id.startsWith(start))) continue;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const sample = (spec.preview ? valuesAt(voice, spec.preview) : []).map(httpsUrl).find((url): url is string => url !== null) ?? null;
+        out.push({
+          voiceId: id,
+          name: textAt(voice, spec.name, 255) || id,
+          description: descriptionOf(voice, spec.description),
+          languages: languagesOf(...spec.languages.map((path) => valuesAt(voice, path))),
+          // A sample served with the key must be at the company's own address: the key never goes to one a listing names
+          preview: sample && (!spec.previewNeedsKey || new URL(sample).host === host) ? sample : null,
+          previewNeedsKey: spec.previewNeedsKey === true,
+        });
+      }
+      if (spec.paging.kind === 'none') break;
+      const more = spec.paging.more ? (answer as Record<string, unknown>)[spec.paging.more] : undefined;
+      if (spec.paging.kind === 'page') {
+        // The list says when it ends; a full page is the sign there may be more when it doesn't
+        if (more === false || (typeof more !== 'boolean' && voices.length < PAGE_SIZE)) break;
+        continue;
+      }
+      const given = (answer as Record<string, unknown>)[spec.paging.next];
+      const token = spec.paging.nextIsLink ? linkParam(given, spec.paging.param) : given;
+      if ((spec.paging.more && more !== true) || typeof token !== 'string' || token === '') break;
+      next = token;
     }
-    if (!parsed.data.has_more || !parsed.data.next_page) break;
-    after = parsed.data.next_page;
   }
-  return out;
+  return out.slice(0, MAX_VOICES);
 }
 
-/** The companies whose voices can be listed. Data, not a branch: add a company by adding its entry. */
-const LISTERS: Record<string, (call: Call) => Promise<Listed[]>> = { elevenlabs: listElevenLabs, cartesia: listCartesia };
+/** The value of `param` in a next page's address, or null: the address itself is never followed. */
+function linkParam(link: unknown, param: string): string | null {
+  if (typeof link !== 'string' || link === '') return null;
+  try {
+    return new URL(link).searchParams.get(param);
+  } catch {
+    return null;
+  }
+}
 
 type Cached = { at: number; voices: Listed[] };
 const cache = new Map<string, Cached>();
@@ -226,13 +234,19 @@ const cache = new Map<string, Cached>();
 /** For tests: forgets every list. */
 export const clearVoiceListCache = () => cache.clear();
 
+/** The job whose voices a provider's bots pick from: speaking, or talking (game #1910) for a company that only talks live. */
+const voiceJobOf = (company: VoiceKeyCompanyInfo | null) => (company?.jobs.speech ? company.jobs.speech : company?.jobs.talk);
+
 /** Where a source's calls go and how they are signed: the company's own address, the key in its one header. */
-function callFor(provider: VoiceProvider): Call {
+function callFor(provider: VoiceProvider): Call & { spec: VoiceListSpec } {
   const company = voiceKeyCompanyInfo(provider.adapter);
-  if (!company || !LISTERS[provider.adapter]) throw new VoiceListRefused(`${company?.label ?? provider.name}’s voices can’t be listed here.`, 409);
+  const job = voiceJobOf(company);
+  const spec = job?.voices;
+  if (!company || !job || !spec) throw new VoiceListRefused(`${company?.label ?? provider.name}’s voices can’t be listed here.`, 409);
   if (!provider.apiKeyEncrypted) throw new VoiceListRefused(`${provider.name} has no key.`, 409);
   // The server's own provider may name another address (a proxy); a person's key never does
-  const base = (provider.ownerId === null && provider.endpoint ? provider.endpoint : BASES[provider.adapter]).replace(/\/+$/, '');
+  // A list kept at another host than the job's is always read there
+  const base = (spec.host ? `https://${spec.host}` : provider.ownerId === null && provider.endpoint ? provider.endpoint : `https://${job.host}`).replace(/\/+$/, '');
   const { check } = company;
   let key: string;
   try {
@@ -240,21 +254,53 @@ function callFor(provider: VoiceProvider): Call {
   } catch {
     throw new VoiceListRefused(`${provider.name}’s key can’t be read.`, 409);
   }
-  return { company, base, headers: { ...check.headers, [check.header]: `${check.prefix}${key}` } };
+  return { company, spec, base, headers: { ...check.headers, [check.header]: `${check.prefix}${key}` } };
+}
+
+/**
+ * The voices of a speech server on a person's own computer (game #1874): its own list at /audio/voices when it has one. A server
+ * with no list answers "can't list voices", and the bot's maker types the voice's name instead. The checks on the address run again
+ * on every list, so a name that later points inside a network is never reached.
+ */
+async function listOwnVoices(provider: VoiceProvider): Promise<Listed[]> {
+  // `no_voice_list`: the game shows a field to type the voice's name instead of Try again
+  const noList = () => new VoiceListRefused(`${provider.name} doesn’t list its voices. Type the voice’s name.`, 409, 'no_voice_list');
+  if (!provider.endpoint) throw noList();
+  let key = '';
+  if (provider.apiKeyEncrypted) {
+    try {
+      key = decryptApiKey(provider.apiKeyEncrypted);
+    } catch {
+      throw new VoiceListRefused(`${provider.name}’s key can’t be read.`, 409);
+    }
+  }
+  const listed = await listOwnSpeechVoices(provider.endpoint, key);
+  // A server that can't be asked is said so: only a server that answers with no list tells the maker to type the name
+  if (!listed.ok) throw new VoiceListRefused(listed.message, listed.reason === 'unreachable' ? 502 : listed.reason === 'refused' ? 502 : 409);
+  const voices = listed.voices;
+  if (!voices) throw noList();
+  return voices.map(({ voiceId }) => ({ voiceId, name: voiceId, description: '', languages: [], preview: null, previewNeedsKey: false }));
 }
 
 async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
+  // A company with no list call (OpenAI's talking voices) has its voices in the catalog: nothing to call, nothing to cache
+  const fixed = voiceJobOf(voiceKeyCompanyInfo(provider.adapter))?.fixedVoices;
+  if (fixed) return fixed.map((voice) => ({ voiceId: voice.id, name: voice.name, description: '', languages: [], preview: null, previewNeedsKey: false }));
   // A new key or address is a new row version, so it is never served an older list
   const id = `${provider.id}:${provider.updatedAt.getTime()}`;
   const hit = cache.get(id);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.voices;
   let voices: Listed[];
   try {
-    const call = callFor(provider);
-    // A lister stops at its page limit, but never trusts that: no more than MAX_VOICES are kept or sent on
-    voices = (await LISTERS[provider.adapter](call)).slice(0, MAX_VOICES);
+    if (isOwnSpeechAdapter(provider.adapter)) {
+      voices = (await listOwnVoices(provider)).slice(0, MAX_VOICES);
+    } else {
+      const call = callFor(provider);
+      // A lister stops at its page limit, but never trusts that: no more than MAX_VOICES are kept or sent on
+      voices = (await listFromSpec(call, call.spec)).slice(0, MAX_VOICES);
+    }
   } catch (error) {
-    if (error instanceof Unreadable) throw new VoiceListRefused(`${voiceKeyCompanyInfo(provider.adapter)?.label ?? provider.name} sent a voice list that can’t be read.`, 502);
+    if (error instanceof Unreadable) throw new VoiceListRefused(`${isOwnSpeechAdapter(provider.adapter) ? OWN_SPEECH_LABEL : (voiceKeyCompanyInfo(provider.adapter)?.label ?? provider.name)} sent a voice list that can’t be read.`, 502);
     throw error;
   }
   cache.delete(id);
@@ -267,6 +313,7 @@ async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
 interface Source {
   provider: VoiceProvider;
   model: string;
+  talk: boolean;
 }
 
 /**
@@ -292,9 +339,11 @@ async function sourceFor(botId: string, source: string): Promise<Source> {
     if (!provider || !bot.createdById || !(await lendAccess(bot.createdById, universeId))) throw new VoiceListRefused('Voice key not found.', 404);
   }
   const allowed = provider.lends?.length ? readLendModels(provider.lends[0].models) : null;
-  const model = readModels(provider.models).find((entry) => entry.kind === 'speech' && (!allowed || allowed.includes(lendModelId(entry))));
+  // A speaking model first; a key whose only speaking is a talking model (game #1910) gives that one
+  const usable = readModels(provider.models).filter((entry) => !allowed || allowed.includes(lendModelId(entry)));
+  const model = usable.find((entry) => entry.kind === 'speech') ?? usable.find((entry) => entry.kind === 'talk');
   if (!model) throw new VoiceListRefused(`${provider.name} has no speaking model set up here.`, 409);
-  return { provider, model: model.id };
+  return { provider, model: model.id, talk: model.kind === 'talk' };
 }
 
 const previewPath = (botId: string, source: string, voiceId: string) =>
@@ -302,7 +351,7 @@ const previewPath = (botId: string, source: string, voiceId: string) =>
 
 /** The speaking voices of one source (`universe-ai` or a voice key's id) for a bot, in the order the company lists them. */
 export async function listBotVoices(botId: string, source: string): Promise<VoiceChoice[]> {
-  const { provider, model } = await sourceFor(botId, source);
+  const { provider, model, talk } = await sourceFor(botId, source);
   const listed = await listedFor(provider);
   return listed.map((voice) => ({
     voiceId: voice.voiceId,
@@ -312,6 +361,7 @@ export async function listBotVoices(botId: string, source: string): Promise<Voic
     previewUrl: !voice.preview ? null : voice.previewNeedsKey ? previewPath(botId, source, voice.voiceId) : voice.preview,
     providerId: provider.id,
     model,
+    talk,
   }));
 }
 
