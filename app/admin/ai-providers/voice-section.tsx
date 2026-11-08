@@ -5,7 +5,7 @@
  * companies people can add their own voice key for.
  */
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { AudioLines, Ear, Info, Loader2, Pause, Play, Plus, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -27,6 +27,7 @@ import {
   callOrbit,
   companyLabel,
   defaultChangeLine,
+  OffJobRows,
   offJobs,
   doesLine,
   logoOf,
@@ -445,10 +446,7 @@ function OffSheet({ provider, providers, onClose, onSaved }: { provider: ServerV
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const { addToast } = useToast();
-  // People can add a company's key while any provider of it is on
-  const stillOn = provider ? providers.some((other) => other.id !== provider.id && other.adapter === provider.adapter && other.enabled) : true;
   const jobs = provider ? offJobs(provider, providers) : [];
-  const company = provider ? companyLabel(provider.adapter) : '';
   async function disable() {
     if (!provider) return;
     setBusy(true);
@@ -465,36 +463,20 @@ function OffSheet({ provider, providers, onClose, onSaved }: { provider: ServerV
   }
   return (
     <FormSheet open={provider !== null} onOpenChange={(next) => !next && !busy && onClose()} title={provider ? `Disable ${provider.name}?` : 'Disable?'}>
-      {jobs.map((each) => (
-        <div key={each.job} className="grid gap-3" data-testid={`off-${each.job}`}>
-          {each.to && (
-            <div className="flex items-center gap-3 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 py-3">
-              <ProviderLogo info={logoOf(each.to.adapter)} />
-              <span className="grid min-w-0 gap-0.5">
-                <span className="text-[15px] font-semibold">{each.job === 'speech' ? `${each.count === 1 ? 'It speaks' : 'They speak'} as ${each.voice} on ${each.to.name}` : `${each.count === 1 ? 'It listens' : 'They listen'} with ${each.to.name}`}</span>
-                <span className="text-[13px] text-muted-foreground">{each.job === 'speech' ? 'What Universe AI speaks with now' : 'What Universe AI listens with now'}</span>
-              </span>
-            </div>
-          )}
-          <p className="text-sm text-muted-foreground">{each.line}</p>
-        </div>
-      ))}
-      {!stillOn && <p className="text-sm text-muted-foreground">{`People can’t add a ${company} key while no ${company} provider is on.`}</p>}
+      <OffJobRows jobs={jobs} />
       {failure && <Refused>{failure}</Refused>}
       <SheetButtons go="Disable" busy={busy} onClose={onClose} onGo={() => void disable()} />
     </FormSheet>
   );
 }
 
-/** Design A: the defaults, the providers, and which companies people can add keys for. */
+/** Design A: the defaults and the providers. People can add their own key for any company in the catalog, whatever is on here. */
 export function VoiceSection() {
   const { providers, failed, loading, reload } = useVoiceProviders();
   const { addToast } = useToast();
   const [sheet, setSheet] = useState<'listen' | 'speak' | null>(null);
   const [off, setOff] = useState<ServerVoiceProvider | null>(null);
   const [toggling, setToggling] = useState<string | null>(null);
-
-  const companies = useMemo(() => Array.from(new Set((providers ?? []).filter((provider) => provider.enabled).map((provider) => companyLabel(provider.adapter)))), [providers]);
 
   async function enable(provider: ServerVoiceProvider) {
     setToggling(provider.id);
@@ -521,7 +503,7 @@ export function VoiceSection() {
       ) : providers.length === 0 ? (
         <div className="grid gap-3 rounded-[14px] border border-border bg-card p-4" data-testid="voice-empty">
           <strong className="text-[15px]">Universe AI has no voice yet</strong>
-          <p className="text-sm text-muted-foreground">Bots on Universe AI answer in text, and nobody can add a voice key of their own. Add one company that listens and one that speaks.</p>
+          <p className="text-sm text-muted-foreground">Bots on Universe AI answer in text until it has one. Add one company that listens and one that speaks. People can still add a voice key of their own.</p>
           <Button asChild variant="outline" className="h-11 w-fit px-5">
             <Link href="/admin/ai-providers/voice/new">
               <Plus className="mr-2 h-4 w-4" />
@@ -592,7 +574,7 @@ export function VoiceSection() {
           </div>
           <p className="flex items-start gap-1.5 text-[13px] text-muted-foreground" data-testid="people-line">
             <Info size={14} aria-hidden="true" className="mt-0.5 shrink-0" />
-            {companies.length > 0 ? `People can add their own voice key for the companies that are on here: ${companies.join(', ')}.` : 'No company is on here, so people can’t add a voice key of their own.'}
+            People can add their own voice key for any company, whatever is on here.
           </p>
         </>
       )}

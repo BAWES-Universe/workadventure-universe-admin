@@ -345,6 +345,8 @@ describe('Deepgram\'s voices', () => {
     tts: [
       { name: 'thalia', canonical_name: 'aura-2-thalia-en', architecture: 'aura-2', languages: ['en', 'en-US'], metadata: { accent: 'American', age: 'Adult', tags: ['clear', 'confident'], sample: 'https://static.deepgram.com/samples/thalia.wav' } },
       { name: 'celeste', canonical_name: 'aura-2-celeste-es', architecture: 'aura-2', languages: ['es'], metadata: { sample: 'http://insecure.example.com/celeste.wav' } },
+      // Flux speaks at another address the game doesn't call yet: left out
+      { name: 'heather', canonical_name: 'flux-heather-en', architecture: 'flux', languages: ['en'], metadata: {} },
     ],
   };
 
@@ -354,7 +356,7 @@ describe('Deepgram\'s voices', () => {
     fetchMock.mockImplementation(async () => json(answer));
   });
 
-  it('are every speaking voice in one answer, each its own model, with a public sample, the key as a token', async () => {
+  it('are every speaking voice in one answer but Flux, each its own model, with a public sample, the key as a token', async () => {
     const list = await (await voices('part=speech&source=key-1')).json();
     expect(list).toEqual([
       { voiceId: 'aura-2-thalia-en', name: 'thalia', description: 'American, Adult, clear, confident', languages: ['en'], previewUrl: 'https://static.deepgram.com/samples/thalia.wav', providerId: 'key-1', model: 'aura-2', talk: false },
