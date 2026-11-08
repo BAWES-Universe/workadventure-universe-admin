@@ -1141,6 +1141,25 @@ describe('a key with a talking model (game #1910)', () => {
     const list = await (await voices('part=speech&source=key-1')).json();
     expect(list[0]).toEqual(expect.objectContaining({ model: 'gpt-4o-mini-tts', talk: false }));
   });
+
+  it('lists the talking voices too, with part=talk, for a key that both speaks and talks live (xAI)', async () => {
+    providers = [key({ adapter: 'xai', name: 'My xAI', recognition: true, speech: true, models: [{ id: 'grok-tts', kind: 'speech' }, { id: 'grok-voice-latest', kind: 'talk' }] })];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    const speaking = await (await voices('part=speech&source=key-1')).json();
+    expect(speaking[0]).toEqual(expect.objectContaining({ model: 'grok-tts', talk: false }));
+    const talking = await (await voices('part=talk&source=key-1')).json();
+    expect(talking.length).toBe(speaking.length);
+    expect(talking.every((voice: Row) => voice.model === 'grok-voice-latest' && voice.talk === true)).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('says so when part=talk is asked of a key with no talking model', async () => {
+    providers = [openai([{ id: 'gpt-4o-mini-tts', kind: 'speech' }])];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    const response = await voices('part=talk&source=key-1');
+    expect(response.status).toBe(409);
+    expect((await response.json()).error).toBe('My OpenAI has no talking model set up here.');
+  });
 });
 
 describe('Inworld’s voices (game #1910)', () => {

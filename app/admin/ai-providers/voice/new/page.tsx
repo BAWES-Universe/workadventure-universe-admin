@@ -109,10 +109,12 @@ export default function NewVoiceProviderPage() {
     const found = (answer.data as { models?: unknown } | null)?.models;
     const listed = Array.isArray(found) && found.length > 0 ? (found as Listed[]) : null;
     setCheck({ status: 'ok', listed });
-    // Like Pipecat's services, a working model is ticked from the start: the one Universe starts this company's keys on. Nothing
-    // picked by hand is replaced.
-    const start = listed ? known[0] : undefined;
-    if (start) setModels((now) => (now.length > 0 ? now : [{ id: start.id, label: start.label, kind: start.kind }]));
+    // Every model the company lists is ticked from the start, the one Universe starts this company's keys on first: new ones the
+    // company adds later show up on their own too. Nothing picked by hand is replaced.
+    if (listed) {
+      const all = [...known, ...listed.filter((entry) => !known.some((model) => model.id === entry.id))];
+      setModels((now) => (now.length > 0 ? now : all.map(({ id, label, kind }) => ({ id, ...(label ? { label } : {}), kind }))));
+    }
   }
 
   const addressProblem =
@@ -149,6 +151,8 @@ export default function NewVoiceProviderPage() {
       apiKey: fullKey,
       ...(account?.regions && region ? { region } : {}),
       models,
+      // The listed ones left unticked stay off when the company's list fills in the rest on its own
+      ...(options ? { hiddenModels: options.map(lendModelId).filter((id) => !models.some((model) => lendModelId(model) === id)) } : {}),
       ...(address.trim() ? { endpoint: address.trim() } : {}),
     });
     if (!answer.ok) {
@@ -301,7 +305,7 @@ export default function NewVoiceProviderPage() {
             {options ? (
               <>
                 <p className={FIELD_HINT}>
-                  {info.label} lists these, each with what {info.label} says about it. One that works is ticked already. Tick more to let bots pick between them: bots on Universe AI, and people’s own {info.label} keys, can use only the ticked ones. The first ticked is what bots start on.
+                  {info.label} lists these for this key, each with what {info.label} says about it, and all are on. Untick any bots shouldn’t use and it stays off. New ones {info.label} adds later show up by themselves. The first ticked is what bots start on.
                 </p>
                 <VoiceModelPicker
                   models={options}
