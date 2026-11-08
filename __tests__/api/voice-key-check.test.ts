@@ -88,9 +88,11 @@ describe('Load models for a voice key', () => {
     answer(200);
     // A company whose keys live at the person's own address (Azure) is asked there
     const address = company.account?.address ? 'https://my-resource.openai.azure.com' : undefined;
-    expect((await send({ adapter, apiKey: KEY, ...(address ? { address } : {}) })).status).toBe(200);
+    // A company whose keys are made per region (Azure AI Speech) is asked in the region picked
+    const region = company.account?.regions?.[0].id;
+    expect((await send({ adapter, apiKey: KEY, ...(address ? { address } : {}), ...(region ? { region } : {}) })).status).toBe(200);
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe(company.check.url.replace('{address}', address ?? ''));
+    expect(url).toBe(company.check.url.replace('{address}', address ?? '').replace('{region}', region ?? ''));
     expect(new URL(url).protocol).toBe('https:');
     // A GET, or a POST with the catalog's own body when the company lists that way (Async): never the key in the body
     if (company.check.body) {
@@ -104,6 +106,19 @@ describe('Load models for a voice key', () => {
     expect(init.redirect).toBe('manual');
     expect(init.headers[company.check.header]).toBe(`${company.check.prefix}${KEY}`);
     expect(Object.values(init.headers).filter((value) => String(value).includes(KEY))).toHaveLength(1);
+  });
+
+  it('checks an Azure AI Speech key in the region picked, and only in one of Azure’s own regions (#1875)', async () => {
+    findMany.mockResolvedValue([{ adapter: 'azure-speech', name: 'Azure AI Speech', recognition: true, speech: true, models: [{ id: 'azure-tts', kind: 'speech' }] }]);
+    answer(200);
+    expect((await send({ adapter: 'azure-speech', apiKey: KEY, region: 'uaenorth' })).status).toBe(200);
+    expect(fetchMock.mock.calls[0][0]).toBe('https://uaenorth.tts.speech.microsoft.com/cognitiveservices/voices/list');
+    expect(fetchMock.mock.calls[0][1].headers['Ocp-Apim-Subscription-Key']).toBe(KEY);
+    fetchMock.mockClear();
+    for (const region of [undefined, '', 'evil.com/x', 'uaenorth.evil']) {
+      expect((await send({ adapter: 'azure-speech', apiKey: KEY, ...(region === undefined ? {} : { region }) })).status).toBe(400);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('checks an Azure key on the person’s own resource, then asks for the deployment to be typed', async () => {
@@ -135,7 +150,17 @@ describe('Load models for a voice key', () => {
       answer(200);
       const response = await send({ adapter: 'aws', apiKey: AWS, region: 'eu-north-1' });
       expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ ok: true, models: [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }] });
+      expect(await response.json()).toEqual({
+        ok: true,
+        models: [
+          { id: 'amazon-transcribe', label: 'Amazon Transcribe', kind: 'recognition' },
+          { id: 'generative', label: 'Polly Generative', kind: 'speech' },
+          { id: 'neural', label: 'Polly Neural', kind: 'speech' },
+          { id: 'long-form', label: 'Polly Long-Form', kind: 'speech' },
+          { id: 'standard', label: 'Polly Standard', kind: 'speech' },
+          { id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' },
+        ],
+      });
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toBe('https://sts.eu-north-1.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15');
       expect(init.method).toBe('GET');
