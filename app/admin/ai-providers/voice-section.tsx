@@ -424,7 +424,7 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
       <SheetButtons
         go="Save"
         busy={busy}
-        disabled={unchanged || !modelId}
+        disabled={unchanged || !modelId || voices.status === 'loading'}
         onClose={onClose}
         onGo={() => {
           if (!picked || !modelId) return;

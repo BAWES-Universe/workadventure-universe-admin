@@ -12,6 +12,8 @@ type Row = Record<string, unknown>;
 const calls: { method: string; url: string; body: Row | null }[] = [];
 let providers: Row[];
 let voicesAnswer: { ok: boolean; status?: number; body: unknown };
+// When set, the voice list answers only once it settles
+let holdVoices: Promise<void> | null = null;
 let patchAnswer: { ok: boolean; body: unknown };
 // When set, reading the list never answers: the moment after a save, before the list that follows it arrives
 let holdList = false;
@@ -24,7 +26,7 @@ jest.mock('@/lib/client-auth', () => ({
     calls.push({ method, url, body: init?.body ? JSON.parse(init.body) : null });
     const answer = (ok: boolean, body: unknown, status = ok ? 200 : 400) => Promise.resolve({ ok, status, json: () => Promise.resolve(body) });
     if (url === '/api/admin/voice-providers' && method === 'GET') return holdList ? new Promise(() => {}) : answer(true, { providers });
-    if (url.split('?')[0].endsWith('/voices')) return answer(voicesAnswer.ok, voicesAnswer.body, voicesAnswer.status);
+    if (url.split('?')[0].endsWith('/voices')) return (holdVoices ?? Promise.resolve()).then(() => answer(voicesAnswer.ok, voicesAnswer.body, voicesAnswer.status));
     if (method === 'PATCH') return answer(patchAnswer.ok, patchAnswer.body);
     if (url === '/api/admin/voice-providers/check') return answer(checkAnswer.ok, checkAnswer.body);
     if (url === '/api/admin/voice-providers' && method === 'POST') return answer(true, { provider: {} }, 201);
@@ -57,6 +59,7 @@ beforeEach(() => {
   calls.length = 0;
   providers = [soniox(), eleven(), cartesia(), deepgram()];
   voicesAnswer = { ok: true, body: { voices: VOICES } };
+  holdVoices = null;
   patchAnswer = { ok: true, body: { provider: {} } };
   holdList = false;
   checkAnswer = { ok: true, body: { ok: true } };
@@ -243,6 +246,20 @@ describe('Change what Universe AI speaks with', () => {
     await waitFor(() => expect(patches()).toHaveLength(1));
     // Aria is in the new model's list, so it is sent again with the model and stays the starting voice
     expect(patches()[0].body).toMatchObject({ defaultVoiceId: 'aria', defaultVoiceName: 'Aria' });
+  });
+
+  it('keeps Save off while the voices of a newly picked model are loading, so a voice picked is never dropped', async () => {
+    render(<VoiceSection />);
+    fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
+    const sheet = await screen.findByRole('dialog');
+    fireEvent.click(within(await within(sheet).findByTestId('voice-list')).getByRole('radio', { name: /Sarah/ }));
+    let answerVoices: () => void = () => undefined;
+    holdVoices = new Promise<void>((resolve) => (answerVoices = resolve));
+    await pickModel(sheet, /Multilingual v2/);
+    expect(within(sheet).getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
+    answerVoices();
+    await within(sheet).findByTestId('voice-list');
+    await waitFor(() => expect(within(sheet).getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(false));
   });
 
   it('does not save a voice that the speaking model picked does not list', async () => {
