@@ -264,10 +264,18 @@ export default function AddAiKeyPage() {
   // A listed provider needs at least one model for the key's check; a provider with no list needs its model typed
   // A server's models that it didn't say a job for each need the person's pick first
   const unsure = models.status === 'voice' ? (models.unsure ?? []) : [];
-  const picked: VoiceModel[] = models.status === 'voice' ? [...models.models, ...unsure.flatMap((id) => (marks[id] ? [{ id, kind: marks[id] }] : []))] : [];
+  // Own keys only: a model a server names `constructor` is not already picked
+  const markOf = (id: string) => (Object.hasOwn(marks, id) ? marks[id] : undefined);
+  const marked = unsure.flatMap((id) => {
+    const kind = markOf(id);
+    return kind ? [{ id, kind }] : [];
+  });
+  const picked: VoiceModel[] = models.status === 'voice' ? [...models.models, ...marked] : [];
+  // A key that can be split between two companies on a bot: it has a model that only listens and one that only speaks
+  const splits = picked.some((entry) => entry.kind === 'recognition') && picked.some((entry) => entry.kind === 'speech');
   const canAdd =
     models.status === 'voice'
-      ? picked.length > 0 && unsure.every((id) => marks[id])
+      ? picked.length > 0 && unsure.every((id) => markOf(id))
       : models.status === 'ready'
         ? models.models.length > 0
         : models.status === 'typed' && !!model && model.trim() !== '';
@@ -553,7 +561,12 @@ export default function AddAiKeyPage() {
                 {picked.some((entry) => entry.kind === 'recognition' || entry.kind === 'talk') && picked.some((entry) => entry.kind === 'speech' || entry.kind === 'talk') && (
                   <p className="flex items-start gap-2 rounded-2xl border border-foreground/10 bg-foreground/[.04] px-3.5 py-2.5 text-[13px]" data-testid="voice-one-key">
                     <Check size={16} aria-hidden="true" className="mt-0.5 shrink-0 text-[#4ade80]" />
-                    <span>{ownSpeech ? 'This server listens and speaks' : 'This key listens and speaks'}, so it’s all a bot needs. On a bot’s Voice row you can still split: listen with one company, speak with another.</span>
+                    <span>
+                      {splits
+                        ? `${ownSpeech ? 'This server listens and speaks' : 'This key listens and speaks'}, so it’s all a bot needs. On a bot’s Voice row you can still split: listen with one company, speak with another.`
+                        : // A talking model can't be split (lib/bot-voice.ts profileProblem): a bot names it for both jobs
+                          'This key talks live, so it’s all a bot needs. A bot on it listens and speaks with the same model.'}
+                    </span>
                   </p>
                 )}
                 {unsure.length === 0 && <p className={FIELD_HINT}>Nothing to pick here. Each bot picks one of these on its own page. When you lend the key, you can limit which ones bots there may use.</p>}
@@ -591,7 +604,7 @@ export default function AddAiKeyPage() {
                           <Segmented
                             aria-label={`What ${id} does`}
                             className="sm:w-[220px]"
-                            value={marks[id] ?? ('' as VoiceModel['kind'])}
+                            value={markOf(id) ?? ('' as VoiceModel['kind'])}
                             onChange={(next) => setMarks((all) => ({ ...all, [id]: next }))}
                             options={[
                               { value: 'recognition', label: 'Listens' },
