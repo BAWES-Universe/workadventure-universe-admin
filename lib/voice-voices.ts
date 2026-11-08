@@ -190,6 +190,7 @@ async function listFromSpec(call: Call, spec: VoiceListSpec): Promise<Listed[]> 
         if (typeof id !== 'string' || id.length === 0 || id.length > 255) throw unreadable(call);
         const fields = voice as Record<string, unknown>;
         if (spec.keep && Object.entries(spec.keep).some(([field, wanted]) => fields[field] != null && fields[field] !== wanted)) continue;
+        if (spec.leaveOut?.some((start) => id.startsWith(start))) continue;
         if (seen.has(id)) continue;
         seen.add(id);
         const sample = (spec.preview ? valuesAt(voice, spec.preview) : []).map(httpsUrl).find((url): url is string => url !== null) ?? null;
