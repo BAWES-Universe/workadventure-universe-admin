@@ -685,6 +685,8 @@ describe('Add a key for voice', () => {
     fetchMock.mockImplementation((url: string) => (url === '/api/me/voice-keys/check' ? json({ ok: true, models: nova }) : json({ key: { id: 'vk-new' } })));
     fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
     await screen.findByText(/It answered/);
+    // A talking model can't be split between two companies on a bot, so the page doesn't offer that
+    expect(screen.getByTestId('voice-one-key').textContent).toBe('This key talks live, so it’s all a bot needs. A bot on it listens and speaks with the same model.');
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ adapter: 'aws', apiKey: 'AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', region: 'eu-north-1' });
     fireEvent.click(addButton());
     await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/you/ai-keys'));

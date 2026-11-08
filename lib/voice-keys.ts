@@ -449,6 +449,9 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
     const models = input.models ?? readModels(row.models);
     const refused = problem({ recognition: row.recognition, speech: row.speech, models });
     if (refused) throw new VoiceKeyRefused(refused);
+    // As when it was added: a talking model only on a key from a company that talks live (an own server never does)
+    const talksLive = Boolean(voiceKeyCompanyInfo(row.adapter)?.does.talk);
+    if (input.models !== undefined && !talksLive && models.some((model) => model.kind === 'talk')) throw new VoiceKeyRefused(`${companyName(row.adapter)} doesn’t talk live`);
     if (input.models !== undefined) checkTypedModel(row.adapter, models);
     // Only what the owner changed is kept: a value picked that is the server's own now is dropped, so it follows the server from then on.
     // Only the names sent are looked at: a limit saved earlier that happens to equal the server's today stays saved
