@@ -177,6 +177,7 @@ export async function listCompanyModels(company: VoiceKeyCompanyInfo, apiKey: st
       if (spec.where && !Object.entries(spec.where).every(([field, value]) => fields[field] === value)) continue;
       const id = typeof fields[spec.id] === 'string' ? (fields[spec.id] as string).trim() : '';
       if (!id || id.length > 255) continue;
+      if (spec.leaveOut?.some((start) => id.startsWith(start))) continue;
       const languages = spec.languages ? languagesOf(fields[spec.languages]) : [];
       const seen = found.get(id);
       if (seen) {
