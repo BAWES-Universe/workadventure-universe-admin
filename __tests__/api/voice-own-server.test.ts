@@ -101,8 +101,8 @@ describe('Load models for your own speech server', () => {
     const body = await (await send(check, { adapter: 'openai-compatible', address: 'https://speech.example.com' })).json();
     expect(body).toMatchObject({ ok: true, models: [], unsure: ['tts-1', 'kokoro'], voices: 1 });
     // Even a model called whisper or tts is unsure when the server doesn't say
-    server({ '/v1/models': answer(200, { data: [{ id: 'whisper-1' }, { id: 'tts-hd', task: 'chat' }] }) });
-    expect(await (await send(check, { adapter: 'openai-compatible', address: 'https://speech.example.com' })).json()).toMatchObject({ models: [], unsure: ['whisper-1', 'tts-hd'] });
+    server({ '/v1/models': answer(200, { data: [{ id: 'whisper-1' }, { id: 'tts-hd', task: 'chat' }, { id: 'odd', task: 'constructor' }] }) });
+    expect(await (await send(check, { adapter: 'openai-compatible', address: 'https://speech.example.com' })).json()).toMatchObject({ models: [], unsure: ['whisper-1', 'tts-hd', 'odd'] });
   });
 
   it('says a server has no voice list when it has none', async () => {
@@ -395,6 +395,22 @@ describe('a bot’s Voice row for an own speech server', () => {
     clearVoiceListCache();
     server({ '/v1/audio/voices': answer(401, 'nope') });
     await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 502, message: 'The server asked for a key, or didn’t accept the one you gave.' });
+  });
+
+  it('says a busy or timed-out server is down for now, never that it has no list', async () => {
+    server({ '/v1/audio/voices': answer(429, 'slow down') });
+    await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 502, code: undefined, message: 'It didn’t answer. Is the server running and the tunnel up?' });
+    clearVoiceListCache();
+    server({ '/v1/audio/voices': answer(408, 'request timeout') });
+    await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 502, code: undefined, message: 'It didn’t answer. Is the server running and the tunnel up?' });
+  });
+
+  it('says a server whose tunnel answers for it while it is down (502, 503) is down, never that it has no list', async () => {
+    server({ '/v1/audio/voices': answer(502, 'Bad gateway') });
+    await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 502, code: undefined, message: 'It didn’t answer. Is the server running and the tunnel up?' });
+    clearVoiceListCache();
+    server({ '/v1/audio/voices': answer(503, 'unavailable') });
+    await expect(listBotVoices('b1', 'k1')).rejects.toMatchObject({ status: 502, code: undefined });
   });
 
   it('checks the address again on every list: a name that now points inside a network is never reached', async () => {
