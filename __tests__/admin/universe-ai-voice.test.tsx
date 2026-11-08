@@ -738,6 +738,17 @@ describe('A voice provider\u2019s models, from the company\u2019s own list for i
     });
   });
 
+  it('catches a model typed again that is already ticked on the company\u2019s list', async () => {
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }] } };
+    fireEvent.click(await open('v-eleven'));
+    await screen.findByText('ElevenLabs knows this key and lists 1 model for it. Checked just now, nothing paid.');
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'eleven_flash_v2_5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+    expect(await screen.findByText('That model is already on the list.')).toBeTruthy();
+    expect(patches()).toHaveLength(0);
+  });
+
   it('keeps the rows when the company has no list or it can\u2019t be read', async () => {
     fireEvent.click(await open('v-eleven'));
     expect(await screen.findByText('ElevenLabs knows this key. Checked just now, nothing paid.')).toBeTruthy();

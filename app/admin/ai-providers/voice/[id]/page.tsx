@@ -359,6 +359,7 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
             {/* Models the company doesn't list for this key (typed, or for a job it has no list for) stay as rows */}
             <ModelRows
               models={provider.models.filter((model) => !onList(model))}
+              alsoListed={provider.models.filter(onList)}
               jobs={jobs}
               onChange={(next) => changeModels([...provider.models.filter((model) => onList(model) || next.includes(model)), ...next.filter((model) => !provider.models.includes(model))])}
               disabled={busy}

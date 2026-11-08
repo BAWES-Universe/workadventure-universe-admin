@@ -255,8 +255,11 @@ export function ModelRows({
   jobs,
   onChange,
   disabled,
+  alsoListed = [],
 }: {
   models: VoiceModel[];
+  /** Models on the provider's list that aren't shown as rows here (ticked on the company's list): a model typed again is still caught. */
+  alsoListed?: VoiceModel[];
   /** The jobs the provider does. */
   jobs: VoiceJob[];
   /** `false` says the list was not saved: a model being added then stays typed, so nothing the person wrote is lost. */
@@ -280,7 +283,7 @@ export function ModelRows({
   async function add() {
     const typed = id.trim();
     if (typed === '') return;
-    if (models.some((model) => model.kind === job && model.id === typed)) {
+    if ([...models, ...alsoListed].some((model) => model.kind === job && model.id === typed)) {
       setProblem('That model is already on the list.');
       return;
     }
