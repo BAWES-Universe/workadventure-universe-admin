@@ -93,6 +93,22 @@ describe('the models a company lists for one job', () => {
   });
 });
 
+describe('Deepgram’s lists', () => {
+  // Flux listens and speaks at another address the game doesn't call yet, so its models and voices stay off the lists
+  it('leave Flux models out of the hearing list', async () => {
+    fetchMock.mockResolvedValue({
+      status: 200,
+      json: async () => ({ stt: [{ canonical_name: 'nova-3', streaming: true }, { canonical_name: 'flux-general-en', streaming: true }, { canonical_name: 'flux-general-multi', streaming: true }] }),
+      body: null,
+    });
+    expect((await listCompanyModels(voiceKeyCompanyInfo('deepgram')!, 'k', 'recognition'))?.map((model) => model.id)).toEqual(['nova-3']);
+  });
+
+  it('leave Flux voices out of the voice list', () => {
+    expect(voiceKeyCompanyInfo('deepgram')?.jobs.speech?.voices?.leaveOut).toEqual(['flux']);
+  });
+});
+
 describe('a key at the person’s own address (Azure)', () => {
   const azure = voiceKeyCompanyInfo('azure')!;
   it('keeps an https address on one of the company’s hosts as its origin, and nothing else', () => {
