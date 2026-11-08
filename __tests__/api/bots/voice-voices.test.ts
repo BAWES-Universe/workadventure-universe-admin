@@ -84,6 +84,7 @@ beforeEach(() => {
   (canManageBotMcpServers as jest.Mock).mockReset().mockResolvedValue(true);
   (lendAccess as jest.Mock).mockReset().mockResolvedValue('manage');
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  jest.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 afterEach(() => jest.restoreAllMocks());
 
@@ -443,6 +444,8 @@ describe('Fish Audio\'s voices', () => {
     expect(list).toHaveLength(MAX_VOICES);
     // Own voices (1 call), then ten pages of the library: never more than the cap
     expect(fetchMock).toHaveBeenCalledTimes(11);
+    // Reaching the cap is said in the logs, so a list that outgrows it is seen
+    expect(console.warn).toHaveBeenCalledWith('[voices] api.fish.audio lists at least 1000 voices; the first 1000 are offered');
   });
 
   it('read a full page without a "has more" as a sign of another, and a short one as the end', async () => {
@@ -1014,6 +1017,106 @@ describe('Hume\'s voices', () => {
 describe('languageCode', () => {
   it('keeps the language of a code, reads a three-letter one as its two-letter code, and drops anything that isn\'t one', () => {
     expect([languageCode('en-GB'), languageCode('AR_kw'), languageCode('ara'), languageCode('ger'), languageCode('fil'), languageCode('English'), languageCode(''), languageCode(7)]).toEqual(['en', 'ar', 'ar', 'de', 'fil', null, null, null]);
+  });
+});
+
+describe('AWS Polly\'s voices (#1886)', () => {
+  const AWS_KEY = 'AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+  const aws = (models: Row[]) => key({ adapter: 'aws', name: 'My AWS', region: 'eu-north-1', recognition: true, speech: true, apiKeyEncrypted: encryptApiKey(AWS_KEY), models });
+  const polly = {
+    Voices: [
+      { Id: 'Hala', Name: 'Hala', Gender: 'Female', LanguageCode: 'ar-AE', LanguageName: 'Gulf Arabic', SupportedEngines: ['neural'] },
+      { Id: 'Joanna', Name: 'Joanna', Gender: 'Female', LanguageCode: 'en-US', LanguageName: 'US English', AdditionalLanguageCodes: ['es-US'], SupportedEngines: ['generative', 'neural', 'standard'] },
+    ],
+  };
+
+  it('lists them signed in the key’s own region, sending the ID and a signature but never the secret', async () => {
+    providers = [aws([{ id: 'generative', kind: 'speech' }, { id: 'amazon.nova-2-sonic-v1:0', kind: 'talk' }])];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(polly));
+    const list = await (await voices('part=speech&source=key-1')).json();
+    // Hala speaks with the neural engine only, which this key doesn't have
+    expect(list.map((voice: Row) => [voice.voiceId, voice.description, voice.languages, voice.model, voice.talk])).toEqual([
+      ['Joanna', 'Female, US English', ['en', 'es'], 'generative', false],
+    ]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://polly.eu-north-1.amazonaws.com/v1/voices?IncludeAdditionalLanguageCodes=true');
+    const headers = (init as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE\/\d{8}\/eu-north-1\/polly\/aws4_request, SignedHeaders=host;x-amz-date, Signature=[0-9a-f]{64}$/);
+    expect(JSON.stringify(init)).not.toContain('wJalrXUtnFEMI');
+  });
+
+  it('gives each voice the first engine set up on the key that it speaks with', async () => {
+    providers = [aws([{ id: 'generative', kind: 'speech' }, { id: 'neural', kind: 'speech' }])];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(polly));
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.model])).toEqual([
+      ['Hala', 'neural'],
+      ['Joanna', 'generative'],
+    ]);
+  });
+
+  it('gives Nova Sonic’s own voices, without calling AWS, when the key only talks live', async () => {
+    providers = [aws([{ id: 'amazon.nova-2-sonic-v1:0', kind: 'talk' }])];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list[0]).toEqual(expect.objectContaining({ voiceId: 'tiffany', model: 'amazon.nova-2-sonic-v1:0', talk: true }));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('gives Nova Sonic’s own voices when asked for the talking ones of a key that also speaks with Polly', async () => {
+    providers = [aws([{ id: 'generative', kind: 'speech' }, { id: 'amazon.nova-2-sonic-v1:0', kind: 'talk' }])];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    const talking = await voices('part=talk&source=key-1');
+    expect(talking.status).toBe(200);
+    const list = await talking.json();
+    expect(list[0]).toEqual(expect.objectContaining({ voiceId: 'tiffany', model: 'amazon.nova-2-sonic-v1:0', talk: true }));
+    expect(list.every((voice: Row) => voice.talk === true)).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+    // A key with no talking model has no talking voices
+    providers = [aws([{ id: 'generative', kind: 'speech' }])];
+    expect((await voices('part=talk&source=key-1')).status).toBe(409);
+  });
+});
+
+describe('Azure AI Speech\'s voices (#1875)', () => {
+  const azure = (region: string | null) => key({ adapter: 'azure-speech', name: 'Azure AI Speech', region, recognition: true, speech: true, models: [{ id: 'azure-tts', kind: 'speech' }] });
+  const list = [
+    { Name: 'Microsoft Server Speech Text to Speech Voice (ar-KW, FahedNeural)', DisplayName: 'Fahed', ShortName: 'ar-KW-FahedNeural', Gender: 'Male', Locale: 'ar-KW', LocaleName: 'Arabic (Kuwait)', VoiceType: 'Neural' },
+    { DisplayName: 'Ava Multilingual', ShortName: 'en-US-AvaMultilingualNeural', Gender: 'Female', Locale: 'en-US', LocaleName: 'English (United States)', SecondaryLocaleList: ['fr-FR', 'ar-EG'], VoiceType: 'Neural' },
+  ];
+
+  it('lists them in the key’s own region, from an answer that is the list itself, the key in its one header', async () => {
+    providers = [azure('uaenorth')];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(list));
+    const answer = await (await voices('part=speech&source=key-1')).json();
+    expect(answer.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.languages, voice.model])).toEqual([
+      ['ar-KW-FahedNeural', 'Fahed', 'Male, Arabic (Kuwait)', ['ar'], 'azure-tts'],
+      ['en-US-AvaMultilingualNeural', 'Ava Multilingual', 'Female, English (United States)', ['en', 'fr', 'ar'], 'azure-tts'],
+    ]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://uaenorth.tts.speech.microsoft.com/cognitiveservices/voices/list');
+    expect(init.headers).toMatchObject({ 'Ocp-Apim-Subscription-Key': SECRET });
+  });
+
+  it('offers the first MAX_VOICES of an unpaged list longer than that, and says so in the logs', async () => {
+    providers = [azure('uaenorth')];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(Array.from({ length: MAX_VOICES + 200 }, (_, i) => ({ ...list[0], ShortName: `ar-KW-Voice${i}Neural` }))));
+    expect(await (await voices('part=speech&source=key-1')).json()).toHaveLength(MAX_VOICES);
+    expect(console.warn).toHaveBeenCalledWith(`[voices] uaenorth.tts.speech.microsoft.com lists ${MAX_VOICES + 200} voices; the first ${MAX_VOICES} are offered`);
+  });
+
+  it('can’t be listed without a region of Azure’s own, and calls nothing', async () => {
+    for (const region of [null, 'evil.com/x']) {
+      clearVoiceListCache();
+      providers = [azure(region)];
+      lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+      expect((await voices('part=speech&source=key-1')).status).toBe(409);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

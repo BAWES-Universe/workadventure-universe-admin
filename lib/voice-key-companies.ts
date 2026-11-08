@@ -98,8 +98,11 @@ export interface VoiceListSpec {
   list: string;
   /** More fields in the same answer holding voices (MiniMax: the account's cloned and designed voices). One that is absent holds none. */
   alsoLists?: string[];
-  /** The host voices are listed at, when it isn't the job's own (Soniox speaks at tts-rt.soniox.com, lists at api.soniox.com; Resemble speaks at f.cluster.resemble.ai, lists at app.resemble.ai). */
+  /** The host voices are listed at, when it isn't the job's own (Soniox speaks at tts-rt.soniox.com, lists at api.soniox.com; Resemble speaks at f.cluster.resemble.ai, lists at app.resemble.ai).
+   * `{region}` is the provider's region, for a list read in the key's own region (AWS, Azure AI Speech). */
   host?: string;
+  /** The list is asked for signed with the key (AWS Signature Version 4, for this service) in the provider's region, never sent the key. */
+  sign?: { service: string };
   /**
    * How the next page is asked for: a token the answer gives (`token`) or the last voice's id (`after`), sent as `param`, while
    * `more` says there is more (or, for a company with no such field, while there is a token: Mistral); or a page number (`page`, from 1,
@@ -183,8 +186,10 @@ export interface VoiceKeyAccount {
   address?: { label: string; example: string; hint: string; hosts: string[] };
   /** The model is typed, as the person named it at the company (Azure: the deployment name), for this job. */
   typedModel?: { title: string; label: string; hint: string; kind: VoiceCompanyJobName };
-  /** The regions a key may be in, one picked on Add a key (AWS), each with the host the bot server calls there. */
+  /** The regions a key may be in, one picked on Add a key (AWS, Azure AI Speech), each with the host the bot server calls there. */
   regions?: { id: string; label: string; host: string }[];
+  /** What to pick by, under the regions, when the key only works in the region it was made in (Azure AI Speech). */
+  regionHint?: string;
   /** A key in two parts (AWS): this one shown as typed (the access key ID), the other kept secret like any key. */
   keyId?: { label: string; example: string; hint: string };
   /** What the secret part is called, when not "API key" (AWS: "Secret access key"). */
@@ -498,6 +503,37 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     adapter: 'aws',
     label: 'AWS',
     jobs: {
+      recognition: {
+        // Live hearing with Amazon Transcribe's streaming socket, signed with the key, as Pipecat's AWSTranscribeSTTService does. The
+        // region picked names the host: transcribestreaming.<region>.amazonaws.com. Transcribe names no model (#1886)
+        host: 'transcribestreaming.us-east-1.amazonaws.com',
+        models: [{ id: 'amazon-transcribe', label: 'Amazon Transcribe' }],
+      },
+      speech: {
+        // Text to speech with Amazon Polly (POST /v1/speech), signed with the key, as Pipecat's AWSPollyTTSService does. Each model is
+        // one of Polly's engines; the region picked names the host: polly.<region>.amazonaws.com
+        host: 'polly.us-east-1.amazonaws.com',
+        models: [
+          { id: 'generative', label: 'Polly Generative' },
+          { id: 'neural', label: 'Polly Neural' },
+          { id: 'long-form', label: 'Polly Long-Form' },
+          { id: 'standard', label: 'Polly Standard' },
+        ],
+        // GET /v1/voices (DescribeVoices), signed, in the key's region: every voice in one answer
+        voices: {
+          host: 'polly.{region}.amazonaws.com',
+          sign: { service: 'polly' },
+          path: '/v1/voices?IncludeAdditionalLanguageCodes=true',
+          list: 'Voices',
+          paging: { kind: 'none' },
+          id: 'Id',
+          name: 'Name',
+          description: [{ join: ['Gender', 'LanguageName'] }],
+          languages: ['LanguageCode', 'AdditionalLanguageCodes[]'],
+          // Each voice works with some engines only (Joanna with all four, Danielle without standard…)
+          model: 'SupportedEngines[]',
+        },
+      },
       talk: {
         // The region picked on Add a key names the host: bedrock-runtime.<region>.amazonaws.com
         host: 'bedrock-runtime.us-east-1.amazonaws.com',
@@ -526,7 +562,7 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
       },
     },
     benefit: '{does}. Uses your AWS account, in the region you pick.',
-    step: 'In the AWS console, open IAM and create an access key for a user allowed bedrock:InvokeModelWithBidirectionalStream.',
+    step: 'In the AWS console, open IAM and create an access key for a user allowed what you use: transcribe:StartStreamTranscriptionWebSocket to listen, polly:SynthesizeSpeech and polly:DescribeVoices to speak, bedrock:InvokeModelWithBidirectionalStream to talk live.',
     docs: 'https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-2-sonic.html',
     account: {
       regions: [
@@ -541,6 +577,79 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
     // STS GetCallerIdentity answers any valid key, needs no permission and is free; a wrong key is 403. The call is signed, so
     // neither part of the key leaves Universe
     check: { url: 'https://sts.{region}.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15', header: 'Authorization', prefix: '', sign: { service: 'sts' } },
+  }),
+  company({
+    adapter: 'azure-speech',
+    label: 'Azure AI Speech',
+    jobs: {
+      recognition: {
+        // Real-time hearing over the Speech service's own socket in the region picked (<region>.stt.speech.microsoft.com), as
+        // Pipecat's AzureSTTService does through the Speech SDK (#1875). The service names no model
+        host: 'eastus.stt.speech.microsoft.com',
+        models: [{ id: 'azure-stt', label: 'Real-time speech to text' }],
+      },
+      speech: {
+        // Streamed text to speech (POST /cognitiveservices/v1) in the region picked, as Pipecat's AzureHttpTTSService does. The
+        // voice picked names the voice family (Neural, HD), so there is one model
+        host: 'eastus.tts.speech.microsoft.com',
+        models: [{ id: 'azure-tts', label: 'Text to speech' }],
+        // GET /cognitiveservices/voices/list in the key's region: every voice in one answer, the answer itself the list
+        voices: {
+          host: '{region}.tts.speech.microsoft.com',
+          path: '/cognitiveservices/voices/list',
+          list: '',
+          paging: { kind: 'none' },
+          id: 'ShortName',
+          name: 'DisplayName',
+          description: [{ join: ['Gender', 'LocaleName'] }],
+          languages: ['Locale', 'SecondaryLocaleList[]'],
+        },
+      },
+    },
+    benefit: '{does}. Uses your Azure Speech resource, in the region you pick.',
+    step: 'In the Azure portal, create a Speech resource, then copy Key 1 and its Location/Region from Keys and Endpoint.',
+    docs: 'https://learn.microsoft.com/azure/ai-services/speech-service/',
+    account: {
+      // Azure's Speech regions (learn.microsoft.com/azure/ai-services/speech-service/regions, 7 Nov 2026)
+      regionHint: 'Pick the region your Speech resource is in. Azure shows it as Location/Region next to the key, and the key only works there.',
+      regions: [
+        { id: 'eastus', label: 'East US', host: 'eastus.tts.speech.microsoft.com' },
+        { id: 'eastus2', label: 'East US 2', host: 'eastus2.tts.speech.microsoft.com' },
+        { id: 'centralus', label: 'Central US', host: 'centralus.tts.speech.microsoft.com' },
+        { id: 'northcentralus', label: 'North Central US', host: 'northcentralus.tts.speech.microsoft.com' },
+        { id: 'southcentralus', label: 'South Central US', host: 'southcentralus.tts.speech.microsoft.com' },
+        { id: 'westcentralus', label: 'West Central US', host: 'westcentralus.tts.speech.microsoft.com' },
+        { id: 'westus', label: 'West US', host: 'westus.tts.speech.microsoft.com' },
+        { id: 'westus2', label: 'West US 2', host: 'westus2.tts.speech.microsoft.com' },
+        { id: 'westus3', label: 'West US 3', host: 'westus3.tts.speech.microsoft.com' },
+        { id: 'canadacentral', label: 'Canada Central', host: 'canadacentral.tts.speech.microsoft.com' },
+        { id: 'canadaeast', label: 'Canada East', host: 'canadaeast.tts.speech.microsoft.com' },
+        { id: 'brazilsouth', label: 'Brazil South', host: 'brazilsouth.tts.speech.microsoft.com' },
+        { id: 'northeurope', label: 'North Europe', host: 'northeurope.tts.speech.microsoft.com' },
+        { id: 'westeurope', label: 'West Europe', host: 'westeurope.tts.speech.microsoft.com' },
+        { id: 'uksouth', label: 'UK South', host: 'uksouth.tts.speech.microsoft.com' },
+        { id: 'ukwest', label: 'UK West', host: 'ukwest.tts.speech.microsoft.com' },
+        { id: 'francecentral', label: 'France Central', host: 'francecentral.tts.speech.microsoft.com' },
+        { id: 'germanywestcentral', label: 'Germany West Central', host: 'germanywestcentral.tts.speech.microsoft.com' },
+        { id: 'italynorth', label: 'Italy North', host: 'italynorth.tts.speech.microsoft.com' },
+        { id: 'norwayeast', label: 'Norway East', host: 'norwayeast.tts.speech.microsoft.com' },
+        { id: 'swedencentral', label: 'Sweden Central', host: 'swedencentral.tts.speech.microsoft.com' },
+        { id: 'switzerlandnorth', label: 'Switzerland North', host: 'switzerlandnorth.tts.speech.microsoft.com' },
+        { id: 'switzerlandwest', label: 'Switzerland West', host: 'switzerlandwest.tts.speech.microsoft.com' },
+        { id: 'uaenorth', label: 'UAE North', host: 'uaenorth.tts.speech.microsoft.com' },
+        { id: 'qatarcentral', label: 'Qatar Central', host: 'qatarcentral.tts.speech.microsoft.com' },
+        { id: 'southafricanorth', label: 'South Africa North', host: 'southafricanorth.tts.speech.microsoft.com' },
+        { id: 'centralindia', label: 'Central India', host: 'centralindia.tts.speech.microsoft.com' },
+        { id: 'eastasia', label: 'East Asia', host: 'eastasia.tts.speech.microsoft.com' },
+        { id: 'southeastasia', label: 'Southeast Asia', host: 'southeastasia.tts.speech.microsoft.com' },
+        { id: 'japaneast', label: 'Japan East', host: 'japaneast.tts.speech.microsoft.com' },
+        { id: 'japanwest', label: 'Japan West', host: 'japanwest.tts.speech.microsoft.com' },
+        { id: 'koreacentral', label: 'Korea Central', host: 'koreacentral.tts.speech.microsoft.com' },
+        { id: 'australiaeast', label: 'Australia East', host: 'australiaeast.tts.speech.microsoft.com' },
+      ],
+    },
+    // The voice list in the key's region: free, and a wrong key is 401
+    check: { url: 'https://{region}.tts.speech.microsoft.com/cognitiveservices/voices/list', header: 'Ocp-Apim-Subscription-Key', prefix: '' },
   }),
   company({
     adapter: 'azure',

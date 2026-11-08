@@ -24,8 +24,9 @@ const query = z.object({
  * lowercase codes ("en", "ar"), `previewUrl` is a free sample (or null), and `model` is the speaking model to use with the voice.
  * Cached per provider for 10 minutes. 409 when the source can't list (Universe AI has no voice, no speaking model, a company
  * Orbit can't list); 502 when the company didn't answer or turned the key away. Part `recognition` has no voices (400).
- * `part=talk` lists the voices of the source's talking model instead (game #1910), each with `talk: true`, for a key that both
- * speaks and talks live (xAI): `part=speech` gives its speaking model first. 409 when the source has no talking model.
+ * `part=speech` lists a speaking model's voices, or a talking model's when the key only talks live; `part=talk` lists the voices
+ * of the source's talking model (game #1910), so a key that both speaks and talks live (xAI, AWS) offers each kind's own; `talk`
+ * on each voice says which. 409 when the source has no talking model.
  *
  * Auth: Manage bots for this bot (403 without it).
  */

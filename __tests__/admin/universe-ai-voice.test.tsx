@@ -380,6 +380,8 @@ describe('New voice provider', () => {
     // A company that listens and speaks is under both, with the same line (#844)
     expect(within(listens).getAllByRole('radio').map((card) => card.textContent)).toEqual([
       'AssemblyAIListens. Uses your account at assemblyai.com.',
+      'AWSListens, speaks and talks live. Uses your AWS account, in the region you pick.',
+      'Azure AI SpeechListens and speaks. Uses your Azure Speech resource, in the region you pick.',
       'CartesiaListens and speaks. Uses your account at cartesia.ai.',
       'DeepgramListens and speaks. Uses your account at deepgram.com.',
       'ElevenLabsListens and speaks. Uses your account at elevenlabs.io.',
@@ -397,7 +399,7 @@ describe('New voice provider', () => {
       'Together AIListens and speaks. Uses your account at together.ai.',
       'xAIListens, speaks and talks live. Uses your account at console.x.ai.',
     ]);
-    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['AsyncSpeaks', 'BlandSpeaks', 'CAMB', 'CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks', 'GoogleSpeaks and talks live', 'GradiumListens and speaks', 'GroqListens and speaks', 'HumeSpeaks', 'MiniMaxSpeaks', 'MistralListens and speaks', 'NeuphonicSpeaks', 'NVIDIAListens and speaks', 'Resemble AISpeaks', 'RimeSpeaks', 'Sarvam AIListens and speaks', 'Smallest AIListens and speaks', 'SonioxListens and speaks', 'SpeechifySpeaks', 'SpeechmaticsListens and speaks', 'Together AIListens and speaks', 'xAIListens, speaks and talks live']);
+    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['AsyncSpeaks', 'AWSListens, speaks and talks live', 'Azure AI SpeechListens and speaks', 'BlandSpeaks', 'CAMB', 'CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks', 'GoogleSpeaks and talks live', 'GradiumListens and speaks', 'GroqListens and speaks', 'HumeSpeaks', 'MiniMaxSpeaks', 'MistralListens and speaks', 'NeuphonicSpeaks', 'NVIDIAListens and speaks', 'Resemble AISpeaks', 'RimeSpeaks', 'Sarvam AIListens and speaks', 'Smallest AIListens and speaks', 'SonioxListens and speaks', 'SpeechifySpeaks', 'SpeechmaticsListens and speaks', 'Together AIListens and speaks', 'xAIListens, speaks and talks live']);
     expect(screen.queryByText('Recommended')).toBeNull();
     fireEvent.click(within(speaks).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByRole('heading', { name: 'Set up ElevenLabs' })).toBeTruthy();
@@ -448,6 +450,43 @@ describe('New voice provider', () => {
       models: [{ id: 'stt-rt-v6', kind: 'recognition' }],
       endpoint: 'wss://stt-rt.soniox.com/transcribe-websocket',
     });
+  });
+
+  it('asks for the region and both parts of the key for a company whose keys are made per region (AWS)', async () => {
+    render(<NewVoiceProviderPage />);
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Speaks' })).getByRole('radio', { name: /^AWS/ }));
+    expect(screen.getByRole('heading', { name: 'Pick the region' })).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Access key ID'), { target: { value: 'AKIAEXAMPLE' } });
+    fireEvent.change(screen.getByLabelText('Secret access key'), { target: { value: 'secret-1234' } });
+    // No check before a region is picked: the key only works in its own
+    expect(screen.getByRole('button', { name: 'Check key' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Region' })).getByRole('radio', { name: /^Europe \(Stockholm\)/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await screen.findByText('AWS knows this key. Nothing was spoken, so nothing was paid.');
+    expect(calls.find((call) => call.url === '/api/admin/voice-providers/check')?.body).toEqual({ adapter: 'aws', apiKey: 'AKIAEXAMPLE:secret-1234', job: 'speech', region: 'eu-north-1' });
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'neural' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add provider' }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/ai-providers'));
+    expect(calls.find((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers')?.body).toMatchObject({
+      adapter: 'aws',
+      apiKey: 'AKIAEXAMPLE:secret-1234',
+      region: 'eu-north-1',
+      speech: true,
+    });
+  });
+
+  it('asks Azure AI Speech\'s region before its key is checked, with where Azure shows it, and saves it', async () => {
+    render(<NewVoiceProviderPage />);
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Speaks' })).getByRole('radio', { name: /^Azure AI Speech/ }));
+    expect(screen.getByText(/Azure shows it as Location\/Region next to the key/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'azure-key-1234' } });
+    expect(screen.getByRole('button', { name: 'Check key' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Region' })).getByRole('radio', { name: /^East US 2/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await screen.findByText(/^Azure AI Speech knows this key/);
+    expect(calls.find((call) => call.url === '/api/admin/voice-providers/check')?.body).toEqual({ adapter: 'azure-speech', apiKey: 'azure-key-1234', job: 'speech', region: 'eastus2' });
   });
 
   it('sets up the job picked for a company that listens and speaks, asking it for that job\'s models (#844)', async () => {

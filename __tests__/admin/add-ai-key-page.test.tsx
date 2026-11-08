@@ -703,6 +703,29 @@ describe('Add a key for voice', () => {
     });
   });
 
+  it('asks an Azure AI Speech key for the region its resource is in, says why, and checks the key there (#1875)', async () => {
+    const account = {
+      regions: [
+        { id: 'eastus', label: 'East US', host: 'eastus.tts.speech.microsoft.com' },
+        { id: 'uaenorth', label: 'UAE North', host: 'uaenorth.tts.speech.microsoft.com' },
+      ],
+      regionHint: 'Pick the region your Speech resource is in. Azure shows it as Location/Region next to the key, and the key only works there.',
+    };
+    const speech = [{ id: 'azure-stt', label: 'Real-time speech to text', kind: 'recognition' }, { id: 'azure-tts', label: 'Text to speech', kind: 'speech' }];
+    voiceCompanies = [company('azure-speech', 'Azure AI Speech', { account })];
+    render(<AddAiKeyPage />);
+    fireEvent.click(await screen.findByRole('radio', { name: /^Azure AI Speech/ }));
+    expect(screen.getByRole('heading', { name: /Pick the region/ })).toBeTruthy();
+    expect(screen.getByText(account.regionHint)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'azure-speech-key-123456' } });
+    expect((screen.getByRole('button', { name: 'Load models' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('radio', { name: /UAE North/ }));
+    fetchMock.mockImplementation((url: string) => (url === '/api/me/voice-keys/check' ? json({ ok: true, models: speech }) : json({ key: { id: 'vk-new' } })));
+    fireEvent.click(screen.getByRole('button', { name: 'Load models' }));
+    await screen.findByText(/It answered/);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ adapter: 'azure-speech', apiKey: 'azure-speech-key-123456', region: 'uaenorth' });
+  });
+
   it('adds a voice key with what it listens and speaks, then goes back to the AI keys page', async () => {
     voiceCompanies = [company('elevenlabs', 'ElevenLabs')];
     render(<AddAiKeyPage />);

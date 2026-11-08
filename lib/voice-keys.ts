@@ -38,6 +38,7 @@ export interface VoiceKeyCompany {
     address?: { label: string; example: string; hint: string };
     typedModel?: { title: string; label: string; hint: string; kind: 'recognition' | 'speech' | 'talk' };
     regions?: { id: string; label: string; host: string }[];
+    regionHint?: string;
     keyId?: { label: string; example: string; hint: string };
     keyLabel?: string;
   } | null;
@@ -78,6 +79,7 @@ export async function voiceKeyCompanies(): Promise<VoiceKeyCompany[]> {
             ...(info.account.address ? { address: { label: info.account.address.label, example: info.account.address.example, hint: info.account.address.hint } } : {}),
             ...(info.account.typedModel ? { typedModel: info.account.typedModel } : {}),
             ...(info.account.regions ? { regions: info.account.regions } : {}),
+            ...(info.account.regionHint ? { regionHint: info.account.regionHint } : {}),
             ...(info.account.keyId ? { keyId: info.account.keyId } : {}),
             ...(info.account.keyLabel ? { keyLabel: info.account.keyLabel } : {}),
           }
