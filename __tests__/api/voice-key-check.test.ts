@@ -302,10 +302,28 @@ describe('Load models for a voice key', () => {
     }
   });
 
-  it('lists the server\'s own models instead of the catalog\'s when it has a provider for the company', async () => {
+  it('lists the server\'s own models instead of the catalog\'s for each job the server has a provider for', async () => {
+    answer(200);
+    const response = await send({ adapter: 'elevenlabs', apiKey: KEY });
+    const { models } = await response.json();
+    expect(models.map((model: { id: string }) => model.id)).toEqual(['scribe_v1', 'eleven_flash_v2_5', 'eleven_v3']);
+  });
+
+  it('gives the catalog\'s starting models for a job the server has no provider for, after the server\'s own', async () => {
     answer(200);
     const response = await send({ adapter: 'cartesia', apiKey: KEY });
-    expect(await response.json()).toEqual({ ok: true, models: [{ id: 'sonic-3', kind: 'speech' }] });
+    expect(await response.json()).toEqual({ ok: true, models: [{ id: 'sonic-3', kind: 'speech' }, { id: 'ink-whisper', label: 'Ink Whisper', kind: 'recognition' }] });
+    // The same for a company the server only listens with: its key still speaks
+    answer(200);
+    const deepgram = await (await send({ adapter: 'deepgram', apiKey: KEY })).json();
+    expect(deepgram.models).toEqual([{ id: 'nova-3', label: 'Nova 3', kind: 'recognition' }, { id: 'aura-2', label: 'Aura 2', kind: 'speech' }]);
+  });
+
+  it('leaves out what the company\'s own list leaves out (Deepgram Flux) even when a server provider lists it', async () => {
+    findMany.mockImplementation(async () => [{ adapter: 'deepgram', name: 'Deepgram', recognition: true, speech: false, models: [{ id: 'flux-general-en', kind: 'recognition' }, { id: 'nova-3', kind: 'recognition' }] }]);
+    answer(200);
+    const { models } = await (await send({ adapter: 'deepgram', apiKey: KEY })).json();
+    expect(models.map((model: { id: string }) => model.id)).toEqual(['nova-3', 'aura-2']);
   });
 
   it('never returns or logs the key', async () => {

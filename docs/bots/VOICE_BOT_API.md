@@ -72,8 +72,15 @@ the speaking model to use with the voice: the first one the source lists, and fo
 
 - **Who:** Manage bots for this bot, as the other routes. A key is listed only when the bot's maker owns it, has lent it to the bot's
   universe and may still lend there: anything else is a 404 ("Voice key not found."), so a key's existence is never confirmed.
-- **Companies:** ElevenLabs, Cartesia and Fish Audio (its own voices first, then the public library by score; a voice must be for speaking and finished training; its samples are public addresses). Others (Deepgram and Soniox only listen) answer 409 "…voices can't be listed here.". Part
-  `recognition` is a 400: there are no voices to pick for listening.
+- **Companies:** every company in the catalog (`lib/voice-key-companies.ts`) lists voices except AssemblyAI, which only listens and
+  answers 409 "…voices can't be listed here.". Cartesia, Deepgram, ElevenLabs, Fish Audio, Inworld, Soniox and Ultravox list them with
+  their own free list call (Fish Audio: its own voices first, then the public library by score; a voice must be for speaking and finished
+  training; its samples are public addresses). AWS, Azure OpenAI, Google, OpenAI, xAI and Zoom have no list call, so their voices come
+  from the catalog (`fixedVoices`): nothing is called, and they have no samples. For a company that only talks live, the voices and
+  `model` are its talking model's. A speech server on the person's own computer (`openai-compatible`) lists what it serves at
+  `/audio/voices`; one with no list answers 409 with `code: "no_voice_list"` ("…doesn't list its voices. Type the voice's name."), and
+  the maker types the voice's name instead. A server that is down, busy (429 or 5xx, as a tunnel answers for a server that is down) or
+  turns the key away is a 502, never `no_voice_list`. Part `recognition` is a 400: there are no voices to pick for listening.
 - **Errors:** 409 when Universe AI has no voice set up on the server, or the source has no speaking model; 502 when the company turns the key
   away or does not answer (the line says which; never the key).
 - **Cache:** per provider for 10 minutes, dropped when the key or address is replaced. Failures are not cached. At most 1000 voices.
