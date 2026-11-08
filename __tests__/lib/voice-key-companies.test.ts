@@ -60,7 +60,7 @@ describe('the voice company catalog', () => {
   it('lists voices for every company that speaks and has a voice list, at its own address', () => {
     for (const entry of VOICE_KEY_COMPANIES) {
       const voices = entry.jobs.speech?.voices;
-      if (!voices) continue;
+      if (!voices || 'fixed' in voices) continue;
       expect(voices.path.startsWith('/')).toBe(true);
       if (voices.paging.kind !== 'none') expect(voices.path).toContain('{size}');
       if (voices.paging.kind === 'page') expect(voices.path).toContain('{page}');
