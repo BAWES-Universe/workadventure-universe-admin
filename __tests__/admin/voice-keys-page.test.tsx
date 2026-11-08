@@ -134,6 +134,27 @@ describe('a voice key on the AI keys page', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/me/voice-keys/vk-1/check', { method: 'POST' }));
   });
 
+  it('"Load models" asks its company again through the voice key route and says how many new models came', async () => {
+    answer({ voice: [voiceKey] });
+    const fresh = { ...voiceKey, models: [...models, { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] };
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) =>
+      url === '/api/me/voice-keys/vk-1/models' ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ key: fresh, added: [fresh.models[3]] }) }) : base(url, init),
+    );
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Load models' }));
+    await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: '1 new model from ElevenLabs added to My ElevenLabs', variant: 'success' })));
+    expect(fetchMock).toHaveBeenCalledWith('/api/me/voice-keys/vk-1/models', { method: 'POST' });
+    expect(await screen.findByText(/4 models/)).toBeTruthy();
+  });
+
+  it('has no Load models for a key whose model is typed (an Azure deployment)', async () => {
+    answer({ voice: [{ ...voiceKey, adapter: 'azure', company: 'Azure' }] });
+    render(<AiKeysPage />);
+    await screen.findByRole('button', { name: 'Lend to a universe' });
+    expect(screen.queryByRole('button', { name: 'Load models' })).toBeNull();
+  });
+
   it('has no Check now while it works', async () => {
     answer({ voice: [voiceKey] });
     render(<AiKeysPage />);
