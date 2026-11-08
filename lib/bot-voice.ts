@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import { BotSettingsError } from '@/lib/bot-access-settings';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels, universeAiDefaults } from '@/lib/voice-providers';
+import { discoverVoiceModels } from '@/lib/voice-discovery';
 import { fixedVoiceModel, modelDoes, talksLive, voicesTiedToModels } from '@/lib/voice-key-companies';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
 import { isOwnSpeechAdapter } from '@/lib/voice-own-server';
@@ -266,6 +267,13 @@ export async function readBotVoice(botId: string) {
     },
   });
   if (!bot) throw new BotSettingsError(404, 'Bot not found');
+  // The models fill in on their own: Universe AI's providers and the keys lent here are read from their companies first
+  const universeId = bot.room.world.universeId;
+  await discoverVoiceModels(
+    await prisma.voiceProvider.findMany({
+      where: { OR: [{ ownerId: null, enabled: true }, ...(bot.createdById ? [{ ownerId: bot.createdById, lends: { some: { universeId } } }] : [])] },
+    }),
+  );
   const revisions = bot.voiceRevisions.map(revisionView);
   const speaking = bot.voiceRevision === null ? undefined : bot.voiceRevisions.find((revision) => revision.number === bot.voiceRevision);
   const parsed = speaking ? voiceProfileSchema.safeParse(speaking.profile) : null;

@@ -1,7 +1,8 @@
-import type { Prisma, VoiceProvider } from '@prisma/client';
+import { Prisma, type VoiceProvider } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { encryptApiKey } from '@/lib/encryption';
+import { modelChange } from '@/lib/voice-hidden-models';
 import { fixedVoiceModel, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 
 /**
@@ -57,6 +58,8 @@ export const createVoiceProviderSchema = z
     region: fields.region.optional(),
     apiKey: fields.apiKey.optional(),
     models: fields.models.default([]),
+    // The listed models left unticked when it was added ("kind:id"): the company's list fills in the rest on its own, never these
+    hiddenModels: z.array(z.string().min(1).max(300)).max(1000).optional(),
   })
   .strict();
 
@@ -71,6 +74,8 @@ export const updateVoiceProviderSchema = z
     region: fields.region,
     apiKey: fields.apiKey,
     models: fields.models,
+    // The models taken off by hand in this change ("kind:id"): kept off when the company's list is read again
+    takenOff: z.array(z.string().min(1).max(300)).max(1000),
     defaultRecognition: fields.defaultRecognition,
     defaultSpeech: fields.defaultSpeech,
     defaultVoiceId: fields.defaultVoiceId,
@@ -161,6 +166,7 @@ export async function createVoiceProvider(input: z.infer<typeof createVoiceProvi
       region: input.region ?? null,
       ...(input.apiKey ? { apiKeyEncrypted: encryptApiKey(input.apiKey), apiKeyLast4: input.apiKey.slice(-4) } : {}),
       models: input.models as Prisma.InputJsonValue,
+      ...(input.hiddenModels?.length ? { hiddenModels: input.hiddenModels as Prisma.InputJsonValue } : {}),
       createdById: userId,
     },
   });
@@ -172,6 +178,8 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
     const row = await tx.voiceProvider.findUnique({ where: { id } });
     if (!row || row.ownerId !== null) throw new VoiceProviderRefused('Voice provider not found', 404);
     const changesCompany = input.adapter !== undefined && input.adapter !== row.adapter;
+    // A model the company's list added while the page was open is kept, not taken off with the ones named
+    const changed = input.models !== undefined ? modelChange(readModels(row.models), input.models, input.takenOff, row.hiddenModels) : null;
     // A company that lists each voice for the models it speaks (Rime's field, Smallest AI's page per model, Together's model
     // groups) had the starting voice picked for the starting model, the first speaking one, which is the model Universe AI lends
     // it with (borrowUniverseAi): a new starting model drops the voice unless a new one comes with the change, so a voice is
@@ -181,7 +189,7 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
     const changesStartingModel =
       input.models !== undefined &&
       !!(listed?.model || listed?.perModel || listed?.groups) &&
-      startingModel(input.models) !== startingModel(readModels(row.models));
+      startingModel(changed?.models ?? input.models) !== startingModel(readModels(row.models));
     const dropsVoice = changesCompany || changesStartingModel;
     const next = {
       recognition: input.recognition ?? row.recognition,
@@ -189,7 +197,7 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
       enabled: input.enabled ?? row.enabled,
       defaultRecognition: input.defaultRecognition ?? row.defaultRecognition,
       defaultSpeech: input.defaultSpeech ?? row.defaultSpeech,
-      models: input.models ?? readModels(row.models),
+      models: changed?.models ?? readModels(row.models),
       endpoint: input.endpoint === undefined ? row.endpoint : input.endpoint,
       // The name goes with its voice: a new voice id without a name drops the old name, and no voice has no name
       // A voice belongs to its company: a provider moved to another adapter loses it unless a new one comes with the change
@@ -214,7 +222,8 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
         ...(input.endpoint !== undefined ? { endpoint: input.endpoint } : {}),
         ...(input.region !== undefined ? { region: input.region } : {}),
         ...(input.apiKey === undefined ? {} : input.apiKey === null ? { apiKeyEncrypted: null, apiKeyLast4: null } : { apiKeyEncrypted: encryptApiKey(input.apiKey), apiKeyLast4: input.apiKey.slice(-4) }),
-        ...(input.models !== undefined ? { models: input.models as Prisma.InputJsonValue } : {}),
+        // A model taken off by hand stays off when the company's list is read again; one added back by hand comes back
+        ...(changed ? { models: changed.models as Prisma.InputJsonValue, hiddenModels: (changed.hidden ?? Prisma.DbNull) as Prisma.InputJsonValue } : {}),
         recognition: next.recognition,
         speech: next.speech,
         enabled: next.enabled,
