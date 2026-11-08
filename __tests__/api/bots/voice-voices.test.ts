@@ -359,7 +359,7 @@ describe('Deepgram\'s voices', () => {
   it('are every speaking voice in one answer but Flux, each its own model, with a public sample, the key as a token', async () => {
     const list = await (await voices('part=speech&source=key-1')).json();
     expect(list).toEqual([
-      { voiceId: 'aura-2-thalia-en', name: 'thalia', description: 'American, Adult, clear', languages: ['en'], previewUrl: 'https://static.deepgram.com/samples/thalia.wav', providerId: 'key-1', model: 'aura-2', talk: false },
+      { voiceId: 'aura-2-thalia-en', name: 'thalia', description: 'American, Adult, clear, confident', languages: ['en'], previewUrl: 'https://static.deepgram.com/samples/thalia.wav', providerId: 'key-1', model: 'aura-2', talk: false },
       { voiceId: 'aura-2-celeste-es', name: 'celeste', description: '', languages: ['es'], previewUrl: null, providerId: 'key-1', model: 'aura-2', talk: false },
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -477,9 +477,543 @@ describe('Fish Audio\'s voices', () => {
   });
 });
 
+describe('Async\'s voices', () => {
+  const asyncKey = () => key({ adapter: 'async', name: 'Async', models: [{ id: 'async_flash_v1.0', label: 'Flash v1.0', kind: 'speech' }] });
+  const answer = {
+    voices: [
+      { voice_id: 'a1', name: 'Layla', description: 'Calm and clear', language: 'ar', gender: 'female', voice_type: 'library' },
+      { voice_id: 'a2', name: 'Theo', description: '', language: 'en', gender: 'male', voice_type: 'library' },
+    ],
+    next_cursor: null,
+  };
+
+  beforeEach(() => {
+    providers = [asyncKey()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(answer));
+  });
+
+  it('are asked for with a POST that carries the page size, the key and the API version', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.languages, voice.model])).toEqual([
+      ['a1', 'Layla', ['ar'], 'async_flash_v1.0'],
+      ['a2', 'Theo', ['en'], 'async_flash_v1.0'],
+    ]);
+    expect(list[0].description).toContain('Calm and clear');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.async.com/voices');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({ limit: 100 });
+    expect(init.headers).toMatchObject({ 'x-api-key': SECRET, version: 'v1', 'Content-Type': 'application/json' });
+  });
+
+  it('say Async did not accept the key', async () => {
+    fetchMock.mockImplementation(async () => new Response('', { status: 401 }));
+    const refused = await voices('part=speech&source=key-1');
+    expect(refused.status).toBe(502);
+    expect((await refused.json()).error).toBe('Async didn’t accept the key.');
+  });
+});
+
+describe('Bland\'s voices', () => {
+  const bland = () => key({ adapter: 'bland', name: 'Bland', models: [{ id: 'btts-3', label: 'Bland TTS v3', kind: 'speech' }] });
+  const answer = {
+    voices: [
+      { id: 'b1', name: 'Karen', description: 'Mature, calm', public: true, tags: ['english', 'support'], service: 'BTTS_V3' },
+      { id: 'b2', name: 'My clone', description: null, public: false, tags: ['arabic'], service: 'BTTS_V3' },
+    ],
+  };
+
+  beforeEach(() => {
+    providers = [bland()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(answer));
+  });
+
+  it('are every voice in one answer, with the key as a bearer', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.model])).toEqual([
+      ['b1', 'Karen', 'Mature, calm', 'btts-3'],
+      ['b2', 'My clone', 'arabic', 'btts-3'],
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.bland.ai/v1/voices');
+    expect(init.headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+  });
+});
+
+describe('CAMB.AI\'s voices', () => {
+  const camb = () => key({ adapter: 'camb', name: 'CAMB.AI', models: [{ id: 'mars-flash', label: 'MARS Flash', kind: 'speech' }] });
+  const answer = [
+    { id: 147320, voice_name: 'Noor', gender: 2, age: 30, language: 1, description: 'Warm Gulf voice' },
+    { id: 9, voice_name: 'Sam', description: null },
+  ];
+
+  beforeEach(() => {
+    providers = [camb()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(answer));
+  });
+
+  it('are the answer itself, each id a whole number kept as its digits, with the key in x-api-key', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.model])).toEqual([
+      ['147320', 'Noor', 'Warm Gulf voice', 'mars-flash'],
+      ['9', 'Sam', '', 'mars-flash'],
+    ]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://client.camb.ai/apis/list-voices');
+    expect(init.headers).toMatchObject({ 'x-api-key': SECRET });
+  });
+
+  it('say so when a voice has an id that is not a whole number, or the answer is not a list', async () => {
+    fetchMock.mockImplementation(async () => json([{ id: 1.5, voice_name: 'Odd' }]));
+    expect((await voices('part=speech&source=key-1')).status).toBe(502);
+    clearVoiceListCache();
+    fetchMock.mockImplementation(async () => json({ voices: [] }));
+    expect((await voices('part=speech&source=key-1')).status).toBe(502);
+  });
+});
+
+describe('Gradium\'s voices', () => {
+  const gradium = () => key({ adapter: 'gradium', name: 'Gradium', models: [{ id: 'default', label: 'Gradium TTS (current)', kind: 'speech' }] });
+  const answer = [
+    { uid: 'own-1', name: 'My voice', description: null, is_catalog: false, language: 'fr', tags: [] },
+    { uid: '_6Aslh2DxfmnRLmP', name: 'Emma', description: 'Warm and clear', is_catalog: true, language: 'en', tags: [{ category: 'use_case', value: 'Narration' }] },
+  ];
+
+  beforeEach(() => {
+    providers = [gradium()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(answer));
+  });
+
+  it('are the account\'s own and Gradium\'s catalog in one answer, with the key in x-api-key', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.languages])).toEqual([
+      ['own-1', 'My voice', '', ['fr']],
+      ['_6Aslh2DxfmnRLmP', 'Emma', 'Warm and clear', ['en']],
+    ]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.gradium.ai/api/voices/?include_catalog=true&limit=1000');
+    expect(init.headers).toMatchObject({ 'x-api-key': SECRET });
+  });
+});
+
+describe('Mistral\'s voices', () => {
+  const mistral = () => key({ adapter: 'mistral', name: 'Mistral', models: [{ id: 'voxtral-mini-tts-2603', label: 'Voxtral Mini TTS', kind: 'speech' }] });
+  const pages = [
+    { data: [{ id: 'v-1', name: 'Paul', description: 'Calm narrator', gender: 'male', tags: ['narration'], languages: ['en', 'fr'], type: 'preset' }], next_page_token: 'page-2' },
+    { data: [{ id: 'v-2', name: 'My voice', description: null, gender: 'female', tags: ['custom'], languages: ['ar'], type: 'custom' }], next_page_token: null },
+  ];
+
+  beforeEach(() => {
+    providers = [mistral()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    let page = 0;
+    fetchMock.mockImplementation(async () => json(pages[page++]));
+  });
+
+  it('are read page after page while Mistral gives a token, with the key as a bearer', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.languages])).toEqual([
+      ['v-1', 'Paul', 'Calm narrator', ['en', 'fr']],
+      ['v-2', 'My voice', 'female, custom', ['ar']],
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [first, init] = fetchMock.mock.calls[0];
+    expect(first).toBe('https://api.mistral.ai/v2/audio/voices?page_size=100');
+    expect(fetchMock.mock.calls[1][0]).toBe('https://api.mistral.ai/v2/audio/voices?page_size=100&page_token=page-2');
+    expect(init.headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+  });
+});
+
+describe('Neuphonic\'s voices', () => {
+  const neuphonic = () => key({ adapter: 'neuphonic', name: 'Neuphonic', models: [{ id: 'neuphonic', label: 'Neuphonic TTS', kind: 'speech' }] });
+
+  beforeEach(() => {
+    providers = [neuphonic()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () =>
+      json({
+        data: {
+          voices: [
+            { id: 'v-1', voice_id: 'v-1', name: 'Holly', tags: ['Female', 'British'], lang_code: 'en', type: 'Standard' },
+            { id: 'v-2', voice_id: 'v-2', name: 'Amira', tags: null, lang_code: 'ar', type: 'Cloned' },
+          ],
+        },
+      })
+    );
+  });
+
+  it('come in one answer inside its data, each with its language, the key in its own header', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.languages, voice.model])).toEqual([
+      ['v-1', 'Holly', 'Female, British', ['en'], 'neuphonic'],
+      ['v-2', 'Amira', '', ['ar'], 'neuphonic'],
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.neuphonic.com/voices');
+    expect(init.headers).toMatchObject({ 'X-API-KEY': SECRET });
+  });
+
+  it('are read by whichever id field the answer carries', async () => {
+    fetchMock.mockImplementation(async () =>
+      json({
+        data: {
+          voices: [
+            { id: 'v-1', name: 'Holly', tags: [], lang_code: 'en' },
+            { voice_id: 'v-2', name: 'Amira', tags: [], lang_code: 'ar' },
+          ],
+        },
+      })
+    );
+    const response = await voices('part=speech&source=key-1');
+    expect(response.status).toBe(200);
+    expect((await response.json()).map((voice: Row) => voice.voiceId)).toEqual(['v-1', 'v-2']);
+  });
+});
+
+describe('Resemble\'s voices', () => {
+  const resemble = () => key({ adapter: 'resemble', name: 'Resemble', models: [{ id: 'resemble', label: 'Resemble TTS', kind: 'speech' }] });
+  const full = Array.from({ length: 100 }, (_, i) => ({ uuid: `v-${i}`, name: `Voice ${i}`, default_language: 'en-US', supported_languages: ['en-US'] }));
+
+  beforeEach(() => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    let page = 0;
+    fetchMock.mockImplementation(async () => json(page++ === 0 ? { success: true, page: 1, num_pages: 2, items: full } : { success: true, page: 2, num_pages: 2, items: [{ uuid: 'v-ar', name: 'Noor', default_language: 'ar-SA', supported_languages: ['ar-SA', 'en-US'] }] }));
+  });
+
+  it('are read at app.resemble.ai page after page while a page is full, with the key as a bearer, not where it speaks', async () => {
+    providers = [resemble()];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toHaveLength(101);
+    expect(list[100]).toMatchObject({ voiceId: 'v-ar', name: 'Noor', languages: ['ar', 'en'], model: 'resemble' });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://app.resemble.ai/api/v2/voices?page=1&page_size=100', 'https://app.resemble.ai/api/v2/voices?page=2&page_size=100']);
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+  });
+});
+
+describe('Rime\'s voices', () => {
+  const rime = (models: string[]) => key({ adapter: 'rime', name: 'Rime', models: models.map((id) => ({ id, label: id, kind: 'speech' })) });
+  const details = [
+    { speaker: 'astra', gender: 'Female', age: 'Young Adult', country: 'US', modelId: 'mistv2', lang: 'eng', description: 'Bright, lively' },
+    { speaker: 'astra', gender: 'Female', age: 'Young Adult', country: 'US', modelId: 'coda', lang: 'eng', description: 'Bright, lively' },
+    { speaker: 'layla', gender: 'Female', age: 'Adult', country: 'SA', modelId: 'mistv3', lang: 'ara', description: '' },
+    { speaker: 'cove', gender: 'Male', age: 'Adult', country: 'US', modelId: 'mistv2', lang: 'eng' },
+  ];
+
+  beforeEach(() => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(details));
+  });
+
+  it('are each listed once, with the first of their models the key has, and three-letter languages read as two', async () => {
+    providers = [rime(['coda', 'mistv3'])];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.languages, voice.model])).toEqual([
+      ['astra', 'astra', 'Bright, lively', ['en'], 'coda'],
+      ['layla', 'layla', 'Female, Adult, SA', ['ar'], 'mistv3'],
+    ]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://users.rime.ai/data/voices/voice_details.json');
+    expect(init.headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+  });
+
+  it('come with the model the key has when a voice is in more than one', async () => {
+    providers = [rime(['mistv2'])];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.model])).toEqual([
+      ['astra', 'mistv2'],
+      ['cove', 'mistv2'],
+    ]);
+  });
+});
+
+describe('Sarvam\'s voices', () => {
+  beforeEach(() => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+  });
+
+  it('are Bulbul v3\'s speakers and Bulbul v4 Flash\'s own, each with its model, with no call made', async () => {
+    providers = [key({ adapter: 'sarvam', name: 'Sarvam', models: [{ id: 'bulbul:v4-flash', label: 'v4', kind: 'speech' }, { id: 'bulbul:v3', label: 'v3', kind: 'speech' }] })];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toHaveLength(25 + 222);
+    expect(list[0]).toMatchObject({ voiceId: 'shubh', name: 'Shubh', model: 'bulbul:v3' });
+    expect(list[0].languages).toContain('hi');
+    expect(list.find((voice: { voiceId: string }) => voice.voiceId === 'shubh_en_narration_gentle')).toMatchObject({
+      name: 'Shubh (narration gentle)',
+      languages: ['en'],
+      model: 'bulbul:v4-flash',
+    });
+    expect(list.find((voice: { voiceId: string }) => voice.voiceId === 'shubh_enhi_ads')).toMatchObject({ languages: ['en', 'hi'], model: 'bulbul:v4-flash' });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // A key that speaks only with Bulbul v4 Flash offers only its voices
+    clearVoiceListCache();
+    providers = [key({ adapter: 'sarvam', name: 'Sarvam', models: [{ id: 'bulbul:v4-flash', label: 'v4', kind: 'speech' }] })];
+    const flash = await (await voices('part=speech&source=key-1')).json();
+    expect(flash).toHaveLength(222);
+    expect(flash.every((voice: { model: string }) => voice.model === 'bulbul:v4-flash')).toBe(true);
+  });
+});
+
+describe('Smallest AI\'s voices', () => {
+  const smallest = (models: string[]) => key({ adapter: 'smallest', name: 'Smallest', models: models.map((id) => ({ id, label: id, kind: 'speech' })) });
+  const lists: Record<string, unknown> = {
+    'https://api.smallest.ai/waves/v1/lightning-v3.1-pro/get_voices': {
+      voices: [
+        { voiceId: 'kaitlyn', displayName: 'Kaitlyn', tags: { language: ['en'], accent: 'american', gender: 'female', age: 'young', usecases: ['support', 'sales'] } },
+        { voiceId: 'layla', displayName: 'Layla', tags: { language: ['ar', 'en'], gender: 'female' } },
+      ],
+    },
+    'https://api.smallest.ai/waves/v1/lightning-v3.1/get_voices': { voices: [{ voiceId: 'sophia', displayName: 'Sophia', tags: { language: ['en'], gender: 'female' } }] },
+  };
+
+  beforeEach(() => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async (url: string) => json(lists[url]));
+  });
+
+  it('are read model by model, asking only for the models the key has, each voice with its own model', async () => {
+    providers = [smallest(['lightning_v3.1_pro'])];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.languages, voice.model])).toEqual([
+      ['kaitlyn', 'Kaitlyn', 'female, young, american, support, sales', ['en'], 'lightning_v3.1_pro'],
+      ['layla', 'Layla', 'female', ['ar', 'en'], 'lightning_v3.1_pro'],
+    ]);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://api.smallest.ai/waves/v1/lightning-v3.1-pro/get_voices']);
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+
+    clearVoiceListCache();
+    fetchMock.mockClear();
+    providers = [smallest(['lightning_v3.1'])];
+    expect((await (await voices('part=speech&source=key-1')).json()).map((voice: Row) => [voice.voiceId, voice.model])).toEqual([['sophia', 'lightning_v3.1']]);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://api.smallest.ai/waves/v1/lightning-v3.1/get_voices']);
+  });
+
+  it('still list when the account can\'t use a model it doesn\'t have: that model is never asked', async () => {
+    fetchMock.mockImplementation(async (url: string) => (url.includes('lightning-v3.1-pro') ? json({ message: 'Forbidden' }, 403) : json(lists[url])));
+    providers = [smallest(['lightning_v3.1'])];
+    const response = await voices('part=speech&source=key-1');
+    expect(response.status).toBe(200);
+    expect((await response.json()).map((voice: Row) => voice.voiceId)).toEqual(['sophia']);
+  });
+});
+
+describe('Speechify\'s voices', () => {
+  const speechify = (models: string[]) => key({ adapter: 'speechify', name: 'Speechify', models: models.map((id) => ({ id, label: id, kind: 'speech' })) });
+  const pages: Record<string, unknown> = {
+    'https://api.speechify.ai/v1/voices?limit=100': {
+      voices: [
+        {
+          id: 'george',
+          display_name: 'George',
+          locale: 'en-US',
+          tags: ['timbre:deep', 'use-case:narration'],
+          preview_audio: 'https://storage.example.com/george.mp3',
+          models: [
+            { name: 'simba-3.0', languages: [{ locale: 'en-US' }] },
+            { name: 'simba-3.5', languages: [{ locale: 'en-US' }, { locale: 'ar-SA' }] },
+          ],
+        },
+      ],
+      has_more: true,
+      next_cursor: 'c 2',
+    },
+    'https://api.speechify.ai/v1/voices?limit=100&cursor=c%202': {
+      voices: [{ id: 'henry', display_name: 'Henry', locale: 'en-GB', tags: null, preview_audio: null, models: [{ name: 'simba-3.0', languages: [{ locale: 'en-GB' }] }] }],
+      has_more: false,
+      next_cursor: null,
+    },
+  };
+
+  beforeEach(() => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async (url: string) => json(pages[url]));
+  });
+
+  it('are read page by page by cursor, each voice with the first of its models the key has', async () => {
+    providers = [speechify(['simba-3.5', 'simba-3.0'])];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description, voice.languages, voice.previewUrl, voice.model])).toEqual([
+      ['george', 'George', 'timbre:deep, use-case:narration', ['en', 'ar'], 'https://storage.example.com/george.mp3', 'simba-3.5'],
+      ['henry', 'Henry', '', ['en'], null, 'simba-3.0'],
+    ]);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(Object.keys(pages));
+    // Every page asks for the API version speaking was built for
+    for (const [, init] of fetchMock.mock.calls) expect(init.headers).toMatchObject({ Authorization: `Bearer ${SECRET}`, 'Speechify-Version': '2026-09-30' });
+  });
+
+  it('leave out a voice that has none of the key\'s models', async () => {
+    providers = [speechify(['simba-3.5'])];
+    expect((await (await voices('part=speech&source=key-1')).json()).map((voice: Row) => voice.voiceId)).toEqual(['george']);
+  });
+});
+
+describe('Speechmatics\' voices', () => {
+  it('are the four its docs name, with no call made', async () => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    providers = [key({ adapter: 'speechmatics', name: 'Speechmatics', models: [{ id: 'speechmatics', label: 'TTS', kind: 'speech' }] })];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.description, voice.languages, voice.model])).toEqual([
+      ['sarah', 'Female, UK English', ['en'], 'speechmatics'],
+      ['theo', 'Male, UK English', ['en'], 'speechmatics'],
+      ['megan', 'Female, US English', ['en'], 'speechmatics'],
+      ['jack', 'Male, US English', ['en'], 'speechmatics'],
+    ]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('Together AI\'s voices', () => {
+  const together = (models: string[]) => key({ adapter: 'together', name: 'Together', models: models.map((id) => ({ id, label: id, kind: 'speech' })) });
+  const groups = {
+    data: [
+      { model: 'hexgrad/Kokoro-82M', voices: [{ id: 'v1', name: 'af_heart' }, { id: 'v2', name: 'am_adam' }] },
+      { model: 'canopylabs/orpheus-3b-0.1-ft', voices: [{ id: 'v3', name: 'tara' }] },
+      { model: 'cartesia/sonic-2', voices: [{ id: 'v4', name: 'af_heart' }] },
+    ],
+  };
+
+  beforeEach(() => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementation(async () => json(groups));
+  });
+
+  it('are read model by model from one list, each by its name, and only for the models the key has', async () => {
+    providers = [together(['hexgrad/Kokoro-82M'])];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.model])).toEqual([
+      ['af_heart', 'af_heart', 'hexgrad/Kokoro-82M'],
+      ['am_adam', 'am_adam', 'hexgrad/Kokoro-82M'],
+    ]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.together.ai/v1/voices');
+    expect(init.headers).toMatchObject({ Authorization: `Bearer ${SECRET}` });
+
+    clearVoiceListCache();
+    providers = [together(['canopylabs/orpheus-3b-0.1-ft'])];
+    expect((await (await voices('part=speech&source=key-1')).json()).map((voice: Row) => [voice.voiceId, voice.model])).toEqual([['tara', 'canopylabs/orpheus-3b-0.1-ft']]);
+  });
+
+  it('is a list that can\'t be read when a group holds no voices list', async () => {
+    providers = [together(['hexgrad/Kokoro-82M'])];
+    fetchMock.mockImplementation(async () => json({ data: [{ model: 'hexgrad/Kokoro-82M', voices: 'none' }] }));
+    expect((await voices('part=speech&source=key-1')).status).toBe(502);
+  });
+});
+
+describe('NVIDIA\'s voices', () => {
+  it('are Magpie Multilingual\'s 36 voices, each in its own language, with no call made', async () => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    providers = [key({ adapter: 'nvidia', name: 'NVIDIA', models: [{ id: 'magpie-tts-multilingual', label: 'Magpie', kind: 'speech' }] })];
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toHaveLength(36);
+    expect(new Set(list.map((voice: Row) => voice.voiceId)).size).toBe(36);
+    expect(list.find((voice: Row) => voice.voiceId === 'Magpie-Multilingual.AR-AR.Sofia')).toMatchObject({ name: 'Sofia (Arabic)', description: 'Arabic', languages: ['ar'], model: 'magpie-tts-multilingual' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('MiniMax\'s voices', () => {
+  it('are its own voices, then the account\'s cloned and designed ones, from one POST', async () => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    providers = [key({ adapter: 'minimax', name: 'MiniMax', models: [{ id: 'speech-2.8-turbo', label: 'Turbo', kind: 'speech' }] })];
+    fetchMock.mockImplementation(async () =>
+      json({
+        system_voice: [{ voice_id: 'English_Graceful_Lady', voice_name: 'Graceful Lady', description: ['Elegant', 'Calm'] }],
+        voice_cloning: [{ voice_id: 'my-clone', description: [], created_time: '2026-11-01' }],
+        voice_generation: null,
+        base_resp: { status_code: 0, status_msg: 'success' },
+      }),
+    );
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => [voice.voiceId, voice.name, voice.description])).toEqual([
+      ['English_Graceful_Lady', 'Graceful Lady', 'Elegant, Calm'],
+      ['my-clone', 'my-clone', ''],
+    ]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://api.minimax.io/v1/get_voice');
+    expect(init).toMatchObject({ method: 'POST', headers: expect.objectContaining({ Authorization: `Bearer ${SECRET}` }) });
+    expect(JSON.parse(init.body)).toEqual({ voice_type: 'all' });
+  });
+
+  it('say MiniMax didn\'t accept the key when it answers a wrong one with a 200 that says so', async () => {
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    providers = [key({ adapter: 'minimax', name: 'MiniMax', models: [{ id: 'speech-2.8-turbo', label: 'Turbo', kind: 'speech' }] })];
+    for (const code of [1004, 2049]) {
+      fetchMock.mockImplementation(async () => json({ system_voice: null, base_resp: { status_code: code, status_msg: 'invalid api key' } }));
+      const refused = await voices('part=speech&source=key-1');
+      expect(refused.status).toBe(502);
+      expect((await refused.json()).error).toBe('MiniMax didn’t accept the key.');
+    }
+  });
+});
+
+describe('Groq\'s voices', () => {
+  const ENGLISH = { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' };
+  const ARABIC = { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' };
+  const groq = (models = [ENGLISH, ARABIC]) => key({ adapter: 'groq', name: 'Groq', models });
+
+  beforeEach(() => {
+    providers = [groq()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+  });
+
+  it('are the ones its docs name, each with its language and its own model, and nothing is asked with the key', async () => {
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toHaveLength(12);
+    expect(list[0]).toEqual({ voiceId: 'autumn', name: 'Autumn', description: 'Orpheus English', languages: ['en'], previewUrl: null, providerId: 'key-1', model: 'canopylabs/orpheus-v1-english', talk: false });
+    expect(list.find((voice: Row) => voice.voiceId === 'noura')).toMatchObject({ name: 'Noura', languages: ['ar'], model: 'canopylabs/orpheus-arabic-saudi' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('are only the voices of the models set up on the key and allowed in the universe', async () => {
+    providers = [groq([ARABIC])];
+    const arabicOnly = await (await voices('part=speech&source=key-1')).json();
+    expect(arabicOnly.map((voice: Row) => voice.voiceId)).toEqual(['abdullah', 'fahad', 'sultan', 'lulwa', 'noura', 'aisha']);
+
+    providers = [groq()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: ['speech:canopylabs/orpheus-v1-english'] }];
+    const lentEnglish = await (await voices('part=speech&source=key-1')).json();
+    expect(lentEnglish.map((voice: Row) => voice.model)).toEqual(Array(6).fill('canopylabs/orpheus-v1-english'));
+  });
+});
+
+describe('Hume\'s voices', () => {
+  const hume = () => key({ adapter: 'hume', name: 'Hume', models: [{ id: 'octave-2', label: 'Octave 2', kind: 'speech' }] });
+  const voice = (id: string, provider: string) => ({ id, name: `Voice ${id}`, provider, compatible_octave_models: ['2'] });
+
+  beforeEach(() => {
+    providers = [hume()];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+  });
+
+  it('are the account\'s own, then Hume\'s library, counting pages from 0, with the key in X-Hume-Api-Key', async () => {
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('CUSTOM_VOICE')) return json({ page_number: 0, page_size: 100, total_pages: 1, voices_page: [voice('mine', 'CUSTOM_VOICE')] });
+      const page = Number(new URL(url).searchParams.get('page_number'));
+      return json({ page_number: page, page_size: 100, total_pages: 2, voices_page: page === 0 ? Array.from({ length: 100 }, (_, i) => voice(`lib${i}`, 'HUME_AI')) : [voice('last', 'HUME_AI')] });
+    });
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list).toHaveLength(102);
+    expect(list[0]).toMatchObject({ voiceId: 'mine', name: 'Voice mine', model: 'octave-2' });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'https://api.hume.ai/v0/tts/voices?page_size=100&page_number=0&provider=CUSTOM_VOICE',
+      'https://api.hume.ai/v0/tts/voices?page_size=100&page_number=0&provider=HUME_AI',
+      'https://api.hume.ai/v0/tts/voices?page_size=100&page_number=1&provider=HUME_AI',
+    ]);
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ 'X-Hume-Api-Key': SECRET });
+  });
+});
+
 describe('languageCode', () => {
-  it('keeps the language of a code and drops anything that isn\'t one', () => {
-    expect([languageCode('en-GB'), languageCode('AR_kw'), languageCode('ara'), languageCode('English'), languageCode(''), languageCode(7)]).toEqual(['en', 'ar', 'ara', null, null, null]);
+  it('keeps the language of a code, reads a three-letter one as its two-letter code, and drops anything that isn\'t one', () => {
+    expect([languageCode('en-GB'), languageCode('AR_kw'), languageCode('ara'), languageCode('ger'), languageCode('fil'), languageCode('English'), languageCode(''), languageCode(7)]).toEqual(['en', 'ar', 'ar', 'de', 'fil', null, null, null]);
   });
 });
 
