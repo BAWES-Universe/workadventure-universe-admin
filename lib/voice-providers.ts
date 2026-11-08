@@ -2,7 +2,7 @@ import type { Prisma, VoiceProvider } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { encryptApiKey } from '@/lib/encryption';
-import { voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { fixedVoiceModel, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 
 /**
  * Voice providers (#740): the speech companies a super admin sets up for the whole server. Each can listen (recognition),
@@ -306,11 +306,16 @@ export async function universeAiDefaults() {
   };
   const speech = part('speech');
   const speechRow = speech ? rows.find((row) => row.id === speech.providerId) : undefined;
+  // A starting voice that names its own model (Groq's Orpheus) starts on that model, as borrowUniverseAi lends it; when the
+  // provider no longer lists that model, there is no starting voice rather than one paired with a model it can't speak
+  const tied = speech && speechRow?.defaultVoiceId ? fixedVoiceModel(speechRow.adapter, speechRow.defaultVoiceId) : undefined;
+  const voiceFits = !tied || !!speech?.models.some((model) => model.id === tied);
   return {
     recognition: part('recognition'),
     speech: speech && {
       ...speech,
-      defaultVoice: speechRow?.defaultVoiceId ? { voiceId: speechRow.defaultVoiceId, voiceName: speechRow.defaultVoiceName } : null,
+      ...(tied && voiceFits ? { model: tied } : {}),
+      defaultVoice: speechRow?.defaultVoiceId && voiceFits ? { voiceId: speechRow.defaultVoiceId, voiceName: speechRow.defaultVoiceName } : null,
     },
   };
 }
