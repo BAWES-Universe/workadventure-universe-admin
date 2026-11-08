@@ -16,6 +16,7 @@ let patchAnswer: { ok: boolean; body: unknown };
 // When set, reading the list never answers: the moment after a save, before the list that follows it arrives
 let holdList = false;
 let checkAnswer: { ok: boolean; body: unknown };
+let savedCheckAnswer: { ok: boolean; body: unknown };
 const push = jest.fn();
 
 jest.mock('@/lib/client-auth', () => ({
@@ -27,6 +28,7 @@ jest.mock('@/lib/client-auth', () => ({
     if (url.endsWith('/voices')) return answer(voicesAnswer.ok, voicesAnswer.body, voicesAnswer.status);
     if (method === 'PATCH') return answer(patchAnswer.ok, patchAnswer.body);
     if (url === '/api/admin/voice-providers/check') return answer(checkAnswer.ok, checkAnswer.body);
+    if (url.endsWith('/check')) return answer(savedCheckAnswer.ok, savedCheckAnswer.body);
     if (url === '/api/admin/voice-providers' && method === 'POST') return answer(true, { provider: {} }, 201);
     return answer(true, {});
   },
@@ -60,6 +62,7 @@ beforeEach(() => {
   patchAnswer = { ok: true, body: { provider: {} } };
   holdList = false;
   checkAnswer = { ok: true, body: { ok: true } };
+  savedCheckAnswer = { ok: true, body: { ok: true, models: null } };
   push.mockReset();
 });
 
@@ -699,5 +702,46 @@ describe('A voice provider\u2019s key', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
     expect(await screen.findByText('This provider uses its own address, so ElevenLabs can\u2019t check its key.')).toBeTruthy();
     expect(calls.some((call) => call.url.endsWith('/check'))).toBe(false);
+  });
+});
+
+describe('A voice provider\u2019s models, from the company\u2019s own list for its key', () => {
+  const open = async (id: string) => {
+    const params = Object.assign(Promise.resolve({ id }), { status: 'fulfilled', value: { id } });
+    render(<VoiceProviderPage params={params} />);
+    return screen.findByRole('button', { name: 'Check key' });
+  };
+
+  it('ticks from what the company lists after Check key, keeping a model it doesn\u2019t list as a row', async () => {
+    savedCheckAnswer = {
+      ok: true,
+      body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech', note: '2 languages' }, { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] },
+    };
+    fireEvent.click(await open('v-eleven'));
+    expect(screen.getByText('Check the key to tick models from ElevenLabs\u2019s own list for it.')).toBeTruthy();
+    expect(await screen.findByText('ElevenLabs knows this key and lists 2 models for it. Checked just now, nothing paid.')).toBeTruthy();
+    const boxes = screen.getAllByRole('checkbox');
+    // The saved one it lists first, ticked, then the rest of the company's list
+    expect(boxes.map((box) => box.textContent)).toEqual(['Eleven Flash v2.5eleven_flash_v2_5 · 2 languages', 'Eleven v4 Turboeleven_v4_turbo']);
+    expect(boxes.map((box) => box.getAttribute('aria-checked'))).toEqual(['true', 'false']);
+    // Multilingual v2 isn't on the company's list for this key: it stays a row, to take off by hand
+    expect(listedRows().map((row) => row.textContent)).toEqual(['Multilingual v2eleven_multilingual_v2']);
+    fireEvent.click(screen.getByRole('checkbox', { name: /^Eleven v4 Turbo/ }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    // Saved in order, the new tick last, and only the model: never the company's line about it
+    expect(patches()[0].body).toEqual({
+      models: [
+        { id: 'eleven_flash_v2_5', label: 'Flash v2.5', kind: 'speech' },
+        { id: 'eleven_multilingual_v2', label: 'Multilingual v2', kind: 'speech' },
+        { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' },
+      ],
+    });
+  });
+
+  it('keeps the rows when the company has no list or it can\u2019t be read', async () => {
+    fireEvent.click(await open('v-eleven'));
+    expect(await screen.findByText('ElevenLabs knows this key. Checked just now, nothing paid.')).toBeTruthy();
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+    expect(listedRows()).toHaveLength(2);
   });
 });

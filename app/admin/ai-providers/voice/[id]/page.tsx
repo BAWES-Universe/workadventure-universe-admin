@@ -8,9 +8,11 @@ import { Input } from '@/components/ui/input';
 import { useToast } from '@/components/ui/toast';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import type { VoiceModel } from '@/lib/voice-providers';
-import { companyHost } from '@/lib/voice-key-companies';
+import { companyHost, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { lendModelId } from '@/lib/voice-lend-model';
 import { LoadError, LoadingRows, PageHeader, SettingSwitch, Settings } from '../../../components/ds';
 import { ProviderLogo } from '../../../components/ds/provider-logo';
+import { VoiceModelPicker } from '../../../components/ds/voice-model-picker';
 import { FormSheet } from '../../../components/form-sheet';
 import { EnabledPill } from '../../components/provider-state';
 import {
@@ -94,6 +96,9 @@ function EditField({
   );
 }
 
+/** A model the company lists for the key, with its short line about it (never saved). */
+type Listed = VoiceModel & { note?: string };
+
 const verbFor = (provider: ServerVoiceProvider) => (provider.recognition && provider.speech ? 'listen and speak' : provider.recognition ? 'listen' : 'speak');
 
 /** A voice provider's own page (#792): on or off, who uses it, its key, models, address, name and delete. */
@@ -107,6 +112,8 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
   const [failed, setFailed] = useState(false);
   const [checked, setChecked] = useState<{ ok: true } | { ok: false; message: string } | { ok: 'note'; message: string } | null>(null);
   const [checking, setChecking] = useState(false);
+  // The models the company listed for the saved key when it was last checked, to tick (null: not checked, no list, or unreadable)
+  const [listed, setListed] = useState<Listed[] | null>(null);
   const [editing, setEditing] = useState<'key' | 'address' | 'name' | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [turningOff, setTurningOff] = useState(false);
@@ -221,6 +228,19 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
     const answer = await callOrbit('POST', `/api/admin/voice-providers/${encodeURIComponent(id)}/check`);
     setChecking(false);
     setChecked(answer.ok ? { ok: true } : { ok: false, message: answer.error });
+    const found = answer.ok ? (answer.data as { models?: unknown } | null)?.models : null;
+    setListed(Array.isArray(found) && found.length > 0 ? (found as Listed[]) : null);
+  }
+
+  /** On the company's list for this key: ticked there, not typed. */
+  const onList = (model: VoiceModel) => listed?.some((entry) => lendModelId(entry) === lendModelId(model)) ?? false;
+
+  /** The ticks on the company's list, saved: models kept in their order, typed ones kept, newly ticked ones last. */
+  function tick(ids: string[]) {
+    const kept = provider!.models.filter((model) => !onList(model) || ids.includes(lendModelId(model)));
+    const added = (listed ?? []).filter((entry) => ids.includes(lendModelId(entry)) && !kept.some((model) => lendModelId(model) === lendModelId(entry)));
+    // What is saved is the model only: the line about it is the company's, read again whenever the list is
+    void changeModels([...kept, ...added.map(({ id: modelId, label, kind }) => ({ id: modelId, ...(label ? { label } : {}), kind }))]);
   }
 
   async function replaceKey(key: string): Promise<string | null> {
@@ -237,6 +257,8 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
     if (refused) return refused;
     setEditing(null);
     setChecked(ownAddress ? null : { ok: true });
+    // The list read for the old key may not be this one's
+    setListed(null);
     addToast({ description: 'Key replaced', variant: 'success', duration: 2500 });
     return null;
   }
@@ -312,14 +334,44 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
             </Button>
           </div>
         )}
-        {checked?.ok === true && <Answered>{company} knows this key. Checked just now, nothing paid.</Answered>}
+        {checked?.ok === true && (
+          <Answered>
+            {company} knows this key{listed ? ` and lists ${listed.length} ${listed.length === 1 ? 'model' : 'models'} for it` : ''}. Checked just now, nothing paid.
+          </Answered>
+        )}
         {checked?.ok === false && <Refused>{checked.message}</Refused>}
         {checked?.ok === 'note' && <p className="text-[13px] text-muted-foreground">{checked.message}</p>}
       </section>
       <section className="grid gap-2">
         <Caption>Models</Caption>
         <p className="-mt-1 text-[13px] text-muted-foreground">Bots on Universe AI, and people’s own {company} keys, can use only these.</p>
-        <ModelRows models={provider.models} jobs={jobs} onChange={changeModels} disabled={busy} />
+        {listed ? (
+          <>
+            <p className={FIELD_HINT}>{company} lists these for this key, each with what {company} says about it. Tick more to let bots pick between them. The first ticked is what bots start on.</p>
+            <VoiceModelPicker
+              models={[...provider.models.filter(onList).map((model) => listed.find((entry) => lendModelId(entry) === lendModelId(model))!), ...listed.filter((entry) => !provider.models.some((model) => lendModelId(model) === lendModelId(entry)))]}
+              mode="many"
+              detailed
+              label={`${company} models`}
+              picked={provider.models.filter(onList).map(lendModelId)}
+              onChange={busy ? undefined : tick}
+            />
+            {/* Models the company doesn't list for this key (typed, or for a job it has no list for) stay as rows */}
+            <ModelRows
+              models={provider.models.filter((model) => !onList(model))}
+              jobs={jobs}
+              onChange={(next) => changeModels([...provider.models.filter((model) => onList(model) || next.includes(model)), ...next.filter((model) => !provider.models.includes(model))])}
+              disabled={busy}
+            />
+          </>
+        ) : (
+          <>
+            {provider.hasKey && !provider.endpoint && jobs.some((job) => voiceKeyCompanyInfo(provider.adapter)?.jobs[job]?.modelList) && (
+              <p className={FIELD_HINT}>Check the key to tick models from {company}’s own list for it.</p>
+            )}
+            <ModelRows models={provider.models} jobs={jobs} onChange={changeModels} disabled={busy} />
+          </>
+        )}
       </section>
       <section className="grid gap-2">
         <Caption>Address</Caption>
