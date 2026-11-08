@@ -12,6 +12,8 @@ type Row = Record<string, unknown>;
 const calls: { method: string; url: string; body: Row | null }[] = [];
 let providers: Row[];
 let voicesAnswer: { ok: boolean; status?: number; body: unknown };
+// When set, the voice list answers only once it settles
+let holdVoices: Promise<void> | null = null;
 let patchAnswer: { ok: boolean; body: unknown };
 // When set, reading the list never answers: the moment after a save, before the list that follows it arrives
 let holdList = false;
@@ -24,7 +26,7 @@ jest.mock('@/lib/client-auth', () => ({
     calls.push({ method, url, body: init?.body ? JSON.parse(init.body) : null });
     const answer = (ok: boolean, body: unknown, status = ok ? 200 : 400) => Promise.resolve({ ok, status, json: () => Promise.resolve(body) });
     if (url === '/api/admin/voice-providers' && method === 'GET') return holdList ? new Promise(() => {}) : answer(true, { providers });
-    if (url.endsWith('/voices')) return answer(voicesAnswer.ok, voicesAnswer.body, voicesAnswer.status);
+    if (url.split('?')[0].endsWith('/voices')) return (holdVoices ?? Promise.resolve()).then(() => answer(voicesAnswer.ok, voicesAnswer.body, voicesAnswer.status));
     if (method === 'PATCH') return answer(patchAnswer.ok, patchAnswer.body);
     if (url === '/api/admin/voice-providers/check') return answer(checkAnswer.ok, checkAnswer.body);
     if (url === '/api/admin/voice-providers' && method === 'POST') return answer(true, { provider: {} }, 201);
@@ -57,6 +59,7 @@ beforeEach(() => {
   calls.length = 0;
   providers = [soniox(), eleven(), cartesia(), deepgram()];
   voicesAnswer = { ok: true, body: { voices: VOICES } };
+  holdVoices = null;
   patchAnswer = { ok: true, body: { provider: {} } };
   holdList = false;
   checkAnswer = { ok: true, body: { ok: true } };
@@ -64,6 +67,13 @@ beforeEach(() => {
 });
 
 const patches = () => calls.filter((call) => call.method === 'PATCH');
+// Picks a model in the sheet's model menu (jsdom has no pointer capture or scrolling, which the menu asks for)
+async function pickModel(sheet: HTMLElement, name: RegExp) {
+  Object.assign(Element.prototype, { hasPointerCapture: () => false, releasePointerCapture: () => undefined, scrollIntoView: () => undefined });
+  fireEvent.keyDown(within(sheet).getByRole('combobox'), { key: 'Enter' });
+  fireEvent.click(await screen.findByRole('option', { name }));
+}
+
 // The models on a provider's list (the ticks Universe offers are model rows too)
 const listedRows = () => screen.queryAllByTestId('model-row').filter((row) => row.tagName === 'LI');
 
@@ -176,7 +186,7 @@ describe('Change what Universe AI speaks with', () => {
     fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
     const sheet = await screen.findByRole('dialog');
     const list = await within(sheet).findByTestId('voice-list');
-    expect(calls.some((call) => call.url === '/api/admin/voice-providers/v-eleven/voices')).toBe(true);
+    expect(calls.some((call) => call.url === '/api/admin/voice-providers/v-eleven/voices?model=eleven_flash_v2_5')).toBe(true);
     expect(within(sheet).getByText('Samples come from ElevenLabs, free.')).toBeTruthy();
     expect(within(sheet).getByRole('searchbox', { name: 'Search voices' }).getAttribute('placeholder')).toBe('Search 2 voices');
     expect(within(list).getByRole('radio', { name: /Aria/ }).getAttribute('aria-checked')).toBe('true');
@@ -222,6 +232,65 @@ describe('Change what Universe AI speaks with', () => {
     fireEvent.click(save);
     await waitFor(() => expect(patches()).toHaveLength(1));
     expect(patches()[0]).toMatchObject({ url: '/api/admin/voice-providers/v-eleven', body: { defaultSpeech: true, defaultVoiceId: 'sarah', defaultVoiceName: 'Sarah' } });
+  });
+
+  it('lists the voices of the speaking model picked, and saves the voice again with a new model only from that model\'s list', async () => {
+    render(<VoiceSection />);
+    fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
+    const sheet = await screen.findByRole('dialog');
+    await within(sheet).findByTestId('voice-list');
+    await pickModel(sheet, /Multilingual v2/);
+    await waitFor(() => expect(calls.some((call) => call.url === '/api/admin/voice-providers/v-eleven/voices?model=eleven_multilingual_v2')).toBe(true));
+    await within(sheet).findByTestId('voice-list');
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    // Aria is in the new model's list, so it is sent again with the model and stays the starting voice
+    expect(patches()[0].body).toMatchObject({ defaultVoiceId: 'aria', defaultVoiceName: 'Aria' });
+  });
+
+  it('keeps Save off while the voices of a newly picked model are loading, so a voice picked is never dropped', async () => {
+    render(<VoiceSection />);
+    fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
+    const sheet = await screen.findByRole('dialog');
+    fireEvent.click(within(await within(sheet).findByTestId('voice-list')).getByRole('radio', { name: /Sarah/ }));
+    let answerVoices: () => void = () => undefined;
+    holdVoices = new Promise<void>((resolve) => (answerVoices = resolve));
+    await pickModel(sheet, /Multilingual v2/);
+    expect(within(sheet).getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
+    answerVoices();
+    await within(sheet).findByTestId('voice-list');
+    await waitFor(() => expect(within(sheet).getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(false));
+  });
+
+  it('does not save a voice that the speaking model picked does not list', async () => {
+    voicesAnswer = { ok: true, body: { voices: [{ voiceId: 'sarah', name: 'Sarah', description: '', languages: [], previewUrl: null }] } };
+    render(<VoiceSection />);
+    fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
+    const sheet = await screen.findByRole('dialog');
+    await within(sheet).findByTestId('voice-list');
+    await pickModel(sheet, /Multilingual v2/);
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith('?model=eleven_multilingual_v2'))).toBe(true));
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0].body).not.toHaveProperty('defaultVoiceId');
+  });
+
+  it('says the voice picked is not one of a newly picked model\u2019s voices, so saving drops it in plain sight', async () => {
+    voicesAnswer = { ok: true, body: { voices: [{ voiceId: 'sarah', name: 'Sarah', description: '', languages: [], previewUrl: null }] } };
+    render(<VoiceSection />);
+    fireEvent.click(within(await screen.findByTestId('default-speak')).getByRole('button', { name: 'Change' }));
+    const sheet = await screen.findByRole('dialog');
+    await within(sheet).findByTestId('voice-list');
+    // Aria is the saved voice but not in this model's list either: on the model it starts on, it stays picked and nothing is said
+    expect(within(sheet).queryByTestId('voice-not-listed')).toBeNull();
+    await pickModel(sheet, /Multilingual v2/);
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith('?model=eleven_multilingual_v2'))).toBe(true));
+    await within(sheet).findByTestId('voice-list');
+    expect((await within(sheet).findByTestId('voice-not-listed')).textContent).toBe('Multilingual v2 doesn\u2019t speak the voice picked. Pick one here, or bots start with the first voice ElevenLabs lists.');
+    expect(within(sheet).queryByText('No voice picked: bots start with the first voice ElevenLabs lists.')).toBeNull();
+    // Picking one of its voices clears it
+    fireEvent.click(within(within(sheet).getByTestId('voice-list')).getByRole('radio', { name: /Sarah/ }));
+    expect(within(sheet).queryByTestId('voice-not-listed')).toBeNull();
   });
 
   it('searches the voices and says so when none match', async () => {
@@ -314,10 +383,21 @@ describe('New voice provider', () => {
       'CartesiaListens and speaks. Uses your account at cartesia.ai.',
       'DeepgramListens and speaks. Uses your account at deepgram.com.',
       'ElevenLabsListens and speaks. Uses your account at elevenlabs.io.',
+      'falListens. Uses your account at fal.ai.',
+      'GladiaListens. Uses your account at gladia.io.',
+      'GradiumListens and speaks. Uses your account at gradium.ai.',
+      'GroqListens and speaks. Uses your account at groq.com.',
+      'MetaListens. Uses your account at dev.meta.ai.',
+      'MistralListens and speaks. Uses your account at mistral.ai.',
+      'NVIDIAListens and speaks. Uses your account at build.nvidia.com.',
       'OpenAIListens and talks live. Uses your account at platform.openai.com.',
+      'Sarvam AIListens and speaks. Uses your account at sarvam.ai.',
+      'Smallest AIListens and speaks. Uses your account at smallest.ai.',
       'SonioxListens and speaks. Uses your account at soniox.com.',
+      'SpeechmaticsListens and speaks. Uses your account at speechmatics.com.',
+      'Together AIListens and speaks. Uses your account at together.ai.',
     ]);
-    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks', 'SonioxListens and speaks']);
+    expect(within(speaks).getAllByRole('radio').map((card) => card.textContent?.split('.')[0])).toEqual(['AsyncSpeaks', 'BlandSpeaks', 'CAMB', 'CartesiaListens and speaks', 'DeepgramListens and speaks', 'ElevenLabsListens and speaks', 'Fish AudioSpeaks', 'GradiumListens and speaks', 'GroqListens and speaks', 'HumeSpeaks', 'MiniMaxSpeaks', 'MistralListens and speaks', 'NeuphonicSpeaks', 'NVIDIAListens and speaks', 'Resemble AISpeaks', 'RimeSpeaks', 'Sarvam AIListens and speaks', 'Smallest AIListens and speaks', 'SonioxListens and speaks', 'SpeechifySpeaks', 'SpeechmaticsListens and speaks', 'Together AIListens and speaks']);
     expect(screen.queryByText('Recommended')).toBeNull();
     fireEvent.click(within(speaks).getByRole('radio', { name: /^ElevenLabs/ }));
     expect(screen.getByRole('heading', { name: 'Set up ElevenLabs' })).toBeTruthy();
