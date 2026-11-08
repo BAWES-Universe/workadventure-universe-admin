@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 import { VoiceKeyRefused, deleteVoiceKey, updateVoiceKey, updateVoiceKeySchema } from '@/lib/voice-keys';
+import { forgetDiscovery } from '@/lib/voice-discovery';
 
 export const runtime = 'nodejs';
 
@@ -28,7 +29,11 @@ export async function PATCH(request: NextRequest, { params }: Context) {
   const parsed = updateVoiceKeySchema.safeParse(body);
   if (!parsed.success) return respond(request, { error: parsed.error.issues[0]?.message ?? 'Invalid request data' }, 400);
   try {
-    return respond(request, { key: await updateVoiceKey(user.id, (await params).id, parsed.data) });
+    const id = (await params).id;
+    const key = await updateVoiceKey(user.id, id, parsed.data);
+    // A new key lists other models: its company is asked again on the next read
+    if (parsed.data.apiKey !== undefined) forgetDiscovery(id);
+    return respond(request, { key });
   } catch (error) {
     if (error instanceof VoiceKeyRefused) return respond(request, { error: error.message }, error.status);
     console.error('[VoiceKeys] Could not change the key:', error instanceof Error ? error.message : 'unknown');

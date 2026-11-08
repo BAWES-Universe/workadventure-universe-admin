@@ -1,7 +1,8 @@
-import type { Prisma, VoiceProvider } from '@prisma/client';
+import { Prisma, type VoiceProvider } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { encryptApiKey } from '@/lib/encryption';
+import { hiddenAfter } from '@/lib/voice-hidden-models';
 
 /**
  * Voice providers (#740): the speech companies a super admin sets up for the whole server. Each can listen (recognition),
@@ -56,6 +57,8 @@ export const createVoiceProviderSchema = z
     region: fields.region.optional(),
     apiKey: fields.apiKey.optional(),
     models: fields.models.default([]),
+    // The listed models left unticked when it was added ("kind:id"): the company's list fills in the rest on its own, never these
+    hiddenModels: z.array(z.string().min(1).max(300)).max(1000).optional(),
   })
   .strict();
 
@@ -160,6 +163,7 @@ export async function createVoiceProvider(input: z.infer<typeof createVoiceProvi
       region: input.region ?? null,
       ...(input.apiKey ? { apiKeyEncrypted: encryptApiKey(input.apiKey), apiKeyLast4: input.apiKey.slice(-4) } : {}),
       models: input.models as Prisma.InputJsonValue,
+      ...(input.hiddenModels?.length ? { hiddenModels: input.hiddenModels as Prisma.InputJsonValue } : {}),
       createdById: userId,
     },
   });
@@ -202,7 +206,10 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
         ...(input.endpoint !== undefined ? { endpoint: input.endpoint } : {}),
         ...(input.region !== undefined ? { region: input.region } : {}),
         ...(input.apiKey === undefined ? {} : input.apiKey === null ? { apiKeyEncrypted: null, apiKeyLast4: null } : { apiKeyEncrypted: encryptApiKey(input.apiKey), apiKeyLast4: input.apiKey.slice(-4) }),
-        ...(input.models !== undefined ? { models: input.models as Prisma.InputJsonValue } : {}),
+        // A model taken off by hand stays off when the company's list is read again; one added back by hand comes back
+        ...(input.models !== undefined
+          ? { models: input.models as Prisma.InputJsonValue, hiddenModels: (hiddenAfter(readModels(row.models), input.models, row.hiddenModels) ?? Prisma.DbNull) as Prisma.InputJsonValue }
+          : {}),
         recognition: next.recognition,
         speech: next.speech,
         enabled: next.enabled,

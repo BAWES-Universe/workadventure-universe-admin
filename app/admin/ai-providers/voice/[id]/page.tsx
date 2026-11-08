@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input';
 import { useToast } from '@/components/ui/toast';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import type { VoiceModel } from '@/lib/voice-providers';
-import { companyHost } from '@/lib/voice-key-companies';
+import { companyHost, listedModelJobs } from '@/lib/voice-key-companies';
 import { LoadError, LoadingRows, PageHeader, SettingSwitch, Settings } from '../../../components/ds';
 import { ProviderLogo } from '../../../components/ds/provider-logo';
 import { FormSheet } from '../../../components/form-sheet';
@@ -318,7 +318,10 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
       </section>
       <section className="grid gap-2">
         <Caption>Models</Caption>
-        <p className="-mt-1 text-[13px] text-muted-foreground">Bots on Universe AI, and people’s own {company} keys, can use only these.</p>
+        <p className="-mt-1 text-[13px] text-muted-foreground">
+          {listedModelJobs(provider).length > 0 && provider.hasKey ? `${company} lists these for this key, and new ones show up by themselves. A model you take off stays off. ` : ''}
+          Bots on Universe AI, and people’s own {company} keys, can use only these.
+        </p>
         <ModelRows models={provider.models} jobs={jobs} onChange={changeModels} disabled={busy} />
       </section>
       <section className="grid gap-2">

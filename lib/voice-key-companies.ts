@@ -762,6 +762,16 @@ export const talksLive = (
 /** The jobs a company does, in the order they are shown. */
 export const companyJobs = (info: Pick<VoiceKeyCompanyEntry, 'jobs'>): VoiceCompanyJobName[] => VOICE_COMPANY_JOBS.filter((job) => info.jobs[job]);
 
+/**
+ * The jobs whose models fill in on their own from the company's list (voice discovery): the jobs the provider does that its company
+ * lists models for. None for a provider at its own address, or a company where the model is typed as the person named it (Azure).
+ */
+export const listedModelJobs = (row: { adapter: string; recognition: boolean; speech: boolean; endpoint?: string | null }): VoiceCompanyJobName[] => {
+  const company = voiceKeyCompanyInfo(row.adapter);
+  if (!company || row.endpoint || company.account?.typedModel) return [];
+  return companyJobs(company).filter((job) => (job === 'talk' ? row.recognition && row.speech : row[job]) && company.jobs[job]?.modelList);
+};
+
 /** The company's own host for a job (its first job when none is named), as the bot server calls it when no address is typed. */
 export const companyHost = (adapter: string, job?: VoiceCompanyJobName): string | undefined => {
   const info = voiceKeyCompanyInfo(adapter);

@@ -392,7 +392,7 @@ describe('New voice provider', () => {
 });
 
 describe('New voice provider, models the company lists (#840)', () => {
-  it('lists the company\'s models after Check key to tick, each with what the company says, one that works ticked already', async () => {
+  it('lists the company\'s models after Check key to tick, each with what the company says, all of them on, one unticked stays off', async () => {
     checkAnswer = {
       ok: true,
       body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech', note: '2 languages · Fast.' }, { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' }] },
@@ -405,24 +405,25 @@ describe('New voice provider, models the company lists (#840)', () => {
     expect(await screen.findByText('ElevenLabs knows this key and lists 2 models for it. Nothing was spoken, so nothing was paid.')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Add a model' })).toBeNull();
     const add = screen.getByRole('button', { name: 'Add provider' });
-    // The models Universe starts ElevenLabs keys on come first, the first one ticked already, so it can be added as it is
+    // The models Universe starts ElevenLabs keys on come first, then the company's; all are on, so it can be added as it is
     const boxes = screen.getAllByRole('checkbox');
     expect(boxes.map((box) => box.textContent)).toEqual([
       'Eleven v4 Turboeleven_v4_turbo',
       'Eleven Flash v2.5eleven_flash_v2_5 · 2 languages · Fast.',
       'Eleven v3eleven_v3',
     ]);
-    expect(boxes[0].getAttribute('aria-checked')).toBe('true');
+    expect(boxes.map((box) => box.getAttribute('aria-checked'))).toEqual(['true', 'true', 'true']);
     expect(add.hasAttribute('disabled')).toBe(false);
     fireEvent.click(screen.getByRole('checkbox', { name: /^Eleven v3/ }));
     fireEvent.click(add);
     await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/ai-providers'));
     const post = calls.find((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers');
-    // Only the model is saved, never the company's line about it
+    // Only the model is saved, never the company's line about it; the one unticked is kept off, so the company's list never adds it back
     expect(post?.body?.models).toEqual([
       { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' },
-      { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' },
+      { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' },
     ]);
+    expect(post?.body?.hiddenModels).toEqual(['speech:eleven_v3']);
   });
 
   it('offers the models Universe knows to tick, or one to type, for a company that shares no list', async () => {

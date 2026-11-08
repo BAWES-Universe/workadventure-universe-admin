@@ -5,6 +5,7 @@ import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { lendAccess, parseLendModels } from '@/lib/ai-key-lend';
 import { readModels, voiceProviderProblem, type VoiceModel } from '@/lib/voice-providers';
 import { lendModelId } from '@/lib/voice-lend-model';
+import { hiddenAfter } from '@/lib/voice-hidden-models';
 import { AWS_KEY, TYPED_MODEL, VOICE_KEY_COMPANIES, accountAddress, accountRegion, modelDoes, voiceDoesLine, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits } from '@/lib/voice-limits';
@@ -472,7 +473,8 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
           : {}),
         // A new address is a new connection: tried at once too
         ...(endpoint !== undefined ? { endpoint, ...CLEAN_HEALTH } : {}),
-        ...(input.models !== undefined ? { models: input.models as Prisma.InputJsonValue } : {}),
+        // A model taken off by hand stays off when the company's list is read again; one added back by hand comes back
+        ...(input.models !== undefined ? { models: input.models as Prisma.InputJsonValue, hiddenModels: (hiddenAfter(readModels(row.models), input.models, row.hiddenModels) ?? Prisma.DbNull) as Prisma.InputJsonValue } : {}),
         ...(voiceLimits !== undefined ? { voiceLimits } : {}),
       },
     });
