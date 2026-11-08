@@ -70,8 +70,8 @@ async function ask(company: VoiceKeyCompanyInfo, apiKey: string, address: string
 
 /**
  * The models a company's key may be used with: the union of what the server's own providers for that adapter that are on list,
- * one entry per kind and id (the first listing's label wins), kept to what each provider does. A server with none listed for the
- * company gives the catalog's own starting models, so a company is never without any.
+ * one entry per kind and id (the first listing's label wins), kept to what each provider does. A job the server has none listed
+ * for gives the catalog's own starting models for that job, so a company is never without a job it does.
  */
 export async function serverVoiceModels(adapter: string): Promise<VoiceModel[]> {
   const rows = await prisma.voiceProvider.findMany({
@@ -87,8 +87,14 @@ export async function serverVoiceModels(adapter: string): Promise<VoiceModel[]> 
       if (!seen.has(id)) seen.set(id, model);
     }
   }
-  if (seen.size > 0) return [...seen.values()];
-  return (voiceKeyCompanyInfo(adapter)?.models ?? []).map((model) => ({ ...model }));
+  // A job the server has no provider for gives the catalog's own starting models for that job, so a key is never without a job its
+  // company does (a server that only speaks with a company still lets a person's key of it listen)
+  const jobsListed = new Set([...seen.values()].map((model) => model.kind));
+  for (const model of voiceKeyCompanyInfo(adapter)?.models ?? []) {
+    const id = `${model.kind}:${model.id}`;
+    if (!jobsListed.has(model.kind) && !seen.has(id)) seen.set(id, { ...model });
+  }
+  return [...seen.values()];
 }
 
 /**
