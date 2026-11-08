@@ -240,7 +240,6 @@ describe('the list', () => {
       expect.objectContaining({ adapter: 'inworld', label: 'Inworld', recognition: false, speech: false, talk: true, account: null }),
       expect.objectContaining({ adapter: 'meta', label: 'Meta', recognition: true, speech: false }),
       expect.objectContaining({ adapter: 'mistral', label: 'Mistral', recognition: true, speech: true }),
-      expect.objectContaining({ adapter: 'meta', label: 'Meta', recognition: true, speech: false }),
       expect.objectContaining({ adapter: 'openai', label: 'OpenAI', recognition: false, speech: false, talk: true, logo: 'openai' }),
       expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: true }),
       expect.objectContaining({ adapter: 'ultravox', label: 'Ultravox', recognition: false, speech: false, talk: true, account: null }),
