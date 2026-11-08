@@ -184,8 +184,11 @@ export async function listCompanyModels(company: VoiceKeyCompanyInfo, apiKey: st
       if (typeof entry !== 'object' || entry === null) continue;
       const fields = entry as Record<string, unknown>;
       if (spec.where && !Object.entries(spec.where).every(([field, value]) => fields[field] === value)) continue;
-      const id = typeof fields[spec.id] === 'string' ? (fields[spec.id] as string).trim() : '';
+      if (spec.whereHas && !Object.entries(spec.whereHas).every(([field, value]) => Array.isArray(fields[field]) && (fields[field] as unknown[]).includes(value))) continue;
+      let id = typeof fields[spec.id] === 'string' ? (fields[spec.id] as string).trim() : '';
+      if (spec.idAfter && id.startsWith(spec.idAfter)) id = id.slice(spec.idAfter.length);
       if (!id || id.length > 255) continue;
+      if (spec.keepStarting && !spec.keepStarting.some((start) => id.startsWith(start))) continue;
       if (spec.leaveOut?.some((start) => id.startsWith(start))) continue;
       const languages = spec.languages ? languagesOf(fields[spec.languages]) : [];
       const seen = found.get(id);

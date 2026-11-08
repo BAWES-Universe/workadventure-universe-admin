@@ -166,3 +166,35 @@ describe('AWS: a key in two parts, made per region (#1910)', () => {
     }
   });
 });
+
+describe('lists of companies that say little about each model', () => {
+  const reply = (body: unknown) => fetchMock.mockResolvedValue({ status: 200, json: async () => body, body: null });
+
+  it('Google: the models that talk live, named as the bot server calls them', async () => {
+    reply({
+      models: [
+        { name: 'models/gemini-3.8-live', displayName: 'Gemini 3.8 Live', description: 'Live voice', supportedGenerationMethods: ['bidiGenerateContent', 'countTokens'] },
+        { name: 'models/gemini-3.5-pro', displayName: 'Gemini 3.5 Pro', supportedGenerationMethods: ['generateContent', 'countTokens'] },
+        { name: 'models/text-embedding-005', supportedGenerationMethods: ['embedContent'] },
+        { name: 'models/gemini-3.8-live-preview', supportedGenerationMethods: 'bidiGenerateContent' },
+      ],
+    });
+    expect(await listCompanyModels(voiceKeyCompanyInfo('google')!, 'k', 'talk')).toEqual([{ id: 'gemini-3.8-live', label: 'Gemini 3.8 Live', kind: 'talk', note: 'Live voice' }]);
+    expect(fetchMock).toHaveBeenCalledWith('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000', expect.objectContaining({ headers: expect.objectContaining({ 'x-goog-api-key': 'k' }) }));
+  });
+
+  it('OpenAI: only the realtime models, without the one that only listens', async () => {
+    reply({
+      object: 'list',
+      data: [
+        { id: 'gpt-realtime-2.1', object: 'model' },
+        { id: 'gpt-realtime-2.1-mini', object: 'model' },
+        { id: 'gpt-4o-realtime-preview-2025-06-03', object: 'model' },
+        { id: 'gpt-realtime-whisper', object: 'model' },
+        { id: 'gpt-5.5', object: 'model' },
+        { id: 'tts-1', object: 'model' },
+      ],
+    });
+    expect((await listCompanyModels(voiceKeyCompanyInfo('openai')!, 'k', 'talk'))?.map((model) => model.id)).toEqual(['gpt-realtime-2.1', 'gpt-realtime-2.1-mini', 'gpt-4o-realtime-preview-2025-06-03']);
+  });
+});
