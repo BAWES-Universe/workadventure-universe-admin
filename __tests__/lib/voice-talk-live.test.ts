@@ -64,11 +64,17 @@ describe('the OpenAI entry', () => {
 describe('the Google entry', () => {
   it('talks live only, with Gemini 3.8 Live and its 30 prebuilt voices', () => {
     const google = voiceKeyCompanyInfo('google');
-    expect(google?.does).toEqual({ recognition: false, speech: false, talk: true });
-    expect(google?.models).toEqual([{ id: 'gemini-3.8-live', label: 'Gemini 3.8 Live', kind: 'talk' }]);
+    // Gemini text to speech besides talking live (#1891)
+    expect(google?.does).toEqual({ recognition: false, speech: true, talk: true });
+    expect(google?.models).toEqual([
+      { id: 'gemini-3.8-flash-tts', label: 'Gemini 3.8 Flash TTS', kind: 'speech' },
+      { id: 'gemini-3.8-flash-lite-tts', label: 'Gemini 3.8 Flash-Lite TTS', kind: 'speech' },
+      { id: 'gemini-3.8-live', label: 'Gemini 3.8 Live', kind: 'talk' },
+    ]);
     const voices = google?.jobs.talk?.fixedVoices ?? [];
     expect(voices).toHaveLength(30);
     expect(new Set(voices.map((voice) => voice.id)).size).toBe(30);
+    expect(google?.jobs.speech?.fixedVoices).toEqual(voices);
     expect(google?.check.header).toBe('x-goog-api-key');
     expect(google?.check.alsoRefused).toEqual({ status: 400, includes: 'API_KEY_INVALID' });
     expect(JSON.stringify(google)).not.toMatch(/recommend/i);
@@ -103,11 +109,14 @@ describe('the Ultravox entry', () => {
 });
 
 describe('the xAI entry', () => {
-  it('talks live only, with its Grok Voice models and its 28 built-in voices, Eve first', () => {
+  it('listens, speaks and talks live, with its Grok models and its 28 built-in voices for speaking and talking, Eve first', () => {
     const xai = voiceKeyCompanyInfo('xai');
     expect(xai?.label).toBe('xAI');
-    expect(xai?.does).toEqual({ recognition: false, speech: false, talk: true });
+    // Hearing and speaking of its own besides talking live (#1907)
+    expect(xai?.does).toEqual({ recognition: true, speech: true, talk: true });
     expect(xai?.models).toEqual([
+      { id: 'grok-voice-transcribe-2.0', label: 'Grok Voice Transcribe 2.0', kind: 'recognition' },
+      { id: 'grok-tts', label: 'Grok Text to Speech', kind: 'speech' },
       { id: 'grok-voice-latest', label: 'Grok Voice (latest)', kind: 'talk' },
       { id: 'grok-voice-3.0', label: 'Grok Voice 3.0', kind: 'talk' },
     ]);
@@ -115,6 +124,7 @@ describe('the xAI entry', () => {
     expect(voices).toHaveLength(28);
     expect(voices[0]).toEqual({ id: 'eve', name: 'Eve' });
     expect(new Set(voices.map((voice) => voice.id)).size).toBe(28);
+    expect(xai?.jobs.speech?.fixedVoices).toEqual(voices);
     expect(xai?.check).toEqual({ url: 'https://api.x.ai/v1/tts/voices', header: 'Authorization', prefix: 'Bearer ' });
     expect(JSON.stringify(xai)).not.toMatch(/recommend/i);
   });

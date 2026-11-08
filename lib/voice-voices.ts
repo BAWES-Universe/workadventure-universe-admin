@@ -286,6 +286,9 @@ const cache = new Map<string, Cached>();
 /** For tests: forgets every list. */
 export const clearVoiceListCache = () => cache.clear();
 
+/** Which voices are listed: the ones a bot speaks with, or the ones it talks live with (game #1910). */
+export type VoicePart = 'speech' | 'talk';
+
 /** The job whose voices a provider's bots pick from: speaking, or talking (game #1910) for a company that only talks live. */
 const voiceJobOf = (company: VoiceKeyCompanyInfo | null) => (company?.jobs.speech ? company.jobs.speech : company?.jobs.talk);
 
@@ -334,9 +337,11 @@ async function listOwnVoices(provider: VoiceProvider): Promise<Listed[]> {
   return voices.map(({ voiceId }) => ({ voiceId, name: voiceId, description: '', languages: [], preview: null, previewNeedsKey: false }));
 }
 
-async function listedFor(provider: VoiceProvider): Promise<Listed[]> {
+async function listedFor(provider: VoiceProvider, talk = false): Promise<Listed[]> {
   // A company with no list call (OpenAI's talking voices) has its voices in the catalog: nothing to call, nothing to cache
-  const fixed = voiceJobOf(voiceKeyCompanyInfo(provider.adapter))?.fixedVoices;
+  const company = voiceKeyCompanyInfo(provider.adapter);
+  const fixed = talk && company?.jobs.talk ? company.jobs.talk.fixedVoices : voiceJobOf(company)?.fixedVoices;
+  if (talk && !fixed && company?.jobs.speech) throw new VoiceListRefused(`${company.label}’s talking voices can’t be listed here.`, 409);
   if (fixed) {
     return fixed.map((voice) => ({
       voiceId: voice.id,
@@ -387,7 +392,7 @@ interface Source {
  * belongs to the bot's maker, is lent to the bot's universe and that the maker may still lend there (the rule that decides
  * whose keys a bot speaks on, lib/bot-voice.ts). Anything else reads as "not found", so a key's existence is never confirmed.
  */
-async function sourceFor(botId: string, source: string): Promise<Source> {
+async function sourceFor(botId: string, source: string, part: VoicePart = 'speech'): Promise<Source> {
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { createdById: true, room: { select: { world: { select: { universeId: true } } } } } });
   if (!bot) throw new BotSettingsError(404, 'Bot not found');
   const universeId = bot.room.world.universeId;
@@ -405,10 +410,11 @@ async function sourceFor(botId: string, source: string): Promise<Source> {
     if (!provider || !bot.createdById || !(await lendAccess(bot.createdById, universeId))) throw new VoiceListRefused('Voice key not found.', 404);
   }
   const allowed = provider.lends?.length ? readLendModels(provider.lends[0].models) : null;
-  // A speaking model first; a key whose only speaking is a talking model (game #1910) gives that one
+  // Speaking: a speaking model first, and a key whose only speaking is a talking model (game #1910) gives that one. Talking:
+  // only a talking model, so a key that both speaks and talks live (xAI) still offers its voices marked "Talks live"
   const usable = readModels(provider.models).filter((entry) => !allowed || allowed.includes(lendModelId(entry)));
-  const model = usable.find((entry) => entry.kind === 'speech') ?? usable.find((entry) => entry.kind === 'talk');
-  if (!model) throw new VoiceListRefused(`${provider.name} has no speaking model set up here.`, 409);
+  const model = part === 'talk' ? usable.find((entry) => entry.kind === 'talk') : (usable.find((entry) => entry.kind === 'speech') ?? usable.find((entry) => entry.kind === 'talk'));
+  if (!model) throw new VoiceListRefused(`${provider.name} has no ${part === 'talk' ? 'talking' : 'speaking'} model set up here.`, 409);
   return { provider, model: model.id, talk: model.kind === 'talk', models: usable.filter((entry) => entry.kind === model.kind).map((entry) => entry.id) };
 }
 
@@ -416,9 +422,9 @@ const previewPath = (botId: string, source: string, voiceId: string) =>
   `/api/bots/${encodeURIComponent(botId)}/voice/voices/${encodeURIComponent(voiceId)}/preview?source=${encodeURIComponent(source)}`;
 
 /** The speaking voices of one source (`universe-ai` or a voice key's id) for a bot, in the order the company lists them. */
-export async function listBotVoices(botId: string, source: string): Promise<VoiceChoice[]> {
-  const { provider, model, talk, models } = await sourceFor(botId, source);
-  const listed = await listedFor(provider);
+export async function listBotVoices(botId: string, source: string, part: VoicePart = 'speech'): Promise<VoiceChoice[]> {
+  const { provider, model, talk, models } = await sourceFor(botId, source, part);
+  const listed = await listedFor(provider, talk);
   // A voice tied to models (Groq, Rime) comes with the first of them set up and allowed here, and not at all when none is
   return listed.flatMap((voice) => {
     const own = voice.models ? models.find((id) => voice.models!.includes(id)) : model;
