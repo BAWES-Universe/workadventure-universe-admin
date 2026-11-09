@@ -167,6 +167,18 @@ describe('super admin routes', () => {
     expect(db.update.mock.calls[2][0].data).toMatchObject({ apiKeyEncrypted: null, apiKeyLast4: null });
   });
 
+  it('hold the provider row before reading the models a change saves over, as model discovery does', async () => {
+    const lock = (prisma as unknown as { $queryRaw: jest.Mock }).$queryRaw;
+    db.findUnique.mockResolvedValue(row());
+    db.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => row(data));
+    lock.mockClear();
+    expect((await call(patchAdmin, 'PATCH', { models: [{ id: 'm2', label: 'Model two', kind: 'speech' }], takenOff: ['speech:m1'] })).status).toBe(200);
+    const [sql, id] = lock.mock.calls[0] as [TemplateStringsArray, string];
+    expect(sql.join('?')).toMatch(/FROM "voice_providers" WHERE "id" = \? FOR UPDATE/);
+    expect(id).toBe('p1');
+    expect(lock.mock.invocationCallOrder[0]).toBeLessThan(db.findUnique.mock.invocationCallOrder[0]);
+  });
+
   it('set the voice Universe AI speaks with, keep its name with it, and take it away', async () => {
     db.findUnique.mockResolvedValue(row({ defaultSpeech: true }));
     db.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => row(data));

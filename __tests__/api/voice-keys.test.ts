@@ -28,6 +28,7 @@ jest.mock('@/lib/ai-key-lend', () => ({ ...jest.requireActual('@/lib/ai-key-lend
 jest.mock('@/lib/db', () => ({
   prisma: {
     $transaction: jest.fn(),
+    $queryRaw: jest.fn(async () => []),
     voiceProvider: { findMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), deleteMany: jest.fn() },
     voiceKeyLend: { findMany: jest.fn(), update: jest.fn(), delete: jest.fn(), upsert: jest.fn(), deleteMany: jest.fn() },
     appSetting: { findUnique: jest.fn() },
@@ -178,6 +179,19 @@ describe('adding a key', () => {
     expect(data).toMatchObject({ adapter: 'aws', name: 'AWS', region: 'eu-north-1', endpoint: null, apiKeyLast4: 'EKEY', models: [{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }] });
     expect(decryptApiKey(data.apiKeyEncrypted)).toBe('AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY');
     expect(JSON.stringify(await response.json())).not.toContain('wJalrXUtnFEMI');
+  });
+
+  it('holds the key row before reading the models a change saves over, as model discovery does', async () => {
+    const lock = (prisma as unknown as { $queryRaw: jest.Mock }).$queryRaw;
+    db.voiceProvider.findFirst.mockResolvedValue(key());
+    db.voiceKeyLend.findMany.mockResolvedValue([]);
+    expect((await call(patch, 'PATCH', { models: [{ id: 'flash', label: 'Flash', kind: 'speech' }] })).status).toBe(200);
+    const [sql, ...values] = lock.mock.calls[0] as [TemplateStringsArray, ...string[]];
+    expect(sql.join('?')).toMatch(/FROM "voice_providers" WHERE "id" = \? AND "owner_id" = \? FOR UPDATE/);
+    expect(values).toEqual(['k1', 'u-ana']);
+    const firstReadInside = db.voiceProvider.findFirst.mock.invocationCallOrder.find((order) => order > lock.mock.invocationCallOrder[0]);
+    expect(firstReadInside).toBeDefined();
+    expect(firstReadInside!).toBeLessThan(db.voiceProvider.update.mock.invocationCallOrder[0]);
   });
 
   it('replaces an AWS key only whole: the access key ID, a colon, then the secret', async () => {

@@ -5,17 +5,21 @@
 import type { VoiceProvider } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { listCompanyModels } from '@/lib/voice-key-check';
-import { DISCOVERY_REFRESH_MS, discoverVoiceModels, forgetDiscovery } from '@/lib/voice-discovery';
+import { DISCOVERY_REFRESH_MS, DISCOVERY_RETRY_MS, discoverVoiceModels, discoveryRetryDelay, forgetDiscovery } from '@/lib/voice-discovery';
 import { modelChange, readHiddenModels } from '@/lib/voice-hidden-models';
 
 jest.mock('@/lib/encryption', () => ({ decryptApiKey: jest.fn((value: string) => value.replace(/^enc:/, '')) }));
 jest.mock('@/lib/voice-key-check', () => ({ listCompanyModels: jest.fn() }));
 jest.mock('@/lib/db', () => {
   const voiceProvider = { findUnique: jest.fn(), update: jest.fn(), findMany: jest.fn() };
-  return { prisma: { voiceProvider, $transaction: jest.fn(async (run: (tx: unknown) => unknown) => run({ voiceProvider })) } };
+  const $queryRaw = jest.fn(async () => [{ '?column?': 1 }]);
+  return { prisma: { voiceProvider, $queryRaw, $transaction: jest.fn(async (run: (tx: unknown) => unknown) => run({ voiceProvider, $queryRaw })) } };
 });
 
 const db = (prisma as unknown as { voiceProvider: { findUnique: jest.Mock; update: jest.Mock } }).voiceProvider;
+const lock = (prisma as unknown as { $queryRaw: jest.Mock }).$queryRaw;
+/** Lets the asking that carries on after the wait finish. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 const list = listCompanyModels as jest.Mock;
 
 const provider = (over: Partial<VoiceProvider> = {}): VoiceProvider =>
@@ -80,21 +84,104 @@ describe('voice models fill in on their own', () => {
     expect((saved.models as { id: string }[]).map((m) => m.id)).toEqual(['eleven_v4_turbo', 'eleven_flash_v2_5']);
   });
 
-  it('asks each provider at most once every 10 minutes, and again after a failure', async () => {
+  it('asks each provider at most once every 10 minutes after its list was read', async () => {
     const now = jest.spyOn(Date, 'now').mockReturnValue(1_000_000);
     await discoverVoiceModels([saved]);
+    await discoverVoiceModels([saved]);
+    expect(list).toHaveBeenCalledTimes(1);
+    now.mockReturnValue(1_000_000 + DISCOVERY_REFRESH_MS - 1);
     await discoverVoiceModels([saved]);
     expect(list).toHaveBeenCalledTimes(1);
     now.mockReturnValue(1_000_000 + DISCOVERY_REFRESH_MS);
     await discoverVoiceModels([saved]);
     expect(list).toHaveBeenCalledTimes(2);
+    now.mockRestore();
+  });
 
-    forgetDiscovery();
+  it('asks again soon after a list that could not be read, waiting longer after each failure in a row, never past 10 minutes', async () => {
+    let clock = 1_000_000;
+    const now = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    list.mockResolvedValue(null);
+    const waits: number[] = [];
+    for (let failure = 1; failure <= 7; failure += 1) {
+      const before = list.mock.calls.length;
+      await discoverVoiceModels([saved]);
+      await settle();
+      expect(list).toHaveBeenCalledTimes(before + 1);
+      const wait = discoveryRetryDelay(failure);
+      waits.push(wait);
+      // Not before its wait is up, and at once when it is
+      clock += wait - 1;
+      await discoverVoiceModels([saved]);
+      expect(list).toHaveBeenCalledTimes(before + 1);
+      clock += 1;
+    }
+    expect(waits[0]).toBe(DISCOVERY_RETRY_MS);
+    expect(waits[1]).toBe(DISCOVERY_RETRY_MS * 2);
+    expect(waits.every((wait, i) => i === 0 || wait >= waits[i - 1])).toBe(true);
+    expect(Math.max(...waits)).toBe(DISCOVERY_REFRESH_MS);
+    expect(db.update).not.toHaveBeenCalled();
+
+    // The company is back: its models are saved, and it is asked every 10 minutes again
+    list.mockResolvedValue(companyList);
+    await discoverVoiceModels([saved]);
+    await settle();
+    expect((saved.models as unknown[]).length).toBe(3);
+    const calls = list.mock.calls.length;
+    clock += DISCOVERY_RETRY_MS;
+    await discoverVoiceModels([saved]);
+    expect(list).toHaveBeenCalledTimes(calls);
+    clock += DISCOVERY_REFRESH_MS - DISCOVERY_RETRY_MS;
+    await discoverVoiceModels([saved]);
+    expect(list).toHaveBeenCalledTimes(calls + 1);
+    now.mockRestore();
+  });
+
+  it('asks again soon after the save fails, not on every read', async () => {
+    let clock = 1_000_000;
+    const now = jest.spyOn(Date, 'now').mockImplementation(() => clock);
     db.findUnique.mockRejectedValueOnce(new Error('db down'));
     await discoverVoiceModels([saved]);
+    await settle();
     await discoverVoiceModels([saved]);
-    expect(list).toHaveBeenCalledTimes(4);
+    expect(list).toHaveBeenCalledTimes(1);
+    clock += DISCOVERY_RETRY_MS;
+    await discoverVoiceModels([saved]);
+    await settle();
+    expect(list).toHaveBeenCalledTimes(2);
+    expect((saved.models as unknown[]).length).toBe(3);
     now.mockRestore();
+  });
+
+  it('saves the lists that were read when another of the same key could not be, and asks again soon', async () => {
+    let clock = 1_000_000;
+    const now = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+    saved = provider({ adapter: 'cartesia', recognition: true, speech: true, models: [] as never });
+    list.mockImplementation(async (_company: unknown, _key: string, job: string) => (job === 'speech' ? [{ id: 'sonic-3', kind: 'speech' }] : null));
+    await discoverVoiceModels([saved]);
+    await settle();
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(saved.models).toEqual([{ id: 'sonic-3', kind: 'speech' }]);
+    clock += DISCOVERY_RETRY_MS;
+    list.mockImplementation(async (_company: unknown, _key: string, job: string) => [{ id: job === 'speech' ? 'sonic-3' : 'ink-whisper', kind: job }]);
+    await discoverVoiceModels([saved]);
+    await settle();
+    expect(saved.models).toEqual([
+      { id: 'sonic-3', kind: 'speech' },
+      { id: 'ink-whisper', kind: 'recognition' },
+    ]);
+    now.mockRestore();
+  });
+
+  it('asks a new key at once even when the old key was still being asked', async () => {
+    let finish: (value: unknown) => void = () => undefined;
+    list.mockReturnValueOnce(new Promise((resolve) => (finish = resolve)));
+    await discoverVoiceModels([saved], 10);
+    forgetDiscovery(saved.id);
+    finish(null);
+    await settle();
+    await discoverVoiceModels([saved]);
+    expect(list).toHaveBeenCalledTimes(2);
   });
 
   it.each([
@@ -113,6 +200,26 @@ describe('voice models fill in on their own', () => {
     saved = provider({ apiKeyEncrypted: 'enc:sk-new' });
     await discoverVoiceModels([asked]);
     expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['an address was typed', { endpoint: 'https://speech.example.com' }],
+    ['speaking was switched off', { speech: false }],
+  ])('saves nothing when %s while it was asked', async (_why, over) => {
+    const asked = saved;
+    saved = provider(over as Partial<VoiceProvider>);
+    await discoverVoiceModels([asked]);
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it('holds the provider row before reading the models it saves over, as a change by hand does', async () => {
+    await discoverVoiceModels([saved]);
+    expect(lock).toHaveBeenCalledTimes(1);
+    const [sql, id] = lock.mock.calls[0] as [TemplateStringsArray, string];
+    expect(sql.join('?')).toMatch(/FROM "voice_providers" WHERE "id" = \? FOR UPDATE/);
+    expect(id).toBe('p-eleven');
+    expect(lock.mock.invocationCallOrder[0]).toBeLessThan(db.findUnique.mock.invocationCallOrder[0]);
+    expect(db.findUnique.mock.invocationCallOrder[0]).toBeLessThan(db.update.mock.invocationCallOrder[0]);
   });
 
   it('answers after the wait while a slow company is still asked, and saves what comes later', async () => {
