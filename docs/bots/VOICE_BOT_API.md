@@ -68,7 +68,10 @@ of a key from `lentKeys`. Answers
 
 in the company's order. `languages` are lowercase codes without region, as the company lists them (empty when it does not say). `model` is
 the speaking model to use with the voice: the first one the source lists, and for a key the first the lend allows. `providerId` and
-`model` go in the draft's `speech` with `voiceId` and `voiceName`. `talk` is true when `model` is a talking model (#1910).
+`model` go in the draft's `speech` with `voiceId` and `voiceName`. `talk` is true when `model` is a talking model (#1910). A talking
+model listens and speaks in one, so it is named for both or for neither: with `talk` true, put the same `providerId` and `model` in the
+draft's `recognition` too. Publishing a talking model in `speech` with another choice left in `recognition` is a 409 ("…talks live, so it
+must be named for both listening and speaking").
 
 `part=talk` lists a talking model's voices instead (a 409 when the source has none). With `part=speech`, a key whose only speaking is
 a talking model gives that model's voices; a key with both (Amazon Polly and Nova Sonic) gives its speaking voices, and its talking

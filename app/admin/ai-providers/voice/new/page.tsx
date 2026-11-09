@@ -64,6 +64,8 @@ export default function NewVoiceProviderPage() {
   const [failure, setFailure] = useState<string | null>(null);
   // Only the newest check may answer: a slow one for a key since changed is dropped
   const latest = useRef(0);
+  // The key (and region) whose list the ticked models came from: a check of another key starts from that key's own list
+  const listedFor = useRef<string | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
 
   const info = VOICE_KEY_COMPANIES.find((entry) => entry.adapter === adapter && entry.jobs[job]) ?? null;
@@ -88,6 +90,7 @@ export default function NewVoiceProviderPage() {
       setRegion(null);
       setCheck({ status: 'none' });
       setModels([]);
+      listedFor.current = null;
       setTypedName(null);
       setAddress('');
       setFailure(null);
@@ -102,6 +105,13 @@ export default function NewVoiceProviderPage() {
     setCheck({ status: 'checking' });
     const answer = await callOrbit('POST', '/api/admin/voice-providers/check', { adapter: info.adapter, apiKey: fullKey, job, ...(account?.regions && region ? { region } : {}) });
     if (mine !== latest.current) return;
+    // The models ticked from another key's list go: that key's models may not be this one's
+    const forKey = JSON.stringify([fullKey, region]);
+    const sameKey = listedFor.current === forKey;
+    if (!sameKey && listedFor.current !== null) {
+      setModels([]);
+      listedFor.current = null;
+    }
     if (!answer.ok) {
       setCheck({ status: 'refused', message: answer.error });
       return;
@@ -110,10 +120,12 @@ export default function NewVoiceProviderPage() {
     const listed = Array.isArray(found) && found.length > 0 ? (found as Listed[]) : null;
     setCheck({ status: 'ok', listed });
     // Every model the company lists is ticked from the start, the one Universe starts this company's keys on first: new ones the
-    // company adds later show up on their own too. Nothing picked by hand is replaced.
+    // company adds later show up on their own too. Checking the same key again keeps what was ticked and unticked by hand; a new
+    // key starts from its own list, since only the listed models show to tick.
     if (listed) {
       const all = [...known, ...listed.filter((entry) => !known.some((model) => model.id === entry.id))];
-      setModels((now) => (now.length > 0 ? now : all.map(({ id, label, kind }) => ({ id, ...(label ? { label } : {}), kind }))));
+      setModels((now) => (sameKey && now.length > 0 ? now : all.map(({ id, label, kind }) => ({ id, ...(label ? { label } : {}), kind }))));
+      listedFor.current = forKey;
     }
   }
 

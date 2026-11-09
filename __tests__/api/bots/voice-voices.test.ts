@@ -1057,6 +1057,18 @@ describe('AWS Polly\'s voices (#1886)', () => {
     ]);
   });
 
+  it('reads every page Polly gives, asking the next one with its NextToken, each page signed', async () => {
+    providers = [aws([{ id: 'generative', kind: 'speech' }, { id: 'neural', kind: 'speech' }])];
+    lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];
+    fetchMock.mockImplementationOnce(async () => json({ Voices: [polly.Voices[0]], NextToken: 'page/2+=' })).mockImplementationOnce(async () => json({ Voices: [polly.Voices[1]] }));
+    const list = await (await voices('part=speech&source=key-1')).json();
+    expect(list.map((voice: Row) => voice.voiceId)).toEqual(['Hala', 'Joanna']);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [url, init] = fetchMock.mock.calls[1];
+    expect(url).toBe('https://polly.eu-north-1.amazonaws.com/v1/voices?IncludeAdditionalLanguageCodes=true&NextToken=page%2F2%2B%3D');
+    expect(((init as RequestInit).headers as Record<string, string>).Authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE\//);
+  });
+
   it('gives Nova Sonic’s own voices, without calling AWS, when the key only talks live', async () => {
     providers = [aws([{ id: 'amazon.nova-2-sonic-v1:0', kind: 'talk' }])];
     lends = [{ providerId: 'key-1', universeId: 'uni-1', models: null }];

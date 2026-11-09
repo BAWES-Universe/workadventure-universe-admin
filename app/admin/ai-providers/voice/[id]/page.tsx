@@ -233,7 +233,9 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
     // not asked there.
     const ownAddress = Boolean(provider!.endpoint);
     if (!ownAddress) {
-      const asked = await callOrbit('POST', '/api/admin/voice-providers/check', { adapter: provider!.adapter, apiKey: key });
+      // A company whose keys are made per region (AWS, Azure AI Speech) is asked in the provider's saved region, as Check key does
+      const region = provider!.region;
+      const asked = await callOrbit('POST', '/api/admin/voice-providers/check', { adapter: provider!.adapter, apiKey: key, ...(region ? { region } : {}) });
       if (!asked.ok) return asked.error;
     }
     const refused = await change({ apiKey: key });
