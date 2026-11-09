@@ -442,6 +442,8 @@ export async function updateVoiceKey(ownerId: string, id: string, input: z.infer
     if (input.address !== undefined) endpoint = await movedAddress(current, input.address, input.apiKey);
   }
   await prisma.$transaction(async (tx) => {
+    // The row is held until this is saved, as model discovery holds it: one waits for the other, so neither saves over the other's models
+    await tx.$queryRaw`SELECT 1 FROM "voice_providers" WHERE "id" = ${id} AND "owner_id" = ${ownerId} FOR UPDATE`;
     const row = await tx.voiceProvider.findFirst({ where: { id, ownerId } });
     if (!row) throw new VoiceKeyRefused('Key not found', 404);
     // A key in two parts (AWS) is replaced whole: the access key ID, a colon, the secret

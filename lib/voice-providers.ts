@@ -175,6 +175,8 @@ export async function createVoiceProvider(input: z.infer<typeof createVoiceProvi
 /** Changes only what is named. Making one the default takes it from the one that had it, in one transaction. */
 export async function updateVoiceProvider(id: string, input: z.infer<typeof updateVoiceProviderSchema>): Promise<VoiceProvider> {
   return prisma.$transaction(async (tx) => {
+    // The row is held until this is saved, as model discovery holds it: one waits for the other, so neither saves over the other's models
+    await tx.$queryRaw`SELECT 1 FROM "voice_providers" WHERE "id" = ${id} FOR UPDATE`;
     const row = await tx.voiceProvider.findUnique({ where: { id } });
     if (!row || row.ownerId !== null) throw new VoiceProviderRefused('Voice provider not found', 404);
     const changesCompany = input.adapter !== undefined && input.adapter !== row.adapter;

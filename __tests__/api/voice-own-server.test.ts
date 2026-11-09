@@ -24,6 +24,7 @@ jest.mock('@/lib/ai-key-fetch', () => ({ ...jest.requireActual('@/lib/ai-key-fet
 jest.mock('@/lib/db', () => ({
   prisma: {
     $transaction: jest.fn(),
+    $queryRaw: jest.fn(async () => []),
     voiceProvider: { findMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
     voiceKeyLend: { findMany: jest.fn(), update: jest.fn(), delete: jest.fn() },
     voiceKeyUsage: { findMany: jest.fn() },
