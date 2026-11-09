@@ -575,12 +575,10 @@ export async function listServerVoices(providerId: string, startingModel?: strin
   // The Universe AI page asks for the voices of the starting model being picked, before it is saved: one the provider lists
   // comes first, as it will once saved
   const models = startingModel && listed.includes(startingModel) ? [startingModel, ...listed.filter((id) => id !== startingModel)] : listed;
-  const named = !!voiceKeyCompanyInfo(provider.adapter)?.jobs.speech?.fixedVoices;
-  // A voice tied to models is offered only with the model it would speak in as the starting voice (borrowUniverseAi): its own
-  // model when the catalog names it (Groq's Orpheus) and the provider lists it, or else the provider's starting model when the
-  // voice speaks in it (Rime)
-  const speaksWith = (voice: Listed) =>
-    !voice.models ? undefined : named ? models.find((id) => voice.models!.includes(id)) : models[0] && voice.models.includes(models[0]) ? models[0] : undefined;
+  // A voice tied to models (Groq's and Sarvam's fixed voices, Rime) is offered only when it speaks the starting model, so the
+  // starting voice saved never pulls Universe AI (borrowUniverseAi) back to another model than the one picked: a new starting
+  // model leaves the old voice off the list, the page doesn't send it again, and saving drops it (updateVoiceProvider)
+  const speaksWith = (voice: Listed) => (voice.models && models[0] && voice.models.includes(models[0]) ? models[0] : undefined);
   return (await listedFor(provider)).flatMap((voice) => {
     const model = speaksWith(voice);
     if (voice.models && !model) return [];
