@@ -203,6 +203,22 @@ describe('the voices of a server provider', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('are only the fixed voices of the starting model being picked (Groq, Sarvam), so a new starting model never keeps the old voice', async () => {
+    const ENGLISH = { id: 'canopylabs/orpheus-v1-english', kind: 'speech' };
+    const ARABIC = { id: 'canopylabs/orpheus-arabic-saudi', kind: 'speech' };
+    db.findFirst.mockResolvedValue(row({ adapter: 'groq', name: 'Groq', models: [ENGLISH, ARABIC] }));
+    const saved = (await (await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx())).json()).voices;
+    expect(saved.map((voice: Row) => voice.voiceId)).toEqual(['autumn', 'diana', 'hannah', 'austin', 'daniel', 'troy']);
+    const picking = (await (await listVoices(new NextRequest(`http://localhost:3333/api/x?model=${encodeURIComponent(ARABIC.id)}`), ctx())).json()).voices;
+    expect(picking.map((voice: Row) => voice.voiceId)).toEqual(['abdullah', 'fahad', 'sultan', 'lulwa', 'noura', 'aisha']);
+    expect(picking.every((voice: Row) => voice.model === ARABIC.id)).toBe(true);
+    db.findFirst.mockResolvedValue(row({ adapter: 'sarvam', name: 'Sarvam AI', models: [{ id: 'bulbul:v3', kind: 'speech' }, { id: 'bulbul:v4-flash', kind: 'speech' }] }));
+    const flash = (await (await listVoices(new NextRequest('http://localhost:3333/api/x?model=bulbul%3Av4-flash'), ctx())).json()).voices;
+    expect(flash.length).toBeGreaterThan(0);
+    expect(flash.every((voice: Row) => voice.model === 'bulbul:v4-flash')).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('are only the Rime voices that speak in the provider\'s starting model, which a borrowed starting voice uses', async () => {
     fetchMock.mockResolvedValue(
       json([
