@@ -519,13 +519,13 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
           { id: 'long-form', label: 'Polly Long-Form' },
           { id: 'standard', label: 'Polly Standard' },
         ],
-        // GET /v1/voices (DescribeVoices), signed, in the key's region: every voice in one answer
+        // GET /v1/voices (DescribeVoices), signed, in the key's region, `NextToken` while the answer gives one
         voices: {
           host: 'polly.{region}.amazonaws.com',
           sign: { service: 'polly' },
           path: '/v1/voices?IncludeAdditionalLanguageCodes=true',
           list: 'Voices',
-          paging: { kind: 'none' },
+          paging: { kind: 'token', param: 'NextToken', next: 'NextToken' },
           id: 'Id',
           name: 'Name',
           description: [{ join: ['Gender', 'LanguageName'] }],

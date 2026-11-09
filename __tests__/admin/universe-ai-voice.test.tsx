@@ -344,6 +344,16 @@ describe('what a change of Universe AI\u2019s company or model does to bots', ()
     // Deepgram is off, so its bots borrow Universe AI's default: the new one
     expect(defaultChangeLine(rows, as(soniox()), 'recognition', true)).toBe('Bots that turn voice on from now listen with it. The 14 bots listening with Soniox move to this model. The 3 bots on Deepgram listen with it while Deepgram is off.');
   });
+  it('says the bots keep their model and voice on a company that ties each voice to its models (Polly, Rime, Together)', () => {
+    for (const [adapter, name] of [['aws', 'AWS'], ['rime', 'Rime'], ['together', 'Together AI']]) {
+      const tied = as({ ...eleven(), id: `v-${adapter}`, adapter, name });
+      expect(defaultChangeLine([tied], tied, 'speech', true)).toBe(
+        `Bots that turn voice on from now start with it. The 12 bots speaking with ${name} keep their models and voices, since each ${name} voice speaks only in its own models.`
+      );
+    }
+    const one = as({ ...eleven(), adapter: 'rime', name: 'Rime', bots: { recognition: 0, speech: 1, total: 1 } });
+    expect(defaultChangeLine([one], one, 'speech', true)).toBe('Bots that turn voice on from now start with it. The 1 bot speaking with Rime keeps its model and voice, since each Rime voice speaks only in its own models.');
+  });
   it('says nothing moves when the model stays, and counts one bot as a bot', () => {
     expect(defaultChangeLine(rows, as(eleven()), 'speech', false)).toBe('Bots that turn voice on from now start with it. The 2 bots speaking with Cartesia stay on Cartesia.');
     expect(defaultChangeLine([as({ ...cartesia(), bots: { recognition: 0, speech: 1, total: 1 } })], as(eleven()), 'speech', false)).toBe('Bots that turn voice on from now start with it. The 1 bot speaking with Cartesia stays on Cartesia.');
@@ -546,6 +556,42 @@ describe('New voice provider, models the company lists (#840)', () => {
       { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' },
     ]);
     expect(post?.body?.hiddenModels).toEqual(['speech:eleven_v3']);
+  });
+
+  it('starts from the new key’s own list when the key changes, so models ticked for the old key are not saved with it', async () => {
+    checkAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }, { id: 'eleven_v3', label: 'Eleven v3', kind: 'speech' }] } };
+    render(<NewVoiceProviderPage />);
+    fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Speaks' })).getByRole('radio', { name: /^ElevenLabs/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk_old_000000000000a1b2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await screen.findByText(/lists 2 models for it/);
+    // Checking the same key again keeps what was unticked by hand
+    fireEvent.click(screen.getByRole('checkbox', { name: /^Eleven v3/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await waitFor(() => expect(calls.filter((call) => call.url === '/api/admin/voice-providers/check')).toHaveLength(2));
+    await screen.findByText(/lists 2 models for it/);
+    expect(screen.getByRole('checkbox', { name: /^Eleven v3/ }).getAttribute('aria-checked')).toBe('false');
+    // Another key lists other models: the old key's ticks go, and all of the new key's models are on (with the ones Universe
+    // starts ElevenLabs keys on)
+    checkAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_multilingual_v2', label: 'Eleven Multilingual v2', kind: 'speech' }] } };
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk_new_000000000000c3d4' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check key' }));
+    await screen.findByText(/lists 1 model for it/);
+    expect(screen.getAllByRole('checkbox').map((box) => [box.textContent, box.getAttribute('aria-checked')])).toEqual([
+      ['Eleven v4 Turboeleven_v4_turbo', 'true'],
+      ['Eleven Flash v2.5eleven_flash_v2_5', 'true'],
+      ['Eleven Multilingual v2eleven_multilingual_v2', 'true'],
+    ]);
+    expect(screen.queryByRole('checkbox', { name: /^Eleven v3/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Add provider' }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/ai-providers'));
+    const post = calls.find((call) => call.method === 'POST' && call.url === '/api/admin/voice-providers');
+    expect(post?.body?.models).toEqual([
+      { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' },
+      { id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' },
+      { id: 'eleven_multilingual_v2', label: 'Eleven Multilingual v2', kind: 'speech' },
+    ]);
+    expect(post?.body?.hiddenModels).toEqual([]);
   });
 
   it('offers the models Universe knows to tick, or one to type, for a company that shares no list', async () => {
@@ -816,6 +862,16 @@ describe('A voice provider\u2019s key', () => {
     await waitFor(() => expect(saves()).toHaveLength(1));
     expect(saves()[0].body).toEqual({ apiKey: 'sk_custom_host_0000' });
     expect(checks()).toHaveLength(0);
+  });
+
+  it('is asked about in the provider\u2019s saved region for a company whose keys are made per region (AWS, Azure AI Speech)', async () => {
+    providers = [soniox(), provider({ id: 'v-azure', adapter: 'azure-speech', name: 'Azure AI Speech', recognition: false, speech: true, enabled: true, apiKeyLast4: '5e6f', region: 'uaenorth', models: [{ id: 'azure-tts', kind: 'speech' }] })];
+    fireEvent.click(await open('v-azure'));
+    fireEvent.change(screen.getByLabelText('New key'), { target: { value: 'azure-new-key-0000' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check and replace' }));
+    await waitFor(() => expect(saves()).toHaveLength(1));
+    expect(checks()[0].body).toEqual({ adapter: 'azure-speech', apiKey: 'azure-new-key-0000', region: 'uaenorth' });
+    expect(saves()[0].body).toEqual({ apiKey: 'azure-new-key-0000' });
   });
 
   it('says the company can\u2019t check it when the provider has its own address, instead of a refusal', async () => {

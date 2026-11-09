@@ -62,7 +62,8 @@ describe('the voice company catalog', () => {
       const voices = entry.jobs.speech?.voices;
       if (!voices || 'fixed' in voices) continue;
       expect(voices.path.startsWith('/')).toBe(true);
-      if (voices.paging.kind !== 'none') expect(voices.path).toContain('{size}');
+      // Amazon Polly's DescribeVoices takes no page size: it says there is more with a NextToken
+      if (voices.paging.kind !== 'none' && entry.adapter !== 'aws') expect(voices.path).toContain('{size}');
       if (voices.paging.kind === 'page') expect(voices.path).toContain('{page}');
     }
     expect(['cartesia', 'deepgram', 'elevenlabs', 'fish'].every((adapter) => voiceKeyCompanyInfo(adapter)?.jobs.speech?.voices)).toBe(true);
