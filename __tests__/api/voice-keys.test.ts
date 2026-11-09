@@ -28,6 +28,7 @@ jest.mock('@/lib/ai-key-lend', () => ({ ...jest.requireActual('@/lib/ai-key-lend
 jest.mock('@/lib/db', () => ({
   prisma: {
     $transaction: jest.fn(),
+    $queryRaw: jest.fn(async () => []),
     voiceProvider: { findMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), create: jest.fn(), update: jest.fn(), deleteMany: jest.fn() },
     voiceKeyLend: { findMany: jest.fn(), update: jest.fn(), delete: jest.fn(), upsert: jest.fn(), deleteMany: jest.fn() },
     appSetting: { findUnique: jest.fn() },
@@ -180,6 +181,19 @@ describe('adding a key', () => {
     expect(JSON.stringify(await response.json())).not.toContain('wJalrXUtnFEMI');
   });
 
+  it('holds the key row before reading the models a change saves over, as model discovery does', async () => {
+    const lock = (prisma as unknown as { $queryRaw: jest.Mock }).$queryRaw;
+    db.voiceProvider.findFirst.mockResolvedValue(key());
+    db.voiceKeyLend.findMany.mockResolvedValue([]);
+    expect((await call(patch, 'PATCH', { models: [{ id: 'flash', label: 'Flash', kind: 'speech' }] })).status).toBe(200);
+    const [sql, ...values] = lock.mock.calls[0] as [TemplateStringsArray, ...string[]];
+    expect(sql.join('?')).toMatch(/FROM "voice_providers" WHERE "id" = \? AND "owner_id" = \? FOR UPDATE/);
+    expect(values).toEqual(['k1', 'u-ana']);
+    const firstReadInside = db.voiceProvider.findFirst.mock.invocationCallOrder.find((order) => order > lock.mock.invocationCallOrder[0]);
+    expect(firstReadInside).toBeDefined();
+    expect(firstReadInside!).toBeLessThan(db.voiceProvider.update.mock.invocationCallOrder[0]);
+  });
+
   it('replaces an AWS key only whole: the access key ID, a colon, then the secret', async () => {
     db.voiceProvider.findFirst.mockResolvedValue(key({ adapter: 'aws', region: 'eu-north-1', recognition: true, speech: true, models: [{ id: 'amazon.nova-2-sonic-v1:0', kind: 'talk' }] }));
     expect((await call(patch, 'PATCH', { apiKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY' })).status).toBe(400);
@@ -210,47 +224,90 @@ describe('the list', () => {
     // plus what a provider the server has on does (ElevenLabs also listens here, since the stand-in server has one that does)
     expect(body.companies).toEqual([
       expect.objectContaining({ adapter: 'assemblyai', label: 'AssemblyAI', recognition: true, speech: false }),
+      expect.objectContaining({ adapter: 'async', label: 'Async', recognition: false, speech: true }),
       // A key at the person's own Azure resource, with its deployment typed as its model
       expect.objectContaining({
         adapter: 'aws',
         label: 'AWS',
-        recognition: false,
-        speech: false,
+        recognition: true,
+        speech: true,
         talk: true,
         account: expect.objectContaining({ regions: expect.arrayContaining([expect.objectContaining({ id: 'eu-north-1' })]), keyId: expect.objectContaining({ label: 'Access key ID' }), keyLabel: 'Secret access key' }),
       }),
+      // A key made per region, with the region picked from Azure's own list (#1875)
+      expect.objectContaining({ adapter: 'azure-speech', label: 'Azure AI Speech', recognition: true, speech: true, talk: false, account: { regions: expect.arrayContaining([{ id: 'uaenorth', label: 'UAE North', host: 'uaenorth.tts.speech.microsoft.com' }]), regionHint: expect.stringContaining('Location/Region') } }),
       expect.objectContaining({ adapter: 'azure', label: 'Azure OpenAI', recognition: false, speech: false, talk: true, account: expect.objectContaining({ address: expect.objectContaining({ label: 'Endpoint' }), typedModel: expect.objectContaining({ label: 'Deployment name', kind: 'talk' }) }) }),
+      expect.objectContaining({ adapter: 'bland', label: 'Bland', recognition: false, speech: true }),
+      expect.objectContaining({ adapter: 'camb', label: 'CAMB.AI', recognition: false, speech: true }),
       expect.objectContaining({ adapter: 'cartesia', label: 'Cartesia', recognition: true, speech: true }),
       expect.objectContaining({ adapter: 'deepgram', label: 'Deepgram', recognition: true, speech: true, logo: 'deepgram' }),
       expect.objectContaining({ adapter: 'elevenlabs', label: 'ElevenLabs', recognition: true, speech: true, logo: 'elevenlabs', docs: 'https://elevenlabs.io/docs' }),
+      expect.objectContaining({ adapter: 'fal', label: 'fal', recognition: true, speech: false }),
       expect.objectContaining({ adapter: 'fish', label: 'Fish Audio', recognition: false, speech: true, logo: 'fish-audio' }),
-      expect.objectContaining({ adapter: 'google', label: 'Google', recognition: false, speech: false, talk: true, logo: 'google' }),
+      expect.objectContaining({ adapter: 'gladia', label: 'Gladia', recognition: true, speech: false }),
+      expect.objectContaining({ adapter: 'google', label: 'Google', recognition: false, speech: true, talk: true, logo: 'google' }),
+      expect.objectContaining({ adapter: 'gradium', label: 'Gradium', recognition: true, speech: true }),
+      expect.objectContaining({ adapter: 'groq', label: 'Groq', recognition: true, speech: true }),
+      expect.objectContaining({ adapter: 'hume', label: 'Hume', recognition: false, speech: true }),
       // A talking model listens and speaks in one (game #1910)
       expect.objectContaining({ adapter: 'inworld', label: 'Inworld', recognition: false, speech: false, talk: true, account: null }),
-      expect.objectContaining({ adapter: 'openai', label: 'OpenAI', recognition: false, speech: false, talk: true, logo: 'openai' }),
+      expect.objectContaining({ adapter: 'meta', label: 'Meta', recognition: true, speech: false }),
+      expect.objectContaining({ adapter: 'minimax', label: 'MiniMax', recognition: false, speech: true }),
+      expect.objectContaining({ adapter: 'mistral', label: 'Mistral', recognition: true, speech: true }),
+      expect.objectContaining({ adapter: 'neuphonic', label: 'Neuphonic', recognition: false, speech: true }),
+      expect.objectContaining({ adapter: 'nvidia', label: 'NVIDIA', recognition: true, speech: true }),
+      expect.objectContaining({ adapter: 'openai', label: 'OpenAI', recognition: true, speech: false, talk: true, logo: 'openai' }),
+      expect.objectContaining({ adapter: 'resemble', label: 'Resemble AI', recognition: false, speech: true }),
+      expect.objectContaining({ adapter: 'rime', label: 'Rime', recognition: false, speech: true }),
+      expect.objectContaining({ adapter: 'sarvam', label: 'Sarvam AI', recognition: true, speech: true }),
+      expect.objectContaining({ adapter: 'smallest', label: 'Smallest AI', recognition: true, speech: true }),
       expect.objectContaining({ adapter: 'soniox', label: 'Soniox', recognition: true, speech: true }),
+      expect.objectContaining({ adapter: 'speechify', label: 'Speechify', recognition: false, speech: true }),
+      expect.objectContaining({ adapter: 'speechmatics', label: 'Speechmatics', recognition: true, speech: true }),
+      expect.objectContaining({ adapter: 'together', label: 'Together AI', recognition: true, speech: true }),
       expect.objectContaining({ adapter: 'ultravox', label: 'Ultravox', recognition: false, speech: false, talk: true, account: null }),
-      expect.objectContaining({ adapter: 'xai', label: 'xAI', recognition: false, speech: false, talk: true, logo: 'xai' }),
-      expect.objectContaining({ adapter: 'zoom', label: 'Zoom', recognition: false, speech: false, talk: true, account: null }),
+      expect.objectContaining({ adapter: 'xai', label: 'xAI', recognition: true, speech: true, talk: true, logo: 'xai' }),
+      expect.objectContaining({ adapter: 'zoom', label: 'Zoom', recognition: true, speech: false, talk: true, account: null }),
       // The speech server on a person's own computer is last, and is not a company (game #1874)
       expect.objectContaining({ adapter: 'openai-compatible', label: 'Any OpenAI-compatible speech server', ownServer: expect.any(Object) }),
     ]);
     // Its line says only the jobs Universe runs for it, the same neutral shape for every company
     expect(body.companies.map((entry: { benefit: string }) => entry.benefit)).toEqual([
       'Listens. Uses your account at assemblyai.com.',
-      'Talks live. Uses your AWS account, in the region you pick.',
+      'Speaks. Uses your account at async.com.',
+      'Listens, speaks and talks live. Uses your AWS account, in the region you pick.',
+      'Listens and speaks. Uses your Azure Speech resource, in the region you pick.',
       'Talks live. Uses your Azure OpenAI resource.',
+      'Speaks. Uses your account at bland.ai.',
+      'Speaks. Uses your account at camb.ai.',
       'Listens and speaks. Uses your account at cartesia.ai.',
       'Listens and speaks. Uses your account at deepgram.com.',
       'Listens and speaks. Uses your account at elevenlabs.io.',
+      'Listens. Uses your account at fal.ai.',
       'Speaks. Uses your account at fish.audio.',
-      'Talks live. Uses your account at aistudio.google.com.',
+      'Listens. Uses your account at gladia.io.',
+      'Speaks and talks live. Uses your account at aistudio.google.com.',
+      'Listens and speaks. Uses your account at gradium.ai.',
+      'Listens and speaks. Uses your account at groq.com.',
+      'Speaks. Uses your account at hume.ai.',
       'Talks live. Uses your account at inworld.ai.',
-      'Talks live. Uses your account at platform.openai.com.',
+      'Listens. Uses your account at dev.meta.ai.',
+      'Speaks. Uses your account at minimax.io.',
+      'Listens and speaks. Uses your account at mistral.ai.',
+      'Speaks. Uses your account at neuphonic.com.',
+      'Listens and speaks. Uses your account at build.nvidia.com.',
+      'Listens and talks live. Uses your account at platform.openai.com.',
+      'Speaks. Uses your account at resemble.ai.',
+      'Speaks. Uses your account at rime.ai.',
+      'Listens and speaks. Uses your account at sarvam.ai.',
+      'Listens and speaks. Uses your account at smallest.ai.',
       'Listens and speaks. Uses your account at soniox.com.',
+      'Speaks. Uses your account at speechify.ai.',
+      'Listens and speaks. Uses your account at speechmatics.com.',
+      'Listens and speaks. Uses your account at together.ai.',
       'Talks live. Uses your account at ultravox.ai.',
-      'Talks live. Uses your account at console.x.ai.',
-      'Talks live, in English. Uses your Zoom AI Services account.',
+      'Listens, speaks and talks live. Uses your account at console.x.ai.',
+      'Listens and talks live. Talking live is in English. Uses your Zoom AI Services account.',
       'Speaches, Kokoro-FastAPI, your own Whisper: anything that answers /v1/audio.',
     ]);
     expect(JSON.stringify(body)).not.toContain('apiKeyEncrypted');

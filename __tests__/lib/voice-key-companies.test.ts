@@ -60,9 +60,10 @@ describe('the voice company catalog', () => {
   it('lists voices for every company that speaks and has a voice list, at its own address', () => {
     for (const entry of VOICE_KEY_COMPANIES) {
       const voices = entry.jobs.speech?.voices;
-      if (!voices) continue;
+      if (!voices || 'fixed' in voices) continue;
       expect(voices.path.startsWith('/')).toBe(true);
-      if (voices.paging.kind !== 'none') expect(voices.path).toContain('{size}');
+      // Amazon Polly's DescribeVoices takes no page size: it says there is more with a NextToken
+      if (voices.paging.kind !== 'none' && entry.adapter !== 'aws') expect(voices.path).toContain('{size}');
       if (voices.paging.kind === 'page') expect(voices.path).toContain('{page}');
     }
     expect(['cartesia', 'deepgram', 'elevenlabs', 'fish'].every((adapter) => voiceKeyCompanyInfo(adapter)?.jobs.speech?.voices)).toBe(true);
@@ -139,9 +140,19 @@ describe('a key at the person’s own address (Azure)', () => {
 describe('AWS: a key in two parts, made per region (#1910)', () => {
   const aws = voiceKeyCompanyInfo('aws')!;
 
-  it('talks live with Nova 2 Sonic and its 16 voices, in the four regions that run it, checked by a signed call', () => {
-    expect(aws.does).toEqual({ recognition: false, speech: false, talk: true });
-    expect(aws.models).toEqual([{ id: 'amazon.nova-2-sonic-v1:0', label: 'Nova 2 Sonic', kind: 'talk' }]);
+  it('listens with Transcribe, speaks with Polly and talks live with Nova 2 Sonic and its 16 voices, in the four regions that run it, checked by a signed call', () => {
+    // Transcribe and Polly besides talking live (#1886)
+    expect(aws.does).toEqual({ recognition: true, speech: true, talk: true });
+    expect(aws.models.map((model) => `${model.kind}:${model.id}`)).toEqual([
+      'recognition:amazon-transcribe',
+      'speech:generative',
+      'speech:neural',
+      'speech:long-form',
+      'speech:standard',
+      'talk:amazon.nova-2-sonic-v1:0',
+    ]);
+    // Polly's voices are listed signed, in the key's own region
+    expect(aws.jobs.speech?.voices).toMatchObject({ host: 'polly.{region}.amazonaws.com', sign: { service: 'polly' }, path: '/v1/voices?IncludeAdditionalLanguageCodes=true', list: 'Voices' });
     const voices = aws.jobs.talk?.fixedVoices ?? [];
     expect(voices).toHaveLength(16);
     expect(new Set(voices.map((voice) => voice.id)).size).toBe(16);

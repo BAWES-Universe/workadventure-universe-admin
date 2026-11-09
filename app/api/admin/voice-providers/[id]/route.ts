@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { VoiceProviderRefused, deleteVoiceProvider, updateVoiceProvider, updateVoiceProviderSchema, voiceProviderView } from '@/lib/voice-providers';
+import { forgetDiscovery } from '@/lib/voice-discovery';
 
 export const runtime = 'nodejs';
 
@@ -45,7 +46,11 @@ export async function PATCH(request: NextRequest, { params }: Context) {
   const parsed = updateVoiceProviderSchema.safeParse(body);
   if (!parsed.success) return NextResponse.json({ error: parsed.error.issues[0]?.message ?? 'Invalid request data' }, { status: 400 });
   try {
-    return NextResponse.json({ provider: voiceProviderView(await updateVoiceProvider((await params).id, parsed.data)) });
+    const id = (await params).id;
+    const saved = await updateVoiceProvider(id, parsed.data);
+    // A new key, company or job lists other models: its company is asked again on the next read
+    if (parsed.data.apiKey !== undefined || parsed.data.adapter !== undefined || parsed.data.recognition !== undefined || parsed.data.speech !== undefined) forgetDiscovery(id);
+    return NextResponse.json({ provider: voiceProviderView(saved) });
   } catch (error) {
     return failure(error, 'change the provider');
   }

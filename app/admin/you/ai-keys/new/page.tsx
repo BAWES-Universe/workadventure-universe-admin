@@ -66,7 +66,7 @@ function SetupCard({ info }: { info: AiKeyKindInfo }) {
   const opensHere = useLinksOpeningInGame(info.docs ? [info.docs] : []);
   const here = info.docs ? opensHere.has(info.docs) : false;
   return (
-    <div className="grid gap-1 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 pt-3 text-[13px]" data-testid="setup-card">
+    <div className="grid gap-1 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 pt-3 text-[13px] [overflow-wrap:anywhere]" data-testid="setup-card">
       {info.steps.length === 1 ? (
         <p className="pb-1"><SetupStep step={info.steps[0]} /></p>
       ) : (
@@ -444,7 +444,7 @@ export default function AddAiKeyPage() {
                   />
                 ))}
               </div>
-              <p className={FIELD_HINT}>{account?.regions ? `Where ${info.label} runs your voice. Pick one near the people talking with your bots.` : 'A key only works in the region it was made in.'}</p>
+              <p className={FIELD_HINT}>{account?.regionHint ?? (account?.regions ? `Where ${info.label} runs your voice. Pick one near the people talking with your bots.` : 'A key only works in the region it was made in.')}</p>
             </Part>
           )}
 

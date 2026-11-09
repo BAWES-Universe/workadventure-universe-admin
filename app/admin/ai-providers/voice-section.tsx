@@ -295,19 +295,21 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // The voices of whichever company is picked, from the company's own free list
+  // The voices of whichever company is picked, from the company's own free list, for the speaking model picked: a company that
+  // lists each voice for the models it speaks (Rime) offers only the voices of that model
   useEffect(() => {
     if (!open || !pickedId) return;
     let current = true;
     setVoices({ status: 'loading' });
-    void callOrbit<{ voices: Voice[] }>('GET', `/api/admin/voice-providers/${encodeURIComponent(pickedId)}/voices`).then((answer) => {
+    const forModel = modelId ? `?model=${encodeURIComponent(modelId)}` : '';
+    void callOrbit<{ voices: Voice[] }>('GET', `/api/admin/voice-providers/${encodeURIComponent(pickedId)}/voices${forModel}`).then((answer) => {
       if (!current) return;
       setVoices(answer.ok ? { status: 'ready', voices: answer.data.voices } : { status: 'failed', message: answer.error });
     });
     return () => {
       current = false;
     };
-  }, [open, pickedId]);
+  }, [open, pickedId, modelId]);
 
   const picked = candidates.find((provider) => provider.id === pickedId) ?? null;
   const models = picked ? picked.models.filter((model) => model.kind === 'speech') : [];
@@ -319,7 +321,11 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
   // The voice that is picked stays on screen however the list is searched
   const rows = pickedVoice && !shown.includes(pickedVoice) ? [pickedVoice, ...shown] : shown;
   const voiceChanged = voiceId !== (picked?.defaultVoiceId ?? null);
-  const unchanged = !picked || (picked.defaultSpeech && modelId === startingModel(picked, 'speech')?.id && !voiceChanged);
+  const modelChanged = Boolean(picked && modelId && modelId !== startingModel(picked, 'speech')?.id);
+  const unchanged = !picked || (picked.defaultSpeech && !modelChanged && !voiceChanged);
+  // A newly picked model that doesn't list the voice picked can't keep it: saving drops it, so the sheet says so
+  const pickedModel = models.find((model) => model.id === modelId);
+  const voiceNotListed = modelChanged && voices.status === 'ready' && voiceId !== null && !pickedVoice;
   const company = picked ? companyLabel(picked.adapter) : '';
 
   return (
@@ -411,18 +417,23 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
               {matching.length > SHOWN_VOICES && <p className={FIELD_HINT}>Showing {SHOWN_VOICES} of {matching.length.toLocaleString('en')}. Search to narrow them.</p>}
               {samples.failed && <Refused>{samples.failed}</Refused>}
               {voiceId === null && <p className={FIELD_HINT}>No voice picked: bots start with the first voice {company} lists.</p>}
+              {voiceNotListed && (
+                <p className={FIELD_HINT} role="status" data-testid="voice-not-listed">
+                  {pickedModel ? modelName(pickedModel) : 'This model'} doesn’t speak the voice picked. Pick one here, or bots start with the first voice {company} lists.
+                </p>
+              )}
             </>
           )}
         </div>
       )}
       <p className={FIELD_HINT} data-testid="speak-change-line">
-        {defaultChangeLine(providers, picked, 'speech', Boolean(picked && modelId && modelId !== startingModel(picked, 'speech')?.id))}
+        {defaultChangeLine(providers, picked, 'speech', modelChanged)}
       </p>
       {failure && <Refused>{failure}</Refused>}
       <SheetButtons
         go="Save"
         busy={busy}
-        disabled={unchanged || !modelId}
+        disabled={unchanged || !modelId || voices.status === 'loading'}
         onClose={onClose}
         onGo={() => {
           if (!picked || !modelId) return;
@@ -432,7 +443,9 @@ function SpeakSheet({ open, providers, onClose, onSaved }: SheetProps) {
             {
               defaultSpeech: true,
               models: withStartingModel(picked.models, 'speech', modelId),
-              ...(voiceId !== null && voiceChanged ? { defaultVoiceId: voiceId, defaultVoiceName: pickedVoice?.name ?? null } : {}),
+              // Only a voice listed for the model picked is saved: a new starting model of a company that lists voices per model
+              // drops the old voice unless it is sent again from that model's list
+              ...(pickedVoice && (voiceChanged || modelChanged) ? { defaultVoiceId: pickedVoice.voiceId, defaultVoiceName: pickedVoice.name } : {}),
             },
             `Universe AI speaks with ${picked.name}`
           );
