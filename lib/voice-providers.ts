@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { encryptApiKey } from '@/lib/encryption';
 import { modelChange } from '@/lib/voice-hidden-models';
-import { fixedVoiceModel, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
+import { fixedVoiceModel, voicesTiedToModels } from '@/lib/voice-key-companies';
 
 /**
  * Voice providers (#740): the speech companies a super admin sets up for the whole server. Each can listen (recognition),
@@ -182,15 +182,15 @@ export async function updateVoiceProvider(id: string, input: z.infer<typeof upda
     const changesCompany = input.adapter !== undefined && input.adapter !== row.adapter;
     // A model the company's list added while the page was open is kept, not taken off with the ones named
     const changed = input.models !== undefined ? modelChange(readModels(row.models), input.models, input.takenOff, row.hiddenModels) : null;
-    // A company that lists each voice for the models it speaks (Rime's field, Smallest AI's page per model, Together's model
-    // groups) had the starting voice picked for the starting model, the first speaking one, which is the model Universe AI lends
-    // it with (borrowUniverseAi): a new starting model drops the voice unless a new one comes with the change, so a voice is
-    // never lent with a model it doesn't speak
+    // A company that ties each voice to the models it speaks (Rime's field, Smallest AI's page per model, Together's model
+    // groups, Groq's and Sarvam's fixed voices) had the starting voice picked for the starting model, the first speaking one,
+    // which is the model Universe AI lends it with (borrowUniverseAi): a new starting model drops the voice unless a new one
+    // comes with the change, so a voice is never lent with a model it doesn't speak, and a kept fixed voice never pulls the
+    // starting model back to its own
     const startingModel = (models: VoiceModel[]) => models.find((entry) => entry.kind === 'speech')?.id;
-    const listed = voiceKeyCompanyInfo(input.adapter ?? row.adapter)?.jobs.speech?.voices;
     const changesStartingModel =
       input.models !== undefined &&
-      !!(listed?.model || listed?.perModel || listed?.groups) &&
+      voicesTiedToModels(input.adapter ?? row.adapter) &&
       startingModel(changed?.models ?? input.models) !== startingModel(readModels(row.models));
     const dropsVoice = changesCompany || changesStartingModel;
     const next = {

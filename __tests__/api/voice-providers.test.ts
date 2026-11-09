@@ -239,6 +239,20 @@ describe('super admin routes', () => {
     }
   });
 
+  it('drop the default voice on a new starting model for companies whose fixed voices each belong to one model (Groq, Sarvam)', async () => {
+    db.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => row(data));
+    const cases = [
+      { adapter: 'groq', voice: 'autumn', first: { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' }, next: { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' } },
+      { adapter: 'sarvam', voice: 'shubh', first: { id: 'bulbul:v3', label: 'Bulbul v3', kind: 'speech' }, next: { id: 'bulbul:v4-flash', label: 'Bulbul v4 Flash', kind: 'speech' } },
+    ];
+    for (const [index, { adapter, voice, first, next }] of cases.entries()) {
+      db.findUnique.mockResolvedValue(row({ adapter, defaultSpeech: true, models: [first], defaultVoiceId: voice, defaultVoiceName: 'Voice one' }));
+      await call(patchAdmin, 'PATCH', { models: [next, first] });
+      // The old voice goes, so Universe AI lends the new starting model rather than pulling it back to the old voice's model
+      expect(db.update.mock.calls[index][0].data).toMatchObject({ defaultVoiceId: null, defaultVoiceName: null });
+    }
+  });
+
   it('turn down a default voice on a provider that doesn\'t speak, a name with no voice, and an empty voice', async () => {
     // No models listed, so the only thing wrong is the voice (a speaking model on a provider that doesn't speak would be refused first)
     db.findUnique.mockResolvedValue(row({ speech: false, models: [] }));
