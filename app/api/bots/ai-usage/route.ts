@@ -31,6 +31,7 @@ export async function POST(request: NextRequest) {
       latency = null,
       error = false,
       timestamp = new Date(),
+      greeting = false,
     } = body;
 
     // A bot on Universe AI is paid for by the provider that is the Default, so that is the row the usage belongs to
@@ -90,6 +91,8 @@ export async function POST(request: NextRequest) {
           channel: readUsageChannel(channel),
           talkedPersonId: person.personId,
           talkedGuest: person.guest,
+          // A greeting the bot made on its own: still the payer's usage, never counted against the person it greeted
+          greeting: greeting === true,
         },
       })
       .catch((err) => {
