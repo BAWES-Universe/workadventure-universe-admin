@@ -250,11 +250,11 @@ describe('what is left', () => {
     expect(await checkVoiceAllowance('bot-1', { ...SARA, turnId: 'again' }, NOW)).toMatchObject({ allowed: true, left: 0 });
   });
 
-  it('counts the replies a person got from any bot on Universe AI, never ones a personal key paid for', async () => {
+  it('counts the replies a person got from any bot on Universe AI, never ones a personal key paid for or greetings', async () => {
     await checkVoiceAllowance('bot-1', SARA, NOW);
-    expect(db.botsAiUsage.count).toHaveBeenCalledWith({ where: { talkedPersonId: 'u-sara', keyOwnerId: null, error: false, timestamp: { gte: STARTED } } });
+    expect(db.botsAiUsage.count).toHaveBeenCalledWith({ where: { talkedPersonId: 'u-sara', keyOwnerId: null, error: false, greeting: false, timestamp: { gte: STARTED } } });
     await checkVoiceAllowance('bot-1', GUEST, NOW);
-    expect(db.botsAiUsage.count).toHaveBeenLastCalledWith({ where: { talkedUserId: 'wa-guest', talkedGuest: true, keyOwnerId: null, error: false, timestamp: { gte: STARTED } } });
+    expect(db.botsAiUsage.count).toHaveBeenLastCalledWith({ where: { talkedUserId: 'wa-guest', talkedGuest: true, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: STARTED } } });
   });
 
   it("counts the typed replies inside the person's transaction, on the transaction's own connection", async () => {

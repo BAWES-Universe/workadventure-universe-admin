@@ -89,14 +89,14 @@ describe('Universe AI, per person', () => {
   it('counts a signed-in person by their account across every Universe AI bot, and never key-paid replies', async () => {
     counts(0);
     await checkReplyAllowance('bot-1', { ...SARA, source: 'universe-ai' }, NOW);
-    expect(db.botsAiUsage.count).toHaveBeenCalledWith({ where: { talkedPersonId: 'u-sara', keyOwnerId: null, error: false, timestamp: { gte: STARTED } } });
+    expect(db.botsAiUsage.count).toHaveBeenCalledWith({ where: { talkedPersonId: 'u-sara', keyOwnerId: null, error: false, greeting: false, timestamp: { gte: STARTED } } });
     expect(db.$queryRaw.mock.calls[0][0].values).toEqual(expect.arrayContaining(['ua:person:u-sara']));
   });
 
   it('gives a guest 10, counted by their own id, then the Sign in card', async () => {
     counts(10);
     expect(await checkReplyAllowance('bot-1', { ...GUEST, source: 'universe-ai' }, NOW)).toMatchObject({ allowed: false, limit: 'guest', who: 'guest' });
-    expect(db.botsAiUsage.count).toHaveBeenCalledWith({ where: { talkedUserId: 'wa-guest', talkedGuest: true, keyOwnerId: null, error: false, timestamp: { gte: STARTED } } });
+    expect(db.botsAiUsage.count).toHaveBeenCalledWith({ where: { talkedUserId: 'wa-guest', talkedGuest: true, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: STARTED } } });
     expect(db.user.findUnique).not.toHaveBeenCalled();
   });
 
@@ -120,7 +120,7 @@ describe("a bot's guests share 200", () => {
   it('stops a guest with replies of their own left once the bot\'s guests used 200', async () => {
     counts(3, 200);
     expect(await checkReplyAllowance('bot-1', { ...GUEST, source: 'universe-ai' }, NOW)).toMatchObject({ allowed: false, limit: 'guests', who: 'guest' });
-    expect(db.botsAiUsage.count).toHaveBeenLastCalledWith({ where: { botId: 'bot-1', talkedGuest: true, keyOwnerId: null, error: false, timestamp: { gte: STARTED } } });
+    expect(db.botsAiUsage.count).toHaveBeenLastCalledWith({ where: { botId: 'bot-1', talkedGuest: true, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: STARTED } } });
   });
 
   it('never touches a signed-in person', async () => {
@@ -138,7 +138,7 @@ describe("the bot's own limit", () => {
     expect(await checkReplyAllowance('bot-1', { ...SARA, source: 'own-key' }, NOW)).toEqual({
       allowed: false, limit: 'bot', resetsAt: '2026-10-28T13:20:00.000Z', who: 'member',
     });
-    expect(db.botsAiUsage.count).toHaveBeenCalledWith({ where: { talkedPersonId: 'u-sara', botId: 'bot-1', error: false, timestamp: { gte: STARTED } } });
+    expect(db.botsAiUsage.count).toHaveBeenCalledWith({ where: { talkedPersonId: 'u-sara', botId: 'bot-1', error: false, greeting: false, timestamp: { gte: STARTED } } });
   });
 
   it('is checked after Universe AI, which has the earlier end', async () => {

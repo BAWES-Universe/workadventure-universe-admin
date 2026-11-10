@@ -1069,6 +1069,10 @@ model BotsAiUsage {
   talkedPersonId  String?  @map("talked_person_id")
   // True when a guest talked, false for a signed-in person; null when the bot server did not say (older rows)
   talkedGuest     Boolean? @map("talked_guest")
+  // A greeting the bot made on its own when someone walked up. It is paid for by whoever's key the bot runs on and reported as
+  // usage, but it is never counted against the person it greeted: not in their Universe AI window, not in a bot's own limit per
+  // person and not in the guests' pool.
+  greeting        Boolean  @default(false)
 
   provider        BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
   talkedPerson    User?          @relation("UsageTalkedPerson", fields: [talkedPersonId], references: [id], onDelete: SetNull)

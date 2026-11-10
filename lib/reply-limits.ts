@@ -13,7 +13,8 @@ import { resolveUsagePerson } from '@/lib/usage-person';
  *   - A bot's own limit per person (`dailyReplyCap`, set by whoever manages the bot): that bot only, whatever it runs
  *     on, in a 24-hour window. No limit when it is empty.
  * A window starts at the first reply asked for once the last one has ended, so the end time a person sees is fixed.
- * Replies are counted from usage rows (one per reply, failed ones left out). A super admin changes the three Universe AI
+ * Replies are counted from usage rows (one per reply, failed ones and greetings left out: a greeting the bot makes on its own
+ * is free for the person, the usage of whoever's key the bot runs on). A super admin changes the three Universe AI
  * numbers on the Universe AI page (#666), read through getUniverseAiReplyLimits.
  */
 export const BOT_LIMIT_WINDOW_HOURS = 24;
@@ -105,7 +106,7 @@ export async function checkReplyAllowance(
       hours: limits.windowHours,
       limit: room(guest ? limits.guest : limits.signedIn),
       // Every Universe AI reply this person got, from any bot: a reply no personal key paid for
-      where: (since) => ({ ...personRows, keyOwnerId: null, error: false, timestamp: { gte: since } }),
+      where: (since) => ({ ...personRows, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } }),
     });
     if (guest) {
       checks.push({
@@ -113,7 +114,7 @@ export async function checkReplyAllowance(
         key: `ua:guests:${bot.id}`,
         hours: limits.windowHours,
         limit: limits.guestPool,
-        where: (since) => ({ botId: bot.id, talkedGuest: true, keyOwnerId: null, error: false, timestamp: { gte: since } }),
+        where: (since) => ({ botId: bot.id, talkedGuest: true, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } }),
       });
     }
   }
@@ -123,7 +124,7 @@ export async function checkReplyAllowance(
       key: `bot:${bot.id}:${personKey}`,
       hours: BOT_LIMIT_WINDOW_HOURS,
       limit: bot.dailyReplyCap,
-      where: (since) => ({ ...personRows, botId: bot.id, error: false, timestamp: { gte: since } }),
+      where: (since) => ({ ...personRows, botId: bot.id, error: false, greeting: false, timestamp: { gte: since } }),
     });
   }
 
