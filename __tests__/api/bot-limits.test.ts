@@ -7,7 +7,7 @@ import { GET, PATCH } from '@/app/api/admin/bot-limits/route';
 import { PATCH as patchKey } from '@/app/api/me/ai-keys/[id]/route';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
-import { getGreetingCooldownMinutes, getUniverseAiReplyLimits } from '@/lib/bot-limits';
+import { getUniverseAiReplyLimits } from '@/lib/bot-limits';
 import { checkBotLimit, checkServerLimits, limitsForBot, readServerLimits, REPLY_LIMITS_RECOMMENDED, SERVER_LIMITS_RECOMMENDED } from '@/lib/bot-limit-values';
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -50,7 +50,7 @@ describe('the values', () => {
       universeAi: { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60, recentFiles: 5, results: 10, part: 8000, room: 80000 },
       artifacts: { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 },
       guard: true,
-      fairUsage: { signedIn: 30, guest: 10, guestPool: 200, greetingCooldown: 720 },
+      fairUsage: { signedIn: 30, guest: 10, guestPool: 200 },
       files: { text: 2_000_000, findable: 0, guestDays: 1 },
     });
   });
@@ -98,17 +98,6 @@ describe('the values', () => {
     expect(await getUniverseAiReplyLimits()).toEqual({ signedIn: 30, guest: 10, guestPool: 200, windowHours: 5 });
     settings.findUnique.mockResolvedValue({ key: 'bot-limits', value: { fairUsage: { guest: 20 } } });
     expect(await getUniverseAiReplyLimits()).toEqual({ signedIn: 30, guest: 20, guestPool: 200, windowHours: 5 });
-  });
-
-  it('gives the greetings cooldown in minutes, 12 hours until a super admin changes it, and 0 greets every time', async () => {
-    expect(await getGreetingCooldownMinutes()).toBe(720);
-    settings.findUnique.mockResolvedValue({ key: 'bot-limits', value: { fairUsage: { greetingCooldown: 30 } } });
-    expect(await getGreetingCooldownMinutes()).toBe(30);
-    settings.findUnique.mockResolvedValue({ key: 'bot-limits', value: { fairUsage: { greetingCooldown: 0 } } });
-    expect(await getGreetingCooldownMinutes()).toBe(0);
-    expect(checkServerLimits({ fairUsage: { greetingCooldown: 60 } })).toEqual({ ok: true, value: { fairUsage: { greetingCooldown: 60 } } });
-    expect(checkServerLimits({ fairUsage: { greetingCooldown: -1 } })).toMatchObject({ ok: false });
-    expect(checkServerLimits({ fairUsage: { greetingCooldown: 1.5 } })).toMatchObject({ ok: false });
   });
 
   it('reads the recommended values when the saved ones can’t be read, so a reply never fails over them', async () => {

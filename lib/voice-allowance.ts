@@ -48,7 +48,7 @@ const usedReplies = (db: Pick<typeof prisma, 'botsAiUsage'>, person: { personId:
       ...(person.personId ? { talkedPersonId: person.personId } : { talkedUserId: userId, talkedGuest: true }),
       keyOwnerId: null,
       error: false,
-      // A greeting the bot made on its own is free for the person (lib/bot-greetings.ts)
+      // A greeting the bot made on its own is free for the person (see lib/reply-limits.ts)
       greeting: false,
       timestamp: { gte: since },
     },

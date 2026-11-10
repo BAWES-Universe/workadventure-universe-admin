@@ -550,19 +550,6 @@ export function fairUsageLimits(values: FairUsage): Limit[] {
         { value: 500, label: '500 replies', meaning: every },
       ],
     },
-    {
-      id: 'greetingCooldown',
-      label: 'Greet the same person again after',
-      hint: 'When someone walks up, a bot greets them once, then waits this long before greeting them again. Greetings are free for the person. For every bot.',
-      unit: 'minutes',
-      value: values.greetingCooldown,
-      recommended: recommended.greetingCooldown,
-      options: [
-        { value: 60, label: '1 hour', meaning: 'Someone who comes back later the same day is greeted again.' },
-        { value: 720, label: '12 hours', meaning: 'About once a day.' },
-        { value: 1440, label: '24 hours', meaning: 'Once a day at most.' },
-      ],
-    },
   ], LIMIT_RANGES.fairUsage);
 }
 

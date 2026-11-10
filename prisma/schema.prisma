@@ -854,7 +854,6 @@ model Bot {
   voiceKeyUsage  VoiceKeyUsage[]
   voiceReplyUses VoiceReplyUse[]
   voiceListenUses VoiceListenUse[]
-  greetings       BotGreeting[]
 
   @@index([roomId])
   @@map("bots")
@@ -1070,9 +1069,9 @@ model BotsAiUsage {
   talkedPersonId  String?  @map("talked_person_id")
   // True when a guest talked, false for a signed-in person; null when the bot server did not say (older rows)
   talkedGuest     Boolean? @map("talked_guest")
-  // A greeting the bot made on its own when someone walked up (game greetings cooldown). It is paid for by whoever's key the bot
-  // runs on and reported as usage, but it is never counted against the person it greeted: not in their Universe AI window, not in
-  // a bot's own limit per person and not in the guests' pool.
+  // A greeting the bot made on its own when someone walked up. It is paid for by whoever's key the bot runs on and reported as
+  // usage, but it is never counted against the person it greeted: not in their Universe AI window, not in a bot's own limit per
+  // person and not in the guests' pool.
   greeting        Boolean  @default(false)
 
   provider        BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
@@ -1131,21 +1130,6 @@ model VoiceListenUse {
 
   @@id([botId, day])
   @@map("voice_listen_uses")
-}
-
-// When a bot last greeted a person on its own (game greetings cooldown). One row per bot and person: a bot greets the same person
-// again only once the cooldown (the "Greet the same person again after" setting) has passed since then. A signed-in person is
-// remembered by their account, so it is the same on every device; a guest by their id.
-model BotGreeting {
-  botId     String   @map("bot_id")
-  // "person:<user id>" or "guest:<their id>", the same words the reply limits use
-  personKey String   @map("person_key") @db.VarChar(300)
-  greetedAt DateTime @map("greeted_at")
-
-  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
-
-  @@id([botId, personKey])
-  @@map("bot_greetings")
 }
 
 // Someone reached a reply limit on a bot (game #1159, Orbit #491): once per person, limit and window. The bot page counts

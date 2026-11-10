@@ -14,7 +14,7 @@ import { resolveUsagePerson } from '@/lib/usage-person';
  *     on, in a 24-hour window. No limit when it is empty.
  * A window starts at the first reply asked for once the last one has ended, so the end time a person sees is fixed.
  * Replies are counted from usage rows (one per reply, failed ones and greetings left out: a greeting the bot makes on its own
- * is free for the person, bounded by the greetings cooldown, lib/bot-greetings.ts). A super admin changes the three Universe AI
+ * is free for the person, the usage of whoever's key the bot runs on). A super admin changes the three Universe AI
  * numbers on the Universe AI page (#666), read through getUniverseAiReplyLimits.
  */
 export const BOT_LIMIT_WINDOW_HOURS = 24;

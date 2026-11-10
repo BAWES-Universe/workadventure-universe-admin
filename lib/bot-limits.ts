@@ -78,16 +78,8 @@ export async function saveServerLimits(change: ServerChange, userId: string): Pr
  * one bot, in each window of `windowHours`. 30, 10, 200 and 5 until a super admin changes them.
  */
 export async function getUniverseAiReplyLimits(): Promise<{ signedIn: number; guest: number; guestPool: number; windowHours: number }> {
-  const { signedIn, guest, guestPool } = (await getServerLimits()).fairUsage;
-  return { signedIn, guest, guestPool, windowHours: FAIR_USAGE_WINDOW_HOURS };
-}
-
-/**
- * Minutes before a bot greets the same person on its own again (greetings cooldown). 720 (12 hours) until a super admin changes
- * it on the Universe AI page; a saved value that can't be read gives that too.
- */
-export async function getGreetingCooldownMinutes(): Promise<number> {
-  return (await getServerLimits()).fairUsage.greetingCooldown;
+  const { fairUsage } = await getServerLimits();
+  return { ...fairUsage, windowHours: FAIR_USAGE_WINDOW_HOURS };
 }
 
 /** A key's reply limits: what its owner changed, the recommended value for the rest. */
