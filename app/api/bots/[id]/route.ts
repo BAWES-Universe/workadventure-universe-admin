@@ -18,6 +18,7 @@ import { tellKeyOwnerMovedOff } from '@/lib/ai-key-moved-off';
 import { corsHeaders } from '@/lib/cors';
 import { clearBotRunsOnNotices } from '@/lib/notices';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
+import { brickHasNoRoomText, ownsBrick } from '@/lib/brick';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
@@ -231,8 +232,23 @@ export async function GET(
       return response;
     }
 
+    // A Brick (game #1992) has no room to be seen in. It is there for its owner and the bot server, and for nobody else:
+    // they get the same answer as for a bot that does not exist.
+    const room = bot.room;
+    if (!room) {
+      const response = isAdminToken || ownsBrick(bot, userId)
+        ? NextResponse.json(transformBot(bot))
+        : isAuthenticated
+          ? NextResponse.json({ error: 'Bot not found' }, { status: 404 })
+          : NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
+
     // Check visibility: public if room.isPublic AND world.isPublic AND universe.isPublic
-    const isPublic = bot.room.isPublic && bot.room.world.isPublic && bot.room.world.universe.isPublic;
+    const isPublic = room.isPublic && room.world.isPublic && room.world.universe.isPublic;
 
     // If not public, require authentication
     if (!isPublic && !isAuthenticated) {
@@ -247,7 +263,7 @@ export async function GET(
     }
 
     // A members-only room's bots are for the people who may see the room. The bot server's admin token keeps full access.
-    if (!isPublic && !isAdminToken && userId && !(await mayReadRoomBots(bot.room, userId))) {
+    if (!isPublic && !isAdminToken && userId && !(await mayReadRoomBots(room, userId))) {
       // The same answer as for a bot that does not exist, so a stranger learns nothing about it
       const response = NextResponse.json(
         { error: 'Bot not found' },
@@ -340,6 +356,20 @@ export async function PUT(
       return response;
     }
 
+    // A Brick (game #1992) has no room, and this save reads the room's keys and rules and can move a bot to another room.
+    // What a Brick's owner may change opens with the issue for each part (game #1995 onwards).
+    const currentRoomId = existingBot.roomId;
+    if (currentRoomId === null) {
+      const response = NextResponse.json(
+        { error: brickHasNoRoomText(existingBot, { userId, isAdminToken }) },
+        { status: 404 }
+      );
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
+
     // Check permissions (skip if admin token)
     if (!isAdminToken && userId) {
       const hasPermission = await canManageThisBot(userId, null, existingBot, { creatorPasses: false });
@@ -413,7 +443,7 @@ export async function PUT(
     }
 
     // If roomId is being updated, verify the new room exists
-    if (resolvedRoomId && resolvedRoomId !== existingBot.roomId) {
+    if (resolvedRoomId && resolvedRoomId !== currentRoomId) {
       const newRoom = await prisma.room.findUnique({
         where: { id: resolvedRoomId },
       });
@@ -446,7 +476,7 @@ export async function PUT(
     }
 
     // Hide bot conversations (#435): a move out of a hiding universe keeps the bot Private, so what it wrote stays hidden
-    const keepPrivate = resolvedRoomId && resolvedRoomId !== existingBot.roomId
+    const keepPrivate = resolvedRoomId && resolvedRoomId !== currentRoomId
       ? await mustStayPrivateAfterMove(id, resolvedRoomId)
       : false;
 
@@ -455,7 +485,7 @@ export async function PUT(
       const providerError = await checkAiProviderRef(validatedData.aiProviderRef, existingBot.aiProviderRef, {
         actorId: userId ?? null,
         makerId: existingBot.createdById ?? null,
-        roomId: resolvedRoomId ?? existingBot.roomId,
+        roomId: resolvedRoomId ?? currentRoomId,
         botId: id,
       });
       if (providerError) {
@@ -479,7 +509,7 @@ export async function PUT(
         currentModel: existingBot.aiModel,
         actorId: userId ?? null,
         makerId: existingBot.createdById ?? null,
-        roomId: resolvedRoomId ?? existingBot.roomId,
+        roomId: resolvedRoomId ?? currentRoomId,
         botId: id,
       });
       if (modelError) {
@@ -497,7 +527,7 @@ export async function PUT(
         storedConfig: existingBot.behaviorConfig,
         actorId: userId ?? null,
         makerId: existingBot.createdById ?? null,
-        roomId: resolvedRoomId ?? existingBot.roomId,
+        roomId: resolvedRoomId ?? currentRoomId,
         botId: id,
         mainRef: nextRef ?? null,
       });
@@ -670,6 +700,19 @@ export async function DELETE(
     if (!bot) {
       const response = NextResponse.json(
         { error: 'Bot not found' },
+        { status: 404 }
+      );
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
+
+    // A Brick (game #1992) is not deleted here: this is the room editor's delete, and what goes with a Brick when it is
+    // deleted is decided with the Brick itself (game #1995 onwards)
+    if (bot.roomId === null) {
+      const response = NextResponse.json(
+        { error: brickHasNoRoomText(bot, { userId, isAdminToken }) },
         { status: 404 }
       );
       Object.entries(corsHeaders(request)).forEach(([key, value]) => {

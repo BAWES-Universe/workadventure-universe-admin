@@ -67,7 +67,7 @@ describe('checkAiProviderRef', () => {
       findUnique.mockResolvedValueOnce(key);
       (checkKeyForBot as jest.Mock).mockResolvedValue({ ok: true });
       await expect(checkAiProviderRef('key-1', null, ctx)).resolves.toBeNull();
-      expect(checkKeyForBot).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', bot: { id: 'bot-1', createdById: 'maker', roomId: 'room-1' } });
+      expect(checkKeyForBot).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', bot: { id: 'bot-1', createdById: 'maker', roomId: 'room-1', ownerId: null } });
     });
 
     it('tells the owner why when it is not lent there', async () => {
@@ -80,7 +80,7 @@ describe('checkAiProviderRef', () => {
       findUnique.mockResolvedValueOnce(key);
       (checkKeyForBot as jest.Mock).mockResolvedValue({ ok: true });
       await expect(checkAiProviderRef('key-1', 'sara-key', { ...ctx, makerId: 'sara' })).resolves.toBeNull();
-      expect(checkKeyForBot).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', bot: { id: 'bot-1', createdById: 'sara', roomId: 'room-1' } });
+      expect(checkKeyForBot).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', bot: { id: 'bot-1', createdById: 'sara', roomId: 'room-1', ownerId: null } });
     });
 
     it('refuses their own key when they can’t manage the bot', async () => {
@@ -129,7 +129,7 @@ describe('checkBotModel (#575)', () => {
 
   it('accepts a model the key lists, picked by the key’s owner, whoever made the bot', async () => {
     await expect(checkBotModel('claude-haiku-5-5', context)).resolves.toBeNull();
-    expect(checkKeyForBot).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', bot: { id: 'bot-1', createdById: 'maker', roomId: 'room-1' } });
+    expect(checkKeyForBot).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', bot: { id: 'bot-1', createdById: 'maker', roomId: 'room-1', ownerId: null } });
     await expect(checkBotModel('claude-haiku-5-5', { ...context, makerId: 'someone-else' })).resolves.toBeNull();
   });
 

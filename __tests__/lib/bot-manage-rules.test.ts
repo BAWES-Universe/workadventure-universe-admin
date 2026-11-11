@@ -63,7 +63,7 @@ const ADMIN = role(ADMIN_KEY, ALL_PERMISSIONS, 1_000_000);
 const KEEPER = role('keeper', flag('MANAGE_BOTS'));
 const INTERN = role('intern');
 
-const bot = { id: 'bot-1', createdById: 'maker', roomId: 'room-hq' };
+const bot = { id: 'bot-1', createdById: 'maker', roomId: 'room-hq', ownerId: null };
 
 const rule = (subject: { roleId?: string; userId?: string }, values: Partial<Record<RuleAction, RuleValue>>) =>
   state.rules.push({ roleId: subject.roleId ?? null, userId: subject.userId ?? null, ...withValues(NO_RULE, values) });
@@ -219,10 +219,10 @@ describe('row 11: Manage this bot', () => {
 
 describe('many bots in one room for one person (the room list)', () => {
   const bots = [
-    { id: 'bot-1', createdById: 'maker-a', roomId: 'room-hq' },
-    { id: 'bot-2', createdById: 'maker-b', roomId: 'room-hq' },
-    { id: 'bot-3', createdById: 'maker-c', roomId: 'room-hq' },
-    { id: 'bot-4', createdById: 'maker-d', roomId: 'room-hq' },
+    { id: 'bot-1', createdById: 'maker-a', roomId: 'room-hq', ownerId: null },
+    { id: 'bot-2', createdById: 'maker-b', roomId: 'room-hq', ownerId: null },
+    { id: 'bot-3', createdById: 'maker-c', roomId: 'room-hq', ownerId: null },
+    { id: 'bot-4', createdById: 'maker-d', roomId: 'room-hq', ownerId: null },
   ];
   const mocks = prisma as unknown as { room: { findUnique: jest.Mock }; botAccessRule: { findMany: jest.Mock } };
   const verdicts = (userId: string, memo?: ManageMemo) => Promise.all(bots.map((b) => canManageThisBot(userId, null, b, { creatorPasses: false, memo })));

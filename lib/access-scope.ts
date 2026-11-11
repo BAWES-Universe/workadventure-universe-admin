@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { validateAdminToken } from '@/lib/auth';
 import { getSessionUser, type SessionUser } from '@/lib/auth-session';
 import { canManageThisBot } from '@/lib/bot-permissions';
+import { isBrick, ownsBrick } from '@/lib/brick';
 
 /**
  * Who is making a request to the admin API.
@@ -111,11 +112,14 @@ export async function canManageRoom(userId: string, roomId: string): Promise<boo
   return !!member;
 }
 
-/** A bot is managed by whoever can manage the room it lives in, unless the bot's own Manage rules say otherwise (#427). */
+/**
+ * A bot is managed by whoever can manage the room it lives in, unless the bot's own Manage rules say otherwise (#427).
+ * A Brick has no room: only its owner manages it (game #1992).
+ */
 export async function canManageBot(userId: string, botId: string): Promise<boolean> {
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
-    select: { id: true, createdById: true, roomId: true },
+    select: { id: true, createdById: true, roomId: true, ownerId: true },
   });
   return !!bot && (await canManageThisBot(userId, null, bot, { creatorPasses: false }));
 }
@@ -202,11 +206,33 @@ export function forbiddenResponse(headers?: HeadersInit) {
 }
 
 /**
+ * Whether this bot is someone else's Brick to this viewer (game #1992). A Brick is its owner's: nobody else reads or
+ * manages it by its id, a super admin included, so this is asked before any privileged pass. The admin token is the bot
+ * server, not a person, and is never shut out here. Nobody is, for a room bot.
+ */
+export async function isSomeoneElsesBrick(viewer: Viewer, botId: string): Promise<boolean> {
+  if (viewer.kind !== 'user') return false;
+  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { roomId: true, ownerId: true } });
+  return !!bot && isBrick(bot) && !ownsBrick(bot, viewer.user.id);
+}
+
+/**
+ * Who may read one bot's figures and clear its saved chats: privileged viewers and managers of the bot's room. For a
+ * Brick that is its owner (and the bot server) and nobody else: a super admin who does not own it is held to the same
+ * rule as everyone, the one canManageBot keeps.
+ */
+export async function viewerManagesBot(viewer: Viewer, botId: string): Promise<boolean> {
+  if (isPrivileged(viewer) && !(await isSomeoneElsesBrick(viewer, botId))) return true;
+  return viewer.kind === 'user' && (await canManageBot(viewer.user.id, botId));
+}
+
+/**
  * Guard for routes that read the counts of one bot's data (conversation figures, metrics). What people said and what
  * the bot remembers use botContentReadDenied. Returns an error response when the viewer may not read it, or
- * null when they may: privileged viewers and managers of the bot's room.
+ * null when they may: privileged viewers and managers of the bot's room, and for a Brick its owner alone
+ * (viewerManagesBot).
  * A bot that does not exist is reported as forbidden so the response does
- * not reveal whether it exists.
+ * not reveal whether it exists; so is someone else's Brick.
  */
 export async function botReadDenied(
   request: NextRequest,
@@ -215,9 +241,7 @@ export async function botReadDenied(
 ): Promise<NextResponse | null> {
   const viewer = await getViewer(request);
   if (!viewer) return unauthorizedResponse(headers);
-  if (isPrivileged(viewer)) return null;
-  if (viewer.kind === 'user' && (await canManageBot(viewer.user.id, botId))) return null;
-  return forbiddenResponse(headers);
+  return (await viewerManagesBot(viewer, botId)) ? null : forbiddenResponse(headers);
 }
 
 /**

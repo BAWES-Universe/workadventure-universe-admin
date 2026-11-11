@@ -3,6 +3,7 @@ import { has } from '@/lib/permissions';
 import { ADMIN_KEY, permissionsForWorld, worldAccessFor } from '@/lib/roles';
 import { verdictFor } from '@/lib/bot-rules';
 import { isSuperAdmin } from '@/lib/super-admin';
+import { ownsBrick } from '@/lib/brick';
 
 /**
  * Checks if a user can manage bots in a specific room (#423).
@@ -38,7 +39,10 @@ export async function canManageBots(userId: string, roomId: string): Promise<boo
 export interface ManagedBot {
   id: string;
   createdById: string | null;
-  roomId: string;
+  /** Null for a Brick (game #1992), which has no room: then only `ownerId` decides. */
+  roomId: string | null;
+  /** The person a Brick belongs to. Null for a room bot. */
+  ownerId: string | null;
 }
 
 /**
@@ -91,6 +95,9 @@ async function stillInUniverse(userId: string, universeId: string, inAWorld: boo
  * a No from another); with none, the room answer stands. A Yes only counts for someone still in the universe. The bot's
  * creator (when `creatorPasses`), the owner of the universe, super admins and Admin always manage it, whatever a rule
  * says. A bot with no rules answers exactly as canManageBots does.
+ *
+ * A Brick (game #1992) has no room, so none of that applies: only its owner manages it. Nobody else does, a super admin
+ * included, because managing a Brick reaches its owner's private chats, memory and apps.
  */
 export async function canManageThisBot(
   userId: string,
@@ -98,11 +105,13 @@ export async function canManageThisBot(
   bot: ManagedBot,
   options: { creatorPasses: boolean; memo?: ManageMemo },
 ): Promise<boolean> {
+  const roomId = bot.roomId;
+  if (roomId === null) return ownsBrick(bot, userId);
   if (options.creatorPasses && bot.createdById === userId) return true;
   if (isSuperAdmin(userEmail)) return true;
 
   const { memo } = options;
-  const roomManages = () => once(memo, `${userId}:manage:${bot.roomId}`, () => canManageBots(userId, bot.roomId));
+  const roomManages = () => once(memo, `${userId}:manage:${roomId}`, () => canManageBots(userId, roomId));
   const rules = await once(memo, `rules:${bot.id}`, () =>
     prisma.botAccessRule.findMany({
       where: { botId: bot.id },
@@ -112,9 +121,9 @@ export async function canManageThisBot(
   if (rules.length === 0) return roomManages();
 
   // Who they are in this room is the same for every bot in it; only the bot's own rules below differ
-  const standing = await once(memo, `${userId}:standing:${bot.roomId}`, async () => {
+  const standing = await once(memo, `${userId}:standing:${roomId}`, async () => {
     const room = await prisma.room.findUnique({
-      where: { id: bot.roomId },
+      where: { id: roomId },
       select: { world: { select: { id: true, universeId: true, universe: { select: { ownerId: true } } } } },
     });
     if (!room) return null;
@@ -151,7 +160,7 @@ export async function canManageThisBot(
  * super admins; then the bot's own Manage rules apply (see canManageThisBot). The
  * bot's creator gets no extra way in: someone who has lost Manage bots in the room
  * can no longer change the bot's tools, the same as they can no longer edit or
- * delete the bot.
+ * delete the bot. A Brick's are its owner's alone.
  */
 export async function canManageBotMcpServers(
   userId: string,

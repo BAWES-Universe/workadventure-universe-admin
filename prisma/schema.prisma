@@ -47,6 +47,7 @@ model User {
   membershipInvitationsReceived MembershipInvitation[] @relation("InvitedUser")
   ownershipOffersReceived OwnershipOffer[] @relation("OwnershipOfferTo")
   ownershipOffersMade     OwnershipOffer[] @relation("OwnershipOfferBy")
+  bricks            Bot[] @relation("BotOwner")
   botsCreated       Bot[] @relation("BotCreatedBy")
   botsUpdated       Bot[] @relation("BotUpdatedBy")
   botAccessRules    BotAccessRule[]
@@ -791,7 +792,12 @@ model AppSetting {
 // Bots
 model Bot {
   id                  String   @id @default(uuid())
-  roomId              String   @map("room_id")
+  // Where the bot lives. A room bot has a room and no owner. A Brick (game #1992) has an owner and no room: it lives in
+  // its owner's chats. The database holds a bot to exactly one of the two (bots_room_or_owner).
+  roomId              String?  @map("room_id")
+  // The person a Brick belongs to: whoever made it. Null for a room bot, which belongs to its room and is managed by
+  // the room's people. "Created by" on a room bot only says who typed it in, and is never read as ownership.
+  ownerId             String?  @map("owner_id")
   name                String   @db.VarChar(100)
   description         String?
   characterTextureId  String?  @map("character_texture_id") @db.VarChar(100)
@@ -839,7 +845,8 @@ model Bot {
   createdById         String?  @map("created_by_id")
   updatedById          String?  @map("updated_by_id")
 
-  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  room Room? @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  owner User? @relation("BotOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   createdBy User? @relation("BotCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   updatedBy User? @relation("BotUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
   mcpServers BotMcpServer[]
@@ -856,6 +863,7 @@ model Bot {
   voiceListenUses VoiceListenUse[]
 
   @@index([roomId])
+  @@index([ownerId])
   @@map("bots")
 }
 

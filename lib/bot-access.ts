@@ -6,6 +6,7 @@ import { canSeeRoom } from '@/lib/room-visibility';
 import { findUserByIdentifier } from '@/lib/user-identifier';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { bansCoveringWorld } from '@/lib/moderation';
+import { ownsBrick } from '@/lib/brick';
 
 /**
  * Can this person do this with this bot? (#426) What people do with a bot: chat in its bubble on the map, send it
@@ -17,6 +18,9 @@ import { bansCoveringWorld } from '@/lib/moderation';
  * then the bot's own rules (#427), in this order: its creator, the universe owner, super admins and Admin always pass;
  * then the person's own row; then the rows of their roles; then Private bot, which shuts out everyone a row does not
  * say Yes to; then the role permissions. Guests have no account, so they get Everyone's and Everyone's rows.
+ *
+ * A Brick (game #1992) has no room, so no world, roles or rules decide for it: its owner may do all of this with it, and
+ * nobody else may do any of it. That holds for a super admin too, because a Brick answers from its owner's private memory.
  */
 export type BotAction = 'chat' | 'dm' | 'summon' | 'change' | 'deleteOrSend';
 
@@ -145,6 +149,8 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
       id: true,
       name: true,
       createdById: true,
+      roomId: true,
+      ownerId: true,
       privateBot: true,
       refusalReply: true,
       accessRules: { select: { roleId: true, userId: true, allow: true, deny: true } },
@@ -159,7 +165,6 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
     },
   });
   if (!bot) return null;
-  const { world } = bot.room;
 
   let user: { id: string; uuid: string; email: string | null; name: string | null; isGuest: boolean } | null;
   // Whose ban to look up. Only the ban: a guest account has no roles or membership, so `user` stays null for it
@@ -181,6 +186,18 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
     user = person.signedIn && person.identifier ? await findUserByIdentifier(person.identifier) : null;
     banUserId = user?.id ?? null;
   }
+
+  if (!bot.room) {
+    // A Brick: its owner, signed in, and nobody else. No world to be banned from, and no roles or rules to read.
+    const answer =
+      action === 'dm' && !signedIn
+        ? refusal('sign_in_required', action, bot.name)
+        : ownsBrick(bot, user?.id)
+          ? ALLOWED
+          : refusal('not_allowed', action, bot.name);
+    return named ? { ...answer, person: named } : answer;
+  }
+  const { world } = bot.room;
 
   // A direct message can come from anywhere, so a ban from the bot's world keeps it out too, and so does having the bot
   // change things, or delete or send, which can be asked in a direct message. Chatting nearby and summoning need the

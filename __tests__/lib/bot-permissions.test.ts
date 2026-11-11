@@ -182,7 +182,7 @@ describe('canManageBots', () => {
 });
 
 describe('canManageBotMcpServers', () => {
-  const bot = { id: 'bot-1', createdById: 'maker', roomId: 'room-hq' };
+  const bot = { id: 'bot-1', createdById: 'maker', roomId: 'room-hq', ownerId: null };
 
   it('gives the bot\'s creator no extra way in: with no role they are refused, with Manage bots they are in', async () => {
     expect(await canManageBotMcpServers('maker', null, bot)).toBe(false);
@@ -191,7 +191,7 @@ describe('canManageBotMcpServers', () => {
   });
 
   it('a bot whose creator is gone is managed by whoever manages bots in its room', async () => {
-    const orphan = { id: 'bot-2', createdById: null, roomId: 'room-hq' };
+    const orphan = { id: 'bot-2', createdById: null, roomId: 'room-hq', ownerId: null };
     member('keeper', [everywhere(role('bot-keeper', flag('MANAGE_BOTS')))]);
     member('ed', [everywhere(EDITOR_NO_BOTS)]);
     expect(await canManageBotMcpServers('keeper', null, orphan)).toBe(true);

@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db';
-import { KEY_FOR_BOT_TEXT, checkKeyForBot } from '@/lib/ai-key-pay';
+import { KEY_FOR_BOT_TEXT, checkKeyForBot, type BotForKey } from '@/lib/ai-key-pay';
 import { canCallTools, keyModels, modelFactsOf, noToolsWords } from '@/lib/ai-key-model-list';
 import { UNIVERSE_AI_MISSING, UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 
@@ -91,6 +91,7 @@ export async function checkBotModel(
 /** Someone else's key: its model is its owner's to pick, as the key is theirs to put a bot on. */
 export const ONLY_OWNER_PICKS_MODEL = 'Only the key’s owner can pick its model.';
 
-function botOf(context: BotContext): { id: string | null; createdById: string | null; roomId: string } {
-  return { id: context.botId, createdById: context.makerId, roomId: context.roomId };
+/** These checks run when a bot is saved through a room's bot editor, so it is a room bot: a room and no owner. */
+function botOf(context: BotContext): BotForKey {
+  return { id: context.botId, createdById: context.makerId, roomId: context.roomId, ownerId: null };
 }

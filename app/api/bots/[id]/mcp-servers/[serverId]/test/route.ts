@@ -25,7 +25,7 @@ export async function OPTIONS(request: NextRequest) {
 async function getAuthorizedBot(botId: string, actorUserId: string): Promise<{ id: string }> {
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
-    select: { id: true, createdById: true, roomId: true },
+    select: { id: true, createdById: true, roomId: true, ownerId: true },
   });
 
   if (!bot) {

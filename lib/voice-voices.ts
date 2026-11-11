@@ -7,6 +7,7 @@ import { readModels } from '@/lib/voice-providers';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
 import { accountRegion, voiceKeyCompanyInfo, type VoiceKeyCompanyInfo, type VoiceListSpec } from '@/lib/voice-key-companies';
 import { signAwsGet } from '@/lib/aws-sign';
+import { BRICK_HAS_NO_ROOM } from '@/lib/brick';
 import { OWN_SPEECH_LABEL, isOwnSpeechAdapter, listOwnSpeechVoices } from '@/lib/voice-own-server';
 
 /**
@@ -423,6 +424,8 @@ interface Source {
 async function sourceFor(botId: string, source: string, part: VoicePart = 'speech'): Promise<Source> {
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { createdById: true, room: { select: { world: { select: { universeId: true } } } } } });
   if (!bot) throw new BotSettingsError(404, 'Bot not found');
+  // A Brick has no room, so no universe lends it a voice key yet (lib/bot-voice.ts, homeOf)
+  if (!bot.room) throw new BotSettingsError(404, BRICK_HAS_NO_ROOM);
   const universeId = bot.room.world.universeId;
   let provider: (VoiceProvider & { lends?: { models: unknown }[] }) | null;
   if (source === UNIVERSE_AI_SOURCE) {

@@ -9,6 +9,7 @@ import { validateAccessToken } from '@/lib/oidc';
 import { transformBotToServerFormat } from '@/lib/bot-config-helpers';
 import { corsHeaders } from '@/lib/cors';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
+import { brickHasNoRoomText } from '@/lib/brick';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
@@ -153,6 +154,19 @@ export async function GET(
       return response;
     }
 
+    // A Brick (game #1992) has no room URL, so it has no configuration in this shape yet: the bot server learns about
+    // Bricks with game #1995. Until then the answer is the same as for a bot that does not exist, a super admin included.
+    if (bot.roomId === null) {
+      const response = NextResponse.json(
+        { error: brickHasNoRoomText(bot, { userId, isAdminToken }) },
+        { status: 404 }
+      );
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
+
     // A session user may only read bots in rooms they can manage (the config carries chat instructions)
     let hasPermission = false;
     if (userId) {
@@ -226,12 +240,25 @@ export async function DELETE(
         id: true,
         createdById: true,
         roomId: true,
+        ownerId: true,
       },
     });
 
     if (!bot) {
       const response = NextResponse.json(
         { error: 'Bot not found' },
+        { status: 404 }
+      );
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
+
+    // A Brick (game #1992) is not deleted here: this is a room bot's delete (see DELETE /api/bots/:id)
+    if (bot.roomId === null) {
+      const response = NextResponse.json(
+        { error: brickHasNoRoomText(bot, { userId, isAdminToken }) },
         { status: 404 }
       );
       Object.entries(corsHeaders(request)).forEach(([key, value]) => {

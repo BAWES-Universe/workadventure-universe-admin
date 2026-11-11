@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { canManageBots, canManageThisBot } from '@/lib/bot-permissions';
 import { lendModels } from '@/lib/ai-key-model-list';
+import { ownsBrick } from '@/lib/brick';
 
 /**
  * Who pays for a bot's AI (#374, #709). A bot runs on Universe AI or on one person's own key, never on the chatter's.
@@ -12,6 +13,9 @@ import { lendModels } from '@/lib/ai-key-model-list';
  *      roles: the super admin pass doesn't count, as it doesn't for lending.
  * Orbit checks this when a bot is saved, and again every time the bot server asks for the key. A key that may run the bot
  * also says which of its models the lend allows there (#575): null for all of them.
+ *
+ * A Brick (game #1992) stands in no universe, so there is no lend to look for. Only its owner manages it, so only its
+ * owner's own key may run it, with all of that key's models.
  */
 export type KeyForBot =
   | { ok: true; lendModels: string[] | null }
@@ -21,12 +25,18 @@ export type KeyForBot =
 export interface BotForKey {
   id: string | null;
   createdById: string | null;
-  roomId: string;
+  /** Null for a Brick, which has no room: then `ownerId` decides. */
+  roomId: string | null;
+  ownerId: string | null;
 }
 
 export async function checkKeyForBot(input: { keyId: string; keyOwnerId: string | null; bot: BotForKey }): Promise<KeyForBot> {
   if (!input.keyOwnerId) return { ok: false, reason: 'no-owner' };
-  const room = await prisma.room.findUnique({ where: { id: input.bot.roomId }, select: { world: { select: { universeId: true } } } });
+  const roomId = input.bot.roomId;
+  if (roomId === null) {
+    return ownsBrick(input.bot, input.keyOwnerId) ? { ok: true, lendModels: null } : { ok: false, reason: 'no-access' };
+  }
+  const room = await prisma.room.findUnique({ where: { id: roomId }, select: { world: { select: { universeId: true } } } });
   if (!room) return { ok: false, reason: 'no-room' };
   const lent = await prisma.aiKeyLend.findUnique({
     where: { providerId_universeId: { providerId: input.keyId, universeId: room.world.universeId } },
@@ -34,8 +44,8 @@ export async function checkKeyForBot(input: { keyId: string; keyOwnerId: string 
   });
   if (!lent) return { ok: false, reason: 'not-lent' };
   const manages = input.bot.id
-    ? await canManageThisBot(input.keyOwnerId, null, { id: input.bot.id, createdById: input.bot.createdById, roomId: input.bot.roomId }, { creatorPasses: false })
-    : await canManageBots(input.keyOwnerId, input.bot.roomId);
+    ? await canManageThisBot(input.keyOwnerId, null, { id: input.bot.id, createdById: input.bot.createdById, roomId, ownerId: input.bot.ownerId }, { creatorPasses: false })
+    : await canManageBots(input.keyOwnerId, roomId);
   if (!manages) return { ok: false, reason: 'no-access' };
   return { ok: true, lendModels: lendModels(lent.models) };
 }

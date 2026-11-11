@@ -151,7 +151,7 @@ export async function GET(
     // Fetch the bot to check ownership
     const bot = await prisma.bot.findUnique({
       where: { id: botId },
-      select: { id: true, createdById: true, roomId: true },
+      select: { id: true, createdById: true, roomId: true, ownerId: true },
     });
 
     if (!bot) {
@@ -305,7 +305,7 @@ export async function POST(
     // Fetch the bot to check ownership
     const bot = await prisma.bot.findUnique({
       where: { id: botId },
-      select: { id: true, createdById: true, roomId: true },
+      select: { id: true, createdById: true, roomId: true, ownerId: true },
     });
 
     if (!bot) {

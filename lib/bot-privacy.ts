@@ -42,7 +42,8 @@ export function resolveBotPrivacy(universeHides: boolean, stored: boolean | null
 
 /**
  * Does this bot hide its conversations? null when the bot no longer exists: its leftovers are shown as they always
- * were, since there is no universe to ask.
+ * were, since there is no universe to ask. A Brick (game #1992) has no universe either, and what it wrote is its owner's:
+ * it is always hidden.
  */
 export async function loadBotPrivacy(botId: string): Promise<BotPrivacy | null> {
   const bot = await prisma.bot.findUnique({
@@ -50,6 +51,7 @@ export async function loadBotPrivacy(botId: string): Promise<BotPrivacy | null> 
     select: { hideConversations: true, room: { select: { world: { select: { universe: { select: { hideBotConversations: true } } } } } } },
   });
   if (!bot) return null;
+  if (!bot.room) return resolveBotPrivacy(false, true);
   return resolveBotPrivacy(bot.room.world.universe.hideBotConversations, bot.hideConversations);
 }
 
@@ -76,9 +78,12 @@ export async function isBotHidden(botId: string): Promise<boolean> {
   return (await loadBotPrivacy(botId))?.hidden === true;
 }
 
-/** The filter for bots that hide their conversations: their own choice is Private, or their universe hides them. */
+/**
+ * The filter for bots that hide their conversations: their own choice is Private, or their universe hides them. A Brick
+ * (game #1992, no room) always hides them, as loadBotPrivacy says.
+ */
 const HIDING_BOTS: Prisma.BotWhereInput = {
-  OR: [{ hideConversations: true }, { room: { world: { universe: { hideBotConversations: true } } } }],
+  OR: [{ hideConversations: true }, { roomId: null }, { room: { world: { universe: { hideBotConversations: true } } } }],
 };
 
 /** Every bot that hides its conversations, for the pages that list across bots. */
@@ -94,6 +99,10 @@ export async function hiddenBotIds(): Promise<string[]> {
  * data goes in the same transaction as the delete. When no bot in it hides, this is just the delete, as before.
  *
  * `botsWhere` picks the bots that go with it, `remove` is the delete itself.
+ *
+ * Nothing in Orbit deletes an account today. When something does, it goes through here too: the database takes the
+ * account's universes (with their room bots) and its Bricks (game #1992, `{ ownerId }`) with it, and their hidden chats
+ * and memory would stay behind as above.
  */
 export async function deleteWithHiddenBotData<T>(botsWhere: Prisma.BotWhereInput, remove: () => Prisma.PrismaPromise<T>): Promise<T> {
   const hidden = await prisma.bot.findMany({ where: { AND: [botsWhere, HIDING_BOTS] }, select: { id: true } });

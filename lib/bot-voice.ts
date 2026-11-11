@@ -11,6 +11,7 @@ import { isOwnSpeechAdapter } from '@/lib/voice-own-server';
 import { claimVoiceKeyTry, healthOf, tryIsDue } from '@/lib/voice-key-health';
 import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits, servedVoiceLimits } from '@/lib/voice-limits';
+import { BRICK_HAS_NO_ROOM } from '@/lib/brick';
 import { LISTENING_KEY_LIMITS, SPEAKING_KEY_LIMITS, readVoiceKeyLimits, savedVoiceKeyLimits } from '@/lib/voice-limit-values';
 
 /**
@@ -154,9 +155,14 @@ interface Home {
   universeId: string;
 }
 
+/**
+ * A Brick (game #1992) has no room, so no universe says whether it may speak or lends it a voice key: its voice settings
+ * answer "not in a room" until the issue that gives Bricks a voice says whose keys and whose allowance they speak on.
+ */
 async function homeOf(botId: string): Promise<Home> {
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { createdById: true, room: { select: { world: { select: { universeId: true } } } } } });
   if (!bot) throw new BotSettingsError(404, 'Bot not found');
+  if (!bot.room) throw new BotSettingsError(404, BRICK_HAS_NO_ROOM);
   return { createdById: bot.createdById, universeId: bot.room.world.universeId };
 }
 
@@ -267,8 +273,10 @@ export async function readBotVoice(botId: string) {
     },
   });
   if (!bot) throw new BotSettingsError(404, 'Bot not found');
+  if (!bot.room) throw new BotSettingsError(404, BRICK_HAS_NO_ROOM);
+  const room = bot.room;
   // The models fill in on their own: Universe AI's providers and the keys lent here are read from their companies first
-  const universeId = bot.room.world.universeId;
+  const universeId = room.world.universeId;
   await discoverVoiceModels(
     await prisma.voiceProvider.findMany({
       where: { OR: [{ ownerId: null, enabled: true }, ...(bot.createdById ? [{ ownerId: bot.createdById, lends: { some: { universeId } } }] : [])] },
@@ -279,13 +287,13 @@ export async function readBotVoice(botId: string) {
   const parsed = speaking ? voiceProfileSchema.safeParse(speaking.profile) : null;
   return {
     enabled: bot.voiceEnabled,
-    universeAllows: bot.room.world.universe.allowVoiceBots,
+    universeAllows: room.world.universe.allowVoiceBots,
     ...(await payersOf(parsed?.success ? parsed.data : null)),
     serverProviderIds: await serverProvidersIn(parsed?.success ? parsed.data : null),
     revision: bot.voiceRevision,
     draft: { profile: readDraft(bot.voiceDraft?.profile), updatedAt: bot.voiceDraft?.updatedAt ?? null },
     revisions,
-    lentKeys: await lentKeysFor(botId, { createdById: bot.createdById, universeId: bot.room.world.universeId }),
+    lentKeys: await lentKeysFor(botId, { createdById: bot.createdById, universeId }),
     // What the bot page needs to show and start from Universe AI (game #1668): its default providers, models and voice, and the
     // server's voice limits with the voice replies a fair-usage window leaves
     universeAi: await universeAiDefaults(),
@@ -330,6 +338,8 @@ async function lentKeysFor(botId: string, home: Home) {
 
 /** Saves the draft in place of the one there. It only has to be well formed: finishing it is for publishing. */
 export async function saveVoiceDraft(botId: string, profile: z.infer<typeof voiceDraftSchema>, userId: string) {
+  // A Brick has no room yet to speak in (see homeOf): nothing is saved for it, so the answer and what is stored agree
+  await homeOf(botId);
   await prisma.botVoiceDraft.upsert({
     where: { botId },
     create: { botId, profile: profile as Prisma.InputJsonValue, updatedById: userId },
@@ -375,6 +385,8 @@ export async function rollBackVoice(botId: string, number: number) {
 
 /** Turns voice on or off. On needs the universe to allow it and a published profile that works now; off always works. */
 export async function setBotVoiceEnabled(botId: string, enabled: boolean) {
+  // A Brick has no room yet to speak in (see homeOf): on or off, it is told so and nothing is written
+  await homeOf(botId);
   if (enabled) {
     // A key that is Down for now doesn't stop voice being turned on: the bot replies in text until the key answers again
     const state = await effectiveBotVoice(botId, { ignoreSwitch: true, ignoreKeyHealth: true });
@@ -435,13 +447,16 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
     // The voice limits this bot's turns run under: the server's, with a lent key's own for the job it does (#783)
     limits: await limitsFor(profile, keys),
   });
+  // A Brick has no room, so no universe allows it a voice yet (see homeOf): it replies in text
+  if (!bot.room) return result('off');
+  const room = bot.room;
   if (!bot.voiceEnabled && !options.ignoreSwitch) return result('off');
-  if (!bot.room.world.universe.allowVoiceBots) return result('universe');
+  if (!room.world.universe.allowVoiceBots) return result('universe');
   if (bot.voiceRevision === null) return result('no-profile');
   const revision = await prisma.botVoiceRevision.findUnique({ where: { botId_number: { botId, number: bot.voiceRevision } } });
   const parsed = revision ? voiceProfileSchema.safeParse(revision.profile) : null;
   if (!revision || !parsed?.success) return result('no-profile');
-  const { providers, lent } = await providersFor(parsed.data, { createdById: bot.createdById, universeId: bot.room.world.universeId });
+  const { providers, lent } = await providersFor(parsed.data, { createdById: bot.createdById, universeId: room.world.universeId });
   // A bot on Universe AI speaks with the models Universe AI uses now, not the ones it was turned on with, and a part on a
   // company a super admin turned off borrows what Universe AI uses now until it is on again
   const profile = borrowUniverseAi(followUniverseAi(parsed.data, providers), providers);

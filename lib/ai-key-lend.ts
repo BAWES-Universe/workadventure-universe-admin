@@ -94,6 +94,9 @@ export async function moveBotsOffKey(
 
   const byUniverse = new Map<string, MovedBots['universes'][number]>();
   for (const bot of movedBots) {
+    // A Brick stands in no universe. Only its owner's key runs it (lib/ai-key-pay.ts), so its owner is the one who pulled
+    // or revoked the key and needs no notice; the bot has moved either way and is counted.
+    if (!bot.room) continue;
     const universe = bot.room.world.universe;
     const entry = byUniverse.get(universe.id) ?? { id: universe.id, name: universe.name, ownerId: universe.ownerId, botNames: [], botIds: [] };
     entry.botNames.push(bot.name);
@@ -187,8 +190,9 @@ export async function moveBotsToAllowedModel(
   );
   const moved = leaving.filter((_, index) => results[index].count > 0);
   if (moved.length === 0) return { count: 0 };
-  const universe = moved[0].room.world.universe;
-  if (universe.ownerId !== options.actor.id) {
+  // Every bot here was found by its room's universe, so each one has a room
+  const universe = moved[0].room?.world.universe;
+  if (universe && universe.ownerId !== options.actor.id) {
     const names = moved.map((bot) => bot.name);
     try {
       await addNotice({

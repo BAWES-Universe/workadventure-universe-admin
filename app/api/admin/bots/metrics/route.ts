@@ -27,8 +27,11 @@ export async function GET(request: NextRequest) {
     const startDate = searchParams.get('startDate');
     const endDate = searchParams.get('endDate');
 
-    // Build where clause
-    const where: any = {};
+    // Build where clause. This page is about room bots only (game #1992): a Brick's figures are its owner's, here as on
+    // the bot's own metrics (botReadDenied). Metrics are kept by bot id with no tie to the bot row, so Bricks are left
+    // out by id, and asking for one by its id finds nothing.
+    const bricks = await prisma.bot.findMany({ where: { roomId: null }, select: { id: true } });
+    const where: any = bricks.length > 0 ? { NOT: { botId: { in: bricks.map((bot) => bot.id) } } } : {};
 
     if (botId) {
       where.botId = botId;

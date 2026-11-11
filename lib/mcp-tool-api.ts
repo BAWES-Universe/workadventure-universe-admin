@@ -37,7 +37,7 @@ export async function authorizeToolsRequest(
     return { response: json(request, { error: 'Unauthorized' }, 401) };
   }
 
-  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { id: true, createdById: true, roomId: true } });
+  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { id: true, createdById: true, roomId: true, ownerId: true } });
   if (!bot) return { response: json(request, { error: 'Bot not found' }, 404) };
   if (!(await canManageBotMcpServers(sessionUser.id, sessionUser.email ?? null, bot))) {
     return { response: json(request, { error: 'Forbidden' }, 403) };
