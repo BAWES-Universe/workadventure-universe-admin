@@ -65,6 +65,7 @@ model User {
   pushActivity     PushActivity?
   artifacts        Artifact[]        @relation("ArtifactOwner")
   artifactAsks     ArtifactVersion[] @relation("ArtifactAsker")
+  artifactPasses   ArtifactPass[]    @relation("ArtifactPassHolder")
   nearbySharedItems NearbySharedItem[]
   botUsageTalked   BotsAiUsage[]     @relation("UsageTalkedPerson")
   botFiles         BotFile[]         @relation("BotFileOwner")
@@ -208,7 +209,7 @@ model Artifact {
   // The chat it was made in: nearby | dm, and the id the bot server and the game both use for that chat. A copy has none.
   chatKind      String?   @map("chat_kind") @db.VarChar(20)
   chatRef       String?   @map("chat_ref") @db.VarChar(255)
-  // Who can open it: chat (people in that chat) | link (anyone with the link)
+  // Who can open it: me (just its owner, game #1994) | chat (people in that chat) | link (anyone with the link)
   openScope     String    @default("chat") @map("open_scope") @db.VarChar(20)
   // Who can ask for changes: owner (only the owner) | openers (everyone who can open it, in its chat)
   changeScope   String    @default("owner") @map("change_scope") @db.VarChar(20)
@@ -220,6 +221,7 @@ model Artifact {
 
   owner    User?             @relation("ArtifactOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   versions ArtifactVersion[]
+  passes   ArtifactPass[]
 
   @@index([ownerId, updatedAt])
   @@index([makerBotId])
@@ -250,6 +252,40 @@ model ArtifactVersion {
   @@unique([artifactId, number])
   @@index([askedById])
   @@map("artifact_versions")
+}
+
+// One opening of a "Just you" artifact by its owner (game #1994): the address its files are served at, by Orbit itself, for
+// that opening (lib/artifact-pass.ts). It goes with the artifact and with the account.
+model ArtifactPass {
+  id         String    @id @default(uuid())
+  // SHA-256 of the random part of the address. The address itself is never stored, so this table opens nothing.
+  tokenHash  String    @unique @map("token_hash") @db.VarChar(64)
+  artifactId String    @map("artifact_id")
+  // The owner it was made for. Checked against the artifact's owner again on every request.
+  userId     String    @map("user_id")
+  // Set by the first request for the page: SHA-256 of the cookie that browser was given. The page then needs it.
+  cookieHash String?   @map("cookie_hash") @db.VarChar(64)
+  redeemedAt DateTime? @map("redeemed_at")
+  expiresAt  DateTime  @map("expires_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  artifact Artifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  user     User     @relation("ArtifactPassHolder", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([artifactId])
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("artifact_passes")
+}
+
+// A file in the artifacts bucket whose address was handed out before its artifact became "Just you" (game #1994). It is
+// removed from the bucket at once; it stays listed here until the bucket has confirmed, so a restart never forgets one.
+model ArtifactRetiredFile {
+  key       String   @id @db.VarChar(255)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@map("artifact_retired_files")
 }
 
 // Universes

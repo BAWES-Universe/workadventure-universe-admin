@@ -7,8 +7,11 @@ import { randomBytes } from 'node:crypto';
 export const ARTIFACT_KINDS = ['app', 'page', 'markdown', 'svg'] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 
-/** Who can open it: people in the chat it was made in, or anyone who has the link. */
-export const OPEN_SCOPES = ['chat', 'link'] as const;
+/**
+ * Who can open it: just its owner ("Just you", game #1994), people in the chat it was made in, or anyone who has the
+ * link. "Just you" is the only one whose files are never served from the bucket's own address (lib/artifact-pass.ts).
+ */
+export const OPEN_SCOPES = ['me', 'chat', 'link'] as const;
 export type OpenScope = (typeof OPEN_SCOPES)[number];
 
 /** Who can ask for changes: only the owner, or everyone who can open it (in its chat). */
@@ -294,14 +297,22 @@ export function hasExpired(artifact: ArtifactRules, now: Date): boolean {
   return artifact.expiresAt !== null && artifact.expiresAt.getTime() <= now.getTime();
 }
 
+/** "Just you": its owner keeps it to themselves. Nobody else opens it, in its chat or by a link. */
+export function isJustYou(artifact: Pick<ArtifactRules, 'openScope'>): boolean {
+  return artifact.openScope === 'me';
+}
+
 /**
- * May this person open it (and see its versions and code)? The owner always. A link opens for anyone who has it.
- * "People in this chat" opens only for someone who is in that chat now, which the game vouches for.
+ * May this person open it (and see its versions and code)? The owner always. "Just you" opens for nobody else. A link
+ * opens for anyone who has it. "People in this chat" opens only for someone who is in that chat now, which the game
+ * vouches for. Anything that is not one of the three is read as the narrowest, so a value this Orbit does not know never
+ * opens a door.
  */
 export function canOpen(artifact: ArtifactRules, asker: Asker, now: Date): boolean {
   if (hasExpired(artifact, now)) return false;
   if (isOwner(artifact, asker)) return true;
   if (artifact.openScope === 'link') return true;
+  if (artifact.openScope !== 'chat') return false;
   return asker.inChat && artifact.chatRef !== null;
 }
 
@@ -313,6 +324,8 @@ export function canOpen(artifact: ArtifactRules, asker: Asker, now: Date): boole
 export function canAskForChange(artifact: ArtifactRules, asker: Asker, inThisChat: boolean, now: Date): boolean {
   if (hasExpired(artifact, now)) return false;
   if (isOwner(artifact, asker)) return true;
+  // "Everyone who can open it" is nobody else while it is "Just you", whatever was allowed before
+  if (isJustYou(artifact)) return false;
   if (!inThisChat || artifact.chatRef === null) return false;
   return artifact.ownerId === null || artifact.changeScope === 'openers';
 }

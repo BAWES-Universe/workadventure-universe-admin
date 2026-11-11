@@ -15,8 +15,16 @@ export const db = {
   versions: [] as Row[],
   /** The bucket: key to text (or bytes, for media). */
   files: new Map<string, string | Uint8Array>(),
+  /** One opening of a private artifact each (game #1994). */
+  passes: [] as Row[],
+  /** Files listed to be removed from the bucket. */
+  retired: [] as Row[],
   /** Make the next version insert fail, to see that its file does not stay behind. */
   failNextVersionCreate: false,
+  /** Make a copy inside the bucket fail when the file it copies from has this in its key. */
+  failCopyOf: null as string | null,
+  /** Make the bucket refuse to remove anything. */
+  failRemove: false,
   /** app_settings rows (#666): the super admin's limits, saved under "bot-limits". */
   settings: new Map<string, unknown>(),
   reset() {
@@ -26,7 +34,11 @@ export const db = {
     this.artifacts.length = 0;
     this.versions.length = 0;
     this.files.clear();
+    this.passes.length = 0;
+    this.retired.length = 0;
     this.failNextVersionCreate = false;
+    this.failCopyOf = null;
+    this.failRemove = false;
   },
 };
 
@@ -52,12 +64,20 @@ export const fakeFiles: ArtifactFiles = {
     if (body === undefined) throw new Error(`no file ${key}`);
     return typeof body === 'string' ? body : Buffer.from(body).toString('utf8');
   },
+  async read(key, range) {
+    const body = db.files.get(key);
+    if (body === undefined) throw new Error(`no file ${key}`);
+    const bytes = typeof body === 'string' ? new Uint8Array(Buffer.from(body, 'utf8')) : body;
+    return range ? bytes.slice(range.start, range.end + 1) : bytes;
+  },
   async copy(fromKey, toKey) {
+    if (db.failCopyOf !== null && fromKey.includes(db.failCopyOf)) throw new Error('the bucket is down');
     const body = db.files.get(fromKey);
     if (body === undefined) throw new Error(`no file ${fromKey}`);
     db.files.set(toKey, body);
   },
   async remove(keys) {
+    if (db.failRemove) throw new Error('the bucket would not remove them');
     keys.forEach((key) => db.files.delete(key));
   },
   urlFor: (key) => `https://files.example.test/${key}`,
@@ -141,6 +161,8 @@ const client: Row = {
       const gone = db.artifacts.filter((a) => matches(a, where)).map((a) => a.id);
       db.artifacts = db.artifacts.filter((a) => !gone.includes(a.id)) as typeof db.artifacts;
       db.versions = db.versions.filter((v) => !gone.includes(v.artifactId)) as typeof db.versions;
+      // As the database does: a pass goes with its artifact
+      db.passes = db.passes.filter((pass) => !gone.includes(pass.artifactId)) as typeof db.passes;
       return { count: gone.length };
     },
   },
@@ -159,6 +181,44 @@ const client: Row = {
         throw new Error('database is down');
       }
       return createVersion(data);
+    },
+    update: async ({ where, data }: Row) => {
+      const row = db.versions.find((v) => v.id === where.id);
+      if (!row) throw new Error('not found');
+      Object.assign(row, data);
+      return row;
+    },
+  },
+  artifactPass: {
+    create: async ({ data }: Row) => {
+      if (db.passes.some((pass) => pass.tokenHash === data.tokenHash)) throw new Error('unique violation');
+      const row = { id: nextId(), cookieHash: null, redeemedAt: null, createdAt: new Date(), ...data };
+      db.passes.push(row);
+      return row;
+    },
+    findUnique: async ({ where }: Row) => db.passes.find((pass) => pass.tokenHash === where.tokenHash) ?? null,
+    updateMany: async ({ where, data }: Row) => {
+      const rows = db.passes.filter((pass) => matches(pass, where));
+      rows.forEach((row) => Object.assign(row, data));
+      return { count: rows.length };
+    },
+    deleteMany: async ({ where }: Row) => {
+      const before = db.passes.length;
+      db.passes = db.passes.filter((pass) => !matches(pass, where)) as typeof db.passes;
+      return { count: before - db.passes.length };
+    },
+  },
+  artifactRetiredFile: {
+    createMany: async ({ data }: Row) => {
+      const fresh = (data as Row[]).filter((row) => !db.retired.some((kept) => kept.key === row.key));
+      fresh.forEach((row) => db.retired.push({ createdAt: new Date(), ...row }));
+      return { count: fresh.length };
+    },
+    findMany: async ({ take }: Row) => db.retired.slice(0, take),
+    deleteMany: async ({ where }: Row) => {
+      const before = db.retired.length;
+      db.retired = db.retired.filter((row) => !matches(row, where)) as typeof db.retired;
+      return { count: before - db.retired.length };
     },
   },
   $transaction: async (fn: (tx: Row) => Promise<unknown>) => fn(client),

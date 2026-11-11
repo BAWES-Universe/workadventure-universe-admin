@@ -23,6 +23,7 @@ export function middleware(request: NextRequest) {
 
 export const config = {
   // Not the artifact routes: they are called by servers, never a browser, and a song or video sent to them (#1510) is
-  // larger than the body Next lets through a middleware (10 MB, cut off past that)
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|api/artifacts(?:/|$)|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)'],
+  // larger than the body Next lets through a middleware (10 MB, cut off past that). Not a private artifact's files
+  // either (/af, game #1994): that route sets every header itself, and its address is kept out of everything it can be.
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|api/artifacts(?:/|$)|af/|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)'],
 };

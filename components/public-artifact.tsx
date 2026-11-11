@@ -58,7 +58,7 @@ function ArtifactFrame({ view, className }: { view: PublicView; className: strin
       className={className}
     />
   ) : (
-    <iframe title={view.title} sandbox="allow-scripts allow-forms" src={view.url} referrerPolicy="no-referrer" className={className} />
+    <iframe title={view.title} sandbox="allow-scripts allow-forms" src={view.url ?? undefined} referrerPolicy="no-referrer" className={className} />
   );
 }
 
