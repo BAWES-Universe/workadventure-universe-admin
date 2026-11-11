@@ -6,7 +6,7 @@
  * The database is a small stand-in that fails the test if a Brick's rules ever reach for a room, a lend or a role.
  */
 const state = {
-  bot: null as null | { id: string; name: string; createdById: string | null; roomId: string | null; ownerId: string | null; hideConversations?: boolean | null },
+  bot: null as null | { id: string; name: string; createdById: string | null; roomId: string | null; ownerId: string | null; deletedAt: Date | null; hideConversations?: boolean | null },
   users: [] as { id: string; uuid: string; email: string | null; name: string | null; isGuest: boolean; matrixChatId?: string }[],
   created: [] as Record<string, unknown>[],
 };
@@ -57,8 +57,8 @@ const OMAR = { id: 'u-omar', uuid: 'uuid-omar', email: 'omar@example.com', name:
 const ROOT = { id: 'u-root', uuid: 'uuid-root', email: 'root@example.com', name: 'Root', isGuest: false };
 const GUEST = { id: 'u-guest', uuid: 'uuid-guest', email: null, name: null, isGuest: true, matrixChatId: '@guest:chat' };
 
-const BRICK = { id: 'brick-1', name: 'Brick', createdById: SARA.id, roomId: null, ownerId: SARA.id };
-const ROOM_BOT = { id: 'bot-1', name: 'Nora', createdById: SARA.id, roomId: 'room-1', ownerId: null };
+const BRICK = { id: 'brick-1', name: 'Brick', createdById: SARA.id, roomId: null, ownerId: SARA.id, deletedAt: null as Date | null };
+const ROOM_BOT = { id: 'bot-1', name: 'Nora', createdById: SARA.id, roomId: 'room-1', ownerId: null, deletedAt: null };
 
 const superAdminsBefore = process.env.SUPER_ADMINS;
 
@@ -91,7 +91,7 @@ describe('what a Brick is', () => {
   it('never reads a room bot as owned: "made by" is not ownership', () => {
     expect(ownsBrick(ROOM_BOT, SARA.id)).toBe(false);
     // Even a row that could not exist (the database refuses a room and an owner together) is not owned while it has a room
-    expect(ownsBrick({ roomId: 'room-1', ownerId: SARA.id }, SARA.id)).toBe(false);
+    expect(ownsBrick({ roomId: 'room-1', ownerId: SARA.id, deletedAt: null }, SARA.id)).toBe(false);
   });
 
   it('tells its owner and the bot server why a room part is not there, and is not there at all for anyone else', () => {
@@ -197,7 +197,7 @@ describe('who may use a Brick', () => {
 });
 
 describe('whose key may run a Brick', () => {
-  const brickForKey = { id: BRICK.id, createdById: BRICK.createdById, roomId: null, ownerId: BRICK.ownerId };
+  const brickForKey = { id: BRICK.id, createdById: BRICK.createdById, roomId: null, ownerId: BRICK.ownerId, deletedAt: null };
 
   it('its owner’s own key, with all of its models and no lend to look for', async () => {
     expect(await checkKeyForBot({ keyId: 'key-1', keyOwnerId: SARA.id, bot: brickForKey })).toEqual({ ok: true, lendModels: null });
@@ -216,6 +216,47 @@ describe('whose key may run a Brick', () => {
 
   it('no key that lost its owner', async () => {
     expect(await checkKeyForBot({ keyId: 'key-1', keyOwnerId: null, bot: brickForKey })).toEqual({ ok: false, reason: 'no-owner' });
+  });
+});
+
+describe('a Brick its owner deleted, while it waits for Undo (game #1996)', () => {
+  const DELETED = { ...BRICK, deletedAt: new Date('2026-11-10T09:00:00Z') };
+
+  beforeEach(() => {
+    state.bot = { ...DELETED };
+  });
+
+  it('is nobody’s: not its owner’s, and not anyone else’s', () => {
+    expect(ownsBrick(DELETED, SARA.id)).toBe(false);
+    expect(ownsBrick(DELETED, OMAR.id)).toBe(false);
+    expect(isBrick(DELETED)).toBe(true);
+  });
+
+  it('is managed by nobody, its owner included', async () => {
+    expect(await canManageThisBot(SARA.id, SARA.email, DELETED, { creatorPasses: true })).toBe(false);
+    expect(await canManageBotMcpServers(SARA.id, SARA.email, DELETED)).toBe(false);
+    expect(await canManageThisBot(ROOT.id, ROOT.email, DELETED, { creatorPasses: true })).toBe(false);
+  });
+
+  it.each(BOT_ACTIONS)('refuses its owner who wants to %s', async (action) => {
+    expect(await checkBotAccess({ botId: DELETED.id, action, person: { signedIn: true, identifier: SARA.email } })).toMatchObject({ allowed: false });
+    expect(await checkBotAccess({ botId: DELETED.id, action, person: { signedIn: false, chatId: SARA.matrixChatId } })).toMatchObject({ allowed: false });
+  });
+
+  it('runs on no key, its owner’s included', async () => {
+    const forKey = { id: DELETED.id, createdById: DELETED.createdById, roomId: null, ownerId: DELETED.ownerId, deletedAt: DELETED.deletedAt };
+    expect(await checkKeyForBot({ keyId: 'key-1', keyOwnerId: SARA.id, bot: forKey })).toEqual({ ok: false, reason: 'no-access' });
+  });
+
+  it('is not there for its owner where a room part is asked for, as for anyone else', () => {
+    expect(brickHasNoRoomText(DELETED, { userId: SARA.id })).toBe('Bot not found');
+  });
+
+  it('is its owner’s again the moment the mark is gone', async () => {
+    const back = { ...DELETED, deletedAt: null };
+    state.bot = { ...back };
+    expect(ownsBrick(back, SARA.id)).toBe(true);
+    expect(await checkBotAccess({ botId: back.id, action: 'dm', person: { signedIn: true, identifier: SARA.email } })).toMatchObject({ allowed: true });
   });
 });
 

@@ -49,6 +49,7 @@ model User {
   ownershipOffersMade     OwnershipOffer[] @relation("OwnershipOfferBy")
   bricks            Bot[] @relation("BotOwner")
   defaultBrick      DefaultBrick?
+  brickOffers       BrickOffer[]
   botsCreated       Bot[] @relation("BotCreatedBy")
   botsUpdated       Bot[] @relation("BotUpdatedBy")
   botAccessRules    BotAccessRule[]
@@ -877,6 +878,16 @@ model Bot {
   // speaks with (BotVoiceRevision.number); null until one is published.
   voiceEnabled        Boolean  @default(false) @map("voice_enabled")
   voiceRevision       Int?     @map("voice_revision")
+  // A Brick its owner deleted (game #1996) waits until `goneAt`, and Undo gives it back before then. While it waits it
+  // is off and nobody's to use (the database holds a deleted Brick to `enabled` false, bots_deleted_brick), and
+  // `enabledBeforeDelete` is where Undo leaves its switch. All three are null for every other bot, a room bot always.
+  deletedAt           DateTime? @map("deleted_at")
+  goneAt              DateTime? @map("gone_at")
+  enabledBeforeDelete Boolean?  @map("enabled_before_delete")
+  // The first line of a Brick's chat, shown by the game while nothing has been written there (game #1996). Written once
+  // when the Brick is made for a job ("Send me the first recipe"); null = the game's own fixed hello. Never sent as a
+  // message and never read by the AI. Always null for a room bot.
+  hello               String?   @db.VarChar(300)
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")
@@ -902,6 +913,7 @@ model Bot {
 
   @@index([roomId])
   @@index([ownerId])
+  @@index([goneAt])
   @@map("bots")
 }
 
@@ -917,6 +929,23 @@ model DefaultBrick {
   bot  Bot? @relation(fields: [botId], references: [id], onDelete: SetNull)
 
   @@map("default_bricks")
+}
+
+// A suggestion to make a Brick for a kind of job that keeps coming back (game #1996). One row per person and topic, and
+// the row is the whole rule: a topic is suggested at most once to a person, in every chat and on every device, whatever
+// they answered. `answer` is made | not_now once they tapped one; null while the card waits or was closed unanswered.
+model BrickOffer {
+  userId     String    @map("user_id")
+  // The topic in a few plain words as the Brick named it, lower case ("recipes")
+  topic      String    @db.VarChar(60)
+  answer     String?   @db.VarChar(10)
+  offeredAt  DateTime  @default(now()) @map("offered_at")
+  answeredAt DateTime? @map("answered_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, topic])
+  @@map("brick_offers")
 }
 
 // One role's or one person's No / Default / Yes for a bot (#427), the same shape room overrides will reuse: two

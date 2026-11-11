@@ -34,6 +34,7 @@ function answer(limits = SERVER_LIMITS_RECOMMENDED, voice = VOICE_LIMITS_RECOMME
               guard: change.guard ?? limits.guard,
               fairUsage: { ...limits.fairUsage, ...change.fairUsage },
               files: { ...limits.files, ...change.files },
+              bricks: { ...limits.bricks, ...change.bricks },
             },
           }),
       });
@@ -140,6 +141,25 @@ describe('Universe AI limits', () => {
     fireEvent.click(await screen.findByRole('radio', { name: /None/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ artifacts: { media: 0 } }));
+  });
+
+  it('shows the two numbers for Bricks, and saves each on its own (game #1996)', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    expect(await screen.findByText('Bricks')).toBeTruthy();
+    expect(screen.getByText('Days a deleted Brick can be brought back')).toBeTruthy();
+    expect(screen.getByText('Times a job comes back before Brick suggests a Brick for it')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('limit-undoDays'));
+    fireEvent.click(await screen.findByRole('radio', { name: /30 days/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ bricks: { undoDays: 30 } }));
+    await waitFor(() => expect(screen.getAllByText('Recommended: 7 days').length).toBeGreaterThan(0));
+    fetchMock.mockClear();
+    answer();
+    fireEvent.click(screen.getByTestId('limit-offerAfter'));
+    fireEvent.click(await screen.findByRole('radio', { name: /5 times/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ bricks: { offerAfter: 5 } }));
   });
 
   it('saves the switch', async () => {

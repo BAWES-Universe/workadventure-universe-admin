@@ -70,7 +70,7 @@ export async function botAiOptions(input: {
   const bot = input.botId
     ? await prisma.bot.findUnique({
         where: { id: input.botId },
-        select: { id: true, roomId: true, ownerId: true, aiProviderRef: true, aiModel: true, behaviorConfig: true, createdById: true, createdBy: { select: { id: true, name: true } } },
+        select: { id: true, roomId: true, ownerId: true, deletedAt: true, aiProviderRef: true, aiModel: true, behaviorConfig: true, createdById: true, createdBy: { select: { id: true, name: true } } },
       })
     : null;
   if (input.botId && !bot) return { ok: false, status: 404, error: 'Bot not found' };
@@ -90,7 +90,7 @@ export async function botAiOptions(input: {
   // configuration, so a bot's own Manage rules also decide who learns whose key it runs on
   const allowed = input.viewer.isSuperAdmin
     || (bot
-      ? await canManageThisBot(input.viewer.id, null, { id: bot.id, createdById: bot.createdById, roomId, ownerId: null }, { creatorPasses: false })
+      ? await canManageThisBot(input.viewer.id, null, { id: bot.id, createdById: bot.createdById, roomId, ownerId: null, deletedAt: null }, { creatorPasses: false })
       : await canManageBots(input.viewer.id, roomId));
   if (!allowed) {
     return { ok: false, status: 403, error: 'You do not have permission to manage bots in this room' };
@@ -162,7 +162,7 @@ async function savedVisionKey(
   viewerId: string
 ): Promise<{ name: string; problem: AnotherProblem | null }> {
   // Only a room bot gets this far (botAiOptions answers "not in a room" for a Brick)
-  const usable = await usableVisionKey(saved, { ...bot, ownerId: null }, { mainKeyOwnerId });
+  const usable = await usableVisionKey(saved, { ...bot, ownerId: null, deletedAt: null }, { mainKeyOwnerId });
   const problem = usable.ok ? null : usable.problem;
   if (!usable.key) return { name: 'A key that was removed', problem };
   // Someone else's key is named by whose it is, as the key the bot runs on is (#709)

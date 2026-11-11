@@ -48,7 +48,7 @@ const SARA = { id: 'u-sara', email: 'sara@example.com', name: 'Sara', isSuperAdm
 const OMAR = { id: 'u-omar', email: 'omar@example.com', name: 'Omar', isSuperAdmin: false };
 const ROOT = { id: 'u-root', email: 'root@example.com', name: 'Root', isSuperAdmin: true };
 
-const brick = { id: BRICK_ID, name: 'Brick', roomId: null, ownerId: SARA.id, createdById: SARA.id, room: null, aiProviderRef: 'universe-ai', aiModel: null, behaviorConfig: {} };
+const brick = { id: BRICK_ID, name: 'Brick', roomId: null, ownerId: SARA.id, deletedAt: null as Date | null, createdById: SARA.id, room: null, aiProviderRef: 'universe-ai', aiModel: null, behaviorConfig: {} };
 const roomBot = { ...brick, id: 'room-bot', roomId: 'room-1', ownerId: null, room: { world: { universeId: 'uni-1', universe: { hideBotConversations: false } } } };
 
 type Who = typeof SARA | 'token' | null;

@@ -45,7 +45,7 @@ const ownKey = { ...lmstudio, providerId: 'key-1', name: 'My LM Studio', endpoin
 const FIELDS = ['providerId', 'name', 'type', 'enabled', 'endpoint', 'apiKeyEncrypted', 'model', 'temperature', 'maxTokens', 'supportsStreaming', 'supportsVision', 'visionModel', 'defaultVision', 'settings'];
 
 const botOn = (ref: string | null, over: object = {}) => ({
-  id: 'b1', name: 'Sam', aiProviderRef: ref, createdById: 'maker', roomId: 'room-1',
+  id: 'b1', name: 'Sam', aiProviderRef: ref, createdById: 'maker', roomId: 'room-1', deletedAt: null,
   room: { world: { universe: { id: 'uni-1', name: 'BAWES Universe', ownerId: 'universe-owner' } } }, ...over,
 });
 const ask = (id = 'b1') => GET(new NextRequest(`http://localhost:3333/api/bots/${id}/ai-credentials`), { params: Promise.resolve({ id }) });
@@ -63,6 +63,19 @@ describe('GET /api/bots/:id/ai-credentials', () => {
     });
     expect((await ask()).status).toBe(401);
     expect(bot.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('serves nothing for a Brick its owner deleted, Universe AI included: it is not there until Undo (game #1996)', async () => {
+    bot.findUnique.mockResolvedValue(botOn('universe-ai', { roomId: null, room: null, ownerId: 'maker', deletedAt: new Date('2026-11-10T09:00:00Z') }));
+    provider.findFirst.mockResolvedValue(deepseek);
+    const response = await ask();
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'Bot not found' });
+    expect(provider.findFirst).not.toHaveBeenCalled();
+    expect(provider.findUnique).not.toHaveBeenCalled();
+    // Taken back with Undo, it runs again as it did
+    bot.findUnique.mockResolvedValue(botOn('universe-ai', { roomId: null, room: null, ownerId: 'maker', deletedAt: null }));
+    expect(await (await ask()).json()).toMatchObject({ providerId: 'deepseek-flash', source: 'universe-ai' });
   });
 
   it('serves a bot pinned to DeepSeek on the openai type exactly the fields it always got, plus where it came from and its limits', async () => {
@@ -134,7 +147,7 @@ describe('GET /api/bots/:id/ai-credentials', () => {
     provider.findUnique.mockResolvedValue(ownKey);
     verdict.mockResolvedValue({ ok: true });
     const body = await (await ask()).json();
-    expect(verdict).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', bot: { id: 'b1', createdById: 'maker', roomId: 'room-1' } });
+    expect(verdict).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', bot: { id: 'b1', createdById: 'maker', roomId: 'room-1', deletedAt: null } });
     expect(body).toMatchObject({ providerId: 'key-1', source: 'own-key', keyOwnerId: 'maker', keyKind: 'lmstudio', keyGroup: 'own-computer', keyAddressTyped: true, endpoint: 'https://lm.example.com' });
     expect(bot.updateMany).not.toHaveBeenCalled();
   });

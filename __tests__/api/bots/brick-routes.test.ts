@@ -61,6 +61,7 @@ const brick = {
   id: BRICK_ID,
   roomId: null,
   ownerId: SARA.id,
+  deletedAt: null as Date | null,
   room: null,
   name: 'Brick',
   description: null,

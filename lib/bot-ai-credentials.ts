@@ -86,6 +86,7 @@ const loadBot = (botId: string) =>
       createdById: true,
       roomId: true,
       ownerId: true,
+      deletedAt: true,
       maxReplyTokens: true,
       maxSteps: true,
       room: { select: { world: { select: { universe: { select: { id: true, name: true, ownerId: true } } } } } },
@@ -95,6 +96,9 @@ const loadBot = (botId: string) =>
 export async function credentialsForBot(botId: string): Promise<BotAiCredentials> {
   const bot = await loadBot(botId);
   if (!bot) return { status: 404, error: 'Bot not found' };
+  // A Brick its owner deleted runs on nothing while it waits for Undo (game #1996): no key is served for it, Universe
+  // AI's included, so a reply that was about to start for it cannot
+  if (bot.deletedAt !== null) return { status: 404, error: 'Bot not found' };
   const main = await mainCredentials(bot);
   if (main.status !== 200 || main.body.source === 'resting') return main;
   const answer = { status: 200 as const, body: await withLimits(bot, main.body) };
@@ -146,7 +150,7 @@ async function visionPlan(bot: BotForCredentials, main: ServedProvider): Promise
       : null);
   if (!choice || (!picked && choice.choice === 'this')) return undefined;
   if (choice.choice !== 'another') return choice;
-  const usable = await usableVisionKey(choice, { id: bot.id, createdById: bot.createdById, roomId: bot.roomId, ownerId: bot.ownerId }, { recheck: true, mainKeyOwnerId: own ? main.keyOwnerId ?? null : null });
+  const usable = await usableVisionKey(choice, { id: bot.id, createdById: bot.createdById, roomId: bot.roomId, ownerId: bot.ownerId, deletedAt: bot.deletedAt }, { recheck: true, mainKeyOwnerId: own ? main.keyOwnerId ?? null : null });
   if (!usable.ok) return { choice: 'this', problem: 'key' };
   const info = kindInfo((usable.key.settings as { kind?: unknown } | null)?.kind);
   return {
@@ -184,7 +188,7 @@ async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials
     return { status: 200, body: { ...providerPayload(provider), source: 'provider' } };
   }
 
-  const verdict = await checkKeyForBot({ keyId: ref, keyOwnerId: provider.ownerId, bot: { id: bot.id, createdById: bot.createdById, roomId: bot.roomId, ownerId: bot.ownerId } });
+  const verdict = await checkKeyForBot({ keyId: ref, keyOwnerId: provider.ownerId, bot: { id: bot.id, createdById: bot.createdById, roomId: bot.roomId, ownerId: bot.ownerId, deletedAt: bot.deletedAt } });
   if (verdict.ok) {
     const health = await recheckIfDue(provider);
     if (health.downSince) {

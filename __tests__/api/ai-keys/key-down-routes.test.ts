@@ -48,7 +48,7 @@ const ownKey = {
 const down = (over: object = {}) => ({ ...ownKey, downSince: new Date('2026-10-19T12:00:00Z'), ...over });
 
 const botOn = (ref: string) => ({
-  id: 'b1', name: 'Sam', aiProviderRef: ref, createdById: 'maker', roomId: 'room-1',
+  id: 'b1', name: 'Sam', aiProviderRef: ref, createdById: 'maker', roomId: 'room-1', deletedAt: null,
   room: { world: { universe: { id: 'uni-1', name: 'BAWES Universe', ownerId: 'universe-owner' } } },
 });
 const ask = () => credentials(new NextRequest('http://localhost:3333/api/bots/b1/ai-credentials'), { params: Promise.resolve({ id: 'b1' }) });

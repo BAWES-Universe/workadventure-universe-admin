@@ -2,15 +2,21 @@
  * The routes for a person's own Bricks (game #1995): the Brick everyone gets, the list for the Bricks page, what its
  * owner can change, and the shape the bot server reads a Brick in. A Brick is its owner's: a guest has none, nobody asks
  * for someone else, and a super admin gets no further than anyone. A bot server from before Bricks is never handed one.
+ *
+ * With them (game #1996): New Brick, deleting one, Undo, and the sweep that removes what waited long enough.
  */
 import { NextRequest } from 'next/server';
-import { GET as listMine } from '@/app/api/bricks/route';
+import { GET as listMine, POST as makeMine } from '@/app/api/bricks/route';
 import { POST as ensureMine } from '@/app/api/bricks/default/route';
-import { PATCH as changeBrick } from '@/app/api/bricks/[id]/route';
+import { DELETE as deleteMine, PATCH as changeBrick } from '@/app/api/bricks/[id]/route';
+import { POST as undoMine } from '@/app/api/bricks/[id]/undo/route';
+import { POST as sweep } from '@/app/api/bricks/sweep/route';
 import { GET as getConfiguration } from '@/app/api/bots/configuration/[id]/route';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
-import { ensureDefaultBrick, isDefaultBrick, listBricks } from '@/lib/brick-default';
+import { ensureDefaultBrick, isDefaultBrick, listBricks, listDeletedBricks } from '@/lib/brick-default';
+import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
+import { makeBrick } from '@/lib/brick-make';
 import { BRICK_HAS_NO_ROOM } from '@/lib/brick';
 
 jest.mock('@/lib/db', () => ({
@@ -27,28 +33,42 @@ jest.mock('@/lib/brick-default', () => ({
   ...jest.requireActual('@/lib/brick-default'),
   ensureDefaultBrick: jest.fn(),
   listBricks: jest.fn(),
+  listDeletedBricks: jest.fn(),
   isDefaultBrick: jest.fn(),
 }));
+jest.mock('@/lib/brick-delete', () => ({ deleteBrick: jest.fn(), undoBrickDelete: jest.fn(), removeGoneBricks: jest.fn() }));
+jest.mock('@/lib/brick-make', () => ({ ...jest.requireActual('@/lib/brick-make'), makeBrick: jest.fn() }));
+jest.mock('@/lib/bot-limits', () => ({ ...jest.requireActual('@/lib/bot-limits'), getBrickLimits: jest.fn(async () => ({ undoDays: 7, offerAfter: 3 })) }));
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 
 const db = prisma as unknown as { bot: Record<'findUnique' | 'update', jest.Mock>; user: Record<'findUnique', jest.Mock> };
 const session = getSessionUser as jest.Mock;
 const ensure = ensureDefaultBrick as jest.Mock;
 const list = listBricks as jest.Mock;
+const listDeleted = listDeletedBricks as jest.Mock;
 const isDefault = isDefaultBrick as jest.Mock;
+const remove = deleteBrick as jest.Mock;
+const undo = undoBrickDelete as jest.Mock;
+const removeGone = removeGoneBricks as jest.Mock;
+const make = makeBrick as jest.Mock;
 
 const ADMIN_TOKEN = 'admin-secret';
+const SERVICE_TOKEN = 'bot-server-secret';
 const BRICK_ID = '7b0f3c1e-52a4-4d0b-9a3e-6f1d2c3b4a5e';
 const SARA = { id: 'u-sara', email: 'sara@example.com', name: 'Sara' };
 const OMAR = { id: 'u-omar', email: 'omar@example.com', name: 'Omar' };
 const ROOT = { id: 'u-root', email: 'root@example.com', name: 'Root' };
 const GUEST = { id: 'u-guest', email: null, name: 'Visitor' };
 
-const card = { id: BRICK_ID, name: 'Brick', description: 'Your everyday helper', characterTextureId: 'brick-orange', enabled: true, isDefault: true, createdAt: '2026-11-11T00:00:00.000Z' };
+const card = { id: BRICK_ID, name: 'Brick', description: 'Your everyday helper', characterTextureId: 'brick-orange', enabled: true, isDefault: true, hello: null, createdAt: '2026-11-11T00:00:00.000Z' };
+const MADE_ID = '0a7d2f4c-1b3e-4c5d-8e9f-a0b1c2d3e4f5';
+const madeCard = { id: MADE_ID, name: 'Recipe Brick', description: 'Keeps your mum’s recipes', characterTextureId: 'brick-red', enabled: true, isDefault: false, hello: 'Send me the first recipe.', createdAt: '2026-11-12T00:00:00.000Z' };
+const waitingCard = { ...madeCard, enabled: false, deletedAt: '2026-11-12T09:00:00.000Z', goneAt: '2026-11-19T09:00:00.000Z' };
 const brick = {
   id: BRICK_ID,
   roomId: null,
   ownerId: SARA.id,
+  deletedAt: null as Date | null,
   room: null,
   name: 'Brick',
   description: 'Your everyday helper',
@@ -82,22 +102,25 @@ function request(path: string, who: Who, init: { method?: string; body?: unknown
 }
 const params = (id = BRICK_ID) => ({ params: Promise.resolve({ id }) });
 
-const envBefore = { superAdmins: process.env.SUPER_ADMINS, adminToken: process.env.ADMIN_API_TOKEN };
+const envBefore = { superAdmins: process.env.SUPER_ADMINS, adminToken: process.env.ADMIN_API_TOKEN, serviceToken: process.env.BOT_SERVICE_TOKEN };
 
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.SUPER_ADMINS = ROOT.email;
   process.env.ADMIN_API_TOKEN = ADMIN_TOKEN;
+  process.env.BOT_SERVICE_TOKEN = SERVICE_TOKEN;
   db.user.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) => ({ isGuest: where.id === GUEST.id }));
   db.bot.findUnique.mockResolvedValue(brick);
   db.bot.update.mockResolvedValue(brick);
   ensure.mockResolvedValue({ brick: card, made: true, deleted: false });
   list.mockResolvedValue([card]);
+  listDeleted.mockResolvedValue([]);
+  removeGone.mockResolvedValue([]);
   isDefault.mockResolvedValue(true);
 });
 
 afterAll(() => {
-  for (const [key, value] of [['SUPER_ADMINS', envBefore.superAdmins], ['ADMIN_API_TOKEN', envBefore.adminToken]] as const) {
+  for (const [key, value] of [['SUPER_ADMINS', envBefore.superAdmins], ['ADMIN_API_TOKEN', envBefore.adminToken], ['BOT_SERVICE_TOKEN', envBefore.serviceToken]] as const) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
@@ -155,9 +178,31 @@ describe('GET /api/bricks: a person’s own Bricks', () => {
   it('lists the person’s own, and reading the list makes nothing', async () => {
     const response = await listMine(request('/api/bricks', SARA));
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ bricks: [card] });
+    expect(await response.json()).toEqual({ bricks: [card], deleted: [], undoDays: 7 });
     expect(list).toHaveBeenCalledWith(SARA.id);
     expect(ensure).not.toHaveBeenCalled();
+  });
+
+  it('lists the ones that wait deleted on their own, each with the day it is gone for good, and how long a delete waits (game #1996)', async () => {
+    listDeleted.mockResolvedValue([waitingCard]);
+    const response = await listMine(request('/api/bricks', SARA));
+    expect(await response.json()).toEqual({ bricks: [card], deleted: [waitingCard], undoDays: 7 });
+    expect(listDeleted).toHaveBeenCalledWith(SARA.id, expect.any(Date));
+  });
+
+  it('clears away this person’s own Bricks whose days are over on the way, and nobody else’s', async () => {
+    await listMine(request('/api/bricks', SARA));
+    expect(removeGone).toHaveBeenCalledTimes(1);
+    expect(removeGone).toHaveBeenCalledWith(expect.any(Date), SARA.id);
+  });
+
+  it('still lists when that tidying fails: no list ever shows a Brick whose days are over anyway', async () => {
+    const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    removeGone.mockRejectedValue(new Error('down'));
+    const response = await listMine(request('/api/bricks', SARA));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ bricks: [card], deleted: [], undoDays: 7 });
+    error.mockRestore();
   });
 
   it('gives a super admin their own Bricks, like anyone', async () => {
@@ -170,6 +215,146 @@ describe('GET /api/bricks: a person’s own Bricks', () => {
     expect((await listMine(request('/api/bricks', null))).status).toBe(401);
     expect((await listMine(request('/api/bricks', 'token'))).status).toBe(401);
     expect(list).not.toHaveBeenCalled();
+    expect(listDeleted).not.toHaveBeenCalled();
+    expect(removeGone).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/bricks: New Brick (game #1996)', () => {
+  beforeEach(() => make.mockResolvedValue(madeCard));
+
+  it('makes a Brick for the person who asks and answers with its card', async () => {
+    const response = await makeMine(
+      request('/api/bricks', SARA, { method: 'POST', body: { name: '  Recipe Brick ', characterTextureId: 'brick-red', description: ' Keeps your mum’s recipes ', hello: ' Send me the first recipe. ' } }),
+    );
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ brick: madeCard });
+    expect(make).toHaveBeenCalledTimes(1);
+    expect(make).toHaveBeenCalledWith(SARA.id, { name: 'Recipe Brick', characterTextureId: 'brick-red', description: 'Keeps your mum’s recipes', hello: 'Send me the first recipe.' });
+  });
+
+  it('needs only a name', async () => {
+    expect((await makeMine(request('/api/bricks', SARA, { method: 'POST', body: { name: 'Teal Brick' } }))).status).toBe(201);
+    expect(make).toHaveBeenCalledWith(SARA.id, { name: 'Teal Brick' });
+  });
+
+  it.each([
+    ['a room', { roomId: 'room-1' }],
+    ['another owner', { ownerId: OMAR.id }],
+    ['another person', { userId: OMAR.id }],
+    ['a key', { aiProviderRef: 'key-1' }],
+    ['a voice', { voiceEnabled: true }],
+    ['a switch', { enabled: false }],
+  ])('refuses a Brick that names %s, and makes nothing', async (_what, extra) => {
+    const response = await makeMine(request('/api/bricks', SARA, { method: 'POST', body: { name: 'Recipe Brick', ...extra } }));
+    expect(response.status).toBe(400);
+    expect(make).not.toHaveBeenCalled();
+  });
+
+  it('refuses no name, a name, line, look or hello that is too long, and a body that is not JSON', async () => {
+    for (const init of [
+      { body: {} },
+      { body: { name: '   ' } },
+      { body: { name: 'x'.repeat(101) } },
+      { body: { name: 'Ok', description: 'x'.repeat(201) } },
+      { body: { name: 'Ok', characterTextureId: 'x'.repeat(101) } },
+      { body: { name: 'Ok', hello: 'x'.repeat(301) } },
+      { rawBody: 'not json' },
+    ]) {
+      expect((await makeMine(request('/api/bricks', SARA, { method: 'POST', ...init }))).status).toBe(400);
+    }
+    expect(make).not.toHaveBeenCalled();
+  });
+
+  it('makes none for a guest, for someone who is not signed in, or for the bot server’s token', async () => {
+    expect((await makeMine(request('/api/bricks', GUEST, { method: 'POST', body: { name: 'Mine' } }))).status).toBe(403);
+    expect((await makeMine(request('/api/bricks', null, { method: 'POST', body: { name: 'Mine' } }))).status).toBe(401);
+    expect((await makeMine(request('/api/bricks', 'token', { method: 'POST', body: { name: 'Mine' } }))).status).toBe(401);
+    expect(make).not.toHaveBeenCalled();
+  });
+});
+
+describe('DELETE /api/bricks/:id and POST /api/bricks/:id/undo: deleting a Brick, with Undo (game #1996)', () => {
+  beforeEach(() => {
+    remove.mockResolvedValue(waitingCard);
+    undo.mockResolvedValue(madeCard);
+  });
+
+  it('deletes the Brick for its owner and answers with it as it waits, the day it is gone for good with it', async () => {
+    const response = await deleteMine(request(`/api/bricks/${MADE_ID}`, SARA, { method: 'DELETE' }), params(MADE_ID));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ brick: waitingCard });
+    expect(remove).toHaveBeenCalledWith(MADE_ID, SARA.id);
+  });
+
+  it('gives it back to its owner with Undo, as its card', async () => {
+    const response = await undoMine(request(`/api/bricks/${MADE_ID}/undo`, SARA, { method: 'POST' }), params(MADE_ID));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ brick: madeCard });
+    expect(undo).toHaveBeenCalledWith(MADE_ID, SARA.id);
+  });
+
+  it('asks only in the name of the person signed in: whose Brick it is comes from the session, never from the request', async () => {
+    await deleteMine(request(`/api/bricks/${MADE_ID}?userId=${OMAR.id}`, ROOT, { method: 'DELETE', body: { ownerId: OMAR.id } }), params(MADE_ID));
+    expect(remove).toHaveBeenCalledWith(MADE_ID, ROOT.id);
+    await undoMine(request(`/api/bricks/${MADE_ID}/undo?userId=${OMAR.id}`, ROOT, { method: 'POST', body: { ownerId: OMAR.id } }), params(MADE_ID));
+    expect(undo).toHaveBeenCalledWith(MADE_ID, ROOT.id);
+  });
+
+  it('is not there when there is nothing of theirs to delete or give back, in the same words as for no Brick at all', async () => {
+    remove.mockResolvedValue(null);
+    undo.mockResolvedValue(null);
+    for (const response of [
+      await deleteMine(request(`/api/bricks/${MADE_ID}`, OMAR, { method: 'DELETE' }), params(MADE_ID)),
+      await undoMine(request(`/api/bricks/${MADE_ID}/undo`, OMAR, { method: 'POST' }), params(MADE_ID)),
+    ]) {
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: 'Brick not found' });
+    }
+  });
+
+  it('does nothing for a guest, for someone who is not signed in, or for the bot server’s token', async () => {
+    for (const [who, status] of [[GUEST, 403], [null, 401], ['token', 401]] as const) {
+      expect((await deleteMine(request(`/api/bricks/${MADE_ID}`, who, { method: 'DELETE' }), params(MADE_ID))).status).toBe(status);
+      expect((await undoMine(request(`/api/bricks/${MADE_ID}/undo`, who, { method: 'POST' }), params(MADE_ID))).status).toBe(status);
+    }
+    expect(remove).not.toHaveBeenCalled();
+    expect(undo).not.toHaveBeenCalled();
+  });
+
+  it('answers the game’s own origin on both, so the Bricks page can read them', async () => {
+    const before = process.env.NEXT_PUBLIC_PLAY_URL;
+    process.env.NEXT_PUBLIC_PLAY_URL = 'https://play.example.test';
+    try {
+      const del = request(`/api/bricks/${MADE_ID}`, SARA, { method: 'DELETE' });
+      del.headers.set('origin', 'https://play.example.test');
+      expect((await deleteMine(del, params(MADE_ID))).headers.get('Access-Control-Allow-Origin')).toBe('https://play.example.test');
+      const back = request(`/api/bricks/${MADE_ID}/undo`, SARA, { method: 'POST' });
+      back.headers.set('origin', 'https://play.example.test');
+      expect((await undoMine(back, params(MADE_ID))).headers.get('Access-Control-Allow-Origin')).toBe('https://play.example.test');
+    } finally {
+      if (before === undefined) delete process.env.NEXT_PUBLIC_PLAY_URL;
+      else process.env.NEXT_PUBLIC_PLAY_URL = before;
+    }
+  });
+});
+
+describe('POST /api/bricks/sweep: what waited long enough is removed for good (game #1996)', () => {
+  it('removes for everyone when the bot server asks, and names what went so their chats can be closed', async () => {
+    removeGone.mockResolvedValue([MADE_ID]);
+    const asked = request('/api/bricks/sweep', null, { method: 'POST' });
+    asked.headers.set('authorization', `Bearer ${SERVICE_TOKEN}`);
+    const response = await sweep(asked);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ removed: [MADE_ID] });
+    expect(removeGone).toHaveBeenCalledWith();
+  });
+
+  it('is for the bot server only: a person, a super admin included, starts no sweep, and neither does the admin token', async () => {
+    for (const who of [SARA, ROOT, GUEST, null, 'token'] as const) {
+      expect((await sweep(request('/api/bricks/sweep', who, { method: 'POST' }))).status).toBe(401);
+    }
+    expect(removeGone).not.toHaveBeenCalled();
   });
 });
 
@@ -227,8 +412,18 @@ describe('PATCH /api/bricks/:id: what a Brick’s owner can change', () => {
     expect(db.bot.update).not.toHaveBeenCalled();
   });
 
+  it('changes nothing about a Brick that waits deleted, its switch least of all: it is not there until Undo (game #1996)', async () => {
+    db.bot.findUnique.mockResolvedValue({ id: BRICK_ID, roomId: null, ownerId: SARA.id, deletedAt: new Date('2026-11-12T09:00:00Z') });
+    for (const body of [{ enabled: true }, { name: 'Back' }]) {
+      const response = await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body }), params());
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: 'Brick not found' });
+    }
+    expect(db.bot.update).not.toHaveBeenCalled();
+  });
+
   it('never changes a bot that lives in a room, even for the person who made it', async () => {
-    db.bot.findUnique.mockResolvedValue({ id: BRICK_ID, roomId: 'room-1', ownerId: null });
+    db.bot.findUnique.mockResolvedValue({ id: BRICK_ID, roomId: 'room-1', ownerId: null, deletedAt: null });
     const response = await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { enabled: false } }), params());
     expect(response.status).toBe(404);
     expect(db.bot.update).not.toHaveBeenCalled();
@@ -251,7 +446,7 @@ describe('GET /api/bots/configuration/:id: a Brick, as the bot server reads it',
     expect(await response.json()).toEqual({
       botId: BRICK_ID,
       name: 'Brick',
-      brick: { ownerId: SARA.id, isDefault: true },
+      brick: { ownerId: SARA.id, isDefault: true, deleted: false },
       roomUrl: null,
       worldUrl: null,
       universeUrl: null,
@@ -277,6 +472,23 @@ describe('GET /api/bots/configuration/:id: a Brick, as the bot server reads it',
   it('says which Brick is one its owner made', async () => {
     isDefault.mockResolvedValue(false);
     expect(await (await configuration('token')).json()).toMatchObject({ brick: { ownerId: SARA.id, isDefault: false } });
+  });
+
+  it('tells the bot server a Brick that waits deleted is off and deleted, and never that it is gone, so its chat is kept for Undo (game #1996)', async () => {
+    db.bot.findUnique.mockResolvedValue({ ...brick, enabled: false, deletedAt: new Date('2026-11-12T09:00:00Z') });
+    const response = await configuration('token');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ botId: BRICK_ID, enabled: false, brick: { ownerId: SARA.id, isDefault: true, deleted: true } });
+    // Never on while deleted, whatever the row says
+    db.bot.findUnique.mockResolvedValue({ ...brick, enabled: true, deletedAt: new Date('2026-11-12T09:00:00Z') });
+    expect(await (await configuration('token')).json()).toMatchObject({ enabled: false, brick: { deleted: true } });
+  });
+
+  it('is not there for its owner while it waits deleted: only the bot server reads it then', async () => {
+    db.bot.findUnique.mockResolvedValue({ ...brick, enabled: false, deletedAt: new Date('2026-11-12T09:00:00Z') });
+    const response = await configuration(SARA);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: 'Bot not found' });
   });
 
   it('never hands a Brick to a bot server from before Bricks, which would read it as a bot in a room', async () => {

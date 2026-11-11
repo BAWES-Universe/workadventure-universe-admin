@@ -59,6 +59,7 @@ export async function saveServerLimits(change: ServerChange, userId: string): Pr
       guard: change.guard ?? now.guard,
       fairUsage: { ...now.fairUsage, ...change.fairUsage },
       files: { ...now.files, ...change.files },
+      bricks: { ...now.bricks, ...change.bricks },
     };
     const next = readServerLimits(kept);
     const problem = replyLimitsProblem(next.universeAi, change.universeAi);
@@ -80,6 +81,14 @@ export async function saveServerLimits(change: ServerChange, userId: string): Pr
 export async function getUniverseAiReplyLimits(): Promise<{ signedIn: number; guest: number; guestPool: number; windowHours: number }> {
   const { fairUsage } = await getServerLimits();
   return { ...fairUsage, windowHours: FAIR_USAGE_WINDOW_HOURS };
+}
+
+/**
+ * A person's own Bricks (game #1996): how many days a deleted Brick can be brought back, and how often the same kind of
+ * job has to come back before a Brick suggests a Brick for it. 7 and 3 until a super admin changes them.
+ */
+export async function getBrickLimits(): Promise<ServerLimits['bricks']> {
+  return (await getServerLimits()).bricks;
 }
 
 /** A key's reply limits: what its owner changed, the recommended value for the rest. */

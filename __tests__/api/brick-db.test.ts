@@ -86,7 +86,7 @@ run('a Brick in a real database', () => {
   });
 
   it('is managed and used by its owner only', async () => {
-    const brick = await prisma.bot.findUniqueOrThrow({ where: { id: brickId }, select: { id: true, createdById: true, roomId: true, ownerId: true } });
+    const brick = await prisma.bot.findUniqueOrThrow({ where: { id: brickId }, select: { id: true, createdById: true, roomId: true, ownerId: true, deletedAt: true } });
     expect(await canManageThisBot(sara, null, brick, { creatorPasses: false })).toBe(true);
     expect(await canManageThisBot(omar, null, brick, { creatorPasses: true })).toBe(false);
     expect(await checkBotAccess({ botId: brickId, action: 'dm', person: { signedIn: true, identifier: `sara-${tag}@example.test` } })).toMatchObject({ allowed: true });

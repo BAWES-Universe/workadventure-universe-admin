@@ -93,5 +93,5 @@ export const ONLY_OWNER_PICKS_MODEL = 'Only the key’s owner can pick its model
 
 /** These checks run when a bot is saved through a room's bot editor, so it is a room bot: a room and no owner. */
 function botOf(context: BotContext): BotForKey {
-  return { id: context.botId, createdById: context.makerId, roomId: context.roomId, ownerId: null };
+  return { id: context.botId, createdById: context.makerId, roomId: context.roomId, ownerId: null, deletedAt: null };
 }

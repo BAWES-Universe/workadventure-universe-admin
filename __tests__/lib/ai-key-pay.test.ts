@@ -9,7 +9,7 @@ const room = prisma.room.findUnique as jest.Mock;
 const lend = prisma.aiKeyLend.findUnique as jest.Mock;
 const managesRoom = canManageBots as jest.Mock;
 const managesBot = canManageThisBot as jest.Mock;
-const bot = { id: 'bot-1', createdById: 'sara', roomId: 'room-1', ownerId: null };
+const bot = { id: 'bot-1', createdById: 'sara', roomId: 'room-1', ownerId: null, deletedAt: null };
 const input = { keyId: 'key-1', keyOwnerId: 'khalid', bot };
 
 beforeEach(() => {
@@ -34,7 +34,7 @@ describe('who pays for a bot on a personal key (#709)', () => {
   });
 
   it('checks the room for a bot that is not made yet', async () => {
-    expect(await checkKeyForBot({ ...input, bot: { id: null, createdById: 'khalid', roomId: 'room-1', ownerId: null } })).toEqual({ ok: true, lendModels: null });
+    expect(await checkKeyForBot({ ...input, bot: { id: null, createdById: 'khalid', roomId: 'room-1', ownerId: null, deletedAt: null } })).toEqual({ ok: true, lendModels: null });
     expect(managesRoom).toHaveBeenCalledWith('khalid', 'room-1');
     expect(managesBot).not.toHaveBeenCalled();
   });

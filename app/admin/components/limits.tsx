@@ -10,6 +10,7 @@ import { FormSheet } from './form-sheet';
 import { LoadError, LoadingRows, SectionHeader, SettingSwitch, Settings } from './ds';
 import {
   ARTIFACT_LIMITS_RECOMMENDED,
+  BRICK_LIMITS_RECOMMENDED,
   FAIR_USAGE_RECOMMENDED,
   FAIR_USAGE_WINDOW_HOURS,
   FILE_LIMITS_RECOMMENDED,
@@ -17,6 +18,7 @@ import {
   REPLY_LIMITS_RECOMMENDED,
   replyLimitsProblem,
   type ArtifactLimits,
+  type BrickLimits,
   type FairUsage,
   type FileLimits,
   type Range,
@@ -553,6 +555,40 @@ export function fairUsageLimits(values: FairUsage): Limit[] {
   ], LIMIT_RANGES.fairUsage);
 }
 
+/** A person's own Bricks (game #1996): how long a deleted one can be brought back, and when a Brick suggests another. */
+export function brickLimits(values: BrickLimits): Limit[] {
+  const recommended = BRICK_LIMITS_RECOMMENDED;
+  return withRanges([
+    {
+      id: 'undoDays',
+      label: 'Days a deleted Brick can be brought back',
+      hint: 'Undo on the Bricks page works until then. After that the Brick, its chat and what it remembers are gone for good.',
+      unit: 'days',
+      value: values.undoDays,
+      recommended: recommended.undoDays,
+      note: 'A change counts for Bricks deleted from now on. A Brick already deleted keeps the day it was given.',
+      options: [
+        { value: 7, label: '7 days', meaning: 'A week to change your mind.' },
+        { value: 14, label: '14 days', meaning: 'Two weeks.' },
+        { value: 30, label: '30 days', meaning: 'A month.' },
+      ],
+    },
+    {
+      id: 'offerAfter',
+      label: 'Times a job comes back before Brick suggests a Brick for it',
+      hint: 'Brick answers first. When the same kind of job has come back this often, it suggests a Brick just for it, once per topic.',
+      unit: 'times',
+      value: values.offerAfter,
+      recommended: recommended.offerAfter,
+      options: [
+        { value: 3, label: '3 times', meaning: 'Suggests it early.' },
+        { value: 5, label: '5 times', meaning: 'Waits a little longer.' },
+        { value: 10, label: '10 times', meaning: 'Only for a job that comes back a lot.' },
+      ],
+    },
+  ], LIMIT_RANGES.bricks);
+}
+
 /** The id without its maker's prefix: "openai/gpt-4o-mini" is "gpt-4o-mini". */
 const shortModel = (id: string) => (id.includes('/') ? id.slice(id.indexOf('/') + 1) : id);
 const listOf = (names: string[]) => new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(names);
@@ -908,6 +944,7 @@ export function UniverseAiLimits() {
           </Settings>
           <LimitGroup title="Files in chats, for all bots" limits={fileLimits(limits.files)} onChange={(id, value) => save({ files: { [id]: value } })} />
           <LimitGroup title="Fair usage" limits={fairUsageLimits(limits.fairUsage)} onChange={(id, value) => save({ fairUsage: { [id]: value } })} />
+          <LimitGroup title="Bricks" limits={brickLimits(limits.bricks)} onChange={(id, value) => save({ bricks: { [id]: value } })} />
           {voiceFailed ? (
             <LoadError label="the voice limits" retry={loadVoice} />
           ) : !voice ? (
