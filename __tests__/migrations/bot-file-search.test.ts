@@ -89,7 +89,19 @@ describe('bot file search on Postgres', () => {
       inChat: ['a-plain'],
       inChatSomeoneElse: [],
       inChatOwner: ['a-plain', 'a-private'],
+      // For a reply other people read (game #1993): its owner's "Just you" is not found, nor their own from another chat
+      everyoneOwner: ['a-plain'],
+      everyoneElsewhere: ['a-plain'],
+      elsewhere: ['a-marked', 'a-plain'],
     });
+  });
+
+  it('finds only the files of this chat for a reply other people in it read: never the person\'s own from another chat', () => {
+    expect(rows('everyoneInBubble')).toEqual(['guest-pic', 'friend-notes', 'bubble-pic']);
+    expect(result.everyoneInBubble.total).toBe(3);
+    expect(rows('everyoneInDm')).toEqual(['dm-plan', 'dm-song']);
+    // The word is in their own direct messages too: those are not found, counted or named
+    expect(result.everyoneWords).toEqual({ total: 1, rows: ['friend-notes'] });
   });
 
   it('a search can not reach outside its words', () => {

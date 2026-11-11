@@ -8,7 +8,7 @@ import { findFiles, mergePage, readFileText, type FoundArtifact, type FoundFile,
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { hitOf, searchWords, wordQuery, wordsOfSql } from '@/lib/bot-file-search-sql';
-import { addUser, db } from '../../helpers/bot-files-db';
+import { addUser, db, fakePrisma } from '../../helpers/bot-files-db';
 
 jest.mock('@/lib/db', () => ({ prisma: jest.requireActual('../../helpers/bot-files-db').fakePrisma }));
 jest.mock('@/lib/bot-access', () => ({ checkBotAccess: jest.fn() }));
@@ -48,7 +48,9 @@ function fakeSql(rows: ReturnType<typeof fileRow>[], hits: { bot_file_id: string
     asked.push({ sql, values });
     // Titles, as Postgres matches them: in reach, each pattern anywhere, case and Arabic marks left out
     if (sql.includes('FROM artifacts')) {
-      const [chatKind, chatRef, userId, patterns, botId] = values as [string, string, string | null, string[], string];
+      const [chatKind, chatRef, asker, patterns, botId, everyoneHere] = values as [string, string, string | null, string[], string, boolean];
+      // For a reply other people read, nothing is found as the person's own
+      const userId = everyoneHere ? null : asker;
       const bare = (title: string) => title.replace(/[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]/g, '').toLowerCase();
       const has = (title: string) => patterns.map((pattern) => bare(title).includes(pattern.slice(1, -1)));
       return db.artifacts
@@ -222,6 +224,33 @@ describe('finding files in bot chats (game #1508)', () => {
       expect(elsewhere.items.map((item) => (item as FoundArtifact).id)).toEqual(['friends-private', 'friends-shared', 'friends-by-link']);
     });
 
+    it('finds only this chat\'s for a reply other people in it read: nothing of the person\'s from another chat, and no "Just you", their own neither (game #1993)', async () => {
+      addUser('friend');
+      artifact('here-shared', '2026-10-27T10:00:00Z', { title: 'Trip plan', chatRef: 'room#1#100' });
+      artifact('here-private', '2026-10-26T10:00:00Z', { title: 'Trip budget', chatRef: 'room#1#100', openScope: 'me' });
+      artifact('here-friend', '2026-10-25T10:00:00Z', { title: 'Trip photos', ownerId: 'friend', chatRef: 'room#1#100', openScope: 'link' });
+      artifact('elsewhere', '2026-10-24T10:00:00Z', { title: 'Trip diary' });
+      const ids = (found: { items: unknown[] }) => found.items.map((item) => (item as FoundArtifact).id);
+
+      const sql = fakeSql([]);
+      const listed = await findFiles({ botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: true }, { now: NOW, sql: sql.run });
+      expect(ids(listed)).toEqual(['here-shared', 'here-friend']);
+      expect(listed.total).toBe(2);
+      // The files are asked for this chat alone
+      expect(sql.asked.find((ask) => !ask.sql.includes('FROM artifacts'))?.values[12]).toBe(true);
+      const searched = await findFiles({ botId: 'bot1', person: owner, chat: BUBBLE, words: 'trip', kinds: ['artifact'], limit: 10, everyoneHere: true }, { now: NOW, sql: fakeSql([]).run });
+      expect(ids(searched)).toEqual(['here-shared', 'here-friend']);
+      expect(searched.total).toBe(2);
+      // Not their "Just you" and not what they made elsewhere: no title, no count
+      expect(JSON.stringify([listed, searched])).not.toMatch(/Trip budget|Trip diary|here-private|elsewhere/);
+
+      // Asked without it, everything the person may find is there as before
+      const usual = fakeSql([]);
+      const alone = await findFiles({ botId: 'bot1', person: owner, chat: BUBBLE, limit: 10 }, { now: NOW, sql: usual.run });
+      expect(ids(alone)).toEqual(['here-shared', 'here-private', 'here-friend', 'elsewhere']);
+      expect(usual.asked.find((ask) => !ask.sql.includes('FROM artifacts'))?.values[12]).toBe(false);
+    });
+
     it('searches titles only among this bot\'s artifacts and this chat\'s', async () => {
       artifact('quests', '2026-10-26T10:00:00Z', { title: 'Quests board', makerBotId: 'bot2' });
       const found = await findFiles({ botId: 'bot1', person: owner, chat: BUBBLE, words: 'quests', kinds: ['artifact'], limit: 10 }, { now: NOW, sql: fakeSql([]).run });
@@ -341,6 +370,15 @@ describe('finding files in bot chats (game #1508)', () => {
       await expect(readFileText({ botId: 'bot1', person: guest, chat: BUBBLE, ref, chars: 8_000 }, { now: NOW })).rejects.toMatchObject({ status: 404 });
       await expect(readFileText({ botId: 'bot2', person: owner, chat: DM, ref, chars: 8_000 }, { now: NOW })).rejects.toMatchObject({ status: 404 });
     });
+
+    it('for a reply other people in the chat read, only a file that came in this chat (game #1993)', async () => {
+      const ref = await keptFile('private words');
+      // Their own, from their direct messages: alone in a bubble it is read, in front of other people it never was
+      await expect(readFileText({ botId: 'bot1', person: owner, chat: BUBBLE, ref, chars: 8_000 }, { now: NOW })).resolves.toMatchObject({ text: 'private words' });
+      await expect(readFileText({ botId: 'bot1', person: owner, chat: BUBBLE, ref, chars: 8_000, everyoneHere: true }, { now: NOW })).rejects.toMatchObject({ status: 404, code: 'not_found' });
+      // In the chat it came in, it is read either way
+      await expect(readFileText({ botId: 'bot1', person: owner, chat: DM, ref, chars: 8_000, everyoneHere: true }, { now: NOW })).resolves.toMatchObject({ text: 'private words' });
+    });
   });
 
   describe('the routes', () => {
@@ -373,6 +411,28 @@ describe('finding files in bot chats (game #1508)', () => {
       expect((await post(readRoute, { botId: 'bot1', person: owner, chat: DM, ref: 'f1', chars: 5_000_001 })).status).toBe(400);
     });
 
+    it('takes "for everyone here" as yes or no, and nothing else', async () => {
+      // The route runs the search's SQL through Prisma: answered here as a chat with no files
+      const asked: unknown[][] = [];
+      const prisma = fakePrisma as unknown as { $queryRawUnsafe?: unknown };
+      prisma.$queryRawUnsafe = async (sql: string, ...values: unknown[]) => {
+        asked.push(values);
+        return sql.includes('count(*)') ? [{ total: 0 }] : [];
+      };
+      try {
+        const yes = await post(findRoute, { botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: true });
+        expect(yes.status).toBe(200);
+        expect(yes.body).toMatchObject({ items: [], total: 0 });
+        expect(asked.every((values) => values[12] === true)).toBe(true);
+        asked.length = 0;
+        expect((await post(findRoute, { botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: false })).status).toBe(200);
+        expect(asked.every((values) => values[12] === false)).toBe(true);
+        expect((await post(findRoute, { botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: 'yes' })).status).toBe(400);
+      } finally {
+        delete prisma.$queryRawUnsafe;
+      }
+    });
+
     it('reads through the route', async () => {
       const made = await addFile(
         { botId: 'bot1', person: owner, chat: DM, source: 'person', kind: 'document', name: 'plan.pdf', store: { bucket: 'user-refs', fileId: '0b5c1a6e-3f2d-4c8b-9a71-2e4f6d8c0a1b.pdf' } },
@@ -382,6 +442,11 @@ describe('finding files in bot chats (game #1508)', () => {
       const res = await post(readRoute, { botId: 'bot1', person: owner, chat: DM, ref: made.file.ref, at: 6, chars: 8000 });
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({ text: 'there', at: 6, end: 11, next: null, hidden: false });
+      // For a reply other people read (game #1993): yes or no and nothing else, and from another chat it never was
+      const elsewhere = { botId: 'bot1', person: owner, chat: BUBBLE, ref: made.file.ref, chars: 8000 };
+      expect((await post(readRoute, { ...elsewhere, everyoneHere: false })).status).toBe(200);
+      expect((await post(readRoute, { ...elsewhere, everyoneHere: true })).status).toBe(404);
+      expect((await post(readRoute, { ...elsewhere, everyoneHere: 'yes' })).status).toBe(400);
     });
   });
 });

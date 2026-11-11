@@ -257,12 +257,21 @@ export function canUse(row: Pick<FileRow, 'ownerId' | 'chatKind' | 'chatRef'>, w
   return inThisChat(row, chat);
 }
 
-export async function loadUsable(call: BotCall & { ref: string }, who: Who, ctx: Context): Promise<FileRow> {
+/**
+ * A call for a reply that other people in the chat read too (game #1993): only a file that came in this chat is used,
+ * whoever it belongs to. What its person has from another chat answers as if it never was.
+ */
+export interface ForEveryoneHere {
+  everyoneHere?: boolean | null;
+}
+
+export async function loadUsable(call: BotCall & ForEveryoneHere & { ref: string }, who: Who, ctx: Context): Promise<FileRow> {
   const number = numberOfShortId(call.ref);
   if (number === null) throw notFound();
   const row = await prisma.botFile.findUnique({ where: { botId_number: { botId: call.botId, number } } });
   // One that has gone, or that this person may not use, looks the same as one that never was
-  if (!row || hasGone(row, limitsOf(ctx), ctx.now) || !canUse(row, who, call.chat)) throw notFound();
+  if (!row || hasGone(row, limitsOf(ctx), ctx.now)) throw notFound();
+  if (!(call.everyoneHere === true ? inThisChat(row, call.chat) : canUse(row, who, call.chat))) throw notFound();
   return row;
 }
 
@@ -342,7 +351,7 @@ export async function addFile(input: AddInput, ctx: Context = defaultContext()):
   return { file: viewOf(row, who, input.chat), hidden };
 }
 
-export async function getFile(input: BotCall & { ref: string }, ctx: Context = defaultContext()): Promise<{ file: BotFileView; hidden: boolean }> {
+export async function getFile(input: BotCall & ForEveryoneHere & { ref: string }, ctx: Context = defaultContext()): Promise<{ file: BotFileView; hidden: boolean }> {
   const { hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person);
   const row = await loadUsable(input, who, ctx);

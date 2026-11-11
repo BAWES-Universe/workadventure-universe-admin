@@ -287,8 +287,22 @@ interface BotCall {
   chat: Chat;
 }
 
+/**
+ * A call for a reply that other people in the chat read too (game #1993). Such a reply may only take in what all of them
+ * may open, so the artifact is asked for as someone in the chat who owns nothing: never a "Just you", and nothing the
+ * person has in another chat, unless they pointed at it in front of everyone and it opens by its link.
+ */
+interface ForEveryoneHere {
+  everyoneHere?: boolean | null;
+}
+
+/** Who the call asks as: the person, or for a reply everyone here reads, someone in the chat who owns nothing. */
+function readerOf(who: Who, input: ForEveryoneHere): Who {
+  return input.everyoneHere === true ? { ...who, userId: null } : who;
+}
+
 /** What read and change take on top of the call: the artifacts the person themselves pointed at (game #1781). */
-interface ReferencingCall extends BotCall {
+interface ReferencingCall extends BotCall, ForEveryoneHere {
   /**
    * Ids of artifacts the person put in their own message (a pasted link) or replied to, as the bot server found them. The
    * only way for a bot to reach another bot's artifact, and only for its owner. Ids a bot or a tool result mentioned are
@@ -463,7 +477,10 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   const { botName, hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
   const artifact = await loadArtifact(input.artifactId, now);
-  if (!inBotsReach(artifact, who, input)) throw new ArtifactError('not_found', 404, 'No such artifact.');
+  const reader = readerOf(who, input);
+  if (!inBotsReach(artifact, reader, input)) throw new ArtifactError('not_found', 404, 'No such artifact.');
+  // The new version's card lands in front of everyone here, so it has to be one all of them may open
+  if (reader !== who) requireOpen(artifact, { ...reader, inChat: inThisChat(artifact, input.chat) }, now);
   if (!canAskForChange(artifact, who, inThisChat(artifact, input.chat), now)) {
     // Someone who cannot even open it hears the same as for an artifact that is not there
     if (!canOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now)) throw cannotOpen(artifact, inThisChat(artifact, input.chat));
@@ -494,9 +511,10 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
     prisma.$transaction(async (tx) => {
       // The one who gets here first moves the version on; anyone who read the same version before fails here. Someone
       // other than its owner was let in by how it was shared when it was read: if the owner changed that meanwhile
-      // (made it "Just you", or took back who may ask for changes), the change does not land, and asking again is refused
+      // (made it "Just you", or took back who may ask for changes), the change does not land, and asking again is refused.
+      // The same holds for its owner in a reply everyone here reads: it was let in by how it was shared
       const moved = await tx.artifact.updateMany({
-        where: { id: artifact.id, latestVersion: artifact.latestVersion, ...(isOwner(artifact, who) ? {} : { openScope: artifact.openScope, changeScope: artifact.changeScope }) },
+        where: { id: artifact.id, latestVersion: artifact.latestVersion, ...(isOwner(artifact, reader) ? {} : { openScope: artifact.openScope, changeScope: artifact.changeScope }) },
         data: {
           latestVersion: next,
           ...(title ? { title } : {}),
@@ -599,8 +617,9 @@ export async function readArtifact(input: ReadInput, ctx: Context = defaultConte
   const { hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
   const artifact = await loadArtifact(input.artifactId, now);
-  if (!inBotsReach(artifact, who, input)) throw new ArtifactError('not_found', 404, 'No such artifact.');
-  requireOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now);
+  const reader = readerOf(who, input);
+  if (!inBotsReach(artifact, reader, input)) throw new ArtifactError('not_found', 404, 'No such artifact.');
+  requireOpen(artifact, { ...reader, inChat: inThisChat(artifact, input.chat) }, now);
   const row = await findVersion(artifact, input.version);
   return { artifact: viewOf(artifact), version: botVersionView(row), content: await files.get(row.fileKey), hidden };
 }
@@ -611,10 +630,11 @@ export async function readArtifact(input: ReadInput, ctx: Context = defaultConte
  * after a restart. An artifact belongs to the person who asked, so what a bot may do with it is what that person may; but a
  * bot is shown only its own work (and this chat's), never what the person made with other bots (game #1781).
  */
-export async function listArtifactsInChat(input: BotCall, ctx: Context = defaultContext()): Promise<{ artifacts: ArtifactView[]; hidden: boolean }> {
+export async function listArtifactsInChat(input: BotCall & ForEveryoneHere, ctx: Context = defaultContext()): Promise<{ artifacts: ArtifactView[]; hidden: boolean }> {
   const { now } = ctx;
   const { hidden } = await passBotGate(input);
-  const who = await resolvePerson(input.person, true);
+  // For a reply everyone here reads (game #1993): only this chat's, and of those only what all of them may open
+  const who = readerOf(await resolvePerson(input.person, true), input);
   pruneSometimes(ctx);
   // What was made in this chat, and what this bot made for the asking person in any other chat, so a bot in a direct message
   // finds what they started in nearby chat and the other way round. Only theirs, and only this bot's: nobody else's artifact

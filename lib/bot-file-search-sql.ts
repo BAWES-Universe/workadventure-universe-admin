@@ -64,6 +64,11 @@ export interface SearchScope {
   now: Date;
   /** Files made before this can no longer be found (the super admin's days); null = no end. */
   findableSince: Date | null;
+  /**
+   * What is found goes into a reply other people in this chat read (game #1993): only the files of this chat, never the
+   * person's own from another chat.
+   */
+  everyoneHere?: boolean;
 }
 
 export interface SearchFilters {
@@ -108,6 +113,7 @@ export function fileSearchSql(scope: SearchScope, filters: SearchFilters, page: 
     utc(filters.since),
     utc(filters.until),
     filters.every && filters.every.length > 0 ? filters.every.map((word) => `${word}:*`) : null,
+    scope.everyoneHere === true,
   ];
   const at = (n: number) => `($${n}::timestamptz AT TIME ZONE 'UTC')`;
   const matches = `
@@ -124,7 +130,7 @@ export function fileSearchSql(scope: SearchScope, filters: SearchFilters, page: 
         SELECT CASE WHEN q.query IS NULL THEN NULL ELSE ${wordsOfSql(`f.name || ' ' || coalesce(f.line, '') || ' ' || left(coalesce(f.made_prompt, ''), 20000)`)} END AS words
       ) own
       WHERE f.bot_id = $1
-        AND ((f.owner_id IS NOT NULL AND f.owner_id = $2::text) OR (f.chat_kind = $3 AND f.chat_ref = $4))
+        AND ((NOT $13::boolean AND f.owner_id IS NOT NULL AND f.owner_id = $2::text) OR (f.chat_kind = $3 AND f.chat_ref = $4))
         AND (f.expires_at IS NULL OR f.expires_at > ${at(5)})
         AND ($6::text IS NULL OR f.created_at > ${at(6)})
         AND ($7::text[] IS NULL OR f.kind = ANY($7::text[]))
@@ -170,15 +176,20 @@ export function fileHitsSql(fileIds: string[], query: string, anyQuery: string =
  * The artifacts in reach (this chat's, and the ones this bot made for the person) whose title has the words, each anywhere in it, with Arabic
  * marks left out of the title as they are of the words ("مرحبا" finds "مَرْحَبًا"). The words are letters and digits only.
  * Of this chat's, someone else's "Just you" is not in reach (game #1994, the rule of shownInItsChatTo): a title that
- * matched would say it is there.
+ * matched would say it is there. For a reply other people in this chat read (`everyoneHere`, game #1993) only this
+ * chat's are in reach, and no "Just you" at all, the person's own neither.
  */
-export function artifactTitleSql(scope: { botId: string; userId: string | null; chatKind: string; chatRef: string }, words: string[], mode: 'all' | 'any'): { sql: string; values: unknown[] } {
+export function artifactTitleSql(
+  scope: { botId: string; userId: string | null; chatKind: string; chatRef: string; everyoneHere?: boolean },
+  words: string[],
+  mode: 'all' | 'any',
+): { sql: string; values: unknown[] } {
   return {
-    values: [scope.chatKind, scope.chatRef, scope.userId, words.map((word) => `%${word}%`), scope.botId],
+    values: [scope.chatKind, scope.chatRef, scope.userId, words.map((word) => `%${word}%`), scope.botId, scope.everyoneHere === true],
     sql: `
       SELECT id FROM artifacts
-      WHERE ((chat_kind = $1 AND chat_ref = $2 AND (open_scope IN ('chat', 'link') OR ($3::text IS NOT NULL AND owner_id = $3::text)))
-          OR ($3::text IS NOT NULL AND owner_id = $3::text AND maker_bot_id = $5::text))
+      WHERE ((chat_kind = $1 AND chat_ref = $2 AND (open_scope IN ('chat', 'link') OR (NOT $6::boolean AND $3::text IS NOT NULL AND owner_id = $3::text)))
+          OR (NOT $6::boolean AND $3::text IS NOT NULL AND owner_id = $3::text AND maker_bot_id = $5::text))
         AND regexp_replace(title, '${ARABIC_MARKS_CLASS}', '', 'g') ILIKE ${mode === 'all' ? 'ALL' : 'ANY'} ($4::text[])`,
   };
 }

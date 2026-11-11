@@ -245,6 +245,26 @@ describe('files in bot chats (game #1508)', () => {
       expect((await open(ref, guest, BUBBLE)).status).toBe(404);
     });
 
+    it('for a reply other people in the chat read, only a file that came in this chat, the owner\'s own included (game #1993)', async () => {
+      const everyone = (ref: string, who: object, chat: object, everyoneHere: unknown = true) => call(get, { botId: 'bot1', person: who, chat, ref, everyoneHere });
+      const fromDm = await addSong(person('owner'), DM);
+      const fromEarlier = await addSong(person('owner'), BUBBLE);
+      // Theirs from their direct messages, or from an earlier bubble: never in front of the people in this one
+      for (const ref of [fromDm, fromEarlier]) {
+        const res = await everyone(ref, person('owner'), LATER_BUBBLE);
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe('not_found');
+        expect(JSON.stringify(res.body)).not.toContain('yazoghal');
+      }
+      // What came in this chat is there for everyone in it
+      expect((await everyone(fromEarlier, person('owner'), BUBBLE)).body.file).toMatchObject({ mine: true, inThisChat: true });
+      expect((await everyone(fromEarlier, person('friend'), BUBBLE)).status).toBe(200);
+      // Alone it is as before, and the field takes yes or no only
+      expect((await everyone(fromDm, person('owner'), LATER_BUBBLE, false)).status).toBe(200);
+      expect((await everyone(fromDm, person('owner'), LATER_BUBBLE, null)).status).toBe(200);
+      expect((await everyone(fromDm, person('owner'), LATER_BUBBLE, 'yes')).status).toBe(400);
+    });
+
     it('bot B can not open a file sent to bot A', async () => {
       const ref = await addSong(person('owner'), DM);
       expect((await open(ref, person('owner'), DM, 'bot2')).status).toBe(404);
