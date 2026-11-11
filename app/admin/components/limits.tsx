@@ -562,15 +562,15 @@ export function brickLimits(values: BrickLimits): Limit[] {
     {
       id: 'undoDays',
       label: 'Days a deleted Brick can be brought back',
-      hint: 'Undo on the Bricks page works until then. After that the Brick, its chat and what it remembers are gone for good.',
+      hint: 'Its chat, what it remembers and its files wait this long, then go for good.',
       unit: 'days',
       value: values.undoDays,
       recommended: recommended.undoDays,
       note: 'A change counts for Bricks deleted from now on. A Brick already deleted keeps the day it was given.',
       options: [
-        { value: 7, label: '7 days', meaning: 'A week to change your mind.' },
-        { value: 14, label: '14 days', meaning: 'Two weeks.' },
-        { value: 30, label: '30 days', meaning: 'A month.' },
+        { value: 3, label: '3 days', meaning: 'then gone for good' },
+        { value: 7, label: '7 days', meaning: 'then gone for good' },
+        { value: 14, label: '14 days', meaning: 'then gone for good' },
       ],
     },
     {

@@ -148,11 +148,12 @@ describe('Universe AI limits', () => {
     render(<UniverseAiLimits />);
     expect(await screen.findByText('Bricks')).toBeTruthy();
     expect(screen.getByText('Days a deleted Brick can be brought back')).toBeTruthy();
+    expect(screen.getByText('Its chat, what it remembers and its files wait this long, then go for good.')).toBeTruthy();
     expect(screen.getByText('Times a job comes back before Brick suggests a Brick for it')).toBeTruthy();
     fireEvent.click(screen.getByTestId('limit-undoDays'));
-    fireEvent.click(await screen.findByRole('radio', { name: /30 days/ }));
+    fireEvent.click(await screen.findByRole('radio', { name: /14 days/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ bricks: { undoDays: 30 } }));
+    await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ bricks: { undoDays: 14 } }));
     await waitFor(() => expect(screen.getAllByText('Recommended: 7 days').length).toBeGreaterThan(0));
     fetchMock.mockClear();
     answer();
