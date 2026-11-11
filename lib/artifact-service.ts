@@ -490,9 +490,11 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   const media = placeMedia(fileKey, merged);
   const row = await storing(files, fileKey, kind, content, media, () =>
     prisma.$transaction(async (tx) => {
-      // The one who gets here first moves the version on; anyone who read the same version before fails here
+      // The one who gets here first moves the version on; anyone who read the same version before fails here. Someone
+      // other than its owner was let in by how it was shared when it was read: if the owner changed that meanwhile
+      // (made it "Just you", or took back who may ask for changes), the change does not land, and asking again is refused
       const moved = await tx.artifact.updateMany({
-        where: { id: artifact.id, latestVersion: artifact.latestVersion },
+        where: { id: artifact.id, latestVersion: artifact.latestVersion, ...(isOwner(artifact, who) ? {} : { openScope: artifact.openScope, changeScope: artifact.changeScope }) },
         data: {
           latestVersion: next,
           ...(title ? { title } : {}),
@@ -622,7 +624,10 @@ export async function listArtifactsInChat(input: BotCall, ctx: Context = default
   // Expired guest artifacts and copies (which are in no chat) are left out here, not after the limit, so they never crowd out
   // the ones that are still there
   const notExpired = { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] };
-  const inChat = await prisma.artifact.findMany({ where: { chatKind: input.chat.kind, chatRef: input.chat.ref, ...notExpired }, include, orderBy, take });
+  // Someone else's "Just you" is not theirs to open (game #1994). Left out here too, as in listChatArtifacts, so a chat
+  // where other people keep many private ones still lists what this person can open
+  const opens: Prisma.ArtifactWhereInput = { OR: [...(who.userId ? [{ ownerId: who.userId }] : []), { openScope: { in: ['chat', 'link'] } }] };
+  const inChat = await prisma.artifact.findMany({ where: { chatKind: input.chat.kind, chatRef: input.chat.ref, AND: [notExpired, opens] }, include, orderBy, take });
   const own = who.userId ? await prisma.artifact.findMany({ where: { ownerId: who.userId, makerBotId: input.botId, chatRef: { not: null }, ...notExpired }, include, orderBy, take }) : [];
   const seen = new Set(inChat.map((row) => row.id));
   const rows = [...inChat, ...own.filter((row) => !seen.has(row.id))];
@@ -701,27 +706,36 @@ export interface SharingInput {
 
 export async function setSharing(id: string, viewer: Viewer, input: SharingInput, ctx: Context = defaultContext()): Promise<{ artifact: ArtifactView }> {
   const { now } = ctx;
-  const artifact = await loadArtifact(id, now);
-  const who = await whoIsLooking(artifact, viewer);
-  requireOpen(artifact, who, now);
-  requireOwner(artifact, who);
-  const data: { openScope?: OpenScope; changeScope?: ChangeScope } = {};
-  if (input.openScope !== undefined) {
-    if (!isOneOf(OPEN_SCOPES, input.openScope)) throw new ArtifactError('invalid_open_scope', 422, 'Who can open it is me, chat or link.');
-    data.openScope = input.openScope;
-  }
-  if (input.changeScope !== undefined) {
-    if (!isOneOf(CHANGE_SCOPES, input.changeScope)) throw new ArtifactError('invalid_change_scope', 422, 'Who can ask for changes is owner or openers.');
-    data.changeScope = input.changeScope;
-  }
-  if (Object.keys(data).length === 0) throw new ArtifactError('nothing_to_change', 422, 'Send who can open it, who can ask for changes, or both.');
-  // Becoming "Just you" is more than a word in a column: its files move first (see makeJustYou)
-  if (data.openScope === 'me' && !isJustYou(artifact)) {
-    await makeJustYou(artifact, data.changeScope, ctx);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const artifact = await loadArtifact(id, now);
+    const who = await whoIsLooking(artifact, viewer);
+    requireOpen(artifact, who, now);
+    requireOwner(artifact, who);
+    const data: { openScope?: OpenScope; changeScope?: ChangeScope } = {};
+    if (input.openScope !== undefined) {
+      if (!isOneOf(OPEN_SCOPES, input.openScope)) throw new ArtifactError('invalid_open_scope', 422, 'Who can open it is me, chat or link.');
+      data.openScope = input.openScope;
+    }
+    if (input.changeScope !== undefined) {
+      if (!isOneOf(CHANGE_SCOPES, input.changeScope)) throw new ArtifactError('invalid_change_scope', 422, 'Who can ask for changes is owner or openers.');
+      data.changeScope = input.changeScope;
+    }
+    if (Object.keys(data).length === 0) throw new ArtifactError('nothing_to_change', 422, 'Send who can open it, who can ask for changes, or both.');
+    // Becoming "Just you" is more than a word in a column: its files move first (see makeJustYou)
+    if (data.openScope === 'me' && !isJustYou(artifact)) {
+      await makeJustYou(artifact, data.changeScope, ctx);
+      return { artifact: viewOf(await loadArtifact(artifact.id, now)) };
+    }
+    // Only for who could open it when it was read. Its owner may have opened it to others from another window in this
+    // moment: "Just you" written over that would leave its files at addresses that were just handed out, so it is read
+    // again and the files move.
+    const { count } = await prisma.artifact.updateMany({ where: { id: artifact.id, openScope: artifact.openScope }, data });
+    if (count !== 1) continue;
+    // "Just you" asked for again: it is not called done while the bucket still holds a file from before (see makeJustYou)
+    if (data.openScope === 'me') await closeOldAddresses(artifact.id, ctx);
     return { artifact: viewOf(await loadArtifact(artifact.id, now)) };
   }
-  const updated = await prisma.artifact.update({ where: { id: artifact.id }, data, include: ARTIFACT_INCLUDE });
-  return { artifact: viewOf(updated) };
+  throw new ArtifactError('stale_version', 409, 'It changed at the same moment; try again.');
 }
 
 /** How many files are copied at once while an artifact's files move. */
@@ -747,8 +761,9 @@ export function moveStepMs(versions: number): number {
  * are listed to be removed and removed straight away. From then on the files are only served by Orbit, to their owner
  * (lib/artifact-pass.ts).
  *
- * Nothing is half done: if a copy fails, or a new version lands meanwhile, the copies go and the artifact stays as it
- * was. If the bucket will not remove an old file, it stays listed and every tidy-up tries again until it is gone. A copy
+ * Nothing is half done: if a copy fails, or a new version lands or the files move meanwhile, the copies go and the
+ * artifact stays as it was. If the bucket will not remove an old file, it stays listed and every tidy-up tries again
+ * until it is gone; the owner is told it is not finished, and asking again finishes it (see closeOldAddresses). A copy
  * that a browser or a network cache already holds cannot be taken back; nothing new is ever served from the old address.
  */
 async function makeJustYou(artifact: ArtifactRow, changeScope: ChangeScope | undefined, ctx: Context): Promise<void> {
@@ -761,7 +776,7 @@ async function makeJustYou(artifact: ArtifactRow, changeScope: ChangeScope | und
     const fileKey = newFileKey(artifact.id, version.number, kind);
     const media = mediaOf(version).map((file) => ({ ...file, key: mediaKeyFor(fileKey, file.name) }));
     const copies = [{ from: version.fileKey, to: fileKey }, ...mediaOf(version).map((file) => ({ from: file.key, to: mediaKeyFor(fileKey, file.name) }))];
-    return { id: version.id, fileKey, media, copies };
+    return { id: version.id, from: version.fileKey, fileKey, media, copies };
   });
   const copies = moves.flatMap((move) => move.copies);
   try {
@@ -779,7 +794,11 @@ async function makeJustYou(artifact: ArtifactRow, changeScope: ChangeScope | und
       });
       if (moved.count !== 1) throw new ArtifactError('stale_version', 409, 'It changed at the same moment; try again.');
       for (const move of moves) {
-        await tx.artifactVersion.update({ where: { id: move.id }, data: { fileKey: move.fileKey, media: move.media as unknown as Prisma.InputJsonValue } });
+        // Only a version whose file is still where it was copied from. The same version number and the same sharing can
+        // come round again with the files somewhere else (made "Just you" and opened to the chat again from another
+        // window meanwhile): pointing it at these copies would leave those files in the bucket with nothing naming them
+        const pointed = await tx.artifactVersion.updateMany({ where: { id: move.id, fileKey: move.from }, data: { fileKey: move.fileKey, media: move.media as unknown as Prisma.InputJsonValue } });
+        if (pointed.count !== 1) throw new ArtifactError('stale_version', 409, 'It changed at the same moment; try again.');
       }
       await tx.artifactRetiredFile.createMany({ data: copies.map((copy) => ({ key: copy.from })), skipDuplicates: true });
     }, { timeout: moveStepMs(moves.length) });
@@ -787,7 +806,31 @@ async function makeJustYou(artifact: ArtifactRow, changeScope: ChangeScope | und
     await files.remove(copies.map((copy) => copy.to)).catch(() => undefined);
     throw error;
   }
-  await retireFiles(ctx);
+  await closeOldAddresses(artifact.id, ctx);
+  // And whatever the bucket would not let go of before, for other artifacts
+  await retireFiles(ctx).catch((error) => console.error('Could not remove old files of private artifacts:', error instanceof Error ? error.message : 'unknown'));
+}
+
+/**
+ * Removes the files this artifact had before it became "Just you": the ones whose addresses were handed out. They are
+ * asked for by name, first, so a long list of other artifacts' old files never keeps these waiting.
+ *
+ * While the bucket still holds one, the artifact is private everywhere Orbit answers, but that old address still opens.
+ * Its owner is not told it is done: the answer says so, the files stay listed, every tidy-up tries again, and so does
+ * picking "Just you" again.
+ */
+async function closeOldAddresses(artifactId: string, ctx: Context): Promise<void> {
+  // Every file of an artifact sits under its own folder (newFileKey)
+  const rows = await prisma.artifactRetiredFile.findMany({ where: { key: { startsWith: `artifacts/${artifactId}/` } } });
+  if (rows.length === 0) return;
+  const keys = rows.map((row) => row.key);
+  try {
+    await ctx.files.remove(keys);
+  } catch (error) {
+    console.error('Could not remove the old files of a private artifact, will try again:', error instanceof Error ? error.message : 'unknown');
+    throw new ArtifactError('old_files_remain', 503, 'It is private now, but an address it had before could not be closed yet. Try again in a moment.');
+  }
+  await prisma.artifactRetiredFile.deleteMany({ where: { key: { in: keys } } });
 }
 
 /** How many old files one pass removes at once, and how many batches it runs. */
@@ -856,24 +899,28 @@ export async function restoreVersion(id: string, number: number, viewer: Viewer,
 
 /**
  * The owner takes it back: the rows go first (every version with them), then the files, with the same retry for files the
- * bucket would not remove as the guest clean-up. A copy someone made keeps its own files. The delete only goes through for the
- * artifact as it read it, so a change that lands meanwhile is not left with a file nobody lists: it asks again. That holds
- * for a new version, and for its files moving as it becomes "Just you" at the same moment (makeJustYou).
+ * bucket would not remove as the guest clean-up. A copy someone made keeps its own files.
+ *
+ * Where its files are is read in the same step that takes the rows, with the artifact's row held from the first line of
+ * that step. A new version, and its files moving as it becomes "Just you" (makeJustYou), both start by writing to that
+ * row, so neither can land in between: whatever landed before is read here and goes too, and whatever comes after finds
+ * no artifact. Comparing the version number and the sharing with what was read earlier is not enough for that: both can
+ * come round to the same values with the files somewhere else.
  */
 export async function deleteArtifact(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ deleted: true }> {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const artifact = await loadArtifact(id, ctx.now);
-    const who = await whoIsLooking(artifact, viewer);
-    requireOpen(artifact, who, ctx.now);
-    requireOwner(artifact, who);
-    const versions = await prisma.artifactVersion.findMany({ where: { artifactId: artifact.id } });
-    const { count } = await prisma.artifact.deleteMany({ where: { id: artifact.id, latestVersion: artifact.latestVersion, openScope: artifact.openScope } });
-    if (count === 1) {
-      await removeFiles(ctx, keysOf(versions));
-      return { deleted: true };
-    }
-  }
-  throw new ArtifactError('stale_version', 409, 'It changed at the same moment; try again.');
+  const artifact = await loadArtifact(id, ctx.now);
+  const who = await whoIsLooking(artifact, viewer);
+  requireOpen(artifact, who, ctx.now);
+  requireOwner(artifact, who);
+  const keys = await prisma.$transaction(async (tx) => {
+    const held = await tx.artifact.updateMany({ where: { id: artifact.id }, data: { updatedAt: ctx.now } });
+    if (held.count !== 1) throw new ArtifactError('not_found', 404, 'No such artifact.');
+    const versions = await tx.artifactVersion.findMany({ where: { artifactId: artifact.id } });
+    await tx.artifact.deleteMany({ where: { id: artifact.id } });
+    return keysOf(versions);
+  });
+  await removeFiles(ctx, keys);
+  return { deleted: true };
 }
 
 /** Make a copy: the viewer's own artifact, from the version they pick (the latest by default), in no chat. */

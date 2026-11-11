@@ -92,6 +92,7 @@ function matches(row: Row, where: Row): boolean {
       if ('gt' in expected) return row[key] !== null && row[key] > expected.gt;
       if ('not' in expected) return row[key] !== expected.not;
       if ('in' in expected) return expected.in.includes(row[key]);
+      if ('startsWith' in expected) return typeof row[key] === 'string' && row[key].startsWith(expected.startsWith);
     }
     // A moment is the same moment, as in the real database, whichever object holds it
     if (expected instanceof Date) return row[key] instanceof Date && row[key].getTime() === expected.getTime();
@@ -190,6 +191,11 @@ const client: Row = {
       Object.assign(row, data);
       return row;
     },
+    updateMany: async ({ where, data }: Row) => {
+      const rows = db.versions.filter((v) => matches(v, where));
+      rows.forEach((row) => Object.assign(row, data));
+      return { count: rows.length };
+    },
   },
   artifactPass: {
     create: async ({ data }: Row) => {
@@ -216,14 +222,24 @@ const client: Row = {
       fresh.forEach((row) => db.retired.push({ createdAt: new Date(), ...row }));
       return { count: fresh.length };
     },
-    findMany: async ({ take }: Row) => db.retired.slice(0, take),
+    findMany: async ({ where = {}, take }: Row) => db.retired.filter((row) => matches(row, where)).slice(0, take),
     deleteMany: async ({ where }: Row) => {
       const before = db.retired.length;
       db.retired = db.retired.filter((row) => !matches(row, where)) as typeof db.retired;
       return { count: before - db.retired.length };
     },
   },
-  $transaction: async (fn: (tx: Row) => Promise<unknown>) => fn(client),
+  // As the database does: a step that fails leaves no row changed. (The bucket is no part of it, as in real life.)
+  $transaction: async (fn: (tx: Row) => Promise<unknown>) => {
+    const copyOf = (rows: Row[]) => rows.map((row) => ({ ...row }));
+    const before = { artifacts: copyOf(db.artifacts), versions: copyOf(db.versions), passes: copyOf(db.passes), retired: copyOf(db.retired) };
+    try {
+      return await fn(client);
+    } catch (error) {
+      Object.assign(db, before);
+      throw error;
+    }
+  },
 };
 
 export const fakePrisma = client;

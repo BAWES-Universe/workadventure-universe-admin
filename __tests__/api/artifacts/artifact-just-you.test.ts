@@ -182,6 +182,37 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       await justYou(id);
       expect(bucketKeys()).toEqual(keys);
     });
+
+    it('moves the files after all when its owner opened it to the chat from another window in the same moment', async () => {
+      const id = await makePage();
+      await justYou(id);
+      // "Just you" is picked again and read as "Just you" already; before it is written, the other window opens it to
+      // the chat and a friend is handed the files' address
+      let handedOut = '';
+      const write = fakePrisma.artifact.updateMany;
+      jest.spyOn(fakePrisma.artifact, 'updateMany').mockImplementationOnce(async (args: unknown) => {
+        artifactRow(id).openScope = 'chat';
+        handedOut = (await openAs(person('friend'), id)).body.version.url;
+        return write(args as never);
+      });
+      await justYou(id);
+      expect(handedOut).toMatch(/^https:\/\/files\.example\.test\/artifacts\//);
+      // Not "Just you" written over files whose address was given away: they moved, and that address is gone
+      expect(db.files.has(handedOut.replace(BUCKET, ''))).toBe(false);
+      expect(bucketKeys()).toHaveLength(2);
+      expect(db.retired).toEqual([]);
+      expect((await openAs(person('friend'), id)).body.error).toBe('kept_private');
+      expect(await fakeFiles.get(versionRows(id)[0].fileKey)).toBe(PAGE);
+    });
+
+    it('keeps who may ask for changes when only that is sent, whoever can open it', async () => {
+      const id = await makePage();
+      await justYou(id);
+      const keys = bucketKeys();
+      const res = await shareAs(person('owner'), id, { changeScope: 'openers' });
+      expect(res.body.artifact).toMatchObject({ openScope: 'me', changeScope: 'openers' });
+      expect(bucketKeys()).toEqual(keys);
+    });
   });
 
   describe('a second account is refused', () => {
@@ -239,6 +270,22 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect((await list(person('owner'), false)).body).toMatchObject({ artifacts: [{ id }], total: 1 });
     });
 
+    it('still shows a bot what its person can open when other people keep many private ones in the same chat', async () => {
+      const mine = await makePage();
+      artifactRow(mine).updatedAt = new Date(Date.now() - 60_000);
+      // More of them, and newer, than a bot is ever listed at once
+      for (let made = 0; made < 21; made++) {
+        const theirs = await makePage({ who: person('friend'), media: [] });
+        expect((await shareAs(person('friend'), theirs, { openScope: 'me' })).status).toBe(200);
+      }
+      const listed = await call(inChat, { botId: 'bot1', person: person('owner'), chat: NEARBY }, asBot);
+      expect(listed.body.artifacts.map((artifact: { id: string }) => artifact.id)).toEqual([mine]);
+      // Their own are all there for the friend, up to the limit, and a guest is shown the one that is the chat's
+      const friends = await call(inChat, { botId: 'bot1', person: person('friend'), chat: NEARBY }, asBot);
+      expect(friends.body.artifacts).toHaveLength(20);
+      expect((await call(inChat, { botId: 'bot1', person: guest, chat: NEARBY }, asBot)).body.artifacts.map((artifact: { id: string }) => artifact.id)).toEqual([mine]);
+    });
+
     it('never falls back to a link: the public page has nothing, whether it was shared by link before or not', async () => {
       const id = await makePage();
       expect((await shareAs(person('owner'), id, { openScope: 'link' })).status).toBe(200);
@@ -267,6 +314,55 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       // The owner's bot still works with it
       expect((await call(read, { botId: 'bot1', person: person('owner'), chat: NEARBY }, { id, ...asBot })).body.content).toBe(PAGE);
       expect(versionRows(id)).toHaveLength(1);
+    });
+  });
+
+  describe('a change that was on its way', () => {
+    const friendsChange = (id: string) => call(change, { botId: 'bot1', person: person('friend'), chat: NEARBY, content: '<p>mine now</p>' }, { id, ...asBot });
+    /** Runs `meanwhile` after the change was allowed and its file stored, just before the step that saves the version. */
+    function beforeItIsSaved(meanwhile: () => Promise<void>) {
+      const step = fakePrisma.$transaction;
+      jest.spyOn(fakePrisma, '$transaction').mockImplementationOnce(async (fn: unknown, options: unknown) => {
+        await meanwhile();
+        return step(fn as never, options as never);
+      });
+    }
+
+    it('does not land from someone else once its owner made it "Just you" in the same moment', async () => {
+      const id = await makePage();
+      expect((await shareAs(person('owner'), id, { changeScope: 'openers' })).status).toBe(200);
+      beforeItIsSaved(() => justYou(id));
+      const res = await friendsChange(id);
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('stale_version');
+      // Nothing of theirs is kept: no version, and no file beside the two that moved
+      expect(versionRows(id)).toHaveLength(1);
+      expect(artifactRow(id).latestVersion).toBe(1);
+      expect(bucketKeys()).toHaveLength(2);
+      expect(await fakeFiles.get(versionRows(id)[0].fileKey)).toBe(PAGE);
+      // Asking again is refused like any other request from them
+      expect((await friendsChange(id)).status).toBe(404);
+    });
+
+    it('does not land from someone else once its owner took back who may ask for changes', async () => {
+      const id = await makePage();
+      expect((await shareAs(person('owner'), id, { changeScope: 'openers' })).status).toBe(200);
+      beforeItIsSaved(async () => {
+        expect((await shareAs(person('owner'), id, { changeScope: 'owner' })).status).toBe(200);
+      });
+      expect((await friendsChange(id)).status).toBe(409);
+      expect(versionRows(id)).toHaveLength(1);
+      expect((await friendsChange(id)).status).toBe(403);
+    });
+
+    it('still lands from its owner, whatever they did to its sharing meanwhile', async () => {
+      const id = await makePage();
+      beforeItIsSaved(async () => {
+        expect((await shareAs(person('owner'), id, { openScope: 'link', changeScope: 'openers' })).status).toBe(200);
+      });
+      const res = await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>two</p>' }, { id, ...asBot });
+      expect(res.status).toBe(200);
+      expect(res.body.artifact).toMatchObject({ version: 2, openScope: 'link' });
     });
   });
 
@@ -374,23 +470,87 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect(versionRows(id)[0].fileKey).toBe(before.find((key) => key.endsWith('index.html')));
     });
 
-    it('keeps trying to remove an old file the bucket would not let go of, and forgets it only once it is gone', async () => {
+    it('is not called done while the bucket still holds a file from before, and picking it again finishes it', async () => {
+      const id = await makePage();
+      const old = bucketKeys();
+      const address = (await openAs(person('friend'), id)).body.version.url as string;
+      db.failRemove = true;
+      const errors = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const res = await shareAs(person('owner'), id, { openScope: 'me' });
+      // Its owner is not told it is private while the address the friend holds still opens
+      expect(res.status).toBe(503);
+      expect(res.body.error).toBe('old_files_remain');
+      expect(JSON.stringify(res.body)).not.toContain('artifacts/');
+      expect(db.files.has(address.replace(BUCKET, ''))).toBe(true);
+      expect(errors).toHaveBeenCalled();
+      // Everything Orbit answers is private already, and the old files are listed to go
+      expect(artifactRow(id).openScope).toBe('me');
+      expect((await openAs(person('friend'), id)).body.error).toBe('kept_private');
+      expect(db.retired.map((row) => row.key).sort()).toEqual(old);
+      // Picked again with the bucket still down: the same answer, and nothing moves twice
+      const moved = bucketKeys().filter((key) => !old.includes(key));
+      expect((await shareAs(person('owner'), id, { openScope: 'me' })).body.error).toBe('old_files_remain');
+      expect(bucketKeys().filter((key) => !old.includes(key))).toEqual(moved);
+      // Picked again with the bucket back: now it is done
+      db.failRemove = false;
+      await justYou(id);
+      expect(db.retired).toEqual([]);
+      expect(db.files.has(address.replace(BUCKET, ''))).toBe(false);
+      expect(bucketKeys()).toEqual(moved);
+    });
+
+    it('keeps trying by itself to remove an old file the bucket would not let go of, and forgets it only once it is gone', async () => {
       const id = await makePage();
       const old = bucketKeys();
       db.failRemove = true;
-      const errors = jest.spyOn(console, 'error').mockImplementation(() => undefined);
-      await justYou(id);
-      // It is "Just you" already, and nothing names the old files; they are listed to go
-      expect(artifactRow(id).openScope).toBe('me');
-      expect(db.retired.map((row) => row.key).sort()).toEqual(old);
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      expect((await shareAs(person('owner'), id, { openScope: 'me' })).status).toBe(503);
       expect(old.every((key) => db.files.has(key))).toBe(true);
-      expect(errors).toHaveBeenCalled();
       // The next tidy-up, with the bucket back
       db.failRemove = false;
       await pruneExpired({ files: fakeFiles, now: new Date() });
       expect(db.retired).toEqual([]);
       expect(old.some((key) => db.files.has(key))).toBe(false);
       expect(bucketKeys()).toHaveLength(2);
+      await justYou(id);
+    });
+
+    it('removes its own old files first, by name, however many others are still listed', async () => {
+      const id = await makePage();
+      const old = bucketKeys();
+      // Left from other artifacts, from a day the bucket would not remove them
+      for (let other = 0; other < 3; other++) db.retired.push({ key: `artifacts/other-${other}/v1-aaaaaaaaaaaaaaaaaaaaaaaa/index.html`, createdAt: new Date(0) });
+      const removed = jest.spyOn(fakeFiles, 'remove');
+      await justYou(id);
+      expect([...removed.mock.calls[0][0]].sort()).toEqual(old);
+      expect(db.retired).toEqual([]);
+    });
+
+    it('changes nothing when its files moved and came back to the same sharing while these copies were made', async () => {
+      const id = await makePage();
+      // This request has read it ("chat", version 1) and copied its files. Before its last step, another window made it
+      // "Just you" and opened it to the chat again: the same sharing and version, the files somewhere else
+      const step = fakePrisma.$transaction;
+      let handedOut: string[] = [];
+      jest.spyOn(fakePrisma, '$transaction').mockImplementationOnce(async (fn: unknown, options: unknown) => {
+        const mine = bucketKeys();
+        await justYou(id);
+        expect((await shareAs(person('owner'), id, { openScope: 'chat' })).status).toBe(200);
+        handedOut = bucketKeys().filter((key) => !mine.includes(key));
+        return step(fn as never, options as never);
+      });
+      const res = await shareAs(person('owner'), id, { openScope: 'me' });
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('stale_version');
+      // It stays as the other window left it, with those files and no others: none is left in the bucket unnamed
+      expect(artifactRow(id).openScope).toBe('chat');
+      expect(handedOut).toHaveLength(2);
+      expect(bucketKeys()).toEqual(handedOut);
+      expect(handedOut).toContain(versionRows(id)[0].fileKey);
+      expect(db.retired).toEqual([]);
+      // Asked again it goes through, and what was handed out is gone
+      await justYou(id);
+      expect(handedOut.some((key) => db.files.has(key))).toBe(false);
     });
 
     it('gives the step that repoints the versions more time the more versions there are', async () => {
@@ -727,19 +887,49 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       const id = await makePage();
       const before = bucketKeys();
       expect(before).toHaveLength(2);
-      // Its files move between the delete reading where they are and taking the rows
-      const real = fakePrisma.artifact.deleteMany;
-      const spy = jest.spyOn(fakePrisma.artifact, 'deleteMany').mockImplementationOnce(async (args) => {
+      // Its files move after the delete read the artifact and before the step that takes its rows. Inside that step its
+      // row is held, and moving the files starts by writing to that row
+      const step = fakePrisma.$transaction;
+      jest.spyOn(fakePrisma, '$transaction').mockImplementationOnce(async (fn: unknown) => {
         await justYou(id);
         expect(bucketKeys().some((key) => before.includes(key))).toBe(false);
-        return real(args);
+        expect(bucketKeys()).toHaveLength(2);
+        return step(fn as never);
       });
       expect((await call(remove, { viewer: viewer(person('owner')) }, { id, method: 'DELETE' })).status).toBe(200);
-      // It saw the change and read again where the files are
-      expect(spy).toHaveBeenCalledTimes(2);
+      // Where the files are was read in that step, so the ones they moved to went too
       expect(db.artifacts.some((artifact) => artifact.id === id)).toBe(false);
       expect(bucketKeys()).toEqual([]);
       expect(db.retired).toEqual([]);
+    });
+
+    it('leaves no file behind when the files moved and its sharing is back where it was as its owner deletes it', async () => {
+      const id = await makePage();
+      const before = bucketKeys();
+      // Read as "chat", version 1. Then "Just you" and back to the chat from another window: the same again, the files elsewhere
+      const step = fakePrisma.$transaction;
+      jest.spyOn(fakePrisma, '$transaction').mockImplementationOnce(async (fn: unknown) => {
+        await justYou(id);
+        expect((await shareAs(person('owner'), id, { openScope: 'chat' })).status).toBe(200);
+        expect(bucketKeys().some((key) => before.includes(key))).toBe(false);
+        return step(fn as never);
+      });
+      expect((await call(remove, { viewer: viewer(person('owner')) }, { id, method: 'DELETE' })).status).toBe(200);
+      expect(db.artifacts.some((artifact) => artifact.id === id)).toBe(false);
+      expect(db.versions.some((version) => version.artifactId === id)).toBe(false);
+      expect(bucketKeys()).toEqual([]);
+    });
+
+    it('answers that it is not there when it was deleted from another window first', async () => {
+      const id = await makePage();
+      const step = fakePrisma.$transaction;
+      jest.spyOn(fakePrisma, '$transaction').mockImplementationOnce(async (fn: unknown) => {
+        expect((await call(remove, { viewer: viewer(person('owner')) }, { id, method: 'DELETE' })).status).toBe(200);
+        return step(fn as never);
+      });
+      const res = await call(remove, { viewer: viewer(person('owner')) }, { id, method: 'DELETE' });
+      expect(res.status).toBe(404);
+      expect(bucketKeys()).toEqual([]);
     });
 
     it('lasts as long as the setting says', async () => {
