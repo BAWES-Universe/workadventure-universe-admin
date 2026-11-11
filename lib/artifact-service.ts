@@ -857,7 +857,8 @@ export async function restoreVersion(id: string, number: number, viewer: Viewer,
 /**
  * The owner takes it back: the rows go first (every version with them), then the files, with the same retry for files the
  * bucket would not remove as the guest clean-up. A copy someone made keeps its own files. The delete only goes through for the
- * version it read, so a change that lands meanwhile is not left with a file nobody lists: it asks again.
+ * artifact as it read it, so a change that lands meanwhile is not left with a file nobody lists: it asks again. That holds
+ * for a new version, and for its files moving as it becomes "Just you" at the same moment (makeJustYou).
  */
 export async function deleteArtifact(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ deleted: true }> {
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -866,7 +867,7 @@ export async function deleteArtifact(id: string, viewer: Viewer, ctx: Context = 
     requireOpen(artifact, who, ctx.now);
     requireOwner(artifact, who);
     const versions = await prisma.artifactVersion.findMany({ where: { artifactId: artifact.id } });
-    const { count } = await prisma.artifact.deleteMany({ where: { id: artifact.id, latestVersion: artifact.latestVersion } });
+    const { count } = await prisma.artifact.deleteMany({ where: { id: artifact.id, latestVersion: artifact.latestVersion, openScope: artifact.openScope } });
     if (count === 1) {
       await removeFiles(ctx, keysOf(versions));
       return { deleted: true };
@@ -1017,7 +1018,9 @@ async function tieToBrowser(pass: PassRow, request: PrivateFileRequest, tokenHas
     if (current.redeemedAt !== null) {
       const sent = readCookie(request.cookies, passCookieName(tokenHash));
       if (sent && current.cookieHash && sameHash(hashOf(sent), current.cookieHash)) return null;
-      if (now.getTime() - current.redeemedAt.getTime() >= passRetryMs()) throw refused();
+      // How far apart the two moments are, not which came first: the first request may have read its clock a little
+      // after this one read its own, or on a server whose clock runs a little ahead
+      if (Math.abs(now.getTime() - current.redeemedAt.getTime()) >= passRetryMs()) throw refused();
     }
     const cookie = newSecret();
     // Only for the pass as it was read, so of two requests at the same moment one takes it and the other looks again

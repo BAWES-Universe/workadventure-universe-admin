@@ -559,7 +559,8 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       // The other request ties the pass between this one's reading it and taking it
       const real = fakePrisma.artifactPass.updateMany;
       const spy = jest.spyOn(fakePrisma.artifactPass, 'updateMany').mockImplementationOnce(async () => {
-        db.passes[0].redeemedAt = new Date();
+        // A moment later than this request's own, as it is when the other one came in after it and was quicker
+        db.passes[0].redeemedAt = new Date(Date.now() + 5);
         db.passes[0].cookieHash = 'a'.repeat(64);
         return { count: 0 };
       });
@@ -574,13 +575,19 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect((await fetchPrivate(address, inFrame)).status).toBe(403);
     });
 
-    it('refuses the one that loses when the seconds are over, however often it looks again', async () => {
+    // The request that won may have looked at the clock a little after the one that lost, or on another server whose
+    // clock is a little ahead: its moment can be later than the loser's own
+    it.each([
+      ['a moment later than its own', 5],
+      ['the same moment', 0],
+      ['a moment earlier', -5],
+    ])('refuses the one that loses where the setting says no seconds, when the other took the pass %s', async (_when, aheadMs) => {
       process.env.ARTIFACT_PASS_RETRY_SECONDS = '0';
       const id = await makePage();
       await justYou(id);
       const address = await ownerAddress(id);
       const spy = jest.spyOn(fakePrisma.artifactPass, 'updateMany').mockImplementationOnce(async () => {
-        db.passes[0].redeemedAt = new Date();
+        db.passes[0].redeemedAt = new Date(Date.now() + aheadMs);
         db.passes[0].cookieHash = 'a'.repeat(64);
         return { count: 0 };
       });
@@ -588,6 +595,22 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect(loser.status).toBe(403);
       expect(loser.headers.get('set-cookie')).toBeNull();
       expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ['long before', -60_000],
+      ["long after, by another server's clock", 60_000],
+    ])('opens nothing without the cookie when the first request was %s', async (_when, awayMs) => {
+      const id = await makePage();
+      await justYou(id);
+      const address = await ownerAddress(id);
+      const first = await fetchPrivate(address, inFrame);
+      expect(first.status).toBe(200);
+      db.passes[0].redeemedAt = new Date(Date.now() + awayMs);
+      const without = await fetchPrivate(address, inFrame);
+      expect(without.status).toBe(403);
+      expect(without.headers.get('set-cookie')).toBeNull();
+      expect((await fetchPrivate(address, { ...inFrame, cookie: cookieOf(first.headers) })).status).toBe(200);
     });
 
     it('shows a page only inside a frame: opened as a page of its own it is turned away, before anything is tied to that browser', async () => {
@@ -698,6 +721,25 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect((await fetchPrivate(second.replace('index.html', 'song.mp3'))).status).toBe(404);
       expect(db.passes).toEqual([]);
       expect(bucketKeys()).toEqual([]);
+    });
+
+    it('leaves no file behind when its owner deletes it at the moment it becomes "Just you"', async () => {
+      const id = await makePage();
+      const before = bucketKeys();
+      expect(before).toHaveLength(2);
+      // Its files move between the delete reading where they are and taking the rows
+      const real = fakePrisma.artifact.deleteMany;
+      const spy = jest.spyOn(fakePrisma.artifact, 'deleteMany').mockImplementationOnce(async (args) => {
+        await justYou(id);
+        expect(bucketKeys().some((key) => before.includes(key))).toBe(false);
+        return real(args);
+      });
+      expect((await call(remove, { viewer: viewer(person('owner')) }, { id, method: 'DELETE' })).status).toBe(200);
+      // It saw the change and read again where the files are
+      expect(spy).toHaveBeenCalledTimes(2);
+      expect(db.artifacts.some((artifact) => artifact.id === id)).toBe(false);
+      expect(bucketKeys()).toEqual([]);
+      expect(db.retired).toEqual([]);
     });
 
     it('lasts as long as the setting says', async () => {
