@@ -76,7 +76,7 @@ describe('who may reach the rules', () => {
 
   it('asks whether this person manages this bot, with no extra way in for its creator', async () => {
     await call(GET, 'GET');
-    expect(manages).toHaveBeenCalledWith('u-sara', 'sara@example.com', { id: 'bot-1', createdById: 'u-maker', roomId: 'room-1', ownerId: null }, { creatorPasses: false });
+    expect(manages).toHaveBeenCalledWith('u-sara', 'sara@example.com', { id: 'bot-1', createdById: 'u-maker', roomId: 'room-1', ownerId: null, deletedAt: null }, { creatorPasses: false });
   });
 
   it('answers 404 for a bot that does not exist', async () => {

@@ -122,7 +122,7 @@ export async function checkVisionPick(
     if (main?.ownerId && main.ownerId !== context.actorId) return OTHER_OWNER_TEXT;
   }
   // Saved through the room's bot editor, so this is a room bot: it has a room and no owner
-  const usable = await usableVisionKey(pick, { id: context.botId, createdById: context.makerId, roomId: context.roomId, ownerId: null });
+  const usable = await usableVisionKey(pick, { id: context.botId, createdById: context.makerId, roomId: context.roomId, ownerId: null, deletedAt: null });
   if (usable.ok) return null;
   switch (usable.problem) {
     case 'no-model':

@@ -245,6 +245,7 @@ export async function DELETE(
         createdById: true,
         roomId: true,
         ownerId: true,
+        deletedAt: true,
       },
     });
 

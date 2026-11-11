@@ -119,7 +119,7 @@ export async function canManageRoom(userId: string, roomId: string): Promise<boo
 export async function canManageBot(userId: string, botId: string): Promise<boolean> {
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
-    select: { id: true, createdById: true, roomId: true, ownerId: true },
+    select: { id: true, createdById: true, roomId: true, ownerId: true, deletedAt: true },
   });
   return !!bot && (await canManageThisBot(userId, null, bot, { creatorPasses: false }));
 }
@@ -212,7 +212,7 @@ export function forbiddenResponse(headers?: HeadersInit) {
  */
 export async function isSomeoneElsesBrick(viewer: Viewer, botId: string): Promise<boolean> {
   if (viewer.kind !== 'user') return false;
-  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { roomId: true, ownerId: true } });
+  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { roomId: true, ownerId: true, deletedAt: true } });
   return !!bot && isBrick(bot) && !ownsBrick(bot, viewer.user.id);
 }
 

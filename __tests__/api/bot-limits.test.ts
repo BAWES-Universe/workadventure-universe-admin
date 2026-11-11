@@ -7,7 +7,7 @@ import { GET, PATCH } from '@/app/api/admin/bot-limits/route';
 import { PATCH as patchKey } from '@/app/api/me/ai-keys/[id]/route';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
-import { getUniverseAiReplyLimits } from '@/lib/bot-limits';
+import { getBrickLimits, getUniverseAiReplyLimits } from '@/lib/bot-limits';
 import { checkBotLimit, checkServerLimits, limitsForBot, readServerLimits, REPLY_LIMITS_RECOMMENDED, SERVER_LIMITS_RECOMMENDED } from '@/lib/bot-limit-values';
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -52,7 +52,18 @@ describe('the values', () => {
       guard: true,
       fairUsage: { signedIn: 30, guest: 10, guestPool: 200 },
       files: { text: 2_000_000, findable: 0, guestDays: 1 },
+      bricks: { undoDays: 7, offerAfter: 3 },
     });
+  });
+
+  it('keeps the two numbers for Bricks as settings: whole numbers, each inside what can be saved (game #1996)', () => {
+    expect(readServerLimits({ bricks: { undoDays: 30 } }).bricks).toEqual({ undoDays: 30, offerAfter: 3 });
+    // A saved value that can't be saved reads as the recommended one
+    expect(readServerLimits({ bricks: { undoDays: 0, offerAfter: 'often' } }).bricks).toEqual({ undoDays: 7, offerAfter: 3 });
+    expect(checkServerLimits({ bricks: { undoDays: 14, offerAfter: 5 } })).toEqual({ ok: true, value: { bricks: { undoDays: 14, offerAfter: 5 } } });
+    for (const bad of [0, 366, 2.5]) expect(checkServerLimits({ bricks: { undoDays: bad } })).toMatchObject({ ok: false, error: expect.stringContaining('bricks.undoDays') });
+    for (const bad of [1, 101, 3.5]) expect(checkServerLimits({ bricks: { offerAfter: bad } })).toMatchObject({ ok: false, error: expect.stringContaining('bricks.offerAfter') });
+    expect(checkServerLimits({ bricks: { colour: 1 } })).toMatchObject({ ok: false, error: 'Unknown limit: bricks.colour' });
   });
 
   it('starts "Reads from an earlier file" at "Reads from a page or file" when that one was saved lower (#1508)', () => {
@@ -144,6 +155,17 @@ describe('/api/admin/bot-limits', () => {
     expect(response.status).toBe(200);
     expect((await response.json()).limits.files).toEqual({ text: 2_000_000, findable: 365, guestDays: 7 });
     expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { files: { guestDays: 0 } }))).status).toBe(400);
+  });
+
+  it('saves the numbers for Bricks on top of what is saved, and gives them to whoever deletes or suggests (game #1996)', async () => {
+    expect(await getBrickLimits()).toEqual({ undoDays: 7, offerAfter: 3 });
+    settings.findUnique.mockResolvedValue({ key: 'bot-limits', value: { bricks: { offerAfter: 5 } } });
+    const response = await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { undoDays: 14 } }));
+    expect(response.status).toBe(200);
+    expect((await response.json()).limits.bricks).toEqual({ undoDays: 14, offerAfter: 5 });
+    expect(settings.upsert.mock.calls[0][0].update.value.bricks).toEqual({ offerAfter: 5, undoDays: 14 });
+    expect(await getBrickLimits()).toEqual({ undoDays: 7, offerAfter: 5 });
+    expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { undoDays: 0 } }))).status).toBe(400);
   });
 
   it('turns down "Reads from an earlier file" above "Reads from a page or file", saying why, and saves nothing', async () => {

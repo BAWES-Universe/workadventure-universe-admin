@@ -186,6 +186,10 @@ export async function transformBotToServerFormat(
  * A Brick for the bot server (game #1995): the same fields a room bot has, with no room, world or universe URL, and
  * `brick` saying whose it is. A Brick lives in its owner's chats, so it stands nowhere: it never moves and is never put
  * on a map from this answer. Its voice stays off here: a Brick is spoken to in a call, which is its own issue.
+ *
+ * A Brick its owner deleted (game #1996) is still answered while it waits for Undo, as off and with `brick.deleted`
+ * true, and never as "not found": a bot server takes "not found" as gone for good and closes the bot's chats, and Undo
+ * has to find the chat as it was. It is "not found" from the day it is removed.
  */
 export function transformBrickToServerFormat(
   bot: Pick<
@@ -203,6 +207,7 @@ export function transformBrickToServerFormat(
     | 'toolTimeoutSeconds'
     | 'maxReplyTokens'
     | 'maxSteps'
+    | 'deletedAt'
   >,
   isDefault: boolean
 ) {
@@ -212,7 +217,7 @@ export function transformBrickToServerFormat(
   return {
     botId: bot.id,
     name: bot.name,
-    brick: { ownerId: bot.ownerId, isDefault },
+    brick: { ownerId: bot.ownerId, isDefault, deleted: bot.deletedAt !== null },
     roomUrl: null,
     worldUrl: null,
     universeUrl: null,
@@ -220,7 +225,8 @@ export function transformBrickToServerFormat(
     behaviorType: 'idle',
     behaviorConfig: { ...stored, showToolCalls: stored.showToolCalls === true, behaviorType: 'idle', assignedSpace },
     assignedSpace,
-    enabled: bot.enabled,
+    // The database keeps a deleted Brick off; said here too, so the answer never depends on that alone
+    enabled: bot.enabled && bot.deletedAt === null,
     characterTextureIds: bot.characterTextureId ? [bot.characterTextureId] : [],
     createdAt: bot.createdAt.toISOString(),
     updatedAt: bot.updatedAt.toISOString(),

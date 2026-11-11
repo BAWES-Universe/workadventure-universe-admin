@@ -11,10 +11,15 @@
  * what it means without a room. Nothing a Brick has is ever decided by a room it is not in.
  */
 
-/** Where a bot lives, as stored: a room for a room bot, an owner for a Brick. */
+/**
+ * Where a bot lives, as stored: a room for a room bot, an owner for a Brick. `deletedAt` is set while a Brick its owner
+ * deleted waits for Undo (game #1996). It is asked for by name, never optional, so that whoever decides something about
+ * a Brick has to read it.
+ */
 export interface BotHome {
   roomId: string | null;
   ownerId: string | null;
+  deletedAt: Date | null;
 }
 
 /** Whether this bot is a Brick: it has no room. */
@@ -22,9 +27,14 @@ export function isBrick(bot: { roomId: string | null }): boolean {
   return bot.roomId === null;
 }
 
-/** Whether this person owns this Brick. Always false for a room bot, whoever made it. */
+/**
+ * Whether this person owns this Brick, and has it now. Always false for a room bot, whoever made it. False too for a
+ * Brick that waits deleted: until its owner takes it back with Undo it is nobody's to chat with, read or change, so
+ * everything that asks here stops for it at once. Only the Bricks page's own list, Undo and the last removal read a
+ * deleted Brick, and they ask the database for it by name (lib/brick-delete.ts).
+ */
 export function ownsBrick(bot: BotHome, userId: string | null | undefined): boolean {
-  return bot.roomId === null && !!userId && bot.ownerId === userId;
+  return bot.roomId === null && bot.deletedAt === null && !!userId && bot.ownerId === userId;
 }
 
 /** What a part of a bot's page that needs a room says for a Brick, with a 404: there is no room to read. */

@@ -151,6 +151,7 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
       createdById: true,
       roomId: true,
       ownerId: true,
+      deletedAt: true,
       privateBot: true,
       refusalReply: true,
       accessRules: { select: { roleId: true, userId: true, allow: true, deny: true } },

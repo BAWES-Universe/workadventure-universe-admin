@@ -353,7 +353,7 @@ export async function POST(request: NextRequest) {
       const existingBot = validatedData.botId
         ? await prisma.bot.findUnique({
             where: { id: validatedData.botId },
-            select: { id: true, createdById: true, roomId: true, ownerId: true },
+            select: { id: true, createdById: true, roomId: true, ownerId: true, deletedAt: true },
           })
         : null;
 
@@ -534,7 +534,7 @@ export async function POST(request: NextRequest) {
       {
         const existing = await prisma.bot.findUnique({
           where: { id: validatedData.botId },
-          select: { behaviorConfig: true, roomId: true, ownerId: true, aiProviderRef: true },
+          select: { behaviorConfig: true, roomId: true, ownerId: true, deletedAt: true, aiProviderRef: true },
         });
         // The same answer for whoever got this far with a Brick (the bot server's admin token): nothing is saved
         if (existing && existing.roomId === null) {

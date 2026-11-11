@@ -62,6 +62,14 @@ export interface FairUsage {
   guestPool: number;
 }
 
+/** A person's own Bricks (game #1996). */
+export interface BrickLimits {
+  /** Days a deleted Brick waits before it is gone for good; Undo gives it back until then. */
+  undoDays: number;
+  /** Times the same kind of job has to come back before a Brick suggests a Brick for it. */
+  offerAfter: number;
+}
+
 /** What a super admin sets, all in one place. */
 export interface ServerLimits {
   universeAi: ReplyLimits;
@@ -70,12 +78,14 @@ export interface ServerLimits {
   guard: boolean;
   fairUsage: FairUsage;
   files: FileLimits;
+  bricks: BrickLimits;
 }
 
 export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60, recentFiles: 5, results: 10, part: 8000, room: 80000 };
 export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 };
 export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0, guestDays: 1 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
+export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
 export const FAIR_USAGE_WINDOW_HOURS = 5;
 
@@ -85,6 +95,7 @@ export const SERVER_LIMITS_RECOMMENDED: ServerLimits = {
   guard: true,
   fairUsage: FAIR_USAGE_RECOMMENDED,
   files: FILE_LIMITS_RECOMMENDED,
+  bricks: BRICK_LIMITS_RECOMMENDED,
 };
 
 /**
@@ -131,8 +142,14 @@ const FAIR_USAGE_RANGES: Record<keyof FairUsage, Range> = {
   guestPool: { min: 1, max: 1_000_000, whole: true },
 };
 
+const BRICK_RANGES: Record<keyof BrickLimits, Range> = {
+  undoDays: { min: 1, max: 365, whole: true },
+  // Never 1: a job that came once has not come back
+  offerAfter: { min: 2, max: 100, whole: true },
+};
+
 /** The values each group can hold, for the pages to say ("Between 1 and 100 files") before anything is sent. */
-export const LIMIT_RANGES = { reply: REPLY_RANGES, artifacts: ARTIFACT_RANGES, fairUsage: FAIR_USAGE_RANGES, files: FILE_RANGES };
+export const LIMIT_RANGES = { reply: REPLY_RANGES, artifacts: ARTIFACT_RANGES, fairUsage: FAIR_USAGE_RANGES, files: FILE_RANGES, bricks: BRICK_RANGES };
 
 const fits = (value: unknown, range: Range): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value >= range.min && value <= range.max && (!range.whole || Number.isInteger(value));
@@ -180,6 +197,7 @@ export function readServerLimits(saved: unknown): ServerLimits {
     guard: typeof all.guard === 'boolean' ? all.guard : SERVER_LIMITS_RECOMMENDED.guard,
     fairUsage: readGroup(all.fairUsage, FAIR_USAGE_RANGES, FAIR_USAGE_RECOMMENDED),
     files: readGroup(all.files, FILE_RANGES, FILE_LIMITS_RECOMMENDED),
+    bricks: readGroup(all.bricks, BRICK_RANGES, BRICK_LIMITS_RECOMMENDED),
   };
 }
 
@@ -203,17 +221,28 @@ function checkGroup<T extends object>(input: unknown, ranges: Record<keyof T, Ra
 
 export const checkReplyLimits = (input: unknown, group = 'limits'): Checked<Partial<ReplyLimits>> => checkGroup(input, REPLY_RANGES, group);
 
-/** A super admin's change: any of the five parts, each checked. */
-export function checkServerLimits(input: unknown): Checked<Partial<{ universeAi: Partial<ReplyLimits>; artifacts: Partial<ArtifactLimits>; guard: boolean; fairUsage: Partial<FairUsage>; files: Partial<FileLimits> }>> {
+/** A super admin's change, as it can be sent: any of the parts, each with only the values that change. */
+export type ServerLimitsChange = Partial<{
+  universeAi: Partial<ReplyLimits>;
+  artifacts: Partial<ArtifactLimits>;
+  guard: boolean;
+  fairUsage: Partial<FairUsage>;
+  files: Partial<FileLimits>;
+  bricks: Partial<BrickLimits>;
+}>;
+
+/** A super admin's change: any of the six parts, each checked. */
+export function checkServerLimits(input: unknown): Checked<ServerLimitsChange> {
   if (!isRecord(input)) return { ok: false, error: 'Expected an object' };
-  const out: Partial<{ universeAi: Partial<ReplyLimits>; artifacts: Partial<ArtifactLimits>; guard: boolean; fairUsage: Partial<FairUsage>; files: Partial<FileLimits> }> = {};
+  const out: ServerLimitsChange = {};
   for (const [key, value] of Object.entries(input)) {
     if (key === 'guard') {
       if (typeof value !== 'boolean') return { ok: false, error: 'guard must be true or false' };
       out.guard = value;
       continue;
     }
-    const ranges = key === 'universeAi' ? REPLY_RANGES : key === 'artifacts' ? ARTIFACT_RANGES : key === 'fairUsage' ? FAIR_USAGE_RANGES : key === 'files' ? FILE_RANGES : null;
+    const ranges =
+      key === 'universeAi' ? REPLY_RANGES : key === 'artifacts' ? ARTIFACT_RANGES : key === 'fairUsage' ? FAIR_USAGE_RANGES : key === 'files' ? FILE_RANGES : key === 'bricks' ? BRICK_RANGES : null;
     if (!ranges) return { ok: false, error: `Unknown setting: ${key}` };
     const checked = checkGroup(value, ranges as Record<string, Range>, key);
     if (!checked.ok) return checked;
