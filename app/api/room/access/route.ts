@@ -9,6 +9,7 @@ import { resolveTextureUrls, resolveCompanionTexture } from '@/lib/avatar-catalo
 import { notifyRoomAccess } from '@/lib/discord';
 import { isBotIdentifier } from '@/lib/bot-visitor';
 import { isLinkableGuestId, linkGuestVisits } from '@/lib/guest-sign-in-link';
+import { adoptGuestChat } from '@/lib/guest-brick';
 import { currentOutfit, recordOutfitPick } from '@/lib/user-outfits';
 import { companionWearableHere, wearableHere } from '@/lib/woka-wearable';
 import { canSeeRoom } from '@/lib/room-visibility';
@@ -204,6 +205,12 @@ export async function GET(request: NextRequest) {
       if (user && isAuthenticated && !user.isGuest && !unverifiedAccount && !isBotIdentifier(finalUuid) && isLinkableGuestId(previousGuestUuid, user.uuid)) {
         try {
           await linkGuestVisits(previousGuestUuid, { id: user.id, uuid: user.uuid, name: user.name, email: user.email });
+        } catch (error) {
+          Sentry.captureException(error);
+        }
+        // Their chat with the Brick for guests joins the account's one Brick the same way (game #1997), once
+        try {
+          await adoptGuestChat(previousGuestUuid, user.id);
         } catch (error) {
           Sentry.captureException(error);
         }

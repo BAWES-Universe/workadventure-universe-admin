@@ -134,6 +134,20 @@ describe('Universe AI limits', () => {
     await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ files: { guestDays: 7 } }));
   });
 
+  it('shows the Brick for guests\' two numbers under Bricks and saves one on the limits route (game #1997)', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    expect(await screen.findByText('Bricks')).toBeTruthy();
+    expect(screen.getByText('Replies for a guest from the Brick for guests')).toBeTruthy();
+    expect(screen.getByText('Replies for all guests from the Brick for guests, in one universe')).toBeTruthy();
+    expect(screen.getByTestId('limit-guestReplies').textContent).toContain('10 replies');
+    expect(screen.getByTestId('limit-universePool').textContent).toContain('200 replies');
+    fireEvent.click(screen.getByTestId('limit-guestReplies'));
+    fireEvent.click(await screen.findByRole('radio', { name: /20 replies/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ bricks: { guestReplies: 20 } }));
+  });
+
   it('turns media in artifacts off with None (#1510)', async () => {
     answer();
     render(<UniverseAiLimits />);

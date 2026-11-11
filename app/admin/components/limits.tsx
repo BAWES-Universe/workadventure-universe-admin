@@ -555,7 +555,11 @@ export function fairUsageLimits(values: FairUsage): Limit[] {
   ], LIMIT_RANGES.fairUsage);
 }
 
-/** A person's own Bricks (game #1996): how long a deleted one can be brought back, and when a Brick suggests another. */
+/**
+ * Limits for Bricks. A person's own Bricks (game #1996): how long a deleted one can be brought back, and when a Brick
+ * suggests another. The Brick for guests (game #1997): its own allowance, apart from the replies a guest gets from a
+ * host's bots, so a guest who talks to it can still talk to a host's bots as much as before.
+ */
 export function brickLimits(values: BrickLimits): Limit[] {
   const recommended = BRICK_LIMITS_RECOMMENDED;
   return withRanges([
@@ -584,6 +588,30 @@ export function brickLimits(values: BrickLimits): Limit[] {
         { value: 3, label: '3 times', meaning: 'Suggests it early.' },
         { value: 5, label: '5 times', meaning: 'Waits a little longer.' },
         { value: 10, label: '10 times', meaning: 'Only for a job that comes back a lot.' },
+      ],
+    },
+    {
+      id: 'guestReplies',
+      label: 'Replies for a guest from the Brick for guests',
+      hint: `Its own allowance, every ${FAIR_USAGE_WINDOW_HOURS} hours. Replies from a host’s bots don’t use it.`,
+      unit: 'replies',
+      value: values.guestReplies,
+      recommended: recommended.guestReplies,
+      options: [
+        { value: 10, label: '10 replies', meaning: every },
+        { value: 20, label: '20 replies', meaning: every },
+      ],
+    },
+    {
+      id: 'universePool',
+      label: 'Replies for all guests from the Brick for guests, in one universe',
+      hint: `Shared by every guest in that universe, every ${FAIR_USAGE_WINDOW_HOURS} hours. Nothing comes from a host.`,
+      unit: 'replies',
+      value: values.universePool,
+      recommended: recommended.universePool,
+      options: [
+        { value: 200, label: '200 replies', meaning: every },
+        { value: 500, label: '500 replies', meaning: every },
       ],
     },
   ], LIMIT_RANGES.bricks);

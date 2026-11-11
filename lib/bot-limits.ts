@@ -86,6 +86,9 @@ export async function getUniverseAiReplyLimits(): Promise<{ signedIn: number; gu
 /**
  * A person's own Bricks (game #1996): how many days a deleted Brick can be brought back, and how often the same kind of
  * job has to come back before a Brick suggests a Brick for it. 7 and 3 until a super admin changes them.
+ * The Brick for guests (game #1997) has its own two: replies one guest gets from it, and replies all guests together get
+ * from it in one universe, 10 and 200 until changed. They are apart from fair usage: a guest's replies from it never count
+ * toward the replies a host's bot gives them.
  */
 export async function getBrickLimits(): Promise<ServerLimits['bricks']> {
   return (await getServerLimits()).bricks;
