@@ -5,6 +5,7 @@ import { isIfDown } from '@/lib/ai-key-health';
 import { resolveUniverseAiProvider, UNIVERSE_AI_REF } from '@/lib/universe-ai';
 import { allowedModels, canCallTools, keyModels, lendModels, modelFactsOf, modelSupportsVision, servedModel } from '@/lib/ai-key-model-list';
 import { getServerLimits, keyReplyLimits } from '@/lib/bot-limits';
+import { BRICK_HAS_NO_ROOM, isBrick } from '@/lib/brick';
 import type { ReplyLimits } from '@/lib/bot-limit-values';
 import { keyVisionModels, readVisionPick, usableVisionKey, type AnotherProblem, type VisionPick } from '@/lib/bot-vision';
 
@@ -73,6 +74,9 @@ export async function botAiOptions(input: {
       })
     : null;
   if (input.botId && !bot) return { ok: false, status: 404, error: 'Bot not found' };
+  // A Brick (game #1992) has no room: what it may run on is not a room's to offer, and its own picker comes with Bricks.
+  // The room in the request is never read for a bot that exists, so a Brick is never judged by a room it is not in.
+  if (bot && isBrick(bot)) return { ok: false, status: 404, error: BRICK_HAS_NO_ROOM };
   const roomId = bot?.roomId ?? input.roomId;
   if (!roomId) return { ok: false, status: 404, error: 'Room not found' };
 
@@ -85,7 +89,7 @@ export async function botAiOptions(input: {
   // configuration, so a bot's own Manage rules also decide who learns whose key it runs on
   const allowed = input.viewer.isSuperAdmin
     || (bot
-      ? await canManageThisBot(input.viewer.id, null, { id: bot.id, createdById: bot.createdById, roomId: bot.roomId }, { creatorPasses: false })
+      ? await canManageThisBot(input.viewer.id, null, { id: bot.id, createdById: bot.createdById, roomId, ownerId: null }, { creatorPasses: false })
       : await canManageBots(input.viewer.id, roomId));
   if (!allowed) {
     return { ok: false, status: 403, error: 'You do not have permission to manage bots in this room' };
@@ -123,7 +127,7 @@ export async function botAiOptions(input: {
   const currentModel = current && bot ? servedModel(bot, current, currentLend) : null;
 
   const saved = readVisionPick(bot?.behaviorConfig);
-  const savedKey = saved?.choice === 'another' && bot ? await savedVisionKey(saved, bot, current?.ownerId ?? null, input.viewer.id) : null;
+  const savedKey = saved?.choice === 'another' && bot ? await savedVisionKey(saved, { id: bot.id, createdById: bot.createdById, roomId }, current?.ownerId ?? null, input.viewer.id) : null;
 
   return {
     ok: true,
@@ -156,7 +160,8 @@ async function savedVisionKey(
   mainKeyOwnerId: string | null,
   viewerId: string
 ): Promise<{ name: string; problem: AnotherProblem | null }> {
-  const usable = await usableVisionKey(saved, bot, { mainKeyOwnerId });
+  // Only a room bot gets this far (botAiOptions answers "not in a room" for a Brick)
+  const usable = await usableVisionKey(saved, { ...bot, ownerId: null }, { mainKeyOwnerId });
   const problem = usable.ok ? null : usable.problem;
   if (!usable.key) return { name: 'A key that was removed', problem };
   // Someone else's key is named by whose it is, as the key the bot runs on is (#709)

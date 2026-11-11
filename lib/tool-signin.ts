@@ -38,10 +38,11 @@ function clampAt(at: Date | undefined, now = new Date()): Date {
 async function peopleWhoCanManageTools(botId: string): Promise<Set<string>> {
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
-    select: { id: true, createdById: true, roomId: true, mcpServers: { select: { connectedById: true } } },
+    select: { id: true, createdById: true, roomId: true, ownerId: true, mcpServers: { select: { connectedById: true } } },
   });
   if (!bot) return new Set();
-  const candidates = new Set([bot.createdById, ...bot.mcpServers.map((server) => server.connectedById)].filter((id): id is string => !!id));
+  // A Brick's owner (game #1992) is the only one who manages it, whoever made it
+  const candidates = new Set([bot.ownerId, bot.createdById, ...bot.mcpServers.map((server) => server.connectedById)].filter((id): id is string => !!id));
   const told = new Set<string>();
   for (const userId of candidates) {
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
@@ -209,7 +210,7 @@ export async function dropOrphanedToolSignInNotices(userId: string): Promise<voi
     if (open.length === 0) return;
     // The key is "tool-signin:<bot id>:<time>"
     const botIdOf = (key: string) => key.split(':')[1] ?? '';
-    const bots = await prisma.bot.findMany({ where: { id: { in: open.map((notice) => botIdOf(notice.dedupeKey)) } }, select: { id: true, createdById: true, roomId: true } });
+    const bots = await prisma.bot.findMany({ where: { id: { in: open.map((notice) => botIdOf(notice.dedupeKey)) } }, select: { id: true, createdById: true, roomId: true, ownerId: true } });
     const email = bots.length > 0 ? ((await prisma.user.findUnique({ where: { id: userId }, select: { email: true } }))?.email ?? null) : null;
     // One person, one request: their standing in a room is worked out once, and the bots' rules are read in one query
     const memo: ManageMemo = new Map();

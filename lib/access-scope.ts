@@ -111,11 +111,14 @@ export async function canManageRoom(userId: string, roomId: string): Promise<boo
   return !!member;
 }
 
-/** A bot is managed by whoever can manage the room it lives in, unless the bot's own Manage rules say otherwise (#427). */
+/**
+ * A bot is managed by whoever can manage the room it lives in, unless the bot's own Manage rules say otherwise (#427).
+ * A Brick has no room: only its owner manages it (game #1992).
+ */
 export async function canManageBot(userId: string, botId: string): Promise<boolean> {
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
-    select: { id: true, createdById: true, roomId: true },
+    select: { id: true, createdById: true, roomId: true, ownerId: true },
   });
   return !!bot && (await canManageThisBot(userId, null, bot, { creatorPasses: false }));
 }

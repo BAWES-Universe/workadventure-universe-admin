@@ -1,7 +1,7 @@
 import type { BotsAiProvider } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { kindInfo } from '@/lib/ai-key-kinds';
-import { checkKeyForBot, KEY_FOR_BOT_TEXT } from '@/lib/ai-key-pay';
+import { checkKeyForBot, KEY_FOR_BOT_TEXT, type BotForKey } from '@/lib/ai-key-pay';
 import { recheckIfDue } from '@/lib/ai-key-health';
 import { resolveVisionSupport } from '@/lib/vision-models';
 import { UNIVERSE_AI_MISSING, resolveUniverseAiProvider } from '@/lib/universe-ai';
@@ -76,7 +76,7 @@ export type AnotherProblem = 'gone' | 'no-owner' | 'other-owner' | 'not-lent' | 
  */
 export async function usableVisionKey(
   pick: Extract<VisionPick, { choice: 'another' }>,
-  bot: { id: string | null; createdById: string | null; roomId: string },
+  bot: BotForKey,
   options: { recheck?: boolean; mainKeyOwnerId?: string | null } = {}
 ): Promise<{ ok: true; key: BotsAiProvider } | { ok: false; problem: AnotherProblem; key: BotsAiProvider | null }> {
   const key = await prisma.botsAiProvider.findUnique({ where: { providerId: pick.keyId } });
@@ -121,7 +121,8 @@ export async function checkVisionPick(
     const main = await prisma.botsAiProvider.findUnique({ where: { providerId: context.mainRef }, select: { ownerId: true } });
     if (main?.ownerId && main.ownerId !== context.actorId) return OTHER_OWNER_TEXT;
   }
-  const usable = await usableVisionKey(pick, { id: context.botId, createdById: context.makerId, roomId: context.roomId });
+  // Saved through the room's bot editor, so this is a room bot: it has a room and no owner
+  const usable = await usableVisionKey(pick, { id: context.botId, createdById: context.makerId, roomId: context.roomId, ownerId: null });
   if (usable.ok) return null;
   switch (usable.problem) {
     case 'no-model':

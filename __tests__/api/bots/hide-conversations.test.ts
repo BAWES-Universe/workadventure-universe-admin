@@ -621,7 +621,7 @@ describe('deleting a bot, room, world or universe', () => {
     db.bot.findMany.mockResolvedValue([]);
     await deleteWithHiddenBotData({ roomId: 'r1' }, remove as never);
     expect(db.bot.findMany).toHaveBeenCalledWith({
-      where: { AND: [{ roomId: 'r1' }, { OR: [{ hideConversations: true }, { room: { world: { universe: { hideBotConversations: true } } } }] }] },
+      where: { AND: [{ roomId: 'r1' }, { OR: [{ hideConversations: true }, { roomId: null }, { room: { world: { universe: { hideBotConversations: true } } } }] }] },
       select: { id: true },
     });
   });

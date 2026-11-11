@@ -110,6 +110,10 @@ export async function transformBotToServerFormat(
   hasPermission: boolean
 ): Promise<any> {
   const playUrl = process.env.PLAY_URL || 'http://play.workadventure.localhost';
+
+  // This shape is a room bot's: it is built around the room's URL. A Brick (game #1992) has none, and the callers answer
+  // for a Brick before they get here.
+  if (!bot.room) throw new Error('A bot with no room has no configuration in the room bot shape');
   
   // Get behaviorConfig and ensure assignedSpace exists
   const behaviorConfig = bot.behaviorConfig as any;

@@ -131,21 +131,24 @@ export interface BotPlace {
   universeOwnerId: string;
 }
 
+/**
+ * Where a room bot stands. Null when there is no such bot, and for a Brick (game #1992): a bot's rules name the roles of
+ * its universe, and a Brick stands in none. Only its owner uses a Brick, so it has no rules to read or change.
+ */
 export async function loadBotPlace(botId: string): Promise<(BotPlace & { roomId: string }) | null> {
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
     select: {
       id: true,
       createdById: true,
-      roomId: true,
-      room: { select: { world: { select: { universeId: true, universe: { select: { ownerId: true } } } } } },
+      room: { select: { id: true, world: { select: { universeId: true, universe: { select: { ownerId: true } } } } } },
     },
   });
-  if (!bot) return null;
+  if (!bot || !bot.room) return null;
   return {
     id: bot.id,
     createdById: bot.createdById,
-    roomId: bot.roomId,
+    roomId: bot.room.id,
     universeId: bot.room.world.universeId,
     universeOwnerId: bot.room.world.universe.ownerId,
   };
@@ -165,7 +168,8 @@ export async function readBotSettings(botId: string) {
       accessRules: { select: RULE_SELECT, orderBy: { createdAt: 'asc' } },
     },
   });
-  if (!bot) return null;
+  // No such bot, or a Brick: it stands in no universe, so there are no roles to give rules to (see loadBotPlace)
+  if (!bot || !bot.room) return null;
 
   const roles = await prisma.role.findMany({
     where: { universeId: bot.room.world.universeId, key: { not: ADMIN_KEY } },

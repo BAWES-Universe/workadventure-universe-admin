@@ -268,7 +268,7 @@ async function summaries(rows: KeyRow[], ownerId: string): Promise<VoiceKeySumma
     };
     const botsIn = (universeId: string): BotOnKey[] =>
       bots
-        .filter((bot) => bot.room.world.universeId === universeId)
+        .filter((bot) => bot.room?.world.universeId === universeId)
         .flatMap((bot) => {
           const named = namedProviders(profileOf.get(bot.id)).filter((choice) => choice.providerId === row.id);
           if (named.length === 0) return [];

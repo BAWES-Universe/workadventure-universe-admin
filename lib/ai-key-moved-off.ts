@@ -37,7 +37,7 @@ export async function tellKeyOwnerMovedOff(input: {
           : to.ownerId
             ? `${who}’s ${kindInfo((to.settings as { kind?: unknown } | null)?.kind)?.label ?? 'AI key'}`
             : to.name;
-    const universe = place?.room.world.universe.name;
+    const universe = place?.room?.world.universe.name;
     await addNotice({
       userId: from.ownerId,
       kind: 'ai-key-moved',

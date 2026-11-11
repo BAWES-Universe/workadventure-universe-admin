@@ -14,7 +14,7 @@ const db = prisma.botsAiProvider as unknown as Record<'findUnique' | 'findFirst'
 const verdict = checkKeyForBot as jest.Mock;
 const PICK = { choice: 'another', keyId: 'key-1', model: 'deepseek-v4-flash-vision-exp' } as const;
 const deepseekKey = { providerId: 'key-1', name: 'My DeepSeek', ownerId: 'maker', model: 'deepseek-v4-flash', supportsVision: false, settings: { kind: 'deepseek' }, downSince: null };
-const bot = { id: 'bot-1', createdById: 'maker', roomId: 'room-1' };
+const bot = { id: 'bot-1', createdById: 'maker', roomId: 'room-1', ownerId: null };
 const ctx = (over: object = {}) => ({ current: null, actorId: 'maker', makerId: 'maker', roomId: 'room-1', botId: 'bot-1', ...over });
 
 beforeEach(() => {
@@ -139,7 +139,7 @@ describe('saving a pick', () => {
   it('lets anyone who manages the bot pick their own key for it (#709), not only its maker', async () => {
     db.findUnique.mockResolvedValue({ ...deepseekKey, ownerId: 'khalid' });
     expect(await checkVisionPick(PICK, ctx({ actorId: 'khalid', makerId: 'maker' }))).toBeNull();
-    expect(verdict).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'khalid', bot: { id: 'bot-1', createdById: 'maker', roomId: 'room-1' } });
+    expect(verdict).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'khalid', bot: { id: 'bot-1', createdById: 'maker', roomId: 'room-1', ownerId: null } });
   });
 
   it('keeps images off your key while the bot runs on someone else’s key', async () => {

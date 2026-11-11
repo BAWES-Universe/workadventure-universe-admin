@@ -72,6 +72,9 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   if (!bot) return false;
   // The bot left this key while the reply was on its way: the report is about a key it isn't on, so it says nothing here
   if (bot.aiProviderRef !== key.providerId) return true;
+  // A Brick (game #1992) stands in no universe, so nothing below applies to it: no lend names its models and no universe
+  // owner is there to tell. Its reply's failure counts against the key as before.
+  if (!bot.room) return false;
   const universe = bot.room.world.universe;
   const readLend = async () =>
     lendModels((await prisma.aiKeyLend.findUnique({ where: { providerId_universeId: { providerId: key.providerId, universeId: universe.id } }, select: { models: true } }))?.models);

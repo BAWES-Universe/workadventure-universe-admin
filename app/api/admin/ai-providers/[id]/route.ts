@@ -5,6 +5,7 @@ import { isSuperAdmin } from '@/lib/super-admin';
 import { encryptApiKey } from '@/lib/encryption';
 import { isVisionEligible } from '@/lib/vision-models';
 import { UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
+import { ROOM_BOTS_ONLY } from '@/lib/brick';
 
 /**
  * GET /api/admin/ai-providers/:id
@@ -38,10 +39,11 @@ export async function GET(
       );
     }
 
-    // Find all bots using this provider
+    // Find all bots using this provider. Room bots only: a Brick (game #1992) is its owner's and is not listed to others.
     const bots = await prisma.bot.findMany({
       where: {
         aiProviderRef: id,
+        ...ROOM_BOTS_ONLY,
       },
       select: {
         id: true,

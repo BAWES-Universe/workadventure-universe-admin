@@ -17,6 +17,7 @@ import { clearBotRunsOnNotices } from '@/lib/notices';
 import { tellKeyOwnerMovedOff } from '@/lib/ai-key-moved-off';
 import { z } from 'zod';
 import { corsHeaders } from '@/lib/cors';
+import { ROOM_BOTS_ONLY, brickHasNoRoomText } from '@/lib/brick';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
@@ -151,8 +152,11 @@ export async function GET(request: NextRequest) {
     const includeSensitive = searchParams.get('includeSensitive') === 'true';
 
     // Build where clause
+    // The list is every bot that stands in a room. A Brick (game #1992) has no room URL and is never in it: a bot server
+    // that only knows room bots must not be handed one. How a bot server asks for Bricks comes with game #1995.
     const where: any = {
       enabled: true, // Always filter by enabled = true for list endpoint
+      ...ROOM_BOTS_ONLY,
     };
 
     // Filter by roomUrl
@@ -348,9 +352,22 @@ export async function POST(request: NextRequest) {
       const existingBot = validatedData.botId
         ? await prisma.bot.findUnique({
             where: { id: validatedData.botId },
-            select: { id: true, createdById: true, roomId: true },
+            select: { id: true, createdById: true, roomId: true, ownerId: true },
           })
         : null;
+
+      // A Brick (game #1992) has no room, and this save always puts the bot in the room it names. Placing a Brick in a
+      // room is its own issue; until then a Brick is not saved here (the bot server's saves are answered further down).
+      if (existingBot && existingBot.roomId === null) {
+        const response = NextResponse.json(
+          { error: brickHasNoRoomText(existingBot, { userId }) },
+          { status: 404 }
+        );
+        Object.entries(corsHeaders(request)).forEach(([key, value]) => {
+          response.headers.set(key, value);
+        });
+        return response;
+      }
 
       // Changing a bot that stays in its room is decided by the bot's own check (the same as PUT /api/bots/:id), so a
       // Yes on "Manage this bot" works here too. Creating a bot, or moving one to another room, needs Manage bots in
@@ -516,8 +533,19 @@ export async function POST(request: NextRequest) {
       {
         const existing = await prisma.bot.findUnique({
           where: { id: validatedData.botId },
-          select: { behaviorConfig: true, roomId: true, aiProviderRef: true },
+          select: { behaviorConfig: true, roomId: true, ownerId: true, aiProviderRef: true },
         });
+        // The same answer for whoever got this far with a Brick (the bot server's admin token): nothing is saved
+        if (existing && existing.roomId === null) {
+          const response = NextResponse.json(
+            { error: brickHasNoRoomText(existing, { userId, isAdminToken }) },
+            { status: 404 }
+          );
+          Object.entries(corsHeaders(request)).forEach(([key, value]) => {
+            response.headers.set(key, value);
+          });
+          return response;
+        }
         // A model belongs to one key (#575): a bot moved to another key, or off keys, starts on that key's check model
         moveOffModel = updateData.aiProviderRef !== undefined && updateData.aiProviderRef !== (existing?.aiProviderRef ?? null);
         // Hide bot conversations (#435): a move out of a hiding universe keeps the bot Private

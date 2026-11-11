@@ -101,7 +101,7 @@ run('passing a universe to another account (real database)', () => {
 
   beforeEach(reset);
 
-  const botRuns = () => checkKeyForBot({ keyId, keyOwnerId: people.owner, bot: { id: botId, createdById: people.owner, roomId } });
+  const botRuns = () => checkKeyForBot({ keyId, keyOwnerId: people.owner, bot: { id: botId, createdById: people.owner, roomId, ownerId: null } });
 
   describe('who may offer, and to whom', () => {
     it('lets the owner offer to a member after typing the universe’s name, and changes nothing yet', async () => {

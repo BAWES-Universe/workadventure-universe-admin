@@ -42,7 +42,8 @@ export function resolveBotPrivacy(universeHides: boolean, stored: boolean | null
 
 /**
  * Does this bot hide its conversations? null when the bot no longer exists: its leftovers are shown as they always
- * were, since there is no universe to ask.
+ * were, since there is no universe to ask. A Brick (game #1992) has no universe either, and what it wrote is its owner's:
+ * it is always hidden.
  */
 export async function loadBotPrivacy(botId: string): Promise<BotPrivacy | null> {
   const bot = await prisma.bot.findUnique({
@@ -50,6 +51,7 @@ export async function loadBotPrivacy(botId: string): Promise<BotPrivacy | null> 
     select: { hideConversations: true, room: { select: { world: { select: { universe: { select: { hideBotConversations: true } } } } } } },
   });
   if (!bot) return null;
+  if (!bot.room) return resolveBotPrivacy(false, true);
   return resolveBotPrivacy(bot.room.world.universe.hideBotConversations, bot.hideConversations);
 }
 
@@ -76,9 +78,12 @@ export async function isBotHidden(botId: string): Promise<boolean> {
   return (await loadBotPrivacy(botId))?.hidden === true;
 }
 
-/** The filter for bots that hide their conversations: their own choice is Private, or their universe hides them. */
+/**
+ * The filter for bots that hide their conversations: their own choice is Private, or their universe hides them. A Brick
+ * (game #1992, no room) always hides them, as loadBotPrivacy says.
+ */
 const HIDING_BOTS: Prisma.BotWhereInput = {
-  OR: [{ hideConversations: true }, { room: { world: { universe: { hideBotConversations: true } } } }],
+  OR: [{ hideConversations: true }, { roomId: null }, { room: { world: { universe: { hideBotConversations: true } } } }],
 };
 
 /** Every bot that hides its conversations, for the pages that list across bots. */

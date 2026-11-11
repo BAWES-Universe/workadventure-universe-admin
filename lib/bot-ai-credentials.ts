@@ -85,6 +85,7 @@ const loadBot = (botId: string) =>
       behaviorConfig: true,
       createdById: true,
       roomId: true,
+      ownerId: true,
       maxReplyTokens: true,
       maxSteps: true,
       room: { select: { world: { select: { universe: { select: { id: true, name: true, ownerId: true } } } } } },
@@ -122,8 +123,9 @@ async function withLimits(bot: BotForCredentials, body: ServedProvider): Promise
 async function visionPlan(bot: BotForCredentials, main: ServedProvider): Promise<VisionPlan | undefined> {
   const picked = readVisionPick(bot.behaviorConfig);
   const own = main.source === 'own-key';
-  // Another model on the same key only when the lend there allows it (#575)
-  const lend = own && !picked ? await lentModelsHere(main.providerId, bot.room.world.universe.id) : null;
+  // Another model on the same key only when the lend there allows it (#575). A Brick stands in no universe: its
+  // owner's key runs it with all of its models (lib/ai-key-pay.ts), so there is no lend to narrow them.
+  const lend = own && !picked && bot.room ? await lentModelsHere(main.providerId, bot.room.world.universe.id) : null;
   const mainSees = resolveVisionSupport(main.model ?? '', main.supportsVision);
   // A bot on its own model still has the key's check model to look at images when that one sees (#575)
   const key =
@@ -144,7 +146,7 @@ async function visionPlan(bot: BotForCredentials, main: ServedProvider): Promise
       : null);
   if (!choice || (!picked && choice.choice === 'this')) return undefined;
   if (choice.choice !== 'another') return choice;
-  const usable = await usableVisionKey(choice, { id: bot.id, createdById: bot.createdById, roomId: bot.roomId }, { recheck: true, mainKeyOwnerId: own ? main.keyOwnerId ?? null : null });
+  const usable = await usableVisionKey(choice, { id: bot.id, createdById: bot.createdById, roomId: bot.roomId, ownerId: bot.ownerId }, { recheck: true, mainKeyOwnerId: own ? main.keyOwnerId ?? null : null });
   if (!usable.ok) return { choice: 'this', problem: 'key' };
   const info = kindInfo((usable.key.settings as { kind?: unknown } | null)?.kind);
   return {
@@ -182,7 +184,7 @@ async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials
     return { status: 200, body: { ...providerPayload(provider), source: 'provider' } };
   }
 
-  const verdict = await checkKeyForBot({ keyId: ref, keyOwnerId: provider.ownerId, bot: { id: bot.id, createdById: bot.createdById, roomId: bot.roomId } });
+  const verdict = await checkKeyForBot({ keyId: ref, keyOwnerId: provider.ownerId, bot: { id: bot.id, createdById: bot.createdById, roomId: bot.roomId, ownerId: bot.ownerId } });
   if (verdict.ok) {
     const health = await recheckIfDue(provider);
     if (health.downSince) {
@@ -240,26 +242,28 @@ function settingsForModel(provider: { settings: unknown; model: string | null; s
 /**
  * The key may no longer run this bot: the bot moves to Universe AI now, and the universe's owner is told once. Only the
  * request that really moved it tells (a second, racing one finds nothing to move), so every move gets its own notice
- * even if the owner dismissed an earlier one for the same bot and key.
+ * even if the owner dismissed an earlier one for the same bot and key. A Brick stands in no universe: its own owner is told.
  */
 async function moveToUniverseAi(
-  bot: { id: string; name: string; room: { world: { universe: { id: string; ownerId: string } } } },
+  bot: { id: string; name: string; ownerId: string | null; room: { world: { universe: { id: string; ownerId: string } } } | null },
   ref: string,
   reason: keyof typeof MOVED_BECAUSE,
   keyOwner: string | null = null,
 ): Promise<BotAiCredentials> {
   const moved = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: ref }, data: { aiProviderRef: UNIVERSE_AI_REF, aiModel: null } });
-  if (moved.count > 0) {
-    const universe = bot.room.world.universe;
+  // Who is told, and where the notice leads: the universe's owner and its page, or a Brick's owner and their AI keys
+  const universe = bot.room?.world.universe ?? null;
+  const tell = universe ? { userId: universe.ownerId, href: `/admin/universes/${universe.id}` } : bot.ownerId ? { userId: bot.ownerId, href: '/admin/you/ai-keys' } : null;
+  if (moved.count > 0 && tell) {
     try {
       await addNotice({
-        userId: universe.ownerId,
+        userId: tell.userId,
         kind: 'ai-key-moved',
         dedupeKey: `moved:${ref}:${bot.id}:${new Date().toISOString()}`,
         title: `${bot.name} moved to Universe AI`,
         // Whose key it was, by name, when that person lost Manage for the bot (#709: anyone who manages a bot may put it on their key)
         body: `${keyOwner ? `${keyOwner} can no longer manage ${bot.name}, so it can’t run on ${keyOwner}’s key.` : MOVED_BECAUSE[reason]} It now replies on Universe AI.`,
-        href: `/admin/universes/${universe.id}`,
+        href: tell.href,
       });
     } catch (error) {
       console.error('[AiKeys] Could not tell the universe owner:', error instanceof Error ? error.message : 'unknown');
