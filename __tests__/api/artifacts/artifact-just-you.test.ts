@@ -594,6 +594,20 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect(life).toBeLessThanOrEqual(5 * 60_000 + 2000);
     });
 
+    it('says when the address stops, so a window left open can ask for a new one in time, and says it nowhere else', async () => {
+      const id = await makePage();
+      // An address of the bucket's never stops
+      expect((await openAs(person('owner'), id, true)).body.version).not.toHaveProperty('urlExpiresAt');
+      await justYou(id);
+      const opened = await openAs(person('owner'), id, true);
+      expect(opened.body.version.url).toContain('/af/');
+      expect(opened.body.version.urlExpiresAt).toBe(db.passes[0].expiresAt.toISOString());
+      // No address, no time: the list and the code of a private one
+      const owner = { viewer: viewer(person('owner')) };
+      expect((await call(versions, owner, { id })).body.versions.every((version: object) => !('urlExpiresAt' in version))).toBe(true);
+      expect((await call(code, owner, { id, number: '1' })).body.version).not.toHaveProperty('urlExpiresAt');
+    });
+
     it('gives each opening its own address, and an older version its own', async () => {
       const id = await makePage();
       await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>two</p>' }, { id, ...asBot });

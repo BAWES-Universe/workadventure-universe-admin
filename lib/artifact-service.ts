@@ -178,6 +178,11 @@ export interface VersionView {
    * owner opening it: that one address is for that opening only (lib/artifact-pass.ts).
    */
   url: string | null;
+  /**
+   * When that one address stops working, so a window left open can ask for a new one in time. Only beside the address of
+   * one opening; an address of the bucket's never stops, and has none.
+   */
+  urlExpiresAt?: string;
 }
 
 type VersionRow = { number: number; summary: string | null; askedByName: string | null; sizeBytes: number; createdAt: Date; fileKey: string; media?: unknown };
@@ -196,8 +201,14 @@ function botVersionView(row: VersionRow): BotVersionView {
   };
 }
 
-function versionView(row: VersionRow, url: string | null): VersionView {
-  return { ...botVersionView(row), url };
+function versionView(row: VersionRow, url: string | null, pass?: Pass | null): VersionView {
+  return { ...botVersionView(row), url, ...(pass && url ? { urlExpiresAt: pass.expiresAt.toISOString() } : {}) };
+}
+
+/** One opening of a private artifact: the random part of its address, and when it stops. */
+interface Pass {
+  token: string;
+  expiresAt: Date;
 }
 
 /**
@@ -205,20 +216,21 @@ function versionView(row: VersionRow, url: string | null): VersionView {
  * artifact that is not "Just you". A private one has an address only for a pass (one opening by its owner), and a
  * document needs none: it is drawn from its text, which the routes send to its owner alone.
  */
-function addressOf(artifact: { openScope: string; kind: string }, row: VersionRow, files: ArtifactFiles, passToken?: string | null): string | null {
+function addressOf(artifact: { openScope: string; kind: string }, row: VersionRow, files: ArtifactFiles, pass?: Pass | null): string | null {
   if (!isJustYou(artifact)) return files.urlFor(row.fileKey);
-  if (!passToken || artifact.kind === 'markdown') return null;
-  return passAddress(passToken, row.number, artifact.kind as ArtifactKind);
+  if (!pass || artifact.kind === 'markdown') return null;
+  return passAddress(pass.token, row.number, artifact.kind as ArtifactKind);
 }
 
 /** One opening of a private artifact by its owner: the random part of the address its files are served at for it. */
-async function issuePass(artifact: { id: string; kind: string }, userId: string, now: Date): Promise<string | null> {
+async function issuePass(artifact: { id: string; kind: string }, userId: string, now: Date): Promise<Pass | null> {
   if (artifact.kind === 'markdown') return null;
   // Asked first: without Orbit's own address there is nowhere to serve it from, and no pass is left behind
   orbitAddress();
   const token = newSecret();
-  await prisma.artifactPass.create({ data: { tokenHash: hashOf(token), artifactId: artifact.id, userId, expiresAt: new Date(now.getTime() + passLifeMs()) } });
-  return token;
+  const expiresAt = new Date(now.getTime() + passLifeMs());
+  await prisma.artifactPass.create({ data: { tokenHash: hashOf(token), artifactId: artifact.id, userId, expiresAt } });
+  return { token, expiresAt };
 }
 
 /** What the person who is looking may do, for the buttons the game shows. */
@@ -659,7 +671,7 @@ export async function openArtifact(id: string, viewer: Viewer, version?: number 
   const row = await findVersion(artifact, version);
   // Only its owner gets this far with a private one: the address is theirs, for this opening
   const pass = isJustYou(artifact) && who.userId ? await issuePass(artifact, who.userId, now) : null;
-  return { artifact: viewOf(artifact), version: versionView(row, addressOf(artifact, row, files, pass)), you: rightsOf(artifact, who, now) };
+  return { artifact: viewOf(artifact), version: versionView(row, addressOf(artifact, row, files, pass), pass), you: rightsOf(artifact, who, now) };
 }
 
 export async function listVersions(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ versions: VersionView[] }> {
@@ -936,7 +948,7 @@ export async function openOwned(id: string, userId: string, ctx: Context = defau
   return latestView(artifact, files, isJustYou(artifact) ? await issuePass(artifact, userId, now) : null);
 }
 
-async function latestView(artifact: ArtifactRow, files: Context['files'], pass: string | null = null): Promise<PublicView> {
+async function latestView(artifact: ArtifactRow, files: Context['files'], pass: Pass | null = null): Promise<PublicView> {
   const row = await findVersion(artifact, artifact.latestVersion);
   const kind = artifact.kind as ArtifactKind;
   return {

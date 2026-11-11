@@ -89,8 +89,9 @@ Bodies carry `viewer: { person, inChat, chat }`: `inChat` says the person is in 
 
 `you` is `{ owner, change, manage, copy }`: whether to show Ask-to-change, Share and Restore, and Make a copy.
 `version.url` is where the file is served from, for the locked box. For a "Just you" artifact it is `null` everywhere
-but in the answer to `open`, and there it is an address for that one opening (below). A "Just you" document has none at
-all: it is drawn from the text `versions/:number` sends.
+but in the answer to `open`, and there it is an address for that one opening (below), with `version.urlExpiresAt`
+beside it: when that address stops, so a window left open can ask for a new one in time. A "Just you" document has
+none at all: it is drawn from the text `versions/:number` sends.
 
 ## "Just you": the file itself (game #1994)
 
