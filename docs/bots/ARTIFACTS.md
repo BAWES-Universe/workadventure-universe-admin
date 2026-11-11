@@ -110,6 +110,9 @@ Every other artifact is served from the bucket's own address, which opens for an
   Orbit checks the pass has time left, the artifact is still there and the pass's person still owns it, so deleting the
   artifact stops every pass at once. The page (or drawing) goes to the first browser that asks, with a cookie only that
   pass's addresses read; after that the page needs the cookie, so an address passed on to someone else answers `403`.
+  For the first `ARTIFACT_PASS_RETRY_SECONDS` (10 by default) the same address may ask again without the cookie and is
+  given a new one, the only one that opens the page from then on: the first answer may never have arrived (a dropped
+  connection, a frame taken away while it loaded, a request sent twice). Those seconds count from the first request.
   The media beside a page are served once the page has been, for as long as the pass lasts.
 - **The lock:** a page is sent with the same policy the bucket's address puts on every artifact (`sandbox
   allow-scripts`, no network but the common libraries, no forms), may be framed only by the game and by Orbit, and is
@@ -138,6 +141,7 @@ Without these every route answers `503 storage_not_configured` and nothing else 
 | `ARTIFACTS_S3_REGION` | `auto` for R2 (the default) |
 | `ARTIFACTS_PUBLIC_URL` | The address the bucket is served from. It must **not** be under bawes.net, so a running page can never reach the sign-in or the game |
 | `ARTIFACT_PASS_MINUTES` | How long one opening of a "Just you" artifact lasts (720 by default) |
+| `ARTIFACT_PASS_RETRY_SECONDS` | How long after a "Just you" page was first asked for its address may ask again without the cookie (10 by default; 0 for never) |
 
 "Just you" also needs Orbit's own address as a browser reaches it (`NEXT_PUBLIC_API_URL`, or `ADMIN_API_URL`), which
 sign-in already uses. Without it `PUT share` with `me` answers `503 private_files_not_configured` and changes nothing.

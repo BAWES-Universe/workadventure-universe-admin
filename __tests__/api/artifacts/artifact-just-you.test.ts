@@ -17,8 +17,8 @@ import { GET as privateFile } from '@/app/af/[token]/[number]/[name]/route';
 import { checkBotAccess } from '@/lib/bot-access';
 import { loadBotPrivacy } from '@/lib/bot-privacy';
 import { getSessionUser } from '@/lib/auth-session';
-import { openByLink, pruneExpired, resetPruneClock } from '@/lib/artifact-service';
-import { addBot, addUser, db, fakeFiles } from '../../helpers/artifacts-db';
+import { moveStepMs, openByLink, pruneExpired, resetPruneClock } from '@/lib/artifact-service';
+import { addBot, addUser, db, fakeFiles, fakePrisma } from '../../helpers/artifacts-db';
 
 jest.mock('@/lib/db', () => ({ prisma: jest.requireActual('../../helpers/artifacts-db').fakePrisma }));
 jest.mock('@/lib/artifact-storage', () => ({ artifactFiles: jest.requireActual('../../helpers/artifacts-db').fakeFiles }));
@@ -101,6 +101,11 @@ async function fetchPrivate(address: string, headers: Record<string, string> = {
 
 /** The cookie a first answer set, as a browser sends it back. */
 const cookieOf = (headers: Headers) => (headers.get('set-cookie') ?? '').split(';')[0];
+
+/** The first seconds after a page was first asked for are over: from now on only its cookie opens it. */
+function firstSecondsOver(seconds = 11) {
+  for (const pass of db.passes) if (pass.redeemedAt) pass.redeemedAt = new Date(pass.redeemedAt.getTime() - seconds * 1000);
+}
 const inFrame = { 'sec-fetch-dest': 'iframe' };
 
 /** Where the owner's page opens: the answer to opening it. */
@@ -111,7 +116,7 @@ async function ownerAddress(id: string, version?: number): Promise<string> {
 }
 
 describe('"Just you" for things a bot makes (game #1994)', () => {
-  const env = { bot: process.env.BOT_SERVICE_TOKEN, admin: process.env.ADMIN_API_TOKEN, orbit: process.env.NEXT_PUBLIC_API_URL, adminUrl: process.env.ADMIN_API_URL, life: process.env.ARTIFACT_PASS_MINUTES };
+  const env = { bot: process.env.BOT_SERVICE_TOKEN, admin: process.env.ADMIN_API_TOKEN, orbit: process.env.NEXT_PUBLIC_API_URL, adminUrl: process.env.ADMIN_API_URL, life: process.env.ARTIFACT_PASS_MINUTES, retry: process.env.ARTIFACT_PASS_RETRY_SECONDS };
   const restore_ = (name: string, value: string | undefined) => {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
@@ -122,6 +127,7 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
     restore_('NEXT_PUBLIC_API_URL', env.orbit);
     restore_('ADMIN_API_URL', env.adminUrl);
     restore_('ARTIFACT_PASS_MINUTES', env.life);
+    restore_('ARTIFACT_PASS_RETRY_SECONDS', env.retry);
   });
   beforeEach(() => {
     process.env.BOT_SERVICE_TOKEN = BOT_TOKEN;
@@ -129,6 +135,7 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
     process.env.NEXT_PUBLIC_API_URL = ORBIT;
     delete process.env.ADMIN_API_URL;
     delete process.env.ARTIFACT_PASS_MINUTES;
+    delete process.env.ARTIFACT_PASS_RETRY_SECONDS;
     db.reset();
     resetPruneClock();
     jest.restoreAllMocks();
@@ -386,6 +393,19 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect(bucketKeys()).toHaveLength(2);
     });
 
+    it('gives the step that repoints the versions more time the more versions there are', async () => {
+      const id = await makePage();
+      await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>two</p>' }, { id, ...asBot });
+      await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>three</p>' }, { id, ...asBot });
+      const step = jest.spyOn(fakePrisma, '$transaction');
+      await justYou(id);
+      // The database client's own five seconds would stop an artifact with very many versions from ever becoming private
+      expect(step).toHaveBeenLastCalledWith(expect.any(Function), { timeout: moveStepMs(3) });
+      expect(moveStepMs(3)).toBeGreaterThan(moveStepMs(1));
+      expect(moveStepMs(1)).toBeGreaterThan(5000);
+      expect(moveStepMs(2000)).toBeGreaterThanOrEqual(100_000);
+    });
+
     it('cannot be picked on an Orbit that does not know its own address, and nothing moves', async () => {
       const id = await makePage();
       const before = bucketKeys();
@@ -443,7 +463,8 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect(setCookie).toContain('Secure; SameSite=None');
       expect(setCookie).not.toContain('Partitioned');
 
-      // The same address from another browser: nothing, and no new cookie
+      // The same address from another browser, once the first seconds are over: nothing, and no new cookie
+      firstSecondsOver();
       const forwarded = await fetchPrivate(address, inFrame);
       expect(forwarded.status).toBe(403);
       expect(forwarded.text).toBe('This private page opens only where its owner opened it.');
@@ -471,6 +492,102 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect(kept).not.toContain(token);
       expect(kept).not.toContain(cookie);
       expect(db.passes[0]).toMatchObject({ artifactId: id, userId: 'owner' });
+    });
+
+    it('lets the same address ask again for a few seconds, in case its first answer never arrived, and no longer', async () => {
+      const id = await makePage();
+      await justYou(id);
+      const address = await ownerAddress(id);
+      const lost = await fetchPrivate(address, inFrame);
+      expect(lost.status).toBe(200);
+      const tiedAt = db.passes[0].redeemedAt!.getTime();
+
+      // That answer never reached the browser, which holds no cookie: three seconds on it asks again and is given a new one
+      firstSecondsOver(3);
+      const again = await fetchPrivate(address, inFrame);
+      expect(again.status).toBe(200);
+      expect(again.text).toBe(PAGE);
+      expect(cookieOf(again.headers)).toMatch(/^af_[^=]+=.{43}$/);
+      expect(cookieOf(again.headers)).not.toBe(cookieOf(lost.headers));
+      // Asking again buys no more time: the seconds count from the first request
+      expect(db.passes[0].redeemedAt!.getTime()).toBe(tiedAt - 3_000);
+
+      // Once they are over only the last cookie given opens it: not the one that was lost, and not the bare address
+      firstSecondsOver();
+      expect((await fetchPrivate(address, inFrame)).status).toBe(403);
+      expect((await fetchPrivate(address, { ...inFrame, cookie: cookieOf(lost.headers) })).status).toBe(403);
+      const mine_ = await fetchPrivate(address, { ...inFrame, cookie: cookieOf(again.headers) });
+      expect(mine_.status).toBe(200);
+      expect(mine_.headers.get('set-cookie')).toBeNull();
+      expect(db.passes[0].redeemedAt!.getTime()).toBe(tiedAt - 14_000);
+    });
+
+    it('holds to the cookie from the first moment where the setting says no seconds, and for as many as it says', async () => {
+      const id = await makePage();
+      await justYou(id);
+      process.env.ARTIFACT_PASS_RETRY_SECONDS = '0';
+      const strict = await ownerAddress(id);
+      const first = await fetchPrivate(strict, inFrame);
+      expect(first.status).toBe(200);
+      expect((await fetchPrivate(strict, inFrame)).status).toBe(403);
+      expect((await fetchPrivate(strict, { ...inFrame, cookie: cookieOf(first.headers) })).status).toBe(200);
+
+      process.env.ARTIFACT_PASS_RETRY_SECONDS = '60';
+      const patient = await ownerAddress(id);
+      expect((await fetchPrivate(patient, inFrame)).status).toBe(200);
+      const pass = db.passes[db.passes.length - 1];
+      pass.redeemedAt = new Date(pass.redeemedAt!.getTime() - 59_000);
+      expect((await fetchPrivate(patient, inFrame)).status).toBe(200);
+      pass.redeemedAt = new Date(pass.redeemedAt!.getTime() - 2_000);
+      expect((await fetchPrivate(patient, inFrame)).status).toBe(403);
+
+      // A setting that is no number of seconds is the usual ten
+      process.env.ARTIFACT_PASS_RETRY_SECONDS = 'soon';
+      const usual = await ownerAddress(id);
+      expect((await fetchPrivate(usual, inFrame)).status).toBe(200);
+      const last = db.passes[db.passes.length - 1];
+      last.redeemedAt = new Date(last.redeemedAt!.getTime() - 9_000);
+      expect((await fetchPrivate(usual, inFrame)).status).toBe(200);
+      last.redeemedAt = new Date(last.redeemedAt!.getTime() - 2_000);
+      expect((await fetchPrivate(usual, inFrame)).status).toBe(403);
+    });
+
+    it('serves both of two requests for the page at the same moment, as a browser that sends one twice needs', async () => {
+      const id = await makePage();
+      await justYou(id);
+      const address = await ownerAddress(id);
+      // The other request ties the pass between this one's reading it and taking it
+      const real = fakePrisma.artifactPass.updateMany;
+      const spy = jest.spyOn(fakePrisma.artifactPass, 'updateMany').mockImplementationOnce(async () => {
+        db.passes[0].redeemedAt = new Date();
+        db.passes[0].cookieHash = 'a'.repeat(64);
+        return { count: 0 };
+      });
+      const second = await fetchPrivate(address, inFrame);
+      expect(second.status).toBe(200);
+      expect(second.text).toBe(PAGE);
+      expect(spy).toHaveBeenCalledTimes(2);
+      expect(fakePrisma.artifactPass.updateMany).not.toBe(real);
+      // The cookie it was given is the one that opens the page from then on
+      firstSecondsOver();
+      expect((await fetchPrivate(address, { ...inFrame, cookie: cookieOf(second.headers) })).status).toBe(200);
+      expect((await fetchPrivate(address, inFrame)).status).toBe(403);
+    });
+
+    it('refuses the one that loses when the seconds are over, however often it looks again', async () => {
+      process.env.ARTIFACT_PASS_RETRY_SECONDS = '0';
+      const id = await makePage();
+      await justYou(id);
+      const address = await ownerAddress(id);
+      const spy = jest.spyOn(fakePrisma.artifactPass, 'updateMany').mockImplementationOnce(async () => {
+        db.passes[0].redeemedAt = new Date();
+        db.passes[0].cookieHash = 'a'.repeat(64);
+        return { count: 0 };
+      });
+      const loser = await fetchPrivate(address, inFrame);
+      expect(loser.status).toBe(403);
+      expect(loser.headers.get('set-cookie')).toBeNull();
+      expect(spy).toHaveBeenCalledTimes(1);
     });
 
     it('shows a page only inside a frame: opened as a page of its own it is turned away, before anything is tied to that browser', async () => {
@@ -621,6 +738,7 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect((await fetchPrivate(one, inFrame)).text).toBe('<p>two</p>');
       // Each is tied to its own first browser
       expect((await fetchPrivate(two, { ...inFrame, cookie: 'af_x=y' })).status).toBe(200);
+      firstSecondsOver();
       expect((await fetchPrivate(two, inFrame)).status).toBe(403);
     });
 
@@ -635,6 +753,7 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect(shown.headers.get('content-type')).toBe('image/svg+xml');
       expect(shown.headers.get('content-security-policy')).toContain("sandbox; default-src 'none'");
       expect(shown.headers.get('content-security-policy')).not.toContain('allow-scripts');
+      firstSecondsOver();
       expect((await fetchPrivate(address, { 'sec-fetch-dest': 'image' })).status).toBe(403);
 
       const document = await makePage({ kind: 'markdown', content: '# Notes\n\nJust mine.', media: [] });

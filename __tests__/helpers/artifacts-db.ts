@@ -93,6 +93,8 @@ function matches(row: Row, where: Row): boolean {
       if ('not' in expected) return row[key] !== expected.not;
       if ('in' in expected) return expected.in.includes(row[key]);
     }
+    // A moment is the same moment, as in the real database, whichever object holds it
+    if (expected instanceof Date) return row[key] instanceof Date && row[key].getTime() === expected.getTime();
     return row[key] === expected;
   });
 }

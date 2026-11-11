@@ -58,6 +58,7 @@ import {
   passFolderAddress,
   passCookieName,
   passLifeMs,
+  passRetryMs,
   readCookie,
   sameHash,
 } from '@/lib/artifact-pass';
@@ -727,6 +728,17 @@ export async function setSharing(id: string, viewer: Viewer, input: SharingInput
 const MOVE_AT_ONCE = 6;
 
 /**
+ * How long the one step that repoints every version may take. The database client gives a step five seconds unless told
+ * otherwise, which an artifact with very many versions could outlast on a slow day; it would then never become private.
+ */
+const MOVE_STEP_MS = 15_000;
+const MOVE_STEP_MS_PER_VERSION = 50;
+
+export function moveStepMs(versions: number): number {
+  return MOVE_STEP_MS + versions * MOVE_STEP_MS_PER_VERSION;
+}
+
+/**
  * Makes an artifact "Just you" (game #1994), so that the file itself is protected and not only its card.
  *
  * Until now its files were served from the bucket's own address, to everyone its owner let open it. Those addresses
@@ -770,7 +782,7 @@ async function makeJustYou(artifact: ArtifactRow, changeScope: ChangeScope | und
         await tx.artifactVersion.update({ where: { id: move.id }, data: { fileKey: move.fileKey, media: move.media as unknown as Prisma.InputJsonValue } });
       }
       await tx.artifactRetiredFile.createMany({ data: copies.map((copy) => ({ key: copy.from })), skipDuplicates: true });
-    });
+    }, { timeout: moveStepMs(moves.length) });
   } catch (error) {
     await files.remove(copies.map((copy) => copy.to)).catch(() => undefined);
     throw error;
@@ -985,14 +997,48 @@ export interface PrivateFile {
 /** What every private file is sent with: kept by nobody but the browser that asked, never listed, never guessed at. */
 const PRIVATE_HEADERS = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Robots-Tag': 'noindex, nofollow' } as const;
 
+type PassRow = { id: string; cookieHash: string | null; redeemedAt: Date | null; expiresAt: Date };
+
+/**
+ * Ties a pass to the browser that asks for its page, or checks that this is the browser it is tied to. Answers with the
+ * cookie to set, or null when the request already carries the right one.
+ *
+ * The first request ties it. Its answer may never arrive (a dropped connection, a frame taken away while it loaded, a
+ * request the browser sent twice), and that browser would then hold no cookie. So for a few seconds after the first
+ * request the same address may ask again and is given a new cookie, which is from then on the only one that opens the
+ * page (passRetryMs). Those seconds count from the first request and are never moved, so asking again does not buy more
+ * of them. After that only the cookie opens the page: an address passed on to someone else opens nothing.
+ */
+async function tieToBrowser(pass: PassRow, request: PrivateFileRequest, tokenHash: string, now: Date): Promise<string | null> {
+  const refused = () => new ArtifactError('opened_elsewhere', 403, 'This private page opens only where its owner opened it.');
+  let current: PassRow | null = pass;
+  // Twice at most: when another request for the same page gets in between, the pass is read again, once
+  for (let turn = 0; turn < 2 && current; turn++) {
+    if (current.redeemedAt !== null) {
+      const sent = readCookie(request.cookies, passCookieName(tokenHash));
+      if (sent && current.cookieHash && sameHash(hashOf(sent), current.cookieHash)) return null;
+      if (now.getTime() - current.redeemedAt.getTime() >= passRetryMs()) throw refused();
+    }
+    const cookie = newSecret();
+    // Only for the pass as it was read, so of two requests at the same moment one takes it and the other looks again
+    const taken = await prisma.artifactPass.updateMany({
+      where: { id: current.id, redeemedAt: current.redeemedAt, cookieHash: current.cookieHash },
+      data: { redeemedAt: current.redeemedAt ?? now, cookieHash: hashOf(cookie) },
+    });
+    if (taken.count === 1) return passCookie(request.token, tokenHash, cookie, (current.expiresAt.getTime() - now.getTime()) / 1000);
+    current = await prisma.artifactPass.findUnique({ where: { tokenHash } });
+  }
+  throw refused();
+}
+
 /**
  * Serves one file of a "Just you" artifact for a pass (lib/artifact-pass.ts tells the whole of it). Checked on every
  * request, nothing remembered between two: the pass is known and has time left, its artifact is still there, and the
  * person the pass was made for still owns it. So a pass stops the moment its artifact is deleted, with no delay.
  *
  * The page or drawing: the first request is answered with a cookie only this pass's addresses read; every later one
- * needs it. The media beside a page: served once the page has been. One answer for everything else, so an address tells
- * nothing about what is behind it.
+ * needs it, except in the first few seconds, in case that answer never arrived (tieToBrowser). The media beside a page:
+ * served once the page has been. One answer for everything else, so an address tells nothing about what is behind it.
  */
 export async function servePrivateFile(request: PrivateFileRequest, ctx: Context = defaultContext()): Promise<PrivateFile> {
   const { files, now } = ctx;
@@ -1018,18 +1064,8 @@ export async function servePrivateFile(request: PrivateFileRequest, ctx: Context
       'Content-Type': fileTypeOf(kind).contentType,
       'Content-Security-Policy': kind === 'svg' ? drawingPolicy() : pagePolicy(passFolderAddress(request.token, number)),
     };
-    if (pass.redeemedAt === null) {
-      const cookie = newSecret();
-      // Only one request can be the first: the pass is tied to the browser that made it
-      const first = await prisma.artifactPass.updateMany({ where: { id: pass.id, redeemedAt: null }, data: { redeemedAt: now, cookieHash: hashOf(cookie) } });
-      if (first.count !== 1) throw new ArtifactError('opened_elsewhere', 403, 'This private page opens only where its owner opened it.');
-      headers['Set-Cookie'] = passCookie(request.token, tokenHash, cookie, (pass.expiresAt.getTime() - now.getTime()) / 1000);
-    } else {
-      const cookie = readCookie(request.cookies, passCookieName(tokenHash));
-      if (!cookie || !pass.cookieHash || !sameHash(hashOf(cookie), pass.cookieHash)) {
-        throw new ArtifactError('opened_elsewhere', 403, 'This private page opens only where its owner opened it.');
-      }
-    }
+    const cookie = await tieToBrowser(pass, request, tokenHash, now);
+    if (cookie) headers['Set-Cookie'] = cookie;
     return { status: 200, headers, body: await files.get(row.fileKey) };
   }
 

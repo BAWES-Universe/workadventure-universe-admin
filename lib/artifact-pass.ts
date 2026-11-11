@@ -11,9 +11,11 @@ import { getPlayOrigin } from '@/lib/origin-policy';
  * asking, it stops with the artifact, and on every request Orbit checks again that its person still owns the artifact.
  *
  * The page (or drawing) is served to the first browser that asks, with a cookie that only that address reads. After that
- * the page needs the cookie, so an address passed on to someone else opens nothing. The songs, images and videos beside
- * a page need only the pass: a locked page asks for some of them without cookies (`crossorigin`), and not every browser
- * sends a cookie from a locked frame. They are served once the page has been, and only while the pass lasts.
+ * the page needs the cookie, so an address passed on to someone else opens nothing. For the first few seconds the same
+ * address may ask again without it, because that first answer may never have arrived (passRetryMs). The songs, images
+ * and videos beside a page need only the pass: a locked page asks for some of them without cookies (`crossorigin`), and
+ * not every browser sends a cookie from a locked frame. They are served once the page has been, and only while the pass
+ * lasts.
  */
 
 /** How long one opening lasts, in minutes. A page left open longer is opened again. ARTIFACT_PASS_MINUTES changes it. */
@@ -22,6 +24,21 @@ const DEFAULT_PASS_MINUTES = 12 * 60;
 export function passLifeMs(): number {
   const minutes = Number(process.env.ARTIFACT_PASS_MINUTES);
   return (Number.isFinite(minutes) && minutes >= 1 ? minutes : DEFAULT_PASS_MINUTES) * 60_000;
+}
+
+/**
+ * How long after its page was first asked for an address may ask for it again without the cookie, in seconds. The first
+ * answer may never have arrived: the connection dropped, the frame was taken away while it loaded, or the browser sent
+ * the request twice. That browser then holds no cookie, and without this it could not show the page until the game
+ * opened it again. Seconds only, so an address passed on later still opens nothing. ARTIFACT_PASS_RETRY_SECONDS changes
+ * it; 0 means never.
+ */
+const DEFAULT_PASS_RETRY_SECONDS = 10;
+
+export function passRetryMs(): number {
+  const raw = process.env.ARTIFACT_PASS_RETRY_SECONDS;
+  const seconds = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
+  return (Number.isFinite(seconds) && seconds >= 0 ? seconds : DEFAULT_PASS_RETRY_SECONDS) * 1000;
 }
 
 /** The random part of an address, and of the cookie: 256 bits, in letters a path and a cookie can hold. */
