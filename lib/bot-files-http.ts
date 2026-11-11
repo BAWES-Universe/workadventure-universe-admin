@@ -110,7 +110,10 @@ export const addSchema = z
 
 const shortId = z.string().trim().min(2).max(12);
 
-export const getSchema = z.object({ ...botCall, ref: shortId }).strict();
+/** Yes when the file is for a reply other people in this chat read too (game #1993): then only one that came in this chat. */
+const everyoneHere = z.boolean().nullish();
+
+export const getSchema = z.object({ ...botCall, ref: shortId, everyoneHere }).strict();
 
 export const keepTextSchema = z
   .object({
@@ -137,6 +140,8 @@ export const findSchema = z
     page: z.number().int().min(1).max(100_000).nullish(),
     // The "Files found in one search" setting's range
     limit: z.number().int().min(LIMIT_RANGES.reply.results.min).max(LIMIT_RANGES.reply.results.max),
+    // What is found goes into a reply other people in this chat read (game #1993)
+    everyoneHere,
   })
   .strict();
 
@@ -147,5 +152,6 @@ export const readSchema = z
     at: z.number().int().min(0).max(2147483647).nullish(),
     // The "Reads from an earlier file" setting's range
     chars: z.number().int().min(1).max(LIMIT_RANGES.reply.part.max),
+    everyoneHere,
   })
   .strict();

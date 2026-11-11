@@ -50,6 +50,11 @@ export interface FindInput extends BotCall {
   page?: number | null;
   /** How many a page holds: the "Files found in one search" setting, sent by the bot server. */
   limit: number;
+  /**
+   * What is found goes into a reply other people in this chat read (game #1993): only what came or was made in this
+   * chat, and no "Just you" artifact. Nothing of the person's from another chat is found, counted or named.
+   */
+  everyoneHere?: boolean | null;
 }
 
 export interface FoundFile {
@@ -164,11 +169,18 @@ export function mergePage(files: FoundFile[], artifacts: FoundArtifact[], offset
 function artifactWhere(input: FindInput, who: Who, titled: string[] | null, now: Date) {
   const since = dateOf(input.since);
   const until = dateOf(input.until);
+  // For a reply other people here read (game #1993): this chat's alone, as someone who owns none of them is shown it
+  const everyone = input.everyoneHere === true;
   return {
     AND: [
       // This chat's, and what this bot made for the person in other chats: never what they made with other bots (game #1781).
       // Of this chat's, never someone else's "Just you" (game #1994): what is found names its title and who made it
-      { OR: [{ chatKind: input.chat.kind, chatRef: input.chat.ref, ...shownInItsChatTo(who.userId) }, ...(who.userId ? [{ ownerId: who.userId, makerBotId: input.botId }] : [])] },
+      {
+        OR: [
+          { chatKind: input.chat.kind, chatRef: input.chat.ref, ...shownInItsChatTo(everyone ? null : who.userId) },
+          ...(who.userId && !everyone ? [{ ownerId: who.userId, makerBotId: input.botId }] : []),
+        ],
+      },
       // A guest's artifact past its day is gone for everyone
       { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
       ...(titled === null ? [] : [{ id: { in: titled } }]),
@@ -202,13 +214,14 @@ export async function findFiles(input: FindInput, ctx: SearchContext = defaultCo
         chatRef: input.chat.ref,
         now: ctx.now,
         findableSince: findable > 0 ? new Date(ctx.now.getTime() - findable * DAY_MS) : null,
+        everyoneHere: input.everyoneHere === true,
       },
       { query, every: mode === 'all' && words.length > 1 ? words : null, kinds: fileKinds, source: input.source ?? null, since: dateOf(input.since), until: dateOf(input.until) },
       { offset: 0, limit: offset + limit },
     );
     let titled: string[] | null = null;
     if (wantsArtifacts(input) && words.length > 0) {
-      const byTitle = artifactTitleSql({ botId: input.botId, userId: who.userId, chatKind: input.chat.kind, chatRef: input.chat.ref }, words, mode);
+      const byTitle = artifactTitleSql({ botId: input.botId, userId: who.userId, chatKind: input.chat.kind, chatRef: input.chat.ref, everyoneHere: input.everyoneHere === true }, words, mode);
       titled = (await sql<{ id: string }>(byTitle.sql, byTitle.values)).map((row) => row.id);
     }
     const artifactsWhere = artifactWhere(input, who, titled, ctx.now);
@@ -271,6 +284,8 @@ export interface ReadInput extends BotCall {
   at?: number | null;
   /** How much to read: the "Reads from a kept file" setting, sent by the bot server. */
   chars: number;
+  /** The text goes into a reply other people in this chat read (game #1993): then only a file that came in this chat. */
+  everyoneHere?: boolean | null;
 }
 
 export interface Read {

@@ -19,6 +19,8 @@ export const runtime = 'nodejs';
  *
  * The owner may ask in any chat. Anyone else only in the chat it was made in, and only when the owner allowed everyone
  * who can open it to ask. Someone who may not even open it hears 404.
+ * `everyoneHere: true` (with `referencedArtifactIds`, as for a read) is for a reply other people in the chat read too
+ * (game #1993): the new version's card lands in front of all of them, so only an artifact all of them may open is changed.
  */
 export const POST = artifactRoute(
   'POST /api/artifacts/:id/change',

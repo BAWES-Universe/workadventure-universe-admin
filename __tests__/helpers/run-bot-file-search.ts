@@ -65,6 +65,10 @@ async function main() {
   result.friendLater = await ids(scope({ userId: 'friend', chatKind: 'nearby', chatRef: 'room#9#900' }), filters());
   result.guestInBubble = await ids(scope({ userId: null, chatKind: 'nearby', chatRef: 'room#1#100' }), filters());
   result.guestAfterDay = await ids(scope({ userId: null, chatKind: 'nearby', chatRef: 'room#1#100', now: new Date('2026-10-26T00:00:00Z') }), filters());
+  // For a reply other people in the chat read (game #1993): this chat's files alone, also with words that are in their own direct messages
+  result.everyoneInBubble = await ids(scope({ chatKind: 'nearby', chatRef: 'room#1#100', everyoneHere: true }), filters());
+  result.everyoneInDm = await ids(scope({ everyoneHere: true }), filters());
+  result.everyoneWords = await ids(scope({ chatKind: 'nearby', chatRef: 'room#1#100', everyoneHere: true }), filters({ query: wordQuery(searchWords('yazoghal'), 'all') }));
   result.findableDays = await ids(scope({ findableSince: new Date('2026-10-21T00:00:00Z') }), filters());
   result.kinds = await ids(scope(), filters({ kinds: ['audio', 'image'] }));
   result.source = await ids(scope(), filters({ source: 'bot' }));
@@ -120,7 +124,7 @@ async function main() {
     `INSERT INTO artifacts (id, owner_id, maker_bot_id, maker_name, title, kind, chat_kind, chat_ref, open_scope, updated_at) VALUES
       ('a-private', 'friend', 'bot3', 'Scout', 'Quests private', 'app', 'nearby', 'room#9#900', 'me', now())`,
   );
-  const titles = async (words: string, mode: 'all' | 'any', who: { userId: string | null; chatKind: string; chatRef: string }, botId = 'bot1') => {
+  const titles = async (words: string, mode: 'all' | 'any', who: { userId: string | null; chatKind: string; chatRef: string; everyoneHere?: boolean }, botId = 'bot1') => {
     const built = artifactTitleSql({ botId, ...who }, searchWords(words), mode);
     return (await db.query<{ id: string }>(built.sql, built.values)).rows.map((row) => row.id).sort();
   };
@@ -134,6 +138,10 @@ async function main() {
     // Someone else's "Just you" in the same chat is not found by its title; its owner finds it
     inChatSomeoneElse: await titles('quests private', 'all', { userId: 'owner', chatKind: 'nearby', chatRef: 'room#9#900' }),
     inChatOwner: await titles('quests', 'any', { userId: 'friend', chatKind: 'nearby', chatRef: 'room#9#900' }),
+    // For a reply other people read (game #1993): this chat's alone, and its owner's "Just you" is not among them
+    everyoneOwner: await titles('quests', 'any', { userId: 'friend', chatKind: 'nearby', chatRef: 'room#9#900', everyoneHere: true }),
+    everyoneElsewhere: await titles('board', 'any', { userId: 'owner', chatKind: 'nearby', chatRef: 'room#9#900', everyoneHere: true }),
+    elsewhere: await titles('board', 'any', { userId: 'owner', chatKind: 'nearby', chatRef: 'room#9#900' }),
   };
 
   // One person with 10,000 files with this bot, each with a part of text, and one with the word

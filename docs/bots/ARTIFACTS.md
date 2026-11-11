@@ -22,6 +22,14 @@ game (open, versions, code, share, restore, copy, delete).
   mentioned. Anything else answers `404 not_found`, as for an artifact that is not there. The rules above still apply on
   top: a pasted link opens someone else's artifact only when its owner shared it by link, and changes stay with the chat it
   was made in. The search over files and the in-chat list show the same: this chat's, and what this bot made for the person.
+- **A reply other people in the chat read too (game #1993):** the bot server says so with `everyoneHere: true` on a read,
+  a change, the in-chat list, and on the file routes (`/api/bot-files/find`, `get`, `read`). Orbit then answers as it would
+  for someone in the chat who owns nothing, so such a reply never takes in what only its person may see: no "Just you"
+  (`404 kept_private` in its chat), nothing the person has in another chat (`404 not_found`, the bot's own work for them
+  included), and no file from another chat. One artifact from elsewhere still opens: one the person pointed at
+  (`referencedArtifactIds`) that its owner shared by link. A change still asks who may change it, as above, and does not
+  land if the artifact became "Just you" in the same moment (`409 stale_version`). Left out or `false`, every route
+  answers as before.
   Of this chat's, someone else's "Just you" is in neither, by its title or otherwise: only its owner finds it.
 - **Versions:** every change by the artifact's maker is a new version with what changed and who asked (another bot's change is a copy of its own, Orbit #800). Nothing is overwritten. Restore makes a
   new version out of an old one. Up to 200 versions; one version is up to 512 KB.
@@ -54,9 +62,9 @@ both use for that chat; a viewer is "in the chat" when the game says so for the 
 | Route | Body | Answer |
 | --- | --- | --- |
 | `POST /api/artifacts` | `title`, `kind` (`app`, `page`, `markdown`, `svg`), `content`, `summary?` | `{ artifact, version, hidden }` |
-| `POST /api/artifacts/:id/change` | `edits: [{ old, new, all? }]` **or** `content`; `summary?`, `title?`, `baseVersion?`, `dropMedia?`, `referencedArtifactIds?` (up to 20) | `{ artifact, version, hidden }` |
-| `POST /api/artifacts/:id/read` | `version?` (the latest by default), `referencedArtifactIds?` (up to 20) | `{ artifact, version, content, hidden }` |
-| `POST /api/artifacts/in-chat` | none beyond the three above | `{ artifacts, hidden }`: what was made in this chat that the person may open, plus the artifacts this bot made for the person in their other chats; this chat's come first, then the others, each group newest change first (up to 20 in all) |
+| `POST /api/artifacts/:id/change` | `edits: [{ old, new, all? }]` **or** `content`; `summary?`, `title?`, `baseVersion?`, `dropMedia?`, `referencedArtifactIds?` (up to 20), `everyoneHere?` | `{ artifact, version, hidden }` |
+| `POST /api/artifacts/:id/read` | `version?` (the latest by default), `referencedArtifactIds?` (up to 20), `everyoneHere?` | `{ artifact, version, content, hidden }` |
+| `POST /api/artifacts/in-chat` | `everyoneHere?` | `{ artifacts, hidden }`: what was made in this chat that the person may open, plus the artifacts this bot made for the person in their other chats; this chat's come first, then the others, each group newest change first (up to 20 in all) |
 
 **With media:** send `multipart/form-data` to `POST /api/artifacts` or `POST /api/artifacts/:id/change`: the same JSON
 as a `request` part, and one `media` part per file, its file name being the name the page uses. A change may send only

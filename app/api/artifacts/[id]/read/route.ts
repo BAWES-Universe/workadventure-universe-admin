@@ -7,8 +7,10 @@ export const runtime = 'nodejs';
  * POST /api/artifacts/:id/read
  * A bot reads an artifact: its latest version, or the one asked for, with the file's text.
  *
- * Auth: BOT_SERVICE_TOKEN (the admin token also works). Body: { botId, person, chat, version? }
+ * Auth: BOT_SERVICE_TOKEN (the admin token also works). Body: { botId, person, chat, version?, referencedArtifactIds?, everyoneHere? }
  * Response: { artifact, version, content, hidden }. Only for someone who may open it.
+ * `everyoneHere: true` is for a reply other people in the chat read too (game #1993): it reads only what all of them may
+ * open, so its owner's "Just you" and what they have in another chat answer as if they were not there.
  */
 export const POST = artifactRoute('POST /api/artifacts/:id/read', 'bot', readSchema, (body, params) =>
   readArtifact({ ...body, artifactId: params.id }),

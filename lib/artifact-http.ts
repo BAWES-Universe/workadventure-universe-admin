@@ -169,11 +169,18 @@ const versionNumber = z.number().int().min(1).max(MAX_VERSION_NUMBER);
  */
 const referencedIds = z.array(z.string().trim().min(1).max(255)).max(20).nullish();
 
+/**
+ * Yes when the reply is one other people in the chat read too (game #1993): the artifact is then asked for as someone in
+ * the chat who owns nothing, so the reply never takes in a "Just you" or what the person has in another chat.
+ */
+const everyoneHere = z.boolean().nullish();
+
 export const changeSchema = z
   .object({
     ...botCall,
     baseVersion: versionNumber.nullish(),
     referencedArtifactIds: referencedIds,
+    everyoneHere,
     edits: z
       .array(z.object({ old: text(LARGEST_ARTIFACT_BYTES), new: text(LARGEST_ARTIFACT_BYTES), all: z.boolean().optional() }).strict())
       .max(50)
@@ -186,9 +193,9 @@ export const changeSchema = z
   })
   .strict();
 
-export const readSchema = z.object({ ...botCall, version: versionNumber.nullish(), referencedArtifactIds: referencedIds }).strict();
+export const readSchema = z.object({ ...botCall, version: versionNumber.nullish(), referencedArtifactIds: referencedIds, everyoneHere }).strict();
 
-export const inChatSchema = z.object(botCall).strict();
+export const inChatSchema = z.object({ ...botCall, everyoneHere }).strict();
 
 export const openSchema = z.object({ viewer: viewerSchema, version: versionNumber.nullish() }).strict();
 
