@@ -13,6 +13,8 @@ import { checkKeyForBot } from '@/lib/ai-key-pay';
 import { addNotice } from '@/lib/notices';
 import { requireServiceToken } from '@/lib/service-tokens';
 
+// The meter's books copy each report (game #1998); these tests are about the report, not the books
+jest.mock('@/lib/meter', () => ({ recordModelCall: jest.fn(async () => null) }));
 jest.mock('@/lib/db', () => ({
   prisma: {
     bot: { findUnique: jest.fn(), updateMany: jest.fn() },
