@@ -338,6 +338,8 @@ async function lentKeysFor(botId: string, home: Home) {
 
 /** Saves the draft in place of the one there. It only has to be well formed: finishing it is for publishing. */
 export async function saveVoiceDraft(botId: string, profile: z.infer<typeof voiceDraftSchema>, userId: string) {
+  // A Brick has no room yet to speak in (see homeOf): nothing is saved for it, so the answer and what is stored agree
+  await homeOf(botId);
   await prisma.botVoiceDraft.upsert({
     where: { botId },
     create: { botId, profile: profile as Prisma.InputJsonValue, updatedById: userId },
@@ -383,6 +385,8 @@ export async function rollBackVoice(botId: string, number: number) {
 
 /** Turns voice on or off. On needs the universe to allow it and a published profile that works now; off always works. */
 export async function setBotVoiceEnabled(botId: string, enabled: boolean) {
+  // A Brick has no room yet to speak in (see homeOf): on or off, it is told so and nothing is written
+  await homeOf(botId);
   if (enabled) {
     // A key that is Down for now doesn't stop voice being turned on: the bot replies in text until the key answers again
     const state = await effectiveBotVoice(botId, { ignoreSwitch: true, ignoreKeyHealth: true });

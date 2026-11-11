@@ -41,8 +41,7 @@ async function peopleWhoCanManageTools(botId: string): Promise<Set<string>> {
     select: { id: true, createdById: true, roomId: true, ownerId: true, mcpServers: { select: { connectedById: true } } },
   });
   if (!bot) return new Set();
-  // A Brick's owner (game #1992) is the only one who manages it, whoever made it
-  const candidates = new Set([bot.ownerId, bot.createdById, ...bot.mcpServers.map((server) => server.connectedById)].filter((id): id is string => !!id));
+  const candidates = new Set([bot.createdById, ...bot.mcpServers.map((server) => server.connectedById)].filter((id): id is string => !!id));
   const told = new Set<string>();
   for (const userId of candidates) {
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });

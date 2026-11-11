@@ -5,7 +5,7 @@ import { isIfDown } from '@/lib/ai-key-health';
 import { resolveUniverseAiProvider, UNIVERSE_AI_REF } from '@/lib/universe-ai';
 import { allowedModels, canCallTools, keyModels, lendModels, modelFactsOf, modelSupportsVision, servedModel } from '@/lib/ai-key-model-list';
 import { getServerLimits, keyReplyLimits } from '@/lib/bot-limits';
-import { BRICK_HAS_NO_ROOM, isBrick } from '@/lib/brick';
+import { brickHasNoRoomText, isBrick } from '@/lib/brick';
 import type { ReplyLimits } from '@/lib/bot-limit-values';
 import { keyVisionModels, readVisionPick, usableVisionKey, type AnotherProblem, type VisionPick } from '@/lib/bot-vision';
 
@@ -70,13 +70,14 @@ export async function botAiOptions(input: {
   const bot = input.botId
     ? await prisma.bot.findUnique({
         where: { id: input.botId },
-        select: { id: true, roomId: true, aiProviderRef: true, aiModel: true, behaviorConfig: true, createdById: true, createdBy: { select: { id: true, name: true } } },
+        select: { id: true, roomId: true, ownerId: true, aiProviderRef: true, aiModel: true, behaviorConfig: true, createdById: true, createdBy: { select: { id: true, name: true } } },
       })
     : null;
   if (input.botId && !bot) return { ok: false, status: 404, error: 'Bot not found' };
   // A Brick (game #1992) has no room: what it may run on is not a room's to offer, and its own picker comes with Bricks.
   // The room in the request is never read for a bot that exists, so a Brick is never judged by a room it is not in.
-  if (bot && isBrick(bot)) return { ok: false, status: 404, error: BRICK_HAS_NO_ROOM };
+  // Only its owner is told why: to anyone else, a super admin included, it is a bot that does not exist.
+  if (bot && isBrick(bot)) return { ok: false, status: 404, error: brickHasNoRoomText(bot, { userId: input.viewer.id }) };
   const roomId = bot?.roomId ?? input.roomId;
   if (!roomId) return { ok: false, status: 404, error: 'Room not found' };
 
