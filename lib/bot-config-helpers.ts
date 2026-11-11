@@ -1,3 +1,4 @@
+import type { Bot } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { parsePlayUri, buildPlayUri } from '@/lib/utils';
 
@@ -181,6 +182,58 @@ export async function transformBotToServerFormat(
   return result;
 }
 
+/**
+ * A Brick for the bot server (game #1995): the same fields a room bot has, with no room, world or universe URL, and
+ * `brick` saying whose it is. A Brick lives in its owner's chats, so it stands nowhere: it never moves and is never put
+ * on a map from this answer. Its voice stays off here: a Brick is spoken to in a call, which is its own issue.
+ */
+export function transformBrickToServerFormat(
+  bot: Pick<
+    Bot,
+    | 'id'
+    | 'name'
+    | 'ownerId'
+    | 'enabled'
+    | 'behaviorConfig'
+    | 'characterTextureId'
+    | 'createdAt'
+    | 'updatedAt'
+    | 'aiProviderRef'
+    | 'chatInstructions'
+    | 'toolTimeoutSeconds'
+    | 'maxReplyTokens'
+    | 'maxSteps'
+  >,
+  isDefault: boolean
+) {
+  const config = bot.behaviorConfig;
+  const stored: Record<string, unknown> = config && typeof config === 'object' && !Array.isArray(config) ? config : {};
+  const assignedSpace = { center: { x: 0, y: 0 }, radius: 0 };
+  return {
+    botId: bot.id,
+    name: bot.name,
+    brick: { ownerId: bot.ownerId, isDefault },
+    roomUrl: null,
+    worldUrl: null,
+    universeUrl: null,
+    userId: bot.ownerId,
+    behaviorType: 'idle',
+    behaviorConfig: { ...stored, showToolCalls: stored.showToolCalls === true, behaviorType: 'idle', assignedSpace },
+    assignedSpace,
+    enabled: bot.enabled,
+    characterTextureIds: bot.characterTextureId ? [bot.characterTextureId] : [],
+    createdAt: bot.createdAt.toISOString(),
+    updatedAt: bot.updatedAt.toISOString(),
+    aiProviderRef: bot.aiProviderRef || null,
+    chatInstructions: bot.chatInstructions || null,
+    movementInstructions: null,
+    toolTimeoutSeconds: bot.toolTimeoutSeconds ?? null,
+    maxReplyTokens: bot.maxReplyTokens ?? null,
+    maxSteps: bot.maxSteps ?? null,
+    companionTextureId: null,
+    voiceEnabled: false,
+  };
+}
 
 /**
  * A save that replaces a bot's whole behavior config must not silently turn "Show tool calls"

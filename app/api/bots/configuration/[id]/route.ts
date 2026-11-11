@@ -6,10 +6,11 @@ import { deleteWithHiddenBotData } from '@/lib/bot-privacy';
 import { canManageThisBot } from '@/lib/bot-permissions';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { validateAccessToken } from '@/lib/oidc';
-import { transformBotToServerFormat } from '@/lib/bot-config-helpers';
+import { transformBotToServerFormat, transformBrickToServerFormat } from '@/lib/bot-config-helpers';
 import { corsHeaders } from '@/lib/cors';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
-import { brickHasNoRoomText } from '@/lib/brick';
+import { brickHasNoRoomText, ownsBrick } from '@/lib/brick';
+import { isDefaultBrick } from '@/lib/brick-default';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
@@ -154,13 +155,16 @@ export async function GET(
       return response;
     }
 
-    // A Brick (game #1992) has no room URL, so it has no configuration in this shape yet: the bot server learns about
-    // Bricks with game #1995. Until then the answer is the same as for a bot that does not exist, a super admin included.
+    // A Brick (game #1992) has no room URL, so it has its own shape (game #1995), and only a caller that says it knows
+    // that shape gets it (`?bricks=1`): a bot server from before reads every answer here as a bot in a room. It is for
+    // the bot server and the Brick's owner. Anyone else gets the same answer as for a bot that does not exist, a super
+    // admin included.
     if (bot.roomId === null) {
-      const response = NextResponse.json(
-        { error: brickHasNoRoomText(bot, { userId, isAdminToken }) },
-        { status: 404 }
-      );
+      const mayRead = isAdminToken || ownsBrick(bot, userId);
+      const response =
+        mayRead && searchParams.get('bricks') === '1'
+          ? NextResponse.json(transformBrickToServerFormat(bot, await isDefaultBrick(bot.id)))
+          : NextResponse.json({ error: brickHasNoRoomText(bot, { userId, isAdminToken }) }, { status: 404 });
       Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });

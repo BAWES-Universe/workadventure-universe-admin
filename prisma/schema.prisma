@@ -48,6 +48,7 @@ model User {
   ownershipOffersReceived OwnershipOffer[] @relation("OwnershipOfferTo")
   ownershipOffersMade     OwnershipOffer[] @relation("OwnershipOfferBy")
   bricks            Bot[] @relation("BotOwner")
+  defaultBrick      DefaultBrick?
   botsCreated       Bot[] @relation("BotCreatedBy")
   botsUpdated       Bot[] @relation("BotUpdatedBy")
   botAccessRules    BotAccessRule[]
@@ -897,10 +898,25 @@ model Bot {
   voiceKeyUsage  VoiceKeyUsage[]
   voiceReplyUses VoiceReplyUse[]
   voiceListenUses VoiceListenUse[]
+  defaultBrickOf  DefaultBrick?
 
   @@index([roomId])
   @@index([ownerId])
   @@map("bots")
+}
+
+// The Brick every signed-in person gets (game #1995). One row per account, written the first time the Brick is made, so
+// it is made once: two devices, a double tap or a later sign-in find the row and make nothing. The row stays when the
+// Brick is deleted (botId goes back to null), which is how a Brick deleted on purpose is remembered and never made again.
+model DefaultBrick {
+  userId String   @id @map("user_id")
+  botId  String?  @unique @map("bot_id")
+  madeAt DateTime @default(now()) @map("made_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bot  Bot? @relation(fields: [botId], references: [id], onDelete: SetNull)
+
+  @@map("default_bricks")
 }
 
 // One role's or one person's No / Default / Yes for a bot (#427), the same shape room overrides will reuse: two
