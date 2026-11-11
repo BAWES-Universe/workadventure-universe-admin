@@ -81,7 +81,8 @@ export async function compareReplyWindow(personId: string): Promise<WindowCompar
         personKey: `person:${personId}`,
         kind: 'model_call',
         payerKind: 'universe',
-        AND: [{ detail: { path: ['error'], equals: false } }, { detail: { path: ['greeting'], equals: false } }],
+        // Work a Brick did on its own is put to its owner in the books; today's count has no person for it, so it is left out of this comparison
+        AND: [{ detail: { path: ['error'], equals: false } }, { detail: { path: ['greeting'], equals: false } }, { detail: { path: ['byOwner'], equals: false } }],
         occurredAt: { gte: since },
       },
     }),

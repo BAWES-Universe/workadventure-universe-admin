@@ -96,7 +96,7 @@ describe('a model call copied from its usage row', () => {
       basis: 'estimated',
       sourceRef: 'bots_ai_usage:77',
     });
-    expect(written().detail).toMatchObject({ error: false, greeting: false, channel: 'dm', providerId: 'deepseek-flash', tokens: { input: 700, output: 200 } });
+    expect(written().detail).toMatchObject({ error: false, greeting: false, byOwner: false, channel: 'dm', providerId: 'deepseek-flash', tokens: { input: 700, output: 200 } });
   });
 
   it('uses the bot server’s own id for the call when it sends one, so a report sent twice is one event', async () => {
@@ -118,6 +118,7 @@ describe('a model call copied from its usage row', () => {
   it('is the owner’s when a Brick answered on its own with nobody talking, and nobody’s when a room bot did', async () => {
     await recordModelCall(facts({ talkedPersonId: null, talkedGuest: null, talkedUserId: null }));
     expect(written()).toMatchObject({ personKey: 'person:sara', personId: 'sara' });
+    expect(written().detail.byOwner).toBe(true);
     events.createMany.mockClear();
     bots.findUnique.mockResolvedValue({ roomId: 'room-1', ownerId: null });
     await recordModelCall(facts({ talkedPersonId: null, talkedGuest: null, talkedUserId: null }));

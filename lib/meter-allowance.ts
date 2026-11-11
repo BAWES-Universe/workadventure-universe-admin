@@ -199,7 +199,11 @@ export async function reserveRoom(
   return prisma.$transaction(async (tx): Promise<Room> => {
     await lockPool(tx);
     const already = await tx.meterReservation.findUnique({ where: { reservationKey: input.key } });
-    if (already) return already.personKey === `person:${input.personId}` ? { ok: true, reservation: viewOf(already), created: false } : { ok: false, reason: 'key_reused' };
+    if (already) {
+      if (already.personKey !== `person:${input.personId}`) return { ok: false, reason: 'key_reused' };
+      // Asking again for room that is still held is the same room. Room that was settled, released or lapsed is not a place to start a paid step from
+      return already.state === 'held' && already.expiresAt > now ? { ok: true, reservation: viewOf(already), created: false } : { ok: false, reason: 'closed' };
+    }
     const settings = await getMeterSettings(tx);
     const no = await fits(tx, input.personId, input.amountMicros, now, settings, { newJob: true });
     if (no) return no;

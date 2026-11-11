@@ -160,6 +160,8 @@ export async function recordModelCall(facts: ModelCallFacts, db: Db & Pick<typeo
           channel: facts.channel,
           error: facts.error,
           greeting: facts.greeting,
+          // Attributed to a Brick's owner because nobody talked to it: today's reply counts have no person for these, so shadow checks leave them out
+          byOwner: !facts.talkedPersonId && personId !== null,
           tokensUsed: facts.tokensUsed,
           ...(facts.tokens ? { tokens: facts.tokens } : {}),
         },

@@ -156,6 +156,20 @@ run('the meter, in a real database', () => {
       expect(compared.replies.state).toBe('same');
     });
 
+    it('leaves work a Brick did on its own out of the comparison with today’s window count', async () => {
+      const dana = await person('dana');
+      await prisma.replyWindow.create({ data: { key: `ua:person:${dana.id}`, startedAt: new Date(Date.now() - 60 * 60_000) } });
+      const report = (extra: object = {}) =>
+        trackUsage(new NextRequest('http://localhost:3333/api/bots/ai-usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ botId: dana.brickId, providerId, ...extra }) }));
+      await report({ userId: dana.uuid, isGuest: false });
+      // Nobody talked to it: the books put this one to the owner, today's count has no person for it
+      await report();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(await prisma.meterEvent.count({ where: { personKey: `person:${dana.id}` } })).toBe(2);
+      const compared = await compareReplyWindow(dana.id);
+      expect([compared.today, compared.books, compared.replies.state]).toEqual([1, 1, 'same']);
+    });
+
     it('takes an app use from the bot server, with the person and the Brick worked out here', async () => {
       const noor = await person('noor');
       const response = await writeEvents(
@@ -210,6 +224,20 @@ run('the meter, in a real database', () => {
       const envelope = await currentEnvelope(NOW);
       expect(envelope.unknownEvents).toBe(1);
       expect((await memberAllowance(sara.id, NOW, await getMeterSettings()))?.usedMicros).toBe(0);
+    });
+
+    it('does not answer for the same key once the room was settled, released or lapsed', async () => {
+      const sara = await person('sara');
+      await setUp({ renewMinutes: 10 });
+      await reserveRoom({ key: `a-${tag}`, personId: sara.id, amountMicros: 10 }, NOW);
+      await reserveRoom({ key: `b-${tag}`, personId: sara.id, amountMicros: 10 }, NOW);
+      await reserveRoom({ key: `c-${tag}`, personId: sara.id, amountMicros: 10 }, NOW);
+      await settleRoom({ key: `a-${tag}`, settledMicros: 5 }, minutes(1));
+      await releaseRoom({ key: `b-${tag}` }, minutes(1));
+      for (const key of ['a', 'b']) expect(await reserveRoom({ key: `${key}-${tag}`, personId: sara.id, amountMicros: 10 }, minutes(2))).toEqual({ ok: false, reason: 'closed' });
+      // c is still held and in time at minute 5, and lapsed at minute 11
+      expect(await reserveRoom({ key: `c-${tag}`, personId: sara.id, amountMicros: 10 }, minutes(5))).toMatchObject({ ok: true, created: false });
+      expect(await reserveRoom({ key: `c-${tag}`, personId: sara.id, amountMicros: 10 }, minutes(11))).toEqual({ ok: false, reason: 'closed' });
     });
 
     it('answers the same reservation for the same key and takes nothing more', async () => {
