@@ -115,6 +115,11 @@ async function main() {
       ('a-echo', 'owner', 'bot2', 'Echo', 'Quests echo', 'app', 'nearby', 'room#9#901', now())`,
     [`Board ${MARKED}`],
   );
+  // Someone's "Just you" in a chat others are in too (game #1994)
+  await db.query(
+    `INSERT INTO artifacts (id, owner_id, maker_bot_id, maker_name, title, kind, chat_kind, chat_ref, open_scope, updated_at) VALUES
+      ('a-private', 'friend', 'bot3', 'Scout', 'Quests private', 'app', 'nearby', 'room#9#900', 'me', now())`,
+  );
   const titles = async (words: string, mode: 'all' | 'any', who: { userId: string | null; chatKind: string; chatRef: string }, botId = 'bot1') => {
     const built = artifactTitleSql({ botId, ...who }, searchWords(words), mode);
     return (await db.query<{ id: string }>(built.sql, built.values)).rows.map((row) => row.id).sort();
@@ -126,6 +131,9 @@ async function main() {
     // Made with another bot (game #1781): found by that bot, not by this one
     otherBot: await titles('quests', 'any', { userId: 'owner', chatKind: 'dm', chatRef: '!owner-dm' }, 'bot2'),
     inChat: await titles('quests', 'any', { userId: null, chatKind: 'nearby', chatRef: 'room#9#900' }),
+    // Someone else's "Just you" in the same chat is not found by its title; its owner finds it
+    inChatSomeoneElse: await titles('quests private', 'all', { userId: 'owner', chatKind: 'nearby', chatRef: 'room#9#900' }),
+    inChatOwner: await titles('quests', 'any', { userId: 'friend', chatKind: 'nearby', chatRef: 'room#9#900' }),
   };
 
   // One person with 10,000 files with this bot, each with a part of text, and one with the word

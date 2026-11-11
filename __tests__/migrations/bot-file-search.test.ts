@@ -80,7 +80,16 @@ describe('bot file search on Postgres', () => {
   });
 
   it('finds artifact titles with Arabic short vowels by the word without them, only in reach', () => {
-    expect(result.titles).toEqual({ marked: ['a-marked'], notAll: [], outOfReach: [], otherBot: ['a-echo'], inChat: ['a-plain'] });
+    expect(result.titles).toEqual({
+      marked: ['a-marked'],
+      notAll: [],
+      outOfReach: [],
+      otherBot: ['a-echo'],
+      // Someone's "Just you" in this chat (game #1994) is found by its owner alone
+      inChat: ['a-plain'],
+      inChatSomeoneElse: [],
+      inChatOwner: ['a-plain', 'a-private'],
+    });
   });
 
   it('a search can not reach outside its words', () => {

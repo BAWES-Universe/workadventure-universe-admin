@@ -33,6 +33,7 @@ import {
   mediaOf,
   mergeMedia,
   newFileKey,
+  shownInItsChatTo,
   type ArtifactEdit,
   type ArtifactKind,
   type Asker,
@@ -55,6 +56,7 @@ import {
   parseRange,
   passAddress,
   passCookie,
+  passCookieValue,
   passFolderAddress,
   passCookieName,
   passLifeMs,
@@ -626,7 +628,7 @@ export async function listArtifactsInChat(input: BotCall, ctx: Context = default
   const notExpired = { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] };
   // Someone else's "Just you" is not theirs to open (game #1994). Left out here too, as in listChatArtifacts, so a chat
   // where other people keep many private ones still lists what this person can open
-  const opens: Prisma.ArtifactWhereInput = { OR: [...(who.userId ? [{ ownerId: who.userId }] : []), { openScope: { in: ['chat', 'link'] } }] };
+  const opens: Prisma.ArtifactWhereInput = shownInItsChatTo(who.userId);
   const inChat = await prisma.artifact.findMany({ where: { chatKind: input.chat.kind, chatRef: input.chat.ref, AND: [notExpired, opens] }, include, orderBy, take });
   const own = who.userId ? await prisma.artifact.findMany({ where: { ownerId: who.userId, makerBotId: input.botId, chatRef: { not: null }, ...notExpired }, include, orderBy, take }) : [];
   const seen = new Set(inChat.map((row) => row.id));
@@ -1049,36 +1051,35 @@ type PassRow = { id: string; cookieHash: string | null; redeemedAt: Date | null;
 
 /**
  * Ties a pass to the browser that asks for its page, or checks that this is the browser it is tied to. Answers with the
- * cookie to set, or null when the request already carries the right one.
+ * cookie to set, or null when the request already carries it.
  *
  * The first request ties it. Its answer may never arrive (a dropped connection, a frame taken away while it loaded, a
  * request the browser sent twice), and that browser would then hold no cookie. So for a few seconds after the first
- * request the same address may ask again and is given a new cookie, which is from then on the only one that opens the
- * page (passRetryMs). Those seconds count from the first request and are never moved, so asking again does not buy more
- * of them. After that only the cookie opens the page: an address passed on to someone else opens nothing.
+ * request the same address may ask again and is given the cookie again (passRetryMs). It is the same cookie every time
+ * (passCookieValue), never a new one: two answers can reach a browser in either order, and whichever it keeps must be
+ * the one that opens the page. Those seconds count from the first request and are never moved, so asking again does not
+ * buy more of them. After that only the cookie opens the page: an address passed on to someone else opens nothing.
  */
 async function tieToBrowser(pass: PassRow, request: PrivateFileRequest, tokenHash: string, now: Date): Promise<string | null> {
   const refused = () => new ArtifactError('opened_elsewhere', 403, 'This private page opens only where its owner opened it.');
+  const cookie = passCookieValue(request.token, pass.id);
+  const toSet = () => passCookie(request.token, tokenHash, cookie, (pass.expiresAt.getTime() - now.getTime()) / 1000);
   let current: PassRow | null = pass;
-  // Twice at most: when another request for the same page gets in between, the pass is read again, once
-  for (let turn = 0; turn < 2 && current; turn++) {
-    if (current.redeemedAt !== null) {
-      const sent = readCookie(request.cookies, passCookieName(tokenHash));
-      if (sent && current.cookieHash && sameHash(hashOf(sent), current.cookieHash)) return null;
-      // How far apart the two moments are, not which came first: the first request may have read its clock a little
-      // after this one read its own, or on a server whose clock runs a little ahead
-      if (Math.abs(now.getTime() - current.redeemedAt.getTime()) >= passRetryMs()) throw refused();
-    }
-    const cookie = newSecret();
-    // Only for the pass as it was read, so of two requests at the same moment one takes it and the other looks again
-    const taken = await prisma.artifactPass.updateMany({
-      where: { id: current.id, redeemedAt: current.redeemedAt, cookieHash: current.cookieHash },
-      data: { redeemedAt: current.redeemedAt ?? now, cookieHash: hashOf(cookie) },
-    });
-    if (taken.count === 1) return passCookie(request.token, tokenHash, cookie, (current.expiresAt.getTime() - now.getTime()) / 1000);
+  if (current.redeemedAt === null) {
+    // Only for a pass nobody asked for yet, so of two requests at the same moment one ties it and the other reads it again
+    const taken = await prisma.artifactPass.updateMany({ where: { id: pass.id, redeemedAt: null }, data: { redeemedAt: now, cookieHash: hashOf(cookie) } });
+    if (taken.count === 1) return toSet();
     current = await prisma.artifactPass.findUnique({ where: { tokenHash } });
   }
-  throw refused();
+  if (!current || current.redeemedAt === null || current.cookieHash === null) throw refused();
+  const sent = readCookie(request.cookies, passCookieName(tokenHash));
+  if (sent && sameHash(hashOf(sent), current.cookieHash)) return null;
+  // How far apart the two moments are, not which came first: the first request may have read its clock a little after
+  // this one read its own, or on a server whose clock runs a little ahead
+  if (Math.abs(now.getTime() - current.redeemedAt.getTime()) >= passRetryMs()) throw refused();
+  // Never a cookie the page would not open with afterwards
+  if (!sameHash(hashOf(cookie), current.cookieHash)) throw refused();
+  return toSet();
 }
 
 /**
@@ -1262,7 +1263,7 @@ export async function listChatArtifacts(viewer: Viewer, offset = 0, ctx: Context
   const own: Prisma.ArtifactWhereInput[] = who.userId ? [{ ownerId: who.userId }] : [];
   // In the chat: everything made in it, but someone else's "Just you" is not theirs to open (game #1994). Outside it: only
   // their own and those shared by link.
-  const opens: Prisma.ArtifactWhereInput = who.inChat ? { OR: [...own, { openScope: { in: ['chat', 'link'] } }] } : { OR: [...own, { openScope: 'link' }] };
+  const opens: Prisma.ArtifactWhereInput = who.inChat ? shownInItsChatTo(who.userId) : { OR: [...own, { openScope: 'link' }] };
   return pageOf({ chatKind: chat.kind, chatRef: chat.ref, AND: [notExpiredAt(now), opens] }, offset, (artifact) => ({
     ...viewOf(artifact),
     yours: who.userId !== null && artifact.ownerId === who.userId,

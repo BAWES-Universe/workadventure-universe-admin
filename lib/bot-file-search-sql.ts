@@ -169,13 +169,16 @@ export function fileHitsSql(fileIds: string[], query: string, anyQuery: string =
 /**
  * The artifacts in reach (this chat's, and the ones this bot made for the person) whose title has the words, each anywhere in it, with Arabic
  * marks left out of the title as they are of the words ("مرحبا" finds "مَرْحَبًا"). The words are letters and digits only.
+ * Of this chat's, someone else's "Just you" is not in reach (game #1994, the rule of shownInItsChatTo): a title that
+ * matched would say it is there.
  */
 export function artifactTitleSql(scope: { botId: string; userId: string | null; chatKind: string; chatRef: string }, words: string[], mode: 'all' | 'any'): { sql: string; values: unknown[] } {
   return {
     values: [scope.chatKind, scope.chatRef, scope.userId, words.map((word) => `%${word}%`), scope.botId],
     sql: `
       SELECT id FROM artifacts
-      WHERE ((chat_kind = $1 AND chat_ref = $2) OR ($3::text IS NOT NULL AND owner_id = $3::text AND maker_bot_id = $5::text))
+      WHERE ((chat_kind = $1 AND chat_ref = $2 AND (open_scope IN ('chat', 'link') OR ($3::text IS NOT NULL AND owner_id = $3::text)))
+          OR ($3::text IS NOT NULL AND owner_id = $3::text AND maker_bot_id = $5::text))
         AND regexp_replace(title, '${ARABIC_MARKS_CLASS}', '', 'g') ILIKE ${mode === 'all' ? 'ALL' : 'ANY'} ($4::text[])`,
   };
 }

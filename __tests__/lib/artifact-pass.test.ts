@@ -15,6 +15,7 @@ import {
   parseRange,
   passAddress,
   passCookie,
+  passCookieValue,
   passFolderAddress,
   passCookieName,
   passFolder,
@@ -152,6 +153,29 @@ describe('the cookie that ties a pass to the browser that opened it', () => {
     expect(readCookie(null, 'af_0123456789ab')).toBeNull();
     expect(readCookie('', 'af_0123456789ab')).toBeNull();
     expect(readCookie('a=b=c', 'a')).toBe('b=c');
+  });
+});
+
+describe('the one cookie of a pass', () => {
+  const token = newSecret();
+  const passId = '3f0e8c1a-6a2b-4d57-9a41-0d7c2b9e5f10';
+
+  it('is the same however often it is made, so of two answers to one browser it does not matter which arrives last', () => {
+    expect(passCookieValue(token, passId)).toBe(passCookieValue(token, passId));
+  });
+
+  it('is made of the address and of the pass\'s own id: another address or another pass has another one', () => {
+    expect(passCookieValue(newSecret(), passId)).not.toBe(passCookieValue(token, passId));
+    expect(passCookieValue(token, '9b1d4e7c-0f3a-4c68-8e52-6a7d1c3b2f44')).not.toBe(passCookieValue(token, passId));
+  });
+
+  it('is as long and as plain as any secret here, and is neither of the two things it is made of', () => {
+    const cookie = passCookieValue(token, passId);
+    expect(looksLikeSecret(cookie)).toBe(true);
+    expect(cookie).not.toBe(token);
+    expect(cookie).not.toContain(passId);
+    // What the table keeps of the address does not make it either
+    expect(passCookieValue(hashOf(token), passId)).not.toBe(cookie);
   });
 });
 

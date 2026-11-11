@@ -37,7 +37,7 @@ function fileRow(n: number, created: string, extra: Record<string, unknown> = {}
 function artifact(id: string, updated: string, extra: Record<string, unknown> = {}) {
   db.artifacts.push({
     id, title: `Board ${id}`, kind: 'app', makerName: 'Scout', makerBotId: 'bot1', latestVersion: 2, ownerId: 'owner', chatKind: 'nearby', chatRef: 'room#2#200',
-    expiresAt: null, updatedAt: new Date(updated), ...extra,
+    openScope: 'chat', expiresAt: null, updatedAt: new Date(updated), ...extra,
   });
 }
 
@@ -52,7 +52,11 @@ function fakeSql(rows: ReturnType<typeof fileRow>[], hits: { bot_file_id: string
       const bare = (title: string) => title.replace(/[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]/g, '').toLowerCase();
       const has = (title: string) => patterns.map((pattern) => bare(title).includes(pattern.slice(1, -1)));
       return db.artifacts
-        .filter((row) => (row.chatKind === chatKind && row.chatRef === chatRef) || (userId !== null && row.ownerId === userId && row.makerBotId === botId))
+        .filter(
+          (row) =>
+            (row.chatKind === chatKind && row.chatRef === chatRef && (['chat', 'link'].includes(row.openScope as string) || (userId !== null && row.ownerId === userId))) ||
+            (userId !== null && row.ownerId === userId && row.makerBotId === botId),
+        )
         .filter((row) => (sql.includes('ALL') ? has(row.title as string).every(Boolean) : has(row.title as string).some(Boolean)))
         .map((row) => ({ id: row.id }));
     }
@@ -186,6 +190,36 @@ describe('finding files in bot chats (game #1508)', () => {
       // A guest finds only the chat's
       const asGuest = await findFiles({ botId: 'bot1', person: guest, chat: BUBBLE, limit: 10 }, { now: NOW, sql: fakeSql([]).run });
       expect(asGuest.items.map((item) => (item as FoundArtifact).id)).toEqual(['in-this-bubble']);
+    });
+
+    it('never finds someone else\'s "Just you" in this chat: not its title, not who made it, not that it is there (game #1994)', async () => {
+      addUser('friend');
+      const friend = { signedIn: true, identifier: 'uuid-friend', name: 'Friend' };
+      artifact('friends-private', '2026-10-26T10:00:00Z', { title: 'Salary plan', ownerId: 'friend', chatRef: 'room#1#100', openScope: 'me' });
+      artifact('friends-shared', '2026-10-25T10:00:00Z', { title: 'Salary chart', ownerId: 'friend', chatRef: 'room#1#100' });
+      artifact('friends-by-link', '2026-10-24T10:00:00Z', { title: 'Salary link', ownerId: 'friend', chatRef: 'room#1#100', openScope: 'link' });
+
+      // Someone else in the same chat, a bot that made nothing for them, and a guest: listed or searched by its title
+      for (const person of [owner, guest]) {
+        for (const botId of ['bot1', 'bot3']) {
+          const listed = await findFiles({ botId, person, chat: BUBBLE, kinds: ['artifact'], limit: 10 }, { now: NOW, sql: fakeSql([]).run });
+          expect(listed.items.map((item) => (item as FoundArtifact).id)).toEqual(['friends-shared', 'friends-by-link']);
+          expect(listed.total).toBe(2);
+          const searched = await findFiles({ botId, person, chat: BUBBLE, words: 'salary', kinds: ['artifact'], limit: 10 }, { now: NOW, sql: fakeSql([]).run });
+          expect(searched.items.map((item) => (item as FoundArtifact).id)).toEqual(['friends-shared', 'friends-by-link']);
+          expect(searched.total).toBe(2);
+          expect(JSON.stringify([listed, searched])).not.toContain('Salary plan');
+          const exact = await findFiles({ botId, person, chat: BUBBLE, words: 'salary plan', kinds: ['artifact'], limit: 10 }, { now: NOW, sql: fakeSql([]).run });
+          expect(JSON.stringify(exact)).not.toContain('friends-private');
+        }
+      }
+
+      // Its owner finds it, here and from another chat with the bot that made it
+      const mine = await findFiles({ botId: 'bot1', person: friend, chat: BUBBLE, words: 'salary plan', kinds: ['artifact'], limit: 10 }, { now: NOW, sql: fakeSql([]).run });
+      expect(mine.items.map((item) => (item as FoundArtifact).id)).toEqual(['friends-private']);
+      expect(mine.items[0]).toMatchObject({ title: 'Salary plan', mine: true, inThisChat: true });
+      const elsewhere = await findFiles({ botId: 'bot1', person: friend, chat: OTHER_BUBBLE, kinds: ['artifact'], limit: 10 }, { now: NOW, sql: fakeSql([]).run });
+      expect(elsewhere.items.map((item) => (item as FoundArtifact).id)).toEqual(['friends-private', 'friends-shared', 'friends-by-link']);
     });
 
     it('searches titles only among this bot\'s artifacts and this chat\'s', async () => {

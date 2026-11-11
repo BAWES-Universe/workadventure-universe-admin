@@ -297,6 +297,17 @@ export function hasExpired(artifact: ArtifactRules, now: Date): boolean {
   return artifact.expiresAt !== null && artifact.expiresAt.getTime() <= now.getTime();
 }
 
+
+/**
+ * What someone in a chat is shown of the artifacts made in it, as a filter on artifacts: their own, and those open to the
+ * chat or by link. Never someone else's "Just you" (game #1994): its title, its maker's name and that it exists are
+ * private too, not only its page. Every list of a chat's artifacts takes this one filter (the chat's own list, the list
+ * a bot gets, and what a bot's search finds), so none of them can leave the rule out.
+ */
+export function shownInItsChatTo(userId: string | null): { OR: ({ ownerId: string } | { openScope: { in: OpenScope[] } })[] } {
+  return { OR: [...(userId ? [{ ownerId: userId }] : []), { openScope: { in: ['chat', 'link'] } }] };
+}
+
 /** "Just you": its owner keeps it to themselves. Nobody else opens it, in its chat or by a link. */
 export function isJustYou(artifact: Pick<ArtifactRules, 'openScope'>): boolean {
   return artifact.openScope === 'me';

@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { ArtifactError, fileTypeOf, type ArtifactKind } from '@/lib/artifacts';
 import { getPlayOrigin } from '@/lib/origin-policy';
 
@@ -12,7 +12,8 @@ import { getPlayOrigin } from '@/lib/origin-policy';
  *
  * The page (or drawing) is served to the first browser that asks, with a cookie that only that address reads. After that
  * the page needs the cookie, so an address passed on to someone else opens nothing. For the first few seconds the same
- * address may ask again without it, because that first answer may never have arrived (passRetryMs). The songs, images
+ * address may ask again without it, because that first answer may never have arrived (passRetryMs); it is given the
+ * same cookie again, never another one (passCookieValue). The songs, images
  * and videos beside a page need only the pass: a locked page asks for some of them without cookies (`crossorigin`), and
  * not every browser sends a cookie from a locked frame. They are served once the page has been, and only while the pass
  * lasts.
@@ -55,6 +56,18 @@ export function sameHash(a: string, b: string): boolean {
   const left = Buffer.from(a);
   const right = Buffer.from(b);
   return left.length === right.length && timingSafeEqual(left, right);
+}
+
+/**
+ * The cookie of a pass. One pass has one cookie, the same however often it is made: of two answers to the same browser
+ * (a request it sent twice, or one sent again because the first answer never arrived) it does not matter which arrives
+ * last, the browser holds the cookie that opens the page.
+ *
+ * It is made of two things no one place holds: the address, which is never stored (only its hash is), and the pass's
+ * own id, which is never sent anywhere. So the table alone makes no cookie, and neither does an address passed on.
+ */
+export function passCookieValue(token: string, passId: string): string {
+  return createHmac('sha256', token).update(`af-cookie:${passId}`).digest('base64url');
 }
 
 const SECRET = /^[A-Za-z0-9_-]{43}$/;

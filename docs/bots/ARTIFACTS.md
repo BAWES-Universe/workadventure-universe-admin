@@ -22,6 +22,7 @@ game (open, versions, code, share, restore, copy, delete).
   mentioned. Anything else answers `404 not_found`, as for an artifact that is not there. The rules above still apply on
   top: a pasted link opens someone else's artifact only when its owner shared it by link, and changes stay with the chat it
   was made in. The search over files and the in-chat list show the same: this chat's, and what this bot made for the person.
+  Of this chat's, someone else's "Just you" is in neither, by its title or otherwise: only its owner finds it.
 - **Versions:** every change by the artifact's maker is a new version with what changed and who asked (another bot's change is a copy of its own, Orbit #800). Nothing is overwritten. Restore makes a
   new version out of an old one. Up to 200 versions; one version is up to 512 KB.
 - **Make a copy:** the signed-in viewer's own artifact (version 1 = the version they pick), in no chat, so only they open
@@ -116,8 +117,10 @@ Every other artifact is served from the bucket's own address, which opens for an
   artifact stops every pass at once. The page (or drawing) goes to the first browser that asks, with a cookie only that
   pass's addresses read; after that the page needs the cookie, so an address passed on to someone else answers `403`.
   For the first `ARTIFACT_PASS_RETRY_SECONDS` (10 by default) the same address may ask again without the cookie and is
-  given a new one, the only one that opens the page from then on: the first answer may never have arrived (a dropped
-  connection, a frame taken away while it loaded, a request sent twice). Those seconds count from the first request.
+  given it again: the first answer may never have arrived (a dropped connection, a frame taken away while it loaded, a
+  request sent twice). A pass has one cookie, the same every time, so of two answers it does not matter which one the
+  browser keeps. It is made from the address (never stored) and the pass's own id (never sent), so neither the table
+  nor a passed-on address gives it. Those seconds count from the first request.
   The media beside a page are served once the page has been, for as long as the pass lasts.
 - **The lock:** a page is sent with the same policy the bucket's address puts on every artifact (`sandbox
   allow-scripts`, no network but the common libraries, no forms), may be framed only by the game and by Orbit, and is

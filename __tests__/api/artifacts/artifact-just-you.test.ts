@@ -18,6 +18,7 @@ import { checkBotAccess } from '@/lib/bot-access';
 import { loadBotPrivacy } from '@/lib/bot-privacy';
 import { getSessionUser } from '@/lib/auth-session';
 import { moveStepMs, openByLink, pruneExpired, resetPruneClock } from '@/lib/artifact-service';
+import { hashOf, passCookieValue } from '@/lib/artifact-pass';
 import { addBot, addUser, db, fakeFiles, fakePrisma } from '../../helpers/artifacts-db';
 
 jest.mock('@/lib/db', () => ({ prisma: jest.requireActual('../../helpers/artifacts-db').fakePrisma }));
@@ -661,25 +662,71 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       const lost = await fetchPrivate(address, inFrame);
       expect(lost.status).toBe(200);
       const tiedAt = db.passes[0].redeemedAt!.getTime();
+      const kept = db.passes[0].cookieHash;
 
-      // That answer never reached the browser, which holds no cookie: three seconds on it asks again and is given a new one
+      // That answer never reached the browser, which holds no cookie: three seconds on it asks again and is given it again
       firstSecondsOver(3);
       const again = await fetchPrivate(address, inFrame);
       expect(again.status).toBe(200);
       expect(again.text).toBe(PAGE);
       expect(cookieOf(again.headers)).toMatch(/^af_[^=]+=.{43}$/);
-      expect(cookieOf(again.headers)).not.toBe(cookieOf(lost.headers));
+      // The same cookie, never a new one, and nothing about the pass is written again
+      expect(cookieOf(again.headers)).toBe(cookieOf(lost.headers));
+      expect(db.passes[0].cookieHash).toBe(kept);
       // Asking again buys no more time: the seconds count from the first request
       expect(db.passes[0].redeemedAt!.getTime()).toBe(tiedAt - 3_000);
 
-      // Once they are over only the last cookie given opens it: not the one that was lost, and not the bare address
+      // Once they are over only the cookie opens it: not the bare address, and not another cookie
       firstSecondsOver();
       expect((await fetchPrivate(address, inFrame)).status).toBe(403);
-      expect((await fetchPrivate(address, { ...inFrame, cookie: cookieOf(lost.headers) })).status).toBe(403);
+      expect((await fetchPrivate(address, { ...inFrame, cookie: `${cookieOf(again.headers).split('=')[0]}=${'x'.repeat(43)}` })).status).toBe(403);
       const mine_ = await fetchPrivate(address, { ...inFrame, cookie: cookieOf(again.headers) });
       expect(mine_.status).toBe(200);
       expect(mine_.headers.get('set-cookie')).toBeNull();
       expect(db.passes[0].redeemedAt!.getTime()).toBe(tiedAt - 14_000);
+    });
+
+    it('gives every request inside the first seconds the same cookie, so whichever answer the browser keeps, the page still opens later', async () => {
+      const id = await makePage();
+      await justYou(id);
+      const address = await ownerAddress(id);
+      // A browser sends the request for the page twice, and asks once more a moment later, holding no cookie each time
+      const answers = [await fetchPrivate(address, inFrame), await fetchPrivate(address, inFrame)];
+      firstSecondsOver(2);
+      answers.push(await fetchPrivate(address, inFrame));
+      // A request that carries a cookie this pass never gave is treated the same inside those seconds
+      answers.push(await fetchPrivate(address, { ...inFrame, cookie: `${cookieOf(answers[0].headers).split('=')[0]}=${'x'.repeat(43)}` }));
+      expect(answers.map((answer) => answer.status)).toEqual([200, 200, 200, 200]);
+      expect(new Set(answers.map((answer) => cookieOf(answer.headers))).size).toBe(1);
+
+      // The answers can arrive in any order: whichever one the browser kept last, its cookie opens the page afterwards
+      firstSecondsOver();
+      for (const kept of answers) {
+        const later = await fetchPrivate(address, { ...inFrame, cookie: cookieOf(kept.headers) });
+        expect(later.status).toBe(200);
+        expect(later.headers.get('set-cookie')).toBeNull();
+      }
+      expect((await fetchPrivate(address, inFrame)).status).toBe(403);
+    });
+
+    it('makes a cookie from the address and from what only Orbit holds: another opening has another one, and neither alone gives it', async () => {
+      const id = await makePage();
+      await justYou(id);
+      const one = await ownerAddress(id);
+      const other = await ownerAddress(id);
+      const first = await fetchPrivate(one, inFrame);
+      const second = await fetchPrivate(other, inFrame);
+      const value = (answer: { headers: Headers }) => cookieOf(answer.headers).split('=')[1];
+      expect(value(first)).not.toBe(value(second));
+      // The cookie of one opening opens nothing at another's address
+      firstSecondsOver();
+      const name = cookieOf(second.headers).split('=')[0];
+      expect((await fetchPrivate(other, { ...inFrame, cookie: `${name}=${value(first)}` })).status).toBe(403);
+      // Not the address itself, and nothing the table keeps
+      const token = new URL(one).pathname.split('/')[2];
+      expect(value(first)).not.toBe(token);
+      expect(JSON.stringify(db.passes)).not.toContain(value(first));
+      expect(JSON.stringify(db.passes)).not.toContain(value(second));
     });
 
     it('holds to the cookie from the first moment where the setting says no seconds, and for as many as it says', async () => {
@@ -716,23 +763,37 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       const id = await makePage();
       await justYou(id);
       const address = await ownerAddress(id);
+      const token = new URL(address).pathname.split('/')[2];
       // The other request ties the pass between this one's reading it and taking it
       const real = fakePrisma.artifactPass.updateMany;
       const spy = jest.spyOn(fakePrisma.artifactPass, 'updateMany').mockImplementationOnce(async () => {
         // A moment later than this request's own, as it is when the other one came in after it and was quicker
         db.passes[0].redeemedAt = new Date(Date.now() + 5);
-        db.passes[0].cookieHash = 'a'.repeat(64);
+        db.passes[0].cookieHash = hashOf(passCookieValue(token, db.passes[0].id as string));
         return { count: 0 };
       });
       const second = await fetchPrivate(address, inFrame);
       expect(second.status).toBe(200);
       expect(second.text).toBe(PAGE);
-      expect(spy).toHaveBeenCalledTimes(2);
+      // The one that lost writes nothing: it reads the pass again and is given the cookie the other one was given
+      expect(spy).toHaveBeenCalledTimes(1);
       expect(fakePrisma.artifactPass.updateMany).not.toBe(real);
-      // The cookie it was given is the one that opens the page from then on
+      expect(cookieOf(second.headers).split('=')[1]).toBe(passCookieValue(token, db.passes[0].id as string));
+      // That cookie opens the page from then on
       firstSecondsOver();
       expect((await fetchPrivate(address, { ...inFrame, cookie: cookieOf(second.headers) })).status).toBe(200);
       expect((await fetchPrivate(address, inFrame)).status).toBe(403);
+    });
+
+    it('never hands out a cookie the page would not open with: a pass tied to another cookie turns a request without it away', async () => {
+      const id = await makePage();
+      await justYou(id);
+      const address = await ownerAddress(id);
+      expect((await fetchPrivate(address, inFrame)).status).toBe(200);
+      db.passes[0].cookieHash = 'a'.repeat(64);
+      const without = await fetchPrivate(address, inFrame);
+      expect(without.status).toBe(403);
+      expect(without.headers.get('set-cookie')).toBeNull();
     });
 
     // The request that won may have looked at the clock a little after the one that lost, or on another server whose
