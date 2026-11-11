@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
 import { prisma } from '@/lib/db';
-import { adoptGuestChat, claimGuestBrickReply, finishGuestBrickReply, guestBrickFor, takeCarriedGuestChats } from '@/lib/guest-brick';
+import { adoptGuestChat, claimGuestBrickReply, finishGuestBrickReply, guestBrickFor, takeCarriedGuestChat } from '@/lib/guest-brick';
 import { ensureDefaultBrick } from '@/lib/brick-default';
 import { checkReplyAllowance } from '@/lib/reply-limits';
 import { saveServerLimits } from '@/lib/bot-limits';
@@ -183,6 +183,8 @@ run('the Brick for guests, in a real database', () => {
     expect(served.brick.name).toBe('Brick');
     expect(served.brick.chatInstructions).toContain('Universe: Universe place (A place to meet)');
     expect(served.brick.chatInstructions).toContain('Room: Lobby (The coffee corner is on the second row)');
+    expect(served.brick.chatInstructions).not.toMatch(/free/i);
+    expect(served.brick.chatInstructions).toContain('I can only remember things once I\'m yours');
     expect(served.credentials.source).toBe('universe-ai');
     expect(served.credentials.providerId).toBeTruthy();
     // A room outside any universe still has it, and nothing about it
@@ -227,15 +229,22 @@ run('the Brick for guests, in a real database', () => {
       expect(await bricksOf(third.id)).toBe(0);
     });
 
-    it('hands the guest ids to the first device that asks and to no other', async () => {
+    it('lets only the device that was the guest pick the chat up, once: another device that asks first takes nothing', async () => {
       const a = await universe('carry');
       const noor = await person('noor-in');
       const guestId = guest();
       await claim(guestId, a.roomUrl);
       await adoptGuestChat(guestId, noor.id);
-      const asks = await Promise.all(Array.from({ length: 6 }, () => takeCarriedGuestChats(noor.id)));
-      expect(asks.filter((ids) => ids.length > 0)).toEqual([[guestId]]);
-      expect(await takeCarriedGuestChats(noor.id)).toEqual([]);
+      // Another signed-in device or tab asks first: with no id, a wrong id, or someone else's
+      expect(await takeCarriedGuestChat(noor.id, undefined)).toEqual({ carried: false });
+      expect(await takeCarriedGuestChat(noor.id, '')).toEqual({ carried: false });
+      expect(await takeCarriedGuestChat(noor.id, randomUUID())).toEqual({ carried: false });
+      const other = await person('other-device');
+      expect(await takeCarriedGuestChat(other.id, guestId)).toEqual({ carried: false });
+      // The right device still gets it, and only once, however many of its tabs ask at the same moment
+      const asks = await Promise.all(Array.from({ length: 6 }, () => takeCarriedGuestChat(noor.id, guestId)));
+      expect(asks.filter((answer) => answer.carried)).toHaveLength(1);
+      expect(await takeCarriedGuestChat(noor.id, guestId)).toEqual({ carried: false });
     });
 
     it('does nothing when the guest never talked to the Brick, or only had a reply that failed', async () => {
@@ -276,7 +285,7 @@ run('the Brick for guests, in a real database', () => {
       await claim(waiting, a.roomUrl);
       expect(await adoptGuestChat(waiting, sara.id)).toEqual({ adopted: true });
       await prisma.guestBrickHandover.update({ where: { guestKey: waiting }, data: { claimedAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) } });
-      expect(await takeCarriedGuestChats(sara.id)).toEqual([]);
+      expect(await takeCarriedGuestChat(sara.id, waiting)).toEqual({ carried: false });
     });
 
     it('never hands over an id that is a signed-in account’s own', async () => {

@@ -44,8 +44,8 @@ export const GUEST_BRICK = {
     'You are Brick, a helper in Universe. The person you are talking to is a guest and has not signed in.',
     'Help them with this place: answer questions about it using only the details you are given below, show them around and say what a Brick is in a sentence or two. Keep every answer short and in plain words.',
     'If you do not know something about this place, say you are not sure. Never guess.',
-    'You cannot remember anything after this visit, keep what you make, work with apps, make more Bricks or use a computer. Those come once they sign in and you become theirs.',
-    'When they ask for one of those, say so in one short sentence and say that signing in is free and this chat comes along. Say it once and do not repeat it.',
+    'You cannot remember anything after this visit, keep what you make, work with apps, make more Bricks or use a computer. Those come once they sign in and you become theirs. Answer in the spirit of: "I can only remember things once I\'m yours."',
+    'When they ask for one of those, say so in one short sentence and say that this chat comes along when they sign in. Say it once and do not repeat it.',
     'Never talk about other people in this place, and never say who or what is near or nearest.',
   ].join('\n'),
 } as const;
@@ -241,15 +241,18 @@ export async function adoptGuestChat(guestId: string, userId: string, now: Date 
 }
 
 /**
- * The guest chats waiting for this account to pick them up, each given out once: the first device that asks gets the
- * guest ids and every other asks for them in vain, so one device attaches the chat. A chat nobody picked up within the
+ * The device that was the guest picks its chat up (game #1997). It names the guest id it held; the chat is marked picked
+ * up only for a hand-over of that guest id to this account, once. A device that was never that guest has no such id, so
+ * it can never take it, and asking first, with no id or a wrong one, takes nothing. A chat nobody picked up within the
  * window is not given out.
  */
-export async function takeCarriedGuestChats(userId: string, now: Date = new Date()): Promise<string[]> {
+export async function takeCarriedGuestChat(userId: string, guestIdInput: unknown, now: Date = new Date()): Promise<{ carried: boolean }> {
+  if (typeof guestIdInput !== 'string' || !guestIdInput.trim()) return { carried: false };
+  const guestId = guestIdInput.trim().slice(0, 255);
   const since = await handoverWindow(now);
   const rows = await prisma.$queryRaw<{ guest_key: string }[]>(Prisma.sql`
     UPDATE "guest_brick_handovers" SET "carried_at" = ${now}
-    WHERE "user_id" = ${userId} AND "carried_at" IS NULL AND "claimed_at" >= ${since}
+    WHERE "guest_key" = ${guestId} AND "user_id" = ${userId} AND "carried_at" IS NULL AND "claimed_at" >= ${since}
     RETURNING "guest_key"`);
-  return rows.map((row) => row.guest_key);
+  return { carried: rows.length > 0 };
 }

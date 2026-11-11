@@ -7,10 +7,10 @@ import { NextRequest } from 'next/server';
 import { GET as getBrick } from '@/app/api/guest-brick/route';
 import { POST as claimReply } from '@/app/api/guest-brick/replies/route';
 import { PATCH as finishReply } from '@/app/api/guest-brick/replies/[turnId]/route';
-import { POST as takeChats } from '@/app/api/bricks/default/guest-chat/route';
+import { POST as takeChat } from '@/app/api/bricks/default/guest-chat/route';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
-import { GuestBrickError, claimGuestBrickReply, finishGuestBrickReply, guestBrickFor, takeCarriedGuestChats } from '@/lib/guest-brick';
+import { GuestBrickError, claimGuestBrickReply, finishGuestBrickReply, guestBrickFor, takeCarriedGuestChat } from '@/lib/guest-brick';
 
 jest.mock('@/lib/db', () => ({ prisma: { user: { findUnique: jest.fn() } } }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -20,7 +20,7 @@ jest.mock('@/lib/guest-brick', () => ({
   guestBrickFor: jest.fn(),
   claimGuestBrickReply: jest.fn(),
   finishGuestBrickReply: jest.fn(),
-  takeCarriedGuestChats: jest.fn(),
+  takeCarriedGuestChat: jest.fn(),
 }));
 
 const user = prisma.user as unknown as { findUnique: jest.Mock };
@@ -28,7 +28,7 @@ const session = getSessionUser as jest.Mock;
 const served = guestBrickFor as jest.Mock;
 const claim = claimGuestBrickReply as jest.Mock;
 const finish = finishGuestBrickReply as jest.Mock;
-const take = takeCarriedGuestChats as jest.Mock;
+const take = takeCarriedGuestChat as jest.Mock;
 
 const TOKEN = 'bot-server-secret';
 const asBotServer = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
@@ -115,24 +115,35 @@ describe('what the bot server calls', () => {
 });
 
 describe('the guest chat a person picks up after signing in', () => {
-  it('gives a signed-in person the guest ids once, for themselves', async () => {
+  const post = (headers: Record<string, string>, body?: unknown) => takeChat(call('/api/bricks/default/guest-chat', 'POST', headers, body));
+
+  it('answers for the guest id the device held, for the person who signed in', async () => {
     session.mockResolvedValue({ id: 'u-sara' });
     user.findUnique.mockResolvedValue({ isGuest: false });
-    take.mockResolvedValue(['g-1']);
-    const response = await takeChats(call('/api/bricks/default/guest-chat', 'POST', {}));
+    take.mockResolvedValue({ carried: true });
+    const response = await post({}, { guestId: 'g-1' });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ guestIds: ['g-1'] });
-    expect(take).toHaveBeenCalledWith('u-sara');
+    expect(await response.json()).toEqual({ carried: true });
+    expect(take).toHaveBeenCalledWith('u-sara', 'g-1');
+  });
+
+  it('needs the guest id: a device without one cannot ask', async () => {
+    session.mockResolvedValue({ id: 'u-sara' });
+    user.findUnique.mockResolvedValue({ isGuest: false });
+    expect((await post({}, {})).status).toBe(400);
+    expect((await post({}, { guestId: 7 })).status).toBe(400);
+    expect((await post({})).status).toBe(400);
+    expect(take).not.toHaveBeenCalled();
   });
 
   it('turns down a guest, and someone not signed in, and gives nothing', async () => {
     session.mockResolvedValue({ id: 'u-guest' });
     user.findUnique.mockResolvedValue({ isGuest: true });
-    expect((await takeChats(call('/api/bricks/default/guest-chat', 'POST', {}))).status).toBe(403);
+    expect((await post({}, { guestId: 'g-1' })).status).toBe(403);
     session.mockResolvedValue(null);
-    expect((await takeChats(call('/api/bricks/default/guest-chat', 'POST', {}))).status).toBe(401);
+    expect((await post({}, { guestId: 'g-1' })).status).toBe(401);
     // The service token is no way in: this one is about a person's own account
-    expect((await takeChats(call('/api/bricks/default/guest-chat', 'POST', asBotServer))).status).toBe(401);
+    expect((await post(asBotServer, { guestId: 'g-1' })).status).toBe(401);
     expect(take).not.toHaveBeenCalled();
   });
 });
