@@ -764,7 +764,8 @@ export function moveStepMs(versions: number): number {
  * (lib/artifact-pass.ts).
  *
  * Nothing is half done: if a copy fails, or a new version lands or the files move meanwhile, the copies go and the
- * artifact stays as it was. If the bucket will not remove an old file, it stays listed and every tidy-up tries again
+ * artifact stays as it was. A copy is only ever removed when no version names it, also when the database's answer to the
+ * step itself was lost. If the bucket will not remove an old file, it stays listed and every tidy-up tries again
  * until it is gone; the owner is told it is not finished, and asking again finishes it (see closeOldAddresses). A copy
  * that a browser or a network cache already holds cannot be taken back; nothing new is ever served from the old address.
  */
@@ -781,6 +782,8 @@ async function makeJustYou(artifact: ArtifactRow, changeScope: ChangeScope | und
     return { id: version.id, from: version.fileKey, fileKey, media, copies };
   });
   const copies = moves.flatMap((move) => move.copies);
+  // Every line of the step below was written, so only its own end is left
+  let written = false;
   try {
     for (let start = 0; start < copies.length; start += MOVE_AT_ONCE) {
       // Every copy of a batch settles before anything is cleared: one that lands after the clean-up would stay for good
@@ -803,14 +806,44 @@ async function makeJustYou(artifact: ArtifactRow, changeScope: ChangeScope | und
         if (pointed.count !== 1) throw new ArtifactError('stale_version', 409, 'It changed at the same moment; try again.');
       }
       await tx.artifactRetiredFile.createMany({ data: copies.map((copy) => ({ key: copy.from })), skipDuplicates: true });
+      written = true;
     }, { timeout: moveStepMs(moves.length) });
   } catch (error) {
-    await files.remove(copies.map((copy) => copy.to)).catch(() => undefined);
-    throw error;
+    // Almost always nothing was changed, and the copies go. But a step can land while its answer is lost (the connection
+    // drops as it ends). The versions then name the copies, and the old files are listed to go: removing the copies would
+    // lose every version for good. So once the whole step was written, a copy goes only when the database says that no
+    // version names it. When the database cannot say, every copy stays: a file nobody names costs a little room in the
+    // bucket, at an address nobody was given.
+    const made = copies.map((copy) => copy.to);
+    let named: Set<string>;
+    try {
+      named = written ? await namedNow(artifact.id, made) : new Set();
+    } catch {
+      console.error('Could not tell whether an artifact became private, so the files copied for it are kept:', artifact.id);
+      throw error;
+    }
+    const unnamed = made.filter((key) => !named.has(key));
+    if (unnamed.length > 0) await files.remove(unnamed).catch(() => undefined);
+    // It did not land (or what landed was moved on since): as it was
+    if (named.size === 0) throw error;
+    // It landed: the rest goes on as if the answer had come
   }
   await closeOldAddresses(artifact.id, ctx);
   // And whatever the bucket would not let go of before, for other artifacts
   await retireFiles(ctx).catch((error) => console.error('Could not remove old files of private artifacts:', error instanceof Error ? error.message : 'unknown'));
+}
+
+/**
+ * Which of these files a version of the artifact names now. It is read with the artifact's row held: every step that
+ * changes where an artifact's files are starts by writing to that row, so one that was still landing has landed or gone
+ * before this reads.
+ */
+async function namedNow(artifactId: string, keys: string[]): Promise<Set<string>> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM "artifacts" WHERE "id" = ${artifactId} FOR UPDATE`;
+    const named = new Set(keysOf(await tx.artifactVersion.findMany({ where: { artifactId } })));
+    return new Set(keys.filter((key) => named.has(key)));
+  });
 }
 
 /**

@@ -25,6 +25,12 @@ export const db = {
   failCopyOf: null as string | null,
   /** Make the bucket refuse to remove anything. */
   failRemove: false,
+  /**
+   * What the next steps do, in order, in place of running as usual. 'lost': the step lands, but its answer never comes
+   * (the call throws). 'undone': every line runs, then the step is taken back and the call throws. 'down': the database
+   * cannot be reached, so nothing runs.
+   */
+  nextSteps: [] as ('lost' | 'undone' | 'down')[],
   /** app_settings rows (#666): the super admin's limits, saved under "bot-limits". */
   settings: new Map<string, unknown>(),
   reset() {
@@ -39,6 +45,7 @@ export const db = {
     this.failNextVersionCreate = false;
     this.failCopyOf = null;
     this.failRemove = false;
+    this.nextSteps.length = 0;
   },
 };
 
@@ -229,12 +236,23 @@ const client: Row = {
       return { count: before - db.retired.length };
     },
   },
+  // Holding a row is all the service asks of a query written out by hand
+  $queryRaw: async () => [],
   // As the database does: a step that fails leaves no row changed. (The bucket is no part of it, as in real life.)
   $transaction: async (fn: (tx: Row) => Promise<unknown>) => {
+    const how = db.nextSteps.shift();
+    if (how === 'down') throw new Error('the database cannot be reached');
     const copyOf = (rows: Row[]) => rows.map((row) => ({ ...row }));
     const before = { artifacts: copyOf(db.artifacts), versions: copyOf(db.versions), passes: copyOf(db.passes), retired: copyOf(db.retired) };
     try {
-      return await fn(client);
+      const result = await fn(client);
+      if (how === 'undone') throw new Error('the step ran out of time as it ended');
+      if (how === 'lost') {
+        // Landed: nothing is taken back, and the caller is told it failed
+        Object.keys(before).forEach((table) => delete (before as Row)[table]);
+        throw new Error('the connection dropped');
+      }
+      return result;
     } catch (error) {
       Object.assign(db, before);
       throw error;

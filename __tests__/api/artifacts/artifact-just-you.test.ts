@@ -471,6 +471,102 @@ describe('"Just you" for things a bot makes (game #1994)', () => {
       expect(versionRows(id)[0].fileKey).toBe(before.find((key) => key.endsWith('index.html')));
     });
 
+    /** Every file a version of the artifact names is in the bucket, with what it held. */
+    const expectWhole = async (id: string, pages: string[]) => {
+      const rows = versionRows(id);
+      expect(rows).toHaveLength(pages.length);
+      for (const [index, row] of rows.entries()) {
+        expect(await fakeFiles.get(row.fileKey)).toBe(pages[index]);
+        expect(db.files.get(row.media[0].key)).toEqual(SONG.bytes);
+      }
+    };
+
+    it('keeps the new files when the step landed and only its answer was lost: it is "Just you", whole, and done', async () => {
+      const id = await makePage();
+      await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: PAGE.replace('Trip', 'Our trip') }, { id, ...asBot });
+      const old = bucketKeys();
+      expect(old).toHaveLength(4);
+      // The database took the step, and the connection dropped before it could say so
+      db.nextSteps.push('lost');
+      const res = await shareAs(person('owner'), id, { openScope: 'me' });
+      expect(res.status).toBe(200);
+      expect(res.body.artifact.openScope).toBe('me');
+      // Not one file a version names was removed: both versions, and the song beside each
+      await expectWhole(id, [PAGE, PAGE.replace('Trip', 'Our trip')]);
+      // And the rest went on as usual: the old addresses are closed, nothing is left listed, no file is unnamed
+      expect(old.some((key) => db.files.has(key))).toBe(false);
+      expect(db.retired).toEqual([]);
+      expect(bucketKeys()).toEqual(versionRows(id).flatMap((row) => [row.fileKey, row.media[0].key]).sort());
+      expect((await openAs(person('friend'), id)).body.error).toBe('kept_private');
+      expect((await fetchPrivate(await ownerAddress(id), inFrame)).text).toBe(PAGE.replace('Trip', 'Our trip'));
+    });
+
+    it('removes the copies when the step was taken back as it ended: it stays as it was, with no stray file', async () => {
+      const id = await makePage();
+      const before = bucketKeys();
+      db.nextSteps.push('undone');
+      const res = await shareAs(person('owner'), id, { openScope: 'me' });
+      expect(res.status).toBe(500);
+      expect(artifactRow(id).openScope).toBe('chat');
+      expect(bucketKeys()).toEqual(before);
+      expect(db.retired).toEqual([]);
+      expect((await openAs(person('friend'), id)).status).toBe(200);
+      // Asked again, it goes through
+      await justYou(id);
+      await expectWhole(id, [PAGE]);
+    });
+
+    it('removes no copy while the database cannot say whether the step landed, and asking again finishes it', async () => {
+      const id = await makePage();
+      const old = bucketKeys();
+      const errors = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      // It landed, its answer was lost, and the database cannot be asked what happened
+      db.nextSteps.push('lost', 'down');
+      const res = await shareAs(person('owner'), id, { openScope: 'me' });
+      expect(res.status).toBe(500);
+      expect(JSON.stringify(res.body)).not.toContain('artifacts/');
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining('Could not tell'), id);
+      // The versions name the copies, and every one of them is still there
+      expect(artifactRow(id).openScope).toBe('me');
+      await expectWhole(id, [PAGE]);
+      // The old files wait, listed (the next tidy-up would take them too); picking "Just you" again closes their addresses
+      expect(db.retired.map((row) => row.key).sort()).toEqual(old);
+      await justYou(id);
+      expect(old.some((key) => db.files.has(key))).toBe(false);
+      expect(db.retired).toEqual([]);
+      await expectWhole(id, [PAGE]);
+      expect((await openAs(person('friend'), id)).body.error).toBe('kept_private');
+      expect((await fetchPrivate(await ownerAddress(id), inFrame)).text).toBe(PAGE);
+    });
+
+    it('removes no copy either when the step did not land and the database cannot say so: nothing a version names is touched', async () => {
+      const id = await makePage();
+      const before = bucketKeys();
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      db.nextSteps.push('undone', 'down');
+      expect((await shareAs(person('owner'), id, { openScope: 'me' })).status).toBe(500);
+      expect(artifactRow(id).openScope).toBe('chat');
+      // The files it had are where they were, and open as before
+      expect(before.every((key) => db.files.has(key))).toBe(true);
+      expect(db.retired).toEqual([]);
+      expect((await openAs(person('friend'), id)).status).toBe(200);
+      await expectWhole(id, [PAGE]);
+    });
+
+    it('asks the database only when the whole step was written: a step that fails on the way removes the copies at once', async () => {
+      const id = await makePage();
+      const before = bucketKeys();
+      const steps = jest.spyOn(fakePrisma, '$transaction');
+      const copyInBucket = fakeFiles.copy.bind(fakeFiles);
+      jest.spyOn(fakeFiles, 'copy').mockImplementation(async (from, to) => {
+        artifactRow(id).latestVersion = 2;
+        return copyInBucket(from, to);
+      });
+      expect((await shareAs(person('owner'), id, { openScope: 'me' })).body.error).toBe('stale_version');
+      expect(steps).toHaveBeenCalledTimes(1);
+      expect(bucketKeys()).toEqual(before);
+    });
+
     it('is not called done while the bucket still holds a file from before, and picking it again finishes it', async () => {
       const id = await makePage();
       const old = bucketKeys();

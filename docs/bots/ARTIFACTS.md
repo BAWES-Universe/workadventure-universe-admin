@@ -102,7 +102,9 @@ Every other artifact is served from the bucket's own address, which opens for an
 - **Becoming "Just you"** (`PUT share` with `openScope: "me"`): every version's page and media is copied to a new
   address that nobody was given, the versions point at the copies in the same step that sets `me`, and the old files are
   removed from the bucket. If a copy fails, or a new version lands or the files move meanwhile, nothing changes and the
-  answer is an error (`409 stale_version` for the last two: ask again). Old files the bucket would not remove stay listed
+  answer is an error (`409 stale_version` for the last two: ask again). A copy is only ever removed when no version
+  names it: if the database's answer to that step is lost, Orbit asks it what happened first, and when it cannot say,
+  the copies stay. Old files the bucket would not remove stay listed
   in `artifact_retired_files` and every tidy-up tries again. Until this artifact's own are gone the answer is
   `503 old_files_remain`, not the artifact: it is `me` already for everything Orbit answers, but an address it had
   before still opens, so its owner is not told it is done. Sending `me` again tries again, and answers the artifact once
