@@ -4,6 +4,7 @@ import { requireServiceToken } from '@/lib/service-tokens';
 import { UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 import { readUsagePriceFacts } from '@/lib/ai-usage-cost';
 import { readUsageChannel, resolveUsagePerson } from '@/lib/usage-person';
+import { recordModelCall } from '@/lib/meter';
 
 /**
  * POST /api/bots/ai-usage
@@ -32,6 +33,7 @@ export async function POST(request: NextRequest) {
       error = false,
       timestamp = new Date(),
       greeting = false,
+      eventId: clientEventId = null,
     } = body;
 
     // A bot on Universe AI is paid for by the provider that is the Default, so that is the row the usage belongs to
@@ -95,6 +97,30 @@ export async function POST(request: NextRequest) {
           greeting: greeting === true,
         },
       })
+      // The meter's books (game #1998) copy the call from the row that was just counted. They never hold up or fail the report
+      .then((row) =>
+        recordModelCall({
+          usageRowId: row.id,
+          botId,
+          // The bot server's own id for the call, when it sends one, so a report it sends twice is one event in the books
+          clientEventId: typeof clientEventId === 'string' && clientEventId ? clientEventId.slice(0, 200) : null,
+          providerId,
+          sentProviderId,
+          keyOwnerId: row.keyOwnerId,
+          talkedUserId: row.talkedUserId,
+          talkedPersonId: row.talkedPersonId,
+          talkedGuest: row.talkedGuest,
+          channel: row.channel,
+          tokensUsed: row.tokensUsed,
+          apiCalls: row.apiCalls,
+          error: row.error,
+          greeting: row.greeting,
+          costBasis: row.costBasis,
+          costMicros: row.costMicros,
+          tokens: { input: row.inputTokens, cached: row.cachedTokens, cacheWrite: row.cacheWriteTokens, output: row.outputTokens, reasoning: row.reasoningTokens },
+          occurredAt: row.timestamp,
+        }),
+      )
       .catch((err) => {
         // Log error but don't block response
         console.error('Error tracking AI usage:', err);

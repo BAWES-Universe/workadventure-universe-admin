@@ -10,6 +10,8 @@ import { POST as trackUsage } from '@/app/api/bots/ai-usage/route';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
+// The meter's books copy each report (game #1998); these tests are about the report, not the books
+jest.mock('@/lib/meter', () => ({ recordModelCall: jest.fn(async () => null) }));
 jest.mock('@/lib/db', () => ({
   prisma: {
     $queryRaw: jest.fn(),

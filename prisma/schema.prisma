@@ -1213,6 +1213,103 @@ model BotReplyLimitHit {
   @@map("bot_reply_limit_hits")
 }
 
+// The meter's books (game #1998, Brick 7). Our own count of everything that costs money: one row per app use, model call,
+// computer minute, size change and stored byte, written once under an event id, against a person, a Brick and a payer.
+// It runs in shadow first: it records and is compared with today's counts and the provider's figures, and enforces nothing
+// new. No foreign keys on purpose: the books keep what happened after a person, a bot or a Brick is deleted.
+model MeterEvent {
+  id            String    @id @default(uuid())
+  // What makes a write "once": a retry of the same event finds this row and writes nothing
+  eventId       String    @unique @map("event_id") @db.VarChar(255)
+  // model_call, speech, app_use, computer_time, size_change, stored_bytes
+  kind          String    @db.VarChar(20)
+  // "chat" (replies and voice) or "computer" (what a Brick's computer costs); the two are kept apart
+  pool          String    @db.VarChar(10)
+  occurredAt    DateTime  @map("occurred_at")
+  recordedAt    DateTime  @default(now()) @map("recorded_at")
+  // Who asked: "person:<user id>", "guest:<their id>" (the same words reply windows use) or "unknown"
+  personKey     String    @map("person_key") @db.VarChar(320)
+  personId      String?   @map("person_id")
+  // The bot that did it, and whether it was a Brick (no room) at the time; null when the bot was not found
+  botId         String?   @map("bot_id")
+  brick         Boolean?
+  // Who pays: "universe" (we do), "person" (the owner of a key or of a connected app) or "unknown"
+  payerKind     String    @map("payer_kind") @db.VarChar(10)
+  payerPersonId String?   @map("payer_person_id")
+  // The route it took: universe-ai, provider, own-key, app, computer
+  route         String?   @db.VarChar(40)
+  // The job it belongs to, for work a computer does
+  jobId         String?   @map("job_id") @db.VarChar(255)
+  quantity      BigInt
+  // call, token, second, minute, byte, use, reply
+  unit          String    @db.VarChar(12)
+  // Millionths of a dollar. Empty when the price is unknown; 0 is a real zero
+  costMicros    BigInt?   @map("cost_micros")
+  // measured, estimated, paid_by_other (someone else's bill) or unknown
+  basis         String    @db.VarChar(16)
+  // When the provider's settlement covered it; empty until then (the envelope keeps room for what is not settled yet)
+  settledAt     DateTime? @map("settled_at")
+  // Where it was copied from, such as "bots_ai_usage:123", so the books can be compared with that source
+  sourceRef     String?   @map("source_ref") @db.VarChar(255)
+  detail        Json?
+
+  @@index([personKey, occurredAt])
+  @@index([botId, occurredAt])
+  @@index([pool, kind, occurredAt])
+  @@index([sourceRef])
+  @@map("meter_events")
+}
+
+// Room kept for a paid step before it is taken (game #1998): against the member's allowance and our own pool. A long job renews
+// it while it runs. One row per key, so asking again for the same step finds the same room. A reservation never goes away; it
+// ends as settled (the step ran) or released (it never ran), so what happened stays in the books.
+model MeterReservation {
+  id             String    @id @default(uuid())
+  reservationKey String    @unique @map("reservation_key") @db.VarChar(255)
+  personKey      String    @map("person_key") @db.VarChar(320)
+  personId       String?   @map("person_id")
+  botId          String?   @map("bot_id")
+  jobId          String?   @map("job_id") @db.VarChar(255)
+  amountMicros   BigInt    @map("amount_micros")
+  // held, settled or released
+  state          String    @db.VarChar(10)
+  expiresAt      DateTime  @map("expires_at")
+  renewals       Int       @default(0)
+  settledMicros  BigInt?   @map("settled_micros")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  closedAt       DateTime? @map("closed_at")
+
+  @@index([personKey, state])
+  @@index([state, expiresAt])
+  @@map("meter_reservations")
+}
+
+// Extra usage given to a member (game #1998): recorded once under its key, so a retry or a second super admin never gives
+// it twice. A gift is free to the person and never owed; extra usage to be billed records something agreed with the person
+// before it was given, outside the product, and says when it was billed. The two are never the same row kind.
+model MeterGrant {
+  id          String    @id @default(uuid())
+  grantKey    String    @unique @map("grant_key") @db.VarChar(255)
+  personId    String    @map("person_id")
+  // gift or to_bill
+  settlement  String    @db.VarChar(10)
+  // 2 for double, 5 for five times; empty when it lifts the member's own limit
+  multiplier  Int?
+  noLimit     Boolean   @default(false) @map("no_limit")
+  // What it covers; chat, voice and computer time are raised together
+  covers      String    @default("all") @db.VarChar(20)
+  startsAt    DateTime  @map("starts_at")
+  endsAt      DateTime  @map("ends_at")
+  givenById   String    @map("given_by_id")
+  // What was agreed, for extra usage to be billed
+  note        String?   @db.VarChar(1000)
+  billedAt    DateTime? @map("billed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([personId, endsAt])
+  @@map("meter_grants")
+}
+
 // Bot Metrics
 model BotsMetric {
   id          Int      @id @default(autoincrement())

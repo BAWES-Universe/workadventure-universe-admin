@@ -6,6 +6,7 @@ import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db';
 import { POST as trackUsage } from '@/app/api/bots/ai-usage/route';
 import { readUsageChannel } from '@/lib/usage-person';
+import { recordModelCall } from '@/lib/meter';
 
 jest.mock('@/lib/db', () => ({
   prisma: {
@@ -15,6 +16,7 @@ jest.mock('@/lib/db', () => ({
   },
 }));
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
+jest.mock('@/lib/meter', () => ({ recordModelCall: jest.fn(async () => null) }));
 
 const provider = prisma.botsAiProvider as unknown as Record<'findUnique', jest.Mock>;
 const usage = prisma.botsAiUsage as unknown as Record<'create', jest.Mock>;
@@ -113,5 +115,68 @@ describe('a bot server from before this', () => {
     provider.findUnique.mockResolvedValue({ providerId: 'key-1', ownerId: 'maker-1' });
     await track({ providerId: 'key-1', keyOwnerId: 'someone-else' });
     expect(saved().keyOwnerId).toBe('maker-1');
+  });
+});
+
+describe('the meter’s books (game #1998)', () => {
+  const books = recordModelCall as unknown as jest.Mock;
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  const row = (over: object = {}) => ({
+    id: 41,
+    keyOwnerId: null,
+    talkedUserId: 'wa-uuid-sara',
+    talkedPersonId: 'user-sara',
+    talkedGuest: false,
+    channel: 'dm',
+    tokensUsed: 900,
+    apiCalls: 1,
+    error: false,
+    greeting: false,
+    costBasis: 'priced',
+    costMicros: 1200,
+    inputTokens: 700,
+    cachedTokens: 0,
+    cacheWriteTokens: 0,
+    outputTokens: 200,
+    reasoningTokens: 0,
+    timestamp: new Date('2026-11-11T10:00:00Z'),
+    ...over,
+  });
+
+  beforeEach(() => books.mockClear());
+
+  it('copies the call from the row that was just counted, with the same ids and the same figures', async () => {
+    usage.create.mockResolvedValue(row());
+    await track({ userId: 'wa-uuid-sara', providerId: 'deepseek-flash', channel: 'dm' });
+    await flush();
+    expect(books).toHaveBeenCalledTimes(1);
+    expect(books.mock.calls[0][0]).toMatchObject({
+      usageRowId: 41,
+      botId: 'b1',
+      clientEventId: null,
+      providerId: 'deepseek-flash',
+      keyOwnerId: null,
+      talkedPersonId: 'user-sara',
+      costBasis: 'priced',
+      costMicros: 1200,
+      occurredAt: new Date('2026-11-11T10:00:00Z'),
+    });
+  });
+
+  it('passes on the bot server’s own id for the call, so a report sent twice is one event in the books', async () => {
+    usage.create.mockResolvedValue(row());
+    await track({ eventId: 'turn-9' });
+    await flush();
+    expect(books.mock.calls[0][0].clientEventId).toBe('turn-9');
+  });
+
+  it('answers the report even when the books are down', async () => {
+    usage.create.mockResolvedValue(row());
+    books.mockRejectedValueOnce(new Error('books down'));
+    const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const response = await track({});
+    await flush();
+    spy.mockRestore();
+    expect(response.status).toBe(200);
   });
 });
