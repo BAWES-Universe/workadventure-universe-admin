@@ -224,7 +224,7 @@ describe('finding files in bot chats (game #1508)', () => {
       expect(elsewhere.items.map((item) => (item as FoundArtifact).id)).toEqual(['friends-private', 'friends-shared', 'friends-by-link']);
     });
 
-    it('finds only this chat\'s for a reply other people in it read: nothing of the person\'s from another chat, and no "Just you", their own neither (game #1993)', async () => {
+    it('finds only this chat\'s artifacts for a reply other people in it read: nothing of the person\'s from another chat, and no "Just you", their own neither (game #1993)', async () => {
       addUser('friend');
       artifact('here-shared', '2026-10-27T10:00:00Z', { title: 'Trip plan', chatRef: 'room#1#100' });
       artifact('here-private', '2026-10-26T10:00:00Z', { title: 'Trip budget', chatRef: 'room#1#100', openScope: 'me' });
@@ -233,11 +233,12 @@ describe('finding files in bot chats (game #1508)', () => {
       const ids = (found: { items: unknown[] }) => found.items.map((item) => (item as FoundArtifact).id);
 
       const sql = fakeSql([]);
-      const listed = await findFiles({ botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: true }, { now: NOW, sql: sql.run });
+      const listed = await findFiles({ botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: true, others: ['uuid-friend'] }, { now: NOW, sql: sql.run });
       expect(ids(listed)).toEqual(['here-shared', 'here-friend']);
       expect(listed.total).toBe(2);
-      // The files are asked for this chat alone
-      expect(sql.asked.find((ask) => !ask.sql.includes('FROM artifacts'))?.values[12]).toBe(true);
+      // The files are asked for by who reads the reply: the person and everyone else there
+      const asked = sql.asked.find((ask) => !ask.sql.includes('FROM artifacts'))?.values;
+      expect(asked?.slice(12)).toEqual([true, ['uuid-owner', 'uuid-friend']]);
       const searched = await findFiles({ botId: 'bot1', person: owner, chat: BUBBLE, words: 'trip', kinds: ['artifact'], limit: 10, everyoneHere: true }, { now: NOW, sql: fakeSql([]).run });
       expect(ids(searched)).toEqual(['here-shared', 'here-friend']);
       expect(searched.total).toBe(2);
@@ -246,9 +247,21 @@ describe('finding files in bot chats (game #1508)', () => {
 
       // Asked without it, everything the person may find is there as before
       const usual = fakeSql([]);
-      const alone = await findFiles({ botId: 'bot1', person: owner, chat: BUBBLE, limit: 10 }, { now: NOW, sql: usual.run });
+      const alone = await findFiles({ botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, others: ['uuid-friend'] }, { now: NOW, sql: usual.run });
       expect(ids(alone)).toEqual(['here-shared', 'here-private', 'here-friend', 'elsewhere']);
-      expect(usual.asked.find((ask) => !ask.sql.includes('FROM artifacts'))?.values[12]).toBe(false);
+      expect(usual.asked.find((ask) => !ask.sql.includes('FROM artifacts'))?.values.slice(12)).toEqual([false, []]);
+    });
+
+    it('asks for no file at all when it is not said who else reads the reply, or one of them cannot be named (game #1993)', async () => {
+      for (const others of [undefined, null, [], ['?'], ['uuid-friend', '?']]) {
+        const sql = fakeSql([]);
+        await findFiles({ botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: true, others }, { now: NOW, sql: sql.run });
+        expect(sql.asked[0].values.slice(12)).toEqual([true, []]);
+      }
+      // Nor for a person the bot server has no id for
+      const sql = fakeSql([]);
+      await findFiles({ botId: 'bot1', person: { signedIn: false, name: 'Visitor' }, chat: BUBBLE, limit: 10, everyoneHere: true, others: ['uuid-friend'] }, { now: NOW, sql: sql.run });
+      expect(sql.asked[0].values.slice(12)).toEqual([true, []]);
     });
 
     it('searches titles only among this bot\'s artifacts and this chat\'s', async () => {
@@ -371,13 +384,22 @@ describe('finding files in bot chats (game #1508)', () => {
       await expect(readFileText({ botId: 'bot2', person: owner, chat: DM, ref, chars: 8_000 }, { now: NOW })).rejects.toMatchObject({ status: 404 });
     });
 
-    it('for a reply other people in the chat read, only a file that came in this chat (game #1993)', async () => {
+    it('for a reply other people in the chat read, only a file all of them were there for (game #1993)', async () => {
       const ref = await keptFile('private words');
+      const inBubble = { botId: 'bot1', person: owner, chat: BUBBLE, ref, chars: 8_000 };
       // Their own, from their direct messages: alone in a bubble it is read, in front of other people it never was
-      await expect(readFileText({ botId: 'bot1', person: owner, chat: BUBBLE, ref, chars: 8_000 }, { now: NOW })).resolves.toMatchObject({ text: 'private words' });
-      await expect(readFileText({ botId: 'bot1', person: owner, chat: BUBBLE, ref, chars: 8_000, everyoneHere: true }, { now: NOW })).rejects.toMatchObject({ status: 404, code: 'not_found' });
-      // In the chat it came in, it is read either way
-      await expect(readFileText({ botId: 'bot1', person: owner, chat: DM, ref, chars: 8_000, everyoneHere: true }, { now: NOW })).resolves.toMatchObject({ text: 'private words' });
+      await expect(readFileText(inBubble, { now: NOW })).resolves.toMatchObject({ text: 'private words' });
+      await expect(readFileText({ ...inBubble, everyoneHere: true, others: ['uuid-friend'] }, { now: NOW })).rejects.toMatchObject({ status: 404, code: 'not_found' });
+      // One sent with the friend there is read for the two of them, and for nobody who came later
+      const made = await addFile(
+        { botId: 'bot1', person: owner, chat: BUBBLE, source: 'person', kind: 'document', name: 'menu.pdf', store: { bucket: 'user-refs', fileId: '0b5c1a6e-3f2d-4c8b-9a71-2e4f6d8c0a1c.pdf' }, others: ['uuid-friend'] },
+        { now: NOW },
+      );
+      await keepFileText({ botId: 'bot1', person: owner, chat: BUBBLE, ref: made.file.ref, text: 'soup and bread' }, { now: NOW });
+      const shown = { ...inBubble, ref: made.file.ref, everyoneHere: true };
+      await expect(readFileText({ ...shown, others: ['uuid-friend'] }, { now: NOW })).resolves.toMatchObject({ text: 'soup and bread' });
+      await expect(readFileText({ ...shown, others: ['uuid-friend', 'uuid-third'] }, { now: NOW })).rejects.toMatchObject({ status: 404 });
+      await expect(readFileText({ ...shown, others: [] }, { now: NOW })).rejects.toMatchObject({ status: 404 });
     });
   });
 
@@ -411,7 +433,7 @@ describe('finding files in bot chats (game #1508)', () => {
       expect((await post(readRoute, { botId: 'bot1', person: owner, chat: DM, ref: 'f1', chars: 5_000_001 })).status).toBe(400);
     });
 
-    it('takes "for everyone here" as yes or no, and nothing else', async () => {
+    it('takes "for everyone here" as yes or no and who else is there as a list, and nothing else', async () => {
       // The route runs the search's SQL through Prisma: answered here as a chat with no files
       const asked: unknown[][] = [];
       const prisma = fakePrisma as unknown as { $queryRawUnsafe?: unknown };
@@ -420,14 +442,15 @@ describe('finding files in bot chats (game #1508)', () => {
         return sql.includes('count(*)') ? [{ total: 0 }] : [];
       };
       try {
-        const yes = await post(findRoute, { botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: true });
+        const yes = await post(findRoute, { botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: true, others: ['uuid-friend'] });
         expect(yes.status).toBe(200);
         expect(yes.body).toMatchObject({ items: [], total: 0 });
-        expect(asked.every((values) => values[12] === true)).toBe(true);
+        expect(asked.every((values) => values[12] === true && JSON.stringify(values[13]) === '["uuid-owner","uuid-friend"]')).toBe(true);
         asked.length = 0;
         expect((await post(findRoute, { botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: false })).status).toBe(200);
         expect(asked.every((values) => values[12] === false)).toBe(true);
         expect((await post(findRoute, { botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: 'yes' })).status).toBe(400);
+        expect((await post(findRoute, { botId: 'bot1', person: owner, chat: BUBBLE, limit: 10, everyoneHere: true, others: 'uuid-friend' })).status).toBe(400);
       } finally {
         delete prisma.$queryRawUnsafe;
       }
@@ -442,11 +465,12 @@ describe('finding files in bot chats (game #1508)', () => {
       const res = await post(readRoute, { botId: 'bot1', person: owner, chat: DM, ref: made.file.ref, at: 6, chars: 8000 });
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({ text: 'there', at: 6, end: 11, next: null, hidden: false });
-      // For a reply other people read (game #1993): yes or no and nothing else, and from another chat it never was
+      // For a reply other people read (game #1993): yes or no and a list of ids, and one from a direct message never was
       const elsewhere = { botId: 'bot1', person: owner, chat: BUBBLE, ref: made.file.ref, chars: 8000 };
-      expect((await post(readRoute, { ...elsewhere, everyoneHere: false })).status).toBe(200);
-      expect((await post(readRoute, { ...elsewhere, everyoneHere: true })).status).toBe(404);
+      expect((await post(readRoute, { ...elsewhere, everyoneHere: false, others: ['uuid-friend'] })).status).toBe(200);
+      expect((await post(readRoute, { ...elsewhere, everyoneHere: true, others: ['uuid-friend'] })).status).toBe(404);
       expect((await post(readRoute, { ...elsewhere, everyoneHere: 'yes' })).status).toBe(400);
+      expect((await post(readRoute, { ...elsewhere, everyoneHere: true, others: 'uuid-friend' })).status).toBe(400);
     });
   });
 });

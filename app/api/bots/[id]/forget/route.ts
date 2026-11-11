@@ -30,7 +30,8 @@ export async function OPTIONS(request: NextRequest) {
  * stays until the bot server reports it dropped these people (app/api/bots/memory/[id]/forgotten/route.ts, #493).
  *
  * The files the bot kept for these people go too (game #1508): what they sent it and what it sent them, with the text kept
- * from them. Their artifacts stay: those have their own delete.
+ * from them, and that they were there when someone else's file was put in a chat (game #1993). Their artifacts stay:
+ * those have their own delete.
  *
  * Only for a bot that hides its conversations: a manager who can read them uses the usual cleanup.
  *
@@ -65,6 +66,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       prisma.botMemoryForget.create({ data: { botId: id, userUuid: person.userUuid } }),
       prisma.botsMemory.deleteMany({ where: { id: person.id } }),
       prisma.botFile.deleteMany({ where: forgetFilesWhere(id, { userUuid: person.userUuid, userId: person.userId }) }),
+      // Nor that they were there when someone else's file was put in a chat (game #1993): that file stays with the
+      // people still named on it
+      ...(person.userUuid
+        ? [prisma.$executeRaw`UPDATE "bot_files" SET "seen_by" = array_remove("seen_by", ${person.userUuid}) WHERE "bot_id" = ${id} AND ${person.userUuid} = ANY("seen_by")`]
+        : []),
     ]);
     return json(request, { forgotten: deleted.count, everyone: false });
   } catch (error) {

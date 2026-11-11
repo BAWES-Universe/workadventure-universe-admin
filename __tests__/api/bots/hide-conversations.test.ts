@@ -28,6 +28,7 @@ jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: jest.fn((email?: string | 
 jest.mock('@/lib/db', () => ({
   prisma: {
     $transaction: jest.fn(),
+    $executeRaw: jest.fn(),
     bot: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn() },
     universe: { findUnique: jest.fn(), update: jest.fn() },
     user: { findUnique: jest.fn() },
@@ -408,6 +409,10 @@ describe('Forget', () => {
     });
     expect(db.botMemoryForget.create).toHaveBeenCalledWith({ data: { botId: 'bot-1', userUuid: 'bob@example.com' } });
     expect(db.botsMemory.deleteMany).toHaveBeenCalledWith({ where: { id: 5 } });
+    // And that they were there when someone else's file was put in a chat (game #1993), for this bot's files alone
+    const [sql, ...values] = (prisma as unknown as { $executeRaw: jest.Mock }).$executeRaw.mock.calls[0];
+    expect((sql as string[]).join('?')).toBe('UPDATE "bot_files" SET "seen_by" = array_remove("seen_by", ?) WHERE "bot_id" = ? AND ? = ANY("seen_by")');
+    expect(values).toEqual(['bob@example.com', 'bot-1', 'bob@example.com']);
     expect((await call(forget, 'POST', { body: { userUuid: 'x' } })).status).toBe(400);
   });
 

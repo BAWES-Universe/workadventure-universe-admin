@@ -2,7 +2,8 @@
  * The search over files in bot chats (game #1508), as SQL with no database of its own, so the tests run the same text on
  * a real Postgres (PGlite). lib/bot-file-search.ts runs it through Prisma.
  *
- * It looks only where the person may: their own files with this bot, and the files of the chat they are asking in. It
+ * It looks only where the person may: their own files with this bot, and the files of the chat they are asking in (for a
+ * reply other people read too, of those only the files all of them were there for, game #1993). It
  * uses Postgres's own word index in 'simple' mode (no extension): a part's stored `words`, and the expression index on a
  * file's name and line (the expression below must stay the same as the migration's).
  */
@@ -65,10 +66,15 @@ export interface SearchScope {
   /** Files made before this can no longer be found (the super admin's days); null = no end. */
   findableSince: Date | null;
   /**
-   * What is found goes into a reply other people in this chat read (game #1993): only the files of this chat, never the
-   * person's own from another chat.
+   * What is found goes into a reply other people in this chat read (game #1993): only files every one of `readers` was
+   * there for when they were put in a chat.
    */
   everyoneHere?: boolean;
+  /**
+   * Everyone who reads that reply, the person who asked included, by the ids the bot server names people by. Null when
+   * one of them cannot be named: then nothing is found.
+   */
+  readers?: string[] | null;
 }
 
 export interface SearchFilters {
@@ -114,6 +120,7 @@ export function fileSearchSql(scope: SearchScope, filters: SearchFilters, page: 
     utc(filters.until),
     filters.every && filters.every.length > 0 ? filters.every.map((word) => `${word}:*`) : null,
     scope.everyoneHere === true,
+    scope.everyoneHere === true ? (scope.readers ?? []) : [],
   ];
   const at = (n: number) => `($${n}::timestamptz AT TIME ZONE 'UTC')`;
   const matches = `
@@ -130,7 +137,10 @@ export function fileSearchSql(scope: SearchScope, filters: SearchFilters, page: 
         SELECT CASE WHEN q.query IS NULL THEN NULL ELSE ${wordsOfSql(`f.name || ' ' || coalesce(f.line, '') || ' ' || left(coalesce(f.made_prompt, ''), 20000)`)} END AS words
       ) own
       WHERE f.bot_id = $1
-        AND ((NOT $13::boolean AND f.owner_id IS NOT NULL AND f.owner_id = $2::text) OR (f.chat_kind = $3 AND f.chat_ref = $4))
+        AND ((f.owner_id IS NOT NULL AND f.owner_id = $2::text) OR (f.chat_kind = $3 AND f.chat_ref = $4))
+        -- For a reply other people read (game #1993): only a file every reader was there for. With no reader named,
+        -- nobody can be checked, so nothing is found
+        AND (NOT $13::boolean OR (cardinality($14::text[]) > 0 AND f.seen_by @> $14::text[]))
         AND (f.expires_at IS NULL OR f.expires_at > ${at(5)})
         AND ($6::text IS NULL OR f.created_at > ${at(6)})
         AND ($7::text[] IS NULL OR f.kind = ANY($7::text[]))

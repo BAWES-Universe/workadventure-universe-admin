@@ -8,6 +8,7 @@ import {
   limitsOf,
   loadUsable,
   passBotGate,
+  readersOf,
   resolvePerson,
   shortIdOf,
   viewOf,
@@ -51,10 +52,13 @@ export interface FindInput extends BotCall {
   /** How many a page holds: the "Files found in one search" setting, sent by the bot server. */
   limit: number;
   /**
-   * What is found goes into a reply other people in this chat read (game #1993): only what came or was made in this
-   * chat, and no "Just you" artifact. Nothing of the person's from another chat is found, counted or named.
+   * What is found goes into a reply other people in this chat read (game #1993): of the files only those everyone who
+   * reads it was there for (the person and `others`), and of the artifacts only what was made in this chat and is not
+   * "Just you". Nothing else is found, counted or named.
    */
   everyoneHere?: boolean | null;
+  /** Everyone else in the bubble or meeting room now, by the ids the bot server names people by. */
+  others?: string[] | null;
 }
 
 export interface FoundFile {
@@ -215,6 +219,7 @@ export async function findFiles(input: FindInput, ctx: SearchContext = defaultCo
         now: ctx.now,
         findableSince: findable > 0 ? new Date(ctx.now.getTime() - findable * DAY_MS) : null,
         everyoneHere: input.everyoneHere === true,
+        readers: input.everyoneHere === true ? readersOf(who, input) : null,
       },
       { query, every: mode === 'all' && words.length > 1 ? words : null, kinds: fileKinds, source: input.source ?? null, since: dateOf(input.since), until: dateOf(input.until) },
       { offset: 0, limit: offset + limit },
@@ -284,8 +289,9 @@ export interface ReadInput extends BotCall {
   at?: number | null;
   /** How much to read: the "Reads from a kept file" setting, sent by the bot server. */
   chars: number;
-  /** The text goes into a reply other people in this chat read (game #1993): then only a file that came in this chat. */
+  /** The text goes into a reply other people in this chat read (game #1993): then only a file all of them were there for. */
   everyoneHere?: boolean | null;
+  others?: string[] | null;
 }
 
 export interface Read {
