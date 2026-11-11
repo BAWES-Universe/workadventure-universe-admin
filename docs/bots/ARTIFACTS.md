@@ -8,8 +8,11 @@ game (open, versions, code, share, restore, copy, delete).
 
 - **Owner:** the person who asked. The bot is its maker (id and the name it had). A guest owns nothing: what a guest asks
   for is kept for a day from its last change, and anyone in that chat may change it meanwhile.
-- **Who can open it** (`openScope`): `chat` (people in the chat it was made in, the default) or `link` (anyone with the
-  link). The owner always can. Someone who may not open it hears `404`, the same as for an artifact that does not exist.
+- **Who can open it** (`openScope`): `me` ("Just you": nobody but its owner, in its chat or by link, game #1994), `chat`
+  (people in the chat it was made in, the default) or `link` (anyone with the link). The owner always can. Someone who
+  may not open it hears `404 not_found`, the same as for an artifact that does not exist. One exception: a "Just you"
+  artifact asked for from the chat it was made in answers `404 kept_private`, because its card is in front of that
+  person already ("Its owner keeps this one private."). A guest owns nothing, so a guest's artifact is never "Just you".
 - **Who can ask for changes** (`changeScope`): `owner` (the default) or `openers` (everyone who can open it, in the chat
   it was made in). The owner may ask in any chat they have with a bot; nobody else asks from another chat.
 - **One bot's work is not another bot's context (game #1781, Orbit #790):** by id, a bot reaches the artifacts made in the
@@ -19,10 +22,12 @@ game (open, versions, code, share, restore, copy, delete).
   mentioned. Anything else answers `404 not_found`, as for an artifact that is not there. The rules above still apply on
   top: a pasted link opens someone else's artifact only when its owner shared it by link, and changes stay with the chat it
   was made in. The search over files and the in-chat list show the same: this chat's, and what this bot made for the person.
+  Of this chat's, someone else's "Just you" is in neither, by its title or otherwise: only its owner finds it.
 - **Versions:** every change by the artifact's maker is a new version with what changed and who asked (another bot's change is a copy of its own, Orbit #800). Nothing is overwritten. Restore makes a
   new version out of an old one. Up to 200 versions; one version is up to 512 KB.
 - **Make a copy:** the signed-in viewer's own artifact (version 1 = the version they pick), in no chat, so only they open
-  it until they share it. The file is copied, so deleting the original leaves the copy whole.
+  it until they share it. The file is copied, so deleting the original leaves the copy whole. A copy of a "Just you"
+  artifact is "Just you" too, and so is the copy another bot's change makes of one: nothing widens by itself.
 - **Bot access and telemetry:** make, change and read first ask the same rules as `/api/bots/:id/access` (nearby chat for
   a `nearby` chat, direct message for a `dm` chat). The answer carries `hidden`, the Bot chat telemetry switch for that
   bot: when `true` the bot server keeps the artifact's text out of PostHog and Sentry. Orbit logs no content.
@@ -84,7 +89,56 @@ Bodies carry `viewer: { person, inChat, chat }`: `inChat` says the person is in 
 | `DELETE /api/artifacts/:id` | `viewer` | `{ deleted: true }`; owner only. Removes every version and file; a copy keeps its own files |
 
 `you` is `{ owner, change, manage, copy }`: whether to show Ask-to-change, Share and Restore, and Make a copy.
-`version.url` is where the file is served from, for the locked box.
+`version.url` is where the file is served from, for the locked box. For a "Just you" artifact it is `null` everywhere
+but in the answer to `open`, and there it is an address for that one opening (below), with `version.urlExpiresAt`
+beside it: when that address stops, so a window left open can ask for a new one in time. A "Just you" document has
+none at all: it is drawn from the text `versions/:number` sends.
+
+## "Just you": the file itself (game #1994)
+
+Every other artifact is served from the bucket's own address, which opens for anyone who has it. That is not enough for
+"Just you", so its files never are:
+
+- **Becoming "Just you"** (`PUT share` with `openScope: "me"`): every version's page and media is copied to a new
+  address that nobody was given, the versions point at the copies in the same step that sets `me`, and the old files are
+  removed from the bucket. If a copy fails, or a new version lands or the files move meanwhile, nothing changes and the
+  answer is an error (`409 stale_version` for the last two: ask again). A copy is only ever removed when no version
+  names it: if the database's answer to that step is lost, Orbit asks it what happened first, and when it cannot say,
+  the copies stay. Old files the bucket would not remove stay listed
+  in `artifact_retired_files` and every tidy-up tries again. Until this artifact's own are gone the answer is
+  `503 old_files_remain`, not the artifact: it is `me` already for everything Orbit answers, but an address it had
+  before still opens, so its owner is not told it is done. Sending `me` again tries again, and answers the artifact once
+  they are gone. A copy a browser or a network cache already holds cannot be taken back.
+- **Someone else's change that was on its way** when the owner made it "Just you", or took back who may ask for
+  changes, does not land: it answers `409 stale_version`, and asking again is refused like any other request of theirs.
+- **Opening it:** `open` (and `GET /api/me/artifacts/:id`) checks who is asking, then makes a **pass**: a row in
+  `artifact_passes` holding only the hash of 256 random bits, the artifact and its owner. `version.url` is
+  `<Orbit>/af/<pass>/<version>/index.html` (or `index.svg`), and a page names its media beside it as before.
+- **`GET /af/:pass/:version/:name`** serves the file. No sign-in is read and none is given to the page. On every request
+  Orbit checks the pass has time left, the artifact is still there and the pass's person still owns it, so deleting the
+  artifact stops every pass at once. The page (or drawing) goes to the first browser that asks, with a cookie only that
+  pass's addresses read; after that the page needs the cookie, so an address passed on to someone else answers `403`.
+  For the first `ARTIFACT_PASS_RETRY_SECONDS` (10 by default) the same address may ask again without the cookie and is
+  given it again: the first answer may never have arrived (a dropped connection, a frame taken away while it loaded, a
+  request sent twice). A pass has one cookie, the same every time, so of two answers it does not matter which one the
+  browser keeps. It is made from the address (never stored) and the pass's own id (never sent), so neither the table
+  nor a passed-on address gives it. Those seconds count from the first request.
+  The media beside a page are served once the page has been, for as long as the pass lasts.
+- **The lock:** a page is sent with the same policy the bucket's address puts on every artifact (`sandbox
+  allow-scripts`, no network but the common libraries, no forms), may be framed only by the game and by Orbit, and is
+  refused when a browser asks for it as a page of its own (`Sec-Fetch-Dest: document`). So although these addresses are
+  Orbit's, a running page has no origin, and can reach neither the sign-in nor the game. One line is tighter than the
+  bucket's: pictures, songs and videos load only from the pass's own folder for that version (`/af/<pass>/<version>/`),
+  not from `'self'`, which here would be all of Orbit.
+- **Reading its own media:** the songs, images and videos are sent with `Access-Control-Allow-Origin: *`, so a page can
+  draw its picture on a canvas and read it back, or analyse its song (`crossorigin`). A locked page has no origin to
+  name, the file is protected by the pass in its address, and no cookie is read for it. It is the one place Orbit
+  answers `*`; the page itself never does.
+- **A pass lasts** `ARTIFACT_PASS_MINUTES` (720 by default). A page left open longer is opened again.
+- **Nothing is recorded with the pass in it:** requests to `/af` are not traced, and an error while serving one is
+  reported without the pass (`lib/sentry-private.ts`).
+- `openScope` back to `chat` or `link` is only the word: from then on the address is the bucket's again, for whoever the
+  owner let in. Going back to "Just you" moves the files again.
 
 ## Storage (Orbit environment)
 
@@ -96,6 +150,11 @@ Without these every route answers `503 storage_not_configured` and nothing else 
 | `ARTIFACTS_S3_ACCESS_KEY_ID`, `ARTIFACTS_S3_SECRET_ACCESS_KEY` | A key that can read, write and delete in that bucket |
 | `ARTIFACTS_S3_REGION` | `auto` for R2 (the default) |
 | `ARTIFACTS_PUBLIC_URL` | The address the bucket is served from. It must **not** be under bawes.net, so a running page can never reach the sign-in or the game |
+| `ARTIFACT_PASS_MINUTES` | How long one opening of a "Just you" artifact lasts (720 by default) |
+| `ARTIFACT_PASS_RETRY_SECONDS` | How long after a "Just you" page was first asked for its address may ask again without the cookie (10 by default; 0 for never) |
+
+"Just you" also needs Orbit's own address as a browser reaches it (`NEXT_PUBLIC_API_URL`, or `ADMIN_API_URL`), which
+sign-in already uses. Without it `PUT share` with `me` answers `503 private_files_not_configured` and changes nothing.
 
 The bucket needs no listing. File names carry a random part, so a link to a version cannot be guessed from the artifact
 id; "people in this chat" is enforced by Orbit's open route, which is the only place that hands out the address.

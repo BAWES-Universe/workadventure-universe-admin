@@ -3,6 +3,8 @@ import {
   applyEdits,
   canAskForChange,
   canOpen,
+  isJustYou,
+  OPEN_SCOPES,
   checkContent,
   checkVersionRoom,
   sizeLabel,
@@ -195,6 +197,43 @@ describe('who can open it', () => {
     const gone = { ...base, ownerId: null, openScope: 'link', expiresAt: new Date('2026-10-26T09:59:59Z') };
     expect(canOpen(gone, guestInChat, NOW)).toBe(false);
     expect(canOpen({ ...gone, expiresAt: new Date('2026-10-27T10:00:00Z') }, guestInChat, NOW)).toBe(true);
+  });
+});
+
+describe('"Just you" (game #1994)', () => {
+  const mine: ArtifactRules = { ...base, openScope: 'me' };
+
+  it('is the first choice of who can open it', () => {
+    expect(OPEN_SCOPES[0]).toBe('me');
+    expect(isJustYou(mine)).toBe(true);
+    expect(isJustYou(base)).toBe(false);
+  });
+
+  it('opens for its owner, from any chat', () => {
+    expect(canOpen(mine, owner, NOW)).toBe(true);
+    expect(canOpen(mine, { userId: 'owner', inChat: true }, NOW)).toBe(true);
+  });
+
+  it('opens for nobody else: not in its chat, not outside it, not a guest', () => {
+    expect(canOpen(mine, inChat, NOW)).toBe(false);
+    expect(canOpen(mine, outside, NOW)).toBe(false);
+    expect(canOpen(mine, guestInChat, NOW)).toBe(false);
+  });
+
+  it('never reads as "people in this chat" for a value it does not know', () => {
+    expect(canOpen({ ...base, openScope: 'everyone' }, inChat, NOW)).toBe(false);
+    expect(canOpen({ ...base, openScope: '' }, inChat, NOW)).toBe(false);
+  });
+
+  it('lets nobody else ask for changes, even where the owner had allowed it before', () => {
+    const open: ArtifactRules = { ...mine, changeScope: 'openers' };
+    expect(canAskForChange(open, inChat, true, NOW)).toBe(false);
+    expect(canAskForChange(open, guestInChat, true, NOW)).toBe(false);
+    expect(canAskForChange(open, owner, false, NOW)).toBe(true);
+  });
+
+  it('holds for one with no owner too: nobody opens it', () => {
+    expect(canOpen({ ...mine, ownerId: null }, guestInChat, NOW)).toBe(false);
   });
 });
 

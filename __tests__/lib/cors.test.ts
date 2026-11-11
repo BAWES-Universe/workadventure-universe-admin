@@ -55,15 +55,33 @@ describe('one CORS rule for every route (#171)', () => {
   walk(join(__dirname, '../../app'));
   walk(join(__dirname, '../../lib'));
 
+  const grantsAnyone = /['"]Access-Control-Allow-Origin['"]\s*[\]:,]\s*(?:=\s*)?['"]\*['"]/g;
+  /**
+   * The one file that may answer `*`: the songs, images and videos of a private artifact (game #1994), read by a locked
+   * page that has no origin to name. They are protected by the pass in their address and read no sign-in or cookie
+   * (lib/artifact-pass.ts, MEDIA_READ_HEADERS).
+   */
+  const privateMedia = join('lib', 'artifact-pass.ts');
+
   it('has no route that grants * or credentials, or keeps its own corsHeaders', () => {
     const offenders = files.filter((path) => {
       const source = readFileSync(path, 'utf8');
       return (
-        /['"]Access-Control-Allow-Origin['"]\s*[\]:,]\s*(?:=\s*)?['"]\*['"]/.test(source) ||
+        (source.match(grantsAnyone) !== null && !path.endsWith(privateMedia)) ||
         /Access-Control-Allow-Credentials['"]\s*[\]:,]/.test(source) ||
         (/function corsHeaders\s*\(/.test(source) && !path.endsWith(join('lib', 'cors.ts')))
       );
     });
     expect(offenders).toEqual([]);
+  });
+
+  it('answers * in one place only: the media of a private artifact, which no cookie opens', () => {
+    const source = readFileSync(join(__dirname, '../..', privateMedia), 'utf8');
+    expect(source.match(grantsAnyone)).toHaveLength(1);
+    expect(source).toMatch(/export const MEDIA_READ_HEADERS = \{ 'Access-Control-Allow-Origin': '\*'/);
+    // Used by the one function that serves those files, and nowhere else
+    const users = files.filter((path) => !path.endsWith(privateMedia) && readFileSync(path, 'utf8').includes('MEDIA_READ_HEADERS'));
+    expect(users).toEqual([join(__dirname, '../../lib/artifact-service.ts')]);
+    expect(readFileSync(users[0], 'utf8').match(/\.\.\.MEDIA_READ_HEADERS/g)).toHaveLength(1);
   });
 });

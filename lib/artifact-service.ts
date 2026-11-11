@@ -26,12 +26,14 @@ import {
   clipText,
   fileTypeOf,
   hasExpired,
+  isJustYou,
   isOneOf,
   isOwner,
   mediaKeyFor,
   mediaOf,
   mergeMedia,
   newFileKey,
+  shownInItsChatTo,
   type ArtifactEdit,
   type ArtifactKind,
   type Asker,
@@ -41,6 +43,27 @@ import {
   type MediaUpload,
   type OpenScope,
 } from '@/lib/artifacts';
+import {
+  MEDIA_POLICY,
+  MEDIA_READ_HEADERS,
+  drawingPolicy,
+  hashOf,
+  looksLikeSecret,
+  mayShowPage,
+  newSecret,
+  orbitAddress,
+  pagePolicy,
+  parseRange,
+  passAddress,
+  passCookie,
+  passCookieValue,
+  passFolderAddress,
+  passCookieName,
+  passLifeMs,
+  passRetryMs,
+  readCookie,
+  sameHash,
+} from '@/lib/artifact-pass';
 
 /**
  * Live artifacts (game #1422, Orbit #622): the list of what bots made for people, the versions of each, and who may
@@ -153,8 +176,16 @@ export interface VersionView {
   sizeBytes: number;
   createdAt: string;
   media: MediaView[];
-  /** Where the file is served from, for the locked box. */
-  url: string;
+  /**
+   * Where the file is served from, for the locked box. Null for a "Just you" artifact everywhere but in the answer to its
+   * owner opening it: that one address is for that opening only (lib/artifact-pass.ts).
+   */
+  url: string | null;
+  /**
+   * When that one address stops working, so a window left open can ask for a new one in time. Only beside the address of
+   * one opening; an address of the bucket's never stops, and has none.
+   */
+  urlExpiresAt?: string;
 }
 
 type VersionRow = { number: number; summary: string | null; askedByName: string | null; sizeBytes: number; createdAt: Date; fileKey: string; media?: unknown };
@@ -173,8 +204,36 @@ function botVersionView(row: VersionRow): BotVersionView {
   };
 }
 
-function versionView(row: VersionRow, files: ArtifactFiles): VersionView {
-  return { ...botVersionView(row), url: files.urlFor(row.fileKey) };
+function versionView(row: VersionRow, url: string | null, pass?: Pass | null): VersionView {
+  return { ...botVersionView(row), url, ...(pass && url ? { urlExpiresAt: pass.expiresAt.toISOString() } : {}) };
+}
+
+/** One opening of a private artifact: the random part of its address, and when it stops. */
+interface Pass {
+  token: string;
+  expiresAt: Date;
+}
+
+/**
+ * Where a version's file opens. The bucket's own address, which opens for anyone who has it, is only ever given for an
+ * artifact that is not "Just you". A private one has an address only for a pass (one opening by its owner), and a
+ * document needs none: it is drawn from its text, which the routes send to its owner alone.
+ */
+function addressOf(artifact: { openScope: string; kind: string }, row: VersionRow, files: ArtifactFiles, pass?: Pass | null): string | null {
+  if (!isJustYou(artifact)) return files.urlFor(row.fileKey);
+  if (!pass || artifact.kind === 'markdown') return null;
+  return passAddress(pass.token, row.number, artifact.kind as ArtifactKind);
+}
+
+/** One opening of a private artifact by its owner: the random part of the address its files are served at for it. */
+async function issuePass(artifact: { id: string; kind: string }, userId: string, now: Date): Promise<Pass | null> {
+  if (artifact.kind === 'markdown') return null;
+  // Asked first: without Orbit's own address there is nowhere to serve it from, and no pass is left behind
+  orbitAddress();
+  const token = newSecret();
+  const expiresAt = new Date(now.getTime() + passLifeMs());
+  await prisma.artifactPass.create({ data: { tokenHash: hashOf(token), artifactId: artifact.id, userId, expiresAt } });
+  return { token, expiresAt };
 }
 
 /** What the person who is looking may do, for the buttons the game shows. */
@@ -202,8 +261,18 @@ function rightsOf(artifact: ArtifactRow, who: Who, now: Date): Rights {
   };
 }
 
+/**
+ * The answer for someone who may not open it. One answer for nearly every case (not there, run out, shared only with its
+ * chat), so it tells nobody which. The one exception is a "Just you" artifact asked for from the chat it was made in: its
+ * card is in front of that person already, so they are told its owner keeps it private (game #1994).
+ */
+function cannotOpen(artifact: ArtifactRow, inItsChat: boolean): ArtifactError {
+  if (isJustYou(artifact) && inItsChat && artifact.chatRef !== null) return new ArtifactError('kept_private', 404, 'Its owner keeps this one private.');
+  return new ArtifactError('not_found', 404, 'No such artifact.');
+}
+
 function requireOpen(artifact: ArtifactRow, who: Who, now: Date): void {
-  if (!canOpen(artifact, who, now)) throw new ArtifactError('not_found', 404, 'No such artifact.');
+  if (!canOpen(artifact, who, now)) throw cannotOpen(artifact, who.inChat);
 }
 
 function requireOwner(artifact: ArtifactRow, who: Who): void {
@@ -397,7 +466,7 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   if (!inBotsReach(artifact, who, input)) throw new ArtifactError('not_found', 404, 'No such artifact.');
   if (!canAskForChange(artifact, who, inThisChat(artifact, input.chat), now)) {
     // Someone who cannot even open it hears the same as for an artifact that is not there
-    if (!canOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now)) throw new ArtifactError('not_found', 404, 'No such artifact.');
+    if (!canOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now)) throw cannotOpen(artifact, inThisChat(artifact, input.chat));
     throw new ArtifactError('change_not_allowed', 403, 'The owner has not allowed changes from this person.');
   }
   const { maxBytes, maxVersions, maxMediaBytes, maxMediaFiles } = await limitsOf(ctx);
@@ -423,9 +492,11 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   const media = placeMedia(fileKey, merged);
   const row = await storing(files, fileKey, kind, content, media, () =>
     prisma.$transaction(async (tx) => {
-      // The one who gets here first moves the version on; anyone who read the same version before fails here
+      // The one who gets here first moves the version on; anyone who read the same version before fails here. Someone
+      // other than its owner was let in by how it was shared when it was read: if the owner changed that meanwhile
+      // (made it "Just you", or took back who may ask for changes), the change does not land, and asking again is refused
       const moved = await tx.artifact.updateMany({
-        where: { id: artifact.id, latestVersion: artifact.latestVersion },
+        where: { id: artifact.id, latestVersion: artifact.latestVersion, ...(isOwner(artifact, who) ? {} : { openScope: artifact.openScope, changeScope: artifact.changeScope }) },
         data: {
           latestVersion: next,
           ...(title ? { title } : {}),
@@ -455,7 +526,8 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
  * A change by a bot that did not make the artifact (game #1805, Orbit #800): the original keeps its versions as they were, and
  * the change becomes version 1 of a new artifact this bot makes for the person who asked, in the chat it is in, with the
  * original's latest text and media plus the change. It starts private to that chat: how the original was shared is not carried
- * over. The bot's next change to it is an ordinary new version, since it is now the maker.
+ * over, with one exception. A copy of a "Just you" artifact is "Just you" too (game #1994): only its owner could ask for it, and
+ * asking for a change never shows it to anyone else. The bot's next change to it is an ordinary new version, since it is now the maker.
  */
 async function changeInACopy(
   call: {
@@ -489,6 +561,7 @@ async function changeInACopy(
         chatKind: input.chat.kind,
         chatRef: input.chat.ref,
         copiedFromId: artifact.id,
+        ...(isJustYou(artifact) ? { openScope: 'me' } : {}),
         // Nothing is kept for a guest beyond a day, and anyone in their chat may ask for a change meanwhile
         changeScope: who.userId ? 'owner' : 'openers',
         expiresAt: who.userId ? null : new Date(now.getTime() + GUEST_KEEP_MS),
@@ -553,7 +626,10 @@ export async function listArtifactsInChat(input: BotCall, ctx: Context = default
   // Expired guest artifacts and copies (which are in no chat) are left out here, not after the limit, so they never crowd out
   // the ones that are still there
   const notExpired = { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] };
-  const inChat = await prisma.artifact.findMany({ where: { chatKind: input.chat.kind, chatRef: input.chat.ref, ...notExpired }, include, orderBy, take });
+  // Someone else's "Just you" is not theirs to open (game #1994). Left out here too, as in listChatArtifacts, so a chat
+  // where other people keep many private ones still lists what this person can open
+  const opens: Prisma.ArtifactWhereInput = shownInItsChatTo(who.userId);
+  const inChat = await prisma.artifact.findMany({ where: { chatKind: input.chat.kind, chatRef: input.chat.ref, AND: [notExpired, opens] }, include, orderBy, take });
   const own = who.userId ? await prisma.artifact.findMany({ where: { ownerId: who.userId, makerBotId: input.botId, chatRef: { not: null }, ...notExpired }, include, orderBy, take }) : [];
   const seen = new Set(inChat.map((row) => row.id));
   const rows = [...inChat, ...own.filter((row) => !seen.has(row.id))];
@@ -601,7 +677,9 @@ export async function openArtifact(id: string, viewer: Viewer, version?: number 
   const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   const row = await findVersion(artifact, version);
-  return { artifact: viewOf(artifact), version: versionView(row, files), you: rightsOf(artifact, who, now) };
+  // Only its owner gets this far with a private one: the address is theirs, for this opening
+  const pass = isJustYou(artifact) && who.userId ? await issuePass(artifact, who.userId, now) : null;
+  return { artifact: viewOf(artifact), version: versionView(row, addressOf(artifact, row, files, pass), pass), you: rightsOf(artifact, who, now) };
 }
 
 export async function listVersions(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ versions: VersionView[] }> {
@@ -610,7 +688,7 @@ export async function listVersions(id: string, viewer: Viewer, ctx: Context = de
   const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   const rows = await prisma.artifactVersion.findMany({ where: { artifactId: artifact.id }, orderBy: { number: 'desc' } });
-  return { versions: rows.map((row) => versionView(row, files)) };
+  return { versions: rows.map((row) => versionView(row, addressOf(artifact, row, files))) };
 }
 
 /** The code of one version, for the Code view. */
@@ -620,7 +698,7 @@ export async function readVersionCode(id: string, number: number, viewer: Viewer
   const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   const row = await findVersion(artifact, number);
-  return { version: versionView(row, files), content: await files.get(row.fileKey) };
+  return { version: versionView(row, addressOf(artifact, row, files)), content: await files.get(row.fileKey) };
 }
 
 export interface SharingInput {
@@ -630,22 +708,188 @@ export interface SharingInput {
 
 export async function setSharing(id: string, viewer: Viewer, input: SharingInput, ctx: Context = defaultContext()): Promise<{ artifact: ArtifactView }> {
   const { now } = ctx;
-  const artifact = await loadArtifact(id, now);
-  const who = await whoIsLooking(artifact, viewer);
-  requireOpen(artifact, who, now);
-  requireOwner(artifact, who);
-  const data: { openScope?: OpenScope; changeScope?: ChangeScope } = {};
-  if (input.openScope !== undefined) {
-    if (!isOneOf(OPEN_SCOPES, input.openScope)) throw new ArtifactError('invalid_open_scope', 422, 'Who can open it is chat or link.');
-    data.openScope = input.openScope;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const artifact = await loadArtifact(id, now);
+    const who = await whoIsLooking(artifact, viewer);
+    requireOpen(artifact, who, now);
+    requireOwner(artifact, who);
+    const data: { openScope?: OpenScope; changeScope?: ChangeScope } = {};
+    if (input.openScope !== undefined) {
+      if (!isOneOf(OPEN_SCOPES, input.openScope)) throw new ArtifactError('invalid_open_scope', 422, 'Who can open it is me, chat or link.');
+      data.openScope = input.openScope;
+    }
+    if (input.changeScope !== undefined) {
+      if (!isOneOf(CHANGE_SCOPES, input.changeScope)) throw new ArtifactError('invalid_change_scope', 422, 'Who can ask for changes is owner or openers.');
+      data.changeScope = input.changeScope;
+    }
+    if (Object.keys(data).length === 0) throw new ArtifactError('nothing_to_change', 422, 'Send who can open it, who can ask for changes, or both.');
+    // Becoming "Just you" is more than a word in a column: its files move first (see makeJustYou)
+    if (data.openScope === 'me' && !isJustYou(artifact)) {
+      await makeJustYou(artifact, data.changeScope, ctx);
+      return { artifact: viewOf(await loadArtifact(artifact.id, now)) };
+    }
+    // Only for who could open it when it was read. Its owner may have opened it to others from another window in this
+    // moment: "Just you" written over that would leave its files at addresses that were just handed out, so it is read
+    // again and the files move.
+    const { count } = await prisma.artifact.updateMany({ where: { id: artifact.id, openScope: artifact.openScope }, data });
+    if (count !== 1) continue;
+    // "Just you" asked for again: it is not called done while the bucket still holds a file from before (see makeJustYou)
+    if (data.openScope === 'me') await closeOldAddresses(artifact.id, ctx);
+    return { artifact: viewOf(await loadArtifact(artifact.id, now)) };
   }
-  if (input.changeScope !== undefined) {
-    if (!isOneOf(CHANGE_SCOPES, input.changeScope)) throw new ArtifactError('invalid_change_scope', 422, 'Who can ask for changes is owner or openers.');
-    data.changeScope = input.changeScope;
+  throw new ArtifactError('stale_version', 409, 'It changed at the same moment; try again.');
+}
+
+/** How many files are copied at once while an artifact's files move. */
+const MOVE_AT_ONCE = 6;
+
+/**
+ * How long the one step that repoints every version may take. The database client gives a step five seconds unless told
+ * otherwise, which an artifact with very many versions could outlast on a slow day; it would then never become private.
+ */
+const MOVE_STEP_MS = 15_000;
+const MOVE_STEP_MS_PER_VERSION = 50;
+
+export function moveStepMs(versions: number): number {
+  return MOVE_STEP_MS + versions * MOVE_STEP_MS_PER_VERSION;
+}
+
+/**
+ * Makes an artifact "Just you" (game #1994), so that the file itself is protected and not only its card.
+ *
+ * Until now its files were served from the bucket's own address, to everyone its owner let open it. Those addresses
+ * open for anyone who kept one, so they have to stop working. Every version's page and media is copied to a new address
+ * that nobody was given, the versions are pointed at the copies in the same step that sets "Just you", and the old files
+ * are listed to be removed and removed straight away. From then on the files are only served by Orbit, to their owner
+ * (lib/artifact-pass.ts).
+ *
+ * Nothing is half done: if a copy fails, or a new version lands or the files move meanwhile, the copies go and the
+ * artifact stays as it was. A copy is only ever removed when no version names it, also when the database's answer to the
+ * step itself was lost. If the bucket will not remove an old file, it stays listed and every tidy-up tries again
+ * until it is gone; the owner is told it is not finished, and asking again finishes it (see closeOldAddresses). A copy
+ * that a browser or a network cache already holds cannot be taken back; nothing new is ever served from the old address.
+ */
+async function makeJustYou(artifact: ArtifactRow, changeScope: ChangeScope | undefined, ctx: Context): Promise<void> {
+  const { files } = ctx;
+  // Asked first: without Orbit's own address its owner could not be shown it afterwards
+  orbitAddress();
+  const kind = artifact.kind as ArtifactKind;
+  const versions = await prisma.artifactVersion.findMany({ where: { artifactId: artifact.id } });
+  const moves = versions.map((version) => {
+    const fileKey = newFileKey(artifact.id, version.number, kind);
+    const media = mediaOf(version).map((file) => ({ ...file, key: mediaKeyFor(fileKey, file.name) }));
+    const copies = [{ from: version.fileKey, to: fileKey }, ...mediaOf(version).map((file) => ({ from: file.key, to: mediaKeyFor(fileKey, file.name) }))];
+    return { id: version.id, from: version.fileKey, fileKey, media, copies };
+  });
+  const copies = moves.flatMap((move) => move.copies);
+  // Every line of the step below was written, so only its own end is left
+  let written = false;
+  try {
+    for (let start = 0; start < copies.length; start += MOVE_AT_ONCE) {
+      // Every copy of a batch settles before anything is cleared: one that lands after the clean-up would stay for good
+      const done = await Promise.allSettled(copies.slice(start, start + MOVE_AT_ONCE).map((copy) => files.copy(copy.from, copy.to)));
+      const failed = done.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (failed) throw failed.reason;
+    }
+    await prisma.$transaction(async (tx) => {
+      // Only for the artifact as it was read: a version made meanwhile would be left at an address that was handed out
+      const moved = await tx.artifact.updateMany({
+        where: { id: artifact.id, latestVersion: artifact.latestVersion, openScope: artifact.openScope },
+        data: { openScope: 'me', ...(changeScope ? { changeScope } : {}) },
+      });
+      if (moved.count !== 1) throw new ArtifactError('stale_version', 409, 'It changed at the same moment; try again.');
+      for (const move of moves) {
+        // Only a version whose file is still where it was copied from. The same version number and the same sharing can
+        // come round again with the files somewhere else (made "Just you" and opened to the chat again from another
+        // window meanwhile): pointing it at these copies would leave those files in the bucket with nothing naming them
+        const pointed = await tx.artifactVersion.updateMany({ where: { id: move.id, fileKey: move.from }, data: { fileKey: move.fileKey, media: move.media as unknown as Prisma.InputJsonValue } });
+        if (pointed.count !== 1) throw new ArtifactError('stale_version', 409, 'It changed at the same moment; try again.');
+      }
+      await tx.artifactRetiredFile.createMany({ data: copies.map((copy) => ({ key: copy.from })), skipDuplicates: true });
+      written = true;
+    }, { timeout: moveStepMs(moves.length) });
+  } catch (error) {
+    // Almost always nothing was changed, and the copies go. But a step can land while its answer is lost (the connection
+    // drops as it ends). The versions then name the copies, and the old files are listed to go: removing the copies would
+    // lose every version for good. So once the whole step was written, a copy goes only when the database says that no
+    // version names it. When the database cannot say, every copy stays: a file nobody names costs a little room in the
+    // bucket, at an address nobody was given.
+    const made = copies.map((copy) => copy.to);
+    let named: Set<string>;
+    try {
+      named = written ? await namedNow(artifact.id, made) : new Set();
+    } catch {
+      console.error('Could not tell whether an artifact became private, so the files copied for it are kept:', artifact.id);
+      throw error;
+    }
+    const unnamed = made.filter((key) => !named.has(key));
+    if (unnamed.length > 0) await files.remove(unnamed).catch(() => undefined);
+    // It did not land (or what landed was moved on since): as it was
+    if (named.size === 0) throw error;
+    // It landed: the rest goes on as if the answer had come
   }
-  if (Object.keys(data).length === 0) throw new ArtifactError('nothing_to_change', 422, 'Send who can open it, who can ask for changes, or both.');
-  const updated = await prisma.artifact.update({ where: { id: artifact.id }, data, include: ARTIFACT_INCLUDE });
-  return { artifact: viewOf(updated) };
+  await closeOldAddresses(artifact.id, ctx);
+  // And whatever the bucket would not let go of before, for other artifacts
+  await retireFiles(ctx).catch((error) => console.error('Could not remove old files of private artifacts:', error instanceof Error ? error.message : 'unknown'));
+}
+
+/**
+ * Which of these files a version of the artifact names now. It is read with the artifact's row held: every step that
+ * changes where an artifact's files are starts by writing to that row, so one that was still landing has landed or gone
+ * before this reads.
+ */
+async function namedNow(artifactId: string, keys: string[]): Promise<Set<string>> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM "artifacts" WHERE "id" = ${artifactId} FOR UPDATE`;
+    const named = new Set(keysOf(await tx.artifactVersion.findMany({ where: { artifactId } })));
+    return new Set(keys.filter((key) => named.has(key)));
+  });
+}
+
+/**
+ * Removes the files this artifact had before it became "Just you": the ones whose addresses were handed out. They are
+ * asked for by name, first, so a long list of other artifacts' old files never keeps these waiting.
+ *
+ * While the bucket still holds one, the artifact is private everywhere Orbit answers, but that old address still opens.
+ * Its owner is not told it is done: the answer says so, the files stay listed, every tidy-up tries again, and so does
+ * picking "Just you" again.
+ */
+async function closeOldAddresses(artifactId: string, ctx: Context): Promise<void> {
+  // Every file of an artifact sits under its own folder (newFileKey)
+  const rows = await prisma.artifactRetiredFile.findMany({ where: { key: { startsWith: `artifacts/${artifactId}/` } } });
+  if (rows.length === 0) return;
+  const keys = rows.map((row) => row.key);
+  try {
+    await ctx.files.remove(keys);
+  } catch (error) {
+    console.error('Could not remove the old files of a private artifact, will try again:', error instanceof Error ? error.message : 'unknown');
+    throw new ArtifactError('old_files_remain', 503, 'It is private now, but an address it had before could not be closed yet. Try again in a moment.');
+  }
+  await prisma.artifactRetiredFile.deleteMany({ where: { key: { in: keys } } });
+}
+
+/** How many old files one pass removes at once, and how many batches it runs. */
+const RETIRE_BATCH = 500;
+const RETIRE_MAX_BATCHES = 8;
+
+/**
+ * Removes the files whose addresses were handed out before their artifact became "Just you". They are listed in the
+ * database, not in memory, so a restart never forgets one: a file stays listed until the bucket has removed it.
+ */
+async function retireFiles(ctx: Context): Promise<void> {
+  for (let batch = 0; batch < RETIRE_MAX_BATCHES; batch++) {
+    const rows = await prisma.artifactRetiredFile.findMany({ orderBy: { createdAt: 'asc' }, take: RETIRE_BATCH });
+    if (rows.length === 0) return;
+    const keys = rows.map((row) => row.key);
+    try {
+      await ctx.files.remove(keys);
+    } catch (error) {
+      console.error('Could not remove the old files of a private artifact, will try again:', error instanceof Error ? error.message : 'unknown');
+      return;
+    }
+    await prisma.artifactRetiredFile.deleteMany({ where: { key: { in: keys } } });
+    if (rows.length < RETIRE_BATCH) return;
+  }
 }
 
 /** Restore makes a new version out of an older one; nothing is deleted, so restoring can itself be undone. */
@@ -685,28 +929,33 @@ export async function restoreVersion(id: string, number: number, viewer: Viewer,
     }),
   );
   const fresh = await loadArtifact(artifact.id, now);
-  return { artifact: viewOf(fresh), version: versionView(row, files), you: rightsOf(fresh, who, now) };
+  return { artifact: viewOf(fresh), version: versionView(row, addressOf(fresh, row, files)), you: rightsOf(fresh, who, now) };
 }
 
 /**
  * The owner takes it back: the rows go first (every version with them), then the files, with the same retry for files the
- * bucket would not remove as the guest clean-up. A copy someone made keeps its own files. The delete only goes through for the
- * version it read, so a change that lands meanwhile is not left with a file nobody lists: it asks again.
+ * bucket would not remove as the guest clean-up. A copy someone made keeps its own files.
+ *
+ * Where its files are is read in the same step that takes the rows, with the artifact's row held from the first line of
+ * that step. A new version, and its files moving as it becomes "Just you" (makeJustYou), both start by writing to that
+ * row, so neither can land in between: whatever landed before is read here and goes too, and whatever comes after finds
+ * no artifact. Comparing the version number and the sharing with what was read earlier is not enough for that: both can
+ * come round to the same values with the files somewhere else.
  */
 export async function deleteArtifact(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ deleted: true }> {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const artifact = await loadArtifact(id, ctx.now);
-    const who = await whoIsLooking(artifact, viewer);
-    requireOpen(artifact, who, ctx.now);
-    requireOwner(artifact, who);
-    const versions = await prisma.artifactVersion.findMany({ where: { artifactId: artifact.id } });
-    const { count } = await prisma.artifact.deleteMany({ where: { id: artifact.id, latestVersion: artifact.latestVersion } });
-    if (count === 1) {
-      await removeFiles(ctx, keysOf(versions));
-      return { deleted: true };
-    }
-  }
-  throw new ArtifactError('stale_version', 409, 'It changed at the same moment; try again.');
+  const artifact = await loadArtifact(id, ctx.now);
+  const who = await whoIsLooking(artifact, viewer);
+  requireOpen(artifact, who, ctx.now);
+  requireOwner(artifact, who);
+  const keys = await prisma.$transaction(async (tx) => {
+    const held = await tx.artifact.updateMany({ where: { id: artifact.id }, data: { updatedAt: ctx.now } });
+    if (held.count !== 1) throw new ArtifactError('not_found', 404, 'No such artifact.');
+    const versions = await tx.artifactVersion.findMany({ where: { artifactId: artifact.id } });
+    await tx.artifact.deleteMany({ where: { id: artifact.id } });
+    return keysOf(versions);
+  });
+  await removeFiles(ctx, keys);
+  return { deleted: true };
 }
 
 /** Make a copy: the viewer's own artifact, from the version they pick (the latest by default), in no chat. */
@@ -736,6 +985,8 @@ export async function copyArtifact(id: string, viewer: Viewer, version?: number 
         title: source.title,
         kind,
         copiedFromId: source.id,
+        // A copy of a "Just you" artifact starts as "Just you": copying never shows it to anyone else
+        ...(isJustYou(source) ? { openScope: 'me' } : {}),
         versions: {
           create: {
             number: 1,
@@ -751,7 +1002,7 @@ export async function copyArtifact(id: string, viewer: Viewer, version?: number 
       include: { ...ARTIFACT_INCLUDE, versions: true },
     }),
   );
-  return { artifact: viewOf(created), version: versionView(created.versions[0], files), you: rightsOf(created, who, now) };
+  return { artifact: viewOf(created), version: versionView(created.versions[0], addressOf(created, created.versions[0], files)), you: rightsOf(created, who, now) };
 }
 
 // ---- The public link page ---------------------------------------------------------------------------------------
@@ -762,8 +1013,8 @@ export interface PublicView {
   kind: ArtifactKind;
   makerName: string;
   version: number;
-  /** Where the file is served from, for the locked box. */
-  url: string;
+  /** Where the file is served from, for the locked box. Null for a "Just you" document, which is drawn from `content`. */
+  url: string | null;
   /** A document is drawn from its text (the page cannot show a Markdown file itself). */
   content: string | null;
 }
@@ -789,10 +1040,10 @@ export async function openOwned(id: string, userId: string, ctx: Context = defau
   const { files, now } = ctx;
   const artifact = await loadArtifact(id, now);
   if (artifact.ownerId !== userId) throw new ArtifactError('not_found', 404, 'No such artifact.');
-  return latestView(artifact, files);
+  return latestView(artifact, files, isJustYou(artifact) ? await issuePass(artifact, userId, now) : null);
 }
 
-async function latestView(artifact: ArtifactRow, files: Context['files']): Promise<PublicView> {
+async function latestView(artifact: ArtifactRow, files: Context['files'], pass: Pass | null = null): Promise<PublicView> {
   const row = await findVersion(artifact, artifact.latestVersion);
   const kind = artifact.kind as ArtifactKind;
   return {
@@ -800,9 +1051,126 @@ async function latestView(artifact: ArtifactRow, files: Context['files']): Promi
     kind,
     makerName: artifact.makerName,
     version: row.number,
-    url: files.urlFor(row.fileKey),
+    url: addressOf(artifact, row, files, pass),
     content: kind === 'markdown' ? await files.get(row.fileKey) : null,
   };
+}
+
+// ---- A private artifact's files (game #1994) --------------------------------------------------------------------
+
+/** One request for a file of a private artifact, as it came to /af/<pass>/<version>/<name>. */
+export interface PrivateFileRequest {
+  token: string;
+  number: string;
+  name: string;
+  /** The Cookie header, as sent. */
+  cookies: string | null;
+  /** Sec-Fetch-Dest: what the browser wants it for. */
+  fetchDest: string | null;
+  /** Range: the part of a song or video a player asks for. */
+  range: string | null;
+}
+
+export interface PrivateFile {
+  status: 200 | 206 | 416;
+  headers: Record<string, string>;
+  body: string | Uint8Array | ReadableStream<Uint8Array> | null;
+}
+
+/** What every private file is sent with: kept by nobody but the browser that asked, never listed, never guessed at. */
+const PRIVATE_HEADERS = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Robots-Tag': 'noindex, nofollow' } as const;
+
+type PassRow = { id: string; cookieHash: string | null; redeemedAt: Date | null; expiresAt: Date };
+
+/**
+ * Ties a pass to the browser that asks for its page, or checks that this is the browser it is tied to. Answers with the
+ * cookie to set, or null when the request already carries it.
+ *
+ * The first request ties it. Its answer may never arrive (a dropped connection, a frame taken away while it loaded, a
+ * request the browser sent twice), and that browser would then hold no cookie. So for a few seconds after the first
+ * request the same address may ask again and is given the cookie again (passRetryMs). It is the same cookie every time
+ * (passCookieValue), never a new one: two answers can reach a browser in either order, and whichever it keeps must be
+ * the one that opens the page. Those seconds count from the first request and are never moved, so asking again does not
+ * buy more of them. After that only the cookie opens the page: an address passed on to someone else opens nothing.
+ */
+async function tieToBrowser(pass: PassRow, request: PrivateFileRequest, tokenHash: string, now: Date): Promise<string | null> {
+  const refused = () => new ArtifactError('opened_elsewhere', 403, 'This private page opens only where its owner opened it.');
+  const cookie = passCookieValue(request.token, pass.id);
+  const toSet = () => passCookie(request.token, tokenHash, cookie, (pass.expiresAt.getTime() - now.getTime()) / 1000);
+  let current: PassRow | null = pass;
+  if (current.redeemedAt === null) {
+    // Only for a pass nobody asked for yet, so of two requests at the same moment one ties it and the other reads it again
+    const taken = await prisma.artifactPass.updateMany({ where: { id: pass.id, redeemedAt: null }, data: { redeemedAt: now, cookieHash: hashOf(cookie) } });
+    if (taken.count === 1) return toSet();
+    current = await prisma.artifactPass.findUnique({ where: { tokenHash } });
+  }
+  if (!current || current.redeemedAt === null || current.cookieHash === null) throw refused();
+  const sent = readCookie(request.cookies, passCookieName(tokenHash));
+  if (sent && sameHash(hashOf(sent), current.cookieHash)) return null;
+  // How far apart the two moments are, not which came first: the first request may have read its clock a little after
+  // this one read its own, or on a server whose clock runs a little ahead
+  if (Math.abs(now.getTime() - current.redeemedAt.getTime()) >= passRetryMs()) throw refused();
+  // Never a cookie the page would not open with afterwards
+  if (!sameHash(hashOf(cookie), current.cookieHash)) throw refused();
+  return toSet();
+}
+
+/**
+ * Serves one file of a "Just you" artifact for a pass (lib/artifact-pass.ts tells the whole of it). Checked on every
+ * request, nothing remembered between two: the pass is known and has time left, its artifact is still there, and the
+ * person the pass was made for still owns it. So a pass stops the moment its artifact is deleted, with no delay.
+ *
+ * The page or drawing: the first request is answered with a cookie only this pass's addresses read; every later one
+ * needs it, except in the first few seconds, in case that answer never arrived (tieToBrowser). The media beside a page:
+ * served once the page has been. One answer for everything else, so an address tells nothing about what is behind it.
+ */
+export async function servePrivateFile(request: PrivateFileRequest, ctx: Context = defaultContext()): Promise<PrivateFile> {
+  const { files, now } = ctx;
+  const gone = () => new ArtifactError('not_found', 404, 'Not found.');
+  const number = Number(request.number);
+  if (!looksLikeSecret(request.token) || !Number.isInteger(number) || number < 1 || number > 2147483647) throw gone();
+  const tokenHash = hashOf(request.token);
+  const pass = await prisma.artifactPass.findUnique({ where: { tokenHash } });
+  if (!pass || pass.expiresAt.getTime() <= now.getTime()) throw gone();
+  const artifact = await prisma.artifact.findUnique({ where: { id: pass.artifactId } });
+  if (!artifact || hasExpired(artifact, now) || artifact.ownerId === null || artifact.ownerId !== pass.userId) throw gone();
+  const row = await prisma.artifactVersion.findUnique({ where: { artifactId_number: { artifactId: artifact.id, number } } });
+  if (!row) throw gone();
+  const kind = artifact.kind as ArtifactKind;
+
+  if (request.name === `index.${fileTypeOf(kind).extension}`) {
+    // A document is drawn from its text, which the routes send to its owner: it has no address at all
+    if (kind === 'markdown') throw gone();
+    if (kind !== 'svg' && !mayShowPage(request.fetchDest)) throw new ArtifactError('frame_only', 403, 'This page opens only inside Universe.');
+    const headers: Record<string, string> = {
+      ...PRIVATE_HEADERS,
+      'Cache-Control': 'private, no-store',
+      'Content-Type': fileTypeOf(kind).contentType,
+      'Content-Security-Policy': kind === 'svg' ? drawingPolicy() : pagePolicy(passFolderAddress(request.token, number)),
+    };
+    const cookie = await tieToBrowser(pass, request, tokenHash, now);
+    if (cookie) headers['Set-Cookie'] = cookie;
+    return { status: 200, headers, body: await files.get(row.fileKey) };
+  }
+
+  const media = mediaOf(row).find((file) => file.name === request.name);
+  // Nothing beside a page is served before the page itself has been
+  if (!media || pass.redeemedAt === null) throw gone();
+  const headers: Record<string, string> = {
+    ...PRIVATE_HEADERS,
+    'Cache-Control': 'private, max-age=3600',
+    'Content-Type': media.contentType,
+    'Content-Security-Policy': MEDIA_POLICY,
+    'Accept-Ranges': 'bytes',
+    ...MEDIA_READ_HEADERS,
+  };
+  const range = parseRange(request.range, media.sizeBytes);
+  if (range === 'unsatisfiable') return { status: 416, headers: { ...headers, 'Content-Range': `bytes */${media.sizeBytes}` }, body: null };
+  const body = await files.read(media.key, range ?? undefined);
+  if (range) {
+    return { status: 206, headers: { ...headers, 'Content-Range': `bytes ${range.start}-${range.end}/${media.sizeBytes}`, 'Content-Length': String(range.end - range.start + 1) }, body };
+  }
+  return { status: 200, headers: { ...headers, 'Content-Length': String(media.sizeBytes) }, body };
 }
 
 // ---- Housekeeping -----------------------------------------------------------------------------------------------
@@ -841,6 +1209,9 @@ async function removeFiles(ctx: Context, keys: string[]): Promise<void> {
 export async function pruneExpired(ctx: Context = defaultContext()): Promise<number> {
   let cleared = 0;
   if (unremovedKeys.length > 0) await removeFiles(ctx, []);
+  // "Just you" (game #1994): old files the bucket would not remove before, and passes that ran out
+  await retireFiles(ctx);
+  await prisma.artifactPass.deleteMany({ where: { expiresAt: { lte: ctx.now } } });
   for (let batch = 0; batch < PRUNE_MAX_BATCHES; batch++) {
     const expired = await prisma.artifact.findMany({
       where: { expiresAt: { lte: ctx.now } },
@@ -922,8 +1293,11 @@ export async function listChatArtifacts(viewer: Viewer, offset = 0, ctx: Context
   pruneSometimes(ctx);
   // Every artifact here was made in this chat, so the game's word counts for all of them (see viewerIsInChat)
   const who = await resolvePerson(viewer.person, viewer.inChat);
-  const opens: Prisma.ArtifactWhereInput[] = who.inChat ? [] : [{ OR: [...(who.userId ? [{ ownerId: who.userId }] : []), { openScope: 'link' }] }];
-  return pageOf({ chatKind: chat.kind, chatRef: chat.ref, AND: [notExpiredAt(now), ...opens] }, offset, (artifact) => ({
+  const own: Prisma.ArtifactWhereInput[] = who.userId ? [{ ownerId: who.userId }] : [];
+  // In the chat: everything made in it, but someone else's "Just you" is not theirs to open (game #1994). Outside it: only
+  // their own and those shared by link.
+  const opens: Prisma.ArtifactWhereInput = who.inChat ? shownInItsChatTo(who.userId) : { OR: [...own, { openScope: 'link' }] };
+  return pageOf({ chatKind: chat.kind, chatRef: chat.ref, AND: [notExpiredAt(now), opens] }, offset, (artifact) => ({
     ...viewOf(artifact),
     yours: who.userId !== null && artifact.ownerId === who.userId,
   }));

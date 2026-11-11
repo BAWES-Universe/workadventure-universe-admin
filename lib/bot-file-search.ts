@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db';
-import { clipText } from '@/lib/artifacts';
+import { clipText, shownInItsChatTo } from '@/lib/artifacts';
 import {
   DAY_MS,
   FILE_KINDS,
@@ -166,8 +166,9 @@ function artifactWhere(input: FindInput, who: Who, titled: string[] | null, now:
   const until = dateOf(input.until);
   return {
     AND: [
-      // This chat's, and what this bot made for the person in other chats: never what they made with other bots (game #1781)
-      { OR: [{ chatKind: input.chat.kind, chatRef: input.chat.ref }, ...(who.userId ? [{ ownerId: who.userId, makerBotId: input.botId }] : [])] },
+      // This chat's, and what this bot made for the person in other chats: never what they made with other bots (game #1781).
+      // Of this chat's, never someone else's "Just you" (game #1994): what is found names its title and who made it
+      { OR: [{ chatKind: input.chat.kind, chatRef: input.chat.ref, ...shownInItsChatTo(who.userId) }, ...(who.userId ? [{ ownerId: who.userId, makerBotId: input.botId }] : [])] },
       // A guest's artifact past its day is gone for everyone
       { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
       ...(titled === null ? [] : [{ id: { in: titled } }]),

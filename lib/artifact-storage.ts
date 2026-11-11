@@ -14,6 +14,8 @@ import { ArtifactError } from '@/lib/artifacts';
 export interface ArtifactFiles {
   put(key: string, body: string | Uint8Array, contentType: string): Promise<void>;
   get(key: string): Promise<string>;
+  /** A file's bytes, or the part asked for, as they come from the bucket: for the media of a private artifact (game #1994). */
+  read(key: string, range?: { start: number; end: number }): Promise<ReadableStream<Uint8Array> | Uint8Array>;
   /** A copy inside the bucket, for media a new version keeps from an older one; nothing passes through Orbit. */
   copy(fromKey: string, toKey: string): Promise<void>;
   remove(keys: string[]): Promise<void>;
@@ -56,6 +58,12 @@ export const artifactFiles: ArtifactFiles = {
     const found = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
     if (!found.Body) throw new ArtifactError('file_missing', 502, 'The file of this version could not be read.');
     return found.Body.transformToString('utf-8');
+  },
+  async read(key, range) {
+    const { s3: s3Client, bucket } = s3();
+    const found = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: key, ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}) }));
+    if (!found.Body) throw new ArtifactError('file_missing', 502, 'The file could not be read.');
+    return found.Body.transformToWebStream() as ReadableStream<Uint8Array>;
   },
   async copy(fromKey, toKey) {
     const { s3: s3Client, bucket } = s3();
