@@ -96,12 +96,21 @@ describe('bot file search on Postgres', () => {
     });
   });
 
-  it('finds only the files of this chat for a reply other people in it read: never the person\'s own from another chat', () => {
-    expect(rows('everyoneInBubble')).toEqual(['guest-pic', 'friend-notes', 'bubble-pic']);
-    expect(result.everyoneInBubble.total).toBe(3);
-    expect(rows('everyoneInDm')).toEqual(['dm-plan', 'dm-song']);
+  it('finds, for a reply other people read, only the files every one of its readers was there for (game #1993)', () => {
+    // Both were there for the picture and the notes; the guest's picture and the owner's direct messages are not found
+    expect(result.everyoneBoth).toEqual({ total: 2, rows: ['friend-notes', 'bubble-pic'] });
+    // A third reader was there for the notes alone, and a stranger for nothing
+    expect(result.everyoneThree).toEqual({ total: 1, rows: ['friend-notes'] });
+    expect(result.everyoneStranger).toEqual({ total: 0, rows: [] });
+    // Nobody named, or someone who cannot be named: nothing
+    expect(result.everyoneUnnamed).toEqual({ total: 0, rows: [] });
+    expect(result.everyoneNobody).toEqual({ total: 0, rows: [] });
+    // It follows the people, not the place: in a later bubble the owner still finds what they both saw
+    expect(result.everyoneLater).toEqual({ total: 1, rows: ['bubble-pic'] });
     // The word is in their own direct messages too: those are not found, counted or named
     expect(result.everyoneWords).toEqual({ total: 1, rows: ['friend-notes'] });
+    // Alone with the bot, who was there changes nothing
+    expect(rows('readersAlone')).toEqual(rows('ownerInBubble'));
   });
 
   it('a search can not reach outside its words', () => {

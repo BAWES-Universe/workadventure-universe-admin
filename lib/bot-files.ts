@@ -191,6 +191,8 @@ export interface FileRow {
   pages: number | null;
   chatKind: string;
   chatRef: string;
+  /** Everyone who was in the chat when it was put there, the sender included (game #1993). Not read by the search. */
+  seenBy?: string[];
   textState: string;
   textChars: number;
   expiresAt: Date | null;
@@ -258,11 +260,46 @@ export function canUse(row: Pick<FileRow, 'ownerId' | 'chatKind' | 'chatRef'>, w
 }
 
 /**
- * A call for a reply that other people in the chat read too (game #1993): only a file that came in this chat is used,
- * whoever it belongs to. What its person has from another chat answers as if it never was.
+ * A call for a reply that other people in the chat read too (game #1993). A file is like anything else a bot remembers:
+ * sent while nobody else was there, it stays with its person. So such a reply uses a file only when everyone who reads
+ * the reply was in the chat when the file was put there: the person who asked, and `others`, everyone else in the
+ * bubble or meeting room now, by the ids the bot server names people by. Any other file answers as if it never was.
  */
 export interface ForEveryoneHere {
   everyoneHere?: boolean | null;
+  others?: string[] | null;
+}
+
+/** The most people kept or asked about for one file: more than a meeting room holds. */
+export const MAX_PEOPLE_THERE = 200;
+const MAX_PERSON_ID_LENGTH = 320;
+
+/**
+ * Ids of people as the bot server names them, each once. Someone it cannot name has no id (it sends a mark of one
+ * character for them, or nothing): they are never kept as having been there.
+ */
+export function peopleIds(ids: readonly (string | null | undefined)[]): string[] {
+  const clean = ids.map((id) => (typeof id === 'string' ? id.trim() : '')).filter((id) => id.length >= 2 && id.length <= MAX_PERSON_ID_LENGTH);
+  return [...new Set(clean)].slice(0, MAX_PEOPLE_THERE);
+}
+
+/**
+ * Everyone who reads a reply other people read: the person who asked and the others, by id. Null when one of them cannot
+ * be named, or nobody else was named at all: then nobody can be checked, and no file is used.
+ */
+export function readersOf(who: Who, call: ForEveryoneHere): string[] | null {
+  const others = call.others ?? [];
+  if (others.length === 0 || others.length > MAX_PEOPLE_THERE) return null;
+  const ids = [who.personRef, ...others].map((id) => (typeof id === 'string' ? id.trim() : ''));
+  // Someone the bot server could not name (no id, or its one-character mark in place of one)
+  if (ids.some((id) => id.length < 2 || id.length > MAX_PERSON_ID_LENGTH)) return null;
+  return [...new Set(ids)];
+}
+
+/** Whether everyone who reads the reply was there when the file was put in a chat. */
+export function seenByAll(row: Pick<FileRow, 'seenBy'>, readers: string[] | null): boolean {
+  const seenBy = row.seenBy ?? [];
+  return readers !== null && readers.length > 0 && readers.every((id) => seenBy.includes(id));
 }
 
 export async function loadUsable(call: BotCall & ForEveryoneHere & { ref: string }, who: Who, ctx: Context): Promise<FileRow> {
@@ -270,8 +307,8 @@ export async function loadUsable(call: BotCall & ForEveryoneHere & { ref: string
   if (number === null) throw notFound();
   const row = await prisma.botFile.findUnique({ where: { botId_number: { botId: call.botId, number } } });
   // One that has gone, or that this person may not use, looks the same as one that never was
-  if (!row || hasGone(row, limitsOf(ctx), ctx.now)) throw notFound();
-  if (!(call.everyoneHere === true ? inThisChat(row, call.chat) : canUse(row, who, call.chat))) throw notFound();
+  if (!row || hasGone(row, limitsOf(ctx), ctx.now) || !canUse(row, who, call.chat)) throw notFound();
+  if (call.everyoneHere === true && !seenByAll(row, readersOf(who, call))) throw notFound();
   return row;
 }
 
@@ -288,6 +325,11 @@ export interface AddInput extends BotCall {
   madePrompt?: string | null;
   lengthSeconds?: number | null;
   pages?: number | null;
+  /**
+   * Everyone else who was in the bubble or meeting room when it was put in the chat (game #1993), by the ids the bot
+   * server names people by. Left out or empty: nobody else was there. The person themselves is always counted.
+   */
+  others?: string[] | null;
 }
 
 /**
@@ -338,6 +380,8 @@ export async function addFile(input: AddInput, ctx: Context = defaultContext()):
       pages: input.pages ?? null,
       chatKind: input.chat.kind,
       chatRef: input.chat.ref,
+      // In a direct message nobody else is ever there, whatever was sent
+      seenBy: peopleIds([who.personRef, ...(input.chat.kind === 'nearby' ? (input.others ?? []) : [])]),
       expiresAt: who.userId ? null : new Date(ctx.now.getTime() + limitsOf(ctx).guestDays * DAY_MS),
       createdAt: ctx.now,
     },

@@ -245,24 +245,82 @@ describe('files in bot chats (game #1508)', () => {
       expect((await open(ref, guest, BUBBLE)).status).toBe(404);
     });
 
-    it('for a reply other people in the chat read, only a file that came in this chat, the owner\'s own included (game #1993)', async () => {
-      const everyone = (ref: string, who: object, chat: object, everyoneHere: unknown = true) => call(get, { botId: 'bot1', person: who, chat, ref, everyoneHere });
-      const fromDm = await addSong(person('owner'), DM);
-      const fromEarlier = await addSong(person('owner'), BUBBLE);
-      // Theirs from their direct messages, or from an earlier bubble: never in front of the people in this one
-      for (const ref of [fromDm, fromEarlier]) {
-        const res = await everyone(ref, person('owner'), LATER_BUBBLE);
-        expect(res.status).toBe(404);
-        expect(res.body.error).toBe('not_found');
-        expect(JSON.stringify(res.body)).not.toContain('yazoghal');
-      }
-      // What came in this chat is there for everyone in it
-      expect((await everyone(fromEarlier, person('owner'), BUBBLE)).body.file).toMatchObject({ mine: true, inThisChat: true });
-      expect((await everyone(fromEarlier, person('friend'), BUBBLE)).status).toBe(200);
-      // Alone it is as before, and the field takes yes or no only
-      expect((await everyone(fromDm, person('owner'), LATER_BUBBLE, false)).status).toBe(200);
-      expect((await everyone(fromDm, person('owner'), LATER_BUBBLE, null)).status).toBe(200);
-      expect((await everyone(fromDm, person('owner'), LATER_BUBBLE, 'yes')).status).toBe(400);
+    describe('for a reply other people in the chat read too (game #1993)', () => {
+      const FRIEND = 'uuid-friend';
+      const THIRD = 'uuid-third';
+      const everyone = (ref: string, who: object, chat: object, others: unknown, everyoneHere: unknown = true) => call(get, { botId: 'bot1', person: who, chat, ref, everyoneHere, others });
+
+      it('uses a file only when everyone who reads the reply was there when it was put in the chat', async () => {
+        // Sent with the friend there, and one sent alone a moment earlier in the same bubble
+        const shown = await addSong(person('owner'), BUBBLE, { others: [FRIEND] });
+        const alone = await addSong(person('owner'), BUBBLE);
+        expect(db.files.map((file) => file.seenBy)).toEqual([['uuid-owner', FRIEND], ['uuid-owner']]);
+
+        const ok = await everyone(shown, person('owner'), BUBBLE, [FRIEND]);
+        expect(ok.status).toBe(200);
+        expect(ok.body.file).toMatchObject({ mine: true, inThisChat: true });
+        // The friend asks, with the owner there: both were there for it
+        expect((await everyone(shown, person('friend'), BUBBLE, ['uuid-owner'])).status).toBe(200);
+        // Someone who was not there for it has walked up
+        expect((await everyone(shown, person('owner'), BUBBLE, [FRIEND, THIRD])).status).toBe(404);
+
+        // The one sent alone stays with its person, in the very chat it came in
+        const kept = await everyone(alone, person('owner'), BUBBLE, [FRIEND]);
+        expect(kept.status).toBe(404);
+        expect(kept.body.error).toBe('not_found');
+        expect(JSON.stringify(kept.body)).not.toContain('yazoghal');
+        expect((await everyone(alone, person('friend'), BUBBLE, ['uuid-owner'])).status).toBe(404);
+        // Alone with the bot again, it is as before
+        expect((await everyone(alone, person('owner'), BUBBLE, null, false)).status).toBe(200);
+        expect((await open(alone, person('owner'), BUBBLE)).status).toBe(200);
+      });
+
+      it('follows the people, not the place: what they both saw is theirs to talk about in a later bubble', async () => {
+        const shown = await addSong(person('owner'), BUBBLE, { others: [FRIEND] });
+        expect((await everyone(shown, person('owner'), LATER_BUBBLE, [FRIEND])).status).toBe(200);
+        // The friend does not own it, so outside the chat it came in they still cannot ask for it
+        expect((await everyone(shown, person('friend'), LATER_BUBBLE, ['uuid-owner'])).status).toBe(404);
+      });
+
+      it('never uses a file from a direct message, whatever was sent with it, nor one from before this was kept', async () => {
+        const fromDm = await addSong(person('owner'), DM, { others: [FRIEND] });
+        expect(db.files[0].seenBy).toEqual(['uuid-owner']);
+        expect((await everyone(fromDm, person('owner'), LATER_BUBBLE, [FRIEND])).status).toBe(404);
+        const old = await addSong(person('owner'), BUBBLE, { others: [FRIEND] });
+        db.files[1].seenBy = [];
+        expect((await everyone(old, person('owner'), BUBBLE, [FRIEND])).status).toBe(404);
+        expect((await open(old, person('owner'), BUBBLE)).status).toBe(200);
+      });
+
+      it('uses nothing when it is not said who else is there, or one of them cannot be named', async () => {
+        const shown = await addSong(person('owner'), BUBBLE, { others: [FRIEND, '?', ' ', FRIEND] });
+        // Someone who could not be named is never kept as having been there
+        expect(db.files[0].seenBy).toEqual(['uuid-owner', FRIEND]);
+        for (const others of [undefined, null, [], ['?'], [FRIEND, '?'], [FRIEND, '']]) {
+          expect((await everyone(shown, person('owner'), BUBBLE, others)).status).toBe(404);
+        }
+        // A person the bot server has no id for
+        expect((await everyone(shown, { signedIn: false, name: 'Visitor' }, BUBBLE, [FRIEND])).status).toBe(404);
+      });
+
+      it('counts a guest like anyone: by the id the bot server names them by', async () => {
+        const shown = await addSong(guest, BUBBLE, { others: ['uuid-owner'] });
+        expect(db.files[0].seenBy).toEqual(['guest-uuid-1', 'uuid-owner']);
+        expect((await everyone(shown, guest, BUBBLE, ['uuid-owner'])).status).toBe(200);
+        expect((await everyone(shown, person('owner'), BUBBLE, ['guest-uuid-1'])).status).toBe(200);
+        expect((await everyone(shown, person('owner'), BUBBLE, ['guest-uuid-2'])).status).toBe(404);
+      });
+
+      it('takes yes or no, and a list of ids, and nothing else', async () => {
+        const ref = await addSong(person('owner'), BUBBLE, { others: [FRIEND] });
+        expect((await everyone(ref, person('owner'), BUBBLE, [FRIEND], 'yes')).status).toBe(400);
+        expect((await everyone(ref, person('owner'), BUBBLE, FRIEND)).status).toBe(400);
+        expect((await everyone(ref, person('owner'), BUBBLE, [7])).status).toBe(400);
+        expect((await everyone(ref, person('owner'), BUBBLE, Array.from({ length: 201 }, (_, i) => `uuid-${i}`))).status).toBe(400);
+        expect((await call(add, song(person('owner'), BUBBLE, { others: 'everyone' }))).status).toBe(400);
+        // Without the yes, the list changes nothing
+        expect((await everyone(ref, person('owner'), LATER_BUBBLE, [THIRD], false)).status).toBe(200);
+      });
     });
 
     it('bot B can not open a file sent to bot A', async () => {

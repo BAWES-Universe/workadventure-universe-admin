@@ -23,13 +23,21 @@ game (open, versions, code, share, restore, copy, delete).
   top: a pasted link opens someone else's artifact only when its owner shared it by link, and changes stay with the chat it
   was made in. The search over files and the in-chat list show the same: this chat's, and what this bot made for the person.
 - **A reply other people in the chat read too (game #1993):** the bot server says so with `everyoneHere: true` on a read,
-  a change, the in-chat list, and on the file routes (`/api/bot-files/find`, `get`, `read`). Orbit then answers as it would
-  for someone in the chat who owns nothing, so such a reply never takes in what only its person may see: no "Just you"
-  (`404 kept_private` in its chat), nothing the person has in another chat (`404 not_found`, the bot's own work for them
-  included), and no file from another chat. One artifact from elsewhere still opens: one the person pointed at
+  a change, the in-chat list, and on the file routes (`/api/bot-files/find`, `get`, `read`). For artifacts Orbit then
+  answers as it would for someone in the chat who owns nothing, so such a reply never takes in what only its person may
+  see: no "Just you" (`404 kept_private` in its chat) and nothing the person has in another chat (`404 not_found`, the
+  bot's own work for them included). One artifact from elsewhere still opens: one the person pointed at
   (`referencedArtifactIds`) that its owner shared by link. A change still asks who may change it, as above, and does not
   land if the artifact became "Just you" in the same moment (`409 stale_version`). Left out or `false`, every route
   answers as before.
+- **Files have no sharing to pick, so they go by who was there (game #1993).** When a file is added
+  (`POST /api/bot-files`), the bot server sends `others`: everyone else who was in the bubble or meeting room, by the ids
+  it names people by. Orbit keeps them with the person (`bot_files.seen_by`). With `everyoneHere: true` the file routes
+  also take `others`, everyone else there now, and use a file only when the person and all of them are on its list. So a
+  file sent while alone with the bot, in a direct message, or before this was kept, is never used in front of anyone
+  else, in the chat it came in either, and what two people both saw is theirs to talk about wherever they meet. Nobody
+  named, or someone who cannot be named (an id of one character), means no file. Forget for a person also takes them off
+  every list of this bot's files.
   Of this chat's, someone else's "Just you" is in neither, by its title or otherwise: only its owner finds it.
 - **Versions:** every change by the artifact's maker is a new version with what changed and who asked (another bot's change is a copy of its own, Orbit #800). Nothing is overwritten. Restore makes a
   new version out of an old one. Up to 200 versions; one version is up to 512 KB.

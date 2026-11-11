@@ -65,10 +65,24 @@ async function main() {
   result.friendLater = await ids(scope({ userId: 'friend', chatKind: 'nearby', chatRef: 'room#9#900' }), filters());
   result.guestInBubble = await ids(scope({ userId: null, chatKind: 'nearby', chatRef: 'room#1#100' }), filters());
   result.guestAfterDay = await ids(scope({ userId: null, chatKind: 'nearby', chatRef: 'room#1#100', now: new Date('2026-10-26T00:00:00Z') }), filters());
-  // For a reply other people in the chat read (game #1993): this chat's files alone, also with words that are in their own direct messages
-  result.everyoneInBubble = await ids(scope({ chatKind: 'nearby', chatRef: 'room#1#100', everyoneHere: true }), filters());
-  result.everyoneInDm = await ids(scope({ everyoneHere: true }), filters());
-  result.everyoneWords = await ids(scope({ chatKind: 'nearby', chatRef: 'room#1#100', everyoneHere: true }), filters({ query: wordQuery(searchWords('yazoghal'), 'all') }));
+  // For a reply other people read (game #1993): only the files every reader was there for. The owner's picture and the
+  // friend's notes were put in the bubble with both there; a third person was there for the notes alone
+  await db.exec(`
+    UPDATE bot_files SET seen_by = ARRAY['uuid-owner', 'uuid-friend'] WHERE id = 'bubble-pic';
+    UPDATE bot_files SET seen_by = ARRAY['uuid-friend', 'uuid-owner', 'uuid-third'] WHERE id = 'friend-notes';
+    UPDATE bot_files SET seen_by = ARRAY['uuid-owner'] WHERE id IN ('dm-song', 'dm-plan');
+  `);
+  const inBubble = { chatKind: 'nearby', chatRef: 'room#1#100', everyoneHere: true };
+  result.everyoneBoth = await ids(scope({ ...inBubble, readers: ['uuid-owner', 'uuid-friend'] }), filters());
+  result.everyoneThree = await ids(scope({ ...inBubble, readers: ['uuid-owner', 'uuid-friend', 'uuid-third'] }), filters());
+  result.everyoneStranger = await ids(scope({ ...inBubble, readers: ['uuid-owner', 'uuid-stranger'] }), filters());
+  result.everyoneUnnamed = await ids(scope({ ...inBubble, readers: null }), filters());
+  result.everyoneNobody = await ids(scope({ ...inBubble, readers: [] }), filters());
+  // What they both saw is found in a later bubble too, by its owner; words in the owner's own direct messages find nothing
+  result.everyoneLater = await ids(scope({ chatKind: 'nearby', chatRef: 'room#9#900', everyoneHere: true, readers: ['uuid-owner', 'uuid-friend'] }), filters());
+  result.everyoneWords = await ids(scope({ ...inBubble, readers: ['uuid-owner', 'uuid-friend'] }), filters({ query: wordQuery(searchWords('yazoghal'), 'all') }));
+  // Without the yes, a list of readers changes nothing
+  result.readersAlone = await ids(scope({ chatKind: 'nearby', chatRef: 'room#1#100', readers: ['uuid-stranger'] }), filters());
   result.findableDays = await ids(scope({ findableSince: new Date('2026-10-21T00:00:00Z') }), filters());
   result.kinds = await ids(scope(), filters({ kinds: ['audio', 'image'] }));
   result.source = await ids(scope(), filters({ source: 'bot' }));

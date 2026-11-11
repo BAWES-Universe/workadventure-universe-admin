@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { validateServiceToken } from '@/lib/service-tokens';
 import { CHAT_KINDS } from '@/lib/artifacts';
-import { BotFileError, FILE_KINDS, FILE_SOURCES, MAX_FILE_NAME_LENGTH, TEXT_PIECE_CHARS, type Context } from '@/lib/bot-files';
+import { BotFileError, FILE_KINDS, FILE_SOURCES, MAX_FILE_NAME_LENGTH, MAX_PEOPLE_THERE, TEXT_PIECE_CHARS, type Context } from '@/lib/bot-files';
 import { getServerLimits } from '@/lib/bot-limits';
 import { LIMIT_RANGES } from '@/lib/bot-limit-values';
 
@@ -90,6 +90,12 @@ const storeSchema = z.union([
   z.object({ url: z.string().min(1).max(2048) }).strict(),
 ]);
 
+/**
+ * People, by the ids the bot server names them by: everyone else in a bubble or meeting room (game #1993). An entry of
+ * one character stands for someone it cannot name.
+ */
+const peopleThere = z.array(z.string().max(320)).max(MAX_PEOPLE_THERE).nullish();
+
 export const addSchema = z
   .object({
     ...botCall,
@@ -105,15 +111,20 @@ export const addSchema = z
     madePrompt: z.string().max(TEXT_PIECE_CHARS).nullish(),
     lengthSeconds: z.number().int().min(0).max(2147483647).nullish(),
     pages: z.number().int().min(0).max(2147483647).nullish(),
+    // Everyone else who was in the bubble or meeting room when it was put in the chat (game #1993)
+    others: peopleThere,
   })
   .strict();
 
 const shortId = z.string().trim().min(2).max(12);
 
-/** Yes when the file is for a reply other people in this chat read too (game #1993): then only one that came in this chat. */
+/**
+ * Yes when the file is for a reply other people in this chat read too (game #1993): then only one that everyone who reads
+ * it was there for, the person and `others`.
+ */
 const everyoneHere = z.boolean().nullish();
 
-export const getSchema = z.object({ ...botCall, ref: shortId, everyoneHere }).strict();
+export const getSchema = z.object({ ...botCall, ref: shortId, everyoneHere, others: peopleThere }).strict();
 
 export const keepTextSchema = z
   .object({
@@ -142,6 +153,7 @@ export const findSchema = z
     limit: z.number().int().min(LIMIT_RANGES.reply.results.min).max(LIMIT_RANGES.reply.results.max),
     // What is found goes into a reply other people in this chat read (game #1993)
     everyoneHere,
+    others: peopleThere,
   })
   .strict();
 
@@ -153,5 +165,6 @@ export const readSchema = z
     // The "Reads from an earlier file" setting's range
     chars: z.number().int().min(1).max(LIMIT_RANGES.reply.part.max),
     everyoneHere,
+    others: peopleThere,
   })
   .strict();

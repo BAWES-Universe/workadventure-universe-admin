@@ -1305,6 +1305,9 @@ model BotFile {
   // The chat it came in: nearby | dm, and the id the bot server uses for it
   chatKind  String    @map("chat_kind") @db.VarChar(20)
   chatRef   String    @map("chat_ref") @db.VarChar(255)
+  // Everyone who was in the chat when it was put there, the sender included, by the ids the bot server names people by
+  // (game #1993). A reply other people read uses it only when all of them are in this list. Empty: nobody was recorded.
+  seenBy    String[]  @default([]) @map("seen_by")
   // The text kept from it: none (not read, or nothing to read) | reading (pieces still coming) | kept | failed
   textState String    @default("none") @map("text_state") @db.VarChar(10)
   textChars Int       @default(0) @map("text_chars")
