@@ -62,9 +62,13 @@ export interface FairUsage {
   guestPool: number;
 }
 
-/** The Brick for guests (game #1997): its own allowance, apart from a guest's replies from a host's bots. */
+/** A person's own Bricks (game #1996) and the Brick for guests (game #1997). */
 export interface BrickLimits {
-  /** Replies one guest gets from the Brick for guests in each window. */
+  /** Days a deleted Brick waits before it is gone for good; Undo gives it back until then. */
+  undoDays: number;
+  /** Times the same kind of job has to come back before a Brick suggests a Brick for it. */
+  offerAfter: number;
+  /** Replies one guest gets from the Brick for guests in each window. Its own allowance, apart from a guest's replies from a host's bots. */
   guestReplies: number;
   /** Replies all guests together get from the Brick for guests in one universe in each window. */
   universePool: number;
@@ -85,7 +89,7 @@ export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, 
 export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 };
 export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0, guestDays: 1 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
-export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { guestReplies: 10, universePool: 200 };
+export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
 export const FAIR_USAGE_WINDOW_HOURS = 5;
 
@@ -143,6 +147,9 @@ const FAIR_USAGE_RANGES: Record<keyof FairUsage, Range> = {
 };
 
 const BRICK_RANGES: Record<keyof BrickLimits, Range> = {
+  undoDays: { min: 1, max: 365, whole: true },
+  // Never 1: a job that came once has not come back
+  offerAfter: { min: 2, max: 100, whole: true },
   guestReplies: { min: 1, max: 1_000_000, whole: true },
   universePool: { min: 1, max: 1_000_000, whole: true },
 };

@@ -43,6 +43,8 @@ export interface ManagedBot {
   roomId: string | null;
   /** The person a Brick belongs to. Null for a room bot. */
   ownerId: string | null;
+  /** Set while a Brick waits deleted (game #1996): then nobody manages it, its owner included, until Undo. */
+  deletedAt: Date | null;
 }
 
 /**

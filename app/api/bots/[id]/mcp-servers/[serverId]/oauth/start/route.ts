@@ -56,7 +56,7 @@ export async function GET(
     // Load the MCP server config
     const server = await prisma.botMcpServer.findUnique({
       where: { id: serverId },
-      include: { bot: { select: { id: true, createdById: true, roomId: true, ownerId: true, name: true } } },
+      include: { bot: { select: { id: true, createdById: true, roomId: true, ownerId: true, deletedAt: true, name: true } } },
     });
 
     if (!server || server.botId !== botId) {

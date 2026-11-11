@@ -189,7 +189,7 @@ describe('GET /api/me/bot-ai', () => {
     const response = await get('botId=sam');
     expect(response.status).toBe(403);
     expect(JSON.stringify(await response.json())).not.toContain('Claude');
-    expect(canManageThisBot).toHaveBeenCalledWith('mishari', null, { id: 'sam', createdById: 'maker', roomId: 'room-1', ownerId: null }, { creatorPasses: false });
+    expect(canManageThisBot).toHaveBeenCalledWith('mishari', null, { id: 'sam', createdById: 'maker', roomId: 'room-1', ownerId: null, deletedAt: null }, { creatorPasses: false });
     expect(db.botsAiProvider.findUnique).not.toHaveBeenCalled();
   });
 

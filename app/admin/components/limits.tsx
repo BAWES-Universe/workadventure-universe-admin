@@ -556,12 +556,40 @@ export function fairUsageLimits(values: FairUsage): Limit[] {
 }
 
 /**
- * The Brick for guests (game #1997): its own allowance, apart from the replies a guest gets from a host's bots, so a
- * guest who talks to it can still talk to a host's bots as much as before.
+ * Limits for Bricks. A person's own Bricks (game #1996): how long a deleted one can be brought back, and when a Brick
+ * suggests another. The Brick for guests (game #1997): its own allowance, apart from the replies a guest gets from a
+ * host's bots, so a guest who talks to it can still talk to a host's bots as much as before.
  */
 export function brickLimits(values: BrickLimits): Limit[] {
   const recommended = BRICK_LIMITS_RECOMMENDED;
   return withRanges([
+    {
+      id: 'undoDays',
+      label: 'Days a deleted Brick can be brought back',
+      hint: 'Its chat, what it remembers and its files wait this long, then go for good.',
+      unit: 'days',
+      value: values.undoDays,
+      recommended: recommended.undoDays,
+      note: 'A change counts for Bricks deleted from now on. A Brick already deleted keeps the day it was given.',
+      options: [
+        { value: 3, label: '3 days', meaning: 'then gone for good' },
+        { value: 7, label: '7 days', meaning: 'then gone for good' },
+        { value: 14, label: '14 days', meaning: 'then gone for good' },
+      ],
+    },
+    {
+      id: 'offerAfter',
+      label: 'Times a job comes back before Brick suggests a Brick for it',
+      hint: 'Brick answers first. When the same kind of job has come back this often, it suggests a Brick just for it, once per topic.',
+      unit: 'times',
+      value: values.offerAfter,
+      recommended: recommended.offerAfter,
+      options: [
+        { value: 3, label: '3 times', meaning: 'Suggests it early.' },
+        { value: 5, label: '5 times', meaning: 'Waits a little longer.' },
+        { value: 10, label: '10 times', meaning: 'Only for a job that comes back a lot.' },
+      ],
+    },
     {
       id: 'guestReplies',
       label: 'Replies for a guest from the Brick for guests',

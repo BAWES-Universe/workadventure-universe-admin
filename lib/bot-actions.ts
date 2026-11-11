@@ -724,6 +724,25 @@ export async function revokeGrants(
   return { revoked: done.count };
 }
 
+/** Why a Brick's remembered approvals ended when its owner deleted it (game #1996). Not a reason the bot server sends. */
+export const ENDED_BY_DELETE = 'brick_deleted';
+
+/**
+ * Everything a bot was allowed ends now (game #1996, a Brick its owner deletes): every remembered approval of it is
+ * revoked, and every card of it that waits, or was approved and has not started, is closed. None of them comes back when
+ * the Brick does: after Undo the next change asks again. A request that is already running is left to finish its own
+ * record, so an action whose outcome is not known is never sent a second time (see BotActionAttempt).
+ */
+export async function endAllApprovals(db: Db, botId: string, now: Date = new Date()): Promise<{ grants: number; requests: number }> {
+  const grants = await db.botActionGrant.updateMany({ where: { botId, revokedAt: null }, data: { revokedAt: now, revokedReason: ENDED_BY_DELETE } });
+  const open = await db.botActionRequest.findMany({ where: { botId, status: { in: ['waiting', 'approved'] } }, select: { id: true, revision: true } });
+  let requests = 0;
+  for (const row of open) {
+    if (await move(db, row, ['waiting', 'approved'], { status: 'closed', closedReason: 'revoked', finishedAt: now }, 'revoke', null)) requests += 1;
+  }
+  return { grants: grants.count, requests };
+}
+
 /** One remembered approval that is still alive, as the bot's Approvals page lists it ("Allowed more right now"). */
 export interface ActiveGrantView {
   id: string;

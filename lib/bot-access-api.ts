@@ -35,7 +35,7 @@ export async function authorizeBotManager(request: NextRequest, botId: string, o
       sessionUser.id,
       sessionUser.email,
       // loadBotPlace answers only for a room bot: a Brick has no place, and gets the "not found" above
-      { id: place.id, createdById: place.createdById, roomId: place.roomId, ownerId: null },
+      { id: place.id, createdById: place.createdById, roomId: place.roomId, ownerId: null, deletedAt: null },
       { creatorPasses: false },
     ))
   ) {

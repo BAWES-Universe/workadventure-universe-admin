@@ -25,7 +25,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const { id } = await params;
     const body = await readBody(request, bodySchema);
     if (body.response) return body.response;
-    const bot = await prisma.bot.findUnique({ where: { id }, select: { id: true, createdById: true, roomId: true, ownerId: true } });
+    const bot = await prisma.bot.findUnique({ where: { id }, select: { id: true, createdById: true, roomId: true, ownerId: true, deletedAt: true } });
     if (!bot) return json(request, { error: 'Bot not found' }, 404);
     const user = await findUserByIdentifier(body.data.identifier);
     // A guest has no account here, so there is nothing to manage with

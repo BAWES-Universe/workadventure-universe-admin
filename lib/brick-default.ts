@@ -7,7 +7,8 @@ import { createBrick } from '@/lib/brick-create';
  *
  * "Once" is the account's row in `default_bricks`. Whoever writes that row makes the Brick, in the same transaction, and
  * everyone else finds the row: a second device, a double tap and a later sign-in make nothing. The row stays when the
- * Brick is deleted, so a Brick its owner deleted on purpose is never made again.
+ * Brick is deleted, so a Brick its owner deleted on purpose is never made again: not while it waits for Undo (game
+ * #1996), and not after it is gone for good.
  *
  * Making it sends nothing to anyone: no message, no notice, no unread count. Its hello is fixed text the game shows when
  * the chat is opened, and no AI runs until its owner writes to it.
@@ -31,14 +32,34 @@ export interface BrickCard {
   enabled: boolean;
   /** The Brick this account got by itself, as opposed to one its owner made. */
   isDefault: boolean;
+  /**
+   * The first line of its chat while nothing is written there, for a Brick that was made for a job (game #1996). Null:
+   * the game shows its own fixed hello.
+   */
+  hello: string | null;
   createdAt: string;
 }
 
-type BrickRow = { id: string; name: string; description: string | null; characterTextureId: string | null; enabled: boolean; createdAt: Date };
+/** A Brick its owner deleted, while Undo can still give it back (game #1996). */
+export interface DeletedBrickCard extends BrickCard {
+  deletedAt: string;
+  /** When it is gone for good. Undo works until then. */
+  goneAt: string;
+}
 
-const CARD_SELECT = { id: true, name: true, description: true, characterTextureId: true, enabled: true, createdAt: true } as const;
+export type BrickRow = {
+  id: string;
+  name: string;
+  description: string | null;
+  characterTextureId: string | null;
+  enabled: boolean;
+  hello: string | null;
+  createdAt: Date;
+};
 
-function toCard(bot: BrickRow, isDefault: boolean): BrickCard {
+export const CARD_SELECT = { id: true, name: true, description: true, characterTextureId: true, enabled: true, hello: true, createdAt: true } as const;
+
+export function toCard(bot: BrickRow, isDefault: boolean): BrickCard {
   return {
     id: bot.id,
     name: bot.name,
@@ -46,6 +67,7 @@ function toCard(bot: BrickRow, isDefault: boolean): BrickCard {
     characterTextureId: bot.characterTextureId,
     enabled: bot.enabled,
     isDefault,
+    hello: bot.hello,
     createdAt: bot.createdAt.toISOString(),
   };
 }
@@ -70,8 +92,9 @@ export async function ensureDefaultBrick(userId: string): Promise<DefaultBrickAn
       ON CONFLICT ("user_id") DO NOTHING
       RETURNING "user_id"`);
     if (claimed.length === 0) {
-      const row = await tx.defaultBrick.findUnique({ where: { userId }, select: { bot: { select: CARD_SELECT } } });
-      if (row?.bot) return { brick: toCard(row.bot, true), made: false, deleted: false };
+      const row = await tx.defaultBrick.findUnique({ where: { userId }, select: { bot: { select: { ...CARD_SELECT, deletedAt: true } } } });
+      // Deleted is deleted from the moment its owner said so: while it waits for Undo it is not handed out either
+      if (row?.bot && row.bot.deletedAt === null) return { brick: toCard(row.bot, true), made: false, deleted: false };
       return { brick: null, made: false, deleted: true };
     }
     const bot = await createBrick(
@@ -85,15 +108,32 @@ export async function ensureDefaultBrick(userId: string): Promise<DefaultBrickAn
 
 /**
  * A person's Bricks for their Bricks page: the one everyone gets first, then the ones they made, oldest first. Only
- * their own: a Brick is nobody else's to list, a super admin included.
+ * their own: a Brick is nobody else's to list, a super admin included. A Brick that waits deleted is not one of them
+ * (see listDeletedBricks).
  */
 export async function listBricks(userId: string): Promise<BrickCard[]> {
   const [bots, own] = await Promise.all([
-    prisma.bot.findMany({ where: { ownerId: userId, roomId: null }, select: CARD_SELECT, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }),
+    prisma.bot.findMany({ where: { ownerId: userId, roomId: null, deletedAt: null }, select: CARD_SELECT, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }),
     prisma.defaultBrick.findUnique({ where: { userId }, select: { botId: true } }),
   ]);
   const cards = bots.map((bot) => toCard(bot, bot.id === own?.botId));
   return [...cards.filter((card) => card.isDefault), ...cards.filter((card) => !card.isDefault)];
+}
+
+/**
+ * The Bricks this person deleted that Undo can still give back (game #1996), the last one deleted first. One whose time
+ * has passed is not listed, whether or not its row has been removed yet.
+ */
+export async function listDeletedBricks(userId: string, now: Date = new Date()): Promise<DeletedBrickCard[]> {
+  const [bots, own] = await Promise.all([
+    prisma.bot.findMany({
+      where: { ownerId: userId, roomId: null, deletedAt: { not: null }, goneAt: { gt: now } },
+      select: { ...CARD_SELECT, deletedAt: true, goneAt: true },
+      orderBy: [{ deletedAt: 'desc' }, { id: 'asc' }],
+    }),
+    prisma.defaultBrick.findUnique({ where: { userId }, select: { botId: true } }),
+  ]);
+  return bots.map((bot) => ({ ...toCard(bot, bot.id === own?.botId), deletedAt: bot.deletedAt!.toISOString(), goneAt: bot.goneAt!.toISOString() }));
 }
 
 /** Whether this bot is the Brick its owner's account got by itself. */

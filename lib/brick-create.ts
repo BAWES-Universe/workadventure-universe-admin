@@ -11,6 +11,8 @@ export interface NewBrick {
   description?: string | null;
   characterTextureId?: string | null;
   chatInstructions?: string | null;
+  /** The first line of its chat while nothing is written there (game #1996); none means the game's own hello. */
+  hello?: string | null;
 }
 
 /**
@@ -30,6 +32,7 @@ export async function createBrick(input: NewBrick, db: Prisma.TransactionClient 
       description: input.description ?? null,
       characterTextureId: input.characterTextureId ?? null,
       chatInstructions: input.chatInstructions ?? null,
+      hello: input.hello ?? null,
       behaviorType: 'idle',
       behaviorConfig: startWithToolCallsOn({}),
       aiProviderRef: UNIVERSE_AI_REF,

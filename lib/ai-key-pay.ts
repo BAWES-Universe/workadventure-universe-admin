@@ -28,6 +28,8 @@ export interface BotForKey {
   /** Null for a Brick, which has no room: then `ownerId` decides. */
   roomId: string | null;
   ownerId: string | null;
+  /** Set while a Brick waits deleted (game #1996): then no key runs it, its owner's included. */
+  deletedAt: Date | null;
 }
 
 export async function checkKeyForBot(input: { keyId: string; keyOwnerId: string | null; bot: BotForKey }): Promise<KeyForBot> {
@@ -44,7 +46,7 @@ export async function checkKeyForBot(input: { keyId: string; keyOwnerId: string 
   });
   if (!lent) return { ok: false, reason: 'not-lent' };
   const manages = input.bot.id
-    ? await canManageThisBot(input.keyOwnerId, null, { id: input.bot.id, createdById: input.bot.createdById, roomId, ownerId: input.bot.ownerId }, { creatorPasses: false })
+    ? await canManageThisBot(input.keyOwnerId, null, { id: input.bot.id, createdById: input.bot.createdById, roomId, ownerId: input.bot.ownerId, deletedAt: input.bot.deletedAt }, { creatorPasses: false })
     : await canManageBots(input.keyOwnerId, roomId);
   if (!manages) return { ok: false, reason: 'no-access' };
   return { ok: true, lendModels: lendModels(lent.models) };
