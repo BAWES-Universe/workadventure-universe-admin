@@ -106,6 +106,16 @@ export interface Envelope {
   jobsRunning: number;
 }
 
+/**
+ * The room that still counts at a moment: held and still in time, or held and lapsed within the month it was taken in. Room that
+ * lapsed (a job that crashed or was abandoned) keeps counting until it is settled or released, because what it spent is not known;
+ * but it counts only in its own month, since anything it really cost is in the books as events dated then. Settling or releasing
+ * lapsed room is the job runner's (game #2000); until it does, a lapsed hold never reaches past the month it was taken in.
+ */
+function stillCounts(now: Date): Prisma.MeterReservationWhereInput {
+  return { state: 'held', OR: [{ expiresAt: { gt: now } }, { createdAt: { gte: monthOf(now).start } }] };
+}
+
 /** The computer pool's envelope at a moment. `settings` must have its money set (see `missingSettings`). */
 export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Promise<Envelope> {
   const month = monthOf(now);
@@ -115,7 +125,7 @@ export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Pr
     tx.meterEvent.aggregate({ where: { ...universeComputer, settledAt: null }, _sum: { costMicros: true } }),
     tx.meterEvent.count({ where: { ...universeComputer, costMicros: null } }),
     tx.meterEvent.aggregate({ where: { pool: 'chat', payerKind: 'universe', occurredAt: { gte: month.start, lt: month.end } }, _sum: { costMicros: true } }),
-    tx.meterReservation.findMany({ where: { state: 'held' }, select: { amountMicros: true, expiresAt: true } }),
+    tx.meterReservation.findMany({ where: stillCounts(now), select: { amountMicros: true, expiresAt: true } }),
     // The newest size recorded for each bot: a disk is a level, not something that adds up
     tx.$queryRaw<{ bytes: bigint | null }[]>`
       SELECT COALESCE(SUM(latest.quantity), 0)::bigint AS bytes FROM (
@@ -168,7 +178,7 @@ async function fits(tx: Tx, personId: string, extraMicros: number, now: Date, se
   if (missing.length > 0) return { ok: false, reason: 'not_set', missing };
   const allowance = await memberAllowance(personId, now, settings, tx);
   if (allowance && !allowance.unlimited) {
-    const held = await tx.meterReservation.aggregate({ where: { personKey: `person:${personId}`, state: 'held' }, _sum: { amountMicros: true } });
+    const held = await tx.meterReservation.aggregate({ where: { personKey: `person:${personId}`, ...stillCounts(now) }, _sum: { amountMicros: true } });
     const left = (allowance.leftMicros ?? 0) - asNumber(held._sum.amountMicros);
     if (left < extraMicros) return { ok: false, reason: 'allowance', leftMicros: Math.max(0, left) };
   }

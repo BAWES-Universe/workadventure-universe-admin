@@ -240,6 +240,18 @@ run('the meter, in a real database', () => {
       expect(await reserveRoom({ key: `c-${tag}`, personId: sara.id, amountMicros: 10 }, minutes(11))).toEqual({ ok: false, reason: 'closed' });
     });
 
+    it('keeps room that lapsed counting through its own month, and never into the next one', async () => {
+      const sara = await person('sara');
+      await setUp({ memberAllowanceMicros: 1_000, poolCeilingMicros: 10_000 });
+      // A job that crashed on 14 November and was never settled or released
+      await prisma.meterReservation.create({ data: { reservationKey: `crashed-${tag}`, personKey: `person:${sara.id}`, personId: sara.id, amountMicros: BigInt(900), state: 'held', expiresAt: minutes(-60), createdAt: minutes(-120) } });
+      expect(await reserveRoom({ key: `same-month-${tag}`, personId: sara.id, amountMicros: 200 }, NOW)).toMatchObject({ ok: false, reason: 'allowance', leftMicros: 100 });
+      expect((await currentEnvelope(NOW)).unsettledMicros).toBe(900);
+      const december = new Date('2026-12-02T09:00:00Z');
+      expect((await reserveRoom({ key: `next-month-${tag}`, personId: sara.id, amountMicros: 1_000 }, december)).ok).toBe(true);
+      expect((await currentEnvelope(new Date('2026-12-02T10:00:00Z'))).unsettledMicros).toBe(0);
+    });
+
     it('answers the same reservation for the same key and takes nothing more', async () => {
       const sara = await person('sara');
       await setUp({ memberAllowanceMicros: 1_000 });
