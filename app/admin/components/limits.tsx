@@ -10,6 +10,7 @@ import { FormSheet } from './form-sheet';
 import { LoadError, LoadingRows, SectionHeader, SettingSwitch, Settings } from './ds';
 import {
   ARTIFACT_LIMITS_RECOMMENDED,
+  BRICK_LIMITS_RECOMMENDED,
   FAIR_USAGE_RECOMMENDED,
   FAIR_USAGE_WINDOW_HOURS,
   FILE_LIMITS_RECOMMENDED,
@@ -17,6 +18,7 @@ import {
   REPLY_LIMITS_RECOMMENDED,
   replyLimitsProblem,
   type ArtifactLimits,
+  type BrickLimits,
   type FairUsage,
   type FileLimits,
   type Range,
@@ -553,6 +555,40 @@ export function fairUsageLimits(values: FairUsage): Limit[] {
   ], LIMIT_RANGES.fairUsage);
 }
 
+/**
+ * The Brick for guests (game #1997): its own allowance, apart from the replies a guest gets from a host's bots, so a
+ * guest who talks to it can still talk to a host's bots as much as before.
+ */
+export function brickLimits(values: BrickLimits): Limit[] {
+  const recommended = BRICK_LIMITS_RECOMMENDED;
+  return withRanges([
+    {
+      id: 'guestReplies',
+      label: 'Replies for a guest from the Brick for guests',
+      hint: `Its own allowance, every ${FAIR_USAGE_WINDOW_HOURS} hours. Replies from a host’s bots don’t use it.`,
+      unit: 'replies',
+      value: values.guestReplies,
+      recommended: recommended.guestReplies,
+      options: [
+        { value: 10, label: '10 replies', meaning: every },
+        { value: 20, label: '20 replies', meaning: every },
+      ],
+    },
+    {
+      id: 'universePool',
+      label: 'Replies for all guests from the Brick for guests, in one universe',
+      hint: `Shared by every guest in that universe, every ${FAIR_USAGE_WINDOW_HOURS} hours. Nothing comes from a host.`,
+      unit: 'replies',
+      value: values.universePool,
+      recommended: recommended.universePool,
+      options: [
+        { value: 200, label: '200 replies', meaning: every },
+        { value: 500, label: '500 replies', meaning: every },
+      ],
+    },
+  ], LIMIT_RANGES.bricks);
+}
+
 /** The id without its maker's prefix: "openai/gpt-4o-mini" is "gpt-4o-mini". */
 const shortModel = (id: string) => (id.includes('/') ? id.slice(id.indexOf('/') + 1) : id);
 const listOf = (names: string[]) => new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(names);
@@ -908,6 +944,7 @@ export function UniverseAiLimits() {
           </Settings>
           <LimitGroup title="Files in chats, for all bots" limits={fileLimits(limits.files)} onChange={(id, value) => save({ files: { [id]: value } })} />
           <LimitGroup title="Fair usage" limits={fairUsageLimits(limits.fairUsage)} onChange={(id, value) => save({ fairUsage: { [id]: value } })} />
+          <LimitGroup title="Bricks" limits={brickLimits(limits.bricks)} onChange={(id, value) => save({ bricks: { [id]: value } })} />
           {voiceFailed ? (
             <LoadError label="the voice limits" retry={loadVoice} />
           ) : !voice ? (

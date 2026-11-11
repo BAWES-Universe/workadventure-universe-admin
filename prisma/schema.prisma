@@ -49,6 +49,7 @@ model User {
   ownershipOffersMade     OwnershipOffer[] @relation("OwnershipOfferBy")
   bricks            Bot[] @relation("BotOwner")
   defaultBrick      DefaultBrick?
+  guestBrickHandovers GuestBrickHandover[]
   botsCreated       Bot[] @relation("BotCreatedBy")
   botsUpdated       Bot[] @relation("BotUpdatedBy")
   botAccessRules    BotAccessRule[]
@@ -917,6 +918,45 @@ model DefaultBrick {
   bot  Bot? @relation(fields: [botId], references: [id], onDelete: SetNull)
 
   @@map("default_bricks")
+}
+
+// A reply the Brick for guests gave or was asked for (game #1997). The Brick for guests is Universe's own and has no bot
+// row, so its allowance is counted here and nowhere else: not in a guest's Universe AI replies for a host's bots and not
+// in a host bot's guest pool. Only totals are kept: who (the guest's id, never a name), where (the universe), when, and
+// what it took. Never what was said.
+model GuestBrickReply {
+  id          String   @id @default(uuid())
+  // Set by the bot server for the one turn; the same turn asked twice counts once
+  turnId      String   @unique @map("turn_id") @db.VarChar(255)
+  // The universe's id, or "outside" for a room that is in no universe
+  universeKey String   @map("universe_key") @db.VarChar(64)
+  // The guest's id as the bot server knows them (the uuid the game made at their first visit)
+  guestKey    String   @map("guest_key") @db.VarChar(255)
+  createdAt   DateTime @default(now()) @map("created_at")
+  // A reply that failed is given back: it is not counted
+  failed      Boolean  @default(false)
+  tokensUsed  Int?     @map("tokens_used")
+  // Millionths of a dollar, when the bot server knew it
+  costMicros  Int?     @map("cost_micros")
+
+  @@index([universeKey, createdAt])
+  @@index([guestKey, createdAt])
+  @@map("guest_brick_replies")
+}
+
+// A guest's chat with the Brick for guests, handed to the account they signed in with (game #1997). One row per guest id,
+// so the chat goes to one account once: a second tab, a second sign-in and a different account find the row and take
+// nothing. `carriedAt` is set once, by the first device that asks for it, so one device attaches the chat.
+model GuestBrickHandover {
+  guestKey  String    @id @map("guest_key") @db.VarChar(255)
+  userId    String    @map("user_id")
+  claimedAt DateTime  @default(now()) @map("claimed_at")
+  carriedAt DateTime? @map("carried_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("guest_brick_handovers")
 }
 
 // One role's or one person's No / Default / Yes for a bot (#427), the same shape room overrides will reuse: two

@@ -8,7 +8,7 @@ export const runtime = 'nodejs';
 
 /**
  * GET /api/admin/bot-limits - the limits a super admin sets for all bots (#666): Universe AI's reply limits, the artifact
- * limits, the "Say when nothing was saved" switch, fair usage and files in bot chats. Anything never changed comes back as its recommended value.
+ * limits, the "Say when nothing was saved" switch, fair usage, files in bot chats and the Brick for guests. Anything never changed comes back as its recommended value.
  */
 export async function GET(request: NextRequest) {
   const user = await getSessionUser(request);
@@ -22,7 +22,7 @@ export async function GET(request: NextRequest) {
 }
 
 /**
- * PATCH /api/admin/bot-limits { universeAi?, artifacts?, guard?, fairUsage?, files? } - changes only the values it names,
+ * PATCH /api/admin/bot-limits { universeAi?, artifacts?, guard?, fairUsage?, files?, bricks? } - changes only the values it names,
  * e.g. { universeAi: { reply: 16000 } }. Answers with all of them as saved, or 400 with the line that says why not.
  */
 export async function PATCH(request: NextRequest) {

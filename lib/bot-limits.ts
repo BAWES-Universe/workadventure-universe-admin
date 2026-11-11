@@ -59,6 +59,7 @@ export async function saveServerLimits(change: ServerChange, userId: string): Pr
       guard: change.guard ?? now.guard,
       fairUsage: { ...now.fairUsage, ...change.fairUsage },
       files: { ...now.files, ...change.files },
+      bricks: { ...now.bricks, ...change.bricks },
     };
     const next = readServerLimits(kept);
     const problem = replyLimitsProblem(next.universeAi, change.universeAi);
@@ -80,6 +81,15 @@ export async function saveServerLimits(change: ServerChange, userId: string): Pr
 export async function getUniverseAiReplyLimits(): Promise<{ signedIn: number; guest: number; guestPool: number; windowHours: number }> {
   const { fairUsage } = await getServerLimits();
   return { ...fairUsage, windowHours: FAIR_USAGE_WINDOW_HOURS };
+}
+
+/**
+ * The Brick for guests (game #1997): replies one guest gets from it, and replies all guests together get from it in one
+ * universe, in each window of the fair usage window. 10 and 200 until a super admin changes them. They are its own, apart
+ * from fair usage: a guest's replies from it never count toward the replies a host's bot gives them.
+ */
+export async function getBrickLimits(): Promise<ServerLimits['bricks']> {
+  return (await getServerLimits()).bricks;
 }
 
 /** A key's reply limits: what its owner changed, the recommended value for the rest. */

@@ -7,7 +7,7 @@ import { GET, PATCH } from '@/app/api/admin/bot-limits/route';
 import { PATCH as patchKey } from '@/app/api/me/ai-keys/[id]/route';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
-import { getUniverseAiReplyLimits } from '@/lib/bot-limits';
+import { getBrickLimits, getUniverseAiReplyLimits } from '@/lib/bot-limits';
 import { checkBotLimit, checkServerLimits, limitsForBot, readServerLimits, REPLY_LIMITS_RECOMMENDED, SERVER_LIMITS_RECOMMENDED } from '@/lib/bot-limit-values';
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -52,6 +52,7 @@ describe('the values', () => {
       guard: true,
       fairUsage: { signedIn: 30, guest: 10, guestPool: 200 },
       files: { text: 2_000_000, findable: 0, guestDays: 1 },
+      bricks: { guestReplies: 10, universePool: 200 },
     });
   });
 
@@ -144,6 +145,17 @@ describe('/api/admin/bot-limits', () => {
     expect(response.status).toBe(200);
     expect((await response.json()).limits.files).toEqual({ text: 2_000_000, findable: 365, guestDays: 7 });
     expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { files: { guestDays: 0 } }))).status).toBe(400);
+  });
+
+  it('saves the Brick for guests\' own allowance and pool (game #1997), and turns down what can\'t be saved', async () => {
+    const response = await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { guestReplies: 20 } }));
+    expect(response.status).toBe(200);
+    expect((await response.json()).limits.bricks).toEqual({ guestReplies: 20, universePool: 200 });
+    expect(settings.upsert.mock.calls[0][0].create.value.bricks).toEqual({ guestReplies: 20, universePool: 200 });
+    expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { universePool: 0 } }))).status).toBe(400);
+    expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { guestReplies: 1.5 } }))).status).toBe(400);
+    expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { nothing: 1 } }))).status).toBe(400);
+    expect(await getBrickLimits()).toEqual({ guestReplies: 10, universePool: 200 });
   });
 
   it('turns down "Reads from an earlier file" above "Reads from a page or file", saying why, and saves nothing', async () => {
