@@ -153,7 +153,8 @@ export async function GET(request: NextRequest) {
 
     // Build where clause
     // The list is every bot that stands in a room. A Brick (game #1992) has no room URL and is never in it: a bot server
-    // that only knows room bots must not be handed one. How a bot server asks for Bricks comes with game #1995.
+    // that only knows room bots must not be handed one. A bot server that knows Bricks reads one by its id, with `bricks=1`
+    // (game #1995, see the route for one bot).
     const where: any = {
       enabled: true, // Always filter by enabled = true for list endpoint
       ...ROOM_BOTS_ONLY,

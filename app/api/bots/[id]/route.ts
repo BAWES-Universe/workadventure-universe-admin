@@ -357,7 +357,8 @@ export async function PUT(
     }
 
     // A Brick (game #1992) has no room, and this save reads the room's keys and rules and can move a bot to another room.
-    // What a Brick's owner may change opens with the issue for each part (game #1995 onwards).
+    // What a Brick's owner may change has its own route, `PATCH /api/bricks/:id` (game #1995); more opens with the issue
+    // for each part.
     const currentRoomId = existingBot.roomId;
     if (currentRoomId === null) {
       const response = NextResponse.json(
@@ -709,7 +710,7 @@ export async function DELETE(
     }
 
     // A Brick (game #1992) is not deleted here: this is the room editor's delete, and what goes with a Brick when it is
-    // deleted is decided with the Brick itself (game #1995 onwards)
+    // deleted is decided with the Brick's own delete (game #1996)
     if (bot.roomId === null) {
       const response = NextResponse.json(
         { error: brickHasNoRoomText(bot, { userId, isAdminToken }) },
