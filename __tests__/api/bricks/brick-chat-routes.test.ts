@@ -153,6 +153,10 @@ describe('/api/bots/:id/brick-offers: the gentle offer', () => {
     expect(topicKey('recipes!')).toBe('recipes');
     expect(topicKey(' my   RECIPES ')).toBe('my recipes');
     expect(topicKey('وصفات الطبخ')).toBe('وصفات الطبخ');
+    // Marks belong to their letters: vowel signs do not split a word or fold two words into one
+    expect(topicKey('وَصَفات')).toBe('وَصَفات');
+    expect(topicKey('की')).not.toBe(topicKey('कु'));
+    expect(topicKey('की')).toBe('की');
     expect(topicKey(' ?! ')).toBeNull();
     expect(topicKey(42)).toBeNull();
     expect(topicKey('x'.repeat(200))).toHaveLength(60);

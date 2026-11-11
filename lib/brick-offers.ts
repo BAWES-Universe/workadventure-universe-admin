@@ -29,7 +29,8 @@ export function topicKey(raw: unknown): string | null {
   const key = raw
     .normalize('NFKC')
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    // Marks stay with their letters (\p{M}): Arabic vowel signs, Devanagari and Thai vowels are part of the word
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, ' ')
     .trim()
     .slice(0, TOPIC_MAX)
     .trim();

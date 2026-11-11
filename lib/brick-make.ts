@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
@@ -58,10 +59,10 @@ function nextLook(worn: (string | null)[]): string {
 }
 
 /** Makes a Brick for this person and answers with its card. */
-export async function makeBrick(ownerId: string, input: NewBrickInput): Promise<BrickCard> {
+export async function makeBrick(ownerId: string, input: NewBrickInput, db: Prisma.TransactionClient = prisma): Promise<BrickCard> {
   const look =
     input.characterTextureId ??
-    nextLook((await prisma.bot.findMany({ where: { ownerId, roomId: null, deletedAt: null }, select: { characterTextureId: true } })).map((bot) => bot.characterTextureId));
+    nextLook((await db.bot.findMany({ where: { ownerId, roomId: null, deletedAt: null }, select: { characterTextureId: true } })).map((bot) => bot.characterTextureId));
   const bot = await createBrick({
     ownerId,
     name: input.name,
@@ -69,7 +70,7 @@ export async function makeBrick(ownerId: string, input: NewBrickInput): Promise<
     characterTextureId: look,
     chatInstructions: input.chatInstructions?.trim() || null,
     hello: input.hello || null,
-  });
+  }, db);
   return toCard(bot, false);
 }
 
@@ -109,18 +110,25 @@ export async function makeBrickFromChat(viaBrickId: string, input: z.infer<typeo
   const { userId, evenIfThere, ...brick } = input;
   const ownerId = await ownerAskingThrough(viaBrickId, userId);
   if (!ownerId) return { ok: false, status: 404, error: 'Brick not found' };
-  if (!evenIfThere) {
-    const there = await prisma.bot.findFirst({
-      where: { ownerId, roomId: null, deletedAt: null, name: { equals: brick.name, mode: 'insensitive' } },
-      select: { id: true },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-    });
-    if (there) {
-      const bricks = await listBricks(ownerId);
-      const card = bricks.find((one) => one.id === there.id);
-      if (card) return { ok: true, made: false, brick: card, bricks };
+  // One at a time per person and name (a lock held for the transaction): two asks for the same name that arrive
+  // together would otherwise each find no such Brick and each make one.
+  const outcome = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-make:${ownerId}:${brick.name.toLowerCase()}`}))`;
+    if (!evenIfThere) {
+      const there = await tx.bot.findFirst({
+        where: { ownerId, roomId: null, deletedAt: null, name: { equals: brick.name, mode: 'insensitive' } },
+        select: { id: true },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      });
+      if (there) return { made: false as const, id: there.id };
     }
-  }
+    return { made: true as const, brick: await makeBrick(ownerId, brick, tx) };
+  });
+  const bricks = await listBricks(ownerId);
+  if (outcome.made) return { ok: true, made: true, brick: outcome.brick, bricks };
+  const card = bricks.find((one) => one.id === outcome.id);
+  if (card) return { ok: true, made: false, brick: card, bricks };
+  // Deleted between the look and the list: it is no longer theirs to open, so they get the one they asked for
   const made = await makeBrick(ownerId, brick);
   return { ok: true, made: true, brick: made, bricks: await listBricks(ownerId) };
 }

@@ -97,6 +97,15 @@ run('more Bricks, deleting one and Undo, in a real database', () => {
     expect(await prisma.bot.count({ where: { ownerId: sara.id, roomId: null, createdById: sara.id, aiProviderRef: 'universe-ai' } })).toBe(4);
   });
 
+  it('makes one Brick when the same ask arrives several times at the same moment', async () => {
+    const hadi = await person('hadi');
+    const { brick } = await ensureDefaultBrick(hadi.id);
+    const answers = await Promise.all(['Music Brick', 'music brick', 'MUSIC BRICK', 'Music Brick'].map((name) => makeBrickFromChat(brick!.id, { userId: hadi.uuid, name })));
+    expect(answers.filter((answer) => answer.ok && answer.made)).toHaveLength(1);
+    expect(new Set(answers.map((answer) => (answer.ok ? answer.brick.id : null))).size).toBe(1);
+    expect((await bricksForChat(brick!.id, hadi.uuid))!.map((card) => card.name.toLowerCase())).toEqual(['brick', 'music brick']);
+  });
+
   it('makes one from the person’s own chat with their Brick, opens the one of that name instead of making it twice, and makes none for anyone else', async () => {
     const omar = await person('omar');
     const lina = await person('lina');
