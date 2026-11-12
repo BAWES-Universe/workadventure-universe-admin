@@ -953,6 +953,9 @@ model BrickVisit {
   userId    String   @id @map("user_id")
   botId     String   @unique @map("bot_id")
   roomId    String?  @map("room_id")
+  // When the person's game saw them come into `roomId` (the game's own time, never later than the moment Orbit heard it). A
+  // visit only moves to another room on a sighting newer than this, so a late sync from a room they left moves nothing
+  roomSince DateTime? @map("room_since")
   startedAt DateTime @default(now()) @map("started_at")
   seenAt    DateTime @default(now()) @map("seen_at")
 

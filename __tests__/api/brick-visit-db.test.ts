@@ -64,8 +64,8 @@ const call = (method: string, url: string, body?: unknown, headers: Record<strin
 const service = { Authorization: `Bearer ${SERVICE_TOKEN}` };
 const chat = (botId: string, user: { email: string }, action: 'chat' | 'dm' | 'summon' | 'change' | 'deleteOrSend', roomUrl?: string) =>
   checkBotAccess({ botId, action, roomUrl: roomUrl ?? null, person: { signedIn: true, identifier: user.email } });
-const feed = async (roomUrl: string, people: string[]) => {
-  const response = await roomFeed(call('POST', '/api/brick-visits/room', { roomUrl, people }, service));
+const feed = async (roomUrl: string, people: string[], enteredAt?: number) => {
+  const response = await roomFeed(call('POST', '/api/brick-visits/room', { roomUrl, people, ...(enteredAt === undefined ? {} : { enteredAt }) }, service));
   expect(response.status).toBe(200);
   return (await response.json()) as { botId: string; roomUrl: string; brick: { visiting?: { ownerUuid: string } } }[];
 };
@@ -672,6 +672,44 @@ run('bringing a Brick along, in a real database', () => {
         await prisma.world.updateMany({ where: { universeId: universes.second.id }, data: { isPublic: true } });
       }
       expect(await whereIsBrick(brickId, null)).not.toBeNull();
+    });
+
+    it('moves to another room only on a sighting newer than the move before it: a late sync from a room its person left moves nothing, refreshes nothing, brings nothing back', async () => {
+      const T = Date.now() - 60_000;
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      // The first sync from room A names when the game saw Sara come in
+      expect(await feed(universes.open.roomUrl, [sara.uuid], T)).toHaveLength(1);
+      expect((await visit(sara.id))?.roomSince?.getTime()).toBe(T);
+      // She walks on to room B: newer, so the visit goes with her
+      expect(await feed(universes.second.roomUrl, [sara.uuid], T + 5_000)).toHaveLength(1);
+      expect(await visit(sara.id)).toMatchObject({ roomId: universes.second.roomId });
+      expect((await visit(sara.id))?.roomSince?.getTime()).toBe(T + 5_000);
+      // A's sync arrives late, after B's: it moves nothing, brings no Brick to A and does not refresh the visit
+      await prisma.brickVisit.update({ where: { userId: sara.id }, data: { seenAt: new Date(Date.now() - 5 * MIN) } });
+      const stamp = (await visit(sara.id))!.seenAt.getTime();
+      expect(await feed(universes.open.roomUrl, [sara.uuid], T)).toHaveLength(0);
+      expect(await feed(universes.open.roomUrl, [sara.uuid], T + 5_000)).toHaveLength(0);
+      expect(await visit(sara.id)).toMatchObject({ roomId: universes.second.roomId });
+      expect((await visit(sara.id))!.seenAt.getTime()).toBe(stamp);
+      // Another sync from B is the same room: seen now, the Brick stays
+      expect(await feed(universes.second.roomUrl, [sara.uuid], T + 5_000)).toHaveLength(1);
+      expect((await visit(sara.id))!.seenAt.getTime()).toBeGreaterThan(stamp + 4 * MIN);
+      // She walks back to A later: that is newer again, so it follows
+      expect(await feed(universes.open.roomUrl, [sara.uuid], T + 9_000)).toHaveLength(1);
+      expect(await visit(sara.id)).toMatchObject({ roomId: universes.open.roomId });
+    });
+
+    it('treats a sync that names no time as now (an older game), and never takes a time in the future', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      expect(await feed(universes.second.roomUrl, [sara.uuid])).toHaveLength(1);
+      const first = (await visit(sara.id))!;
+      expect(first.roomId).toBe(universes.second.roomId);
+      expect(first.roomSince!.getTime()).toBeGreaterThan(Date.now() - 10_000);
+      // A game whose clock runs ahead cannot pin the visit in a room: the time is held to the moment Orbit heard it
+      expect(await feed(universes.open.roomUrl, [sara.uuid], Date.now() + 3_600_000)).toHaveLength(1);
+      const second = (await visit(sara.id))!;
+      expect(second.roomId).toBe(universes.open.roomId);
+      expect(second.roomSince!.getTime()).toBeLessThanOrEqual(Date.now());
     });
 
     it('is seen only in the room the visit is in, which must take visits and be one its owner may open', async () => {
