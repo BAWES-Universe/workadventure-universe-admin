@@ -6,7 +6,7 @@
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-type Result = { before: unknown[]; after: unknown[]; since: unknown; nullable: string; written: string };
+type Result = { clientBefore: unknown; client: string; before: unknown[]; after: unknown[]; since: unknown; nullable: string; written: string };
 
 let result: Result;
 
@@ -20,10 +20,12 @@ describe('visit room_since: the migration', () => {
     expect(result.before).toHaveLength(1);
     expect(result.after).toEqual(result.before);
     expect(result.since).toBeNull();
+    expect(result.clientBefore).toBeNull();
   });
 
   it('is an optional column that takes a time', () => {
     expect(result.nullable).toBe('YES');
     expect(result.written).toMatch(/^2026-11-12T10:00:00/);
+    expect(result.client).toBe('page-laptop-0001');
   });
 });

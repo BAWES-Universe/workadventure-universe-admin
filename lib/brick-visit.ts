@@ -245,9 +245,11 @@ export async function whereIsBrick(botId: string, roomUrl: string | null, now: D
  *
  * `enteredAt` is when the person's game saw them come into this room (never later than now; missing means now). A visit
  * only moves to this room when that is newer than when it last moved (`roomSince`): a sync that arrives late, from a room
- * the person has already left, moves nothing, refreshes nothing and brings nothing back, and is named in `late`.
+ * the person has already left, moves nothing, refreshes nothing and brings nothing back, and is named in `late`. The two
+ * times are only compared when the same page load of the game (`clientId`) said both: a second device has a clock of its
+ * own, so a sighting from another one (or from a game that names none) is a move, as it always was.
  */
-export async function bricksForRoom(roomUrl: string, peopleUuids: string[], now: Date = new Date(), enteredAt?: Date) {
+export async function bricksForRoom(roomUrl: string, peopleUuids: string[], now: Date = new Date(), enteredAt?: Date, clientId?: string) {
   const place = await placeOfRoomUrl(roomUrl);
   const none = { visiting: [] as VisitingBrickRow[], late: [] as string[] };
   if (!place) return { place: null, ...none };
@@ -275,14 +277,15 @@ export async function bricksForRoom(roomUrl: string, peopleUuids: string[], now:
     return { place, ...none };
   }
   // Already in this room: seen now. Somewhere else: moved here only when this sighting is newer than the move that put it there
-  // (equal or older is a late sync from a room the person has left, and changes nothing). A visit with no `roomSince` yet
-  // (just started, or from before it existed) moves, as it always did
+  // (equal or older is a late sync from a room the person has left, and changes nothing)
   await prisma.brickVisit.updateMany({ where: { userId: { in: userIds }, roomId: place.roomId }, data: { seenAt: now } });
   // A visit that began in this room has no time yet: this sighting is the first
-  await prisma.brickVisit.updateMany({ where: { userId: { in: userIds }, roomId: place.roomId, roomSince: null }, data: { roomSince: sightedAt } });
+  await prisma.brickVisit.updateMany({ where: { userId: { in: userIds }, roomId: place.roomId, roomSince: null }, data: { roomSince: sightedAt, roomClient: clientId ?? null } });
+  // Somewhere else: it moves here unless this sighting is older than the move that put it there, by the same page load's clock
+  const newer = clientId ? [{ roomSince: null }, { roomClient: null }, { roomClient: { not: clientId } }, { roomSince: { lt: sightedAt } }] : undefined;
   await prisma.brickVisit.updateMany({
-    where: { userId: { in: userIds }, OR: [{ roomId: null }, { roomId: { not: place.roomId } }], AND: [{ OR: [{ roomSince: null }, { roomSince: { lt: sightedAt } }] }] },
-    data: { roomId: place.roomId, roomSince: sightedAt, seenAt: now },
+    where: { userId: { in: userIds }, OR: [{ roomId: null }, { roomId: { not: place.roomId } }], ...(newer ? { AND: [{ OR: newer }] } : {}) },
+    data: { roomId: place.roomId, roomSince: sightedAt, roomClient: clientId ?? null, seenAt: now },
   });
   // Only the ones that stand in this room now come back: a late sync brings no Brick to a room its person has left
   const inThisRoom = new Set((await prisma.brickVisit.findMany({ where: { userId: { in: userIds }, roomId: place.roomId }, select: { userId: true } })).map((row) => row.userId));

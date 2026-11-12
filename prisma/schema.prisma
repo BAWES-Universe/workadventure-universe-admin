@@ -956,6 +956,9 @@ model BrickVisit {
   // When the person's game saw them come into `roomId` (the game's own time, never later than the moment Orbit heard it). A
   // visit only moves to another room on a sighting newer than this, so a late sync from a room they left moves nothing
   roomSince DateTime? @map("room_since")
+  // Which page load of the player's game said it. Times are only compared with each other when the same one said both: a
+  // second device has its own clock, and its first sighting is a move
+  roomClient String? @map("room_client") @db.VarChar(64)
   startedAt DateTime @default(now()) @map("started_at")
   seenAt    DateTime @default(now()) @map("seen_at")
 

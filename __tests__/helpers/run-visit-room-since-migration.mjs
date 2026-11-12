@@ -29,8 +29,9 @@ const before = (await db.query('SELECT user_id, bot_id, room_id, started_at, see
 
 await run(TARGET);
 const after = (await db.query('SELECT user_id, bot_id, room_id, started_at, seen_at FROM brick_visits')).rows;
-const rows = (await db.query('SELECT room_since FROM brick_visits')).rows;
+const rows = (await db.query('SELECT room_since, room_client FROM brick_visits')).rows;
 const column = (await db.query("SELECT is_nullable FROM information_schema.columns WHERE table_name = 'brick_visits' AND column_name = 'room_since'")).rows[0];
-await db.exec(`UPDATE brick_visits SET room_since = '2026-11-12 10:00:00'`);
+await db.exec(`UPDATE brick_visits SET room_since = '2026-11-12 10:00:00', room_client = 'page-laptop-0001'`);
 const written = (await db.query('SELECT room_since FROM brick_visits')).rows[0].room_since;
-console.log(JSON.stringify({ before, after, since: rows[0].room_since, nullable: column?.is_nullable, written: written instanceof Date ? written.toISOString() : String(written) }));
+const client = (await db.query('SELECT room_client FROM brick_visits')).rows[0].room_client;
+console.log(JSON.stringify({ before, after, since: rows[0].room_since, clientBefore: rows[0].room_client, client, nullable: column?.is_nullable, written: written instanceof Date ? written.toISOString() : String(written) }));

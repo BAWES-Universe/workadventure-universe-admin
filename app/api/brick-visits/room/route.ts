@@ -8,16 +8,17 @@ import { transformVisitingBrickToServerFormat } from '@/lib/bot-config-helpers';
 
 export const runtime = 'nodejs';
 
-const bodySchema = z.object({ roomUrl: z.string().trim().min(1).max(2000), people: z.array(z.string().max(255)).max(500), enteredAt: z.number().int().positive().optional() }).strict();
+const bodySchema = z.object({ roomUrl: z.string().trim().min(1).max(2000), people: z.array(z.string().max(255)).max(500), enteredAt: z.number().int().positive().optional(), clientId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/).optional() }).strict();
 
 /**
- * POST /api/brick-visits/room  { roomUrl, people: [WorkAdventure ids], enteredAt?: ms when their game saw them come in }
+ * POST /api/brick-visits/room  { roomUrl, people: [WorkAdventure ids], enteredAt?: ms when their game saw them come in, clientId?: which page load of the game says so }
  * The Bricks visiting this room (game #2005), for the people the bot server found in it. Asked each time the bot server
  * syncs a room: it is how a Brick follows its person from room to room and how a visit stays alive. Every person found
  * has their visit seen here now. Only a signed-in person's Brick that is on, not deleted and visiting comes back, and
  * nothing at all where the universe does not take visiting Bricks. Each is in the Brick shape the bot server already
  * knows, with `brick.visiting` naming the person it walks beside. An address that is no room answers an empty list. A sync
- * that is late (`enteredAt` is not newer than the visit's last move) moves nothing and answers 409 when it has nothing else to say.
+ * that is late (`enteredAt` is not newer than the visit's last move, both told by the same `clientId`) moves nothing and
+ * answers 409 when it has nothing else to say.
  *
  * Auth: service token only.
  */
@@ -26,8 +27,8 @@ export async function POST(request: NextRequest) {
     requireServiceToken(request);
     const parsed = bodySchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
-    const { roomUrl, people, enteredAt } = parsed.data;
-    const { visiting, late } = await bricksForRoom(roomUrl, people, new Date(), enteredAt === undefined ? undefined : new Date(enteredAt));
+    const { roomUrl, people, enteredAt, clientId } = parsed.data;
+    const { visiting, late } = await bricksForRoom(roomUrl, people, new Date(), enteredAt === undefined ? undefined : new Date(enteredAt), clientId);
     // A late sync, from a room its person has already left: nothing changed, and the bot server must not read it as "no Brick"
     // (it would take down the one standing in their new room), so it is told the sync is stale and leaves things as they are
     if (visiting.length === 0 && late.length > 0) return NextResponse.json({ error: 'Late: the person is in another room now' }, { status: 409 });

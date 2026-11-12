@@ -64,8 +64,9 @@ const call = (method: string, url: string, body?: unknown, headers: Record<strin
 const service = { Authorization: `Bearer ${SERVICE_TOKEN}` };
 const chat = (botId: string, user: { email: string }, action: 'chat' | 'dm' | 'summon' | 'change' | 'deleteOrSend', roomUrl?: string) =>
   checkBotAccess({ botId, action, roomUrl: roomUrl ?? null, person: { signedIn: true, identifier: user.email } });
-const feed = async (roomUrl: string, people: string[], enteredAt?: number) => {
-  const response = await roomFeed(call('POST', '/api/brick-visits/room', { roomUrl, people, ...(enteredAt === undefined ? {} : { enteredAt }) }, service));
+const CLIENT = 'page-laptop-0001';
+const feed = async (roomUrl: string, people: string[], enteredAt?: number, clientId: string | null = enteredAt === undefined ? null : CLIENT) => {
+  const response = await roomFeed(call('POST', '/api/brick-visits/room', { roomUrl, people, ...(enteredAt === undefined ? {} : { enteredAt }), ...(clientId ? { clientId } : {}) }, service));
   expect(response.status).toBe(200);
   return (await response.json()) as { botId: string; roomUrl: string; brick: { visiting?: { ownerUuid: string } } }[];
 };
@@ -688,7 +689,7 @@ run('bringing a Brick along, in a real database', () => {
       await prisma.brickVisit.update({ where: { userId: sara.id }, data: { seenAt: new Date(Date.now() - 5 * MIN) } });
       const stamp = (await visit(sara.id))!.seenAt.getTime();
       for (const late of [T, T + 5_000]) {
-        const answer = await roomFeed(call('POST', '/api/brick-visits/room', { roomUrl: universes.open.roomUrl, people: [sara.uuid], enteredAt: late }, service));
+        const answer = await roomFeed(call('POST', '/api/brick-visits/room', { roomUrl: universes.open.roomUrl, people: [sara.uuid], enteredAt: late, clientId: CLIENT }, service));
         // 409, not an empty list: the bot server leaves the Brick it has standing in B as it is
         expect(answer.status).toBe(409);
       }
@@ -700,6 +701,25 @@ run('bringing a Brick along, in a real database', () => {
       // She walks back to A later: that is newer again, so it follows
       expect(await feed(universes.open.roomUrl, [sara.uuid], T + 9_000)).toHaveLength(1);
       expect(await visit(sara.id)).toMatchObject({ roomId: universes.open.roomId });
+    });
+
+    it('compares times only when the same page load said both: another device with an older clock still moves the visit (no clock of one device is held against another)', async () => {
+      const T = Date.now() - 60_000;
+      // The laptop's clock runs five minutes ahead: it brought the visit into room A at a time far in the future of the phone's
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      expect(await feed(universes.open.roomUrl, [sara.uuid], T + 300_000, 'page-laptop-0001')).toHaveLength(1);
+      expect((await visit(sara.id))?.roomClient).toBe('page-laptop-0001');
+      // She closes the laptop and walks into room B on her phone: its time is older than the laptop's, and it is a move all the same
+      expect(await feed(universes.second.roomUrl, [sara.uuid], T, 'page-phone-00002')).toHaveLength(1);
+      expect(await visit(sara.id)).toMatchObject({ roomId: universes.second.roomId, roomClient: 'page-phone-00002' });
+      // The same phone's late sync from the first room is refused by its own clock; the same phone, newer, moves
+      expect((await roomFeed(call('POST', '/api/brick-visits/room', { roomUrl: universes.open.roomUrl, people: [sara.uuid], enteredAt: T - 1_000, clientId: 'page-phone-00002' }, service))).status).toBe(409);
+      expect(await feed(universes.open.roomUrl, [sara.uuid], T + 1_000, 'page-phone-00002')).toHaveLength(1);
+      expect(await visit(sara.id)).toMatchObject({ roomId: universes.open.roomId });
+      // A game that names no page load, or none stored, is a move, as it was before
+      expect(await feed(universes.second.roomUrl, [sara.uuid], T - 500_000, null)).toHaveLength(1);
+      expect(await visit(sara.id)).toMatchObject({ roomId: universes.second.roomId, roomClient: null });
+      expect(await feed(universes.open.roomUrl, [sara.uuid], T - 600_000, 'page-phone-00002')).toHaveLength(1);
     });
 
     it('treats a sync that names no time as now (an older game), and never takes a time in the future', async () => {
