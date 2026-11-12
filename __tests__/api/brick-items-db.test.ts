@@ -16,7 +16,7 @@ import { ensureDefaultBrick } from '@/lib/brick-default';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { makeBrick } from '@/lib/brick-make';
 import { saveServerLimits } from '@/lib/bot-limits';
-import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, readItem, type NewItemInput } from '@/lib/brick-items';
+import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, markTold, readItem, type NewItemInput } from '@/lib/brick-items';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -464,6 +464,46 @@ run('goals and tasks, in a real database', () => {
     expect(await changeItem(ivo.brickId, sent.id, { userId: ivo.uuid, action: 'snooze' }, at(HOUR + 3 * MIN))).toMatchObject({ ok: true, item: { state: 'on', nextDueAt: at(2 * HOUR + 3 * MIN).toISOString() } });
   });
 
+  it('a repeating item the person marked Done is not brought back by Snooze, only a delivered one-off is', async () => {
+    const ona = await person('ona');
+    const daily = await set(ona, { kind: 'schedule', cadence: { type: 'daily', time: '07:30', days: [0, 1, 2, 3, 4, 5, 6] } });
+    await changeItem(ona.brickId, daily.id, { userId: ona.uuid, action: 'done' }, at(MIN));
+    expect(await changeItem(ona.brickId, daily.id, { userId: ona.uuid, action: 'snooze' }, at(2 * MIN))).toMatchObject({ ok: false, status: 409 });
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: daily.id } })).toMatchObject({ state: 'done', nextDueAt: null });
+    // Reopen is how it comes back
+    expect(await changeItem(ona.brickId, daily.id, { userId: ona.uuid, action: 'reopen' }, at(3 * MIN))).toMatchObject({ ok: true, item: { state: 'on' } });
+    // A one-off that was just delivered still comes back by Snooze
+    const once = await set(ona);
+    const [run] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === once.id);
+    await finishRun(run.runId, { attempt: run.attempt, state: 'done', outcome: 'spoke' }, at(HOUR + 2 * MIN));
+    expect(await changeItem(ona.brickId, once.id, { userId: ona.uuid, action: 'snooze' }, at(HOUR + 3 * MIN))).toMatchObject({ ok: true, item: { state: 'on' } });
+  });
+
+  it('a tell that failed is asked for again with the next failure; it is kept as told only when the bot server confirms it', async () => {
+    const pru = await person('pru');
+    const reminder = await set(pru, { kind: 'reminder', cadence: { type: 'daily', time: '07:30', days: [0, 1, 2, 3, 4, 5, 6] } });
+    const fail = async (day: number) => {
+      const [one] = (await claimDueRuns(at(day * DAY + 3 * HOUR))).filter((claimed) => claimed.itemId === reminder.id);
+      const done = await finishRun(one.runId, { attempt: one.attempt, state: 'failed', error: 'Chat did not answer' }, at(day * DAY + 3 * HOUR + MIN));
+      return { runId: one.runId, tell: done.ok ? done.tellPerson : null };
+    };
+    const first = await fail(1);
+    expect(first.tell).toBe(true);
+    // The bot server could not tell (it never calls markTold): the item is not kept as told, and the next failure asks again
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: reminder.id } })).toMatchObject({ failuresInRow: 1, failureTold: false });
+    const second = await fail(2);
+    expect(second.tell).toBe(true);
+    // This time it told and says so; the third failure in the row does not tell again
+    expect(await markTold(second.runId)).toEqual({ ok: true, told: true });
+    expect(await markTold(second.runId)).toEqual({ ok: true, told: false });
+    expect((await fail(3)).tell).toBe(false);
+    expect(await markTold('nope')).toMatchObject({ ok: false, status: 404 });
+    // A run that works starts the row over, and the next failure tells again
+    const [good] = (await claimDueRuns(at(4 * DAY + 3 * HOUR))).filter((claimed) => claimed.itemId === reminder.id);
+    await finishRun(good.runId, { attempt: good.attempt, state: 'done', outcome: 'spoke' }, at(4 * DAY + 3 * HOUR + MIN));
+    expect((await fail(5)).tell).toBe(true);
+  });
+
   it('a run given up without a report counts in the failures in a row, and the next reported failure still tells the person, once', async () => {
     const olga = await person('olga');
     const reminder = await set(olga, { kind: 'reminder', cadence: { type: 'daily', time: '07:30', days: [0, 1, 2, 3, 4, 5, 6] } });
@@ -480,6 +520,7 @@ run('goals and tasks, in a real database', () => {
       const [one] = (await claimDueRuns(at(day * DAY + 3 * HOUR))).filter((claimed) => claimed.itemId === reminder.id);
       const done = await finishRun(one.runId, { attempt: one.attempt, state: 'failed', error: 'Chat did not answer' }, at(day * DAY + 3 * HOUR + MIN));
       if (done.ok) told.push(done.tellPerson);
+      if (done.ok && done.tellPerson) await markTold(one.runId);
     }
     expect(told).toEqual([true, false]);
     // One that works starts the count over: the next failure tells again
@@ -500,6 +541,7 @@ run('goals and tasks, in a real database', () => {
       for (const one of claimed) {
         const done = await finishRun(one.runId, { attempt: one.attempt, state: 'failed', error: 'Chat did not answer' }, at(day * DAY + 3 * HOUR + MIN));
         if (done.ok) tells[one.itemId].push(done.tellPerson);
+        if (done.ok && done.tellPerson) await markTold(one.runId);
       }
     }
     // Once, on the first failure, never again for each one after it

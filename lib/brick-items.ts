@@ -408,6 +408,8 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (row.kind !== 'reminder' && row.kind !== 'schedule') return { ok: false as const, status: 409 as const, code: 'wrong_state' as const, error: 'Only a reminder or a briefing can be snoozed' };
         if (row.state !== 'on' && row.state !== 'done') return wrongState(row.state);
         if (cadence.type === 'none') return wrongState(row.state);
+        // A repeating one the person marked Done stays done (Reopen is how it comes back); only a delivered one-off comes back by Snooze
+        if (row.state === 'done' && cadence.type !== 'once') return wrongState(row.state);
         // A done one coming back takes its place again, so it keeps to the same limits as a reopen: the Brick on, the goal on, the most
         if (row.state === 'done') {
           const refused = await comingBackProblem(tx, row, ownerId, limits);
@@ -738,11 +740,12 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
 
     const kind = item.kind as ItemKind;
     const cadence = readCadence(item.cadence);
-    // Told once, when the failures in a row first reach the number (a run that was given up without a report counts too, and tells
-    // nothing itself): the first reported failure at or past it tells if nobody was told yet in this row, and a run that works starts over
+    // Told once per row of failures: the first reported failure at or past the number tells if nobody was told yet (a run that was given up
+    // without a report counts in the row and tells nothing itself), and a run that works starts the row over
     const tellAt = kind === 'reminder' || kind === 'schedule' ? 1 : limits.failuresBeforeTelling;
+    // It is kept as told only when the bot server says it did tell (markTold), so a tell that failed is asked for again with the next failure
     const tellPerson = report.state === 'failed' && failuresInRow >= tellAt && !item.failureTold;
-    const data: Prisma.BrickItemUpdateInput = { lastRunAt: now, failuresInRow, failureTold: report.state === 'failed' ? item.failureTold || tellPerson : false };
+    const data: Prisma.BrickItemUpdateInput = { lastRunAt: now, failuresInRow, ...(report.state === 'failed' ? {} : { failureTold: false }) };
     if (report.progress && kind === 'goal') {
       if (report.progress.statusLine !== undefined) data.statusLine = report.progress.statusLine;
       if (report.progress.steps !== undefined) data.steps = report.progress.steps;
@@ -778,6 +781,20 @@ export async function markDelivered(runId: string, eventId: string, now: Date = 
   if (count > 0) return { ok: true, eventId, first: true };
   const kept = await prisma.brickItemRun.findUniqueOrThrow({ where: { id: runId }, select: { deliveredEventId: true } });
   return kept.deliveredEventId === eventId ? { ok: true, eventId, first: false } : { ok: false, status: 409, error: 'This run already sent a message' };
+}
+
+/**
+ * The bot server told the person about a row of failures (the run's `tellPerson` was true): keep that it was told, so the next
+ * failure in the same row does not tell again. Called only after the tell went through; if it never comes, the next failure asks for
+ * the tell again, so a tell that failed is never lost. Nothing happens for a run whose item has since gone or started over.
+ */
+export async function markTold(runId: string): Promise<{ ok: true; told: boolean } | { ok: false; status: 404; error: string }> {
+  const run = await prisma.brickItemRun.findUnique({ where: { id: runId }, select: { itemId: true, state: true } });
+  if (!run) return { ok: false, status: 404, error: 'Run not found' };
+  // Only a run that failed can have asked for a tell, and only while that row of failures is still going
+  if (run.state !== 'failed') return { ok: true, told: false };
+  const { count } = await prisma.brickItem.updateMany({ where: { id: run.itemId, failuresInRow: { gt: 0 }, failureTold: false }, data: { failureTold: true } });
+  return { ok: true, told: count > 0 };
 }
 
 export const deliveredSchema = z.object({ eventId: z.string().trim().min(1).max(255) }).strict();
