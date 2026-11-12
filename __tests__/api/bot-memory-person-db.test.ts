@@ -213,6 +213,26 @@ run('what a bot remembers about a person (real database)', () => {
     expect(JSON.stringify((await rows(melodyId, people.sara.uuid))?.memories)).not.toContain('chess');
   });
 
+  it('a late report of a Forget keeps the time the person asked, and never makes an older Forget newer', async () => {
+    const id = memoryItemKey('pref', null, COFFEE);
+    const asked = Date.now() - 60 * 60 * 1000;
+    const late = await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: id, kind: 'pref', at: asked }), params(melodyId));
+    expect(late.status).toBe(200);
+    expect((await prisma.botMemoryItemForget.findFirstOrThrow({ where: { botId: melodyId, itemKey: id } })).createdAt.getTime()).toBe(asked);
+    // The same thing reported again with an older time: the newer Forget stays
+    await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: id, kind: 'pref', at: asked - 1000 }), params(melodyId));
+    expect((await prisma.botMemoryItemForget.findFirstOrThrow({ where: { botId: melodyId, itemKey: id } })).createdAt.getTime()).toBe(asked);
+    // A time in the future, or older than the bot server keeps trying, is not believed
+    const future = memoryItemKey('pref', null, 'chess');
+    await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: future, kind: 'pref', at: Date.now() + 10 * 60 * 60 * 1000 }), params(melodyId));
+    expect((await prisma.botMemoryItemForget.findFirstOrThrow({ where: { botId: melodyId, itemKey: future } })).createdAt.getTime()).toBeLessThanOrEqual(Date.now());
+    const old = memoryItemKey('pref', null, 'lo-fi');
+    await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: old, kind: 'pref', at: 5 }), params(melodyId));
+    expect((await prisma.botMemoryItemForget.findFirstOrThrow({ where: { botId: melodyId, itemKey: old } })).createdAt.getTime()).toBeGreaterThan(Date.now() - 25 * 60 * 60 * 1000);
+    // Not a time at all is a bad request
+    expect((await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: id, kind: 'pref', at: 'x' }), params(melodyId))).status).toBe(400);
+  });
+
   it('keeps only a key, never the words', async () => {
     const id = memoryItemKey('pref', null, COFFEE);
     await forgetMine(as('sara', `/api/bots/${melodyId}/my-memory/forget`, { itemId: id }), params(melodyId));
