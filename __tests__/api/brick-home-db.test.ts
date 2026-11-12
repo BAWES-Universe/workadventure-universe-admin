@@ -314,9 +314,10 @@ run('a Brick that lives in a room, in a real database', () => {
       expect((await credentials(omar.uuid)).status).toBe(200);
       expect(await (await credentials(omar.uuid)).json()).toMatchObject({ source: 'universe-ai' });
       await prisma.bot.update({ where: { id: brickId }, data: { aiProviderRef: keyId } });
-      const refused = await credentials(omar.uuid);
-      expect(refused.status).toBe(403);
-      expect(await refused.json()).toMatchObject({ code: 'key_not_lent' });
+      // Not lent: others are never refused while Universe AI can answer; it serves them on their own allowance
+      const stoodIn = await credentials(omar.uuid);
+      expect(stoodIn.status).toBe(200);
+      expect(await stoodIn.json()).toMatchObject({ source: 'universe-ai', standingInFor: keyId });
       expect(await (await credentials(sara.uuid)).json()).toMatchObject({ source: 'own-key', providerId: keyId });
       await prisma.aiKeyLend.create({ data: { providerId: keyId, universeId: own.universeId } });
       expect(await (await credentials(omar.uuid)).json()).toMatchObject({ source: 'own-key', providerId: keyId, keyOwnerId: sara.id });
