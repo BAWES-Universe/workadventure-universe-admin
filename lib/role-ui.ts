@@ -244,6 +244,7 @@ const SHORT: Record<PermissionKey, string> = {
   SUMMON_BOTS: 'summon bots',
   BOTS_CHANGE_THINGS: 'have bots change things',
   BOTS_DELETE_OR_SEND: 'have bots delete or send',
+  CALL_BOTS: 'call bots',
   ADMINISTRATOR: 'administrator',
 };
 

@@ -112,7 +112,7 @@ describe('GET /api/room/access, permissions from roles', () => {
     db.worldMember.findUnique.mockResolvedValue({ id: 'm', tags: ['admin'] });
     db.universeMember.findUnique.mockResolvedValue(null);
     const body = await enter();
-    expect(body.permissions).toBe(String(524287 | 512));
+    expect(body.permissions).toBe(String(1048575 | 512));
     expect(body.canEdit).toBe(true);
   });
 

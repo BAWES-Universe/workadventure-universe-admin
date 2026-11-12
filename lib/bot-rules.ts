@@ -1,26 +1,27 @@
 import { combine, flag, type PermissionKey } from '@/lib/permissions';
 
 /**
- * Per-bot rules (#427, #737): a role's or a person's No / Default / Yes for one bot, for the six things people do with it.
+ * Per-bot rules (#427, #737): a role's or a person's No / Default / Yes for one bot, for the seven things people do with it.
  * A rule is two permission numbers, the shape room overrides will reuse: `allow` has a bit set where the answer is Yes,
  * `deny` where it is No, and a bit in neither is Default (the roles decide).
  */
-export type RuleAction = 'chat' | 'dm' | 'summon' | 'manage' | 'change' | 'deleteOrSend';
+export type RuleAction = 'chat' | 'dm' | 'call' | 'summon' | 'manage' | 'change' | 'deleteOrSend';
 export type RuleValue = 'yes' | 'no' | 'default';
 
-export const RULE_ACTIONS: readonly RuleAction[] = ['chat', 'dm', 'summon', 'manage', 'change', 'deleteOrSend'];
+export const RULE_ACTIONS: readonly RuleAction[] = ['chat', 'dm', 'call', 'summon', 'manage', 'change', 'deleteOrSend'];
 export const RULE_VALUES: readonly RuleValue[] = ['yes', 'no', 'default'];
 
 export const RULE_PERMISSION: Record<RuleAction, PermissionKey> = {
   chat: 'CHAT_BOTS_NEARBY',
   dm: 'DM_BOTS',
+  call: 'CALL_BOTS',
   summon: 'SUMMON_BOTS',
   manage: 'MANAGE_BOTS',
   change: 'BOTS_CHANGE_THINGS',
   deleteOrSend: 'BOTS_DELETE_OR_SEND',
 };
 
-/** The six bits a rule may hold. The database refuses any other. */
+/** The seven bits a rule may hold. The database refuses any other. */
 export const RULE_MASK: bigint = combine(...RULE_ACTIONS.map((action) => flag(RULE_PERMISSION[action])));
 
 export interface RuleBits {
