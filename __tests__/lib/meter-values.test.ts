@@ -17,6 +17,7 @@ import {
   usageWords,
   type GrantWindow,
 } from '@/lib/meter-values';
+import { pickRunning } from '@/lib/meter-grants';
 
 const event = (over: object = {}) => ({
   eventId: 'e1',
@@ -237,6 +238,15 @@ describe('which of two equal extra usages is drawn first (game #1999)', () => {
   it('is the smaller key when size, end and start are all the same, whatever the order the rows came in', () => {
     expect(drawnByKey([a, b])).toEqual({ 'k-a': 600, 'k-b': 0 });
     expect(drawnByKey([b, a])).toEqual({ 'k-a': 600, 'k-b': 0 });
+  });
+
+  it('is the grant the person page shows for it: the same key pickRunning picks, in either order', () => {
+    const rows = [a, b].map((grant) => ({ grantKey: grant.key as string, multiplier: grant.multiplier, noLimit: false, endsAt: grant.endsAt }));
+    for (const order of [rows, [...rows].reverse()]) {
+      const shown = pickRunning(order)?.grantKey;
+      const drawn = drawnByKey(order.map((row) => (row.grantKey === 'k-a' ? a : b)));
+      expect(Object.keys(drawn).find((key) => drawn[key] > 0)).toBe(shown);
+    }
   });
 
   it('leaves the member the same amount whichever order, so the allowance and the Costs page agree', () => {
