@@ -178,6 +178,20 @@ run('goals and tasks, in a real database', () => {
     expect(await changeItem(second.id, a.id, { userId: rami.uuid, action: 'resume' }, at(2 * HOUR))).toMatchObject({ ok: true, item: { state: 'on' } });
   });
 
+  it('resuming a goal after its Brick was deleted and given back brings its checks back too', async () => {
+    const dot = await person('dot');
+    const second = await makeBrick(dot.id, { name: 'Trip Brick' });
+    const via = { uuid: dot.uuid, brickId: second.id };
+    const goal = await set(via, { kind: 'goal', words: 'Plan the trip', outcome: 'Booked', cadence: { type: 'every', minutes: 60 } });
+    const check = await createItem(second.id, { userId: dot.uuid, kind: 'watch', words: 'Flights', condition: 'It drops', cadence: { type: 'every', minutes: 60 }, parentId: goal.id }, NOW);
+    if (!check.ok) throw new Error('expected the check');
+    await deleteBrick(second.id, dot.id, NOW);
+    await undoBrickDelete(second.id, dot.id, at(HOUR));
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: check.item.id } })).toMatchObject({ state: 'paused' });
+    await changeItem(second.id, goal.id, { userId: dot.uuid, action: 'resume' }, at(2 * HOUR));
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: check.item.id } })).toMatchObject({ state: 'on', pausedBy: null, nextDueAt: at(3 * HOUR) });
+  });
+
   it('after an outage a reminder comes once and says it is late, a watch does one fresh check, and nothing is replayed', async () => {
     const dana = await person('dana');
     const briefing = await set(dana, { kind: 'schedule', words: 'Tell me what is on', cadence: { type: 'daily', time: '07:30', days: [0, 1, 2, 3, 4] } });

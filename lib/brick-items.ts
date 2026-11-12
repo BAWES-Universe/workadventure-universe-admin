@@ -301,8 +301,8 @@ async function lockedItem(tx: Tx, where: { id: string; ownerId?: string; botId?:
 }
 
 /** Gives the checks a goal set the goal's own change (pause, resume, done, delete), in the same transaction. */
-async function moveChecks(tx: Tx, goalId: string, from: ItemState[], data: Prisma.BrickItemUpdateManyMutationInput, now: Date, recompute: boolean, onlyPausedBy?: string) {
-  const checks = await tx.brickItem.findMany({ where: { parentId: goalId, state: { in: from }, ...(onlyPausedBy ? { pausedBy: onlyPausedBy } : {}) } });
+async function moveChecks(tx: Tx, goalId: string, from: ItemState[], data: Prisma.BrickItemUpdateManyMutationInput, now: Date, recompute: boolean, onlyPausedBy?: string[]) {
+  const checks = await tx.brickItem.findMany({ where: { parentId: goalId, state: { in: from }, ...(onlyPausedBy ? { pausedBy: { in: onlyPausedBy } } : {}) } });
   for (const check of checks) {
     const cadence = readCadence(check.cadence);
     // A one-off check whose moment passed while its goal was paused is due now, once, like a one-off that is resumed on its own
@@ -344,8 +344,8 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (!bot?.enabled || bot.deletedAt) return { ok: false as const, status: 409 as const, code: 'off' as const, error: 'This Brick is switched off' };
         // One that was meant for a moment that has passed while it was paused is due now, once; the rest carry on from now
         const due = cadence.type === 'once' ? (firstDue(cadence, row.timeZone, now) ?? now) : firstDue(cadence, row.timeZone, now);
-        // Only the checks its own pause stopped: one the person paused by itself stays paused
-        await moveChecks(tx, row.id, ['paused'], { state: 'on', pausedBy: null }, now, true, 'goal');
+        // Only the checks its own pause (or the deleted Brick) stopped: one the person paused by itself stays paused
+        await moveChecks(tx, row.id, ['paused'], { state: 'on', pausedBy: null }, now, true, ['goal', 'brick_deleted']);
         return finish({ state: 'on', pausedBy: null, nextDueAt: due, ...bump });
       }
       case 'done': {
