@@ -537,15 +537,15 @@ export async function sweepComputers(now: Date = new Date()): Promise<{ stopped:
   let stopped = 0;
   let released = 0;
   let started = 0;
-  // A person at the keyboard is not a job that went quiet: while the worker waits for them it renews nothing, so the sweep renews
-  // the room for them, a little before it would lapse. If the allowance cannot give more, the job still stops safely.
+  // A job waiting for its person (it asked them to take over, or they did) is not one that went quiet: the worker renews nothing
+  // while it waits, so the sweep renews the room for them, a little before it would lapse. If the allowance cannot give more, the job still stops safely.
   const soon = await prisma.meterReservation.findMany({
     where: { state: 'held', expiresAt: { gt: now, lte: new Date(now.getTime() + PERSON_RENEW_AHEAD_MS) }, jobId: { not: null }, reservationKey: { startsWith: 'computer:job:' } },
     take: 200,
   });
   for (const reservation of soon) {
     const job = reservation.jobId ? await prisma.computerJob.findUnique({ where: { id: reservation.jobId } }) : null;
-    if (job && job.status === 'waiting' && job.control === 'person' && job.reservationKey === reservation.reservationKey) await renewJob(job.id, now);
+    if (job && job.status === 'waiting' && job.reservationKey === reservation.reservationKey) await renewJob(job.id, now);
   }
   const lapsed = await prisma.meterReservation.findMany({ where: { state: 'held', expiresAt: { lte: now }, jobId: { not: null }, reservationKey: { startsWith: 'computer:job:' } }, take: 200 });
   for (const reservation of lapsed) {

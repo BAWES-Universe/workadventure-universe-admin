@@ -402,6 +402,17 @@ run('a Brick’s computer, in a real database', () => {
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'error' });
     });
 
+    it('keeps the room of a job that asked the person to take over, until they come', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!a.ok) throw new Error('no');
+      await requestHandover(a.job.id, 'details', minutes(1));
+      for (let at = 2; at <= 35; at++) await sweepComputers(minutes(at));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'waiting', control: 'brick' });
+      expect((await takeOver(sara.brickId, sara.id, minutes(36))).ok).toBe(true);
+    });
+
     it('a job still in line cannot be finished: only one that started can be done or failed', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
