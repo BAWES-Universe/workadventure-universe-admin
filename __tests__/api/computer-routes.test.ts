@@ -129,15 +129,24 @@ describe('the owner’s calls', () => {
     expect((await handBackRoute(call('/x'), params)).status).toBe(409);
   });
 
-  it('takes "Fill in my details" as one tap with no body: the person approves what Brick named, and only after a take over', async () => {
+  it('takes "Fill in my details" as one tap: only after a take over, and what the screen showed must still be what Brick named', async () => {
     lib.fillInDetails.mockResolvedValue({ ok: false, reason: 'not_in_control' });
     expect((await fillRoute(call('/x', { body: { what: 'Everything', where: 'anywhere' } }), params)).status).toBe(409);
     lib.fillInDetails.mockResolvedValue({ ok: false, reason: 'nothing_ready' });
     expect((await fillRoute(call('/x'), params)).status).toBe(409);
+    lib.fillInDetails.mockResolvedValue({ ok: false, reason: 'changed' });
+    const changed = await fillRoute(call('/x', { body: { what: 'Your name', where: 'visa-portal.example' } }), params);
+    expect(changed.status).toBe(409);
+    expect(await changed.json()).toEqual({ error: 'What Brick is ready to fill in has changed' });
     lib.fillInDetails.mockResolvedValue({ ok: true, job: { id: JOB } as never });
     expect((await fillRoute(call('/x'), params)).status).toBe(200);
-    // Whatever was in the body, only the person and the Brick are asked for: nothing typed there reaches the filling
-    expect(lib.fillInDetails).toHaveBeenLastCalledWith(BRICK, 'u-sara');
+    // No body, or anything but the two words the screen showed: nothing is passed to check
+    expect(lib.fillInDetails).toHaveBeenLastCalledWith(BRICK, 'u-sara', null);
+    expect((await fillRoute(call('/x', { body: { what: 3, where: [] } }), params)).status).toBe(200);
+    expect(lib.fillInDetails).toHaveBeenLastCalledWith(BRICK, 'u-sara', null);
+    // What the screen showed is passed on to be checked against what Brick named
+    expect((await fillRoute(call('/x', { body: { what: 'Your name', where: 'visa-portal.example' } }), params)).status).toBe(200);
+    expect(lib.fillInDetails).toHaveBeenLastCalledWith(BRICK, 'u-sara', { what: 'Your name', where: 'visa-portal.example' });
   });
 });
 
