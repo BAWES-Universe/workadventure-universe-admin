@@ -102,7 +102,8 @@ export type VisitState =
  */
 export async function visitState(brickId: string, ownerId: string, roomUrl: string | null, now: Date = new Date()): Promise<VisitState> {
   const visit = await liveVisit(ownerId, now);
-  const mine = visit?.botId === brickId ? visit : null;
+  // A Brick that is switched off or waits deleted is not walking with anyone (as in `whereIsBrick`): its page says nothing of a visit
+  const mine = visit?.botId === brickId && (await isWalkable(brickId)) ? visit : null;
   let place: Pick<Place, 'name' | 'takesVisits'> | null = null;
   if (roomUrl) {
     const found = await placeOfRoomUrl(roomUrl);
@@ -116,6 +117,12 @@ export async function visitState(brickId: string, ownerId: string, roomUrl: stri
   if (!place) return { state: 'none', place: null };
   if (!place.takesVisits) return { state: 'blocked', place: place.name, visiting: !!mine };
   return mine ? { state: 'visiting', place: place.name, startedAt: mine.startedAt.toISOString() } : { state: 'none', place: place.name };
+}
+
+/** Whether a Brick is on (switched on and not deleted): only then can it walk with its person. */
+async function isWalkable(brickId: string): Promise<boolean> {
+  const brick = await prisma.bot.findUnique({ where: { id: brickId }, select: { enabled: true, deletedAt: true } });
+  return !!brick && brick.enabled && brick.deletedAt === null;
 }
 
 /** The person's visit if it has not run out. */

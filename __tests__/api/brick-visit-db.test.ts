@@ -234,6 +234,14 @@ run('bringing a Brick along, in a real database', () => {
       expect(await feed(universes.second.roomUrl, [sara.uuid])).toHaveLength(1);
     });
 
+    it('says nothing of a visit for a Brick that is switched off, and has it again when it is switched back on (Sentry on #927)', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      await prisma.bot.update({ where: { id: brickId }, data: { enabled: false } });
+      expect(await visitState(brickId, sara.id, universes.open.roomUrl)).toEqual({ state: 'none', place: 'open place' });
+      await prisma.bot.update({ where: { id: brickId }, data: { enabled: true } });
+      expect(await visitState(brickId, sara.id, universes.open.roomUrl)).toMatchObject({ state: 'visiting' });
+    });
+
     it('never names a place with a blank when the visit has no room left to name (Sentry on #927)', async () => {
       await startVisit(brickId, sara.id, universes.open.roomUrl);
       await prisma.brickVisit.update({ where: { userId: sara.id }, data: { roomId: null } });
