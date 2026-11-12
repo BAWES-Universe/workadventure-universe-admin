@@ -413,7 +413,10 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
           const refused = await comingBackProblem(tx, row, ownerId, limits);
           if (refused) return refused;
         }
-        const later = new Date(now.getTime() + limits.snooze * MINUTE);
+        // A one-off that is not due yet moves from the moment it was due (an early or stale tap only ever puts it later, never earlier);
+        // anything else comes back this much after the tap, a repeating one then carrying on from there
+        const from = cadence.type === 'once' && row.state === 'on' && row.nextDueAt && row.nextDueAt > now ? row.nextDueAt : now;
+        const later = new Date(from.getTime() + limits.snooze * MINUTE);
         // A one-off comes back at the new time (done ones too: they have just been delivered); a repeating one is moved once and carries on from there
         const moved: Cadence = cadence.type === 'once' ? { type: 'once', at: later.toISOString() } : cadence;
         return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, cadence: moved as unknown as Prisma.InputJsonValue, nextDueAt: later, ...(row.state === 'done' ? { failuresInRow: 0, failureTold: false } : {}), ...bump });

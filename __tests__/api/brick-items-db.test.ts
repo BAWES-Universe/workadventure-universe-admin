@@ -450,6 +450,20 @@ run('goals and tasks, in a real database', () => {
     expect(await changeItem(zuri.brickId, check.item.id, { userId: zuri.uuid, action: 'snooze' }, at(5 * MIN))).toMatchObject({ ok: true, item: { state: 'on' } });
   });
 
+  it('snoozing one that is not due yet only puts it later, never earlier', async () => {
+    const ivo = await person('ivo');
+    const far = await set(ivo, { cadence: { type: 'once', at: at(5 * HOUR).toISOString() } });
+    const moved = await changeItem(ivo.brickId, far.id, { userId: ivo.uuid, action: 'snooze' }, at(MIN));
+    // Due in five hours: snoozing by an hour makes it six, not one hour from the tap
+    expect(moved).toMatchObject({ ok: true, item: { state: 'on', nextDueAt: at(6 * HOUR).toISOString() } });
+    expect(moved.ok && moved.item.cadence).toEqual({ type: 'once', at: at(6 * HOUR).toISOString() });
+    // One that was just delivered (done) is counted from the tap
+    const sent = await set(ivo, { cadence: { type: 'once', at: at(HOUR).toISOString() } });
+    const [run] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === sent.id);
+    await finishRun(run.runId, { attempt: run.attempt, state: 'done', outcome: 'spoke' }, at(HOUR + 2 * MIN));
+    expect(await changeItem(ivo.brickId, sent.id, { userId: ivo.uuid, action: 'snooze' }, at(HOUR + 3 * MIN))).toMatchObject({ ok: true, item: { state: 'on', nextDueAt: at(2 * HOUR + 3 * MIN).toISOString() } });
+  });
+
   it('a run given up without a report counts in the failures in a row, and the next reported failure still tells the person, once', async () => {
     const olga = await person('olga');
     const reminder = await set(olga, { kind: 'reminder', cadence: { type: 'daily', time: '07:30', days: [0, 1, 2, 3, 4, 5, 6] } });
