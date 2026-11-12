@@ -258,6 +258,43 @@ run('goals and tasks, in a real database', () => {
     expect((await prisma.brickItem.findUniqueOrThrow({ where: { id: item.id } })).failuresInRow).toBe(1);
   });
 
+  it('does not let a person at their runs a day fill the batch ahead of everyone else', async () => {
+    const ivy = await person('ivy');
+    const kai = await person('kai');
+    await saveServerLimits({ bricks: { runsPerDay: 1 } }, ivy.id);
+    // Leave only these two in the queue: what other tests of this file left due would be ahead of both
+    await prisma.brickItem.updateMany({ where: { ownerId: { notIn: [ivy.id, kai.id] }, state: 'on' }, data: { state: 'paused', nextDueAt: null } });
+    try {
+      // Ivy has three watches due long ago and has used her one run today; Kai's is due later
+      for (const name of ['a', 'b', 'c']) await set(ivy, { kind: 'watch', words: name, condition: 'It changes', cadence: { type: 'every', minutes: 60 } });
+      expect((await claimDueRuns(at(HOUR + MIN))).filter((one) => one.userId === ivy.uuid)).toHaveLength(1);
+      const kaiWatch = await set(kai, { kind: 'watch', words: 'k', condition: 'It changes', cadence: { type: 'every', minutes: 90 } });
+      // A batch of one: if Ivy's held-back items were looked at first, Kai's would never come
+      const batch = await claimDueRuns(at(2 * HOUR), 1);
+      expect(batch.map((one) => one.itemId)).toContain(kaiWatch.id);
+      expect(batch.filter((one) => one.userId === ivy.uuid && one.attempt === 1)).toEqual([]);
+    } finally {
+      await saveServerLimits({ bricks: { runsPerDay: 24 } }, ivy.id);
+    }
+  });
+
+  it('a run that is handed out again while its server reports does not deadlock or lose what was claimed', async () => {
+    const lou = await person('lou');
+    const items = [];
+    for (const name of ['a', 'b', 'c', 'd']) items.push(await set(lou, { kind: 'schedule', words: name, cadence: { type: 'every', minutes: 60 } }));
+    const claimed = (await claimDueRuns(at(HOUR + MIN))).filter((one) => items.some((item) => item.id === one.itemId));
+    expect(claimed).toHaveLength(4);
+    // Every one reports at the very moment it is looked at again, after its lease
+    const again = claimDueRuns(at(HOUR + 20 * MIN));
+    const reports = claimed.map((one) => finishRun(one.runId, { state: 'done', outcome: 'quiet' }, at(HOUR + 20 * MIN)));
+    const [handedOut, finished] = await Promise.all([again, Promise.all(reports)]);
+    expect(finished.every((one) => one.ok)).toBe(true);
+    // Each run is either finished or handed out again, never both lost
+    const states = await prisma.brickItemRun.findMany({ where: { id: { in: claimed.map((one) => one.runId) } }, select: { state: true } });
+    expect(states.every((one) => ['done', 'claimed'].includes(one.state))).toBe(true);
+    expect(handedOut.filter((one) => claimed.some((c) => c.runId === one.runId)).length).toBeLessThanOrEqual(4);
+  });
+
   it('keeps to the runs a day for watches and goals, but never for reminders', async () => {
     const jo = await person('jo');
     await saveServerLimits({ bricks: { runsPerDay: 2 } }, jo.id);

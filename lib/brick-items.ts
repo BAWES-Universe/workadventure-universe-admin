@@ -474,27 +474,35 @@ export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH):
   const out: ClaimedRun[] = [];
 
   // Runs handed out and never reported
-  const lapsed = await prisma.brickItemRun.findMany({ where: { state: 'claimed', leaseUntil: { lte: now } }, orderBy: { leaseUntil: 'asc' }, take: limit, select: { id: true } });
-  for (const { id } of lapsed) {
-    const again = await prisma.$transaction(async (tx) => {
-      const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT "id" FROM "brick_item_runs" WHERE "id" = ${id} AND "state" = 'claimed' AND "lease_until" <= ${now} FOR UPDATE SKIP LOCKED`);
-      if (!locked.length) return null;
-      const run = await tx.brickItemRun.findUniqueOrThrow({ where: { id }, include: RUN_INCLUDE });
-      // Only while the item is still the same and still on: a run for something that changed is dropped, not retried
-      const item = await lockedItem(tx, { id: run.itemId });
-      const stillOn = !!item && item.state === 'on' && item.revision === run.revision;
-      if (!stillOn) {
-        await tx.brickItemRun.update({ where: { id }, data: { state: 'dropped', finishedAt: now } });
-        return null;
-      }
-      if (run.attempts >= MAX_TRIES) {
-        await tx.brickItemRun.update({ where: { id }, data: { state: 'failed', error: 'It did not finish in time', finishedAt: now } });
-        await tx.brickItem.update({ where: { id: run.itemId }, data: { failuresInRow: { increment: 1 }, lastRunAt: now } });
-        return null;
-      }
-      return tx.brickItemRun.update({ where: { id }, data: { attempts: { increment: 1 }, leaseUntil: lease }, include: RUN_INCLUDE });
-    });
-    if (again) out.push(claimedOf(again));
+  const lapsed = await prisma.brickItemRun.findMany({ where: { state: 'claimed', leaseUntil: { lte: now } }, orderBy: { leaseUntil: 'asc' }, take: limit, select: { id: true, itemId: true } });
+  for (const { id, itemId } of lapsed) {
+    try {
+      const again = await prisma.$transaction(async (tx) => {
+        // The item first, then its run: the same order as every other writer (finishRun, the claim below), so a run that is handed out
+        // again at the moment its server reports can never wait on each other
+        const item = await lockedItem(tx, { id: itemId });
+        const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT "id" FROM "brick_item_runs" WHERE "id" = ${id} AND "state" = 'claimed' AND "lease_until" <= ${now} FOR UPDATE SKIP LOCKED`);
+        if (!locked.length) return null;
+        const run = await tx.brickItemRun.findUniqueOrThrow({ where: { id }, include: RUN_INCLUDE });
+        // Only while the item is still the same and still on: a run for something that changed is dropped, not retried
+        const stillOn = !!item && item.state === 'on' && item.revision === run.revision;
+        if (!stillOn) {
+          await tx.brickItemRun.update({ where: { id }, data: { state: 'dropped', finishedAt: now } });
+          return null;
+        }
+        if (run.attempts >= MAX_TRIES) {
+          await tx.brickItemRun.update({ where: { id }, data: { state: 'failed', error: 'It did not finish in time', finishedAt: now } });
+          await tx.brickItem.update({ where: { id: run.itemId }, data: { failuresInRow: { increment: 1 }, lastRunAt: now } });
+          return null;
+        }
+        return tx.brickItemRun.update({ where: { id }, data: { attempts: { increment: 1 }, leaseUntil: lease }, include: RUN_INCLUDE });
+      });
+      if (again) out.push(claimedOf(again));
+    } catch (error) {
+      // One run that could not be taken (a deadlock Postgres broke, a dropped connection) never discards what is already claimed:
+      // it stays claimed and is looked at again by the next ask
+      console.error('[BrickItems] Could not hand a run out again:', error instanceof Error ? error.message : 'unknown');
+    }
   }
 
   // What has fallen due. Only an item that is on, whose Brick is on and not deleted and still its owner's
@@ -503,43 +511,53 @@ export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH):
     JOIN "bots" b ON b."id" = i."bot_id"
     WHERE i."state" = 'on' AND i."next_due_at" <= ${now}
       AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
+      -- A person who is at their runs a day is left out here, so what they hold back never fills the batch ahead of everyone else
+      AND (i."kind" = 'reminder' OR (
+        SELECT count(*) FROM "brick_item_runs" r JOIN "brick_items" j ON j."id" = r."item_id"
+        WHERE j."owner_id" = i."owner_id" AND j."kind" <> 'reminder' AND r."claimed_at" > ${new Date(now.getTime() - DAY)}
+      ) < ${limits.runsPerDay})
     ORDER BY i."next_due_at" ASC, i."id" ASC
     LIMIT ${limit}`);
   for (const { id } of due) {
-    const claimed = await prisma.$transaction(async (tx) => {
-      const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
-        SELECT i."id" FROM "brick_items" i
-        JOIN "bots" b ON b."id" = i."bot_id"
-        WHERE i."id" = ${id} AND i."state" = 'on' AND i."next_due_at" <= ${now}
-          AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
-        FOR UPDATE OF i SKIP LOCKED`);
-      if (!locked.length) return null;
-      const item = await tx.brickItem.findUniqueOrThrow({ where: { id } });
-      const dueAt = item.nextDueAt!;
-      const cadence = readCadence(item.cadence);
-      const behind = now.getTime() - dueAt.getTime();
-      const overdue = behind > limits.lateAfter * MINUTE;
-      const reminderLike = item.kind === 'reminder' || item.kind === 'schedule';
+    let claimed: Prisma.BrickItemRunGetPayload<{ include: typeof RUN_INCLUDE }> | null = null;
+    try {
+      claimed = await prisma.$transaction(async (tx) => {
+        const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+          SELECT i."id" FROM "brick_items" i
+          JOIN "bots" b ON b."id" = i."bot_id"
+          WHERE i."id" = ${id} AND i."state" = 'on' AND i."next_due_at" <= ${now}
+            AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
+          FOR UPDATE OF i SKIP LOCKED`);
+        if (!locked.length) return null;
+        const item = await tx.brickItem.findUniqueOrThrow({ where: { id } });
+        const dueAt = item.nextDueAt!;
+        const cadence = readCadence(item.cadence);
+        const behind = now.getTime() - dueAt.getTime();
+        const overdue = behind > limits.lateAfter * MINUTE;
+        const reminderLike = item.kind === 'reminder' || item.kind === 'schedule';
 
-      // Runs a day: watches, schedules and goals together, per person. A reminder is fixed text with no AI and never uses them.
-      if (item.kind !== 'reminder') {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-runs:${item.ownerId}`}))`;
-        const today = await tx.brickItemRun.count({ where: { claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' } } } });
-        if (today >= limits.runsPerDay) return null;
-      }
+        // Runs a day: watches, schedules and goals together, per person. A reminder is fixed text with no AI and never uses them.
+        if (item.kind !== 'reminder') {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-runs:${item.ownerId}`}))`;
+          const today = await tx.brickItemRun.count({ where: { claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' } } } });
+          if (today >= limits.runsPerDay) return null;
+        }
 
-      // The run, once per item and due time: the unique pair is the backstop under the row lock
-      const made = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
-        INSERT INTO "brick_item_runs" ("id", "item_id", "due_at", "revision", "claimed_at", "lease_until", "late", "fresh")
-        VALUES (${randomUUID()}, ${id}, ${dueAt}, ${item.revision}, ${now}, ${lease}, ${overdue && reminderLike}, ${overdue && !reminderLike})
-        ON CONFLICT ("item_id", "due_at") DO NOTHING
-        RETURNING "id"`);
-      // The next one is the first still to come: after an outage everything missed but this one is skipped, never replayed
-      const next = cadence ? nextDue(cadence, item.timeZone, dueAt, now) : null;
-      await tx.brickItem.update({ where: { id }, data: { nextDueAt: next } });
-      if (!made.length) return null;
-      return tx.brickItemRun.findUniqueOrThrow({ where: { id: made[0].id }, include: RUN_INCLUDE });
-    });
+        // The run, once per item and due time: the unique pair is the backstop under the row lock
+        const made = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+          INSERT INTO "brick_item_runs" ("id", "item_id", "due_at", "revision", "claimed_at", "lease_until", "late", "fresh")
+          VALUES (${randomUUID()}, ${id}, ${dueAt}, ${item.revision}, ${now}, ${lease}, ${overdue && reminderLike}, ${overdue && !reminderLike})
+          ON CONFLICT ("item_id", "due_at") DO NOTHING
+          RETURNING "id"`);
+        // The next one is the first still to come: after an outage everything missed but this one is skipped, never replayed
+        const next = cadence ? nextDue(cadence, item.timeZone, dueAt, now) : null;
+        await tx.brickItem.update({ where: { id }, data: { nextDueAt: next } });
+        if (!made.length) return null;
+        return tx.brickItemRun.findUniqueOrThrow({ where: { id: made[0].id }, include: RUN_INCLUDE });
+      });
+    } catch (error) {
+      console.error('[BrickItems] Could not claim a due item:', error instanceof Error ? error.message : 'unknown');
+    }
     if (claimed) out.push(claimedOf(claimed));
   }
   return out;
