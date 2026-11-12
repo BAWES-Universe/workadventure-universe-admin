@@ -13,6 +13,7 @@ import {
   type RuleValue,
 } from '@/lib/bot-rules';
 import { PEOPLE_PREFERENCE_KEYS } from '@/lib/people-settings';
+import type { BotHome } from '@/lib/brick';
 
 /**
  * What an owner can set on one bot (#427): who may use it (rules for roles and people, and Private bot), the line
@@ -153,6 +154,31 @@ export async function loadBotPlace(botId: string): Promise<(BotPlace & { roomId:
     roomId: bot.room.id,
     universeId: bot.room.world.universeId,
     universeOwnerId: bot.room.world.universe.ownerId,
+  };
+}
+
+/** Where a bot lives, but only when it is a Brick (no room); null for a room bot and for no bot. */
+export async function loadBrickHome(botId: string): Promise<(BotHome & { id: string }) | null> {
+  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { id: true, roomId: true, ownerId: true, deletedAt: true } });
+  if (!bot || bot.roomId !== null) return null;
+  return { id: bot.id, roomId: null, ownerId: bot.ownerId, deletedAt: bot.deletedAt };
+}
+
+/**
+ * A Brick's own settings: who may use it, the line refused people hear and the daily limit are saved on the Brick, and
+ * apply once it walks beside its owner on a map. It stands in no universe, so it has no roles to give rules to and no
+ * rows of its own: the answer has the same shape as a room bot's, with `universe` null and nothing to name.
+ */
+export async function readBrickSettings(botId: string) {
+  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { privateBot: true, refusalReply: true, dailyReplyCap: true } });
+  if (!bot) return null;
+  return {
+    universe: null,
+    privateBot: bot.privateBot,
+    refusalReply: bot.refusalReply,
+    dailyReplyCap: bot.dailyReplyCap,
+    rules: [] as RuleJson[],
+    roles: [] as Array<never>,
   };
 }
 
