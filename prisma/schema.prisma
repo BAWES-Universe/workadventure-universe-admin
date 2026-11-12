@@ -1424,6 +1424,23 @@ model MeterGrant {
   @@map("meter_grants")
 }
 
+// A member's "Ask for more" (game #1999): what a person tapped when their computer time ran out. Only a request: it is not a
+// debt and not a grant, and it makes nothing for anyone to pay. One is open for a person at a time (a second tap finds it);
+// giving extra usage answers it. Nothing a person says is kept here, only that they asked and when.
+model MeterRequest {
+  id         String    @id @default(uuid())
+  personId   String    @map("person_id")
+  // What ran out. Computer time is the only thing a member asks for more of; chat and voice keep their own fair usage.
+  what       String    @default("computer") @db.VarChar(20)
+  createdAt  DateTime  @default(now()) @map("created_at")
+  answeredAt DateTime? @map("answered_at")
+  // The extra usage that answered it
+  grantKey   String?   @map("grant_key") @db.VarChar(255)
+
+  @@index([personId, answeredAt])
+  @@map("meter_requests")
+}
+
 // Bot Metrics
 model BotsMetric {
   id          Int      @id @default(autoincrement())

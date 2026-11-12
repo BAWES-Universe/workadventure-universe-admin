@@ -7,11 +7,14 @@ import {
   allowanceNow,
   basisOfCall,
   checkMeterSettings,
+  extraDrawn,
   missingSettings,
   monthOf,
+  nextMonthStart,
   personKeyOf,
   readMeterEvent,
   readMeterSettings,
+  usageWords,
   type GrantWindow,
 } from '@/lib/meter-values';
 
@@ -183,5 +186,56 @@ describe('what a member has left of their month', () => {
       { at: at(11), micros: 800 },
     ];
     expect(allowanceNow(BASE, spends, [double], at(21))).toEqual(allowanceNow(BASE, [...spends].reverse(), [double], at(21)));
+  });
+});
+
+describe('what extra usage has cost above the usual (game #1999)', () => {
+  const BASE = 1000;
+  const at = (day: number) => new Date(`2026-11-${String(day).padStart(2, '0')}T12:00:00Z`);
+  const double: GrantWindow = { startsAt: at(10), endsAt: at(20), multiplier: 2 };
+  const none: GrantWindow = { startsAt: at(10), endsAt: at(20), multiplier: null };
+
+  it('is what was spent while it ran, up to what it added, and nothing before it started or after it ended', () => {
+    const spends = [
+      { at: at(2), micros: 300 },
+      { at: at(12), micros: 400 },
+      { at: at(25), micros: 900 },
+    ];
+    expect(extraDrawn(BASE, spends, [double])).toEqual([400]);
+  });
+
+  it('stops at what it added: double adds one more usual, so a bigger spend is the usual allowance’s', () => {
+    expect(extraDrawn(BASE, [{ at: at(12), micros: 1700 }], [double])).toEqual([1000]);
+  });
+
+  it('counts everything spent while no limit ran', () => {
+    expect(extraDrawn(BASE, [{ at: at(12), micros: 5000 }], [none])).toEqual([5000]);
+  });
+
+  it('gives each extra usage its own figure, in the order given, and the larger one running takes the spend', () => {
+    const five: GrantWindow = { startsAt: at(10), endsAt: at(20), multiplier: 5 };
+    expect(extraDrawn(BASE, [{ at: at(12), micros: 600 }], [double, five])).toEqual([0, 600]);
+  });
+
+  it('is nothing when none was given or nothing was spent', () => {
+    expect(extraDrawn(BASE, [{ at: at(12), micros: 600 }], [])).toEqual([]);
+    expect(extraDrawn(BASE, [], [double])).toEqual([0]);
+  });
+});
+
+describe('the words under a usage bar (game #1999)', () => {
+  it('says out at nothing, low at a fifth or less, and over half above half', () => {
+    expect(usageWords(0)).toBe('out');
+    expect(usageWords(0.01)).toBe('low');
+    expect(usageWords(0.2)).toBe('low');
+    expect(usageWords(0.21)).toBe('half');
+    expect(usageWords(0.5)).toBe('half');
+    expect(usageWords(0.51)).toBe('plenty');
+    expect(usageWords(1)).toBe('plenty');
+  });
+
+  it('says a month starts again on the first of the next one, in UTC, across a year end too', () => {
+    expect(nextMonthStart(new Date('2026-11-15T12:00:00Z')).toISOString()).toBe('2026-12-01T00:00:00.000Z');
+    expect(nextMonthStart(new Date('2026-12-31T23:59:00Z')).toISOString()).toBe('2027-01-01T00:00:00.000Z');
   });
 });

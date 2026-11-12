@@ -14,8 +14,14 @@ import { UniverseAiLimits } from '@/app/admin/components/limits';
 import { SERVER_LIMITS_RECOMMENDED } from '@/lib/bot-limit-values';
 import { VOICE_LIMITS_RECOMMENDED } from '@/lib/voice-limit-values';
 
-function answer(limits = SERVER_LIMITS_RECOMMENDED, voice = VOICE_LIMITS_RECOMMENDED) {
+function answer(limits = SERVER_LIMITS_RECOMMENDED, voice = VOICE_LIMITS_RECOMMENDED, memberAllowanceMicros: number | null = null) {
+  let allowance = memberAllowanceMicros;
   fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+    // The computer allowance for each member (game #1999) is the meter's setting, read and saved on its own route
+    if (url === '/api/admin/meter-settings') {
+      if (init?.method === 'PATCH') allowance = JSON.parse(String(init.body)).memberAllowanceMicros;
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ settings: { memberAllowanceMicros: allowance }, missing: [] }) });
+    }
     // The voice limits (#792) are read and saved on their own route
     if (url === '/api/admin/voice-limits') {
       const change = init?.method === 'PATCH' ? JSON.parse(String(init.body)) : {};
@@ -175,6 +181,44 @@ describe('Universe AI limits', () => {
     fireEvent.click(await screen.findByRole('radio', { name: /5 times/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ bricks: { offerAfter: 5 } }));
+  });
+
+  it('puts the computer allowance first in Bricks: "Not set" with nothing recommended, then saved in dollars (game #1999)', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    const row = await screen.findByTestId('limit-computerMonth');
+    expect(row.textContent).toContain('Computer allowance for each member, a month');
+    expect(row.textContent).toContain('Not set');
+    expect(row.textContent).not.toContain('Recommended');
+    // It is the first row of the Bricks group, above the two rows that were there
+    const group = screen.getByLabelText('Bricks');
+    expect(group.querySelectorAll('[data-testid^="limit-"]')[0]?.getAttribute('data-testid')).toBe('limit-computerMonth');
+    fireEvent.click(row);
+    // No choice on its sheet is marked recommended: the starting value comes from our own test
+    const sheet = (await screen.findByRole('dialog')) as HTMLElement;
+    expect(sheet.textContent).not.toContain('Recommended');
+    fireEvent.click(await screen.findByRole('radio', { name: /\$5/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/meter-settings' && init?.method === 'PATCH')).toBe(true));
+    const patch = fetchMock.mock.calls.find(([url, init]) => url === '/api/admin/meter-settings' && init?.method === 'PATCH')!;
+    expect(JSON.parse(String(patch[1].body))).toEqual({ memberAllowanceMicros: 5_000_000 });
+    await waitFor(() => expect(screen.getByTestId('limit-computerMonth').textContent).toContain('$5'));
+    // Never saved through the bot limits route
+    expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/bot-limits' && init?.method === 'PATCH')).toBe(false);
+  });
+
+  it('takes a computer allowance of its own in dollars and cents', async () => {
+    answer(SERVER_LIMITS_RECOMMENDED, VOICE_LIMITS_RECOMMENDED, 5_000_000);
+    render(<UniverseAiLimits />);
+    const row = await screen.findByTestId('limit-computerMonth');
+    expect(row.textContent).toContain('$5');
+    fireEvent.click(row);
+    fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
+    fireEvent.change(screen.getByLabelText(/Computer allowance for each member, a month, in dollars/), { target: { value: '7.50' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/meter-settings' && init?.method === 'PATCH')).toBe(true));
+    const patch = fetchMock.mock.calls.find(([url, init]) => url === '/api/admin/meter-settings' && init?.method === 'PATCH')!;
+    expect(JSON.parse(String(patch[1].body))).toEqual({ memberAllowanceMicros: 7_500_000 });
   });
 
   it('saves the switch', async () => {

@@ -4,6 +4,7 @@ import { getUniverseAiReplyLimits } from '@/lib/bot-limits';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { textReserve } from '@/lib/voice-limit-values';
 import { resolveUsagePerson } from '@/lib/usage-person';
+import { runningExtra } from '@/lib/meter-grants';
 
 /**
  * Reply limits (game #1159), decided by Khalid 19 Oct and 26 Oct 2026:
@@ -100,14 +101,19 @@ export async function checkReplyAllowance(
   if (source !== 'own-key') {
     const limits = await getUniverseAiReplyLimits();
     const room = (window: number) => (greeting ? window - textReserve(window, kept) : window);
-    checks.push({
-      kind: guest ? 'guest' : 'universe-ai',
-      key: `ua:${personKey}`,
-      hours: limits.windowHours,
-      limit: room(guest ? limits.guest : limits.signedIn),
-      // Every Universe AI reply this person got, from any bot: a reply no personal key paid for
-      where: (since) => ({ ...personRows, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } }),
-    });
+    // Extra usage a super admin gave (game #1999) raises a signed-in person's window while it runs: a multiple of the usual,
+    // or no limit. It ends by itself, and a guest never has it
+    const extra = guest || !person.personId ? null : await runningExtra(person.personId, now);
+    if (!extra?.noLimit) {
+      checks.push({
+        kind: guest ? 'guest' : 'universe-ai',
+        key: `ua:${personKey}`,
+        hours: limits.windowHours,
+        limit: room(guest ? limits.guest : limits.signedIn) * (extra?.multiplier ?? 1),
+        // Every Universe AI reply this person got, from any bot: a reply no personal key paid for
+        where: (since) => ({ ...personRows, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } }),
+      });
+    }
     if (guest) {
       checks.push({
         kind: 'guests',

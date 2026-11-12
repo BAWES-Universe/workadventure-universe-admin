@@ -118,3 +118,70 @@ export async function markGrantBilled(grantKey: string, now: Date = new Date()):
   if (!row) return 'not_found';
   return row.settlement === 'to_bill' ? 'already_billed' : 'not_billable';
 }
+
+/** What is running for a person at a moment: the largest extra usage (no limit beats any multiple); null when none runs. */
+export interface RunningExtra {
+  grantKey: string;
+  /** Null for no limit. */
+  multiplier: number | null;
+  noLimit: boolean;
+  endsAt: Date;
+}
+
+/**
+ * The extra usage running for a person right now, for the replies' limit and the usage page. Only the largest counts, never a
+ * multiple of a multiple; of two the same, the one that ends sooner is the one reported.
+ */
+export async function runningExtra(personId: string, now: Date = new Date(), db: Pick<typeof prisma, 'meterGrant'> = prisma): Promise<RunningExtra | null> {
+  const rows = await db.meterGrant.findMany({ where: { personId, startsAt: { lte: now }, endsAt: { gt: now } }, select: { grantKey: true, multiplier: true, noLimit: true, endsAt: true } });
+  let best: RunningExtra | null = null;
+  const rank = (row: { multiplier: number | null; noLimit: boolean }) => (row.noLimit ? Infinity : (row.multiplier ?? 1));
+  for (const row of rows) {
+    const next: RunningExtra = { grantKey: row.grantKey, multiplier: row.noLimit ? null : row.multiplier, noLimit: row.noLimit, endsAt: row.endsAt };
+    if (!best || rank(next) > rank(best) || (rank(next) === rank(best) && next.endsAt < best.endsAt)) best = next;
+  }
+  return best;
+}
+
+export interface GrantChange {
+  multiplier?: number | null;
+  noLimit?: boolean;
+  endsAt?: Date;
+  note?: string | null;
+}
+
+/**
+ * "Change": a running extra usage's amount, end or note. What was agreed and billed is not rewritten: extra usage already marked
+ * billed, one that ended, and the choice between a gift and extra usage to bill all stay as they were. Give a new one instead.
+ */
+export async function changeGrant(grantKey: string, change: GrantChange, now: Date = new Date()): Promise<Grant> {
+  const row = await prisma.meterGrant.findUnique({ where: { grantKey } });
+  if (!row) throw new GrantRefused('That extra usage does not exist');
+  if (row.endsAt <= now) throw new GrantRefused('That extra usage has ended. Give a new one instead.');
+  if (row.billedAt) throw new GrantRefused('That extra usage is marked billed. Give a new one instead.');
+  const noLimit = change.noLimit ?? (change.multiplier === undefined ? row.noLimit : false);
+  const multiplier = noLimit ? null : change.multiplier === undefined ? row.multiplier : change.multiplier;
+  if (!noLimit && (multiplier === null || !Number.isInteger(multiplier) || multiplier < 2)) throw new GrantRefused('multiplier must be a whole number, 2 or more (or no limit)');
+  const endsAt = change.endsAt ?? row.endsAt;
+  if (!(endsAt > now)) throw new GrantRefused('Extra usage must end in the future. To stop it now, use End it now.');
+  const note = change.note === undefined ? row.note : change.note?.trim() ? change.note.trim().slice(0, 1000) : null;
+  const updated = await prisma.meterGrant.update({ where: { grantKey }, data: { multiplier, noLimit, endsAt, note } });
+  return view(updated);
+}
+
+/** "End it now": a running extra usage stops this moment. What it already covered stays covered; it is still listed, as ended. */
+export async function endGrantNow(grantKey: string, now: Date = new Date()): Promise<'ended' | 'already_ended' | 'not_found'> {
+  const row = await prisma.meterGrant.findUnique({ where: { grantKey }, select: { startsAt: true, endsAt: true } });
+  if (!row) return 'not_found';
+  if (row.endsAt <= now) return 'already_ended';
+  // One that has not started yet never runs: it ends where it would have begun, and the database holds an end after a start
+  const never = row.startsAt >= now;
+  await prisma.meterGrant.update({ where: { grantKey }, data: never ? { startsAt: new Date(now.getTime() - 1000), endsAt: now } : { endsAt: now } });
+  return 'ended';
+}
+
+/** A person's extra usage, newest first. */
+export async function grantsFor(personId: string): Promise<Grant[]> {
+  const rows = await prisma.meterGrant.findMany({ where: { personId }, orderBy: { createdAt: 'desc' }, take: 50 });
+  return rows.map(view);
+}
