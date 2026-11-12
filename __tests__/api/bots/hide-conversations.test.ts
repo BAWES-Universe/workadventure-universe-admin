@@ -36,6 +36,7 @@ jest.mock('@/lib/db', () => ({
     botsMemory: { findMany: jest.fn(), findFirst: jest.fn(), count: jest.fn(), aggregate: jest.fn(), upsert: jest.fn(), delete: jest.fn(), deleteMany: jest.fn() },
     botsAiUsage: { count: jest.fn() },
     botMemoryForget: { findMany: jest.fn(), create: jest.fn(), deleteMany: jest.fn(), updateMany: jest.fn() },
+    botMemoryItemForget: { findMany: jest.fn(), deleteMany: jest.fn(), updateMany: jest.fn() },
     botFile: { deleteMany: jest.fn() },
   },
 }));
@@ -83,6 +84,7 @@ beforeEach(() => {
   db.botsMemory.aggregate.mockResolvedValue({ _count: { _all: 3 }, _max: { updatedAt: new Date(9000) } });
   db.botsAiUsage.count.mockResolvedValue(12);
   db.botMemoryForget.findMany.mockResolvedValue([]);
+  db.botMemoryItemForget.findMany.mockResolvedValue([]);
   db.bot.findMany.mockResolvedValue([]);
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
   jest.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -639,7 +641,8 @@ describe('deleting a bot, room, world or universe', () => {
     expect(db.botsConversation.deleteMany).toHaveBeenCalledWith(where);
     expect(db.botsMemory.deleteMany).toHaveBeenCalledWith(where);
     expect(db.botMemoryForget.deleteMany).toHaveBeenCalledWith(where);
-    expect(db.$transaction.mock.calls[0][0]).toHaveLength(4);
+    expect(db.botMemoryItemForget.deleteMany).toHaveBeenCalledWith(where);
+    expect(db.$transaction.mock.calls[0][0]).toHaveLength(5);
   });
 
   it('does not take the data of a bot that does not hide, and takes nothing if the delete cannot happen', async () => {

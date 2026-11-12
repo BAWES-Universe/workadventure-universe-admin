@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { requireServiceToken, validateServiceToken } from '@/lib/service-tokens';
 import { botContentReadDenied } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
+import { takeItemForgets, withoutForgottenFor, withoutForgottenOne } from '@/lib/bot-memory-person';
 import { dropForgottenFrom, forgetNotice, isBotHidden, memoryTally, takeForgets } from '@/lib/bot-privacy';
 
 export const runtime = 'nodejs';
@@ -58,7 +59,7 @@ export async function GET(
       orderBy: { updatedAt: 'desc' },
     });
 
-    const memories = rows.map((row) => {
+    const restored = rows.map((row) => {
       const rawEmotions = (row.emotions as Record<string, unknown> | null) || {};
       const lastEmotionMs = row.lastEmotionUpdate
         ? row.lastEmotionUpdate.getTime()
@@ -77,6 +78,9 @@ export async function GET(
         emotions,
       };
     });
+
+    // What a person forgot stays gone, also in a row that was restored with it still in (game #2003)
+    const memories = await withoutForgottenFor(botId, restored);
 
     return NextResponse.json(
       { memories },
@@ -168,7 +172,11 @@ export async function POST(
     const forgets = (userUuid: unknown) => forgetting.everyone || (typeof userUuid === 'string' && forgetting.userUuids.has(userUuid));
 
     // Process each memory entry
-    const memoryEntries = (Array.isArray(memories) ? memories : []).filter((memory: { userUuid?: unknown }) => !forgets(memory.userUuid));
+    // What a person forgot one thing at a time is taken out of what is saved (game #2003): the bot server may still hold it
+    const memoryEntries = await withoutForgottenFor(
+      botId,
+      (Array.isArray(memories) ? memories : []).filter((memory: { userUuid?: unknown }) => !forgets(memory.userUuid)),
+    );
     
     // Process memories asynchronously (fire-and-forget pattern)
     const written: string[] = [];
@@ -375,6 +383,8 @@ export async function POST(
             fullMemoryData = body.memories || body.memory || body.memoryData || null;
           }
 
+          fullMemoryData = (await withoutForgottenOne(botId, body.userUuid, fullMemoryData)) as typeof fullMemoryData;
+
           await prisma.botsMemory.upsert({
             where: {
               botId_userUuid: {
@@ -424,11 +434,13 @@ export async function POST(
 
     // Only when someone asked the bot to forget: the people to drop from what it keeps in memory.
     const forget = forgetNotice(forgetting);
+    const forgetItems = await takeItemForgets(botId);
     return NextResponse.json(
       {
         status: 'saved',
         saveType,
         ...(forget ? { forget } : {}),
+        ...(forgetItems.length > 0 ? { forgetItems } : {}),
       },
       { headers: corsHeaders(request) }
     );
