@@ -539,6 +539,25 @@ run('a Brick’s computer, in a real database', () => {
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: queued.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'person' });
     });
 
+    it('Stop with a job running and another in line ends both without the one in line ever starting', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const running = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      const inLine = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, NOW);
+      if (!running.ok || !inLine.ok) throw new Error('no');
+      const before = provider.calls.length;
+      const view = await stopJobFor(sara.brickId, sara.id, minutes(1));
+      expect(view?.queued).toEqual([]);
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: running.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'person' });
+      const second = await prisma.computerJob.findUniqueOrThrow({ where: { id: inLine.job.id } });
+      expect(second).toMatchObject({ status: 'stopped', endedBy: 'person' });
+      // It never held the machine, so it has no time to count and the room it was waiting for was never taken
+      expect(second.secondsRun).toBe(0);
+      expect(second.reservationKey).toBeNull();
+      expect(provider.calls.slice(before).filter((call) => call.name === 'wake')).toEqual([]);
+      expect((await currentEnvelope(minutes(1))).reservedMicros).toBe(0);
+    });
+
     it('once a machine was removed, says so at once: a retried delete does not save a copy of a machine that is gone', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);

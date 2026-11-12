@@ -424,8 +424,12 @@ export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: 
 export async function stopJobFor(botId: string, ownerId: string, now: Date = new Date()): Promise<ComputerView | null> {
   if (!(await brickOf(botId, ownerId))) return null;
   // Stop ends what is running or waiting for them, and what is in line too (a job waiting for the allowance must not start later)
-  const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting', 'queued'] } }, select: { id: true } });
-  for (const job of jobs) await endJob(job.id, 'stopped', 'person', now);
+  // The ones in line end FIRST: ending the running one starts the next in line, and that must not start a job that is about to be stopped
+  const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting', 'queued'] } }, select: { id: true, status: true } });
+  const inLine = jobs.filter((job) => job.status === 'queued');
+  const held = jobs.filter((job) => job.status !== 'queued');
+  for (const job of inLine) await endJob(job.id, 'stopped', 'person', now);
+  for (const job of held) await endJob(job.id, 'stopped', 'person', now);
   return computerView(botId, ownerId, now);
 }
 
