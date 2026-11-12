@@ -195,8 +195,9 @@ export async function giveComputer(botId: string, ownerId: string, now: Date = n
  */
 export async function turnOffComputer(botId: string, ownerId: string, now: Date = new Date()): Promise<ComputerView | null> {
   if (!(await brickOf(botId, ownerId))) return null;
-  await stopComputerWork(botId, 'off', now);
+  // Off first: the sweep starts nothing for a computer that is off, so no queued job can slip in while the work is being stopped
   await prisma.brickComputer.updateMany({ where: { botId }, data: { enabled: false } });
+  await stopComputerWork(botId, 'off', now);
   return computerView(botId, ownerId, now);
 }
 
@@ -490,12 +491,26 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   }
 
   if (held && row && row.providerRef && provider) {
-    const stillHeld = await prisma.computerJob.count({ where: { botId: job.botId, status: { in: ['running', 'waiting'] } } });
-    if (stillHeld === 0 && row.machine === 'working') {
-      // Its work is saved before it rests, and a save that failed is not claimed
-      await saveCopy(job.botId, row.providerRef, provider);
-      await provider.rest(row.providerRef).catch((error) => console.error('[Computer] Could not rest a machine:', error instanceof Error ? error.message : 'unknown'));
-      await prisma.brickComputer.updateMany({ where: { botId: job.botId, machine: 'working' }, data: { machine: 'resting' } });
+    const holders = () => prisma.computerJob.count({ where: { botId: job.botId, status: { in: ['running', 'waiting'] } } });
+    if ((await holders()) === 0) {
+      // The rest is CLAIMED before it is done: a job that starts from here on sees a machine that is resting and wakes it, instead
+      // of seeing "working", skipping the wake and finding the machine put to rest under it.
+      const claim = await prisma.brickComputer.updateMany({ where: { botId: job.botId, machine: 'working' }, data: { machine: 'resting' } });
+      if (claim.count === 1) {
+        if ((await holders()) > 0) {
+          // A job took its place between the count and the claim: the machine is still working
+          await prisma.brickComputer.updateMany({ where: { botId: job.botId, machine: 'resting' }, data: { machine: 'working' } });
+        } else {
+          // Its work is saved before it rests, and a save that failed is not claimed
+          await saveCopy(job.botId, row.providerRef, provider);
+          await provider.rest(row.providerRef).catch((error) => console.error('[Computer] Could not rest a machine:', error instanceof Error ? error.message : 'unknown'));
+          if ((await holders()) > 0) {
+            // A job started while the machine was resting and its wake may have come before the rest: wake it again, so it works
+            await provider.wake(row.providerRef).catch((error) => console.error('[Computer] Could not wake a machine:', error instanceof Error ? error.message : 'unknown'));
+            await prisma.brickComputer.updateMany({ where: { botId: job.botId, machine: 'resting' }, data: { machine: 'working', lastWorkedAt: now } });
+          }
+        }
+      }
     }
   }
   // The turn passes to the next job in line

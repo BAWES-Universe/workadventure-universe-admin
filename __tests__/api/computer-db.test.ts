@@ -341,6 +341,51 @@ run('a Brick’s computer, in a real database', () => {
       expect((await currentEnvelope(minutes(4))).reservedMicros).toBe(0);
     });
 
+    it('Turn off closes the door first: a job asked for while the work is being stopped is refused, and nothing is left running', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!a.ok) throw new Error('no');
+      await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, NOW);
+      let asked: Awaited<ReturnType<typeof startJob>> | null = null;
+      const save = provider.saveFiles.bind(provider);
+      provider.saveFiles = async (ref: string) => {
+        // While the first job is being saved and ended, another job asks and the sweep runs
+        if (!asked) {
+          asked = await startJob({ botId: sara.brickId, personId: sara.id, title: 'C' }, minutes(3));
+          await sweepComputers(minutes(3));
+        }
+        return save(ref);
+      };
+      await turnOffComputer(sara.brickId, sara.id, minutes(3));
+      expect(asked).toEqual({ ok: false, reason: 'off' });
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId, status: { in: ['queued', 'running', 'waiting'] } } })).toBe(0);
+      expect((await currentEnvelope(minutes(4))).reservedMicros).toBe(0);
+    });
+
+    it('a job that starts while the machine is being put to rest finds it awake and working, never resting under it', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!a.ok) throw new Error('no');
+      let started: Awaited<ReturnType<typeof startJob>> | null = null;
+      const rest = provider.rest.bind(provider);
+      provider.rest = async (ref: string) => {
+        // The next job starts at the very moment the rest is being done
+        if (!started) started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(2));
+        return rest(ref);
+      };
+      await finishJob(a.job.id, 'done', minutes(1));
+      expect(started).toMatchObject({ ok: true });
+      const view = await computerView(sara.brickId, sara.id, minutes(3));
+      expect(view?.job).not.toBeNull();
+      expect(view?.machine).toBe('working');
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+      // The last call on the machine is a wake, not a rest
+      const names = provider.calls.map((call) => call.name).filter((name) => name === 'wake' || name === 'rest');
+      expect(names[names.length - 1]).toBe('wake');
+    });
+
     it('never says a save happened that did not: a failed save leaves the last saved day as it was', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
