@@ -358,6 +358,19 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (row.state !== 'done') return wrongState(row.state);
         const bot = await tx.bot.findUnique({ where: { id: row.botId }, select: { enabled: true, deletedAt: true } });
         if (!bot?.enabled || bot.deletedAt) return { ok: false as const, status: 409 as const, code: 'off' as const, error: 'This Brick is switched off' };
+        // Reopening takes a place again, so it keeps to the same limits as setting a new one: the person's goals and tasks, and for a check
+        // its goal's checks, and its goal has to be on. One at a time per person, like creating one.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-items:${ownerId}`}))`;
+        if (row.parentId) {
+          // Read without locking the goal: a goal's own change locks the goal and then its checks, and this holds the check
+          const goal = await tx.brickItem.findUnique({ where: { id: row.parentId }, select: { state: true } });
+          if (goal?.state !== 'on') return { ok: false as const, status: 409 as const, code: 'needs_goal' as const, error: 'A check comes back only while its goal is on' };
+          const checks = await tx.brickItem.count({ where: { parentId: row.parentId, state: { in: ['on', 'paused'] } } });
+          if (checks >= limits.itemsPerPerson) return { ok: false as const, status: 422 as const, code: 'too_many' as const, limit: limits.itemsPerPerson, error: `${limits.itemsPerPerson} checks for one goal is the most` };
+        } else {
+          const have = await tx.brickItem.count({ where: { ownerId, parentId: null, state: { in: ['on', 'paused'] } } });
+          if (have >= limits.itemsPerPerson) return { ok: false as const, status: 422 as const, code: 'too_many' as const, limit: limits.itemsPerPerson, error: `${limits.itemsPerPerson} goals and tasks at once is the most` };
+        }
         // Starts again from the new revision, counted from now: a one-off that has passed is due now, once
         const due = cadence.type === 'once' ? (firstDue(cadence, row.timeZone, now) ?? now) : firstDue(cadence, row.timeZone, now);
         return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, nextDueAt: due, failuresInRow: 0, ...bump });

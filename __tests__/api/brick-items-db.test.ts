@@ -399,6 +399,30 @@ run('goals and tasks, in a real database', () => {
     expect(await changeItem(sam.brickId, waits.id, { userId: sam.uuid, action: 'change', change: { waitingFor: 'The embassy' } }, NOW)).toMatchObject({ ok: true, item: { waitingFor: 'The embassy' } });
   });
 
+  it('reopening keeps to the same limits as setting one: the most goals and tasks, and a check only while its goal is on', async () => {
+    const lorenzo = await person('lorenzo');
+    await saveServerLimits({ bricks: { itemsPerPerson: 2 } }, lorenzo.id);
+    try {
+      const first = await set(lorenzo);
+      await set(lorenzo);
+      await changeItem(lorenzo.brickId, first.id, { userId: lorenzo.uuid, action: 'done' }, NOW);
+      await set(lorenzo);
+      // Two are on again, so the done one cannot come back
+      expect(await changeItem(lorenzo.brickId, first.id, { userId: lorenzo.uuid, action: 'reopen' }, at(MIN))).toMatchObject({ ok: false, status: 422, code: 'too_many', limit: 2 });
+    } finally {
+      await saveServerLimits({ bricks: { itemsPerPerson: 20 } }, lorenzo.id);
+    }
+    const kiran = await person('kiran');
+    const goal = await set(kiran, { kind: 'goal', words: 'Sell the car', outcome: 'Sold', cadence: { type: 'every', minutes: 60 } });
+    const check = await createItem(kiran.brickId, { userId: kiran.uuid, kind: 'watch', words: 'Messages', condition: 'A buyer', cadence: { type: 'every', minutes: 60 }, parentId: goal.id }, NOW);
+    if (!check.ok) throw new Error('expected the check');
+    await changeItem(kiran.brickId, check.item.id, { userId: kiran.uuid, action: 'done' }, at(MIN));
+    await changeItem(kiran.brickId, goal.id, { userId: kiran.uuid, action: 'done' }, at(2 * MIN));
+    expect(await changeItem(kiran.brickId, check.item.id, { userId: kiran.uuid, action: 'reopen' }, at(3 * MIN))).toMatchObject({ ok: false, status: 409, code: 'needs_goal' });
+    await changeItem(kiran.brickId, goal.id, { userId: kiran.uuid, action: 'reopen' }, at(4 * MIN));
+    expect(await changeItem(kiran.brickId, check.item.id, { userId: kiran.uuid, action: 'reopen' }, at(5 * MIN))).toMatchObject({ ok: true, item: { state: 'on' } });
+  });
+
   it('keeps to the runs a day for watches and goals, but never for reminders', async () => {
     const jo = await person('jo');
     await saveServerLimits({ bricks: { runsPerDay: 2 } }, jo.id);
