@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { memoryItemsOf, withoutForgotten, withoutItems, MEMORY_ITEM_KINDS, type ForgottenKey, type MemoryItem, type MemoryItemKind } from '@/lib/bot-memory-items';
 
@@ -66,7 +66,7 @@ async function forgetKeys(botId: string, rows: { id: number; userUuid: string; m
         create: { botId, userUuid: row.userUuid, itemKey, kind, createdAt: now },
       }),
     )),
-    ...rows.map((row) => prisma.botsMemory.update({ where: { id: row.id }, data: { memories: withoutItems(row.memories, ids).data as Prisma.InputJsonValue } })),
+    ...rows.map((row) => prisma.botsMemory.update({ where: { id: row.id }, data: { memories: (withoutItems(row.memories, ids).data ?? Prisma.DbNull) as Prisma.InputJsonValue } })),
   ]);
 }
 
@@ -92,7 +92,11 @@ export async function forgetMyItem(botId: string, who: Remembering, itemId: stri
  */
 export async function forgetMyEverything(botId: string, who: Remembering): Promise<number> {
   const rows = await prisma.botsMemory.findMany({ where: rowsWhere(botId, who), select: { id: true, userUuid: true, memories: true } });
-  if (rows.length === 0) return 0;
+  if (rows.length === 0) {
+    // Nothing saved yet, but the bot server may hold them in memory until its next save: it hears of the Forget by this
+    await prisma.botMemoryForget.createMany({ data: who.refs.map((userUuid) => ({ botId, userUuid })) });
+    return 0;
+  }
   const now = new Date();
   let count = 0;
   const writes: Prisma.PrismaPromise<unknown>[] = [];

@@ -8,6 +8,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
+import { Prisma } from '@prisma/client';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -252,6 +253,23 @@ run('what a bot remembers about a person (real database)', () => {
     expect(await valuesOf('sara', melodyId)).not.toContain(COFFEE);
     const bad = await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: 'not a key', kind: 'pref' }), params(melodyId));
     expect(bad.status).toBe(400);
+  });
+
+  it('takes a "forget that" for a row whose memories are empty (null) without failing', async () => {
+    await prisma.botsMemory.update({ where: { botId_userUuid: { botId: melodyId, userUuid: people.sara.uuid } }, data: { memories: Prisma.DbNull } });
+    const answer = await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: memoryItemKey('pref', null, COFFEE), kind: 'pref' }), params(melodyId));
+    expect(answer.status).toBe(200);
+    expect(await prisma.botMemoryItemForget.count({ where: { botId: melodyId, userUuid: people.sara.uuid, itemKey: memoryItemKey('pref', null, COFFEE) } })).toBe(1);
+  });
+
+  it('forgets everything even before anything was saved: the bot server is still told to drop her from memory', async () => {
+    await prisma.botsMemory.deleteMany({ where: { botId: melodyId, userUuid: people.sara.uuid } });
+    const answer = await forgetMine(as('sara', `/api/bots/${melodyId}/my-memory/forget`, { everything: true }), params(melodyId));
+    expect(answer.status).toBe(200);
+    expect(((await answer.json()) as { forgotten: number }).forgotten).toBe(0);
+    expect(await prisma.botMemoryForget.count({ where: { botId: melodyId, userUuid: people.sara.uuid } })).toBe(1);
+    // Omar's list is untouched
+    expect(await valuesOf('omar', melodyId)).toEqual(expect.arrayContaining(['Omar', 'jazz']));
   });
 
   it('forgets everything: the row, the feelings and the lines of the chat; their files stay, and so does everyone else', async () => {
