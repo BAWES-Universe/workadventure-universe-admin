@@ -98,8 +98,8 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
       const data = (await response.json().catch(() => null)) as { usage?: PersonUsage; error?: string } | null;
       if (!response.ok) {
         addToast({ description: data?.error || 'That didn’t save. Try again.', variant: 'error' });
-        // A 5xx may have saved before it failed; anything else is a plain no
-        return response.status >= 500 ? 'unsure' : 'refused';
+        // A 5xx may have saved before it failed, and a session that ran out (401, 403) says nothing about an earlier try; anything else is a plain no
+        return response.status >= 500 || response.status === 401 || response.status === 403 || response.status === 408 ? 'unsure' : 'refused';
       }
       if (data?.usage) setUsage(data.usage);
       return 'done';
@@ -263,20 +263,22 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
                   // The last try got no answer and this is something else: look at what the server has before giving again, since
                   // that one may have been saved
                   setSaving(true);
-                  let fresh: PersonUsage | null = null;
+                  let saved: boolean | null = null;
                   try {
-                    fresh = await read();
+                    const { authenticatedFetch } = await import('@/lib/client-auth');
+                    const response = await authenticatedFetch(`/api/admin/users/${encodeURIComponent(userId)}/extra-usage?key=${encodeURIComponent(pendingKey.current.key)}`);
+                    if (response.ok) saved = ((await response.json()) as { saved?: boolean }).saved === true;
                   } catch {
-                    fresh = null;
+                    saved = null;
                   }
                   setSaving(false);
-                  if (!fresh) {
+                  if (saved === null) {
                     addToast({ description: 'We couldn’t check whether the last try was saved. Try again in a moment.', variant: 'error' });
                     return;
                   }
-                  setUsage(fresh);
-                  if (fresh.extra?.grantKey === `${userId}:${pendingKey.current.key}`.slice(0, 255)) {
+                  if (saved) {
                     pendingKey.current = null;
+                    await load();
                     addToast({ description: 'The last try was saved after all, so nothing more was given.', variant: 'success' });
                     setOpen(false);
                     return;

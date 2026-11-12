@@ -31,7 +31,10 @@ const endsAtOf = (value: unknown, now: Date): Date | null => {
   return date > now && date.getTime() - now.getTime() <= MAX_AHEAD ? date : null;
 };
 
-/** GET /api/admin/users/:id/extra-usage - what this person uses, whether they asked for more and the extra usage running for them. */
+/**
+ * GET /api/admin/users/:id/extra-usage - what this person uses, whether they asked for more and the extra usage running for them.
+ * With `?key=` it only says whether extra usage given with that key was saved: { saved }.
+ */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const viewer = await asSuperAdmin(request);
   if (!viewer) return refuse();
@@ -39,6 +42,13 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   try {
     const person = await prisma.user.findUnique({ where: { id }, select: { id: true, isGuest: true } });
     if (!person || person.isGuest) return NextResponse.json({ error: 'Person not found' }, { status: 404 });
+    // "Was the one I sent with this key saved?": the answer a sheet needs after a try that got no answer, however many other grants
+    // run for the person
+    const key = request.nextUrl.searchParams.get('key');
+    if (key) {
+      const grant = await prisma.meterGrant.findUnique({ where: { grantKey: `${id}:${key}`.slice(0, 255) }, select: { personId: true } });
+      return NextResponse.json({ saved: grant?.personId === id });
+    }
     return NextResponse.json(await personUsage(id, new Date(), viewer.id));
   } catch (error) {
     console.error('[ExtraUsage] Could not read:', error instanceof Error ? error.message : 'unknown');
@@ -88,7 +98,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     });
     // A new grant answers every ask made up to now, including one made while it was being recorded. A replay answers only what was
     // asked before that grant began, never a newer ask.
-    await answerRequests(id, `${id}:${body.grantKey}`.slice(0, 255), now, recorded ? new Date() : grant.startsAt);
+    const answeredAt = new Date();
+    await answerRequests(id, `${id}:${body.grantKey}`.slice(0, 255), answeredAt, recorded ? answeredAt : grant.startsAt);
     return NextResponse.json({ recorded, usage: await personUsage(id, new Date(), admin.id) }, { status: recorded ? 201 : 200 });
   } catch (error) {
     if (error instanceof GrantRefused) return NextResponse.json({ error: error.message }, { status: 400 });

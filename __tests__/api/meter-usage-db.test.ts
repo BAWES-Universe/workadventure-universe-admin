@@ -324,6 +324,23 @@ run('usage for people, and cost for us, in a real database', () => {
         spy.mockRestore();
       }
       expect(await openRequests()).toEqual([]);
+      // It was answered after it was asked, never before
+      const row = await prisma.meterRequest.findFirstOrThrow({ where: { personId: sara.id } });
+      expect(row.answeredAt).not.toBeNull();
+      expect(row.answeredAt!.getTime()).toBeGreaterThanOrEqual(row.createdAt.getTime());
+    });
+
+    it('makes one open request for each person from taps at the same moment, also where the partial index was never made (a database built with db:push)', async () => {
+      await setUp();
+      const people = await Promise.all(['ali', 'bo', 'cy'].map((name) => person(name)));
+      await prisma.$executeRawUnsafe('DROP INDEX IF EXISTS "meter_requests_one_open"');
+      try {
+        await Promise.all(people.flatMap((one) => Array.from({ length: 8 }, () => askForMore(one.id))));
+        for (const one of people) expect(await prisma.meterRequest.count({ where: { personId: one.id, answeredAt: null } })).toBe(1);
+      } finally {
+        await prisma.meterRequest.deleteMany({});
+        await prisma.$executeRawUnsafe('CREATE UNIQUE INDEX IF NOT EXISTS "meter_requests_one_open" ON "meter_requests"("person_id", "what") WHERE "answered_at" IS NULL');
+      }
     });
 
     it('leaves no request waiting when extra usage lands while a person is asking', async () => {
@@ -342,6 +359,23 @@ run('usage for people, and cost for us, in a real database', () => {
         expect((await memberUsage(who.id, new Date())).computer?.canAskForMore).toBe(false);
         expect((await openRequests()).filter((request) => request.personId === who.id)).toEqual([]);
       }
+    });
+
+    it('says whether extra usage given with a key was saved, whatever else runs for the person', async () => {
+      await setUp();
+      const sara = await person('sara');
+      const faisal = await person('faisal');
+      asAdmin();
+      const post = (key: string, amount: string) => personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, { grantKey: key, amount, endsAt: new Date(Date.now() + 5 * 86_400_000).toISOString(), settlement: 'gift' }), { params: Promise.resolve({ id: sara.id }) });
+      await post('small', 'double');
+      await post('big', 'five');
+      const ask = (id: string, key: string) => personGet(adminCall(`/api/admin/users/${id}/extra-usage?key=${key}`), { params: Promise.resolve({ id }) }).then((response) => response.json());
+      // The smaller one does not show on the page any more, and it is still found
+      expect((await ask(sara.id, 'small')).saved).toBe(true);
+      expect((await ask(sara.id, 'big')).saved).toBe(true);
+      expect((await ask(sara.id, 'never-sent')).saved).toBe(false);
+      // A key belongs to one person
+      expect((await ask(faisal.id, 'small')).saved).toBe(false);
     });
 
     it('is given once however many times it is sent: a double tap, a retry', async () => {

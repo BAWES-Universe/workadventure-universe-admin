@@ -188,19 +188,22 @@ describe('giving extra usage', () => {
   });
 
   describe('when an answer never came back and the admin changes what they give', () => {
-    const setUpOffline = (serverHas: (tried: boolean) => PersonUsage) => {
+    /** The first try gets no answer (`first`); asking whether it was saved answers `check`. */
+    const setUpOffline = (check: () => Promise<unknown>, first = 503) => {
       let attempt = 0;
-      fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
-        if (init?.method !== 'POST') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(serverHas(attempt > 0)) });
+      fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+        if (init?.method !== 'POST') {
+          if (String(url).includes('?key=')) return check();
+          return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(usage()) });
+        }
         attempt += 1;
-        if (attempt === 1) return Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) });
+        if (attempt === 1) return Promise.resolve({ ok: false, status: first, json: () => Promise.resolve({}) });
         return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ usage: usage({ extra: running({ grantKey: 'sara:key-2' }) }) }) });
       });
     };
+    const answered = (saved: boolean) => () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ saved }) });
     const posts = () => fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST');
-
-    it('gives nothing more when the server already has the first one', async () => {
-      setUpOffline((tried) => (tried ? usage({ extra: running({ grantKey: 'sara:key-1' }) }) : usage()));
+    const tryAndChange = async () => {
       render(<ExtraUsage userId="sara" name="Sara" />);
       fireEvent.click(await screen.findByTestId('extra-usage-give'));
       fireEvent.click(screen.getByTestId('extra-usage-confirm'));
@@ -208,21 +211,36 @@ describe('giving extra usage', () => {
       await waitFor(() => expect((screen.getByTestId('extra-usage-confirm') as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(screen.getByRole('radio', { name: /Double/ }));
       fireEvent.click(screen.getByTestId('extra-usage-confirm'));
+    };
+
+    it('gives nothing more when the server has the first one, even when it is not the grant that shows', async () => {
+      setUpOffline(answered(true));
+      await tryAndChange();
       await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'The last try was saved after all, so nothing more was given.' })));
       expect(posts()).toHaveLength(1);
+      // It asked about the key it had sent
+      expect(fetchMock.mock.calls.some(([url]) => String(url) === '/api/admin/users/sara/extra-usage?key=key-1')).toBe(true);
     });
 
     it('gives it with a new key when the server does not have the first one', async () => {
-      setUpOffline(() => usage());
-      render(<ExtraUsage userId="sara" name="Sara" />);
-      fireEvent.click(await screen.findByTestId('extra-usage-give'));
-      fireEvent.click(screen.getByTestId('extra-usage-confirm'));
-      await waitFor(() => expect(posts()).toHaveLength(1));
-      await waitFor(() => expect((screen.getByTestId('extra-usage-confirm') as HTMLButtonElement).disabled).toBe(false));
-      fireEvent.click(screen.getByRole('radio', { name: /Double/ }));
-      fireEvent.click(screen.getByTestId('extra-usage-confirm'));
+      setUpOffline(answered(false));
+      await tryAndChange();
       await waitFor(() => expect(posts()).toHaveLength(2));
       expect(JSON.parse(String(posts()[1][1].body)).grantKey).not.toBe(JSON.parse(String(posts()[0][1].body)).grantKey);
+    });
+
+    it('gives nothing, and says so, when it cannot find out whether the first one was saved', async () => {
+      setUpOffline(() => Promise.reject(new Error('offline')));
+      await tryAndChange();
+      await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'We couldn’t check whether the last try was saved. Try again in a moment.' })));
+      expect(posts()).toHaveLength(1);
+    });
+
+    it('treats a session that ran out like an answer that never came: the first try may have been saved', async () => {
+      setUpOffline(answered(true), 403);
+      await tryAndChange();
+      await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'The last try was saved after all, so nothing more was given.' })));
+      expect(posts()).toHaveLength(1);
     });
   });
 
