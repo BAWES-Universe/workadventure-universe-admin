@@ -110,7 +110,7 @@ export interface ItemView {
   setBy: 'you' | 'brick';
   revision: number;
   parentId: string | null;
-  pausedBy: 'owner' | 'brick_deleted' | null;
+  pausedBy: 'owner' | 'brick_deleted' | 'goal' | null;
   result: string | null;
   doneAt: string | null;
   lastRunAt: string | null;
@@ -138,7 +138,7 @@ function viewOf(row: ItemRow): ItemView {
     setBy: row.setBy === 'brick' ? 'brick' : 'you',
     revision: row.revision,
     parentId: row.parentId,
-    pausedBy: row.pausedBy === 'owner' || row.pausedBy === 'brick_deleted' ? row.pausedBy : null,
+    pausedBy: row.pausedBy === 'owner' || row.pausedBy === 'brick_deleted' || row.pausedBy === 'goal' ? row.pausedBy : null,
     result: row.result,
     doneAt: row.doneAt?.toISOString() ?? null,
     lastRunAt: row.lastRunAt?.toISOString() ?? null,
@@ -259,6 +259,9 @@ export async function createItem(viaBrickId: string, input: NewItemInput, now: D
     if (input.parentId) {
       const goal = await tx.brickItem.findFirst({ where: { id: input.parentId, ownerId, botId: viaBrickId, kind: 'goal', state: 'on' }, select: { id: true } });
       if (!goal) return { ok: false as const, status: 422 as const, code: 'needs_goal' as const, error: 'A check is set by a goal of this person that is on' };
+      // A goal may set as many checks as a person may have goals and tasks, never more: checks are not a way round the limit
+      const checks = await tx.brickItem.count({ where: { parentId: goal.id, state: { in: ['on', 'paused'] } } });
+      if (checks >= limits.itemsPerPerson) return { ok: false as const, status: 422 as const, code: 'too_many' as const, limit: limits.itemsPerPerson, error: `${limits.itemsPerPerson} checks for one goal is the most` };
       parentId = goal.id;
     } else {
       const have = await tx.brickItem.count({ where: { ownerId, parentId: null, state: { in: ['on', 'paused'] } } });
@@ -298,8 +301,8 @@ async function lockedItem(tx: Tx, where: { id: string; ownerId?: string; botId?:
 }
 
 /** Gives the checks a goal set the goal's own change (pause, resume, done, delete), in the same transaction. */
-async function moveChecks(tx: Tx, goalId: string, from: ItemState[], data: Prisma.BrickItemUpdateManyMutationInput, now: Date, recompute: boolean) {
-  const checks = await tx.brickItem.findMany({ where: { parentId: goalId, state: { in: from } } });
+async function moveChecks(tx: Tx, goalId: string, from: ItemState[], data: Prisma.BrickItemUpdateManyMutationInput, now: Date, recompute: boolean, onlyPausedBy?: string) {
+  const checks = await tx.brickItem.findMany({ where: { parentId: goalId, state: { in: from }, ...(onlyPausedBy ? { pausedBy: onlyPausedBy } : {}) } });
   for (const check of checks) {
     const cadence = readCadence(check.cadence);
     // A one-off check whose moment passed while its goal was paused is due now, once, like a one-off that is resumed on its own
@@ -331,7 +334,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
       case 'pause': {
         if (row.state === 'paused') return { ok: true as const, item: viewOf(row) };
         if (row.state !== 'on') return wrongState(row.state);
-        await moveChecks(tx, row.id, ['on'], { state: 'paused', pausedBy: 'owner' }, now, false);
+        await moveChecks(tx, row.id, ['on'], { state: 'paused', pausedBy: 'goal' }, now, false);
         return finish({ state: 'paused', pausedBy: 'owner', nextDueAt: null, ...bump });
       }
       case 'resume': {
@@ -341,7 +344,8 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (!bot?.enabled || bot.deletedAt) return { ok: false as const, status: 409 as const, code: 'off' as const, error: 'This Brick is switched off' };
         // One that was meant for a moment that has passed while it was paused is due now, once; the rest carry on from now
         const due = cadence.type === 'once' ? (firstDue(cadence, row.timeZone, now) ?? now) : firstDue(cadence, row.timeZone, now);
-        await moveChecks(tx, row.id, ['paused'], { state: 'on', pausedBy: null }, now, true);
+        // Only the checks its own pause stopped: one the person paused by itself stays paused
+        await moveChecks(tx, row.id, ['paused'], { state: 'on', pausedBy: null }, now, true, 'goal');
         return finish({ state: 'on', pausedBy: null, nextDueAt: due, ...bump });
       }
       case 'done': {
@@ -381,6 +385,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         } else if (!nextCadence) {
           return { ok: false as const, status: 400 as const, error: 'cadence is not readable' };
         }
+        if (nextCadence?.type === 'none' && !waitingFor) return { ok: false as const, status: 422 as const, code: 'needs_wait' as const, error: 'a goal with no timed check says what it waits for (waitingFor)' };
         if (kind === 'watch' && change.condition === null) return { ok: false as const, status: 400 as const, error: 'a watch needs the condition it speaks for' };
         if (kind === 'goal' && change.outcome === null) return { ok: false as const, status: 400 as const, error: 'a goal needs the outcome the person named' };
         const settled = nextCadence as Cadence;

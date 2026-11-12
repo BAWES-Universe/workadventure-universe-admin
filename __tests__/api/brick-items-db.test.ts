@@ -350,6 +350,41 @@ run('goals and tasks, in a real database', () => {
     expect((await claimDueRuns(at(3 * HOUR + MIN))).filter((one) => one.itemId === check.item.id)).toHaveLength(1);
   });
 
+  it('resuming a goal brings back only the checks its own pause stopped, not one the person paused themselves', async () => {
+    const sol = await person('sol');
+    const goal = await set(sol, { kind: 'goal', words: 'Plan the trip', outcome: 'Booked', cadence: { type: 'every', minutes: 60 } });
+    const make = async (words: string) => {
+      const made = await createItem(sol.brickId, { userId: sol.uuid, kind: 'watch', words, condition: 'It changes', cadence: { type: 'every', minutes: 60 }, parentId: goal.id }, NOW);
+      if (!made.ok) throw new Error('expected the check');
+      return made.item.id;
+    };
+    const mine = await make('Flights');
+    const theirs = await make('Hotels');
+    await changeItem(sol.brickId, theirs, { userId: sol.uuid, action: 'pause' }, at(MIN));
+    await changeItem(sol.brickId, goal.id, { userId: sol.uuid, action: 'pause' }, at(2 * MIN));
+    await changeItem(sol.brickId, goal.id, { userId: sol.uuid, action: 'resume' }, at(HOUR));
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: mine } })).toMatchObject({ state: 'on', pausedBy: null });
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: theirs } })).toMatchObject({ state: 'paused', pausedBy: 'owner' });
+  });
+
+  it('keeps the checks of one goal to the same most as goals and tasks, and a timerless goal always says what it waits for', async () => {
+    const tam = await person('tam');
+    await saveServerLimits({ bricks: { itemsPerPerson: 2 } }, tam.id);
+    try {
+      const goal = await set(tam, { kind: 'goal', words: 'Find a flat', outcome: 'Keys in hand', cadence: { type: 'every', minutes: 60 } });
+      const check = (words: string) => createItem(tam.brickId, { userId: tam.uuid, kind: 'watch', words, condition: 'It changes', cadence: { type: 'every', minutes: 60 }, parentId: goal.id }, NOW);
+      expect((await check('a')).ok).toBe(true);
+      expect((await check('b')).ok).toBe(true);
+      expect(await check('c')).toMatchObject({ ok: false, status: 422, code: 'too_many', limit: 2 });
+    } finally {
+      await saveServerLimits({ bricks: { itemsPerPerson: 20 } }, tam.id);
+    }
+    const sam = await person('sam');
+    const waits = await set(sam, { kind: 'goal', words: 'Hear from the bank', outcome: 'A loan', cadence: { type: 'none' }, waitingFor: 'The bank to answer' });
+    expect(await changeItem(sam.brickId, waits.id, { userId: sam.uuid, action: 'change', change: { waitingFor: null } }, NOW)).toMatchObject({ ok: false, status: 422, code: 'needs_wait' });
+    expect(await changeItem(sam.brickId, waits.id, { userId: sam.uuid, action: 'change', change: { waitingFor: 'The embassy' } }, NOW)).toMatchObject({ ok: true, item: { waitingFor: 'The embassy' } });
+  });
+
   it('keeps to the runs a day for watches and goals, but never for reminders', async () => {
     const jo = await person('jo');
     await saveServerLimits({ bricks: { runsPerDay: 2 } }, jo.id);

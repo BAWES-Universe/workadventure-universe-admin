@@ -90,7 +90,7 @@ ALTER TABLE "brick_item_runs" ADD CONSTRAINT "brick_item_runs_item_id_fkey" FORE
 ALTER TABLE "brick_items" ADD CONSTRAINT "brick_items_kind_check" CHECK ("kind" IN ('reminder', 'schedule', 'watch', 'goal'));
 ALTER TABLE "brick_items" ADD CONSTRAINT "brick_items_state_check" CHECK ("state" IN ('on', 'paused', 'done', 'deleted'));
 ALTER TABLE "brick_items" ADD CONSTRAINT "brick_items_set_by_check" CHECK ("set_by" IN ('you', 'brick'));
-ALTER TABLE "brick_items" ADD CONSTRAINT "brick_items_paused_by_check" CHECK ("paused_by" IS NULL OR "paused_by" IN ('owner', 'brick_deleted'));
+ALTER TABLE "brick_items" ADD CONSTRAINT "brick_items_paused_by_check" CHECK ("paused_by" IS NULL OR "paused_by" IN ('owner', 'brick_deleted', 'goal'));
 -- Only something that is on is ever due
 ALTER TABLE "brick_items" ADD CONSTRAINT "brick_items_due_only_when_on" CHECK ("state" = 'on' OR "next_due_at" IS NULL);
 ALTER TABLE "brick_item_runs" ADD CONSTRAINT "brick_item_runs_state_check" CHECK ("state" IN ('claimed', 'done', 'failed', 'dropped'));
