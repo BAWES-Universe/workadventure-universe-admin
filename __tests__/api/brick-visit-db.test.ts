@@ -20,7 +20,8 @@ import { createBrick } from '@/lib/brick-create';
 import { checkBotAccess } from '@/lib/bot-access';
 import { credentialsForBot } from '@/lib/bot-ai-credentials';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
-import { endStaleVisits, startVisit, visitState, whereIsBrick } from '@/lib/brick-visit';
+import { endStaleVisits, placeOfRoomUrl, startVisit, visitState, whereIsBrick } from '@/lib/brick-visit';
+import { mayReadRoomBots, whoMayReadRoomBots } from '@/lib/bot-room-access';
 import { GET as getVisit, POST as postVisit, DELETE as deleteVisit } from '@/app/api/bricks/[id]/visit/route';
 import { POST as roomFeed } from '@/app/api/brick-visits/room/route';
 import { POST as sweep } from '@/app/api/bricks/sweep/route';
@@ -262,6 +263,34 @@ run('bringing a Brick along, in a real database', () => {
         await prisma.world.updateMany({ where: { universeId: universes.second.id }, data: { isPublic: true } });
       }
       expect(await feed(universes.second.roomUrl, [sara.uuid])).toHaveLength(1);
+    });
+
+    it('asks who may open a room for everyone found in it at once, with the same answer as asking about each (Sentry on #927)', async () => {
+      const everyone = [sara.id, omar.id, host.id, randomUUID()];
+      const check = async () => {
+        const place = (await placeOfRoomUrl(universes.second.roomUrl))!;
+        const together = await whoMayReadRoomBots(place.room, everyone);
+        for (const id of everyone) expect(together.has(id)).toBe(await mayReadRoomBots(place.room, id));
+        return together;
+      };
+      await check();
+      await prisma.universe.update({ where: { id: universes.second.id }, data: { isPublic: false } });
+      await prisma.room.updateMany({ where: { world: { universeId: universes.second.id } }, data: { isPublic: false } });
+      await prisma.world.updateMany({ where: { universeId: universes.second.id }, data: { isPublic: false } });
+      try {
+        const closed = await check();
+        // The universe's owner opens it; people who are not members do not, and nor does a person Orbit has no account for
+        expect([...closed].sort()).toEqual([host.id]);
+        const world = await prisma.world.findFirstOrThrow({ where: { universeId: universes.second.id } });
+        await prisma.worldMember.create({ data: { worldId: world.id, userId: omar.id } });
+        expect([...(await check())].sort()).toEqual([host.id, omar.id].sort());
+      } finally {
+        await prisma.worldMember.deleteMany({ where: { world: { universeId: universes.second.id } } });
+        await prisma.universe.update({ where: { id: universes.second.id }, data: { isPublic: true } });
+        await prisma.room.updateMany({ where: { world: { universeId: universes.second.id } }, data: { isPublic: true } });
+        await prisma.world.updateMany({ where: { universeId: universes.second.id }, data: { isPublic: true } });
+      }
+      expect((await whoMayReadRoomBots((await placeOfRoomUrl(universes.second.roomUrl))!.room, [])).size).toBe(0);
     });
 
     it('stops bringing a Brick when its universe turns the switch off, and when the Brick is switched off or deleted', async () => {
