@@ -237,7 +237,7 @@ run('bringing a Brick along, in a real database', () => {
       expect(await whereIsBrick(brickId, universes.open.roomUrl)).toBeNull();
       expect(await whereIsBrick(brickId, null)).toBeNull();
       expect(await whereIsBrick(brickId, universes.closed.roomUrl)).toBeNull();
-      expect((await chat(brickId, omar, 'chat', universes.open.roomUrl)).allowed).toBe(false);
+      expect((await chat(brickId, omar, 'chat', universes.open.roomUrl))?.allowed).toBe(false);
       // Back where visits are taken, it follows her again
       expect(await feed(universes.second.roomUrl, [sara.uuid])).toHaveLength(1);
     });
