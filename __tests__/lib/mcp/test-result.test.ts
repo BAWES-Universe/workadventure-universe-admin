@@ -144,7 +144,7 @@ describe('summarizeTestResult', () => {
     const legacy: McpTestResult = { success: true, toolCount: 37, toolNames: ['a'] };
     const summary = summarizeTestResult(legacy, { testedAt: '2026-07-31T10:00:00Z', now });
     expect(summary.tone).toBe('ok');
-    expect(summary.label).toBe('Connected — 37 tools');
+    expect(summary.label).toBe('Connected — it can do 37 things');
     expect(summary.detail).toBe('tested 53 days ago');
   });
 
@@ -169,7 +169,7 @@ describe('summarizeTestResult', () => {
       now,
     });
     expect(summary.tone).toBe('stale');
-    expect(summary.label).toBe('Connected — 37 tools');
+    expect(summary.label).toBe('Connected — it can do 37 things');
     expect(summary.detail).toContain('token expired');
     expect(summary.detail).toContain('re-authorize');
   });

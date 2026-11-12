@@ -215,7 +215,8 @@ export function summarizeTestResult(
   const tokenExpired = expiry !== null && !Number.isNaN(expiry.getTime()) && expiry.getTime() <= now.getTime();
 
   if (result.success) {
-    const label = `Connected — ${result.toolCount} tool${result.toolCount !== 1 ? 's' : ''}`;
+    // What an app brings reads "it can do 3 things" (I1): the word tool is never shown to a person
+    const label = `Connected — it can do ${result.toolCount} thing${result.toolCount !== 1 ? 's' : ''}`;
     const lastTested = age ? ` (last tested ${age})` : '';
     if (opts.reconnectRequired === true) {
       return {
