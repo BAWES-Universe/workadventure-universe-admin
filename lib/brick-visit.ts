@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getBrickLimits } from '@/lib/bot-limits';
-import { mayReadRoomBots } from '@/lib/bot-room-access';
+import { mayReadRoomBots, whoMayReadRoomBots } from '@/lib/bot-room-access';
 import { canManageBots } from '@/lib/bot-permissions';
 import { ownsBrick } from '@/lib/brick';
 import { parsePlayUri } from '@/lib/utils';
@@ -247,10 +247,8 @@ export async function bricksForRoom(roomUrl: string, peopleUuids: string[], now:
   });
   // A person is only seen in a room they may see: the bot server is told where people are by the game, and a visit never
   // moves to a room its person could not open
-  const seen: typeof here = [];
-  for (const row of here) {
-    if (await mayReadRoomBots(place.room, row.userId)) seen.push(row);
-  }
+  const mayRead = await whoMayReadRoomBots(place.room, here.map((row) => row.userId));
+  const seen = here.filter((row) => mayRead.has(row.userId));
   if (seen.length === 0) return { place, visiting: [] as VisitingBrickRow[] };
   const userIds = seen.map((row) => row.userId);
   if (!place.takesVisits) {
