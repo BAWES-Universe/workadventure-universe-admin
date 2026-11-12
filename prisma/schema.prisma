@@ -2219,6 +2219,8 @@ model BrickComputer {
   restoredFrom  DateTime? @map("restored_from")
   // Set while a rest is claimed and not finished, empty once it is done: a rest a stopped server left half way is told apart from a finished one
   restClaimedAt DateTime? @map("rest_claimed_at")
+  // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again
+  noticeDismissedJobId String? @map("notice_dismissed_job_id") @db.VarChar(40)
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 

@@ -78,7 +78,16 @@ export interface ComputerView {
   files: { bytes: number; savedAt: Date | null };
   /** The day its files came from, after a restore from a backup. */
   restoredFrom: Date | null;
+  /**
+   * How the last job ended, when the person should be told: it waited for them and nobody answered in time, or this month's computer
+   * time ran out. Only while it is the Brick's latest job and has not been dismissed: a newer job, or "dismiss", takes it away,
+   * and it is never asked again for an old job. Null for every other ending (done, stopped by the person, failed).
+   */
+  notice: { jobId: string; how: 'unanswered' | 'month'; endedAt: Date | null } | null;
 }
+
+/** The endings the person is told about; every other way a job ends says nothing. */
+const NOTICE_BY_ENDING: Partial<Record<EndedBy, 'unanswered' | 'month'>> = { unanswered: 'unanswered', allowance: 'month' };
 
 const toNumber = (value: bigint | number | null | undefined): number => (value === null || value === undefined ? 0 : Number(value));
 
@@ -180,7 +189,29 @@ export async function computerView(botId: string, ownerId: string, now: Date = n
     month: row?.enabled ? await monthOfPerson(ownerId, now) : null,
     files: { bytes: toNumber(row?.filesBytes), savedAt: row?.filesSavedAt ?? null },
     restoredFrom: row?.restoredFrom ?? null,
+    notice: await noticeOf(botId, row?.noticeDismissedJobId ?? null),
   };
+}
+
+/** The ending to tell the person about: the Brick's latest job, only if it ended for a reason they should hear and was not dismissed. */
+async function noticeOf(botId: string, dismissedJobId: string | null): Promise<ComputerView['notice']> {
+  const latest = await prisma.computerJob.findFirst({ where: { botId }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], select: { id: true, status: true, endedBy: true, endedAt: true } });
+  if (!latest || latest.status !== 'stopped' || latest.id === dismissedJobId) return null;
+  const how = NOTICE_BY_ENDING[latest.endedBy as EndedBy];
+  return how ? { jobId: latest.id, how, endedAt: latest.endedAt } : null;
+}
+
+export type Dismissed = { ok: true; view: ComputerView } | { ok: false; reason: 'not_found' };
+
+/**
+ * "Dismiss" on the notice: that job's ending is not shown again, on the page or in the chat. It names the job it was shown for, so a
+ * newer ending that arrived in between is not dismissed by mistake. Asked twice, or for a job that is not the notice, it changes nothing.
+ */
+export async function dismissComputerNotice(botId: string, ownerId: string, jobId: string, now: Date = new Date()): Promise<Dismissed> {
+  if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+  const view = await computerView(botId, ownerId, now);
+  if (view?.notice?.jobId === jobId) await prisma.brickComputer.updateMany({ where: { botId }, data: { noticeDismissedJobId: jobId } });
+  return { ok: true, view: (await computerView(botId, ownerId, now)) as ComputerView };
 }
 
 export type Given = { ok: true; view: ComputerView } | { ok: false; reason: 'not_found' | 'not_open' };

@@ -10,6 +10,7 @@ import { POST as stop } from '@/app/api/bricks/[id]/computer/stop/route';
 import { POST as takeOverRoute } from '@/app/api/bricks/[id]/computer/take-over/route';
 import { POST as handBackRoute } from '@/app/api/bricks/[id]/computer/hand-back/route';
 import { POST as fillRoute } from '@/app/api/bricks/[id]/computer/fill-details/route';
+import { POST as dismissRoute } from '@/app/api/bricks/[id]/computer/dismiss/route';
 import { GET as stateRoute, POST as startRoute } from '@/app/api/bots/[id]/computer-jobs/route';
 import { GET as getJobRoute, POST as jobAction } from '@/app/api/bots/[id]/computer-jobs/[jobId]/route';
 import { POST as sweepRoute } from '@/app/api/computer/sweep/route';
@@ -64,6 +65,7 @@ describe('the owner’s calls', () => {
     ['take over', (r) => takeOverRoute(r, params), 'POST'],
     ['hand back', (r) => handBackRoute(r, params), 'POST'],
     ['fill in details', (r) => fillRoute(r, params), 'POST'],
+    ['dismiss the notice', (r) => dismissRoute(r, params), 'POST'],
   ];
 
   it.each(calls)('%s is for a signed-in person: nobody gets a 401, a guest gets a 403, and nothing is read or changed', async (_name, run, method) => {
@@ -93,6 +95,7 @@ describe('the owner’s calls', () => {
     lib.takeOver.mockResolvedValue({ ok: false, reason: 'not_found' });
     lib.handBack.mockResolvedValue({ ok: false, reason: 'not_found' });
     lib.fillInDetails.mockResolvedValue({ ok: false, reason: 'not_found' });
+    lib.dismissComputerNotice.mockResolvedValue({ ok: false, reason: 'not_found' });
     const answers = await Promise.all([
       view(call('/x', { method: 'GET' }), params),
       give(call('/x'), params),
@@ -102,8 +105,21 @@ describe('the owner’s calls', () => {
       takeOverRoute(call('/x'), params),
       handBackRoute(call('/x'), params),
       fillRoute(call('/x'), params),
+      dismissRoute(call('/x', { body: { jobId: JOB } }), params),
     ]);
-    expect(answers.map((a) => a.status)).toEqual(Array(8).fill(404));
+    expect(answers.map((a) => a.status)).toEqual(Array(9).fill(404));
+  });
+
+  it('dismisses the notice of one named ending, for the person asking and nobody else', async () => {
+    lib.dismissComputerNotice.mockResolvedValue({ ok: true, view: { on: true } as never });
+    expect(await (await dismissRoute(call('/x', { body: { jobId: JOB, owner: 'u-omar' } }), params)).json()).toEqual({ computer: { on: true } });
+    expect(lib.dismissComputerNotice).toHaveBeenCalledWith(BRICK, 'u-sara', JOB);
+    // Without the ending it was shown for, nothing is dismissed
+    lib.dismissComputerNotice.mockClear();
+    expect((await dismissRoute(call('/x', { body: {} }), params)).status).toBe(400);
+    expect((await dismissRoute(call('/x'), params)).status).toBe(400);
+    expect((await dismissRoute(call('/x', { body: { jobId: 'x'.repeat(41) } }), params)).status).toBe(400);
+    expect(lib.dismissComputerNotice).not.toHaveBeenCalled();
   });
 
   it('says computers are not open yet where there is no provider', async () => {

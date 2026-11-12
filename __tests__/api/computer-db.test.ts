@@ -31,6 +31,7 @@ import {
   computerView,
   fillInDetails,
   detailsKey,
+  dismissComputerNotice,
   finishJob,
   giveComputer,
   handBack,
@@ -1187,6 +1188,103 @@ run('a Brick’s computer, in a real database', () => {
       const { jobId } = await waitingJob();
       await finishJob(jobId, 'done', minutes(1));
       expect(await planEffect(jobId, { key: 'k', kind: 'send' })).toEqual({ ok: false, reason: 'job_over' });
+    });
+  });
+
+  describe('telling the person how a job ended', () => {
+    // A job that waited for a person who never came, and one that stopped when the month ran out: only these two are told
+    async function unansweredJob(sara: { id: string; brickId: string }) {
+      await giveComputer(sara.brickId, sara.id);
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!a.ok) throw new Error('no');
+      await requestHandover(a.job.id, 'details', minutes(1));
+      await sweepComputers(minutes(62));
+      return a.job.id;
+    }
+
+    it('says nothing for a Brick that never ran a job, or whose job is still going', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      expect((await computerView(sara.brickId, sara.id))?.notice).toBeNull();
+      await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      expect((await computerView(sara.brickId, sara.id))?.notice).toBeNull();
+    });
+
+    it('says a handover ended because nobody answered, naming the job', async () => {
+      const sara = await person('sara');
+      const jobId = await unansweredJob(sara);
+      expect((await computerView(sara.brickId, sara.id, minutes(63)))?.notice).toMatchObject({ jobId, how: 'unanswered' });
+    });
+
+    it('says the month ran out when a running job could not renew its room', async () => {
+      const sara = await person('sara');
+      await setUp({ memberAllowanceMicros: 70_000 });
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      await renewJob(job.job.id, minutes(5));
+      expect((await computerView(sara.brickId, sara.id, minutes(6)))?.notice).toMatchObject({ jobId: job.job.id, how: 'month' });
+    });
+
+    it('says nothing for a job that finished, failed or was stopped by the person', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const done = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!done.ok) throw new Error('no');
+      await finishJob(done.job.id, 'done', minutes(2));
+      expect((await computerView(sara.brickId, sara.id, minutes(3)))?.notice).toBeNull();
+      const failed = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(4));
+      if (!failed.ok) throw new Error('no');
+      await finishJob(failed.job.id, 'failed', minutes(5));
+      expect((await computerView(sara.brickId, sara.id, minutes(6)))?.notice).toBeNull();
+      await startJob({ botId: sara.brickId, personId: sara.id, title: 'C' }, minutes(7));
+      await stopJobFor(sara.brickId, sara.id, minutes(8));
+      expect((await computerView(sara.brickId, sara.id, minutes(9)))?.notice).toBeNull();
+    });
+
+    it('takes the notice away when a new job comes, so it never shows for an old job', async () => {
+      const sara = await person('sara');
+      await unansweredJob(sara);
+      expect((await computerView(sara.brickId, sara.id, minutes(63)))?.notice).not.toBeNull();
+      await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(64));
+      expect((await computerView(sara.brickId, sara.id, minutes(65)))?.notice).toBeNull();
+      // And when that job ends in a way that says nothing, the old ending does not come back
+      const later = await prisma.computerJob.findFirstOrThrow({ where: { botId: sara.brickId, title: 'B' } });
+      await finishJob(later.id, 'done', minutes(66));
+      expect((await computerView(sara.brickId, sara.id, minutes(67)))?.notice).toBeNull();
+    });
+
+    it('dismiss takes the notice away for good, on every read, and asked twice changes nothing', async () => {
+      const sara = await person('sara');
+      const jobId = await unansweredJob(sara);
+      const dismissed = await dismissComputerNotice(sara.brickId, sara.id, jobId, minutes(63));
+      expect(dismissed.ok && dismissed.view.notice).toBeNull();
+      expect((await computerView(sara.brickId, sara.id, minutes(64)))?.notice).toBeNull();
+      expect((await dismissComputerNotice(sara.brickId, sara.id, jobId, minutes(65))).ok).toBe(true);
+      expect((await computerView(sara.brickId, sara.id, minutes(66)))?.notice).toBeNull();
+    });
+
+    it('dismiss names the ending it was shown for: a newer ending is not dismissed by a tap meant for an older one', async () => {
+      const sara = await person('sara');
+      const first = await unansweredJob(sara);
+      await dismissComputerNotice(sara.brickId, sara.id, first, minutes(63));
+      // A second job ends unanswered later
+      const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(70));
+      if (!b.ok) throw new Error('no');
+      await requestHandover(b.job.id, 'details', minutes(71));
+      await sweepComputers(minutes(140));
+      expect((await computerView(sara.brickId, sara.id, minutes(141)))?.notice).toMatchObject({ jobId: b.job.id, how: 'unanswered' });
+      // A late tap for the first one changes nothing: the second ending is still told
+      await dismissComputerNotice(sara.brickId, sara.id, first, minutes(142));
+      expect((await computerView(sara.brickId, sara.id, minutes(143)))?.notice).toMatchObject({ jobId: b.job.id });
+    });
+
+    it('lets only the Brick\'s owner dismiss', async () => {
+      const sara = await person('sara');
+      const omar = await person('omar');
+      const jobId = await unansweredJob(sara);
+      expect(await dismissComputerNotice(sara.brickId, omar.id, jobId, minutes(63))).toEqual({ ok: false, reason: 'not_found' });
+      expect((await computerView(sara.brickId, sara.id, minutes(64)))?.notice).toMatchObject({ jobId });
     });
   });
 

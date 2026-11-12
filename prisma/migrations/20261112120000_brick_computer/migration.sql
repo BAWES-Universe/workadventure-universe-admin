@@ -18,6 +18,7 @@ CREATE TABLE "brick_computers" (
     "files_saved_at" TIMESTAMP(3),
     "restored_from" TIMESTAMP(3),
     "rest_claimed_at" TIMESTAMP(3),
+    "notice_dismissed_job_id" VARCHAR(40),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP(3) NOT NULL,
 
