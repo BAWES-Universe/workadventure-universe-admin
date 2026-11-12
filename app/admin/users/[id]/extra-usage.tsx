@@ -97,7 +97,12 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
       const response = await authenticatedFetch(`/api/admin/users/${encodeURIComponent(userId)}/extra-usage`, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const data = (await response.json().catch(() => null)) as { usage?: PersonUsage; error?: string; code?: string } | null;
       // Something is already saved under this key (changed since, most likely): it was given once, so it counts as saved and nothing else is given
-      if (response.status === 409 && data?.code === 'key_used') {
+      if (method === 'POST' && response.status === 409) {
+        // The server's only 409 here is "that key is used". A 409 whose words can't be read may be that, so nothing else is given
+        if (data?.code !== 'key_used') {
+          addToast({ description: 'That didn’t save. Try again.', variant: 'error' });
+          return 'unsure';
+        }
         if (data.usage) setUsage(data.usage);
         return 'done';
       }

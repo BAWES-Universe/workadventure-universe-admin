@@ -189,13 +189,14 @@ describe('giving extra usage', () => {
 
   describe('when an answer never came back and the admin changes what they give', () => {
     /** The first try gets no answer (`first`); the same thing sent again gets `again`, and anything after that is saved. */
-    const setUpOffline = (first: { status: number } | 'offline', again: { ok: boolean; status: number } | 'offline') => {
+    const setUpOffline = (first: { status: number } | 'offline', again: { ok: boolean; status: number } | { status: number; unreadable: true } | 'offline') => {
       let attempt = 0;
       fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
         if (init?.method !== 'POST') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(usage()) });
         attempt += 1;
         const turn = attempt === 1 ? first : attempt === 2 ? again : null;
         if (turn === 'offline') return Promise.reject(new Error('offline'));
+        if (turn && 'unreadable' in turn) return Promise.resolve({ ok: false, status: turn.status, json: () => Promise.reject(new Error('not json')) });
         if (turn) return Promise.resolve({ ok: 'ok' in turn ? turn.ok : false, status: turn.status, json: () => Promise.resolve('ok' in turn && turn.ok ? { usage: usage({ extra: running({ grantKey: 'sara:key-1', multiplier: 5 }) }) } : { error: 'No', ...(turn.status === 409 ? { code: 'key_used' } : {}) }) });
         return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ usage: usage({ extra: running({ grantKey: 'sara:key-2' }) }) }) });
       });
@@ -224,6 +225,16 @@ describe('giving extra usage', () => {
       setUpOffline({ status: 503 }, { ok: false, status: 409 });
       await tryAndChange();
       await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'The last try went through. Use Change if that is not what you want now.' })));
+      expect(posts()).toHaveLength(2);
+      expect(posts()[1].grantKey).toBe(posts()[0].grantKey);
+    });
+
+    it('keeps the key and gives nothing else when a 409 comes back whose words cannot be read', async () => {
+      setUpOffline({ status: 503 }, { status: 409, unreadable: true });
+      await tryAndChange();
+      await waitFor(() => expect(posts()).toHaveLength(2));
+      await waitFor(() => expect((screen.getByTestId('extra-usage-confirm') as HTMLButtonElement).disabled).toBe(false));
+      // Nothing else was sent, and the key is still the first one's
       expect(posts()).toHaveLength(2);
       expect(posts()[1].grantKey).toBe(posts()[0].grantKey);
     });
