@@ -189,6 +189,15 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await openRequests()).map((request) => request.personId)).toEqual([sara.id]);
     });
 
+    it('keeps the moment of the ask as it was, whatever time zone the database session runs in', async () => {
+      await setUp();
+      const sara = await person('sara');
+      const at = new Date('2026-11-10T09:30:00.000Z');
+      const { request } = await askForMore(sara.id, at);
+      expect(request.createdAt.toISOString()).toBe(at.toISOString());
+      expect((await prisma.meterRequest.findFirstOrThrow({ where: { personId: sara.id } })).createdAt.toISOString()).toBe(at.toISOString());
+    });
+
     it('never fails when an admin answers the request while a person asks again', async () => {
       await setUp();
       const sara = await person('sara');
