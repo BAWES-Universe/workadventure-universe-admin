@@ -62,8 +62,20 @@ const STORE_ATTEMPTS = 3;
 /** Refresh-token errors that mean the token itself is dead, not our request. */
 const TERMINAL_REFRESH_ERROR_CODES = new Set(['invalid_grant', 'invalid_token']);
 
-/** Single-flight guard, keyed by connection id. */
+/** Single-flight guard, keyed by what holds the token (a bot's server row, or a person's connection). */
 const inFlight = new Map<string, Promise<RefreshOutcome>>();
+
+/**
+ * Where a token is kept: on a bot's own server row as before, or on a person's connection (#2001), which every Brick that was
+ * let use it shares. A connection is refreshed once for all of them.
+ */
+export type TokenHolder = { kind: 'server' | 'connection'; id: string };
+const holderKey = (holder: TokenHolder) => `${holder.kind}:${holder.id}`;
+
+/** How long one request may hold a connection's refresh before another may take it over (the token endpoint times out sooner). */
+export const LEASE_MS = REFRESH_TIMEOUT_MS * 2 + 5_000;
+/** How long a request that did not get the lease waits for the one that has it, looking every `WAIT_STEP_MS`. */
+const WAIT_STEP_MS = 250;
 
 function safeDecrypt(encrypted: string): string {
   try {
@@ -123,15 +135,16 @@ function extractTokenErrorDescription(parsed: Record<string, unknown> | null): s
  * is the one the provider considers current.
  */
 async function persistIfUnchanged(
-  serverId: string,
+  holder: TokenHolder,
   expectedEncrypted: string,
   config: McpOAuthConfig
 ): Promise<{ won: boolean; authConfig: string }> {
   const authConfig = encryptApiKey(JSON.stringify(config));
-  const result = await prisma.botMcpServer.updateMany({
-    where: { id: serverId, authConfig: expectedEncrypted },
-    data: { authConfig },
-  });
+  const where = { id: holder.id, authConfig: expectedEncrypted };
+  const result =
+    holder.kind === 'connection'
+      ? await prisma.appConnection.updateMany({ where, data: { authConfig } })
+      : await prisma.botMcpServer.updateMany({ where, data: { authConfig } });
   return { won: result.count === 1, authConfig };
 }
 
@@ -165,12 +178,12 @@ function sameIssuer(a: McpOAuthConfig, b: McpOAuthConfig): boolean {
 }
 
 async function readStoredConfig(
-  serverId: string
+  holder: TokenHolder
 ): Promise<{ encrypted: string; config: McpOAuthConfig } | null> {
-  const row = await prisma.botMcpServer.findUnique({
-    where: { id: serverId },
-    select: { authConfig: true },
-  });
+  const row =
+    holder.kind === 'connection'
+      ? await prisma.appConnection.findUnique({ where: { id: holder.id }, select: { authConfig: true } })
+      : await prisma.botMcpServer.findUnique({ where: { id: holder.id }, select: { authConfig: true } });
   if (!row?.authConfig) return null;
   const config = parseOAuthConfig(safeDecrypt(row.authConfig));
   if (!config) return null;
@@ -183,11 +196,14 @@ async function readStoredConfig(
  */
 export async function ensureFreshOAuthConfig(params: {
   serverId: string;
+  /** Set when the token is kept on a person's connection (#2001): it is then read, renewed and stored there, once for all of its Bricks. */
+  connectionId?: string | null;
   authConfig: string | null;
   serverUrl?: string | null;
   nowMs?: number;
 }): Promise<RefreshOutcome> {
-  const { serverId, authConfig, serverUrl = null, nowMs = Date.now() } = params;
+  const { serverId, connectionId = null, authConfig, serverUrl = null, nowMs = Date.now() } = params;
+  const holder: TokenHolder = connectionId ? { kind: 'connection', id: connectionId } : { kind: 'server', id: serverId };
 
   if (!authConfig) {
     return {
@@ -217,7 +233,7 @@ export async function ensureFreshOAuthConfig(params: {
 
     if (!config.reconnectRequired && config.accessToken) {
       // Authorized at some point and no longer renewable — record it.
-      return markTerminal(serverId, authConfig, config, reason, nowMs);
+      return markTerminal(holder, authConfig, config, reason, nowMs);
     }
 
     // Either already recorded, or never authorized: nothing to write. A connection
@@ -230,10 +246,12 @@ export async function ensureFreshOAuthConfig(params: {
     return { status: 'fresh', config, authConfig };
   }
 
-  const existing = inFlight.get(serverId);
+  const existing = inFlight.get(holderKey(holder));
   if (existing) return existing;
 
-  const pending = performRefresh(serverId, authConfig, config, serverUrl, nowMs)
+  const pending = (holder.kind === 'connection'
+    ? refreshUnderLease(holder, authConfig, config, serverUrl, nowMs)
+    : performRefresh(holder, authConfig, config, serverUrl, nowMs))
     .catch((error: unknown): RefreshOutcome => ({
       // Unexpected failure: transient by default. Never condemn a connection
       // permanently because of a bug in this code path.
@@ -243,15 +261,83 @@ export async function ensureFreshOAuthConfig(params: {
       reason: `The connection could not be refreshed: ${messageOf(error)}`,
     }))
     .finally(() => {
-      inFlight.delete(serverId);
+      inFlight.delete(holderKey(holder));
     });
 
-  inFlight.set(serverId, pending);
+  inFlight.set(holderKey(holder), pending);
   return pending;
 }
 
+/**
+ * A connection's refresh, one at a time across every server that runs Orbit (#2001): the request that wins the lease renews the
+ * token; the others wait for it and use what it stored. Two Bricks (or two requests) never present the same refresh token, so a
+ * provider that rotates it never signs the person out. The lease ends by itself after `LEASE_MS`, so a crash never blocks a
+ * connection for long, and the compare-and-set write below still guards the row either way.
+ */
+async function refreshUnderLease(
+  holder: TokenHolder,
+  encryptedConfig: string,
+  config: McpOAuthConfig,
+  serverUrl: string | null,
+  nowMs: number
+): Promise<RefreshOutcome> {
+  const claim = () =>
+    prisma.appConnection.updateMany({
+      where: { id: holder.id, OR: [{ refreshLeaseUntil: null }, { refreshLeaseUntil: { lt: new Date() } }] },
+      data: { refreshLeaseUntil: new Date(Date.now() + LEASE_MS) },
+    });
+  const deadline = Date.now() + LEASE_MS;
+  let claimed = (await claim()).count === 1;
+  while (!claimed) {
+    // Someone else is renewing it: look at what they stored instead of renewing a second time
+    await new Promise((resolve) => setTimeout(resolve, WAIT_STEP_MS));
+    const stored = await readStoredConfig(holder).catch(() => null);
+    if (stored && !needsRefresh(stored.config, Date.now()) && !!stored.config.accessToken) {
+      return { status: 'fresh', config: stored.config, authConfig: stored.encrypted };
+    }
+    if (stored && isReconnectRequired(stored.config, Date.now())) {
+      return {
+        status: 'reconnect_required',
+        config: stored.config,
+        authConfig: stored.encrypted,
+        reason: refreshBlockedReason(stored.config, Date.now()) ?? 'Reconnect required.',
+      };
+    }
+    claimed = (await claim()).count === 1;
+    if (!claimed && Date.now() > deadline) {
+      return {
+        status: 'unavailable',
+        config,
+        authConfig: encryptedConfig,
+        reason: 'Another request is renewing this connection. Try again in a moment.',
+      };
+    }
+  }
+  try {
+    // Read again now that the lease is ours: the one that held it may have renewed it just before
+    const stored = await readStoredConfig(holder).catch(() => null);
+    if (stored && stored.encrypted !== encryptedConfig) {
+      if (isReconnectRequired(stored.config, Date.now())) {
+        return {
+          status: 'reconnect_required',
+          config: stored.config,
+          authConfig: stored.encrypted,
+          reason: refreshBlockedReason(stored.config, Date.now()) ?? 'Reconnect required.',
+        };
+      }
+      if (!needsRefresh(stored.config, Date.now()) && !!stored.config.accessToken) {
+        return { status: 'fresh', config: stored.config, authConfig: stored.encrypted };
+      }
+      return performRefresh(holder, stored.encrypted, stored.config, serverUrl, nowMs);
+    }
+    return await performRefresh(holder, encryptedConfig, config, serverUrl, nowMs);
+  } finally {
+    await prisma.appConnection.updateMany({ where: { id: holder.id }, data: { refreshLeaseUntil: null } }).catch(() => undefined);
+  }
+}
+
 async function performRefresh(
-  serverId: string,
+  holder: TokenHolder,
   encryptedConfig: string,
   config: McpOAuthConfig,
   serverUrl: string | null,
@@ -259,7 +345,7 @@ async function performRefresh(
 ): Promise<RefreshOutcome> {
   if (!config.tokenUrl) {
     return markTerminal(
-      serverId,
+      holder,
       encryptedConfig,
       config,
       'No token endpoint is stored for this connection.',
@@ -270,7 +356,7 @@ async function performRefresh(
   const refreshToken = config.refreshToken;
   if (!refreshToken) {
     return markTerminal(
-      serverId,
+      holder,
       encryptedConfig,
       config,
       'The provider issued no refresh token, so this connection cannot be renewed automatically.',
@@ -353,7 +439,7 @@ async function performRefresh(
 
     const detail = extractTokenErrorDescription(parsedBody) ?? errorCode ?? `HTTP ${response.status}`;
     return markTerminal(
-      serverId,
+      holder,
       encryptedConfig,
       config,
       `The provider rejected the stored refresh token (${detail}). Reconnect to authorize this connection again.`,
@@ -371,7 +457,7 @@ async function performRefresh(
 
   if (!tokenResponse.access_token) {
     return markTerminal(
-      serverId,
+      holder,
       encryptedConfig,
       config,
       'The token endpoint returned no access token.',
@@ -383,7 +469,7 @@ async function performRefresh(
 
   let persisted: { won: boolean; authConfig: string };
   try {
-    persisted = await persistIfUnchanged(serverId, encryptedConfig, updated);
+    persisted = await persistIfUnchanged(holder, encryptedConfig, updated);
   } catch (error) {
     // Refusing to hand out a token that is not stored: the next request would
     // present the old one and fail in a far more confusing way.
@@ -396,7 +482,7 @@ async function performRefresh(
   }
 
   if (!persisted.won) {
-    let current = await readStoredConfig(serverId).catch(() => null);
+    let current = await readStoredConfig(holder).catch(() => null);
 
     // Only a pair another writer stored counts. A row that still holds the pair this
     // refresh started from lost the race to something else (a settings save, say), and
@@ -444,14 +530,14 @@ async function performRefresh(
         };
       }
       const toStore = current ? withRefreshedTokens(current.config, updated) : updated;
-      const stored = await persistIfUnchanged(serverId, current?.encrypted ?? encryptedConfig, toStore).catch(
+      const stored = await persistIfUnchanged(holder, current?.encrypted ?? encryptedConfig, toStore).catch(
         () => null
       );
       if (stored?.won) {
         return { status: 'refreshed', config: toStore, authConfig: stored.authConfig };
       }
 
-      current = await readStoredConfig(serverId).catch(() => null);
+      current = await readStoredConfig(holder).catch(() => null);
       if (holdsUsablePair(current)) {
         return { status: 'refreshed', config: current!.config, authConfig: current!.encrypted };
       }
@@ -472,7 +558,7 @@ async function performRefresh(
 }
 
 async function markTerminal(
-  serverId: string,
+  holder: TokenHolder,
   encryptedConfig: string,
   config: McpOAuthConfig,
   reason: string,
@@ -480,7 +566,7 @@ async function markTerminal(
 ): Promise<RefreshOutcome> {
   const marked = markReconnectRequired(config, reason, nowMs);
   try {
-    const persisted = await persistIfUnchanged(serverId, encryptedConfig, marked);
+    const persisted = await persistIfUnchanged(holder, encryptedConfig, marked);
     if (persisted.won) {
       // Hand back the blob that was actually written, never the one this call started
       // from. A caller serves `authConfig` to the bot as its credentials while deriving
@@ -492,7 +578,7 @@ async function markTerminal(
 
     // Someone else wrote while we were in flight. If they stored a usable token
     // (a human just reconnected), adopt it instead of recording our verdict.
-    const current = await readStoredConfig(serverId).catch(() => null);
+    const current = await readStoredConfig(holder).catch(() => null);
     if (current && !!current.config.accessToken && !isAccessTokenStale(current.config, nowMs, 0)) {
       return { status: 'refreshed', config: current.config, authConfig: current.encrypted };
     }

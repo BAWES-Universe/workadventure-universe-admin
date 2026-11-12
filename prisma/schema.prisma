@@ -57,6 +57,8 @@ model User {
   botToolsConfirmed BotMcpTool[] @relation("BotToolConfirmedBy")
   botToolsMoved     BotMcpTool[] @relation("BotToolMovedBy")
   botServersConnected BotMcpServer[] @relation("BotMcpServerConnectedBy")
+  appConnections    AppConnection[] @relation("AppConnectionOwner")
+  appConnectionsMade AppConnection[] @relation("AppConnectionConnectedBy")
   botConversations BotsConversation[]
   botMemories      BotsMemory[]
   avatarGrants     UserAvatarGrant[]
@@ -1050,15 +1052,58 @@ model BotMcpServer {
   // Who connected it last (a sign-in, a key or a token), the person told when its sign-in expires. Null for connections
   // made before this was kept: the bot's maker is told instead.
   connectedById      String?   @map("connected_by_id")
+  // Set when this row is a Brick's grant on a person's connection (#2001): the link, sign-in, extra headers and the sign-in
+  // lost fields above are then read from the connection and never copied, and what is kept here is the Brick's own: its
+  // four headings, its tools and their confirmations, its switch. Null for every app set up on a bot as before.
+  connectionId       String?   @map("connection_id")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
   bot         Bot           @relation(fields: [botId], references: [id], onDelete: Cascade)
+  connection  AppConnection? @relation(fields: [connectionId], references: [id], onDelete: Cascade)
   connectedBy User?         @relation("BotMcpServerConnectedBy", fields: [connectedById], references: [id], onDelete: SetNull)
   tools       BotMcpTool[]
 
+  @@unique([botId, connectionId])
   @@index([botId])
+  @@index([connectionId])
   @@map("bot_mcp_servers")
+}
+
+// An app a person connected once (#2001, game "Apps"): the link, the sign-in, key or token (encrypted as a bot's server's is),
+// the extra headers, who connected it and the sign-in lost fields. It belongs to ONE person and is used only for that person's
+// own requests. A Brick of theirs uses it through a grant, which is a BotMcpServer row with this id; no bot has one by default.
+// Removing the connection deletes every grant with it (onDelete cascade), so every Brick stops at once.
+model AppConnection {
+  id          String   @id @default(uuid())
+  ownerId     String   @map("owner_id")
+  name        String   @db.VarChar(255)
+  serverUrl   String   @map("server_url") @db.Text
+  authType    String   @default("none") @map("auth_type") @db.VarChar(20)   // none | bearer | api-key | oauth
+  authConfig  String?  @map("auth_config") @db.Text                          // encrypted JSON
+  headers     Json?
+  // Where it came from: link = the person pasted its link ("Added by you"); listed = an entry of the super admin's list
+  source      String   @default("link") @db.VarChar(20)
+  // The one ticket a sign-in page may bring back: set when a sign-in starts, cleared when it is used, so a replayed return, or
+  // one from a sign-in that a newer start replaced, is refused
+  signInNonce        String?   @map("sign_in_nonce") @db.VarChar(64)
+  // Held while one request renews the token, so two never spend the same refresh token (a rotating one would sign the person out)
+  refreshLeaseUntil  DateTime? @map("refresh_lease_until")
+  // What the bot server last saw (the same fields a bot's server has, game #1819); a reconnect clears them
+  signInLostAt       DateTime? @map("sign_in_lost_at")
+  signInLostStatus   Int?      @map("sign_in_lost_status")
+  noAnswerAt         DateTime? @map("no_answer_at")
+  reconnectedAt      DateTime? @map("reconnected_at")
+  connectedById      String?   @map("connected_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  owner       User     @relation("AppConnectionOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  connectedBy User?    @relation("AppConnectionConnectedBy", fields: [connectedById], references: [id], onDelete: SetNull)
+  grants      BotMcpServer[]
+
+  @@index([ownerId])
+  @@map("app_connections")
 }
 
 // One tool of a bot's MCP server (#738): what the server says it is, what we suggest it does, and what a person with
