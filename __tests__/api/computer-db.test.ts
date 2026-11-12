@@ -413,6 +413,20 @@ run('a Brick’s computer, in a real database', () => {
       expect((await takeOver(sara.brickId, sara.id, minutes(36))).ok).toBe(true);
     });
 
+    it('a Brick with a long line cannot crowd the others out of the sweep: every Brick still gets its turn', async () => {
+      const sara = await person('sara');
+      const tom = await person('tom');
+      await giveComputer(sara.brickId, sara.id);
+      await giveComputer(tom.brickId, tom.id);
+      const long = new Date(NOW.getTime() - 60 * 60_000);
+      // Sara's line is longer than one sweep looks at, and all of it is older than Tom's job
+      await prisma.computerJob.createMany({ data: Array.from({ length: 205 }, (_, i) => ({ botId: sara.brickId, personId: sara.id, title: `S${i}`, status: 'queued', queuedFor: 'busy', createdAt: new Date(long.getTime() + i) })) });
+      const lone = await prisma.computerJob.create({ data: { botId: tom.brickId, personId: tom.id, title: 'T', status: 'queued', queuedFor: 'busy', createdAt: NOW } });
+      const swept = await sweepComputers(minutes(1));
+      expect(swept.started).toBeGreaterThanOrEqual(2);
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: lone.id } })).toMatchObject({ status: 'running' });
+    });
+
     it('a job still in line cannot be finished: only one that started can be done or failed', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);

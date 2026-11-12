@@ -560,7 +560,7 @@ export async function sweepComputers(now: Date = new Date()): Promise<{ stopped:
   }
   // A machine that was being made when its job died, and never got a reference: nothing was made, so it can be tried again
   await prisma.brickComputer.updateMany({ where: { machine: 'waking', providerRef: null, updatedAt: { lte: new Date(now.getTime() - 5 * 60 * 1000) } }, data: { machine: 'none' } });
-  const lines = await prisma.computerJob.findMany({ where: { status: 'queued' }, select: { id: true, botId: true }, orderBy: { createdAt: 'asc' }, take: 200 });
+  const lines = await prisma.computerJob.findMany({ where: { status: 'queued' }, select: { id: true, botId: true }, orderBy: { createdAt: 'asc' }, distinct: ['botId'], take: 200 });
   const tried = new Set<string>();
   for (const line of lines) {
     // One try per Brick: the oldest job in line has the turn
