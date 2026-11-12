@@ -723,6 +723,8 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH): Pr
         return tx.brickItemRun.findUniqueOrThrow({ where: { id: made[0].id }, include: RUN_INCLUDE });
       });
     } catch (error) {
+      // What was decided inside the transaction did not commit, so nothing is handed out for it: the notice is owed still and comes with a later ask
+      notice = null;
       console.error('[BrickItems] Could not claim a due item:', error instanceof Error ? error.message : 'unknown');
     }
     if (claimed) out.push(claimedOf(claimed));
