@@ -127,6 +127,8 @@ export interface CostsReport {
   guests: GuestRow[];
   days: DayRow[];
   asked: AskedRow[];
+  /** How many more are waiting than the list shows. */
+  askedMore: number;
   given: GivenRow[];
 }
 
@@ -134,6 +136,8 @@ export interface CostsReport {
 /** How many of the grants that already ended the given list keeps, beside the ones running and the ones still to bill. */
 export const GIVEN_RECENT = 50;
 export const COSTS_LISTED = 10;
+/** How many people waiting for more are listed one by one; the rest are counted, and show as these are answered. */
+export const ASKED_LISTED = 200;
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -141,7 +145,8 @@ const DAY = 24 * 60 * 60 * 1000;
 export function readDay(value: unknown): Date | null {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
   const date = new Date(`${value}T00:00:00.000Z`);
-  return Number.isNaN(date.getTime()) ? null : date;
+  // 2026-02-30 would roll over to 2 March, which is a different day from the one asked for
+  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value ? null : date;
 }
 
 const isoDay = (date: Date) => date.toISOString().slice(0, 10);
@@ -235,11 +240,11 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
         (COUNT(DISTINCT person_key) FILTER (WHERE person_key LIKE 'person:%'))::int AS people,
         COALESCE(SUM(cost_micros) FILTER (WHERE payer_kind = 'universe'), 0)::bigint AS cost
       FROM meter_events WHERE ${inRange} GROUP BY 1 ORDER BY 1 DESC`),
-    // A disk is a level, not something that adds up: the newest size recorded for each bot
+    // A disk is a level, not something that adds up: the newest size recorded for each bot, as it stood when the dates end
     prisma.$queryRaw<{ bytes: bigint | null }[]>(Prisma.sql`
       SELECT COALESCE(SUM(latest.quantity), 0)::bigint AS bytes FROM (
         SELECT DISTINCT ON (bot_id) quantity FROM meter_events
-        WHERE kind = 'stored_bytes' AND payer_kind = 'universe' AND bot_id IS NOT NULL
+        WHERE kind = 'stored_bytes' AND payer_kind = 'universe' AND bot_id IS NOT NULL AND occurred_at < ${until}
         ORDER BY bot_id, occurred_at DESC, recorded_at DESC
       ) latest`),
     getMeterSettings(),
@@ -282,20 +287,22 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
   };
   const goes: GoesRow[] = [row('models', 'AI models', ['model_call']), row('voice', 'Voice', ['speech']), row('computers', 'Computers', ['computer_time', 'size_change']), row('apps', 'Apps', ['app_use']), files];
 
-  const costMicros = [...byKind.values()].reduce((sum, group) => sum + toNumber(group.ours), 0);
+  // Guests of a Brick are paid for from their own table, so their cost is added to the headline as well
+  const costMicros = [...byKind.values()].reduce((sum, group) => sum + toNumber(group.ours), 0) + guestRows.reduce((sum, guest) => sum + toNumber(guest.cost), 0);
 
   // Names, Wokas and extra usage for the people and Bricks listed
   const listedPeople = peopleRows.slice(0, COSTS_LISTED);
   const listedBricks = brickRows.slice(0, COSTS_LISTED);
   // The given list is every grant still running or waiting to start, every one still to bill, and the latest few that ended. A cap
   // on all of them would drop a running or unbilled grant once enough newer ones exist.
-  const recentIds = (await prisma.meterGrant.findMany({ orderBy: { createdAt: 'desc' }, take: GIVEN_RECENT, select: { id: true } })).map((grant) => grant.id);
-  const [shownGrants, requests, bots] = await Promise.all([
+  const recentIds = (await prisma.meterGrant.findMany({ where: { endsAt: { lte: now } }, orderBy: { createdAt: 'desc' }, take: GIVEN_RECENT, select: { id: true } })).map((grant) => grant.id);
+  const [shownGrants, requests, openCount, bots] = await Promise.all([
     prisma.meterGrant.findMany({
       where: { OR: [{ endsAt: { gt: now } }, { settlement: 'to_bill', billedAt: null }, { id: { in: recentIds } }] },
       orderBy: { createdAt: 'desc' },
     }),
-    prisma.meterRequest.findMany({ where: { answeredAt: null }, orderBy: { createdAt: 'asc' }, take: 200 }),
+    prisma.meterRequest.findMany({ where: { answeredAt: null }, orderBy: { createdAt: 'asc' }, take: ASKED_LISTED }),
+    prisma.meterRequest.count({ where: { answeredAt: null } }),
     prisma.bot.findMany({ where: { id: { in: listedBricks.map((brick) => brick.bot_id) } }, select: { id: true, name: true, ownerId: true } }),
   ]);
   // Each person's other grants count too: two that overlap a month share its spending, so the figures need all of a person's grants
@@ -400,6 +407,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     guests,
     days: dayRows.map((day) => ({ day: isoDay(day.day), people: day.people, costMicros: toNumber(day.cost) })),
     asked,
+    askedMore: Math.max(0, openCount - requests.length),
     given,
   };
 }

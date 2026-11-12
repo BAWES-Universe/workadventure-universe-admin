@@ -1529,6 +1529,8 @@ model MeterRequest {
   // The extra usage that answered it
   grantKey   String?   @map("grant_key") @db.VarChar(255)
 
+  // The migration also makes a partial unique index (one open request per person and thing: person_id, what WHERE answered_at
+  // IS NULL), which Prisma cannot write here. The code does not need it to be right, it only closes the same-moment race.
   @@index([personId, answeredAt])
   @@map("meter_requests")
 }

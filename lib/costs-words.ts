@@ -4,6 +4,9 @@ import type { CostsReport, GivenRow } from '@/lib/meter-costs';
 
 const plural = (value: number, one: string, many: string) => `${value.toLocaleString('en')} ${value === 1 ? one : many}`;
 
+/** The longest range one Costs request may ask for, so the page never builds a year of figures by accident (the page and the route share it). */
+export const COSTS_MAX_DAYS = 366;
+
 export const dollars = (micros: number): string => {
   const amount = micros / 1_000_000;
   // Small amounts keep their cents ($0.31); a cost under a cent is "less than a cent" rather than a lie of $0.00

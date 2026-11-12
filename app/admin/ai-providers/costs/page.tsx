@@ -7,7 +7,7 @@ import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import { Context, EntityRow, Figure, Figures, LoadError, LoadingRows, PageHeader, SectionHeader, StatLine } from '../../components/ds';
 import { WokaAvatar } from '../../components/profile-card';
 import styles from '../../components/ds/ds.module.css';
-import { amountWords, computerTime, day, didLine, dollars, givenDates, givenPill, goesLines } from '@/lib/costs-words';
+import { COSTS_MAX_DAYS, amountWords, computerTime, day, didLine, dollars, givenDates, givenPill, goesLines } from '@/lib/costs-words';
 import type { CostsReport, Sure } from '@/lib/meter-costs';
 
 /** How sure a figure is: the same quiet pill as Public and Private. */
@@ -62,8 +62,9 @@ export default function CostsPage() {
   }, [range.from, range.to, replacePage]);
 
   // Figures only ever belong to the dates showing: while the dates are not a usable range, none are shown
-  const datesReady = !!range.from && !!range.to && range.from <= range.to;
-  const datesWords = !range.from || !range.to ? 'Pick both dates to see the costs.' : 'The first date comes after the last one. Put them in order to see the costs.';
+  const span = range.from && range.to ? (new Date(range.to).getTime() - new Date(range.from).getTime()) / 86400000 : null;
+  const datesReady = span !== null && span >= 0 && span < COSTS_MAX_DAYS;
+  const datesWords = span === null ? 'Pick both dates to see the costs.' : span < 0 ? 'The first date comes after the last one. Put them in order to see the costs.' : `Pick dates that are at most ${COSTS_MAX_DAYS} days apart to see the costs.`;
 
   useEffect(() => {
     if (datesReady) load();
@@ -173,6 +174,11 @@ export default function CostsPage() {
               ))}
             </div>
             {asked.length === 0 && <p className="text-sm text-muted-foreground">Nobody is waiting.</p>}
+            {report.askedMore > 0 && (
+              <p className="mt-3 text-sm text-muted-foreground" data-testid="costs-asked-more">
+                {report.askedMore.toLocaleString('en')} more {report.askedMore === 1 ? 'person is' : 'people are'} waiting. They show here as the ones above are answered.
+              </p>
+            )}
           </section>
 
           <section aria-labelledby="costs-given" className="min-w-0" data-testid="costs-given">

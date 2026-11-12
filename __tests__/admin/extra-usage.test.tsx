@@ -12,6 +12,11 @@ jest.mock('@/components/ui/toast', () => ({ useToast: () => ({ addToast: mockAdd
 
 import { ExtraUsage } from '@/app/admin/users/[id]/extra-usage';
 import type { PersonUsage } from '@/lib/meter-person';
+import { day } from '@/lib/costs-words';
+
+// The running grant ends 20 days from now, so the tests never depend on today's date
+const ENDS = new Date(Date.now() + 20 * 86_400_000);
+const endsOn = day(ENDS.toISOString());
 
 const usage = (over: Partial<PersonUsage> = {}): PersonUsage => ({
   chatWeekMicros: 6_120_000,
@@ -31,7 +36,7 @@ const running = (over: object = {}): NonNullable<PersonUsage['extra']> => ({
   multiplier: 5,
   noLimit: false,
   startsAt: new Date().toISOString(),
-  endsAt: '2026-11-30T20:00:00.000Z',
+  endsAt: ENDS.toISOString(),
   givenById: 'admin',
   givenByName: 'Khalid',
   settlement: 'to_bill',
@@ -49,10 +54,12 @@ function answer(first: PersonUsage, after?: PersonUsage) {
 
 const bodyOf = (method: string) => JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === method)?.[1].body));
 
+let keys = 0;
 beforeEach(() => {
+  keys = 0;
   fetchMock.mockReset();
   mockAddToast.mockReset();
-  Object.defineProperty(globalThis.crypto ?? (globalThis as unknown as { crypto: object }).crypto, 'randomUUID', { value: () => 'key-1', configurable: true });
+  Object.defineProperty(globalThis.crypto ?? (globalThis as unknown as { crypto: object }).crypto, 'randomUUID', { value: () => `key-${++keys}`, configurable: true });
 });
 
 describe('what a person uses', () => {
@@ -71,6 +78,12 @@ describe('what a person uses', () => {
     expect(await screen.findByText('Computer · $3.10 of $25.00 this month · 1.2 GB kept')).toBeTruthy();
     unmount();
     answer(usage({ allowanceMicros: null, noLimit: true, extra: running({ multiplier: null, noLimit: true }) }));
+    render(<ExtraUsage userId="sara" name="Sara" />);
+    expect(await screen.findByText('Computer · $3.10 this month, no limit · 1.2 GB kept')).toBeTruthy();
+  });
+
+  it('says no limit first when a no-limit grant runs and the usual allowance is not set', async () => {
+    answer(usage({ allowanceSet: false, allowanceMicros: null, noLimit: true, extra: running({ multiplier: null, noLimit: true }) }));
     render(<ExtraUsage userId="sara" name="Sara" />);
     expect(await screen.findByText('Computer · $3.10 this month, no limit · 1.2 GB kept')).toBeTruthy();
   });
@@ -100,11 +113,11 @@ describe('someone asked for more', () => {
     expect(screen.queryByText('On the usual allowance, like every member.')).toBeNull();
   });
 
-  it('shows the request no more once extra usage is running', async () => {
+  it('still shows the request while extra usage runs, since a raised allowance can be used up too', async () => {
     answer(usage({ asked: { at: new Date().toISOString() }, extra: running() }));
     render(<ExtraUsage userId="sara" name="Sara" />);
-    expect(await screen.findByText(/Extra usage until 30 Nov/)).toBeTruthy();
-    expect(screen.queryByText('Sara asked for more')).toBeNull();
+    expect(await screen.findByText(new RegExp(`Extra usage until ${endsOn}`))).toBeTruthy();
+    expect(screen.getByText('Sara asked for more')).toBeTruthy();
   });
 });
 
@@ -132,7 +145,7 @@ describe('giving extra usage', () => {
     expect(new Date(sent.endsAt).getTime()).toBeGreaterThan(Date.now() + 6 * 86_400_000);
     expect(new Date(sent.endsAt).getTime()).toBeLessThan(Date.now() + 8 * 86_400_000);
     // The page then shows it running, as a gift: nothing to bill
-    expect(await screen.findByText(/Extra usage until 30 Nov/)).toBeTruthy();
+    expect(await screen.findByText(new RegExp(`Extra usage until ${endsOn}`))).toBeTruthy();
     expect(screen.queryByText('Mark as billed')).toBeNull();
   });
 
@@ -146,6 +159,32 @@ describe('giving extra usage', () => {
     fireEvent.click(screen.getByTestId('extra-usage-confirm'));
     await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(true));
     expect(bodyOf('POST')).toMatchObject({ amount: 'five', settlement: 'to_bill', note: 'Agreed with Sara on 11 Nov' });
+  });
+
+  it('keeps the same key when an answer never came back, and makes a new one once the server has said no', async () => {
+    let attempt = 0;
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
+      if (init?.method !== 'POST') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(usage()) });
+      attempt += 1;
+      if (attempt === 1) return Promise.reject(new Error('offline'));
+      if (attempt === 2) return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'No' }) });
+      return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ usage: usage({ extra: running({ settlement: 'gift' }) }) }) });
+    });
+    render(<ExtraUsage userId="sara" name="Sara" />);
+    fireEvent.click(await screen.findByTestId('extra-usage-give'));
+    const keysSent = () => fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST').map(([, init]) => JSON.parse(String(init.body)).grantKey);
+    fireEvent.click(screen.getByTestId('extra-usage-confirm'));
+    await waitFor(() => expect(keysSent()).toHaveLength(1));
+    // No answer: the sheet is closed and opened again, and the same thing sent again keeps the same key
+    await waitFor(() => expect((screen.getByTestId('extra-usage-confirm') as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTestId('extra-usage-confirm'));
+    await waitFor(() => expect(keysSent()).toHaveLength(2));
+    expect(keysSent()[1]).toBe(keysSent()[0]);
+    // The server said no to that one, so the next try is a new request with a new key
+    await waitFor(() => expect((screen.getByTestId('extra-usage-confirm') as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTestId('extra-usage-confirm'));
+    await waitFor(() => expect(keysSent()).toHaveLength(3));
+    expect(keysSent()[2]).not.toBe(keysSent()[1]);
   });
 
   it('keeps the sheet open and says why when it was turned down', async () => {
@@ -164,7 +203,7 @@ describe('extra usage that is running', () => {
   it('says what it is, who gave it and whether it is to bill, with Change, End it now and Mark as billed', async () => {
     answer(usage({ extra: running() }));
     render(<ExtraUsage userId="sara" name="Sara" />);
-    expect(await screen.findByText('Extra usage until 30 Nov')).toBeTruthy();
+    expect(await screen.findByText(`Extra usage until ${endsOn}`)).toBeTruthy();
     expect(screen.getByText(/5 times the usual · given by Khalid today · to bill/)).toBeTruthy();
     expect(screen.getByText('Agreed with Sara on 11 Nov')).toBeTruthy();
     for (const label of ['Change', 'End it now', 'Mark as billed']) expect(screen.getByRole('button', { name: label })).toBeTruthy();
@@ -203,6 +242,16 @@ describe('extra usage that is running', () => {
     fireEvent.click(screen.getByRole('radio', { name: /No limit/ }));
     fireEvent.click(screen.getByTestId('extra-usage-confirm'));
     await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PATCH')).toBe(true));
-    expect(bodyOf('PATCH')).toMatchObject({ grantKey: 'sara:k1', action: 'change', amount: 'none' });
+    // Only what changed is sent: the end date and the note were not touched
+    expect(bodyOf('PATCH')).toEqual({ grantKey: 'sara:k1', action: 'change', amount: 'none' });
+  });
+
+  it('sends nothing when nothing was changed', async () => {
+    answer(usage({ extra: running({ multiplier: 2 }) }));
+    render(<ExtraUsage userId="sara" name="Sara" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change' }));
+    fireEvent.click(await screen.findByTestId('extra-usage-confirm'));
+    await waitFor(() => expect(screen.queryByText('Change Sara’s extra usage')).toBeNull());
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PATCH')).toBe(false);
   });
 });

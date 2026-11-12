@@ -28,7 +28,7 @@ const report = (over: Partial<CostsReport> = {}): CostsReport => ({
   people: {
     rows: [
       { id: 'khalid', name: 'Khalid', woka: [], costMicros: 11_900_000, bricks: 3, replies: 264, appUses: 96, computerSeconds: 26 * 3600, extraUntil: null },
-      { id: 'sara', name: 'Sara', woka: [], costMicros: 6_120_000, bricks: 2, replies: 188, appUses: 41, computerSeconds: 9 * 3600, extraUntil: '2026-11-30T20:00:00.000Z' },
+      { id: 'sara', name: 'Sara', woka: [], costMicros: 6_120_000, bricks: 2, replies: 188, appUses: 41, computerSeconds: 9 * 3600, extraUntil: '2026-11-30T12:00:00.000Z' },
     ],
     total: 38,
     more: { count: 36, costMicros: 21_780_000 },
@@ -49,9 +49,10 @@ const report = (over: Partial<CostsReport> = {}): CostsReport => ({
   guests: [{ universeKey: 'u1', name: 'BAWES Universe', guests: 61, replies: 148, costMicros: 1_320_000 }],
   days: [{ day: '2026-11-10', people: 31, costMicros: 8_900_000 }],
   asked: [{ personId: 'sara', name: 'Sara', woka: [], askedAt: new Date().toISOString() }],
+  askedMore: 0,
   given: [
-    { grantKey: 'g1', personId: 'sara', name: 'Sara', woka: [], multiplier: 5, noLimit: false, startsAt: '2026-11-10T09:00:00.000Z', endsAt: '2026-11-30T20:00:00.000Z', ended: false, givenByName: 'Khalid', settlement: 'to_bill', billedAt: null, note: null, aboveUsualMicros: 4_200_000 },
-    { grantKey: 'g2', personId: 'faisal', name: 'Faisal', woka: [], multiplier: 2, noLimit: false, startsAt: '2026-11-01T09:00:00.000Z', endsAt: '2026-11-07T12:00:00.000Z', ended: true, givenByName: 'Khalid', settlement: 'gift', billedAt: null, note: null, aboveUsualMicros: 1_100_000 },
+    { grantKey: 'g1', personId: 'sara', name: 'Sara', woka: [], multiplier: 5, noLimit: false, startsAt: '2026-11-10T12:00:00.000Z', endsAt: '2026-11-30T12:00:00.000Z', ended: false, givenByName: 'Khalid', settlement: 'to_bill', billedAt: null, note: null, aboveUsualMicros: 4_200_000 },
+    { grantKey: 'g2', personId: 'faisal', name: 'Faisal', woka: [], multiplier: 2, noLimit: false, startsAt: '2026-11-01T12:00:00.000Z', endsAt: '2026-11-07T12:00:00.000Z', ended: true, givenByName: 'Khalid', settlement: 'gift', billedAt: null, note: null, aboveUsualMicros: 1_100_000 },
   ],
   ...over,
 });
@@ -204,6 +205,22 @@ describe('the Costs page', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(screen.getByText('$39.80')).toBeTruthy();
     expect(screen.queryByText('$1.00')).toBeNull();
+  });
+
+  it('says how many more are waiting when the list is longer than it shows', async () => {
+    answer(report({ askedMore: 3 }));
+    render(<CostsPage />);
+    expect((await screen.findByTestId('costs-asked-more')).textContent).toBe('3 more people are waiting. They show here as the ones above are answered.');
+  });
+
+  it('asks for a shorter range instead of sending one the route would turn down', async () => {
+    answer();
+    render(<CostsPage />);
+    await screen.findByTestId('costs-goes');
+    fetchMock.mockClear();
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: '2020-01-01' } });
+    expect((await screen.findByTestId('costs-dates-note')).textContent).toBe('Pick dates that are at most 366 days apart to see the costs.');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('sends someone who is not a super admin away, and says when it could not load', async () => {

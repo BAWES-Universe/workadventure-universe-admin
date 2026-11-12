@@ -17,13 +17,16 @@ export interface OpenRequest {
 
 /** Asks for more. Returns the open request and whether this call made it (a second ask while one waits makes nothing new). */
 export async function askForMore(personId: string, now: Date = new Date()): Promise<{ request: OpenRequest; created: boolean }> {
-  // The partial unique index makes two taps at the same moment one request. If an admin answers the open one between the
-  // insert finding it and our read of it, the next round simply asks again.
+  // One request is open per person. The insert only makes one when none is open, and the partial unique index (made by the
+  // migration) turns two taps at the same moment into one; "ON CONFLICT DO NOTHING" names no index, so it still works on a
+  // database built from the schema alone, where that index does not exist. If an admin answers the open one between the insert
+  // finding it and our read of it, the next round simply asks again.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const made = await prisma.$queryRaw<{ id: string; person_id: string; what: string; created_at: Date }[]>(Prisma.sql`
       INSERT INTO "meter_requests" ("id", "person_id", "what", "created_at")
-      VALUES (${randomUUID()}, ${personId}, 'computer', ${now})
-      ON CONFLICT ("person_id", "what") WHERE "answered_at" IS NULL DO NOTHING
+      SELECT ${randomUUID()}::text, ${personId}::text, 'computer', ${now}::timestamp
+      WHERE NOT EXISTS (SELECT 1 FROM "meter_requests" WHERE "person_id" = ${personId} AND "what" = 'computer' AND "answered_at" IS NULL)
+      ON CONFLICT DO NOTHING
       RETURNING "id", "person_id", "what", "created_at"`);
     if (made[0]) return { request: { id: made[0].id, personId: made[0].person_id, what: made[0].what, createdAt: made[0].created_at }, created: true };
     const open = await prisma.meterRequest.findFirst({ where: { personId, what: 'computer', answeredAt: null } });

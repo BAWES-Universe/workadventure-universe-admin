@@ -2,12 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { costsReport, readDay } from '@/lib/meter-costs';
+import { COSTS_MAX_DAYS } from '@/lib/costs-words';
 
 export const runtime = 'nodejs';
 
 const DAY = 24 * 60 * 60 * 1000;
-/** The longest range one request may ask for, so the page never builds a year of figures by accident. */
-const MAX_DAYS = 366;
 
 /**
  * GET /api/admin/meter-costs?from=2026-11-04&to=2026-11-10 - what Universe AI costs us from the meter's books (game #1999): our
@@ -24,7 +23,7 @@ export async function GET(request: NextRequest) {
   const from = params.get('from') ? readDay(params.get('from')) : to ? new Date(to.getTime() - 6 * DAY) : null;
   if (!from || !to) return NextResponse.json({ error: 'from and to must be dates like 2026-11-04' }, { status: 400 });
   if (to < from) return NextResponse.json({ error: 'The end date is before the start date' }, { status: 400 });
-  if ((to.getTime() - from.getTime()) / DAY >= MAX_DAYS) return NextResponse.json({ error: `Pick at most ${MAX_DAYS} days` }, { status: 400 });
+  if ((to.getTime() - from.getTime()) / DAY >= COSTS_MAX_DAYS) return NextResponse.json({ error: `Pick at most ${COSTS_MAX_DAYS} days` }, { status: 400 });
   try {
     return NextResponse.json(await costsReport(from, to, now));
   } catch (error) {

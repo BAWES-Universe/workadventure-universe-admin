@@ -20,7 +20,7 @@ import { GrantRefused, changeGrant, endGrantNow, markGrantBilled, recordGrant, r
 import { answerRequests, askForMore, openRequests } from '@/lib/meter-requests';
 import { memberUsage } from '@/lib/meter-usage';
 import { personUsage } from '@/lib/meter-person';
-import { costsReport } from '@/lib/meter-costs';
+import { costsReport, readDay } from '@/lib/meter-costs';
 import { checkReplyAllowance } from '@/lib/reply-limits';
 import { readMeterEvent, type MeterEventInput } from '@/lib/meter-values';
 import { GET as usageGet } from '@/app/api/me/usage/route';
@@ -271,7 +271,7 @@ run('usage for people, and cost for us, in a real database', () => {
     it('answers an open request, and gives the person room in computer time too', async () => {
       await setUp();
       const sara = await person('sara');
-      await spendComputer(sara, 1_000);
+      await spendComputer(sara, 1_000, new Date());
       await askForMore(sara.id);
       asAdmin();
       const given = await personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, { grantKey: randomUUID(), amount: 'five', endsAt: new Date(Date.now() + 10 * 86_400_000).toISOString(), settlement: 'to_bill', note: 'Agreed with Sara' }), { params: Promise.resolve({ id: sara.id }) });
@@ -286,7 +286,7 @@ run('usage for people, and cost for us, in a real database', () => {
     it('leaves a newer ask open when an old grant is sent again', async () => {
       await setUp();
       const sara = await person('sara');
-      await spendComputer(sara, 1_000);
+      await spendComputer(sara, 1_000, new Date());
       await askForMore(sara.id, new Date(Date.now() - 1_000));
       asAdmin();
       const key = randomUUID();
@@ -298,6 +298,24 @@ run('usage for people, and cost for us, in a real database', () => {
       await askForMore(sara.id);
       expect((await send()).status).toBe(200);
       expect((await openRequests()).map((request) => request.personId)).toEqual([sara.id]);
+    });
+
+    it('leaves no request waiting when extra usage lands while a person is asking', async () => {
+      await setUp();
+      for (let round = 0; round < 8; round++) {
+        const who = await person(`racer${round}`);
+        await spendComputer(who, 1_000, new Date());
+        session.mockResolvedValue({ id: who.id, email: `${who.id}@example.test` });
+        const grant = (async () => {
+          const given = await recordGrant({ grantKey: `g-${tag}-room-${round}`, personId: who.id, settlement: 'gift', multiplier: 5, startsAt: new Date(), endsAt: new Date(Date.now() + 10 * 86_400_000), givenById: who.id });
+          await answerRequests(who.id, given.grant.grantKey, new Date(), given.grant.startsAt);
+        })();
+        const [asked] = await Promise.all([askPost(body('POST', '/api/me/usage/ask-for-more', {})), grant]);
+        expect([200, 201, 409]).toContain(asked.status);
+        // There is room again, so nothing is left waiting, whichever of the two came first
+        expect((await memberUsage(who.id, new Date())).computer?.canAskForMore).toBe(false);
+        expect((await openRequests()).filter((request) => request.personId === who.id)).toEqual([]);
+      }
     });
 
     it('is given once however many times it is sent: a double tap, a retry', async () => {
@@ -352,8 +370,9 @@ run('usage for people, and cost for us, in a real database', () => {
       // Ended and changed together: it ends and stays ended, whichever came first
       const results = await Promise.allSettled([endGrantNow(live.grant.grantKey, NOW), changeGrant(live.grant.grantKey, { endsAt: days(30) }, NOW)]);
       const after = await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: live.grant.grantKey } });
-      if (results[1].status === 'fulfilled') expect(after.endsAt.getTime()).toBeGreaterThan(NOW.getTime());
-      else expect(after.endsAt).toEqual(NOW);
+      // Ending always wins, in whichever order they ran: a change that came first is overwritten by the end, one that came after is refused
+      expect(results[0]).toMatchObject({ status: 'fulfilled', value: 'ended' });
+      expect(after.endsAt).toEqual(NOW);
       // Billed first: a later change is refused and writes nothing
       const owed = await recordGrant({ ...base, grantKey: `g-${tag}-r2`, settlement: 'to_bill', multiplier: 2, endsAt: days(5) });
       await markGrantBilled(owed.grant.grantKey, NOW);
@@ -518,7 +537,39 @@ run('usage for people, and cost for us, in a real database', () => {
         { universeKey: universe.id, name: `Guest place ${tag}`, guests: 2, replies: 3, costMicros: 600 },
         { universeKey: 'outside', name: 'Outside any universe', guests: 1, replies: 1, costMicros: 50 },
       ]);
+      // Their cost is part of the headline too (a failed reply cost nothing)
+      expect(report.totals.costMicros).toBe(650);
       await prisma.universe.delete({ where: { id: universe.id } });
+    });
+
+    it('counts the disk as it stood when the dates end, and reads only real calendar days', async () => {
+      const sara = await person('sara');
+      const disk = (id: string, bytes: number, at: Date) => recordMeterEvent(event({ eventId: `${id}-${tag}`, kind: 'stored_bytes', unit: 'byte', quantity: bytes, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, costMicros: 0, occurredAt: at }));
+      await disk('disk-in', 1_000_000_000, new Date('2026-11-14T12:00:00Z'));
+      await disk('disk-after', 9_000_000_000, new Date('2026-11-20T12:00:00Z'));
+      const report = await costsReport(range.from, range.to, NOW);
+      expect(report.goes.find((row) => row.key === 'files')?.bytes).toBe(1_000_000_000);
+      expect(readDay('2026-02-30')).toBeNull();
+      expect(readDay('2026-13-01')).toBeNull();
+      expect(readDay('2026-02-28')).toEqual(new Date('2026-02-28T00:00:00Z'));
+    });
+
+    it('keeps the recent places for ended grants, however many newer ones still run', async () => {
+      const sara = await person('sara');
+      const base = { personId: sara.id, givenById: sara.id, settlement: 'gift' as const, multiplier: 2 };
+      await recordGrant({ ...base, grantKey: `g-${tag}-old`, startsAt: days(-30), endsAt: days(-20) });
+      for (let i = 0; i < 55; i++) await recordGrant({ ...base, grantKey: `g-${tag}-run-${i}`, startsAt: days(-1), endsAt: days(10) });
+      const report = await costsReport(range.from, range.to, NOW);
+      expect(report.given.some((row) => row.grantKey === `g-${tag}-old` && row.ended)).toBe(true);
+      expect(report.given.filter((row) => !row.ended)).toHaveLength(55);
+    });
+
+    it('counts the people waiting beyond the ones listed', async () => {
+      const sara = await person('sara');
+      await prisma.meterRequest.createMany({ data: Array.from({ length: 202 }, (_, i) => ({ personId: sara.id, what: `thing-${i}`, createdAt: hours(-i) })) });
+      const report = await costsReport(range.from, range.to, NOW);
+      expect(report.asked).toHaveLength(200);
+      expect(report.askedMore).toBe(2);
     });
 
     it('lists who asked for more, and everything given with "To bill" or "A gift" and what it cost above the usual', async () => {

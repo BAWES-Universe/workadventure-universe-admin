@@ -4,7 +4,7 @@
 // nothing is switched on per person (Khalid, 11 Nov). Amounts are multiples of the usual on purpose. A gift is never owed; "I'll bill
 // for it" only records what was agreed outside Universe, and the person sees one plain line and nothing about billing.
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Info, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -42,8 +42,9 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
   // A gift is never owed. "I'll bill for it" only marks it on the Costs page: nothing in Universe takes money, and the person sees no bill.
   const [bill, setBill] = useState<Billing>('gift');
   const [note, setNote] = useState('');
-  // The sheet makes one key when it opens, so a double tap gives the extra usage once
-  const [grantKey, setGrantKey] = useState('');
+  // One key per thing the admin asked for: a double tap, or a second try after an answer that never came back, gives the extra
+  // usage once. It is kept until the server has answered (saved or refused), and a different request gets a new key.
+  const pendingKey = useRef<{ key: string; sig: string } | null>(null);
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
@@ -81,11 +82,11 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
       setBill('gift');
       setNote('');
     }
-    setGrantKey(crypto.randomUUID());
     setOpen(true);
   }
 
-  async function send(method: 'POST' | 'PATCH', body: Record<string, unknown>): Promise<boolean> {
+  /** `done`: saved. `refused`: the server said no, so nothing was given. `unsure`: no answer came back, so it may have been saved. */
+  async function send(method: 'POST' | 'PATCH', body: Record<string, unknown>): Promise<'done' | 'refused' | 'unsure'> {
     setSaving(true);
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
@@ -93,13 +94,14 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
       const data = (await response.json().catch(() => null)) as { usage?: PersonUsage; error?: string } | null;
       if (!response.ok) {
         addToast({ description: data?.error || 'That didn’t save. Try again.', variant: 'error' });
-        return false;
+        // A 5xx may have saved before it failed; anything else is a plain no
+        return response.status >= 500 ? 'unsure' : 'refused';
       }
       if (data?.usage) setUsage(data.usage);
-      return true;
+      return 'done';
     } catch {
       addToast({ description: 'That didn’t save. Check your connection and try again.', variant: 'error' });
-      return false;
+      return 'unsure';
     } finally {
       setSaving(false);
     }
@@ -110,8 +112,10 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
 
   const extra = usage.extra;
   const used = dollars(usage.computerMonthMicros);
-  const computer = !usage.allowanceSet ? `${used} this month` : usage.noLimit ? `${used} this month, no limit` : `${used} of ${dollars(usage.allowanceMicros ?? 0)} this month`;
-  const asked = usage.asked && !extra;
+  // No limit shows first: a running no-limit grant counts even when the usual allowance is not set
+  const computer = usage.noLimit ? `${used} this month, no limit` : !usage.allowanceSet ? `${used} this month` : `${used} of ${dollars(usage.allowanceMicros ?? 0)} this month`;
+  // An ask shows beside a running grant too: someone can use up a raised allowance and ask again
+  const asked = usage.asked;
 
   return (
     <div className="grid min-w-0 gap-3" data-testid="extra-usage">
@@ -237,10 +241,24 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
               disabled={!endsOn || saving}
               data-testid="extra-usage-confirm"
               onClick={async () => {
-                const done = changing && extra
-                  ? await send('PATCH', { grantKey: extra.grantKey, action: 'change', amount, endsAt: ends.toISOString(), note: extra.settlement === 'to_bill' ? note : undefined })
-                  : await send('POST', { grantKey, amount, endsAt: ends.toISOString(), settlement: bill, note: bill === 'to_bill' ? note : null });
-                if (done) setOpen(false);
+                if (changing && extra) {
+                  // Only what the admin changed is sent, so another admin's change is not undone and an end date nobody touched does not move
+                  const change: Record<string, unknown> = { grantKey: extra.grantKey, action: 'change' };
+                  if (amount !== amountOf(extra)) change.amount = amount;
+                  if (!(until === 'date' && date === dateInput(new Date(extra.endsAt)))) change.endsAt = ends.toISOString();
+                  if (extra.settlement === 'to_bill' && note !== (extra.note ?? '')) change.note = note;
+                  if (Object.keys(change).length === 2) {
+                    setOpen(false);
+                    return;
+                  }
+                  if ((await send('PATCH', change)) === 'done') setOpen(false);
+                  return;
+                }
+                const sig = JSON.stringify({ amount, until, date: until === 'date' ? date : null, bill, note: bill === 'to_bill' ? note : null });
+                if (pendingKey.current?.sig !== sig) pendingKey.current = { key: crypto.randomUUID(), sig };
+                const outcome = await send('POST', { grantKey: pendingKey.current.key, amount, endsAt: ends.toISOString(), settlement: bill, note: bill === 'to_bill' ? note : null });
+                if (outcome !== 'unsure') pendingKey.current = null;
+                if (outcome === 'done') setOpen(false);
               }}
             >
               {saving && <Loader2 size={16} className="animate-spin" aria-hidden="true" />}
