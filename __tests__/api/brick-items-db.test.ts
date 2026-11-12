@@ -217,9 +217,9 @@ run('goals and tasks, in a real database', () => {
     const eli = await person('eli');
     const item = await set(eli, { kind: 'schedule', cadence: { type: 'every', minutes: 60 } });
     const [started] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === item.id);
-    expect(await checkRun(started.runId, started.attempt)).toEqual({ ok: true });
+    expect(await checkRun(started.runId, started.attempt, at(HOUR + 2 * MIN))).toEqual({ ok: true });
     await changeItem(eli.brickId, item.id, { userId: eli.uuid, action: 'pause' }, at(HOUR + 2 * MIN));
-    expect(await checkRun(started.runId, started.attempt)).toEqual({ ok: false, reason: 'paused' });
+    expect(await checkRun(started.runId, started.attempt, at(HOUR + 2 * MIN))).toEqual({ ok: false, reason: 'paused' });
     const reported = await finishRun(started.runId, { attempt: started.attempt, state: 'done', outcome: 'spoke', result: 'Sent it' }, at(HOUR + 3 * MIN));
     expect(reported).toMatchObject({ ok: true, applied: false });
     // The run is still in the record as it was reported
@@ -230,11 +230,11 @@ run('goals and tasks, in a real database', () => {
     const second = await set(eli, { kind: 'schedule', cadence: { type: 'every', minutes: 60 } });
     const [other] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === second.id);
     await changeItem(eli.brickId, second.id, { userId: eli.uuid, action: 'change', change: { words: 'Only the important things' } }, at(HOUR + 2 * MIN));
-    expect(await checkRun(other.runId, other.attempt)).toEqual({ ok: false, reason: 'changed' });
+    expect(await checkRun(other.runId, other.attempt, at(HOUR + 2 * MIN))).toEqual({ ok: false, reason: 'changed' });
     await changeItem(eli.brickId, second.id, { userId: eli.uuid, action: 'done' }, at(HOUR + 3 * MIN));
     const reopened = await changeItem(eli.brickId, second.id, { userId: eli.uuid, action: 'reopen' }, at(HOUR + 4 * MIN));
     expect(reopened).toMatchObject({ ok: true, item: { state: 'on', revision: 4 } });
-    expect(await checkRun(other.runId, other.attempt)).toMatchObject({ ok: false });
+    expect(await checkRun(other.runId, other.attempt, at(HOUR + 2 * MIN))).toMatchObject({ ok: false });
   });
 
   it('a one-off ends with its one run, a watch that spoke moves to Done, and a failed run is on record at once and counted', async () => {
@@ -348,7 +348,7 @@ run('goals and tasks, in a real database', () => {
     const [inFlight] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === item.id);
     expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: item.id } })).toMatchObject({ state: 'on', nextDueAt: null });
     await changeItem(pia.brickId, item.id, { userId: pia.uuid, action: 'change', change: { words: 'Call the dentist about the crown' } }, at(HOUR + 2 * MIN));
-    expect(await checkRun(inFlight.runId, inFlight.attempt)).toEqual({ ok: false, reason: 'changed' });
+    expect(await checkRun(inFlight.runId, inFlight.attempt, at(HOUR + 2 * MIN))).toEqual({ ok: false, reason: 'changed' });
     expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: item.id } })).toMatchObject({ state: 'on', nextDueAt: at(HOUR + 2 * MIN) });
     const again = (await claimDueRuns(at(HOUR + 3 * MIN))).filter((one) => one.itemId === item.id && one.runId !== inFlight.runId);
     expect(again).toMatchObject([{ words: 'Call the dentist about the crown', revision: 2, attempt: 1 }]);
@@ -454,10 +454,19 @@ run('goals and tasks, in a real database', () => {
     const [first] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === item.id);
     const [second] = (await claimDueRuns(at(HOUR + 20 * MIN))).filter((one) => one.runId === first.runId);
     expect([first.attempt, second.attempt]).toEqual([1, 2]);
-    expect(await checkRun(first.runId, first.attempt)).toEqual({ ok: false, reason: 'stale' });
+    expect(await checkRun(first.runId, first.attempt, at(HOUR + 21 * MIN))).toEqual({ ok: false, reason: 'stale' });
     expect(await finishRun(first.runId, { attempt: first.attempt, state: 'done' }, at(HOUR + 21 * MIN))).toMatchObject({ ok: false, status: 409 });
-    expect(await checkRun(second.runId, second.attempt)).toEqual({ ok: true });
+    expect(await checkRun(second.runId, second.attempt, at(HOUR + 21 * MIN))).toEqual({ ok: true });
     expect(await finishRun(second.runId, { attempt: second.attempt, state: 'done', outcome: 'quiet' }, at(HOUR + 22 * MIN))).toMatchObject({ ok: true, applied: true });
+  });
+
+  it('a try past its lease takes no new outside step, but its report is still taken while it is the latest try', async () => {
+    const ula = await person('ula');
+    const item = await set(ula, { kind: 'schedule', cadence: { type: 'every', minutes: 60 } });
+    const [run] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === item.id);
+    expect(await checkRun(run.runId, run.attempt, at(HOUR + 5 * MIN))).toEqual({ ok: true });
+    expect(await checkRun(run.runId, run.attempt, at(HOUR + 12 * MIN))).toEqual({ ok: false, reason: 'expired' });
+    expect(await finishRun(run.runId, { attempt: run.attempt, state: 'done', outcome: 'quiet' }, at(HOUR + 13 * MIN))).toMatchObject({ ok: true, applied: true });
   });
 
   it('a run lost while its Brick was off is not handed out again, and a one-off comes back due now', async () => {

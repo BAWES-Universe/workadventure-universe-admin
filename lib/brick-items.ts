@@ -633,19 +633,22 @@ export const runReportSchema = z
   })
   .strict();
 
-export type RunCheck = { ok: true } | { ok: false; reason: 'changed' | 'paused' | 'done' | 'deleted' | 'off' | 'finished' | 'not_found' | 'stale' };
+export type RunCheck = { ok: true } | { ok: false; reason: 'changed' | 'paused' | 'done' | 'deleted' | 'off' | 'finished' | 'not_found' | 'stale' | 'expired' };
 
 /**
  * May this run take its next step? Asked by the bot server before every step that reaches outside Universe (a send, a
  * change in an app, paying), not once per run: the answer is no from the moment a change to the item is saved, or its Brick
  * is switched off or deleted, so nothing new starts and anything already sent is reconciled.
  */
-export async function checkRun(runId: string, attempt: number): Promise<RunCheck> {
+export async function checkRun(runId: string, attempt: number, now: Date = new Date()): Promise<RunCheck> {
   const run = await prisma.brickItemRun.findUnique({ where: { id: runId }, include: { item: { include: { bot: { select: { enabled: true, deletedAt: true } } } } } });
   if (!run) return { ok: false, reason: 'not_found' };
   if (run.state !== 'claimed') return { ok: false, reason: 'finished' };
   // Handed out again to another try: this one stops, so it can never carry on beside the newer one
   if (run.attempts !== attempt) return { ok: false, reason: 'stale' };
+  // Past its lease (the longest-run setting) a try has given the run up: it takes no new outside step, whether or not another try has
+  // been handed the run yet. Its report is still taken while it is the latest try, so what it already did is on record, never done twice.
+  if (run.leaseUntil <= now) return { ok: false, reason: 'expired' };
   const { item } = run;
   if (item.state === 'paused') return { ok: false, reason: 'paused' };
   if (item.state === 'done') return { ok: false, reason: 'done' };

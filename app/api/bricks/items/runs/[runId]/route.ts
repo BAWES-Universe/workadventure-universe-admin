@@ -9,7 +9,7 @@ export const runtime = 'nodejs';
  * GET /api/bricks/items/runs/:runId
  * May this run take its next step? Asked before every step that reaches outside Universe, not once per run. The answer is no
  * from the moment the item is paused, finished, deleted or changed, or its Brick is switched off or deleted.
- * Takes ?attempt=N (the try it holds), and the answer is no (stale) for an older try after the run was handed out again.
+ * Takes ?attempt=N (the try it holds), and the answer is no (stale) for an older try after the run was handed out again, and no (expired) once its lease has passed.
  * Answers { ok: true } or { ok: false, reason }.
  *
  * Auth: service token only.
