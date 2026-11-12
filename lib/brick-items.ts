@@ -36,6 +36,8 @@ export type ItemState = (typeof ITEM_STATES)[number];
 /** Times a run that was claimed but never reported is handed out again (with the same run id) before it counts as failed. */
 const MAX_TRIES = 3;
 const MINUTE = 60 * 1000;
+/** Inside the scheduler only, never a setting: a run this far behind its time is told as late. */
+const LATE_GRACE = 15 * MINUTE;
 const DAY = 24 * 60 * MINUTE;
 /** How many due items one ask for work looks at. The next ask takes the rest. */
 const CLAIM_BATCH = 50;
@@ -431,7 +433,7 @@ export interface ClaimedRun {
   /** The occurrence this run is for; a late one still says when it was due. */
   dueAt: string;
   revision: number;
-  /** A reminder or briefing that comes after an outage: say "Late (due 8:00)". */
+  /** A reminder or briefing that comes after an outage: Brick says so in its own words ("I ran the 8:00 check now, 20 minutes late"). */
   late: boolean;
   /** A watch or goal check run after an outage: one fresh check, nothing replayed. */
   fresh: boolean;
@@ -544,7 +546,7 @@ export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH):
         const dueAt = item.nextDueAt!;
         const cadence = readCadence(item.cadence);
         const behind = now.getTime() - dueAt.getTime();
-        const overdue = behind > limits.lateAfter * MINUTE;
+        const overdue = behind > LATE_GRACE;
         const reminderLike = item.kind === 'reminder' || item.kind === 'schedule';
 
         // Runs a day: watches, schedules and goals together, per person. A reminder is fixed text with no AI and never uses them.
@@ -647,7 +649,8 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
     }
     // A one-off ends with its one run: once it was sent, or when that run failed (it has no next time to come back on, so left on
     // it would sit there forever and count against the person's limit). The failed run stays in "Everything Brick did".
-    const oneOffSent = cadence?.type === 'once' && (report.state === 'done' || (report.state === 'failed' && kind !== 'goal'));
+    // A goal is never a one-off: it lasts until the outcome is reached (goalReached below), whatever its first check was.
+    const oneOffSent = kind !== 'goal' && cadence?.type === 'once' && (report.state === 'done' || report.state === 'failed');
     // A watch speaks only when its condition is met, says so once, then moves to Done (Reopen starts it again)
     const watchSpoke = kind === 'watch' && report.state === 'done' && report.outcome === 'spoke';
     const goalReached = kind === 'goal' && report.state === 'done' && report.reached === true;

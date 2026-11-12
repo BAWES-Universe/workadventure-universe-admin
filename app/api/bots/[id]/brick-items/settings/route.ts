@@ -22,8 +22,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (!userId) return NextResponse.json({ error: 'userId is required' }, { status: 400 });
     const answer = await itemSettings(id, userId);
     if (!answer.ok) return itemsRefused(answer);
-    const { itemsPerPerson, shortestRepeat, runsPerDay, longestRun, lateAfter } = answer.limits;
-    return NextResponse.json({ timeZone: answer.timeZone, workdays: answer.workdays, limits: { itemsPerPerson, shortestRepeat, runsPerDay, longestRun, lateAfter } });
+    const { itemsPerPerson, shortestRepeat, runsPerDay, longestRun } = answer.limits;
+    return NextResponse.json({ timeZone: answer.timeZone, workdays: answer.workdays, limits: { itemsPerPerson, shortestRepeat, runsPerDay, longestRun } });
   } catch (error) {
     return itemsFailed(error, 'Reading settings');
   }

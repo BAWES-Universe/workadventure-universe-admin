@@ -666,19 +666,6 @@ export function brickLimits(values: BrickLimits): Limit[] {
         { value: 30, label: '30 minutes', meaning: 'For longer work.' },
       ],
     },
-    {
-      id: 'lateAfter',
-      label: 'Minutes after its time before a run is marked Late',
-      hint: 'After an outage a reminder or briefing still comes once, marked “Late (due 8:00)”.',
-      unit: 'minutes',
-      value: values.lateAfter,
-      recommended: recommended.lateAfter,
-      options: [
-        { value: 5, label: '5 minutes', meaning: 'Marks it quickly.' },
-        { value: 15, label: '15 minutes', meaning: 'A steady pace.' },
-        { value: 60, label: '1 hour', meaning: 'Only a long delay.' },
-      ],
-    },
   ], LIMIT_RANGES.bricks);
 }
 
