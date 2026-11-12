@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { GRANT_SETTLEMENTS, type GrantSettlement } from '@/lib/meter-values';
 
@@ -165,7 +166,20 @@ export async function changeGrant(grantKey: string, change: GrantChange, now: Da
   const endsAt = change.endsAt ?? row.endsAt;
   if (!(endsAt > now)) throw new GrantRefused('Extra usage must end in the future. To stop it now, use End it now.');
   const note = change.note === undefined ? row.note : change.note?.trim() ? change.note.trim().slice(0, 1000) : null;
-  const updated = await prisma.meterGrant.update({ where: { grantKey }, data: { multiplier, noLimit, endsAt, note } });
+  // Only what was changed is written, and only while the grant is still running and not billed: two admins at the same moment
+  // cannot reopen an ended grant, change a billed one, or undo each other's other fields.
+  const data: Prisma.MeterGrantUpdateManyMutationInput = {};
+  if (change.multiplier !== undefined || change.noLimit !== undefined) Object.assign(data, { multiplier, noLimit });
+  if (change.endsAt !== undefined) data.endsAt = endsAt;
+  if (change.note !== undefined) data.note = note;
+  const { count } = await prisma.meterGrant.updateMany({ where: { grantKey, billedAt: null, endsAt: { gt: now } }, data });
+  if (count === 0) {
+    const now2 = await prisma.meterGrant.findUnique({ where: { grantKey } });
+    if (!now2) throw new GrantRefused('That extra usage does not exist');
+    if (now2.billedAt) throw new GrantRefused('That extra usage is marked billed. Give a new one instead.');
+    throw new GrantRefused('That extra usage has ended. Give a new one instead.');
+  }
+  const updated = await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey } });
   return view(updated);
 }
 
@@ -174,10 +188,14 @@ export async function endGrantNow(grantKey: string, now: Date = new Date()): Pro
   const row = await prisma.meterGrant.findUnique({ where: { grantKey }, select: { startsAt: true, endsAt: true } });
   if (!row) return 'not_found';
   if (row.endsAt <= now) return 'already_ended';
-  // One that has not started yet never runs: it ends where it would have begun, and the database holds an end after a start
+  // One that has not started yet never runs: it ends where it would have begun, and the database holds an end after a start.
+  // Only a grant still running is written, so two admins ending it at the same moment (or one changing it) cannot reopen it.
   const never = row.startsAt >= now;
-  await prisma.meterGrant.update({ where: { grantKey }, data: never ? { startsAt: new Date(now.getTime() - 1000), endsAt: now } : { endsAt: now } });
-  return 'ended';
+  const { count } = await prisma.meterGrant.updateMany({
+    where: { grantKey, endsAt: { gt: now } },
+    data: never ? { startsAt: new Date(now.getTime() - 1000), endsAt: now } : { endsAt: now },
+  });
+  return count > 0 ? 'ended' : 'already_ended';
 }
 
 /** A person's extra usage, newest first. */

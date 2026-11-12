@@ -324,6 +324,26 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(await runningExtra(sara.id, days(4))).toBeNull();
     });
 
+    it('keeps every change and never reopens a grant when two admins act at the same moment', async () => {
+      const sara = await person('sara');
+      const base = { personId: sara.id, givenById: sara.id, startsAt: days(-1) };
+      const live = await recordGrant({ ...base, grantKey: `g-${tag}-r1`, settlement: 'to_bill', multiplier: 2, endsAt: days(5) });
+      // Two different fields changed together: both stay
+      await Promise.all([changeGrant(live.grant.grantKey, { multiplier: 4 }, NOW), changeGrant(live.grant.grantKey, { note: 'Agreed on a call' }, NOW)]);
+      const row = await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: live.grant.grantKey } });
+      expect(row).toMatchObject({ multiplier: 4, note: 'Agreed on a call' });
+      // Ended and changed together: it ends and stays ended, whichever came first
+      const results = await Promise.allSettled([endGrantNow(live.grant.grantKey, NOW), changeGrant(live.grant.grantKey, { endsAt: days(30) }, NOW)]);
+      const after = await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: live.grant.grantKey } });
+      if (results[1].status === 'fulfilled') expect(after.endsAt.getTime()).toBeGreaterThan(NOW.getTime());
+      else expect(after.endsAt).toEqual(NOW);
+      // Billed first: a later change is refused and writes nothing
+      const owed = await recordGrant({ ...base, grantKey: `g-${tag}-r2`, settlement: 'to_bill', multiplier: 2, endsAt: days(5) });
+      await markGrantBilled(owed.grant.grantKey, NOW);
+      await expect(changeGrant(owed.grant.grantKey, { multiplier: 9 }, NOW)).rejects.toThrow(/billed/);
+      expect((await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: owed.grant.grantKey } })).multiplier).toBe(2);
+    });
+
     it('lets a running one change and end, and refuses to rewrite one that was billed, one that ended, or a gift marked billed', async () => {
       const sara = await person('sara');
       const base = { personId: sara.id, givenById: sara.id, startsAt: days(-1) };

@@ -165,6 +165,29 @@ describe('the Costs page', () => {
     expect(screen.queryByTestId('costs-dates-note')).toBeNull();
   });
 
+  it('shows the dates now chosen even when a slower read of older dates comes back last', async () => {
+    const slow = report({ totals: { costMicros: 1_000_000, people: 1, guests: 1, bricks: 1, computers: 1 }, from: '2026-10-01' });
+    const quick = report();
+    let releaseSlow: (value: unknown) => void = () => {};
+    let calls = 0;
+    fetchMock.mockImplementation(() => {
+      calls += 1;
+      if (calls === 1) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(quick) });
+      if (calls === 2) return new Promise((resolve) => { releaseSlow = resolve; });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(quick) });
+    });
+    render(<CostsPage />);
+    await screen.findByTestId('costs-goes');
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: '2026-10-01' } });
+    await waitFor(() => expect(calls).toBe(2));
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: '2026-10-05' } });
+    await waitFor(() => expect(calls).toBe(3));
+    releaseSlow({ ok: true, status: 200, json: () => Promise.resolve(slow) });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByText('$39.80')).toBeTruthy();
+    expect(screen.queryByText('$1.00')).toBeNull();
+  });
+
   it('sends someone who is not a super admin away, and says when it could not load', async () => {
     answer(403);
     const { unmount } = render(<CostsPage />);

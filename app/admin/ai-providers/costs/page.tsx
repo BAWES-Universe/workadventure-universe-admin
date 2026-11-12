@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
@@ -37,20 +37,25 @@ export default function CostsPage() {
   const [range, setRange] = useState({ from: dayInput(new Date(today.getTime() - 6 * 86400000)), to: dayInput(today) });
   const [report, setReport] = useState<CostsReport | null>(null);
   const [failed, setFailed] = useState(false);
+  // Only the latest read may show: a slower read of older dates must not land on top of the dates now showing
+  const latest = useRef(0);
 
   const load = useCallback(async () => {
+    const mine = ++latest.current;
     setFailed(false);
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/admin/meter-costs?from=${range.from}&to=${range.to}`);
+      if (mine !== latest.current) return;
       if (response.status === 401 || response.status === 403) {
         replacePage('/admin');
         return;
       }
       if (!response.ok) throw new Error('load');
-      setReport((await response.json()) as CostsReport);
+      const next = (await response.json()) as CostsReport;
+      if (mine === latest.current) setReport(next);
     } catch {
-      setFailed(true);
+      if (mine === latest.current) setFailed(true);
     }
   }, [range.from, range.to, replacePage]);
 
@@ -60,7 +65,10 @@ export default function CostsPage() {
 
   useEffect(() => {
     if (datesReady) load();
-    else setReport(null);
+    else {
+      latest.current += 1;
+      setReport(null);
+    }
   }, [datesReady, load]);
 
   const asked = report?.asked ?? [];
