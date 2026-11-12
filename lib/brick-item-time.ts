@@ -101,6 +101,8 @@ export function readCadence(value: unknown): Cadence | null {
   if (value.type === 'none') return { type: 'none' };
   if (value.type === 'once') {
     if (typeof value.at !== 'string') return null;
+    // A moment names its own offset (Z or +03:00). Without one it would be read on the server's clock, not the person's
+    if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(value.at)) return null;
     const at = new Date(value.at);
     return Number.isNaN(at.getTime()) ? null : { type: 'once', at: at.toISOString() };
   }
@@ -177,8 +179,16 @@ export function nextDue(cadence: Cadence, timeZone: string, dueAt: Date, now: Da
 /** The shortest gap between two runs of a cadence, in minutes, to compare with "shortest repeat". Null when it does not repeat. */
 export function repeatMinutes(cadence: Cadence): number | null {
   if (cadence.type === 'every') return cadence.minutes;
-  // Once a day at most, on any days
-  if (cadence.type === 'daily') return 24 * 60;
+  if (cadence.type === 'daily') {
+    // The shortest gap between two chosen weekdays, counting the wrap from the last one round to the first (one day: a week)
+    const days = [...cadence.days].sort((a, b) => a - b);
+    let gap = 7;
+    for (let index = 0; index < days.length; index++) {
+      const next = index + 1 < days.length ? days[index + 1] : days[0] + 7;
+      gap = Math.min(gap, next - days[index]);
+    }
+    return gap * 24 * 60;
+  }
   return null;
 }
 

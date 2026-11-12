@@ -1,4 +1,4 @@
-import { firstDue, isTimeZone, nextDue, readCadence, zonedToUtc } from '@/lib/brick-item-time';
+import { firstDue, isTimeZone, nextDue, readCadence, repeatMinutes, zonedToUtc } from '@/lib/brick-item-time';
 
 const iso = (ms: number | Date | null) => (ms === null ? null : new Date(ms).toISOString());
 
@@ -72,5 +72,24 @@ describe('isTimeZone', () => {
     expect(isTimeZone('Mars/Olympus')).toBe(false);
     expect(isTimeZone('')).toBe(false);
     expect(isTimeZone(5)).toBe(false);
+  });
+});
+
+describe('a moment names its own offset, and a daily time repeats at the gap its weekdays leave', () => {
+  it('refuses a moment with no Z or offset, which would be read on the server clock', () => {
+    expect(readCadence({ type: 'once', at: '2026-11-12T08:00:00' })).toBeNull();
+    expect(readCadence({ type: 'once', at: '2026-11-12' })).toBeNull();
+    expect(readCadence({ type: 'once', at: '2026-11-12T08:00:00Z' })).toEqual({ type: 'once', at: '2026-11-12T08:00:00.000Z' });
+    expect(readCadence({ type: 'once', at: '2026-11-12T08:00:00+03:00' })).toEqual({ type: 'once', at: '2026-11-12T05:00:00.000Z' });
+  });
+
+  it('counts the shortest gap between the chosen weekdays, wrapping round the week', () => {
+    const daily = (days: number[]) => repeatMinutes({ type: 'daily', time: '08:00', days });
+    expect(daily([0, 1, 2, 3, 4, 5, 6])).toBe(1440);
+    expect(daily([1, 2, 3, 4, 5])).toBe(1440);
+    expect(daily([1, 3])).toBe(2 * 1440);
+    expect(daily([1, 4])).toBe(3 * 1440);
+    expect(daily([1])).toBe(7 * 1440);
+    expect(daily([0, 6])).toBe(1440);
   });
 });

@@ -255,6 +255,10 @@ export async function createItem(viaBrickId: string, input: NewItemInput, now: D
   return prisma.$transaction(async (tx) => {
     // One at a time per person, so two asks that arrive together can't both take the last place
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-items:${ownerId}`}))`;
+    // The Brick is looked at again under a lock held to the insert: deleting it (or switching it off) waits for this one, and pauses what it
+    // made, or comes first and this one is refused. Nothing is ever set on a Brick that is gone.
+    const alive = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT "id" FROM "bots" WHERE "id" = ${viaBrickId} AND "enabled" = true AND "deleted_at" IS NULL FOR SHARE`);
+    if (!alive.length) return { ok: false as const, status: 409 as const, code: 'off' as const, error: 'This Brick is switched off' };
     let parentId: string | null = null;
     if (input.parentId) {
       const goal = await tx.brickItem.findFirst({ where: { id: input.parentId, ownerId, botId: viaBrickId, kind: 'goal', state: 'on' }, select: { id: true } });
@@ -529,6 +533,14 @@ export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH):
           await tx.brickItemRun.update({ where: { id }, data: { state: 'dropped', finishedAt: now } });
           return null;
         }
+        // And only while its Brick is on: a Brick that is off or deleted is not handed anything. A one-off that was claimed has no next
+        // time, so it is due again now, and runs once when the Brick is back.
+        const bot = await tx.bot.findUnique({ where: { id: run.item.botId }, select: { enabled: true, deletedAt: true } });
+        if (!bot?.enabled || bot.deletedAt) {
+          await tx.brickItemRun.update({ where: { id }, data: { state: 'dropped', finishedAt: now } });
+          if (readCadence(item.cadence)?.type === 'once') await tx.brickItem.update({ where: { id: item.id }, data: { nextDueAt: now } });
+          return null;
+        }
         if (run.attempts >= MAX_TRIES) {
           await tx.brickItemRun.update({ where: { id }, data: { state: 'failed', error: 'It did not finish in time', finishedAt: now } });
           await tx.brickItem.update({ where: { id: run.itemId }, data: { failuresInRow: { increment: 1 }, lastRunAt: now, ...(endsOnFailure(item) ? endedOneOff(now) : {}) } });
@@ -605,6 +617,8 @@ export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH):
 export const runReportSchema = z
   .object({
     state: z.enum(['done', 'failed']),
+    /** The try the bot server holds (`attempt` of the run it was handed). A report for an older try, after the run was handed out again, is refused. */
+    attempt: z.number().int().min(1),
     /** quiet: nothing to say; spoke: it said something; waiting: it needs something and says what. */
     outcome: z.enum(['quiet', 'spoke', 'waiting']).nullish(),
     /** The run in a line, for "Everything Brick did". */
@@ -617,17 +631,19 @@ export const runReportSchema = z
   })
   .strict();
 
-export type RunCheck = { ok: true } | { ok: false; reason: 'changed' | 'paused' | 'done' | 'deleted' | 'off' | 'finished' | 'not_found' };
+export type RunCheck = { ok: true } | { ok: false; reason: 'changed' | 'paused' | 'done' | 'deleted' | 'off' | 'finished' | 'not_found' | 'stale' };
 
 /**
  * May this run take its next step? Asked by the bot server before every step that reaches outside Universe (a send, a
  * change in an app, paying), not once per run: the answer is no from the moment a change to the item is saved, or its Brick
  * is switched off or deleted, so nothing new starts and anything already sent is reconciled.
  */
-export async function checkRun(runId: string): Promise<RunCheck> {
+export async function checkRun(runId: string, attempt: number): Promise<RunCheck> {
   const run = await prisma.brickItemRun.findUnique({ where: { id: runId }, include: { item: { include: { bot: { select: { enabled: true, deletedAt: true } } } } } });
   if (!run) return { ok: false, reason: 'not_found' };
   if (run.state !== 'claimed') return { ok: false, reason: 'finished' };
+  // Handed out again to another try: this one stops, so it can never carry on beside the newer one
+  if (run.attempts !== attempt) return { ok: false, reason: 'stale' };
   const { item } = run;
   if (item.state === 'paused') return { ok: false, reason: 'paused' };
   if (item.state === 'done') return { ok: false, reason: 'done' };
@@ -653,6 +669,7 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
     const run = await tx.brickItemRun.findUnique({ where: { id: runId } });
     if (!item || !run) return { ok: false as const, status: 404 as const, error: 'Run not found' };
     if (run.state !== 'claimed') return { ok: false as const, status: 409 as const, error: 'This run was already reported' };
+    if (run.attempts !== report.attempt) return { ok: false as const, status: 409 as const, error: 'This run was handed out again, so this try can no longer report it' };
 
     await tx.brickItemRun.update({
       where: { id: runId },
