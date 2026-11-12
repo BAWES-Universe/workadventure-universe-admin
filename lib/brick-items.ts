@@ -320,7 +320,7 @@ async function moveChecks(tx: Tx, goalId: string, from: ItemState[], data: Prism
     const cadence = readCadence(check.cadence);
     // A one-off check whose moment passed while its goal was paused is due now, once, like a one-off that is resumed on its own
     const due = recompute && cadence ? (firstDue(cadence, check.timeZone, now) ?? (cadence.type === 'once' ? now : null)) : null;
-    await tx.brickItem.update({ where: { id: check.id }, data: { ...data, nextDueAt: due, revision: { increment: 1 } } });
+    await tx.brickItem.update({ where: { id: check.id }, data: { ...data, ...NOT_HELD, nextDueAt: due, revision: { increment: 1 } } });
   }
 }
 
@@ -328,6 +328,9 @@ async function moveChecks(tx: Tx, goalId: string, from: ItemState[], data: Prism
 async function goalIsOn(tx: Tx, goalId: string): Promise<boolean> {
   return (await tx.brickItem.findUnique({ where: { id: goalId }, select: { state: true } }))?.state === 'on';
 }
+
+/** Whatever changes an item's state or time ends a wait for usage: nothing is held or owed any more, and a new wait starts from nothing. */
+const NOT_HELD = { heldSince: null, heldToldAt: null, heldNoticeAt: null } as const;
 
 const wrongState = (state: string): Refused => ({ ok: false, status: 409, code: 'wrong_state', error: `That is not possible while it is ${state}` });
 
@@ -367,7 +370,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
     const row = await lockedItem(tx, { id: itemId, ownerId, botId: viaBrickId });
     if (!row || row.state === 'deleted') return { ok: false as const, status: 404 as const, error: 'Not found' };
     const cadence = readCadence(row.cadence) ?? ({ type: 'none' } as Cadence);
-    const bump = { revision: { increment: 1 } };
+    const bump = { ...NOT_HELD, revision: { increment: 1 } };
     const finish = async (data: Prisma.BrickItemUpdateInput) => ({ ok: true as const, item: viewOf(await tx.brickItem.update({ where: { id: row.id }, data })) });
 
     switch (input.action) {
@@ -480,7 +483,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
 export async function pauseItemsOfDeletedBrick(db: Tx, botId: string): Promise<number> {
   const { count } = await db.brickItem.updateMany({
     where: { botId, state: 'on' },
-    data: { state: 'paused', pausedBy: 'brick_deleted', nextDueAt: null, revision: { increment: 1 } },
+    data: { state: 'paused', pausedBy: 'brick_deleted', nextDueAt: null, ...NOT_HELD, revision: { increment: 1 } },
   });
   return count;
 }
@@ -580,7 +583,7 @@ function endsOnFailure(item: { kind: string; cadence: Prisma.JsonValue }): boole
   return item.kind !== 'goal' && readCadence(item.cadence)?.type === 'once';
 }
 function endedOneOff(now: Date): Prisma.BrickItemUpdateInput {
-  return { state: 'done', nextDueAt: null, doneAt: now, revision: { increment: 1 } };
+  return { state: 'done', nextDueAt: null, doneAt: now, ...NOT_HELD, revision: { increment: 1 } };
 }
 
 /**
@@ -728,7 +731,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH): Pr
   const owing = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
     SELECT i."id" FROM "brick_items" i
     JOIN "bots" b ON b."id" = i."bot_id"
-    WHERE i."state" = 'on' AND i."held_since" IS NOT NULL AND i."held_told_at" IS NULL
+    WHERE i."state" = 'on' AND i."held_since" IS NOT NULL AND i."held_told_at" IS NULL AND i."next_due_at" > ${now}
       AND (i."held_notice_at" IS NULL OR i."held_notice_at" <= ${new Date(now.getTime() - noticeRetry)})
       AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
     ORDER BY i."held_since" ASC, i."id" ASC
@@ -738,7 +741,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH): Pr
       const notice = await prisma.$transaction(async (tx) => {
         const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
           SELECT i."id" FROM "brick_items" i
-          WHERE i."id" = ${id} AND i."state" = 'on' AND i."held_since" IS NOT NULL AND i."held_told_at" IS NULL
+          WHERE i."id" = ${id} AND i."state" = 'on' AND i."held_since" IS NOT NULL AND i."held_told_at" IS NULL AND i."next_due_at" > ${now}
             AND (i."held_notice_at" IS NULL OR i."held_notice_at" <= ${new Date(now.getTime() - noticeRetry)})
           FOR UPDATE OF i SKIP LOCKED`);
         if (!locked.length) return null;
@@ -833,7 +836,7 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
       if (pausedOnly && workDone) {
         const ended = await tx.brickItem.update({
           where: { id: item.id },
-          data: { state: 'done', pausedBy: null, nextDueAt: null, doneAt: now, lastRunAt: now, result: report.result ?? item.result, revision: { increment: 1 } },
+          data: { state: 'done', pausedBy: null, nextDueAt: null, doneAt: now, lastRunAt: now, result: report.result ?? item.result, ...NOT_HELD, revision: { increment: 1 } },
         });
         return { ok: true as const, item: viewOf(ended), applied: false, failuresInRow: item.failuresInRow, tellPerson: false };
       }
@@ -861,7 +864,7 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
     const watchSpoke = kind === 'watch' && report.state === 'done' && report.outcome === 'spoke';
     const goalReached = kind === 'goal' && report.state === 'done' && report.reached === true;
     if (oneOffSent || watchSpoke || goalReached) {
-      Object.assign(data, { state: 'done', nextDueAt: null, doneAt: now, result: report.result ?? item.result, revision: { increment: 1 } });
+      Object.assign(data, { state: 'done', nextDueAt: null, doneAt: now, result: report.result ?? item.result, ...NOT_HELD, revision: { increment: 1 } });
       if (goalReached) await moveChecks(tx, item.id, ['on', 'paused'], { state: 'done', pausedBy: null, doneAt: now }, now, false);
     }
     const updated = await tx.brickItem.update({ where: { id: item.id }, data });

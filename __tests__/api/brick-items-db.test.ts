@@ -850,6 +850,25 @@ run('goals and tasks, in a real database', () => {
       expect((await prisma.brickItem.findUniqueOrThrow({ where: { id: goal.id } })).heldSince).not.toBeNull();
     });
 
+    it('a wait ends when the item is paused, resumed or changed: nothing is owed and nothing stale is handed out, and a new wait is told afresh', async () => {
+      const gspau = await person('gspau');
+      const watch = await set(gspau, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      await usage(gspau, 9, 'task');
+      const first = await claimWork(at(HOUR + 2 * MIN));
+      expect(first.held.map((one) => one.itemId)).toContain(watch.id);
+      // Paused and resumed while the notice was never confirmed: nothing is left owing, so no notice for a wait that is not there
+      await changeItem(gspau.brickId, watch.id, { userId: gspau.uuid, action: 'pause' }, at(HOUR + 3 * MIN));
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).toMatchObject({ heldSince: null, heldToldAt: null, heldNoticeAt: null });
+      await changeItem(gspau.brickId, watch.id, { userId: gspau.uuid, action: 'resume' }, at(HOUR + 4 * MIN));
+      const quiet = await claimWork(at(HOUR + 30 * MIN));
+      expect(quiet.held.filter((one) => one.itemId === watch.id)).toEqual([]);
+      // Still used up when it comes due: a new wait, told afresh with its own wait id
+      const again = await claimWork(at(2 * HOUR + 10 * MIN));
+      const fresh = again.held.find((one) => one.itemId === watch.id);
+      expect(fresh).toBeDefined();
+      expect(fresh!.waitId).not.toBe(first.held.find((one) => one.itemId === watch.id)!.waitId);
+    });
+
     it('lets extra usage raise the room goals and tasks have, as it does for chat: a multiple raises it, no limit lifts it, and it is back to the usual when it ends', async () => {
       const gsext = await person('gsext');
       const watch = await set(gsext, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
