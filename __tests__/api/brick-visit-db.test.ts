@@ -20,10 +20,11 @@ import { createBrick } from '@/lib/brick-create';
 import { checkBotAccess } from '@/lib/bot-access';
 import { credentialsForBot } from '@/lib/bot-ai-credentials';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
-import { endStaleVisits, placeOfRoomUrl, startVisit, visitState, whereIsBrick } from '@/lib/brick-visit';
+import { endStaleVisits, keepVisitAlive, placeOfRoomUrl, startVisit, visitState, whereIsBrick } from '@/lib/brick-visit';
 import { mayReadRoomBots, whoMayReadRoomBots } from '@/lib/bot-room-access';
 import { GET as getVisit, POST as postVisit, DELETE as deleteVisit } from '@/app/api/bricks/[id]/visit/route';
 import { POST as roomFeed } from '@/app/api/brick-visits/room/route';
+import { POST as seenFeed } from '@/app/api/brick-visits/seen/route';
 import { POST as sweep } from '@/app/api/bricks/sweep/route';
 import { GET as getConfiguration } from '@/app/api/bots/configuration/route';
 import { GET as aiCredentials } from '@/app/api/bots/[id]/ai-credentials/route';
@@ -580,6 +581,118 @@ run('bringing a Brick along, in a real database', () => {
       } finally {
         await prisma.universe.update({ where: { id: universes.open.id }, data: { allowVisitingBricks: true } });
       }
+    });
+  });
+
+  describe('what keeps a visit alive, and what ends it at once (review on #927)', () => {
+    const seenAt = async () => (await visit(sara.id))?.seenAt.getTime();
+
+    it('is kept alive by the bot server seeing its owner, and by nothing else: people chatting with it never prolong it', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      const earlier = new Date(Date.now() - 5 * MIN);
+      await prisma.brickVisit.update({ where: { userId: sara.id }, data: { seenAt: earlier } });
+
+      // Others chat with it, are served by it and are told where it is: its timer does not move
+      await chat(brickId, omar, 'chat', universes.open.roomUrl);
+      await credentialsForBot(brickId, { asker: omar.uuid });
+      await whereIsBrick(brickId, universes.open.roomUrl);
+      await visitState(brickId, sara.id, universes.open.roomUrl);
+      expect(await seenAt()).toBe(earlier.getTime());
+      // Someone else's name in the room's people list moves nothing of hers either
+      await feed(universes.open.roomUrl, [omar.uuid]);
+      expect(await seenAt()).toBe(earlier.getTime());
+
+      // Its owner is seen with it, by the bot server: the timer starts again
+      expect(await keepVisitAlive(brickId, sara.uuid, universes.open.roomUrl)).toBe(true);
+      expect(await seenAt()).toBeGreaterThan(earlier.getTime() + 4 * MIN);
+    });
+
+    it('is never brought back once it has run out, by a sighting, by its owner’s sync or by a chat', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      const long = new Date(Date.now() - 11 * MIN);
+      await prisma.brickVisit.update({ where: { userId: sara.id }, data: { seenAt: long } });
+      // Unusable before the sweep has run
+      expect(await whereIsBrick(brickId, universes.open.roomUrl)).toBeNull();
+      expect(await chat(brickId, omar, 'chat', universes.open.roomUrl)).toMatchObject({ allowed: false });
+      expect(await visitState(brickId, sara.id, universes.open.roomUrl)).toMatchObject({ state: 'none' });
+      // And not revived by anything
+      expect(await keepVisitAlive(brickId, sara.uuid, universes.open.roomUrl)).toBe(false);
+      expect(await feed(universes.open.roomUrl, [sara.uuid])).toHaveLength(0);
+      expect(await seenAt()).toBe(long.getTime());
+    });
+
+    it('answers that the visit is over, at once and without waiting out the time, when it is ended, switched, switched off or deleted, or its place stops taking visits', async () => {
+      const alive = () => keepVisitAlive(brickId, sara.uuid, universes.open.roomUrl);
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      expect(await alive()).toBe(true);
+      // Someone else's Brick or name is not this owner's sighting
+      expect(await keepVisitAlive(brickId, omar.uuid, universes.open.roomUrl)).toBe(false);
+      expect(await keepVisitAlive(secondBrickId, sara.uuid, universes.open.roomUrl)).toBe(false);
+
+      // The Brick is switched off, then on, then deleted
+      await prisma.bot.update({ where: { id: brickId }, data: { enabled: false } });
+      expect(await alive()).toBe(false);
+      expect(await whereIsBrick(brickId, null)).toBeNull();
+      await prisma.bot.update({ where: { id: brickId }, data: { enabled: true } });
+      expect(await alive()).toBe(true);
+      await prisma.bot.update({ where: { id: brickId }, data: { deletedAt: NOW, goneAt: new Date(NOW.getTime() + 86_400_000), enabledBeforeDelete: true, enabled: false } });
+      expect(await alive()).toBe(false);
+      expect(await whereIsBrick(brickId, null)).toBeNull();
+      await prisma.bot.update({ where: { id: brickId }, data: { deletedAt: null, goneAt: null, enabledBeforeDelete: null, enabled: true } });
+
+      // The universe turns the switch off
+      await prisma.universe.update({ where: { id: universes.open.id }, data: { allowVisitingBricks: false } });
+      expect(await alive()).toBe(false);
+      expect(await whereIsBrick(brickId, null)).toBeNull();
+      await prisma.universe.update({ where: { id: universes.open.id }, data: { allowVisitingBricks: true } });
+      expect(await alive()).toBe(true);
+
+      // Switching to another Brick ends this one's visit; ending it ends it
+      await startVisit(secondBrickId, sara.id, universes.open.roomUrl);
+      expect(await alive()).toBe(false);
+      expect(await whereIsBrick(brickId, null)).toBeNull();
+      expect(await whereIsBrick(secondBrickId, null)).not.toBeNull();
+      await deleteVisit(call('DELETE', `/api/bricks/${secondBrickId}/visit`), ids(secondBrickId));
+      expect(await whereIsBrick(secondBrickId, null)).toBeNull();
+      expect(await keepVisitAlive(secondBrickId, sara.uuid, universes.open.roomUrl)).toBe(false);
+    });
+
+    it('ends for others at once when its owner may no longer open the room it is in (access revoked)', async () => {
+      await startVisit(brickId, sara.id, universes.second.roomUrl);
+      expect(await whereIsBrick(brickId, null)).not.toBeNull();
+      await prisma.universe.update({ where: { id: universes.second.id }, data: { isPublic: false } });
+      await prisma.room.updateMany({ where: { world: { universeId: universes.second.id } }, data: { isPublic: false } });
+      await prisma.world.updateMany({ where: { universeId: universes.second.id }, data: { isPublic: false } });
+      try {
+        expect(await whereIsBrick(brickId, null)).toBeNull();
+        expect(await keepVisitAlive(brickId, sara.uuid, universes.second.roomUrl)).toBe(false);
+      } finally {
+        await prisma.universe.update({ where: { id: universes.second.id }, data: { isPublic: true } });
+        await prisma.room.updateMany({ where: { world: { universeId: universes.second.id } }, data: { isPublic: true } });
+        await prisma.world.updateMany({ where: { universeId: universes.second.id }, data: { isPublic: true } });
+      }
+      expect(await whereIsBrick(brickId, null)).not.toBeNull();
+    });
+
+    it('is seen in the room the bot server names, which must be one that takes visits and that its owner may open', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      expect(await keepVisitAlive(brickId, sara.uuid, universes.closed.roomUrl)).toBe(false);
+      expect(await keepVisitAlive(brickId, sara.uuid, 'nonsense')).toBe(false);
+      expect(await keepVisitAlive(brickId, sara.uuid, universes.second.roomUrl)).toBe(true);
+      expect((await visit(sara.id))?.roomId).toBe(universes.second.roomId);
+    });
+
+    it('is asked for by the bot server only, with a well-formed body', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      const body = { botId: brickId, ownerUuid: sara.uuid, roomUrl: universes.open.roomUrl };
+      expect((await seenFeed(call('POST', '/api/brick-visits/seen', body))).status).toBe(401);
+      expect((await seenFeed(call('POST', '/api/brick-visits/seen', { botId: brickId }, service))).status).toBe(400);
+      expect((await seenFeed(call('POST', '/api/brick-visits/seen', { ...body, extra: 1 }, service))).status).toBe(400);
+      const alive = await seenFeed(call('POST', '/api/brick-visits/seen', body, service));
+      expect(alive.status).toBe(200);
+      expect(await alive.json()).toEqual({ alive: true });
+      await prisma.brickVisit.deleteMany({ where: { userId: sara.id } });
+      expect(await (await seenFeed(call('POST', '/api/brick-visits/seen', body, service))).json()).toEqual({ alive: false });
     });
   });
 

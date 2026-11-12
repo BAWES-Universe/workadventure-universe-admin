@@ -178,6 +178,29 @@ export async function endStaleVisits(now: Date = new Date()): Promise<number> {
   return (await prisma.brickVisit.deleteMany({ where: { seenAt: { lt: before } } })).count;
 }
 
+/**
+ * The bot server's own client for the visiting Brick sees its owner in this room: the visit is seen now. Only this and the
+ * owner's own sync (`bricksForRoom`) keep a visit alive; people chatting with the Brick never do. Answers whether the visit is
+ * still alive: false when there is none for this owner and Brick, it is expired (an expired visit is never brought back
+ * by a sighting), the Brick is off or deleted, the place no longer takes visits, or its owner may no longer open the room,
+ * and the bot server then takes the Brick off the map.
+ */
+export async function keepVisitAlive(botId: string, ownerUuid: string, roomUrl: string, now: Date = new Date()): Promise<boolean> {
+  const visit = await prisma.brickVisit.findUnique({
+    where: { botId },
+    include: { user: { select: { uuid: true, isGuest: true } }, bot: { select: { enabled: true, deletedAt: true, roomId: true } } },
+  });
+  if (!visit || visit.user.uuid !== ownerUuid || visit.user.isGuest) return false;
+  if (!visit.bot.enabled || visit.bot.deletedAt !== null || visit.bot.roomId !== null) return false;
+  const stale = new Date(now.getTime() - (await visitEndsAfterMs()));
+  if (visit.seenAt < stale) return false;
+  const place = await placeOfRoomUrl(roomUrl);
+  if (!place || !place.takesVisits || !(await mayReadRoomBots(place.room, visit.userId))) return false;
+  // The row is only moved while it is still live, so a visit that ran out between the read and now stays ended
+  const moved = await prisma.brickVisit.updateMany({ where: { botId, userId: visit.userId, seenAt: { gte: stale } }, data: { roomId: place.roomId, seenAt: now } });
+  return moved.count > 0;
+}
+
 /** A Brick that stands, or walks, in a room: who it belongs to and how it got there. */
 export interface BrickHere {
   botId: string;
@@ -199,6 +222,9 @@ export async function whereIsBrick(botId: string, roomUrl: string | null, now: D
   if (now.getTime() - visit.seenAt.getTime() > (await visitEndsAfterMs())) return null;
   const place = await placeOfRoomId(visit.roomId);
   if (!place || !place.takesVisits) return null;
+  // Its owner's access is checked now, not only when the visit began: where they may no longer open the room, the Brick is
+  // nowhere other people can reach it
+  if (!(await mayReadRoomBots(place.room, visit.userId))) return null;
   if (roomUrl) {
     const asked = await placeOfRoomUrl(roomUrl);
     if (!asked || asked.roomId !== visit.roomId) return null;
