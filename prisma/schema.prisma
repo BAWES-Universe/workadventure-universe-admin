@@ -1039,6 +1039,10 @@ model BrickItem {
   failureTold   Boolean   @default(false) @map("failure_told")
   // The run that was asked to tell the person about this row of failures, until it confirms (markTold) or the row starts over
   tellRunId     String?   @map("tell_run_id") @db.VarChar(36)
+  // Set while a run waits because the person's Universe AI usage for goals and tasks is used up (it carries on when it is back), and
+  // when Brick was told so: told once per wait, never again for each check that is held
+  heldSince   DateTime?   @map("held_since")
+  heldToldAt  DateTime?   @map("held_told_at")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 

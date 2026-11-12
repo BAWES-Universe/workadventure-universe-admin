@@ -16,7 +16,8 @@ import { ensureDefaultBrick } from '@/lib/brick-default';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { makeBrick } from '@/lib/brick-make';
 import { saveServerLimits } from '@/lib/bot-limits';
-import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, markTold, readItem, type NewItemInput } from '@/lib/brick-items';
+import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, markTold, claimWork, readItem, type NewItemInput } from '@/lib/brick-items';
+import { checkReplyAllowance } from '@/lib/reply-limits';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -776,5 +777,72 @@ run('goals and tasks, in a real database', () => {
     expect(await prisma.brickItemRun.count({ where: { item: { ownerId: quiet.id } } })).toBe(0);
     expect(await prisma.bot.count({ where: { ownerId: quiet.id } })).toBe(1);
     expect(await prisma.botsAiUsage.count({ where: { botId: quiet.brickId } })).toBe(0);
+  });
+
+  describe('usage: goals and tasks use their owner’s Universe AI inside a share, and wait with their work saved when it is used up', () => {
+    // The first reply of the person's window was at NOW; it lasts 5 hours, so it ends at 11:00 UTC
+    const WINDOW_ENDS = at(5 * HOUR);
+
+    async function usage(who: { id: string; brickId: string }, count: number, channel: 'dm' | 'task') {
+      await prisma.botsAiProvider.upsert({ where: { providerId: 'universe-ai' }, create: { providerId: 'universe-ai', name: 'Universe AI', type: 'universe-ai', enabled: true }, update: {} });
+      await prisma.botsAiUsage.createMany({ data: Array.from({ length: count }, () => ({ botId: who.brickId, providerId: 'universe-ai', talkedPersonId: who.id, channel, timestamp: at(MIN) })) });
+      await prisma.replyWindow.upsert({ where: { key: `ua:person:${who.id}` }, create: { key: `ua:person:${who.id}`, startedAt: NOW }, update: { startedAt: NOW } });
+    }
+    const mineIn = (work: { runs: { itemId: string }[] }, ...ids: string[]) => work.runs.filter((one) => ids.includes(one.itemId));
+
+    it('runs a watch while goals and tasks are inside their share, and leaves live chat its room', async () => {
+      const gsabel = await person('gsabel');
+      const watch = await set(gsabel, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      // 8 of the 9 replies goals and tasks may use (30% of 30) are used
+      await usage(gsabel, 8, 'task');
+      expect(mineIn(await claimWork(at(HOUR + 2 * MIN)), watch.id)).toHaveLength(1);
+      // Chat is far from its limit and still allowed
+      expect(await checkReplyAllowance(gsabel.brickId, { userId: gsabel.uuid, isGuest: false, source: 'universe-ai' }, at(HOUR + 2 * MIN))).toEqual({ allowed: true });
+    });
+
+    it('holds a watch once its share is used, says so once with when it carries on, runs nothing meanwhile and carries on when the usage is back', async () => {
+      const gsbea = await person('gsbea');
+      const watch = await set(gsbea, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      const briefing = await set(gsbea, { kind: 'schedule', words: 'Morning', cadence: { type: 'every', minutes: 60 } });
+      const reminder = await set(gsbea, { words: 'Call mum' });
+      await usage(gsbea, 9, 'task');
+      const first = await claimWork(at(HOUR + 2 * MIN));
+      expect(mineIn(first, watch.id, briefing.id)).toEqual([]);
+      // A reminder is fixed text with no AI: it still comes
+      expect(mineIn(first, reminder.id)).toHaveLength(1);
+      expect(first.held.filter((one) => one.userId === gsbea.uuid).map((one) => one.itemId).sort()).toEqual([watch.id, briefing.id].sort());
+      expect(first.held.find((one) => one.itemId === watch.id)).toMatchObject({ kind: 'watch', brickId: gsbea.brickId, resumesAt: WINDOW_ENDS.toISOString() });
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).toMatchObject({ state: 'on', nextDueAt: WINDOW_ENDS });
+      expect(await runsOf(watch.id)).toHaveLength(0);
+      // Asked again while it waits: nothing runs and nobody is told a second time
+      const again = await claimWork(at(2 * HOUR));
+      expect(mineIn(again, watch.id, briefing.id)).toEqual([]);
+      expect(again.held.filter((one) => one.userId === gsbea.uuid)).toEqual([]);
+      // The window ends: they carry on, as ordinary runs, and nothing is marked late
+      const back = await claimWork(at(5 * HOUR + MIN));
+      expect(mineIn(back, watch.id, briefing.id)).toHaveLength(2);
+      expect(mineIn(back, watch.id)[0]).toMatchObject({ late: false, fresh: false });
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).toMatchObject({ heldSince: null, heldToldAt: null });
+    });
+
+    it('holds a goal while the person’s whole window is used up, even before goals and tasks used their share', async () => {
+      const gscy = await person('gscy');
+      const goal = await set(gscy, { kind: 'goal', words: 'Visa', outcome: 'Issued', cadence: { type: 'every', minutes: 60 } });
+      await usage(gscy, 30, 'dm');
+      const work = await claimWork(at(HOUR + 2 * MIN));
+      expect(mineIn(work, goal.id)).toEqual([]);
+      expect(work.held.map((one) => one.itemId)).toContain(goal.id);
+      expect((await prisma.brickItem.findUniqueOrThrow({ where: { id: goal.id } })).heldSince).not.toBeNull();
+    });
+
+    it('never holds a Brick that runs on its owner’s own key, and never counts a run against the Universe AI bar for it', async () => {
+      const gsdev = await person('gsdev');
+      await prisma.bot.update({ where: { id: gsdev.brickId }, data: { aiProviderRef: 'my-own-key' } });
+      const watch = await set(gsdev, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      await usage(gsdev, 30, 'dm');
+      const work = await claimWork(at(HOUR + 2 * MIN));
+      expect(mineIn(work, watch.id)).toHaveLength(1);
+      expect(work.held.filter((one) => one.userId === gsdev.uuid)).toEqual([]);
+    });
   });
 });

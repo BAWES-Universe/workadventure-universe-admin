@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireServiceToken } from '@/lib/service-tokens';
-import { claimDueRuns } from '@/lib/brick-items';
+import { claimWork } from '@/lib/brick-items';
 import { itemsFailed } from '@/lib/brick-item-api';
 
 export const runtime = 'nodejs';
@@ -13,13 +13,15 @@ export const runtime = 'nodejs';
  * starts a run. Asked by the bot server every minute or so; nothing depends on exactly when.
  *
  * Auth: service token only.
+ * `held` lists the watches, briefings and goals that now wait because their person's Universe AI usage for goals and tasks is used up, each
+ * once per wait, with `resumesAt`: Brick says so once and nothing runs until then. A reminder is never held.
  * Answers { runs: [{ runId, itemId, brickId, userId, kind, words, condition, outcome, steps, statusLine, timeZone, dueAt,
- * revision, late, fresh, attempt, leaseUntil }] }
+ * revision, late, fresh, attempt, leaseUntil, marker, deliveredEventId }], held: [{ itemId, brickId, userId, kind, words, resumesAt }] }
  */
 export async function POST(request: NextRequest) {
   try {
     requireServiceToken(request);
-    return NextResponse.json({ runs: await claimDueRuns() });
+    return NextResponse.json(await claimWork());
   } catch (error) {
     return itemsFailed(error, 'Claiming due runs');
   }
