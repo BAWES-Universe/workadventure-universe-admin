@@ -32,12 +32,16 @@ export async function OPTIONS(request: NextRequest) {
  * Can this person do this with this bot? (#426)
  *
  * Auth: BOT_SERVICE_TOKEN
- * Body: { action: "chat" | "dm" | "summon" | "change" | "deleteOrSend", person: { signedIn: boolean, identifier?: string, chatId?: string } }
+ * Body: { action: "chat" | "dm" | "call" | "summon" | "change" | "deleteOrSend", person: { signedIn: boolean, identifier?: string, chatId?: string } }
  * Response: { allowed: boolean, code: "allowed" | "sign_in_required" | "not_allowed" | "no_room_access" | "unknown_person"
  *   | "shared_chat_id" | "banned", reason: string | null, person?: { uuid: string, name: string | null } }
  *
  * A direct message that reached the bot over chat names the person by their chat ID instead (action "dm" only): Orbit
  * finds the one account with it, refuses an ID no account or two accounts have, and answers with whose it is.
+ *
+ * A call (game #2004) is a direct message spoken out loud: it needs everything a direct message needs, and then the bot's
+ * "Call" row, which starts as No (only the bot's creator, its universe's owner, super admins, Admin and the people who
+ * manage the bot pass without a Yes). Like a direct message it needs an account, so a guest hears "sign_in_required".
  *
  * A no is a 200 with `allowed: false` and a line to show. Anything that stops Orbit answering is an error status, so
  * the caller can tell "no" from "could not check".

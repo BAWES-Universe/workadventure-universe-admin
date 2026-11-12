@@ -14,6 +14,8 @@ jest.mock('@/lib/bot-permissions', () => ({ canManageThisBot: jest.fn() }));
 jest.mock('@/lib/bot-access-settings', () => ({
   ...jest.requireActual('@/lib/bot-access-settings'),
   loadBotPlace: jest.fn(),
+  loadBrickHome: jest.fn(),
+  readBrickSettings: jest.fn(),
   readBotSettings: jest.fn(),
   saveBotSettings: jest.fn(),
   saveBotRule: jest.fn(),
@@ -22,7 +24,7 @@ jest.mock('@/lib/bot-access-settings', () => ({
 
 const session = getSessionUser as jest.Mock;
 const manages = canManageThisBot as jest.Mock;
-const mocked = settings as unknown as Record<'loadBotPlace' | 'readBotSettings' | 'saveBotSettings' | 'saveBotRule' | 'deleteBotRule', jest.Mock>;
+const mocked = settings as unknown as Record<'loadBotPlace' | 'loadBrickHome' | 'readBrickSettings' | 'readBotSettings' | 'saveBotSettings' | 'saveBotRule' | 'deleteBotRule', jest.Mock>;
 
 const PLACE = { id: 'bot-1', createdById: 'u-maker', roomId: 'room-1', universeId: 'u1', universeOwnerId: 'u-owner' };
 const SETTINGS = { privateBot: true, refusalReply: 'Not for you.', dailyReplyCap: null, rules: [], roles: [] };
@@ -43,8 +45,9 @@ beforeEach(() => {
   process.env.ADMIN_API_TOKEN = 'admin-secret';
   session.mockReset().mockResolvedValue({ id: 'u-sara', email: 'sara@example.com' });
   manages.mockReset().mockResolvedValue(true);
-  for (const name of ['loadBotPlace', 'readBotSettings', 'saveBotSettings', 'saveBotRule', 'deleteBotRule'] as const) mocked[name].mockReset();
+  for (const name of ['loadBotPlace', 'loadBrickHome', 'readBrickSettings', 'readBotSettings', 'saveBotSettings', 'saveBotRule', 'deleteBotRule'] as const) mocked[name].mockReset();
   mocked.loadBotPlace.mockResolvedValue(PLACE);
+  mocked.loadBrickHome.mockResolvedValue(null);
   mocked.readBotSettings.mockResolvedValue(SETTINGS);
   mocked.saveBotRule.mockResolvedValue({ id: 'rule-1', roleId: 'r-acc', chat: 'yes' });
   mocked.deleteBotRule.mockResolvedValue(true);
