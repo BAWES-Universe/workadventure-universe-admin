@@ -16,8 +16,8 @@ export type JobStatus = (typeof JOB_STATUSES)[number];
 export const QUEUED_FOR = ['turn', 'allowance', 'busy', 'pool'] as const;
 export type QueuedFor = (typeof QUEUED_FOR)[number];
 
-/** Why a job stopped before it finished. */
-export const ENDED_BY = ['person', 'allowance', 'pool', 'off', 'deleted', 'error'] as const;
+/** Why a job stopped before it finished. `unanswered`: it waited for a person to take over and nobody did within the wait a super admin set. */
+export const ENDED_BY = ['person', 'allowance', 'pool', 'off', 'deleted', 'error', 'unanswered'] as const;
 export type EndedBy = (typeof ENDED_BY)[number];
 
 /** What a job waits for: the person's step. */

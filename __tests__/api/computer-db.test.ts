@@ -15,6 +15,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
+import { saveServerLimits } from '@/lib/bot-limits';
 import { saveMeterSettings } from '@/lib/meter';
 import { currentEnvelope } from '@/lib/meter-allowance';
 import { recordGrant } from '@/lib/meter-grants';
@@ -66,7 +67,7 @@ const wipe = async () => {
   await prisma.meterEvent.deleteMany({});
   await prisma.meterReservation.deleteMany({});
   await prisma.meterGrant.deleteMany({});
-  await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
+  await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits'] } } });
 };
 
 const woke = () => provider.calls.filter((call) => call.name === 'create' || call.name === 'wake').length;
@@ -413,6 +414,72 @@ run('a Brick’s computer, in a real database', () => {
       expect((await takeOver(sara.brickId, sara.id, minutes(36))).ok).toBe(true);
     });
 
+    it('a job that asked the person to take over and got no answer ends after the wait a super admin set, is told so, and the line moves on', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, NOW);
+      if (!a.ok || !b.ok) throw new Error('no');
+      await requestHandover(a.job.id, 'details', minutes(1));
+      // Inside the wait (an hour until a super admin changes it) the room keeps being renewed and the job stays
+      for (let at = 2; at <= 58; at += 2) await sweepComputers(minutes(at));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'waiting', control: 'brick' });
+      // Past it the job ends as unanswered, its room is settled to what it held, and the next job in line has the machine
+      await sweepComputers(minutes(62));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'unanswered' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: b.job.id } })).toMatchObject({ status: 'running' });
+      expect(await prisma.meterReservation.count({ where: { jobId: a.job.id, state: 'held' } })).toBe(0);
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${a.job.id}:time` } })).toBe(1);
+      // What the job's runner hears when it asks to renew: it ended because nobody answered
+      expect(await renewJob(a.job.id, minutes(63))).toEqual({ ok: false, reason: 'unanswered' });
+    });
+
+    it('a change of the wait counts at once, for a job already waiting, with no deploy', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!a.ok) throw new Error('no');
+      await requestHandover(a.job.id, 'details', minutes(1));
+      for (let at = 2; at <= 20; at += 2) await sweepComputers(minutes(at));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'waiting' });
+      await saveServerLimits({ bricks: { computerWait: 15 } }, 'admin');
+      await sweepComputers(minutes(21));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'unanswered' });
+    });
+
+    it('once the person has taken over, the wait does not end the job: it is theirs', async () => {
+      // A month big enough for two hours at the keyboard: only the wait is under test
+      await setUp({ memberAllowanceMicros: 100_000_000 });
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!a.ok) throw new Error('no');
+      await requestHandover(a.job.id, 'details', minutes(1));
+      for (let at = 2; at <= 130; at += 2) {
+        // They come at 30 minutes, well inside the wait, and stay at the keyboard long past it
+        if (at === 30) await takeOver(sara.brickId, sara.id, minutes(at));
+        await sweepComputers(minutes(at));
+      }
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'waiting', control: 'person' });
+    });
+
+    it('one start that breaks fails one job: the jobs behind it stay in line for the next sweep instead of failing one after another', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      const queued = [await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, NOW), await startJob({ botId: sara.brickId, personId: sara.id, title: 'C' }, NOW), await startJob({ botId: sara.brickId, personId: sara.id, title: 'D' }, NOW)];
+      if (!a.ok || queued.some((job) => !job.ok)) throw new Error('no');
+      const ids = queued.map((job) => (job.ok ? job.job.id : ''));
+      // The provider is down for every wake from now on
+      const down = jest.spyOn(provider, 'wake').mockRejectedValue(new Error('The provider is down'));
+      await finishJob(a.job.id, 'done', minutes(1));
+      down.mockRestore();
+      const statuses = await prisma.computerJob.findMany({ where: { id: { in: ids } }, orderBy: { createdAt: 'asc' } });
+      expect(statuses.map((job) => job.status)).toEqual(['failed', 'queued', 'queued']);
+      // And the next sweep gives the next one its turn, now that the provider is back
+      expect((await sweepComputers(minutes(2))).started).toBe(1);
+    });
+
     it('a Brick with a long line cannot crowd the others out of the sweep: every Brick still gets its turn', async () => {
       const sara = await person('sara');
       const tom = await person('tom');
@@ -606,6 +673,83 @@ run('a Brick’s computer, in a real database', () => {
       expect(await prisma.bot.count({ where: { id: { in: bricks.slice(0, 3) } } })).toBe(3);
     });
 
+    it('across sweeps, Bricks that stay blocked go behind the ones not tried yet, so a Brick further back still gets its turn', async () => {
+      const blocked = [];
+      for (const name of ['c1', 'c2', 'c3']) {
+        const one = await person(name);
+        await giveComputer(one.brickId, one.id);
+        await startJob({ botId: one.brickId, personId: one.id, title: 'W' }, NOW);
+        const q = await startJob({ botId: one.brickId, personId: one.id, title: 'Q' }, NOW);
+        if (!q.ok) throw new Error('no');
+        blocked.push(q.job.id);
+      }
+      const free = await person('free');
+      await giveComputer(free.brickId, free.id);
+      const lone = await prisma.computerJob.create({ data: { botId: free.brickId, personId: free.id, title: 'F', status: 'queued', queuedFor: 'busy', createdAt: new Date(Date.now() + 60_000) } });
+      // A sweep reads three Bricks, one to a page: the three blocked ones in front use all of it, every time it ran before
+      expect((await sweepComputers(minutes(1), 1, 3)).started).toBe(0);
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: lone.id } })).toMatchObject({ status: 'queued' });
+      // The next sweep starts with the Brick not tried yet
+      expect((await sweepComputers(minutes(2), 1, 3)).started).toBe(1);
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: lone.id } })).toMatchObject({ status: 'running' });
+    });
+
+    it('across sweeps, deleted Bricks that wait go behind the ones not looked at yet, so one further back is still removed', async () => {
+      const sara = await person('sara');
+      const bricks: string[] = [];
+      for (const name of ['e1', 'e2', 'e3', 'e4']) bricks.push((await createBrick({ ownerId: sara.id, name: `${name} of Sara` })).id);
+      provider.failSaves = true;
+      for (const id of bricks.slice(0, 3)) {
+        await giveComputer(id, sara.id);
+        const job = await startJob({ botId: id, personId: sara.id, title: 'A' }, NOW);
+        if (!job.ok) throw new Error('no');
+        await finishJob(job.job.id, 'done', minutes(1));
+      }
+      for (const [i, id] of bricks.entries()) {
+        await deleteBrick(id, sara.id, minutes(2));
+        await prisma.bot.update({ where: { id }, data: { goneAt: new Date(minutes(3).getTime() + i) } });
+      }
+      // A sweep reads three Bricks, one to a page: the three that wait use all of it
+      expect(await removeGoneBricks(minutes(10), sara.id, 1, 3)).toEqual([]);
+      // The next one starts with the Brick not looked at yet
+      expect(await removeGoneBricks(minutes(11), sara.id, 1, 3)).toEqual([bricks[3]]);
+    });
+
+    it('a machine whose rest failed is rested by a later sweep, and one left claimed for rest by a stopped server is let go and rested too', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!a.ok) throw new Error('no');
+      provider.failNext.rest = true;
+      await finishJob(a.job.id, 'done', minutes(1));
+      // The rest failed: the machine is still awake, so it is not marked as resting (the sweep only looks at ones that work)
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+      await sweepComputers(minutes(10));
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
+      expect(provider.calls.filter((call) => call.name === 'rest')).toHaveLength(2);
+      // A rest claimed and never finished (the server stopped there) is let go after a while and rested again
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting' } });
+      await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = ${minutes(0)} WHERE "bot_id" = ${sara.brickId}`;
+      await sweepComputers(minutes(30));
+      expect(provider.calls.filter((call) => call.name === 'rest')).toHaveLength(3);
+    });
+
+    it('computer time the books missed is written however old it is, and newer jobs never push an older one out', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const at = minutes(60 * 24 * 12);
+      const made = [];
+      for (const [name, daysAgo] of [['old', 10], ['newer1', 2], ['newer2', 1]] as const) {
+        made.push(await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: name, status: 'done', reservationKey: `k-${name}-${made.length}`, startedAt: new Date(at.getTime() - 11 * 86_400_000), endedAt: new Date(at.getTime() - daysAgo * 86_400_000), secondsRun: 120 } }));
+      }
+      // Two a sweep: the oldest first, so the ten day old one is written by the first sweep and the others by the second
+      await sweepComputers(at, 2);
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${made[0].id}:time` } })).toBe(1);
+      expect(await prisma.meterEvent.count({ where: { eventId: { in: made.map((job) => `computer:${job.id}:time`) } } })).toBe(2);
+      await sweepComputers(at, 2);
+      expect(await prisma.meterEvent.count({ where: { eventId: { in: made.map((job) => `computer:${job.id}:time`) } } })).toBe(3);
+    });
+
     it('a job still in line cannot be finished: only one that started can be done or failed', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
@@ -671,6 +815,58 @@ run('a Brick’s computer, in a real database', () => {
       return { sara, jobId: job.job.id };
     }
 
+    it('nothing starts under Brick’s hands while the person has the machine: a job asked for then waits until they hand back', async () => {
+      const { sara, jobId } = await waitingJob();
+      await takeOver(sara.brickId, sara.id);
+      const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, minutes(1));
+      expect(reader.ok && reader.job.status).toBe('queued');
+      await sweepComputers(minutes(2));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.ok ? reader.job.id : '' } })).toMatchObject({ status: 'queued' });
+      await handBack(sara.brickId, sara.id);
+      await sweepComputers(minutes(3));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.ok ? reader.job.id : '' } })).toMatchObject({ status: 'running' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'running', control: 'brick' });
+    });
+
+    it('a take over and a job starting at the same moment never leave a job running under Brick’s hands while the person has the machine', async () => {
+      for (let round = 0; round < 6; round++) {
+        const { sara, jobId } = await waitingJob();
+        const [, reader] = await Promise.all([takeOver(sara.brickId, sara.id, minutes(1)), startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, minutes(1))]);
+        expect(reader.ok).toBe(true);
+        const jobs = await prisma.computerJob.findMany({ where: { botId: sara.brickId } });
+        const theirs = jobs.some((job) => job.status === 'waiting' && job.control === 'person');
+        expect(theirs).toBe(true);
+        expect(jobs.filter((job) => job.status === 'running')).toEqual([]);
+        expect(jobs.find((job) => job.id === jobId)).toMatchObject({ status: 'waiting', control: 'person' });
+      }
+    });
+
+    it('a details tap spent by a failed try is not claimed again by a try that read the row before it failed', async () => {
+      const { sara, jobId } = await waitingJob();
+      const ready = { what: 'Your details', where: 'Step 1' };
+      await requestHandover(jobId, 'details', minutes(1), ready);
+      await takeOver(sara.brickId, sara.id);
+      const asked = await fillInDetails(sara.brickId, sara.id, ready);
+      const key = asked.ok ? asked.job.detailsToFill[0].key : '';
+      const approved = await prisma.computerEffect.findUniqueOrThrow({ where: { jobId_effectKey: { jobId, effectKey: key } } });
+      expect(await planEffect(jobId, { key, kind: 'details' })).toEqual({ ok: true, already: false });
+      expect(await settleEffect(jobId, key, 'failed', 'the form did not take it')).toBe(true);
+      // The second try read the row while it was still approved: the claim finds it failed, and without a new tap that is not theirs
+      const read = jest.spyOn(prisma.computerEffect, 'findUnique').mockResolvedValueOnce(approved);
+      expect(await planEffect(jobId, { key, kind: 'details' })).toMatchObject({ ok: false, reason: 'look_up' });
+      read.mockRestore();
+      expect((await prisma.computerEffect.findUniqueOrThrow({ where: { jobId_effectKey: { jobId, effectKey: key } } })).state).toBe('failed');
+    });
+
+    it('a tap from a page that showed nothing approves nothing', async () => {
+      const { sara, jobId } = await waitingJob();
+      await requestHandover(jobId, 'details', minutes(1), { what: 'Your details', where: 'Step 1' });
+      await takeOver(sara.brickId, sara.id);
+      expect(await fillInDetails(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'changed' });
+      expect(await fillInDetails(sara.brickId, sara.id, null)).toEqual({ ok: false, reason: 'changed' });
+      expect(await prisma.computerEffect.count({ where: { jobId } })).toBe(0);
+    });
+
     it('waits for the person before their details, holds the machine for them, and Take over and Hand back are theirs only', async () => {
       const { sara, jobId } = await waitingJob();
       const omar = await person('omar');
@@ -696,9 +892,10 @@ run('a Brick’s computer, in a real database', () => {
 
     it('clears what Brick named once the details were put in (or confirmed not), so the tap is spent', async () => {
       const { sara, jobId } = await waitingJob();
-      await requestHandover(jobId, 'details', minutes(1), { what: 'Your details', where: 'Step 1' });
+      const ready = { what: 'Your details', where: 'Step 1' };
+      await requestHandover(jobId, 'details', minutes(1), ready);
       await takeOver(sara.brickId, sara.id);
-      const asked = await fillInDetails(sara.brickId, sara.id);
+      const asked = await fillInDetails(sara.brickId, sara.id, ready);
       const key = asked.ok ? asked.job.detailsToFill[0].key : '';
       await planEffect(jobId, { key, kind: 'details' });
       expect(await settleEffect(jobId, key, 'done', 'step 1')).toBe(true);
@@ -711,7 +908,7 @@ run('a Brick’s computer, in a real database', () => {
       const ready = { what: 'Your details', where: 'Step 1' };
       await requestHandover(jobId, 'details', minutes(1), ready);
       await takeOver(sara.brickId, sara.id);
-      const first = await fillInDetails(sara.brickId, sara.id);
+      const first = await fillInDetails(sara.brickId, sara.id, ready);
       const key = first.ok ? first.job.detailsToFill[0].key : '';
       expect(await planEffect(jobId, { key, kind: 'details' })).toEqual({ ok: true, already: false });
       expect(await settleEffect(jobId, key, 'failed', 'the form did not take it')).toBe(true);
@@ -719,7 +916,7 @@ run('a Brick’s computer, in a real database', () => {
       await handBack(sara.brickId, sara.id);
       await requestHandover(jobId, 'details', minutes(2), ready);
       await takeOver(sara.brickId, sara.id);
-      const second = await fillInDetails(sara.brickId, sara.id);
+      const second = await fillInDetails(sara.brickId, sara.id, ready);
       expect(second.ok && second.job.detailsToFill.map((item) => item.key)).toEqual([key]);
       expect(await planEffect(jobId, { key, kind: 'details' })).toEqual({ ok: true, already: false });
     });
@@ -764,11 +961,11 @@ run('a Brick’s computer, in a real database', () => {
       // Before the person took over there is nothing to approve
       expect(await fillInDetails(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'not_in_control' });
       await takeOver(sara.brickId, sara.id);
-      const asked = await fillInDetails(sara.brickId, sara.id);
+      const asked = await fillInDetails(sara.brickId, sara.id, ready);
       const key = `details:${ready.what}:${ready.where}`;
       expect(asked.ok && asked.job.detailsToFill).toEqual([{ key, what: ready.what, where: ready.where }]);
       // Asked twice, still one
-      const again = await fillInDetails(sara.brickId, sara.id);
+      const again = await fillInDetails(sara.brickId, sara.id, ready);
       expect(again.ok && again.job.detailsToFill).toHaveLength(1);
       const claims = await Promise.all([planEffect(jobId, { key, kind: 'details' }), planEffect(jobId, { key, kind: 'details' })]);
       expect(claims.filter((claim) => claim.ok)).toHaveLength(1);

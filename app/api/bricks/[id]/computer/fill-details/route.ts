@@ -9,7 +9,7 @@ export const OPTIONS = optionsFor;
 /**
  * POST /api/bricks/:id/computer/fill-details
  * "Fill in my details" (game #2000): the person, in control, taps once and Brick puts in exactly what it named it was ready to put
- * in, and where (`job.ready`). The person approves what Brick showed, never something typed here: the body may carry the `what` and `where` the screen showed, and the tap is refused (409) when they are no longer what Brick named. Only
+ * in, and where (`job.ready`). The person approves what Brick showed, never something typed here: the body carries the `what` and `where` the screen showed, and the tap is refused (409) when they are missing or no longer what Brick named. Only
  * while they have taken over. Paying and submitting are never in it: those are theirs.
  */
 export const POST = (request: NextRequest, { params }: { params: Promise<{ id: string }> }) =>

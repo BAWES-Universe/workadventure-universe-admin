@@ -2237,7 +2237,7 @@ model ComputerJob {
   status         String    @default("queued") @db.VarChar(10)
   // Why a queued job is not running yet: turn (another job is writing), allowance (the person's own is used up), busy, pool
   queuedFor      String?   @map("queued_for") @db.VarChar(10)
-  // Why it stopped: person, allowance, pool, off, deleted, error
+  // Why it stopped: person, allowance, pool, off, deleted, error, unanswered (nobody took over in time)
   endedBy        String?   @map("ended_by") @db.VarChar(10)
   writes         Boolean   @default(true)
   stepDone       Int       @default(0) @map("step_done")
@@ -2258,6 +2258,8 @@ model ComputerJob {
   createdAt      DateTime  @default(now()) @map("created_at")
   startedAt      DateTime? @map("started_at")
   endedAt        DateTime? @map("ended_at")
+  // When the sweep last tried a job that waits in line, so Bricks that stay blocked go behind the ones not tried yet
+  lastTriedAt    DateTime? @map("last_tried_at")
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]

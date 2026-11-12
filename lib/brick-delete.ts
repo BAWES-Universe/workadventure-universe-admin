@@ -83,6 +83,11 @@ const SWEEP_BATCH = 200;
 /** How many pages of that size one sweep reads, so it ends even when many Bricks wait. */
 const SWEEP_PAGES = 10;
 
+/** A deleted Brick that had to wait is marked as looked at now, which sends it behind the ones not looked at yet. */
+async function markWaiting(brickId: string, now: Date): Promise<void> {
+  await prisma.bot.updateMany({ where: { id: brickId, roomId: null, deletedAt: { not: null } }, data: { updatedAt: now } });
+}
+
 /**
  * The second step: every deleted Brick whose days are over is removed for good, with its saved chats and what it
  * remembers (a Brick's are always hidden, so they go in the same transaction, see deleteWithHiddenBotData). For one
@@ -91,16 +96,17 @@ const SWEEP_PAGES = 10;
  * Nothing waits on this to be right: from the moment its days are over a deleted Brick is in no list and Undo no longer
  * takes it, removed or not. The sweep only clears the rows away.
  */
-export async function removeGoneBricks(now: Date = new Date(), ownerId?: string, batch: number = SWEEP_BATCH): Promise<string[]> {
+export async function removeGoneBricks(now: Date = new Date(), ownerId?: string, batch: number = SWEEP_BATCH, pages: number = SWEEP_PAGES): Promise<string[]> {
   const removed: string[] = [];
   // Bricks that wait for the next sweep (their computer's files were not saved) are skipped by the next page here, so a run of them
   // never keeps the Bricks behind them from being removed
   const waiting: string[] = [];
-  for (let page = 0; page < SWEEP_PAGES; page++) {
+  for (let page = 0; page < pages; page++) {
     const gone = await prisma.bot.findMany({
       where: { roomId: null, goneAt: { lte: now }, ...(ownerId ? { ownerId } : {}), ...(waiting.length ? { id: { notIn: waiting } } : {}) },
       select: { id: true },
-      orderBy: { goneAt: 'asc' },
+      // Least recently looked at first: a Brick that waited is marked below and goes behind the rest, so across sweeps none is kept from its turn
+      orderBy: [{ updatedAt: 'asc' }, { goneAt: 'asc' }],
       take: batch,
     });
     if (gone.length === 0) break;
@@ -110,6 +116,7 @@ export async function removeGoneBricks(now: Date = new Date(), ownerId?: string,
         // Kept for the next sweep, and said so: a computer that cannot be saved or removed (its provider is off or changed) is looked at, not lost quietly
         console.warn(`[Brick delete] Brick ${id} waits: its computer's files could not be saved or its machine could not be removed`);
         waiting.push(id);
+        await markWaiting(id, now);
         continue;
       }
       // Still only one whose time has passed: the condition is asked again in the delete itself
@@ -117,6 +124,7 @@ export async function removeGoneBricks(now: Date = new Date(), ownerId?: string,
       const { count } = await deleteWithHiddenBotData(where, () => prisma.bot.deleteMany({ where }));
       if (count === 0) {
         waiting.push(id);
+        await markWaiting(id, now);
         continue;
       }
       removed.push(id);

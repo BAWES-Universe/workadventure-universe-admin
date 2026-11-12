@@ -65,7 +65,7 @@ export class FakeComputerProvider implements ComputerProvider {
   readonly kind = 'fake' as const;
   readonly calls: { name: string; ref?: string }[] = [];
   /** A test sets these to make the next call fail, the way a real one can. */
-  failNext: Partial<Record<'create' | 'wake' | 'saveFiles', boolean>> = {};
+  failNext: Partial<Record<'create' | 'wake' | 'rest' | 'saveFiles', boolean>> = {};
   /** Every save fails until this is turned off. */
   failSaves = false;
   filesBytes = 1_288_490_188;
@@ -84,7 +84,7 @@ export class FakeComputerProvider implements ComputerProvider {
     this.calls.push({ name, ref });
   }
 
-  private fail(name: 'create' | 'wake' | 'saveFiles') {
+  private fail(name: 'create' | 'wake' | 'rest' | 'saveFiles') {
     if (this.failNext[name]) {
       this.failNext[name] = false;
       throw new Error(`The pretend provider failed on ${name}`);
@@ -105,6 +105,7 @@ export class FakeComputerProvider implements ComputerProvider {
 
   async rest(ref: string): Promise<void> {
     this.note('rest', ref);
+    this.fail('rest');
     this.awake.delete(ref);
   }
 

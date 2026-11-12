@@ -46,6 +46,7 @@ CREATE TABLE "computer_jobs" (
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "started_at" TIMESTAMP(3),
     "ended_at" TIMESTAMP(3),
+    "last_tried_at" TIMESTAMP(3),
 
     CONSTRAINT "computer_jobs_pkey" PRIMARY KEY ("id")
 );
@@ -94,7 +95,7 @@ ALTER TABLE "brick_computers" ADD CONSTRAINT "brick_computers_files_check" CHECK
 
 ALTER TABLE "computer_jobs" ADD CONSTRAINT "computer_jobs_status_check" CHECK ("status" IN ('queued', 'running', 'waiting', 'done', 'stopped', 'failed'));
 ALTER TABLE "computer_jobs" ADD CONSTRAINT "computer_jobs_queued_for_check" CHECK ("queued_for" IS NULL OR "queued_for" IN ('turn', 'allowance', 'busy', 'pool'));
-ALTER TABLE "computer_jobs" ADD CONSTRAINT "computer_jobs_ended_by_check" CHECK ("ended_by" IS NULL OR "ended_by" IN ('person', 'allowance', 'pool', 'off', 'deleted', 'error'));
+ALTER TABLE "computer_jobs" ADD CONSTRAINT "computer_jobs_ended_by_check" CHECK ("ended_by" IS NULL OR "ended_by" IN ('person', 'allowance', 'pool', 'off', 'deleted', 'error', 'unanswered'));
 ALTER TABLE "computer_jobs" ADD CONSTRAINT "computer_jobs_waiting_for_check" CHECK ("waiting_for" IS NULL OR "waiting_for" IN ('details', 'signin', 'upload', 'pay', 'submit', 'answer'));
 ALTER TABLE "computer_jobs" ADD CONSTRAINT "computer_jobs_control_check" CHECK ("control" IN ('brick', 'person'));
 ALTER TABLE "computer_jobs" ADD CONSTRAINT "computer_jobs_steps_check" CHECK ("step_done" >= 0 AND ("step_total" IS NULL OR "step_total" >= 1) AND "seconds_run" >= 0);
