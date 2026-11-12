@@ -280,7 +280,7 @@ run('goals and tasks, in a real database', () => {
 
   it('a run that is handed out again while its server reports does not deadlock or lose what was claimed', async () => {
     const lou = await person('lou');
-    const items = [];
+    const items: { id: string }[] = [];
     for (const name of ['a', 'b', 'c', 'd']) items.push(await set(lou, { kind: 'schedule', words: name, cadence: { type: 'every', minutes: 60 } }));
     const claimed = (await claimDueRuns(at(HOUR + MIN))).filter((one) => items.some((item) => item.id === one.itemId));
     expect(claimed).toHaveLength(4);
