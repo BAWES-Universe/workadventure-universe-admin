@@ -673,7 +673,7 @@ export function brickLimits(values: BrickLimits): Limit[] {
       unit: 'minutes',
       value: values.computerWait,
       recommended: recommended.computerWait,
-      note: 'A change counts at once, for jobs already waiting too. Once a person has taken over, the job is theirs and is not ended by this.',
+      note: 'Applies to jobs already waiting. Jobs past the new limit end on the next check. Once a person has taken over, the job is theirs and is not ended by this.',
       options: [
         { value: 30, label: '30 minutes', meaning: 'Frees the room sooner.' },
         { value: 60, label: '1 hour', meaning: 'Time to come back to it.' },

@@ -451,9 +451,13 @@ run('a Brick’s computer, in a real database', () => {
       await requestHandover(a.job.id, 'details', minutes(1));
       for (let at = 2; at <= 20; at += 2) await sweepComputers(minutes(at));
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'waiting' });
+      expect(await prisma.meterReservation.count({ where: { jobId: a.job.id, state: 'held' } })).toBe(1);
       await saveServerLimits({ bricks: { computerWait: 15 } }, 'admin');
       await sweepComputers(minutes(21));
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'unanswered' });
+      // Its reserved room is released, and the time it held is counted once: consumed time is not refunded
+      expect(await prisma.meterReservation.count({ where: { jobId: a.job.id, state: 'held' } })).toBe(0);
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${a.job.id}:time` } })).toBe(1);
     });
 
     it('once the person has taken over, the wait does not end the job: it is theirs', async () => {
