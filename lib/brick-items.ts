@@ -300,7 +300,8 @@ async function moveChecks(tx: Tx, goalId: string, from: ItemState[], data: Prism
   const checks = await tx.brickItem.findMany({ where: { parentId: goalId, state: { in: from } } });
   for (const check of checks) {
     const cadence = readCadence(check.cadence);
-    const due = recompute && cadence ? firstDue(cadence, check.timeZone, now) : null;
+    // A one-off check whose moment passed while its goal was paused is due now, once, like a one-off that is resumed on its own
+    const due = recompute && cadence ? (firstDue(cadence, check.timeZone, now) ?? (cadence.type === 'once' ? now : null)) : null;
     await tx.brickItem.update({ where: { id: check.id }, data: { ...data, nextDueAt: due, revision: { increment: 1 } } });
   }
 }

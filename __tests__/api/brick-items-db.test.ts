@@ -307,6 +307,17 @@ run('goals and tasks, in a real database', () => {
     expect(again).toMatchObject([{ words: 'Call the dentist about the crown', revision: 2, attempt: 1 }]);
   });
 
+  it('resuming a goal brings back its one-off check even when its moment passed while the goal was paused', async () => {
+    const rue = await person('rue');
+    const goal = await set(rue, { kind: 'goal', words: 'Sell the car', outcome: 'Sold', cadence: { type: 'every', minutes: 60 } });
+    const check = await createItem(rue.brickId, { userId: rue.uuid, kind: 'reminder', words: 'Post the ad', cadence: { type: 'once', at: at(2 * HOUR).toISOString() }, parentId: goal.id }, NOW);
+    if (!check.ok) throw new Error('expected the check');
+    await changeItem(rue.brickId, goal.id, { userId: rue.uuid, action: 'pause' }, at(MIN));
+    await changeItem(rue.brickId, goal.id, { userId: rue.uuid, action: 'resume' }, at(3 * HOUR));
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: check.item.id } })).toMatchObject({ state: 'on', nextDueAt: at(3 * HOUR) });
+    expect((await claimDueRuns(at(3 * HOUR + MIN))).filter((one) => one.itemId === check.item.id)).toHaveLength(1);
+  });
+
   it('keeps to the runs a day for watches and goals, but never for reminders', async () => {
     const jo = await person('jo');
     await saveServerLimits({ bricks: { runsPerDay: 2 } }, jo.id);
