@@ -27,7 +27,7 @@ function saved() {
         'pref:coffee, no sugar': { place: 'dm', with: [] },
         'fact:current_state': { place: 'dm', with: [] },
       },
-      drawnFrom: { 'pref:coffee, no sugar': T0 + DAY },
+      drawnFrom: { 'pref:coffee, no sugar': T0 + DAY } as Record<string, number>,
     },
     relationship: {
       firstMet: T0,
