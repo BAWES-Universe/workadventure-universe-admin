@@ -614,6 +614,19 @@ export function brickLimits(values: BrickLimits): Limit[] {
         { value: 500, label: '500 replies', meaning: every },
       ],
     },
+    {
+      id: 'visitEndsMinutes',
+      label: 'Minutes a visiting Brick stays after its person is gone',
+      hint: 'A Brick that walks with someone goes when they leave Universe. This is how long Universe waits without seeing them before it ends the visit.',
+      unit: 'minutes',
+      value: values.visitEndsMinutes,
+      recommended: recommended.visitEndsMinutes,
+      options: [
+        { value: 5, label: '5 minutes', meaning: 'It goes quickly.' },
+        { value: 10, label: '10 minutes', meaning: 'Survives a short break.' },
+        { value: 30, label: '30 minutes', meaning: 'Waits for a longer break.' },
+      ],
+    },
   ], LIMIT_RANGES.bricks);
 }
 

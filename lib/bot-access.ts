@@ -7,6 +7,8 @@ import { findUserByIdentifier } from '@/lib/user-identifier';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { bansCoveringWorld } from '@/lib/moderation';
 import { ownsBrick } from '@/lib/brick';
+import { whereIsBrick } from '@/lib/brick-visit';
+import { keyServesOthersIn } from '@/lib/ai-key-pay';
 
 /**
  * Can this person do this with this bot? (#426) What people do with a bot: chat in its bubble on the map, send it
@@ -21,6 +23,14 @@ import { ownsBrick } from '@/lib/brick';
  *
  * A Brick (game #1992) has no room, so no world, roles or rules decide for it: its owner may do all of this with it, and
  * nobody else may do any of it. That holds for a super admin too, because a Brick answers from its owner's private memory.
+ *
+ * One exception, for a Brick that walks beside its owner in a place that takes visiting Bricks (game #2005, see
+ * lib/brick-visit.ts): other people may chat with it nearby and send it direct messages as they could with any bot
+ * there, by the roles of that place, and for nothing else: nobody summons it, has it change things or delete or send for
+ * them. Nothing of its owner's is used for them (that is the bot server's rule, F4.1). No rule of the owner's, no
+ * Private bot and no "its creator passes" apply, and a super admin or the universe's owner has no more say than any
+ * member: it is not their bot. Where its owner's own key runs it, others are served only where that key is lent to the
+ * place (see keyServesOthersIn); where it is not, they are refused with a line that says so.
  */
 export type BotAction = 'chat' | 'dm' | 'summon' | 'change' | 'deleteOrSend';
 
@@ -125,6 +135,11 @@ export function decideBotAccess(input: {
 export interface BotAccessRequest {
   botId: string;
   action: BotAction;
+  /**
+   * The room the person is in, when the caller knows it. A visiting Brick is only ever reached from the room it is in:
+   * from any other it answers as a Brick that is not there for them.
+   */
+  roomUrl?: string | null;
   person: {
     /** The caller vouches that this person is signed in. A guest's identifier is never looked at. */
     signedIn: boolean;
@@ -188,17 +203,25 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
     banUserId = user?.id ?? null;
   }
 
+  // A visiting Brick, and the person who is not its owner talking to it (game #2005): decided below by the roles of the
+  // place it visits, never by anything of its owner's
+  let visitor: { place: NonNullable<Awaited<ReturnType<typeof whereIsBrick>>>['place'] } | null = null;
   if (!bot.room) {
     // A Brick: its owner, signed in, and nobody else. No world to be banned from, and no roles or rules to read.
-    const answer =
-      action === 'dm' && !signedIn
-        ? refusal('sign_in_required', action, bot.name)
-        : ownsBrick(bot, user?.id)
-          ? ALLOWED
-          : refusal('not_allowed', action, bot.name);
-    return named ? { ...answer, person: named } : answer;
+    if (action === 'dm' && !signedIn) {
+      const answer = refusal('sign_in_required', action, bot.name);
+      return named ? { ...answer, person: named } : answer;
+    }
+    if (ownsBrick(bot, user?.id)) return named ? { ...ALLOWED, person: named } : ALLOWED;
+    const here = (action === 'chat' || action === 'dm') && bot.deletedAt === null ? await whereIsBrick(bot.id, request.roomUrl ?? null) : null;
+    if (!here || !(await keyServesOthersIn(bot.id, here.universeId))) {
+      const answer = refusal('not_allowed', action, bot.name);
+      return named ? { ...answer, person: named } : answer;
+    }
+    visitor = { place: here.place };
   }
-  const { world } = bot.room;
+  const place = bot.room ?? visitor!.place.room;
+  const { world } = place;
 
   // A direct message can come from anywhere, so a ban from the bot's world keeps it out too, and so does having the bot
   // change things, or delete or send, which can be asked in a direct message. Chatting nearby and summoning need the
@@ -222,7 +245,8 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
   });
   const superAdmin = !!user && isSuperAdmin(user.email);
 
-  const rules = bot.accessRules ?? [];
+  // A visiting Brick has no rules of its own here: the roles of the place decide, like any bot that has none
+  const rules = visitor ? [] : (bot.accessRules ?? []);
   const roleIds = new Set(roles.map((role) => role.id));
   const personRule = user ? (rules.find((rule) => rule.userId === user.id) ?? null) : null;
   const roleRules = rules.filter((rule) => rule.roleId && roleIds.has(rule.roleId));
@@ -231,15 +255,15 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
     action,
     botName: bot.name,
     signedIn,
-    passes: !!user && (bot.createdById === user.id || world.universe.ownerId === user.id || superAdmin),
+    passes: !visitor && !!user && (bot.createdById === user.id || world.universe.ownerId === user.id || superAdmin),
     isAdmin: has(permissions, 'ADMINISTRATOR') || roles.some((role) => role.key === ADMIN_KEY) || worldTags.includes(ADMIN_KEY),
     permissions,
-    privateBot: bot.privateBot,
+    privateBot: visitor ? false : bot.privateBot,
     personRule,
     roleRules,
-    fixedReply: bot.refusalReply,
+    fixedReply: visitor ? null : bot.refusalReply,
     canSeeRoom: canSeeRoom(
-      bot.room,
+      place,
       user ? { id: user.id, isSuperAdmin: superAdmin } : null,
       new Set(membership ? [world.id] : []),
     ),

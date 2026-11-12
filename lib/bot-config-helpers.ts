@@ -242,6 +242,31 @@ export function transformBrickToServerFormat(
 }
 
 /**
+ * A Brick that visits a room with its owner (game #2005): the same fields the Brick has everywhere, with the room it is
+ * in, and `brick.visiting` saying whose it walks beside, so the bot server can put it next to that person. It stays with
+ * them: no space of its own, no roaming and no greeting. Its voice stays off, as for every Brick.
+ */
+export function transformVisitingBrickToServerFormat(
+  bot: Parameters<typeof transformBrickToServerFormat>[0],
+  isDefault: boolean,
+  where: { roomUrl: string },
+  owner: { uuid: string; name: string | null }
+) {
+  const base = transformBrickToServerFormat(bot, isDefault);
+  const url = new URL(where.roomUrl);
+  const parts = url.pathname.split('/').filter(Boolean);
+  const universeUrl = `${url.origin}/${parts.slice(0, 2).join('/')}`;
+  const worldUrl = `${url.origin}/${parts.slice(0, 3).join('/')}`;
+  return {
+    ...base,
+    brick: { ...base.brick, visiting: { ownerUuid: owner.uuid, ownerName: owner.name } },
+    roomUrl: where.roomUrl,
+    worldUrl,
+    universeUrl,
+  };
+}
+
+/**
  * A save that replaces a bot's whole behavior config must not silently turn "Show tool calls"
  * back off just because the caller did not know about that key. An explicit true or false
  * from the caller still wins.

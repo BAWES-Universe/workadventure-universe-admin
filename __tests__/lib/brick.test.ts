@@ -31,6 +31,8 @@ jest.mock('@/lib/db', () => {
         ),
         findMany: jest.fn(async ({ where }: { where: { matrixChatId: string } }) => state.users.filter((user) => user.matrixChatId === where.matrixChatId)),
       },
+      // Nobody's Brick is visiting anywhere in these tests: another person is refused, as before visits (game #2005)
+      brickVisit: { findUnique: jest.fn(async () => null) },
       room: { findUnique: noRoomReads('a room') },
       aiKeyLend: { findUnique: noRoomReads('a lend') },
       ban: { findFirst: noRoomReads('a ban') },

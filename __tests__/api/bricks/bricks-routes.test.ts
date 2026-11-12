@@ -37,6 +37,7 @@ jest.mock('@/lib/brick-default', () => ({
   isDefaultBrick: jest.fn(),
 }));
 jest.mock('@/lib/brick-delete', () => ({ deleteBrick: jest.fn(), undoBrickDelete: jest.fn(), removeGoneBricks: jest.fn() }));
+jest.mock('@/lib/brick-visit', () => ({ endStaleVisits: jest.fn(async () => 0) }));
 jest.mock('@/lib/brick-make', () => ({ ...jest.requireActual('@/lib/brick-make'), makeBrick: jest.fn() }));
 jest.mock('@/lib/bot-limits', () => ({ ...jest.requireActual('@/lib/bot-limits'), getBrickLimits: jest.fn(async () => ({ undoDays: 7, offerAfter: 3 })) }));
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
