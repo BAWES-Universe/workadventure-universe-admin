@@ -142,11 +142,13 @@ export interface ItemForgetNotice {
   userUuid: string;
   itemKey: string;
   kind: string;
+  /** When it was forgotten, in milliseconds: a thing the person said again after this is theirs to keep. */
+  at: number;
 }
 
 export async function takeItemForgets(botId: string): Promise<ItemForgetNotice[]> {
-  const rows = await prisma.botMemoryItemForget.findMany({ where: { botId, droppedAt: null }, select: { id: true, userUuid: true, itemKey: true, kind: true }, orderBy: { createdAt: 'asc' }, take: 1000 });
-  return rows;
+  const rows = await prisma.botMemoryItemForget.findMany({ where: { botId, droppedAt: null }, select: { id: true, userUuid: true, itemKey: true, kind: true, createdAt: true }, orderBy: { createdAt: 'asc' }, take: 1000 });
+  return rows.map(({ createdAt, ...row }) => ({ ...row, at: createdAt.getTime() }));
 }
 
 /** The bot server reports what it dropped. Ids of other bots are ignored. The Forget itself stays. */

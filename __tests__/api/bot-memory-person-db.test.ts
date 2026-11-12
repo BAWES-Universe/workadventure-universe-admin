@@ -186,7 +186,7 @@ run('what a bot remembers about a person (real database)', () => {
     expect(answer.status).toBe(200);
     // ... and is told to drop it, by key
     const body = (await answer.json()) as { forgetItems?: { itemKey: string; userUuid: string }[] };
-    expect(body.forgetItems).toEqual([expect.objectContaining({ itemKey: id, userUuid: people.sara.uuid })]);
+    expect(body.forgetItems).toEqual([expect.objectContaining({ itemKey: id, userUuid: people.sara.uuid, at: expect.any(Number) })]);
     await settle();
     expect(JSON.stringify((await rows(melodyId, people.sara.uuid))?.memories)).not.toContain(COFFEE);
     expect(await valuesOf('sara', melodyId)).toEqual(expect.arrayContaining(['Sara', 'lo-fi']));
