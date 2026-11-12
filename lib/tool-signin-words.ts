@@ -30,11 +30,11 @@ export function describeToolSignIn(data: ToolSignInNoticeData, formatTime?: (iso
     ? `${names[0]} stopped accepting this bot’s ${what}${formatTime ? ` at ${times[0]}` : ''}.`
     : `${servers.length === 2 ? 'Both' : `All ${servers.length}`} stopped accepting this bot’s ${what}${formatTime ? ` (${listOf(times)})` : ''}.`;
   const meanwhile = keysOnly
-    ? 'Tap to open this bot’s tools page, remove it there and add it again with a new key.'
+    ? 'Tap to open this bot’s apps page, remove it there and add it again with a new key.'
     : one
-      ? 'Until it’s reconnected, this bot answers without its tools and tells people who ask for them.'
+      ? 'Until it’s reconnected, this bot answers without its apps and tells people who ask for them.'
       : 'Until they’re reconnected, this bot answers without them and tells people who ask.';
-  const keyHint = anyKey && !keysOnly ? ' Tap to open this bot’s tools page, where the ones that need a new key can be removed and added again.' : '';
+  const keyHint = anyKey && !keysOnly ? ' Tap to open this bot’s apps page, where the ones that need a new key can be removed and added again.' : '';
   return {
     title: `${data.bot} can’t use ${listOf(names)}`,
     badge: allKeys ? 'Key rejected' : 'Sign-in expired',

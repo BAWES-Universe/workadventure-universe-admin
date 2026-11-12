@@ -66,7 +66,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/ai-providers', label: 'Universe AI', icon: Sparkles, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/ai-providers/usage', label: 'AI usage', icon: BarChart3, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/bots/database', label: 'Bot database', icon: Database, requiresSuperAdmin: true, group: 'admin' },
-  { href: '/admin/bots/mcp-servers', label: 'MCP servers', icon: Server, requiresSuperAdmin: true, group: 'admin' },
+  { href: '/admin/bots/mcp-servers', label: 'Apps', icon: Server, requiresSuperAdmin: true, group: 'admin' },
 ];
 
 export const NAV_GROUP_LABELS: Record<NavGroup, string> = {

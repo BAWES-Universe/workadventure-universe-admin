@@ -193,7 +193,7 @@ export async function PATCH(
     });
 
     if (!existing || existing.botId !== botId) {
-      return NextResponse.json({ error: 'MCP server not found' }, { status: 404, headers: corsHeaders(request) });
+      return NextResponse.json({ error: 'App not found' }, { status: 404, headers: corsHeaders(request) });
     }
 
     const body = await request.json();
@@ -426,7 +426,7 @@ export async function PATCH(
       }
       updated = await prisma.botMcpServer.findUnique({ where: { id: serverId } });
       if (!updated) {
-        return NextResponse.json({ error: 'MCP server not found' }, { status: 404, headers: corsHeaders(request) });
+        return NextResponse.json({ error: 'App not found' }, { status: 404, headers: corsHeaders(request) });
       }
     } else {
       updated = await prisma.botMcpServer.update({
@@ -524,7 +524,7 @@ export async function DELETE(
     });
 
     if (!existing || existing.botId !== botId) {
-      return NextResponse.json({ error: 'MCP server not found' }, { status: 404, headers: corsHeaders(request) });
+      return NextResponse.json({ error: 'App not found' }, { status: 404, headers: corsHeaders(request) });
     }
 
     await prisma.botMcpServer.delete({

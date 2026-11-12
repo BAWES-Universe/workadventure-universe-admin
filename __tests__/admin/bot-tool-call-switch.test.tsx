@@ -27,7 +27,7 @@ beforeEach(() => jest.clearAllMocks());
 test('starts off and saves only this bot switch', async () => {
   (authenticatedFetch as jest.Mock).mockResolvedValue({ ok: true });
   render(<Page initialValue={false} />);
-  const toggle = screen.getByRole('switch', { name: 'Show tool calls' });
+  const toggle = screen.getByRole('switch', { name: 'Show app use' });
   expect(toggle).toHaveAttribute('aria-checked', 'false');
   fireEvent.click(toggle);
   await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'true'));

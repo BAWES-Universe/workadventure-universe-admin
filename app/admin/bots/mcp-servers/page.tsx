@@ -51,7 +51,7 @@ export default function McpServersPage() {
           replacePage('/admin');
           return;
         }
-        throw new Error('Failed to fetch MCP servers');
+        throw new Error('Failed to fetch apps');
       }
 
       const data = await response.json();
@@ -90,23 +90,22 @@ export default function McpServersPage() {
     <div className="grid min-w-0 gap-6">
       <PageHeader
         kind="bot"
-        title="MCP servers"
+        title="Apps"
         context={
           <span>
-            An MCP (Model Context Protocol) server gives a bot extra tools. These are every bot’s servers; open one to
-            manage them.
+            An app gives a bot more it can do. These are every bot’s apps; open one to manage them.
           </span>
         }
       />
 
-      <FilterRow label="Filter MCP servers" className="lg:grid-cols-3">
+      <FilterRow label="Filter apps" className="lg:grid-cols-3">
         <FilterField id="mcpSearch" label="Search">
           <div className="flex gap-2">
             <Input
               id="mcpSearch"
               type="search"
               className="h-11"
-              placeholder="Server name, URL or bot"
+              placeholder="App name, link or bot"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
@@ -133,18 +132,18 @@ export default function McpServersPage() {
         </FilterField>
       </FilterRow>
 
-      {error && <LoadError label="MCP servers" retry={() => fetchServers()} />}
+      {error && <LoadError label="apps" retry={() => fetchServers()} />}
 
       {loading && servers.length === 0 ? (
-        <LoadingRows label="MCP servers" rows={4} />
+        <LoadingRows label="apps" rows={4} />
       ) : servers.length === 0 ? (
         !error &&
         (filtered ? (
           <p className="text-sm text-muted-foreground" role="status">
-            No MCP servers match these filters.
+            No apps match these filters.
           </p>
         ) : (
-          <EmptyCard kind="bot" title="No MCP servers yet." text="Add one from a bot’s page to give it extra tools." />
+          <EmptyCard kind="bot" title="No apps yet." text="Add one from a bot’s page to give it more it can do." />
         ))
       ) : (
         <div className="grid min-w-0 gap-0.5">
@@ -171,7 +170,7 @@ export default function McpServersPage() {
         </div>
       )}
 
-      <ListPager pagination={pagination} noun={['server', 'servers']} loading={loading} onChange={handlePageChange} />
+      <ListPager pagination={pagination} noun={['app', 'apps']} loading={loading} onChange={handlePageChange} />
     </div>
   );
 }
