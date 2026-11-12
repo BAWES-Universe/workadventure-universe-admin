@@ -131,14 +131,17 @@ export interface RunningExtra {
 
 /**
  * Of the extra usage running for one person, the one to report: the largest (no limit beats any multiple, never a multiple of a
- * multiple); of two the same size, the one that ends later, since that is when the person's limit really goes back. The usage page,
+ * multiple); of two the same size, the one that ends later, since that is when the person's limit really goes back (and of two that
+ * end together, the one with the smaller key, so it is never a matter of the order the rows came in). The usage page,
  * the replies' limit and the Costs page all pick through this, so they say the same thing.
  */
-export function pickRunning<T extends { multiplier: number | null; noLimit: boolean; endsAt: Date }>(rows: readonly T[]): T | null {
+export function pickRunning<T extends { grantKey: string; multiplier: number | null; noLimit: boolean; endsAt: Date }>(rows: readonly T[]): T | null {
   const rank = (row: { multiplier: number | null; noLimit: boolean }) => (row.noLimit ? Infinity : (row.multiplier ?? 1));
   let best: T | null = null;
   for (const row of rows) {
-    if (!best || rank(row) > rank(best) || (rank(row) === rank(best) && row.endsAt > best.endsAt)) best = row;
+    // Same size and same end: the smaller key, so the same one is picked whatever order the rows came in
+    const better = !best || rank(row) > rank(best) || (rank(row) === rank(best) && (row.endsAt > best.endsAt || (row.endsAt.getTime() === best.endsAt.getTime() && row.grantKey < best.grantKey)));
+    if (better) best = row;
   }
   return best;
 }
