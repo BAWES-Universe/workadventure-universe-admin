@@ -666,6 +666,20 @@ export function brickLimits(values: BrickLimits): Limit[] {
         { value: 30, label: '30 minutes', meaning: 'For longer work.' },
       ],
     },
+    {
+      id: 'computerWait',
+      label: 'How long a computer waits for a person to take over',
+      hint: 'When Brick hands over and nobody takes over, the computer waits this long. Then the job ends and its room goes back to the person’s allowance.',
+      unit: 'minutes',
+      value: values.computerWait,
+      recommended: recommended.computerWait,
+      note: 'Applies to jobs already waiting. Jobs past the new limit end on the next check. Once a person has taken over, the job is theirs and is not ended by this.',
+      options: [
+        { value: 30, label: '30 minutes', meaning: 'Frees the room sooner.' },
+        { value: 60, label: '1 hour', meaning: 'Time to come back to it.' },
+        { value: 120, label: '2 hours', meaning: 'For people who step away.' },
+      ],
+    },
   ], LIMIT_RANGES.bricks);
 }
 

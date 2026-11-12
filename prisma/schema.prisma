@@ -914,6 +914,8 @@ model Bot {
   voiceReplyUses VoiceReplyUse[]
   voiceListenUses VoiceListenUse[]
   defaultBrickOf  DefaultBrick?
+  computer        BrickComputer?
+  computerJobs    ComputerJob[]
   brickItems      BrickItem[]
 
   @@index([roomId])
@@ -2194,4 +2196,101 @@ model BotVoiceRevision {
 
   @@unique([botId, number])
   @@map("bot_voice_revisions")
+}
+
+// A Brick's computer (game #2000): one lasting computer per Brick, never copied, replaced or reset as a side effect. The row
+// exists once its owner gave the Brick a computer; the machine itself is only made at the first real need (`machine` is
+// "none" until then). `enabled` false is "Turn off computer": the row and its files stay, nothing runs and nothing is
+// counted. There is no per-person switch anywhere: every member may give a Brick a computer, inside their allowance.
+model BrickComputer {
+  id            String    @id @default(uuid())
+  botId         String    @unique @map("bot_id")
+  enabled       Boolean   @default(true)
+  // none (not made yet), waking, resting, working, cold (resting a long while), broken, restoring, stopped (stopped by us)
+  machine       String    @default("none") @db.VarChar(10)
+  // Which provider holds the machine: "fake" (the pretend one, for tests and the dev server) or "real" (off until Khalid says)
+  provider      String    @default("fake") @db.VarChar(10)
+  providerRef   String?   @map("provider_ref") @db.VarChar(255)
+  madeAt        DateTime? @map("made_at")
+  lastWorkedAt  DateTime? @map("last_worked_at")
+  // The last saved copy of its home folder: what Files shows when Computer is off, and which day a restore came from
+  filesBytes    BigInt    @default(0) @map("files_bytes")
+  filesSavedAt  DateTime? @map("files_saved_at")
+  restoredFrom  DateTime? @map("restored_from")
+  // Set while a rest is claimed and not finished, empty once it is done: a rest a stopped server left half way is told apart from a finished one
+  restClaimedAt DateTime? @map("rest_claimed_at")
+  // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again
+  noticeDismissedJobId String? @map("notice_dismissed_job_id") @db.VarChar(40)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@map("brick_computers")
+}
+
+// One job on a Brick's computer (game #2000). Jobs for a Brick queue; the database holds at most one WRITING job running or
+// waiting for its person at a time (computer_jobs_one_writer), so two jobs started at the same moment can never both write.
+// Only work proven read-only (`writes` false) may overlap.
+model ComputerJob {
+  id             String    @id @default(uuid())
+  botId          String    @map("bot_id")
+  personId       String    @map("person_id")
+  title          String    @db.VarChar(200)
+  // queued, running, waiting (for its person), done, stopped, failed
+  status         String    @default("queued") @db.VarChar(10)
+  // Why a queued job is not running yet: turn (another job is writing), allowance (the person's own is used up), busy, pool
+  queuedFor      String?   @map("queued_for") @db.VarChar(10)
+  // Why it stopped: person, allowance, pool, off, deleted, error, unanswered (nobody took over in time)
+  endedBy        String?   @map("ended_by") @db.VarChar(10)
+  writes         Boolean   @default(true)
+  stepDone       Int       @default(0) @map("step_done")
+  stepTotal      Int?      @map("step_total")
+  stepLabel      String?   @map("step_label") @db.VarChar(200)
+  // What it waits for: details, signin, upload, pay, submit or answer
+  waitingFor     String?   @map("waiting_for") @db.VarChar(10)
+  // What Brick is ready to put in at the hand-over, and where: "Your name, passport number…" and "visa-portal.example". Brick
+  // names it before it hands over; the person's one tap fills in exactly this and nothing else.
+  readyWhat      String?   @map("ready_what") @db.VarChar(150)
+  readyWhere     String?   @map("ready_where") @db.VarChar(150)
+  // Who has the mouse and keyboard: brick or person
+  control        String    @default("brick") @db.VarChar(10)
+  reservationKey String?   @map("reservation_key") @db.VarChar(255)
+  // Seconds the machine was held for this job, and when the current stretch began, so cost is worked out from what ran
+  secondsRun     Int       @default(0) @map("seconds_run")
+  stretchStarted DateTime? @map("stretch_started")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  startedAt      DateTime? @map("started_at")
+  endedAt        DateTime? @map("ended_at")
+  // When the sweep last tried a job that waits in line, so Bricks that stay blocked go behind the ones not tried yet
+  lastTriedAt    DateTime? @map("last_tried_at")
+
+  bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
+  effects ComputerEffect[]
+
+  @@index([botId, status])
+  @@index([personId, status])
+  @@map("computer_jobs")
+}
+
+// An effect outside the computer that a job meant to have, written BEFORE it is tried and once per key, so a retry looks up
+// what happened and never does it twice: a lost "created" answer is never a second pull request, send or purchase.
+model ComputerEffect {
+  id        String    @id @default(uuid())
+  jobId     String    @map("job_id")
+  effectKey String    @map("effect_key") @db.VarChar(255)
+  // send, publish, details, upload, pay, submit
+  kind      String    @db.VarChar(10)
+  // approved (the person asked for it, not tried yet), planned (tried or about to be: the outcome may be unknown), done
+  // (confirmed), failed (confirmed not done)
+  state     String    @default("planned") @db.VarChar(10)
+  // Where it went and what proves it (an address, a number): never what was in it
+  evidence  String?   @db.VarChar(500)
+  createdAt DateTime  @default(now()) @map("created_at")
+  settledAt DateTime? @map("settled_at")
+
+  job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, effectKey])
+  @@map("computer_effects")
 }
