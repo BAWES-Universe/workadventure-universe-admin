@@ -1061,6 +1061,10 @@ model BrickItem {
   lastRunAt     DateTime? @map("last_run_at")
   // Runs that failed one after another; a good run sets it back to 0
   failuresInRow Int       @default(0) @map("failures_in_row")
+  // Whether the person was told about the failures in a row so far; cleared by the next run that works
+  failureTold   Boolean   @default(false) @map("failure_told")
+  // The run that was asked to tell the person about this row of failures, until it confirms (markTold) or the row starts over
+  tellRunId     String?   @map("tell_run_id") @db.VarChar(36)
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
@@ -1101,6 +1105,10 @@ model BrickItemRun {
   result     String?   @db.VarChar(1000)
   error      String?   @db.VarChar(300)
   finishedAt DateTime? @map("finished_at")
+  // The chat event of the message this run sent, once it is sent: a run handed out again looks here (and for its marker in the
+  // chat) before it writes anything, so a message is never sent twice. Never claimed as exactly once outside Universe.
+  deliveredEventId String? @map("delivered_event_id") @db.VarChar(255)
+  deliveredAt      DateTime? @map("delivered_at")
 
   item BrickItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
 
@@ -1542,6 +1550,25 @@ model MeterGrant {
 
   @@index([personId, endsAt])
   @@map("meter_grants")
+}
+
+// A member's "Ask for more" (game #1999): what a person tapped when their computer time ran out. Only a request: it is not a
+// debt and not a grant, and it makes nothing for anyone to pay. One is open for a person at a time (a second tap finds it);
+// giving extra usage answers it. Nothing a person says is kept here, only that they asked and when.
+model MeterRequest {
+  id         String    @id @default(uuid())
+  personId   String    @map("person_id")
+  // What ran out. Computer time is the only thing a member asks for more of; chat and voice keep their own fair usage.
+  what       String    @default("computer") @db.VarChar(20)
+  createdAt  DateTime  @default(now()) @map("created_at")
+  answeredAt DateTime? @map("answered_at")
+  // The extra usage that answered it
+  grantKey   String?   @map("grant_key") @db.VarChar(255)
+
+  // The migration also makes a partial unique index (one open request per person and thing: person_id, what WHERE answered_at
+  // IS NULL), which Prisma cannot write here. The code does not need it to be right, it only closes the same-moment race.
+  @@index([personId, answeredAt])
+  @@map("meter_requests")
 }
 
 // Bot Metrics

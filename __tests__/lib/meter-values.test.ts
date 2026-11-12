@@ -7,13 +7,17 @@ import {
   allowanceNow,
   basisOfCall,
   checkMeterSettings,
+  extraDrawn,
   missingSettings,
   monthOf,
+  nextMonthStart,
   personKeyOf,
   readMeterEvent,
   readMeterSettings,
+  usageWords,
   type GrantWindow,
 } from '@/lib/meter-values';
+import { pickRunning } from '@/lib/meter-grants';
 
 const event = (over: object = {}) => ({
   eventId: 'e1',
@@ -183,5 +187,94 @@ describe('what a member has left of their month', () => {
       { at: at(11), micros: 800 },
     ];
     expect(allowanceNow(BASE, spends, [double], at(21))).toEqual(allowanceNow(BASE, [...spends].reverse(), [double], at(21)));
+  });
+});
+
+describe('what extra usage has cost above the usual (game #1999)', () => {
+  const BASE = 1000;
+  const at = (day: number) => new Date(`2026-11-${String(day).padStart(2, '0')}T12:00:00Z`);
+  const double: GrantWindow = { startsAt: at(10), endsAt: at(20), multiplier: 2 };
+  const none: GrantWindow = { startsAt: at(10), endsAt: at(20), multiplier: null };
+
+  it('is what was spent while it ran, up to what it added, and nothing before it started or after it ended', () => {
+    const spends = [
+      { at: at(2), micros: 300 },
+      { at: at(12), micros: 400 },
+      { at: at(25), micros: 900 },
+    ];
+    expect(extraDrawn(BASE, spends, [double])).toEqual([400]);
+  });
+
+  it('stops at what it added: double adds one more usual, so a bigger spend is the usual allowance’s', () => {
+    expect(extraDrawn(BASE, [{ at: at(12), micros: 1700 }], [double])).toEqual([1000]);
+  });
+
+  it('counts everything spent while no limit ran', () => {
+    expect(extraDrawn(BASE, [{ at: at(12), micros: 5000 }], [none])).toEqual([5000]);
+  });
+
+  it('gives each extra usage its own figure, in the order given, and the larger one running takes the spend', () => {
+    const five: GrantWindow = { startsAt: at(10), endsAt: at(20), multiplier: 5 };
+    expect(extraDrawn(BASE, [{ at: at(12), micros: 600 }], [double, five])).toEqual([0, 600]);
+  });
+
+  it('is nothing when none was given or nothing was spent', () => {
+    expect(extraDrawn(BASE, [{ at: at(12), micros: 600 }], [])).toEqual([]);
+    expect(extraDrawn(BASE, [], [double])).toEqual([0]);
+  });
+});
+
+describe('which of two equal extra usages is drawn first (game #1999)', () => {
+  const BASE = 1000;
+  const now = new Date('2026-11-15T12:00:00Z');
+  const at = (day: number) => new Date(`2026-11-${String(day).padStart(2, '0')}T12:00:00Z`);
+  const spends = [{ at: at(12), micros: 600 }];
+  const a: GrantWindow = { key: 'k-a', startsAt: at(10), endsAt: at(20), multiplier: 2 };
+  const b: GrantWindow = { key: 'k-b', startsAt: at(10), endsAt: at(20), multiplier: 2 };
+
+  /** What each key drew, whatever order the grants were read in. */
+  const drawnByKey = (grants: GrantWindow[]) => Object.fromEntries(grants.map((grant, index) => [grant.key, extraDrawn(BASE, spends, grants)[index]]));
+
+  it('is the smaller key when size, end and start are all the same, whatever the order the rows came in', () => {
+    expect(drawnByKey([a, b])).toEqual({ 'k-a': 600, 'k-b': 0 });
+    expect(drawnByKey([b, a])).toEqual({ 'k-a': 600, 'k-b': 0 });
+  });
+
+  it('is the grant the person page shows for it: the same key pickRunning picks, in either order', () => {
+    const rows = [a, b].map((grant) => ({ grantKey: grant.key as string, multiplier: grant.multiplier, noLimit: false, endsAt: grant.endsAt }));
+    for (const order of [rows, [...rows].reverse()]) {
+      const shown = pickRunning(order)?.grantKey;
+      const drawn = drawnByKey(order.map((row) => (row.grantKey === 'k-a' ? a : b)));
+      expect(Object.keys(drawn).find((key) => drawn[key] > 0)).toBe(shown);
+    }
+  });
+
+  it('leaves the member the same amount whichever order, so the allowance and the Costs page agree', () => {
+    expect(allowanceNow(BASE, spends, [a, b], now)).toEqual(allowanceNow(BASE, spends, [b, a], now));
+  });
+
+  it('is the one that ends sooner, then the one that started first, before the key decides', () => {
+    const soonerButLaterKey: GrantWindow = { key: 'k-z', startsAt: at(10), endsAt: at(18), multiplier: 2 };
+    expect(drawnByKey([a, soonerButLaterKey])).toEqual({ 'k-a': 0, 'k-z': 600 });
+    const earlierStartLaterKey: GrantWindow = { key: 'k-z', startsAt: at(9), endsAt: at(20), multiplier: 2 };
+    expect(drawnByKey([a, earlierStartLaterKey])).toEqual({ 'k-a': 0, 'k-z': 600 });
+    expect(drawnByKey([earlierStartLaterKey, a])).toEqual({ 'k-a': 0, 'k-z': 600 });
+  });
+});
+
+describe('the words under a usage bar (game #1999)', () => {
+  it('says out at nothing, low at a fifth or less, and over half above half', () => {
+    expect(usageWords(0)).toBe('out');
+    expect(usageWords(0.01)).toBe('low');
+    expect(usageWords(0.2)).toBe('low');
+    expect(usageWords(0.21)).toBe('half');
+    expect(usageWords(0.5)).toBe('half');
+    expect(usageWords(0.51)).toBe('plenty');
+    expect(usageWords(1)).toBe('plenty');
+  });
+
+  it('says a month starts again on the first of the next one, in UTC, across a year end too', () => {
+    expect(nextMonthStart(new Date('2026-11-15T12:00:00Z')).toISOString()).toBe('2026-12-01T00:00:00.000Z');
+    expect(nextMonthStart(new Date('2026-12-31T23:59:00Z')).toISOString()).toBe('2027-01-01T00:00:00.000Z');
   });
 });

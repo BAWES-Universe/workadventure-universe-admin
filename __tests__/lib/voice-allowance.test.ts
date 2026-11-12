@@ -18,6 +18,7 @@ jest.mock('@/lib/db', () => ({
     user: { findUnique: jest.fn() },
     botsAiUsage: { count: jest.fn() },
     replyWindow: { findUnique: jest.fn() },
+    meterGrant: { findMany: jest.fn() },
     voiceReplyUse: { findUnique: jest.fn(), create: jest.fn(), count: jest.fn(), deleteMany: jest.fn() },
     $executeRaw: jest.fn(),
     $transaction: jest.fn(),
@@ -31,6 +32,7 @@ const db = prisma as unknown as {
   user: { findUnique: jest.Mock };
   botsAiUsage: { count: jest.Mock };
   replyWindow: { findUnique: jest.Mock };
+  meterGrant: { findMany: jest.Mock };
   voiceReplyUse: { findUnique: jest.Mock; create: jest.Mock; count: jest.Mock; deleteMany: jest.Mock };
   $executeRaw: jest.Mock;
   $transaction: jest.Mock;
@@ -50,6 +52,8 @@ beforeEach(() => {
   // The replies a person typed: none unless a test says so
   db.botsAiUsage.count.mockReset().mockResolvedValue(0);
   db.replyWindow.findUnique.mockReset().mockResolvedValue({ startedAt: STARTED });
+  // Extra usage a super admin gave: none unless a test says so
+  db.meterGrant.findMany.mockReset().mockResolvedValue([]);
   db.voiceReplyUse.findUnique.mockReset().mockResolvedValue(null);
   db.voiceReplyUse.create.mockReset().mockResolvedValue({});
   db.voiceReplyUse.count.mockReset().mockResolvedValue(0);
@@ -325,5 +329,86 @@ describe('POST /api/bots/:id/voice-allowance/left', () => {
     expect(
       (await LEFT(new NextRequest('http://localhost:3333/x', { method: 'POST', headers: { Authorization: 'Bearer svc' }, body: 'no' }), { params: Promise.resolve({ id: 'bot-1' }) })).status,
     ).toBe(400);
+  });
+});
+
+describe('with extra usage running (game #1999)', () => {
+  const grant = (change: { multiplier?: number | null; noLimit?: boolean }) =>
+    db.meterGrant.findMany.mockResolvedValue([{ grantKey: 'g-1', multiplier: change.multiplier ?? null, noLimit: change.noLimit ?? false, endsAt: new Date('2026-11-03T10:00:00Z') }]);
+  const typed = (n: number) => db.botsAiUsage.count.mockResolvedValue(n);
+  const spokenBefore = (n: number) => db.voiceReplyUse.count.mockResolvedValue(n);
+  const again = (turnId: string) => ({ ...SARA, turnId });
+
+  it('raises the voice limit with a multiple: 2x gives 50 spoken replies, not 25', async () => {
+    grant({ multiplier: 2 });
+    spokenBefore(25);
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toMatchObject({ allowed: true, left: 24 });
+    spokenBefore(49);
+    expect(await checkVoiceAllowance('bot-1', again('b'), NOW)).toMatchObject({ allowed: true, left: 0 });
+    spokenBefore(50);
+    expect(await checkVoiceAllowance('bot-1', again('c'), NOW)).toMatchObject({ allowed: false });
+  });
+
+  it('raises the text side with a multiple too: typed replies past the usual 30 no longer refuse a spoken one', async () => {
+    grant({ multiplier: 2 });
+    // 31 typed is past the usual window (30), so before this fix byText went below zero and voice was refused outright
+    typed(31);
+    spokenBefore(3);
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toMatchObject({ allowed: true });
+    // 2x keeps 10 for text out of 60: at 50 typed the window leaves exactly 0 places for text, still allowed; 51 is not
+    typed(50);
+    expect(await checkVoiceAllowance('bot-1', again('b'), NOW)).toMatchObject({ allowed: true, left: 0 });
+    typed(51);
+    expect(await checkVoiceAllowance('bot-1', again('c'), NOW)).toMatchObject({ allowed: false });
+  });
+
+  it('without the grant the same typed replies still turn a spoken one down', async () => {
+    typed(31);
+    spokenBefore(3);
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toMatchObject({ allowed: false });
+  });
+
+  it('stops nothing with no limit, on the voice side or the text side, and gives no count', async () => {
+    grant({ noLimit: true });
+    spokenBefore(500);
+    typed(500);
+    const answer = await checkVoiceAllowance('bot-1', SARA, NOW);
+    expect(answer).toEqual({ allowed: true, resetsAt: '2026-11-02T13:00:00.000Z' });
+    expect(db.voiceReplyUse.create).toHaveBeenCalled();
+  });
+
+  it('gives a reply asked for again the same count as the first time', async () => {
+    grant({ multiplier: 2 });
+    db.voiceReplyUse.findUnique.mockResolvedValue({ id: 'u1' });
+    spokenBefore(30);
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toMatchObject({ allowed: true, left: 20 });
+    grant({ noLimit: true });
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toEqual({ allowed: true, resetsAt: '2026-11-02T13:00:00.000Z' });
+  });
+
+  it('tells the Voice menu what is left: the multiple, and nothing to count with no limit', async () => {
+    grant({ multiplier: 2 });
+    db.voiceReplyUse.count.mockResolvedValue(10);
+    expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: 40, resetsAt: '2026-11-02T13:00:00.000Z' });
+    grant({ noLimit: true });
+    expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: null, resetsAt: '2026-11-02T13:00:00.000Z' });
+  });
+
+  it('applies it before a window runs too: 2x gives 50, no limit gives no count', async () => {
+    db.replyWindow.findUnique.mockResolvedValue(null);
+    grant({ multiplier: 2 });
+    expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: 50, resetsAt: null });
+    grant({ noLimit: true });
+    expect(await voiceRepliesLeft('bot-1', { userId: 'wa-sara', isGuest: false }, NOW)).toEqual({ left: null, resetsAt: null });
+  });
+
+  it('looks up a signed-in person by their account and the moment now, and a guest not at all: a guest never has extra usage', async () => {
+    grant({ noLimit: true });
+    await checkVoiceAllowance('bot-1', SARA, NOW);
+    expect(db.meterGrant.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { personId: 'u-sara', startsAt: { lte: NOW }, endsAt: { gt: NOW } } }));
+    db.meterGrant.findMany.mockClear();
+    spokenBefore(3);
+    expect(await checkVoiceAllowance('bot-1', GUEST, NOW)).toMatchObject({ allowed: false });
+    expect(db.meterGrant.findMany).not.toHaveBeenCalled();
   });
 });
