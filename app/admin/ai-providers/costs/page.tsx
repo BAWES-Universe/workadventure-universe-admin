@@ -64,7 +64,7 @@ export default function CostsPage() {
   // Figures only ever belong to the dates showing: while the dates are not a usable range, none are shown
   const span = range.from && range.to ? (new Date(range.to).getTime() - new Date(range.from).getTime()) / 86400000 : null;
   const datesReady = span !== null && span >= 0 && span < COSTS_MAX_DAYS;
-  const datesWords = span === null ? 'Pick both dates to see the costs.' : span < 0 ? 'The first date comes after the last one. Put them in order to see the costs.' : `Pick dates that are at most ${COSTS_MAX_DAYS} days apart to see the costs.`;
+  const datesWords = span === null ? 'Pick both dates to see the costs.' : span < 0 ? 'The first date comes after the last one. Put them in order to see the costs.' : `Pick a range of at most ${COSTS_MAX_DAYS} days, including both dates, to see the costs.`;
 
   useEffect(() => {
     if (datesReady) load();

@@ -219,8 +219,19 @@ describe('the Costs page', () => {
     await screen.findByTestId('costs-goes');
     fetchMock.mockClear();
     fireEvent.change(screen.getByLabelText('From'), { target: { value: '2020-01-01' } });
-    expect((await screen.findByTestId('costs-dates-note')).textContent).toBe('Pick dates that are at most 366 days apart to see the costs.');
+    expect((await screen.findByTestId('costs-dates-note')).textContent).toBe('Pick a range of at most 366 days, including both dates, to see the costs.');
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('takes a range of exactly 366 days counting both dates and turns down 367', async () => {
+    answer();
+    render(<CostsPage />);
+    await screen.findByTestId('costs-goes');
+    fireEvent.change(screen.getByLabelText('To'), { target: { value: '2026-11-10' } });
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: '2025-11-10' } });
+    await waitFor(() => expect(screen.queryByTestId('costs-dates-note')).toBeNull());
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: '2025-11-09' } });
+    expect((await screen.findByTestId('costs-dates-note')).textContent).toContain('at most 366 days');
   });
 
   it('sends someone who is not a super admin away, and says when it could not load', async () => {
