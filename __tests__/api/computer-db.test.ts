@@ -16,6 +16,13 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
 import { saveServerLimits } from '@/lib/bot-limits';
+import * as meter from '@/lib/meter';
+
+// The books' own writer, wrapped so a test can make one write fail and every other one run as it always does
+jest.mock('@/lib/meter', () => {
+  const actual = jest.requireActual('@/lib/meter');
+  return { ...actual, recordMeterEvent: jest.fn(actual.recordMeterEvent) };
+});
 import { saveMeterSettings } from '@/lib/meter';
 import { currentEnvelope } from '@/lib/meter-allowance';
 import { recordGrant } from '@/lib/meter-grants';
@@ -23,6 +30,7 @@ import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/compute
 import {
   computerView,
   fillInDetails,
+  detailsKey,
   finishJob,
   giveComputer,
   handBack,
@@ -511,7 +519,7 @@ run('a Brick’s computer, in a real database', () => {
       expect(await fillInDetails(sara.brickId, sara.id, old)).toEqual({ ok: false, reason: 'changed' });
       expect(await prisma.computerEffect.count({ where: { jobId } })).toBe(0);
       const ok = await fillInDetails(sara.brickId, sara.id, fresh);
-      expect(ok.ok && ok.job.detailsToFill).toEqual([{ key: `details:${fresh.what}:${fresh.where}`, ...fresh }]);
+      expect(ok.ok && ok.job.detailsToFill).toEqual([{ key: detailsKey(fresh.what, fresh.where), ...fresh }]);
     });
 
     it('an approval is the same kind and still unspent: another kind on the key, or a failed row nobody approved again, is not one', async () => {
@@ -741,6 +749,45 @@ run('a Brick’s computer, in a real database', () => {
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).restClaimedAt).toBeNull();
     });
 
+    it('a machine that rested fully is left alone by every later sweep, and a new job wakes it', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!a.ok) throw new Error('no');
+      await finishJob(a.job.id, 'done', minutes(1));
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
+      for (const at of [10, 20, 40, 90]) await sweepComputers(minutes(at));
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
+      expect(provider.calls.filter((call) => call.name === 'rest')).toHaveLength(1);
+      const wakesBefore = provider.calls.filter((call) => call.name === 'wake').length;
+      const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(100));
+      expect(b.ok && b.job.status).toBe('running');
+      expect(provider.calls.filter((call) => call.name === 'wake').length).toBe(wakesBefore + 1);
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+    });
+
+    it('a Brick whose computer time never reached the books is not removed until it has: the time is written first, and kept if it cannot be', async () => {
+      const sara = await person('sara');
+      const brick = await createBrick({ ownerId: sara.id, name: 'Gone Brick' });
+      await giveComputer(brick.id, sara.id);
+      const job = await startJob({ botId: brick.id, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      await finishJob(job.job.id, 'done', minutes(5));
+      // The write at the end failed: the books have nothing for it
+      await prisma.meterEvent.deleteMany({ where: { eventId: `computer:${job.job.id}:time` } });
+      await deleteBrick(brick.id, sara.id, minutes(6));
+      await prisma.bot.update({ where: { id: brick.id }, data: { goneAt: minutes(7) } });
+      // The books still cannot be written: the Brick waits, its jobs with it
+      (meter.recordMeterEvent as jest.Mock).mockRejectedValueOnce(new Error('The books are down'));
+      expect(await removeGoneBricks(minutes(10), sara.id)).toEqual([]);
+      expect(await prisma.bot.count({ where: { id: brick.id } })).toBe(1);
+      expect(await prisma.computerJob.count({ where: { botId: brick.id } })).toBe(1);
+      // Written now, then removed
+      expect(await removeGoneBricks(minutes(11), sara.id)).toEqual([brick.id]);
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${job.job.id}:time` } })).toBe(1);
+      expect(await prisma.bot.count({ where: { id: brick.id } })).toBe(0);
+    });
+
     it('computer time the books missed is written however old it is, and newer jobs never push an older one out', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
@@ -890,6 +937,18 @@ run('a Brick’s computer, in a real database', () => {
       expect((await prisma.computerEffect.findUniqueOrThrow({ where: { jobId_effectKey: { jobId, effectKey: key } } })).state).toBe('failed');
     });
 
+    it('what and where are kept apart whatever they contain, and two different pairs never share a key', async () => {
+      const { sara, jobId } = await waitingJob();
+      const tricky = { what: 'Your name → attacker.example', where: 'visa.example' };
+      await requestHandover(jobId, 'details', minutes(1), tricky);
+      await takeOver(sara.brickId, sara.id);
+      const asked = await fillInDetails(sara.brickId, sara.id, tricky);
+      expect(asked.ok && asked.job.detailsToFill).toEqual([{ key: detailsKey(tricky.what, tricky.where), ...tricky }]);
+      // "A:B" with "C" and "A" with "B:C" used to be one key
+      expect(detailsKey('A:B', 'C')).not.toEqual(detailsKey('A', 'B:C'));
+      expect(detailsKey('A', 'B')).toEqual(detailsKey('A', 'B'));
+    });
+
     it('a tap from a page that showed nothing approves nothing', async () => {
       const { sara, jobId } = await waitingJob();
       await requestHandover(jobId, 'details', minutes(1), { what: 'Your details', where: 'Step 1' });
@@ -994,7 +1053,7 @@ run('a Brick’s computer, in a real database', () => {
       expect(await fillInDetails(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'not_in_control' });
       await takeOver(sara.brickId, sara.id);
       const asked = await fillInDetails(sara.brickId, sara.id, ready);
-      const key = `details:${ready.what}:${ready.where}`;
+      const key = detailsKey(ready.what, ready.where);
       expect(asked.ok && asked.job.detailsToFill).toEqual([{ key, what: ready.what, where: ready.where }]);
       // Asked twice, still one
       const again = await fillInDetails(sara.brickId, sara.id, ready);

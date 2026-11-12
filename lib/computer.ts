@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
@@ -100,12 +101,20 @@ type JobRow = {
   effects?: { effectKey: string; kind: string; state: string; evidence: string | null }[];
 };
 
+/**
+ * What and where are kept apart by a character that cannot be in either (they are cleaned of control characters when Brick names them),
+ * and the key of an approval is a hash of the pair, so "A:B" with "C" and "A" with "B:C" never share one and no value can pass for two.
+ */
+const DETAILS_SEPARATOR = '\u001f';
+const cleanDetail = (text: string) => text.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150);
+export const detailsKey = (what: string, where: string) => `details:${createHash('sha256').update(JSON.stringify([what, where])).digest('hex').slice(0, 40)}`;
+
 /** What the owner is told about a job. The evidence of an effect is where it went, never what was in it. */
 function jobView(row: JobRow): JobView {
   const detailsToFill = (row.effects ?? [])
     .filter((effect) => effect.kind === 'details' && effect.state === 'approved')
     .map((effect) => {
-      const [what, where] = (effect.evidence ?? '').split(' → ');
+      const [what, where] = (effect.evidence ?? '').split(DETAILS_SEPARATOR);
       return { key: effect.effectKey, what: what ?? '', where: where ?? '' };
     });
   return {
@@ -599,12 +608,14 @@ const SWEEP_PAGES = 10;
  * Jobs that ran and ended whose computer time never reached the books are written now, oldest first, however long ago they ended:
  * the ones missing are picked first and only then limited, so newer jobs never push an older one out. Safe to run twice.
  */
-async function recordMissingComputerTime(now: Date, batch: number): Promise<void> {
-  const cutoff = new Date(now.getTime() - 60 * 1000);
+async function recordMissingComputerTime(now: Date, batch: number, botId?: string): Promise<void> {
+  // A job that ended a moment ago may still be writing its own event: the sweep leaves it a minute. One Brick's, before its removal, does not wait.
+  const cutoff = botId ? now : new Date(now.getTime() - 60 * 1000);
+  const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
   const ended = await prisma.$queryRaw<Array<{ id: string; botId: string; personId: string; secondsRun: number; status: string; endedBy: string | null; endedAt: Date | null }>>(Prisma.sql`
     SELECT j."id", j."bot_id" AS "botId", j."person_id" AS "personId", j."seconds_run" AS "secondsRun", j."status", j."ended_by" AS "endedBy", j."ended_at" AS "endedAt"
     FROM "computer_jobs" j
-    WHERE j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0 AND j."ended_at" <= ${cutoff}
+    WHERE j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0 AND j."ended_at" <= ${cutoff} ${only}
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')
     ORDER BY j."ended_at" ASC
     LIMIT ${batch}`);
@@ -716,7 +727,7 @@ export async function watchComputer(botId: string, ownerId: string): Promise<Wat
  * them, and the person's Take over appears. Asked by the bot server.
  */
 export async function requestHandover(jobId: string, waitingFor: WaitingFor, now: Date = new Date(), ready?: { what: string; where: string } | null): Promise<JobView | null> {
-  const readyData = waitingFor === 'details' && ready ? { readyWhat: ready.what.trim().slice(0, 150) || null, readyWhere: ready.where.trim().slice(0, 150) || null } : { readyWhat: null, readyWhere: null };
+  const readyData = waitingFor === 'details' && ready ? { readyWhat: cleanDetail(ready.what) || null, readyWhere: cleanDetail(ready.where) || null } : { readyWhat: null, readyWhere: null };
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (!job) return null;
   if (job.status === 'running') {
@@ -786,14 +797,14 @@ export async function fillInDetails(botId: string, ownerId: string, shown?: { wh
   // The tap approves what the person was looking at, so the screen must say what it showed: a page that sent nothing, or opened before
   // Brick named something new, never approves the new thing.
   if (!shown) return { ok: false, reason: 'changed' };
-  const key = `details:${shown.what}:${shown.where}`.slice(0, 255);
+  const key = detailsKey(shown.what, shown.where);
   // The check and the approval are one transaction: what Brick named cannot change between them, so the approval is for exactly what was shown
   const approved = await prisma.$transaction(async (tx) => {
     const same = await tx.computerJob.updateMany({ where: { id: job.id, status: 'waiting', control: 'person', readyWhat: shown.what, readyWhere: shown.where }, data: { readyWhat: shown.what } });
     if (same.count === 0) return false;
     await tx.computerEffect.upsert({
       where: { jobId_effectKey: { jobId: job.id, effectKey: key } },
-      create: { jobId: job.id, effectKey: key, kind: 'details', state: 'approved', evidence: `${shown.what} → ${shown.where}` },
+      create: { jobId: job.id, effectKey: key, kind: 'details', state: 'approved', evidence: `${shown.what}${DETAILS_SEPARATOR}${shown.where}` },
       update: {},
     });
     // One that was tried and confirmed NOT done is approved again by this tap, so Brick can try it once more; done or still planned stay as they are
@@ -883,7 +894,14 @@ export async function getJob(jobId: string): Promise<(JobView & { botId: string;
  * When a Brick is removed for good: its machine goes only after its files were saved. A save that did not happen leaves the Brick
  * for the next sweep, and nothing is deleted quietly. True when there is nothing in the way.
  */
-export async function removeMachineBeforeDelete(botId: string): Promise<boolean> {
+export async function removeMachineBeforeDelete(botId: string, now: Date = new Date()): Promise<boolean> {
+  // Deleting a Brick deletes its jobs, so what they ran reaches the books first: one that still cannot be written keeps the Brick for the next sweep
+  await recordMissingComputerTime(now, SWEEP_BATCH, botId);
+  const unwritten = await prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`
+    SELECT COUNT(*)::bigint AS "n" FROM "computer_jobs" j
+    WHERE j."bot_id" = ${botId} AND j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0
+      AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')`);
+  if (Number(unwritten[0]?.n ?? 0) > 0) return false;
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   if (!row || !row.providerRef || row.machine === 'none') return true;
   const provider = providerFor(row);

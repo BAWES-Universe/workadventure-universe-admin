@@ -112,9 +112,9 @@ export async function removeGoneBricks(now: Date = new Date(), ownerId?: string,
     if (gone.length === 0) break;
     for (const { id } of gone) {
       // Its computer goes only after its files were saved; if that did not happen the Brick waits for the next sweep (game #2000)
-      if (!(await removeMachineBeforeDelete(id))) {
+      if (!(await removeMachineBeforeDelete(id, now))) {
         // Kept for the next sweep, and said so: a computer that cannot be saved or removed (its provider is off or changed) is looked at, not lost quietly
-        console.warn(`[Brick delete] Brick ${id} waits: its computer's files could not be saved or its machine could not be removed`);
+        console.warn(`[Brick delete] Brick ${id} waits: its computer's files could not be saved, its machine could not be removed or what it ran is not in the books yet`);
         waiting.push(id);
         await markWaiting(id, now);
         continue;
