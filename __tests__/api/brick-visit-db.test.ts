@@ -212,6 +212,25 @@ run('bringing a Brick along, in a real database', () => {
       expect(await feed(universes.second.roomUrl, [sara.uuid])).toHaveLength(1);
     });
 
+    it('keeps the visit alive while its person stays where visits are not taken, so it is there when they come back (Sentry on #927)', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      const before = new Date(Date.now() - 9 * MIN);
+      await prisma.brickVisit.update({ where: { userId: sara.id }, data: { seenAt: before } });
+      expect(await feed(universes.closed.roomUrl, [sara.uuid])).toHaveLength(0);
+      const kept = await visit(sara.id);
+      expect(kept!.seenAt.getTime()).toBeGreaterThan(before.getTime() + 8 * MIN);
+      // Where it was last seen on a map that takes visits is kept, so nothing says it walks in the closed place
+      expect(kept!.roomId).toBe(universes.open.roomId);
+      expect(await whereIsBrick(brickId, universes.closed.roomUrl)).toBeNull();
+      expect(await feed(universes.second.roomUrl, [sara.uuid])).toHaveLength(1);
+    });
+
+    it('never names a place with a blank when the visit has no room left to name (Sentry on #927)', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      await prisma.brickVisit.update({ where: { userId: sara.id }, data: { roomId: null } });
+      expect(await visitState(brickId, sara.id, null)).toEqual({ state: 'none', place: null });
+    });
+
     it('stops bringing a Brick when its universe turns the switch off, and when the Brick is switched off or deleted', async () => {
       await startVisit(brickId, sara.id, universes.open.roomUrl);
       expect(await feed(universes.open.roomUrl, [sara.uuid])).toHaveLength(1);

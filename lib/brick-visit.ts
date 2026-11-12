@@ -112,7 +112,8 @@ export async function visitState(brickId: string, ownerId: string, roomUrl: stri
     const found = await placeOfRoomId(mine.roomId);
     if (found) place = found;
   }
-  if (!place) return mine ? { state: 'visiting', place: '', startedAt: mine.startedAt.toISOString() } : { state: 'none', place: null };
+  // A place that can't be told (a room that is gone, or one the person may not see) is never shown as a blank name
+  if (!place) return { state: 'none', place: null };
   if (!place.takesVisits) return { state: 'blocked', place: place.name, visiting: !!mine };
   return mine ? { state: 'visiting', place: place.name, startedAt: mine.startedAt.toISOString() } : { state: 'none', place: place.name };
 }
@@ -193,12 +194,12 @@ export async function whereIsBrick(botId: string, roomUrl: string | null, now: D
  * The visiting Bricks the bot server should have in this room, for the people it found there (their WorkAdventure
  * ids). Every person found has their visit seen here, now: that is where a Brick follows its person from room to room,
  * and what keeps a visit alive. A person who is not here, or whose Brick is off, deleted or not visiting, adds nothing;
- * and nothing at all comes back where the universe does not take visiting Bricks.
+ * and no Brick comes back where the universe does not take visiting Bricks, though the visit is still kept alive there.
  */
 export async function bricksForRoom(roomUrl: string, peopleUuids: string[], now: Date = new Date()) {
   const place = await placeOfRoomUrl(roomUrl);
   if (!place) return { place: null, visiting: [] as VisitingBrickRow[] };
-  if (!place.takesVisits || peopleUuids.length === 0) return { place, visiting: [] as VisitingBrickRow[] };
+  if (peopleUuids.length === 0) return { place, visiting: [] as VisitingBrickRow[] };
   // A visit nobody has seen for too long has ended: it is not brought back by its person turning up again
   const stale = new Date(now.getTime() - (await visitEndsAfterMs()));
   const here = await prisma.brickVisit.findMany({
@@ -210,7 +211,13 @@ export async function bricksForRoom(roomUrl: string, peopleUuids: string[], now:
     },
   });
   if (here.length === 0) return { place, visiting: [] as VisitingBrickRow[] };
-  await prisma.brickVisit.updateMany({ where: { userId: { in: here.map((row) => row.userId) } }, data: { roomId: place.roomId, seenAt: now } });
+  const userIds = here.map((row) => row.userId);
+  if (!place.takesVisits) {
+    // Not on this map, but the person is still here: the visit is kept alive where it was, for the places that take it
+    await prisma.brickVisit.updateMany({ where: { userId: { in: userIds } }, data: { seenAt: now } });
+    return { place, visiting: [] as VisitingBrickRow[] };
+  }
+  await prisma.brickVisit.updateMany({ where: { userId: { in: userIds } }, data: { roomId: place.roomId, seenAt: now } });
   return { place, visiting: here.map((row) => ({ ownerUuid: row.user.uuid, ownerName: row.user.name, bot: row.bot })) };
 }
 
