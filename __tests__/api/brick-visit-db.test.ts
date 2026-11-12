@@ -521,6 +521,49 @@ run('bringing a Brick along, in a real database', () => {
     });
   });
 
+  describe('who the answer is for, so the bot server keeps the owner’s things out of it (audit on #2023)', () => {
+    const credentials = async (asker?: string) => aiCredentials(call('GET', `/api/bots/${brickId}/ai-credentials${asker ? `?asker=${encodeURIComponent(asker)}` : ''}`, undefined, service), ids(brickId));
+    const onKey = () => prisma.bot.update({ where: { id: brickId }, data: { aiProviderRef: keyId } });
+
+    it('flags every answer for someone who is not the owner, on every route, and never the owner’s', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      await feed(universes.open.roomUrl, [sara.uuid]);
+      // Universe AI, the owner's key unlent (stood in for), the owner's key lent
+      expect((await (await credentials(omar.uuid)).json()).forOthers).toBe(true);
+      await onKey();
+      expect(await (await credentials(omar.uuid)).json()).toMatchObject({ source: 'universe-ai', standingInFor: keyId, forOthers: true });
+      await prisma.aiKeyLend.create({ data: { providerId: keyId, universeId: universes.open.id } });
+      expect(await (await credentials(omar.uuid)).json()).toMatchObject({ source: 'own-key', forOthers: true });
+      // A person the bot server cannot name is nobody's owner
+      expect(await (await credentials('unknown')).json()).toMatchObject({ forOthers: true });
+      // Its owner is never flagged, by uuid or email
+      for (const asker of [sara.uuid, sara.email, undefined]) {
+        expect((await (await credentials(asker)).json()).forOthers).toBeUndefined();
+      }
+    });
+
+    it('answers nobody but its owner when the Brick is not visiting anywhere (a restart, a room that takes no visits, a visit that ran out)', async () => {
+      await onKey();
+      // Never visited
+      expect((await credentials(omar.uuid)).status).toBe(404);
+      expect((await credentials('unknown')).status).toBe(404);
+      // A visit that has run out
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      await prisma.brickVisit.update({ where: { userId: sara.id }, data: { seenAt: new Date(Date.now() - 60 * MIN) } });
+      expect((await credentials(omar.uuid)).status).toBe(404);
+      // The universe it walked into stops taking visits
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      await prisma.universe.update({ where: { id: universes.open.id }, data: { allowVisitingBricks: false } });
+      try {
+        expect((await credentials(omar.uuid)).status).toBe(404);
+        // Its owner is served as always, on their own key
+        expect(await (await credentials(sara.uuid)).json()).toMatchObject({ source: 'own-key', providerId: keyId });
+      } finally {
+        await prisma.universe.update({ where: { id: universes.open.id }, data: { allowVisitingBricks: true } });
+      }
+    });
+  });
+
   describe('what a visit does not touch', () => {
     it('keeps today’s room bots out of it: a room bot cannot be brought along and has no visit', async () => {
       expect(await startVisit(roomBotId, sara.id, universes.open.roomUrl)).toEqual({ ok: false, reason: 'not_found' });

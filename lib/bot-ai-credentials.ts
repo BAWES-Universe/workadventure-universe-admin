@@ -42,6 +42,12 @@ type ServedProvider = ReturnType<typeof providerPayload> & {
   source: 'provider' | 'universe-ai' | 'own-key';
   movedFromKey?: string;
   standingInFor?: string;
+  /**
+   * Set when the asker is not the Brick's owner (game #2005): the answer is for someone the Brick does not belong to, so the
+   * bot server keeps its owner's apps, files and computer out of the reply. Decided here, from who asked, and never from what
+   * the bot server believes about where the Brick stands.
+   */
+  forOthers?: boolean;
   vision?: VisionPlan;
   limits?: ServedLimits;
 } & Partial<OwnKeyFacts>;
@@ -125,7 +131,7 @@ export async function credentialsForBot(botId: string, options: { asker?: string
   }
   const main = await mainCredentials(bot, others);
   if (main.status !== 200 || main.body.source === 'resting') return main;
-  const answer = { status: 200 as const, body: await withLimits(bot, main.body) };
+  const answer = { status: 200 as const, body: { ...(await withLimits(bot, main.body)), ...(others ? { forOthers: true } : {}) } };
   // Only a bot on Universe AI or a person's own key has its images decided here; a pinned server provider stays as it was
   if (answer.body.source === 'provider') return answer;
   const vision = await visionPlan(bot, answer.body, others);
