@@ -634,6 +634,26 @@ run('usage for people, and cost for us, in a real database', () => {
       // And the person’s row says extra usage runs, until when
       expect((await costsReport(new Date('2026-11-01T00:00:00Z'), range.to, NOW)).people.rows.find((row) => row.name === 'sara')?.extraUntil).toBe(days(10).toISOString());
     });
+    it('says the same end on the person’s page and on the Costs page when grants of one size overlap, or a bigger one ends sooner than a smaller one', async () => {
+      await setUp();
+      const sara = await person('sara');
+      const faisal = await person('faisal');
+      await spendComputer(sara, 2_500, hours(-5));
+      const give = (key: string, amount: number, ends: number) => recordGrant({ grantKey: `g-${tag}-${key}`, personId: sara.id, settlement: 'gift', multiplier: amount, startsAt: days(-1), endsAt: days(ends), givenById: faisal.id });
+      // Two of the same size that overlap: the later end is the one reported, in both places
+      await give('five-soon', 5, 3);
+      await give('five-late', 5, 6);
+      const same = async () => {
+        const page = (await personUsage(sara.id, NOW)).extra;
+        const costs = (await costsReport(new Date('2026-11-01T00:00:00Z'), range.to, NOW)).people.rows.find((row) => row.name === 'sara')?.extraUntil;
+        return { page: page?.endsAt, costs, key: page?.grantKey };
+      };
+      expect(await same()).toEqual({ page: days(6).toISOString(), costs: days(6).toISOString(), key: `g-${tag}-five-late` });
+      // A bigger one that ends sooner is the one reported (it is the limit that applies), in both places
+      await recordGrant({ grantKey: `g-${tag}-none`, personId: sara.id, settlement: 'gift', noLimit: true, startsAt: days(-1), endsAt: days(2), givenById: faisal.id });
+      expect(await same()).toEqual({ page: days(2).toISOString(), costs: days(2).toISOString(), key: `g-${tag}-none` });
+    });
+
     it('keeps a grant still running and a grant still to bill in the list however many newer ones have ended', async () => {
       await setUp();
       const sara = await person('sara');

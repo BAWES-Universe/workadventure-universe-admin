@@ -130,18 +130,24 @@ export interface RunningExtra {
 }
 
 /**
- * The extra usage running for a person right now, for the replies' limit and the usage page. Only the largest counts, never a
- * multiple of a multiple; of two the same, the one that ends sooner is the one reported.
+ * Of the extra usage running for one person, the one to report: the largest (no limit beats any multiple, never a multiple of a
+ * multiple); of two the same size, the one that ends later, since that is when the person's limit really goes back. The usage page,
+ * the replies' limit and the Costs page all pick through this, so they say the same thing.
  */
-export async function runningExtra(personId: string, now: Date = new Date(), db: Pick<typeof prisma, 'meterGrant'> = prisma): Promise<RunningExtra | null> {
-  const rows = await db.meterGrant.findMany({ where: { personId, startsAt: { lte: now }, endsAt: { gt: now } }, select: { grantKey: true, multiplier: true, noLimit: true, endsAt: true } });
-  let best: RunningExtra | null = null;
+export function pickRunning<T extends { multiplier: number | null; noLimit: boolean; endsAt: Date }>(rows: readonly T[]): T | null {
   const rank = (row: { multiplier: number | null; noLimit: boolean }) => (row.noLimit ? Infinity : (row.multiplier ?? 1));
+  let best: T | null = null;
   for (const row of rows) {
-    const next: RunningExtra = { grantKey: row.grantKey, multiplier: row.noLimit ? null : row.multiplier, noLimit: row.noLimit, endsAt: row.endsAt };
-    if (!best || rank(next) > rank(best) || (rank(next) === rank(best) && next.endsAt < best.endsAt)) best = next;
+    if (!best || rank(row) > rank(best) || (rank(row) === rank(best) && row.endsAt > best.endsAt)) best = row;
   }
   return best;
+}
+
+/** The extra usage running for a person right now, for the replies' limit and the usage page (see `pickRunning`). */
+export async function runningExtra(personId: string, now: Date = new Date(), db: Pick<typeof prisma, 'meterGrant'> = prisma): Promise<RunningExtra | null> {
+  const rows = await db.meterGrant.findMany({ where: { personId, startsAt: { lte: now }, endsAt: { gt: now } }, select: { grantKey: true, multiplier: true, noLimit: true, endsAt: true } });
+  const best = pickRunning(rows);
+  return best ? { grantKey: best.grantKey, multiplier: best.noLimit ? null : best.multiplier, noLimit: best.noLimit, endsAt: best.endsAt } : null;
 }
 
 export interface GrantChange {

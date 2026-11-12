@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
+import { pickRunning } from '@/lib/meter-grants';
 import { extraDrawn, monthOf, type GrantWindow } from '@/lib/meter-values';
 import { wokaLayersForMany } from '@/lib/woka-avatar';
 
@@ -315,10 +316,11 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
   const nameOf = new Map(users.map((user) => [user.id, user.name?.trim() || user.email || 'Someone']));
   const botOf = new Map(bots.map((bot) => [bot.id, bot]));
   const running = grants.filter((grant) => grant.startsAt <= now && grant.endsAt > now);
+  // The same one the person's page reports: the largest running, and the later end of two the same
   const extraOf = new Map<string, Date>();
-  for (const grant of running) {
-    const kept = extraOf.get(grant.personId);
-    if (!kept || grant.endsAt > kept) extraOf.set(grant.personId, grant.endsAt);
+  for (const personId of new Set(running.map((grant) => grant.personId))) {
+    const picked = pickRunning(running.filter((grant) => grant.personId === personId));
+    if (picked) extraOf.set(personId, picked.endsAt);
   }
 
   const people: PersonRow[] = listedPeople.map((person) => ({
