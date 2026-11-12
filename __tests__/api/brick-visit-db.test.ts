@@ -158,6 +158,15 @@ run('bringing a Brick along, in a real database', () => {
       expect(await prisma.bot.count({ where: { ownerId: sara.id } })).toBe(2);
     });
 
+    it('ends as one visit when the same person taps twice at once, without a failure (Sentry on #927)', async () => {
+      const answers = await Promise.all([1, 2, 3].map(() => startVisit(brickId, sara.id, universes.open.roomUrl)));
+      expect(answers.every((answer) => answer.ok)).toBe(true);
+      expect(await prisma.brickVisit.count({ where: { userId: sara.id } })).toBe(1);
+      const other = await Promise.all([startVisit(brickId, sara.id, universes.open.roomUrl), startVisit(secondBrickId, sara.id, universes.open.roomUrl)]);
+      expect(other.every((answer) => answer.ok)).toBe(true);
+      expect(await prisma.brickVisit.count({ where: { userId: sara.id } })).toBe(1);
+    });
+
     it('walks one Brick with a person at a time: bringing another swaps them', async () => {
       await postVisit(call('POST', `/api/bricks/${brickId}/visit`, { roomUrl: universes.open.roomUrl }), ids(brickId));
       await postVisit(call('POST', `/api/bricks/${secondBrickId}/visit`, { roomUrl: universes.open.roomUrl }), ids(secondBrickId));
@@ -363,6 +372,8 @@ run('bringing a Brick along, in a real database', () => {
       const owner = await credentials(sara.uuid);
       expect(await owner.json()).toMatchObject({ source: 'own-key', providerId: keyId, keyOwnerId: sara.id });
       // Not lent: others are served Universe AI on their own allowance, never the owner's key. The Brick is NOT moved off its owner's key
+      // Access does not refuse them for the key either (Sentry on #927): credentials decide who answers
+      expect(await chat(brickId, omar, 'chat', universes.open.roomUrl)).toMatchObject({ allowed: true });
       const stoodIn = await credentials(omar.uuid);
       expect(stoodIn.status).toBe(200);
       expect(await stoodIn.json()).toMatchObject({ source: 'universe-ai', providerId: serverProviderId, standingInFor: keyId });

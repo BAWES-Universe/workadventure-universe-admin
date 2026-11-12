@@ -8,7 +8,6 @@ import { isSuperAdmin } from '@/lib/super-admin';
 import { bansCoveringWorld } from '@/lib/moderation';
 import { ownsBrick } from '@/lib/brick';
 import { whereIsBrick } from '@/lib/brick-visit';
-import { keyServesOthersIn } from '@/lib/ai-key-pay';
 
 /**
  * Can this person do this with this bot? (#426) What people do with a bot: chat in its bubble on the map, send it
@@ -29,8 +28,9 @@ import { keyServesOthersIn } from '@/lib/ai-key-pay';
  * there, by the roles of that place, and for nothing else: nobody summons it, has it change things or delete or send for
  * them. Nothing of its owner's is used for them (that is the bot server's rule, F4.1). No rule of the owner's, no
  * Private bot and no "its creator passes" apply, and a super admin or the universe's owner has no more say than any
- * member: it is not their bot. Where its owner's own key runs it, others are served only where that key is lent to the
- * place (see keyServesOthersIn); where it is not, they are refused with a line that says so.
+ * member: it is not their bot. Whose key answers them is not decided here but in lib/bot-ai-credentials.ts: where the
+ * owner's own key runs it, others are served it only where it is lent to the place, and Universe AI otherwise, so a Brick
+ * is not refused here for its key; only when nothing can answer do they get the line that says so.
  */
 export type BotAction = 'chat' | 'dm' | 'summon' | 'change' | 'deleteOrSend';
 
@@ -214,7 +214,7 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
     }
     if (ownsBrick(bot, user?.id)) return named ? { ...ALLOWED, person: named } : ALLOWED;
     const here = (action === 'chat' || action === 'dm') && bot.deletedAt === null ? await whereIsBrick(bot.id, request.roomUrl ?? null) : null;
-    if (!here || !(await keyServesOthersIn(bot.id, here.universeId))) {
+    if (!here) {
       const answer = refusal('not_allowed', action, bot.name);
       return named ? { ...answer, person: named } : answer;
     }

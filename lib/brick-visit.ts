@@ -141,10 +141,19 @@ export async function startVisit(brickId: string, ownerId: string, roomUrl: stri
   const place = await placeOfRoomUrl(roomUrl);
   if (!place || !(await mayReadRoomBots(place.room, ownerId))) return { ok: false, reason: 'no_place' };
   if (!place.takesVisits) return { ok: false, reason: 'not_taken', place: place.name };
-  await prisma.$transaction(async (tx) => {
-    await tx.brickVisit.deleteMany({ where: { OR: [{ userId: ownerId }, { botId: brickId }] } });
-    await tx.brickVisit.create({ data: { userId: ownerId, botId: brickId, roomId: place.roomId, startedAt: now, seenAt: now } });
-  });
+  // Two taps together can both clear the old row before either adds the new one; the one that loses the race to add it
+  // tries once more, so it ends as the one visit the person has instead of failing
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await prisma.$transaction(async (tx) => {
+        await tx.brickVisit.deleteMany({ where: { OR: [{ userId: ownerId }, { botId: brickId }] } });
+        await tx.brickVisit.create({ data: { userId: ownerId, botId: brickId, roomId: place.roomId, startedAt: now, seenAt: now } });
+      });
+      break;
+    } catch (error) {
+      if (attempt >= 2 || !(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') throw error;
+    }
+  }
   return { ok: true, state: { state: 'visiting', place: place.name, startedAt: now.toISOString() } };
 }
 
