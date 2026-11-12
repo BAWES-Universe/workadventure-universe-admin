@@ -428,6 +428,24 @@ run('a Brick’s computer, in a real database', () => {
       expect(await fillInDetails(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'nothing_ready' });
     });
 
+    it('a tap after details were confirmed not put in approves the same key again, so Brick can try once more', async () => {
+      const { sara, jobId } = await waitingJob();
+      const ready = { what: 'Your details', where: 'Step 1' };
+      await requestHandover(jobId, 'details', minutes(1), ready);
+      await takeOver(sara.brickId, sara.id);
+      const first = await fillInDetails(sara.brickId, sara.id);
+      const key = first.ok ? first.job.detailsToFill[0].key : '';
+      expect(await planEffect(jobId, { key, kind: 'details' })).toEqual({ ok: true, already: false });
+      expect(await settleEffect(jobId, key, 'failed', 'the form did not take it')).toBe(true);
+      // The person hands back, Brick names the same thing again and the person taps again
+      await handBack(sara.brickId, sara.id);
+      await requestHandover(jobId, 'details', minutes(2), ready);
+      await takeOver(sara.brickId, sara.id);
+      const second = await fillInDetails(sara.brickId, sara.id);
+      expect(second.ok && second.job.detailsToFill.map((item) => item.key)).toEqual([key]);
+      expect(await planEffect(jobId, { key, kind: 'details' })).toEqual({ ok: true, already: false });
+    });
+
     it('nothing is waiting, nothing to take over', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);

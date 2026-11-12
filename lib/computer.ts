@@ -623,6 +623,8 @@ export async function fillInDetails(botId: string, ownerId: string): Promise<Fil
     create: { jobId: job.id, effectKey: key, kind: 'details', state: 'approved', evidence: `${job.readyWhat} → ${job.readyWhere}` },
     update: {},
   });
+  // One that was tried and confirmed NOT done is approved again by this tap, so Brick can try it once more; done or still planned stay as they are
+  await prisma.computerEffect.updateMany({ where: { jobId: job.id, effectKey: key, state: 'failed' }, data: { state: 'approved', settledAt: null } });
   const after = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id }, include: JOB_INCLUDE });
   return { ok: true, job: jobView(after) };
 }
