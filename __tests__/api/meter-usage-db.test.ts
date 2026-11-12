@@ -309,6 +309,71 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await openRequests()).map((request) => request.personId)).toEqual([sara.id]);
     });
 
+    describe('a grant sent again after its end date passed', () => {
+      const give = (sara: { id: string }, json: object) => personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, json), { params: Promise.resolve({ id: sara.id }) });
+      const grantRows = (personId: string) => prisma.meterGrant.count({ where: { personId } });
+
+      it('is answered as saved, not refused as an end in the past, so nothing new is given', async () => {
+        await setUp();
+        const sara = await person('sara');
+        asAdmin();
+        const key = randomUUID();
+        const endsAt = new Date(Date.now() + 400).toISOString();
+        const first = { grantKey: key, amount: 'five', endsAt, settlement: 'gift' };
+        expect((await give(sara, first)).status).toBe(201);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        // The end has passed: the same try is still the saved grant, and a changed one says the key was used
+        const again = await give(sara, first);
+        expect(again.status).toBe(200);
+        expect((await again.json()).recorded).toBe(false);
+        expect((await give(sara, { ...first, amount: 'double' })).status).toBe(400);
+        expect(await grantRows(sara.id)).toBe(1);
+      });
+
+      it('still refuses an end in the past for a key that was never saved', async () => {
+        await setUp();
+        const sara = await person('sara');
+        asAdmin();
+        const response = await give(sara, { grantKey: randomUUID(), amount: 'five', endsAt: new Date(Date.now() - 1_000).toISOString(), settlement: 'gift' });
+        expect(response.status).toBe(400);
+        expect(await grantRows(sara.id)).toBe(0);
+      });
+
+      it('waits for the first try still being saved, so the end passing meanwhile never gives a second grant', async () => {
+        await setUp();
+        const sara = await person('sara');
+        asAdmin();
+        const key = randomUUID();
+        const first = { grantKey: key, amount: 'five', endsAt: new Date(Date.now() + 600).toISOString(), settlement: 'gift' };
+        // The first try has passed its checks and is slow to write: the end date passes while it is
+        const original = prisma.meterGrant.createMany.bind(prisma.meterGrant);
+        const spy = jest.spyOn(prisma.meterGrant, 'createMany').mockImplementationOnce(((args: Parameters<typeof original>[0]) => new Promise((resolve) => setTimeout(resolve, 900)).then(() => original(args))) as unknown as typeof prisma.meterGrant.createMany);
+        try {
+          const slow = give(sara, first);
+          await new Promise((resolve) => setTimeout(resolve, 750));
+          // Sent again after the end has passed: it waits for the first, then finds it saved (the old answer was "end in the past",
+          // which the sheet read as a refusal and gave a new grant)
+          const again = await give(sara, first);
+          expect(again.status).toBe(200);
+          expect((await again.json()).recorded).toBe(false);
+          expect((await slow).status).toBe(201);
+        } finally {
+          spy.mockRestore();
+        }
+        expect(await grantRows(sara.id)).toBe(1);
+      });
+
+      it('gives one grant, once, when the same try arrives many times at the same moment', async () => {
+        await setUp();
+        const sara = await person('sara');
+        asAdmin();
+        const json = { grantKey: randomUUID(), amount: 'five', endsAt: new Date(Date.now() + 10 * 86_400_000).toISOString(), settlement: 'gift' };
+        const statuses = (await Promise.all(Array.from({ length: 6 }, () => give(sara, json)))).map((response) => response.status).sort();
+        expect(statuses).toEqual([200, 200, 200, 200, 200, 201]);
+        expect(await grantRows(sara.id)).toBe(1);
+      });
+    });
+
     it('answers an ask made while the grant was still being recorded', async () => {
       await setUp();
       const sara = await person('sara');

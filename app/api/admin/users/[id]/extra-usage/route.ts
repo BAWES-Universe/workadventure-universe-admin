@@ -63,34 +63,47 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
-  const now = new Date();
   const amount = typeof body.amount === 'string' ? AMOUNTS[body.amount] : undefined;
   if (!amount) return NextResponse.json({ error: 'amount must be double, five or none' }, { status: 400 });
-  const endsAt = endsAtOf(body.endsAt, now);
-  if (!endsAt) return NextResponse.json({ error: 'endsAt must be a date in the future, within a year' }, { status: 400 });
   if (body.settlement !== 'gift' && body.settlement !== 'to_bill') return NextResponse.json({ error: 'settlement must be gift or to_bill' }, { status: 400 });
   if (typeof body.grantKey !== 'string' || !body.grantKey) return NextResponse.json({ error: 'grantKey is required' }, { status: 400 });
   if (body.note !== undefined && body.note !== null && typeof body.note !== 'string') return NextResponse.json({ error: 'note must be text' }, { status: 400 });
+  // A grant key belongs to one person: the same key for someone else is a different grant, so it is refused rather than reused
+  const key = `${id}:${body.grantKey}`.slice(0, 255);
+  const { settlement } = body;
   try {
-    const person = await prisma.user.findUnique({ where: { id }, select: { id: true, isGuest: true } });
-    if (!person || person.isGuest) return NextResponse.json({ error: 'Person not found' }, { status: 404 });
-    // A grant key belongs to one person: the same key for someone else is a different grant, so it is refused rather than reused
-    const { recorded, grant } = await recordGrant({
-      grantKey: `${id}:${body.grantKey}`.slice(0, 255),
-      personId: id,
-      settlement: body.settlement,
-      multiplier: amount.multiplier,
-      noLimit: amount.noLimit,
-      startsAt: now,
-      endsAt,
-      givenById: admin.id,
-      note: typeof body.note === 'string' ? body.note : null,
-    });
-    // A new grant answers every ask made up to now, including one made while it was being recorded. A replay answers only what was
-    // asked before that grant began, never a newer ask.
-    const answeredAt = new Date();
-    await answerRequests(id, `${id}:${body.grantKey}`.slice(0, 255), answeredAt, recorded ? answeredAt : grant.startsAt);
-    return NextResponse.json({ recorded, usage: await personUsage(id, new Date(), admin.id) }, { status: recorded ? 201 : 200 });
+    // One key is settled one at a time, from before anything about the time is judged to the end: a try that got no answer and is sent
+    // again waits for the first to finish, then finds what it saved. So "was it saved?" always has an answer before a new grant is
+    // given, and a key that was saved is answered as saved even when the end date has passed since.
+    return await prisma.$transaction(
+      async (lock) => {
+        await lock.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`grant:${key}`}))`;
+        const now = new Date();
+        const person = await prisma.user.findUnique({ where: { id }, select: { id: true, isGuest: true } });
+        if (!person || person.isGuest) return NextResponse.json({ error: 'Person not found' }, { status: 404 });
+        const saved = await prisma.meterGrant.findUnique({ where: { grantKey: key }, select: { startsAt: true, endsAt: true } });
+        // What was saved stands, with the times it was saved with; a new grant needs an end in the future
+        const endsAt = saved ? saved.endsAt : endsAtOf(body.endsAt, now);
+        if (!endsAt) return NextResponse.json({ error: 'endsAt must be a date in the future, within a year' }, { status: 400 });
+        const { recorded, grant } = await recordGrant({
+          grantKey: key,
+          personId: id,
+          settlement,
+          multiplier: amount.multiplier,
+          noLimit: amount.noLimit,
+          startsAt: saved ? saved.startsAt : now,
+          endsAt,
+          givenById: admin.id,
+          note: typeof body.note === 'string' ? body.note : null,
+        });
+        // A new grant answers every ask made up to now, including one made while it was being recorded. A replay answers only what was
+        // asked before that grant began, never a newer ask.
+        const answeredAt = new Date();
+        await answerRequests(id, key, answeredAt, recorded ? answeredAt : grant.startsAt);
+        return NextResponse.json({ recorded, usage: await personUsage(id, new Date(), admin.id) }, { status: recorded ? 201 : 200 });
+      },
+      { timeout: 30_000, maxWait: 10_000 },
+    );
   } catch (error) {
     if (error instanceof GrantRefused) return NextResponse.json({ error: error.message }, { status: 400 });
     console.error('[ExtraUsage] Could not give:', error instanceof Error ? error.message : 'unknown');
