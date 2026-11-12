@@ -510,6 +510,8 @@ export interface HeldNotice {
   kind: ItemKind;
   words: string;
   resumesAt: string;
+  /** Names this wait (when it began): the confirm carries it, so a late confirm from an earlier wait marks nothing. */
+  waitId: string;
 }
 
 export interface ClaimedRun {
@@ -595,6 +597,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH): Pr
   const lease = new Date(now.getTime() + limits.longestRun * MINUTE);
   const out: ClaimedRun[] = [];
   const held: HeldNotice[] = [];
+  const noticeRetry = limits.longestRun * MINUTE;
 
   // Runs handed out and never reported
   const lapsed = await prisma.brickItemRun.findMany({ where: { state: 'claimed', leaseUntil: { lte: now } }, orderBy: { leaseUntil: 'asc' }, take: limit, select: { id: true, itemId: true } });
@@ -675,11 +678,14 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH): Pr
           const bot = await tx.bot.findUniqueOrThrow({ where: { id: item.botId }, select: { aiProviderRef: true } });
           const room = bot.aiProviderRef === UNIVERSE_AI_REF ? await goalsRoom(item.ownerId, now) : ({ ok: true } as const);
           if (!room.ok) {
-            const first = item.heldSince === null || item.heldToldAt === null;
-            await tx.brickItem.update({ where: { id }, data: { nextDueAt: room.resumesAt, heldSince: item.heldSince ?? now, ...(first ? { heldToldAt: now } : {}) } });
-            if (first) {
+            // The notice is owed until the bot server confirms it (markHeldTold); it is handed out now, and handed out again after the
+            // retry interval if no confirm came, so an answer that never arrived does not lose it and a quick second ask does not repeat it
+            const since = item.heldSince ?? now;
+            const owed = item.heldToldAt === null && (item.heldNoticeAt === null || item.heldNoticeAt.getTime() <= now.getTime() - noticeRetry);
+            await tx.brickItem.update({ where: { id }, data: { nextDueAt: room.resumesAt, heldSince: since, ...(owed ? { heldNoticeAt: now } : {}) } });
+            if (owed) {
               const owner = await tx.user.findUniqueOrThrow({ where: { id: item.ownerId }, select: { uuid: true } });
-              notice = { itemId: item.id, brickId: item.botId, userId: owner.uuid, kind: item.kind as ItemKind, words: item.words, resumesAt: room.resumesAt.toISOString() };
+              notice = { itemId: item.id, brickId: item.botId, userId: owner.uuid, kind: item.kind as ItemKind, words: item.words, resumesAt: room.resumesAt.toISOString(), waitId: since.toISOString() };
             }
             return null;
           }
@@ -701,7 +707,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH): Pr
         // The next one is the first still to come: after an outage everything missed but this one is skipped, never replayed
         const next = cadence ? nextDue(cadence, item.timeZone, dueAt, now) : null;
         // A run is being made, so nothing is waiting any more
-        await tx.brickItem.update({ where: { id }, data: { nextDueAt: next, heldSince: null, heldToldAt: null } });
+        await tx.brickItem.update({ where: { id }, data: { nextDueAt: next, heldSince: null, heldToldAt: null, heldNoticeAt: null } });
         if (!made.length) return null;
         return tx.brickItemRun.findUniqueOrThrow({ where: { id: made[0].id }, include: RUN_INCLUDE });
       });
@@ -710,6 +716,36 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH): Pr
     }
     if (claimed) out.push(claimedOf(claimed));
     if (notice) held.push(notice);
+  }
+
+  // A held notice handed out and never confirmed is handed out again once the retry interval is over: the item itself is not due until its
+  // usage is back, so it is found here, not above
+  const owing = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+    SELECT i."id" FROM "brick_items" i
+    JOIN "bots" b ON b."id" = i."bot_id"
+    WHERE i."state" = 'on' AND i."held_since" IS NOT NULL AND i."held_told_at" IS NULL
+      AND (i."held_notice_at" IS NULL OR i."held_notice_at" <= ${new Date(now.getTime() - noticeRetry)})
+      AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
+    ORDER BY i."held_since" ASC, i."id" ASC
+    LIMIT ${limit}`);
+  for (const { id } of owing) {
+    try {
+      const notice = await prisma.$transaction(async (tx) => {
+        const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+          SELECT i."id" FROM "brick_items" i
+          WHERE i."id" = ${id} AND i."state" = 'on' AND i."held_since" IS NOT NULL AND i."held_told_at" IS NULL
+            AND (i."held_notice_at" IS NULL OR i."held_notice_at" <= ${new Date(now.getTime() - noticeRetry)})
+          FOR UPDATE OF i SKIP LOCKED`);
+        if (!locked.length) return null;
+        const item = await tx.brickItem.findUniqueOrThrow({ where: { id }, include: { owner: { select: { uuid: true } } } });
+        if (!item.heldSince || !item.nextDueAt) return null;
+        await tx.brickItem.update({ where: { id }, data: { heldNoticeAt: now } });
+        return { itemId: item.id, brickId: item.botId, userId: item.owner.uuid, kind: item.kind as ItemKind, words: item.words, resumesAt: item.nextDueAt.toISOString(), waitId: item.heldSince.toISOString() } satisfies HeldNotice;
+      });
+      if (notice) held.push(notice);
+    } catch (error) {
+      console.error('[BrickItems] Could not hand a held notice out again:', error instanceof Error ? error.message : 'unknown');
+    }
   }
   return { runs: out, held };
 }
@@ -855,6 +891,22 @@ export async function markTold(runId: string): Promise<{ ok: true; told: boolean
   // Only the run that was asked to tell, and only while its row of failures is still the item's: a late confirmation from a row that has
   // since started over (a run worked, or the item was reopened) matches nothing and marks nothing
   const { count } = await prisma.brickItem.updateMany({ where: { id: run.itemId, tellRunId: runId, failureTold: false }, data: { failureTold: true, tellRunId: null } });
+  return { ok: true, told: count > 0 };
+}
+
+export const heldToldSchema = z.object({ waitId: z.string().trim().min(1).max(64) }).strict();
+
+/**
+ * The bot server said, to the person, that their goal or task is waiting (a `held` notice from the due call). Call it only after it was
+ * said: a notice that is never confirmed is handed out again by a later due call. Only the wait it names is marked, so a late
+ * confirm from an earlier wait, or for an item that has since carried on, marks nothing. Answers whether it was kept.
+ */
+export async function markHeldTold(itemId: string, waitId: string): Promise<{ ok: true; told: boolean } | { ok: false; status: 404; error: string }> {
+  const since = new Date(waitId);
+  const item = await prisma.brickItem.findUnique({ where: { id: itemId }, select: { id: true } });
+  if (!item) return { ok: false, status: 404, error: 'Item not found' };
+  if (Number.isNaN(since.getTime())) return { ok: true, told: false };
+  const { count } = await prisma.brickItem.updateMany({ where: { id: itemId, heldSince: since, heldToldAt: null }, data: { heldToldAt: new Date() } });
   return { ok: true, told: count > 0 };
 }
 

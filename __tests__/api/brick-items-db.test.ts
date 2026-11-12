@@ -16,7 +16,7 @@ import { ensureDefaultBrick } from '@/lib/brick-default';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { makeBrick } from '@/lib/brick-make';
 import { saveServerLimits } from '@/lib/bot-limits';
-import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, markTold, claimWork, readItem, type NewItemInput } from '@/lib/brick-items';
+import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, markHeldTold, markTold, claimWork, readItem, type NewItemInput } from '@/lib/brick-items';
 import { checkReplyAllowance } from '@/lib/reply-limits';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -814,15 +814,29 @@ run('goals and tasks, in a real database', () => {
       expect(first.held.find((one) => one.itemId === watch.id)).toMatchObject({ kind: 'watch', brickId: gsbea.brickId, resumesAt: WINDOW_ENDS.toISOString() });
       expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).toMatchObject({ state: 'on', nextDueAt: WINDOW_ENDS });
       expect(await runsOf(watch.id)).toHaveLength(0);
-      // Asked again while it waits: nothing runs and nobody is told a second time
-      const again = await claimWork(at(2 * HOUR));
-      expect(mineIn(again, watch.id, briefing.id)).toEqual([]);
-      expect(again.held.filter((one) => one.userId === gsbea.uuid)).toEqual([]);
+      // Asked again soon, before anything confirmed it: nothing runs and the same notice is not handed out twice in a row
+      const soon = await claimWork(at(HOUR + 5 * MIN));
+      expect(mineIn(soon, watch.id, briefing.id)).toEqual([]);
+      expect(soon.held.filter((one) => one.userId === gsbea.uuid)).toEqual([]);
+      // The answer never reached the bot server and nothing was confirmed: after the retry interval it is handed out again, never lost
+      const retry = await claimWork(at(HOUR + 13 * MIN));
+      expect(retry.held.filter((one) => one.userId === gsbea.uuid).map((one) => one.itemId).sort()).toEqual([watch.id, briefing.id].sort());
+      expect(mineIn(retry, watch.id, briefing.id)).toEqual([]);
+      const offered = retry.held.find((one) => one.itemId === watch.id)!;
+      expect(offered.waitId).toBe(first.held.find((one) => one.itemId === watch.id)!.waitId);
+      // A confirm for another wait marks nothing; the right one keeps it, and it is not handed out again for this wait
+      expect(await markHeldTold(watch.id, new Date(0).toISOString())).toEqual({ ok: true, told: false });
+      expect(await markHeldTold('00000000-0000-4000-8000-000000000000', offered.waitId)).toMatchObject({ ok: false, status: 404 });
+      expect(await markHeldTold(watch.id, offered.waitId)).toEqual({ ok: true, told: true });
+      expect(await markHeldTold(watch.id, offered.waitId)).toEqual({ ok: true, told: false });
+      const after = await claimWork(at(2 * HOUR));
+      expect(mineIn(after, watch.id, briefing.id)).toEqual([]);
+      expect(after.held.filter((one) => one.userId === gsbea.uuid).map((one) => one.itemId)).toEqual([briefing.id]);
       // The window ends: they carry on, as ordinary runs, and nothing is marked late
       const back = await claimWork(at(5 * HOUR + MIN));
       expect(mineIn(back, watch.id, briefing.id)).toHaveLength(2);
       expect(mineIn(back, watch.id)[0]).toMatchObject({ late: false, fresh: false });
-      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).toMatchObject({ heldSince: null, heldToldAt: null });
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).toMatchObject({ heldSince: null, heldToldAt: null, heldNoticeAt: null });
     });
 
     it('holds a goal while the person’s whole window is used up, even before goals and tasks used their share', async () => {
