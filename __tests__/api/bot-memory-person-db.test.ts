@@ -268,6 +268,8 @@ run('what a bot remembers about a person (real database)', () => {
     expect(answer.status).toBe(200);
     expect(((await answer.json()) as { forgotten: number }).forgotten).toBe(0);
     expect(await prisma.botMemoryForget.count({ where: { botId: melodyId, userUuid: people.sara.uuid } })).toBe(1);
+    // By the email the bot server may name her by too
+    expect(await prisma.botMemoryForget.count({ where: { botId: melodyId, userUuid: `sara-${tag}@example.test` } })).toBe(1);
     // Omar's list is untouched
     expect(await valuesOf('omar', melodyId)).toEqual(expect.arrayContaining(['Omar', 'jazz']));
   });
@@ -283,6 +285,8 @@ run('what a bot remembers about a person (real database)', () => {
     expect(await valuesOf('omar', melodyId)).toEqual(expect.arrayContaining(['Omar', 'jazz']));
     // The bot server is told to drop her whole, as for a Forget a manager pressed, and her Brick is untouched
     expect(await prisma.botMemoryForget.count({ where: { botId: melodyId, userUuid: people.sara.uuid } })).toBe(1);
+    // Also by her email, which has no saved row, so what the bot server holds under it is dropped too
+    expect(await prisma.botMemoryForget.count({ where: { botId: melodyId, userUuid: `sara-${tag}@example.test` } })).toBe(1);
     expect(await valuesOf('sara', saraBrick)).toContain(COFFEE);
     // A row restored afterwards is as empty as this one
     await prisma.botsMemory.create({ data: { botId: melodyId, userUuid: people.sara.uuid, userId: people.sara.id, isGuest: false, memories: memoryOf() } });

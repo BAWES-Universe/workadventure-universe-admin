@@ -92,11 +92,6 @@ export async function forgetMyItem(botId: string, who: Remembering, itemId: stri
  */
 export async function forgetMyEverything(botId: string, who: Remembering): Promise<number> {
   const rows = await prisma.botsMemory.findMany({ where: rowsWhere(botId, who), select: { id: true, userUuid: true, memories: true } });
-  if (rows.length === 0) {
-    // Nothing saved yet, but the bot server may hold them in memory until its next save: it hears of the Forget by this
-    await prisma.botMemoryForget.createMany({ data: who.refs.map((userUuid) => ({ botId, userUuid })) });
-    return 0;
-  }
   const now = new Date();
   let count = 0;
   const writes: Prisma.PrismaPromise<unknown>[] = [];
@@ -112,9 +107,12 @@ export async function forgetMyEverything(botId: string, who: Remembering): Promi
         }),
       );
     }
-    // The person as a whole: the bot server drops them from memory and Orbit skips their saves until it says it did
-    writes.push(prisma.botMemoryForget.create({ data: { botId, userUuid: row.userUuid } }));
     writes.push(prisma.botsMemory.deleteMany({ where: { id: row.id } }));
+  }
+  // The person as a whole, by every id the bot server may name them by, saved or not: it drops them from memory, and
+  // Orbit skips their saves until it says it did. A row's own id is one of them too.
+  for (const userUuid of new Set([...who.refs, ...rows.map((row) => row.userUuid)])) {
+    writes.push(prisma.botMemoryForget.create({ data: { botId, userUuid } }));
   }
   await prisma.$transaction(writes);
   return count;
