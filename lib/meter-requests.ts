@@ -44,8 +44,11 @@ export async function openRequests(): Promise<OpenRequest[]> {
   return rows.map((row) => ({ id: row.id, personId: row.personId, what: row.what, createdAt: row.createdAt }));
 }
 
-/** Extra usage was given: what the person asked for is answered. Safe to say twice. */
-export async function answerRequests(personId: string, grantKey: string, now: Date = new Date()): Promise<number> {
-  const { count } = await prisma.meterRequest.updateMany({ where: { personId, answeredAt: null }, data: { answeredAt: now, grantKey } });
+/**
+ * Extra usage was given: what the person asked for before it began is answered. Safe to say twice, and a replay of an old grant
+ * (`askedUntil` is when that grant began) leaves a newer ask open, since that grant never answered it.
+ */
+export async function answerRequests(personId: string, grantKey: string, now: Date = new Date(), askedUntil: Date = now): Promise<number> {
+  const { count } = await prisma.meterRequest.updateMany({ where: { personId, answeredAt: null, createdAt: { lte: askedUntil } }, data: { answeredAt: now, grantKey } });
   return count;
 }

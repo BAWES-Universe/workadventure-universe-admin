@@ -75,7 +75,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const person = await prisma.user.findUnique({ where: { id }, select: { id: true, isGuest: true } });
     if (!person || person.isGuest) return NextResponse.json({ error: 'Person not found' }, { status: 404 });
     // A grant key belongs to one person: the same key for someone else is a different grant, so it is refused rather than reused
-    const { recorded } = await recordGrant({
+    const { recorded, grant } = await recordGrant({
       grantKey: `${id}:${body.grantKey}`.slice(0, 255),
       personId: id,
       settlement: body.settlement,
@@ -86,7 +86,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       givenById: admin.id,
       note: typeof body.note === 'string' ? body.note : null,
     });
-    await answerRequests(id, `${id}:${body.grantKey}`.slice(0, 255), now);
+    // A replay answers only what was asked before the grant began, never a newer ask
+    await answerRequests(id, `${id}:${body.grantKey}`.slice(0, 255), now, grant.startsAt);
     return NextResponse.json({ recorded, usage: await personUsage(id, new Date(), admin.id) }, { status: recorded ? 201 : 200 });
   } catch (error) {
     if (error instanceof GrantRefused) return NextResponse.json({ error: error.message }, { status: 400 });

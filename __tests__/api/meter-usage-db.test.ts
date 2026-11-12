@@ -283,6 +283,23 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(usage.computer?.left).toBeCloseTo(0.8, 5);
     });
 
+    it('leaves a newer ask open when an old grant is sent again', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 1_000);
+      await askForMore(sara.id, new Date(Date.now() - 1_000));
+      asAdmin();
+      const key = randomUUID();
+      const send = () => personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, { grantKey: key, amount: 'five', endsAt: new Date(Date.now() + 10 * 86_400_000).toISOString(), settlement: 'gift' }), { params: Promise.resolve({ id: sara.id }) });
+      expect((await send()).status).toBe(201);
+      expect(await openRequests()).toEqual([]);
+      // She asks again later; the same grant sent again (a retry, a replay) is not an answer to that
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await askForMore(sara.id);
+      expect((await send()).status).toBe(200);
+      expect((await openRequests()).map((request) => request.personId)).toEqual([sara.id]);
+    });
+
     it('is given once however many times it is sent: a double tap, a retry', async () => {
       const sara = await person('sara');
       asAdmin();
