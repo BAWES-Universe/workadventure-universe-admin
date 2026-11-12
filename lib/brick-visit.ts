@@ -245,12 +245,13 @@ export async function whereIsBrick(botId: string, roomUrl: string | null, now: D
  *
  * `enteredAt` is when the person's game saw them come into this room (never later than now; missing means now). A visit
  * only moves to this room when that is newer than when it last moved (`roomSince`): a sync that arrives late, from a room
- * the person has already left, moves nothing, refreshes nothing and brings nothing back.
+ * the person has already left, moves nothing, refreshes nothing and brings nothing back, and is named in `late`.
  */
 export async function bricksForRoom(roomUrl: string, peopleUuids: string[], now: Date = new Date(), enteredAt?: Date) {
   const place = await placeOfRoomUrl(roomUrl);
-  if (!place) return { place: null, visiting: [] as VisitingBrickRow[] };
-  if (peopleUuids.length === 0) return { place, visiting: [] as VisitingBrickRow[] };
+  const none = { visiting: [] as VisitingBrickRow[], late: [] as string[] };
+  if (!place) return { place: null, ...none };
+  if (peopleUuids.length === 0) return { place, ...none };
   // A visit nobody has seen for too long has ended: it is not brought back by its person turning up again
   const stale = new Date(now.getTime() - (await visitEndsAfterMs()));
   const here = await prisma.brickVisit.findMany({
@@ -265,13 +266,13 @@ export async function bricksForRoom(roomUrl: string, peopleUuids: string[], now:
   // moves to a room its person could not open
   const mayRead = await whoMayReadRoomBots(place.room, here.map((row) => row.userId));
   const seen = here.filter((row) => mayRead.has(row.userId));
-  if (seen.length === 0) return { place, visiting: [] as VisitingBrickRow[] };
+  if (seen.length === 0) return { place, ...none };
   const userIds = seen.map((row) => row.userId);
   const sightedAt = enteredAt && enteredAt.getTime() < now.getTime() ? enteredAt : now;
   if (!place.takesVisits) {
     // Not on this map, but the person is still here: the visit is kept alive where it was, for the places that take it
     await prisma.brickVisit.updateMany({ where: { userId: { in: userIds } }, data: { seenAt: now } });
-    return { place, visiting: [] as VisitingBrickRow[] };
+    return { place, ...none };
   }
   // Already in this room: seen now. Somewhere else: moved here only when this sighting is newer than the move that put it there
   // (equal or older is a late sync from a room the person has left, and changes nothing). A visit with no `roomSince` yet
@@ -285,7 +286,9 @@ export async function bricksForRoom(roomUrl: string, peopleUuids: string[], now:
   });
   // Only the ones that stand in this room now come back: a late sync brings no Brick to a room its person has left
   const inThisRoom = new Set((await prisma.brickVisit.findMany({ where: { userId: { in: userIds }, roomId: place.roomId }, select: { userId: true } })).map((row) => row.userId));
-  return { place, visiting: seen.filter((row) => inThisRoom.has(row.userId)).map((row) => ({ ownerUuid: row.user.uuid, ownerName: row.user.name, bot: row.bot })) };
+  const standing = seen.filter((row) => inThisRoom.has(row.userId));
+  const late = seen.filter((row) => !inThisRoom.has(row.userId)).map((row) => row.user.uuid);
+  return { place, visiting: standing.map((row) => ({ ownerUuid: row.user.uuid, ownerName: row.user.name, bot: row.bot })), late };
 }
 
 export const VISITING_BOT_SELECT = {

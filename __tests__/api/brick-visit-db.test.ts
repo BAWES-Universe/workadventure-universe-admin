@@ -687,8 +687,11 @@ run('bringing a Brick along, in a real database', () => {
       // A's sync arrives late, after B's: it moves nothing, brings no Brick to A and does not refresh the visit
       await prisma.brickVisit.update({ where: { userId: sara.id }, data: { seenAt: new Date(Date.now() - 5 * MIN) } });
       const stamp = (await visit(sara.id))!.seenAt.getTime();
-      expect(await feed(universes.open.roomUrl, [sara.uuid], T)).toHaveLength(0);
-      expect(await feed(universes.open.roomUrl, [sara.uuid], T + 5_000)).toHaveLength(0);
+      for (const late of [T, T + 5_000]) {
+        const answer = await roomFeed(call('POST', '/api/brick-visits/room', { roomUrl: universes.open.roomUrl, people: [sara.uuid], enteredAt: late }, service));
+        // 409, not an empty list: the bot server leaves the Brick it has standing in B as it is
+        expect(answer.status).toBe(409);
+      }
       expect(await visit(sara.id)).toMatchObject({ roomId: universes.second.roomId });
       expect((await visit(sara.id))!.seenAt.getTime()).toBe(stamp);
       // Another sync from B is the same room: seen now, the Brick stays

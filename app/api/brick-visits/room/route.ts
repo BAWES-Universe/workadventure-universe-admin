@@ -16,7 +16,8 @@ const bodySchema = z.object({ roomUrl: z.string().trim().min(1).max(2000), peopl
  * syncs a room: it is how a Brick follows its person from room to room and how a visit stays alive. Every person found
  * has their visit seen here now. Only a signed-in person's Brick that is on, not deleted and visiting comes back, and
  * nothing at all where the universe does not take visiting Bricks. Each is in the Brick shape the bot server already
- * knows, with `brick.visiting` naming the person it walks beside. An address that is no room answers an empty list.
+ * knows, with `brick.visiting` naming the person it walks beside. An address that is no room answers an empty list. A sync
+ * that is late (`enteredAt` is not newer than the visit's last move) moves nothing and answers 409 when it has nothing else to say.
  *
  * Auth: service token only.
  */
@@ -26,7 +27,10 @@ export async function POST(request: NextRequest) {
     const parsed = bodySchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
     const { roomUrl, people, enteredAt } = parsed.data;
-    const { visiting } = await bricksForRoom(roomUrl, people, new Date(), enteredAt === undefined ? undefined : new Date(enteredAt));
+    const { visiting, late } = await bricksForRoom(roomUrl, people, new Date(), enteredAt === undefined ? undefined : new Date(enteredAt));
+    // A late sync, from a room its person has already left: nothing changed, and the bot server must not read it as "no Brick"
+    // (it would take down the one standing in their new room), so it is told the sync is stale and leaves things as they are
+    if (visiting.length === 0 && late.length > 0) return NextResponse.json({ error: 'Late: the person is in another room now' }, { status: 409 });
     const defaults = visiting.length > 0 ? await prisma.defaultBrick.findMany({ where: { botId: { in: visiting.map((row) => row.bot.id) } }, select: { botId: true } }) : [];
     const defaultIds = new Set(defaults.map((row) => row.botId));
     return NextResponse.json(
