@@ -296,6 +296,8 @@ run('goals and tasks, in a real database', () => {
     expect(await createItem(pippa.brickId, { ...remind({ kind: 'goal', outcome: 'The passport is renewed', cadence: { type: 'once', at: at(HOUR).toISOString() } }), userId: pippa.uuid }, NOW)).toMatchObject({ ok: false, status: 400 });
     const goal = await set(pippa, { kind: 'goal', words: 'Renew my passport', outcome: 'The passport is renewed', cadence: { type: 'every', minutes: 60 } });
     expect(await changeItem(pippa.brickId, goal.id, { userId: pippa.uuid, action: 'change', change: { cadence: { type: 'once', at: at(2 * HOUR).toISOString() } } }, NOW)).toMatchObject({ ok: false, status: 400 });
+    // And never under another goal, so a stop reaches every check in one step
+    expect(await createItem(pippa.brickId, { userId: pippa.uuid, kind: 'goal', words: 'Sub goal', outcome: 'Done', cadence: { type: 'every', minutes: 60 }, parentId: goal.id }, NOW)).toMatchObject({ ok: false, status: 400 });
     const check = await createItem(pippa.brickId, { userId: pippa.uuid, kind: 'reminder', words: 'Collect it', cadence: { type: 'once', at: at(3 * HOUR).toISOString() }, parentId: goal.id }, NOW);
     expect(check).toMatchObject({ ok: true, item: { setBy: 'brick' } });
     // A report that is not "reached" leaves the goal on and due again; only reaching the outcome closes it, and its checks with it

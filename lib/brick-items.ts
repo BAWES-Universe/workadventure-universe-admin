@@ -249,6 +249,8 @@ export async function createItem(viaBrickId: string, input: NewItemInput, now: D
   }
   if (input.kind === 'watch' && !input.condition) return { ok: false, status: 400, error: 'a watch needs the condition it speaks for' };
   if (input.kind === 'goal' && !input.outcome) return { ok: false, status: 400, error: 'a goal needs the outcome the person named' };
+  // A goal is always the top of its own tree: only its checks (reminders, schedules, watches) hang under it, so one stop reaches them all
+  if (input.kind === 'goal' && input.parentId) return { ok: false, status: 400, error: 'a goal cannot be set under another goal' };
   const problem = cadenceProblem(input.kind, cadence, timeZone, now, limits.shortestRepeat, input.waitingFor);
   if (problem) return problem;
   const settled = cadence as Cadence;
