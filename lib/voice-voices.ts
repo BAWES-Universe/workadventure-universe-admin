@@ -7,7 +7,8 @@ import { readModels } from '@/lib/voice-providers';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
 import { accountRegion, voiceKeyCompanyInfo, type VoiceKeyCompanyInfo, type VoiceListSpec } from '@/lib/voice-key-companies';
 import { signAwsGet } from '@/lib/aws-sign';
-import { BRICK_HAS_NO_ROOM } from '@/lib/brick';
+import { isBrick } from '@/lib/brick';
+import { NO_UNIVERSE } from '@/lib/bot-voice';
 import { OWN_SPEECH_LABEL, isOwnSpeechAdapter, listOwnSpeechVoices } from '@/lib/voice-own-server';
 
 /**
@@ -422,23 +423,26 @@ interface Source {
  * whose keys a bot speaks on, lib/bot-voice.ts). Anything else reads as "not found", so a key's existence is never confirmed.
  */
 async function sourceFor(botId: string, source: string, part: VoicePart = 'speech'): Promise<Source> {
-  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { createdById: true, room: { select: { world: { select: { universeId: true } } } } } });
+  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { createdById: true, ownerId: true, roomId: true, deletedAt: true, room: { select: { world: { select: { universeId: true } } } } } });
   if (!bot) throw new BotSettingsError(404, 'Bot not found');
-  // A Brick has no room, so no universe lends it a voice key yet (lib/bot-voice.ts, homeOf)
-  if (!bot.room) throw new BotSettingsError(404, BRICK_HAS_NO_ROOM);
-  const universeId = bot.room.world.universeId;
+  // A Brick has no room, so no universe lends it a voice key: it picks voices from its owner's own keys, wherever they are lent
+  // (or lent at all), as it speaks on them
+  const brick = isBrick(bot);
+  if (brick ? bot.deletedAt : !bot.room) throw new BotSettingsError(404, 'Bot not found');
+  const universeId = bot.room?.world.universeId ?? null;
+  const keysOf = brick ? bot.ownerId : bot.createdById;
   let provider: (VoiceProvider & { lends?: { models: unknown }[] }) | null;
   if (source === UNIVERSE_AI_SOURCE) {
     provider = await prisma.voiceProvider.findFirst({ where: { ownerId: null, enabled: true, speech: true, defaultSpeech: true } });
     if (!provider || !provider.apiKeyEncrypted) throw new VoiceListRefused('Universe AI has no voice set up on this server.', 409);
   } else {
-    provider = bot.createdById
+    provider = keysOf
       ? await prisma.voiceProvider.findFirst({
-          where: { id: source, ownerId: bot.createdById, enabled: true, speech: true, lends: { some: { universeId } } },
-          include: { lends: { where: { universeId }, select: { models: true } } },
+          where: { id: source, ownerId: keysOf, enabled: true, speech: true, ...(universeId ? { lends: { some: { universeId } } } : {}) },
+          include: { lends: { where: { universeId: universeId ?? NO_UNIVERSE }, select: { models: true } } },
         })
       : null;
-    if (!provider || !bot.createdById || !(await lendAccess(bot.createdById, universeId))) throw new VoiceListRefused('Voice key not found.', 404);
+    if (!provider || !keysOf || (universeId !== null && !(await lendAccess(keysOf, universeId)))) throw new VoiceListRefused('Voice key not found.', 404);
   }
   const allowed = provider.lends?.length ? readLendModels(provider.lends[0].models) : null;
   // Speaking: a speaking model first, and a key whose only speaking is a talking model (game #1910) gives that one. Talking:

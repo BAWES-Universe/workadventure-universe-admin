@@ -51,6 +51,7 @@ model User {
   defaultBrick      DefaultBrick?
   brickVisit        BrickVisit?
   brickOffers       BrickOffer[]
+  brickItems        BrickItem[] @relation("BrickItemOwner")
   guestBrickHandovers GuestBrickHandover[]
   botsCreated       Bot[] @relation("BotCreatedBy")
   botsUpdated       Bot[] @relation("BotUpdatedBy")
@@ -919,6 +920,7 @@ model Bot {
   voiceListenUses VoiceListenUse[]
   defaultBrickOf  DefaultBrick?
   visit           BrickVisit?
+  brickItems      BrickItem[]
 
   @@index([roomId])
   @@index([ownerId])
@@ -1014,6 +1016,96 @@ model BrickOffer {
 
   @@id([userId, topic])
   @@map("brick_offers")
+}
+
+// A reminder, a schedule, a watch or a goal a person gave their Brick (game #2002). Universe's own scheduler keeps them all
+// here: no provider timer ever starts a run. `kind` is never asked of the person; the Brick works it out from their words.
+// `cadence` is one of { type: once | daily | every | none } (lib/brick-item-time.ts) and is read on the clock of `timeZone`,
+// the zone the item was set in, so travelling never moves it. `revision` goes up with every change that must stop work
+// that already started (pause, done, delete, change, reopen): a run belongs to one revision and is dropped when it moves.
+// `parentId` is the goal a check was set by; ending a goal ends only its own checks, never a reminder the person set.
+model BrickItem {
+  id            String    @id @default(uuid())
+  ownerId       String    @map("owner_id")
+  botId         String    @map("bot_id")
+  // reminder, schedule, watch, goal
+  kind          String    @db.VarChar(10)
+  // What was asked, in the person's words, or the fixed text of a reminder
+  words         String
+  // A watch: when it should speak
+  condition     String?
+  // A goal: the outcome the person named
+  outcome       String?
+  cadence       Json
+  timeZone      String    @map("time_zone") @db.VarChar(64)
+  // When it is next due; empty when nothing is due (done, paused, or a goal that waits for something)
+  nextDueAt     DateTime? @map("next_due_at")
+  // What a goal with no timed check waits for, in a line
+  waitingFor    String?   @map("waiting_for") @db.VarChar(300)
+  // A goal's one status line and its steps ([{ text, state: todo | doing | done }])
+  statusLine    String?   @map("status_line") @db.VarChar(300)
+  steps         Json      @default("[]")
+  // on, paused, done, deleted
+  state         String    @default("on") @db.VarChar(10)
+  // you (the person asked), brick (a check a goal set for itself)
+  setBy         String    @default("you") @map("set_by") @db.VarChar(5)
+  revision      Int       @default(1)
+  parentId      String?   @map("parent_id")
+  // Why it is paused: owner (they paused it) or brick_deleted (its Brick was deleted; Undo never switches it back on)
+  pausedBy      String?   @map("paused_by") @db.VarChar(14)
+  // The result a finished goal or watch ended with, in a line
+  result        String?   @db.VarChar(1000)
+  doneAt        DateTime? @map("done_at")
+  lastRunAt     DateTime? @map("last_run_at")
+  // Runs that failed one after another; a good run sets it back to 0
+  failuresInRow Int       @default(0) @map("failures_in_row")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  owner  User           @relation("BrickItemOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  bot    Bot            @relation(fields: [botId], references: [id], onDelete: Cascade)
+  parent BrickItem?     @relation("BrickItemChecks", fields: [parentId], references: [id], onDelete: Cascade)
+  checks BrickItem[]    @relation("BrickItemChecks")
+  runs   BrickItemRun[]
+
+  @@index([ownerId, state])
+  @@index([botId])
+  @@index([state, nextDueAt])
+  @@index([parentId])
+  @@map("brick_items")
+}
+
+// One run of an item at one due time. The unique pair (itemId, dueAt) is what makes a run happen once: whoever writes the row
+// owns the run, and two servers or a retry find it and run nothing. A claimed run that never reports is given back after its
+// lease (`attempts` counts the tries); the run's own id is what an outside effect is looked up by before it is written again.
+model BrickItemRun {
+  id         String    @id @default(uuid())
+  itemId     String    @map("item_id")
+  dueAt      DateTime  @map("due_at")
+  // The item's revision when the run was claimed
+  revision   Int
+  claimedAt  DateTime  @default(now()) @map("claimed_at")
+  leaseUntil DateTime  @map("lease_until")
+  attempts   Int       @default(1)
+  // A reminder or briefing run after an outage, marked "Late (due 8:00)"
+  late       Boolean   @default(false)
+  // A watch or goal check run after an outage: one fresh check, never the missed ones
+  fresh      Boolean   @default(false)
+  // claimed, done, failed, dropped (the item changed before it ran)
+  state      String    @default("claimed") @db.VarChar(8)
+  // What it came to: quiet, spoke, waiting, or empty while it runs
+  outcome    String?   @db.VarChar(10)
+  // The result in a line, for "Everything Brick did"
+  result     String?   @db.VarChar(1000)
+  error      String?   @db.VarChar(300)
+  finishedAt DateTime? @map("finished_at")
+
+  item BrickItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([itemId, dueAt])
+  @@index([itemId, claimedAt])
+  @@index([state, leaseUntil])
+  @@map("brick_item_runs")
 }
 
 // One role's or one person's No / Default / Yes for a bot (#427), the same shape room overrides will reuse: two
@@ -1521,6 +1613,25 @@ model BotMemoryForget {
   @@map("bot_memory_forgets")
 }
 
+// One thing a person asked a bot to forget (game #2003), as the key of what it said (a hash: the words themselves are
+// never kept). It stays for good: every memory save and read takes a thing with this key out again, so a copy the bot
+// server still holds, an old row that is restored, or the same words found in older history never bring it back. Only
+// the person saying it again afterwards is learned again. `droppedAt` is when the bot server reported it dropped the thing
+// from what it keeps in memory; until then Orbit keeps telling it.
+model BotMemoryItemForget {
+  id        String    @id @default(uuid())
+  botId     String    @map("bot_id") @db.VarChar(255)
+  userUuid  String    @map("user_uuid") @db.VarChar(255)
+  itemKey   String    @map("item_key") @db.VarChar(64)
+  kind      String    @db.VarChar(10)
+  createdAt DateTime  @default(now()) @map("created_at")
+  droppedAt DateTime? @map("dropped_at")
+
+  @@unique([botId, userUuid, itemKey])
+  @@index([botId, droppedAt])
+  @@map("bot_memory_item_forgets")
+}
+
 // Files in bot chats (game #1508): what a person sent a bot and what a bot sent them, so the bot can find, read and send
 // them again later instead of forgetting them once the message has passed. Artifacts are not copied here: they have their
 // own tables, and the bot finds them there. A file belongs to the person who sent it or who the bot made it for; others
@@ -1578,6 +1689,21 @@ model BotFile {
   @@index([botId, personRef])
   @@index([expiresAt])
   @@map("bot_files")
+}
+
+// A file its person deleted from a Brick's list (game #2003), waiting for the bot server to remove it from the uploader.
+// Orbit cannot reach the uploader, so the row stays until the bot server has confirmed, and a restart never forgets one.
+// Only where the file is, never what it was called or said.
+model BotFileRemoval {
+  id        String   @id @default(uuid())
+  botId     String   @map("bot_id") @db.VarChar(255)
+  bucket    String   @db.VarChar(255)
+  fileId    String   @map("file_id") @db.VarChar(255)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([bucket, fileId])
+  @@index([createdAt])
+  @@map("bot_file_removals")
 }
 
 // The text kept from a file, in parts in order, so a long document is searched by its words and read a part at a time.

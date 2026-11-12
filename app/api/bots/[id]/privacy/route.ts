@@ -3,6 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { authorizeBotManager, json } from '@/lib/bot-access-api';
+import { takeItemForgets } from '@/lib/bot-memory-person';
 import { BOT_PRIVACY_CHOICES, forgetNotice, loadBotPrivacy, memoryTally, storedFor, takeForgets, type BotPrivacyChoice } from '@/lib/bot-privacy';
 import { validateServiceToken } from '@/lib/service-tokens';
 import { corsHeaders } from '@/lib/cors';
@@ -47,7 +48,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (fromBotServer) {
       // The bot server asks every 30 seconds, so a Forget reaches it even while nobody is talking to the bot
       const forget = forgetNotice(await takeForgets(id));
-      return json(request, { botId: id, ...privacy, ...(forget ? { forget } : {}) });
+      // Things a person forgot one at a time (game #2003), until the bot server says it dropped them
+      const forgetItems = await takeItemForgets(id);
+      return json(request, { botId: id, ...privacy, ...(forget ? { forget } : {}), ...(forgetItems.length > 0 ? { forgetItems } : {}) });
     }
 
     const [tally, replies, people] = await Promise.all([
