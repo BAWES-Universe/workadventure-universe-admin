@@ -31,10 +31,7 @@ const endsAtOf = (value: unknown, now: Date): Date | null => {
   return date > now && date.getTime() - now.getTime() <= MAX_AHEAD ? date : null;
 };
 
-/**
- * GET /api/admin/users/:id/extra-usage - what this person uses, whether they asked for more and the extra usage running for them.
- * With `?key=` it only says whether extra usage given with that key was saved: { saved }.
- */
+/** GET /api/admin/users/:id/extra-usage - what this person uses, whether they asked for more and the extra usage running for them. */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const viewer = await asSuperAdmin(request);
   if (!viewer) return refuse();
@@ -42,13 +39,6 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   try {
     const person = await prisma.user.findUnique({ where: { id }, select: { id: true, isGuest: true } });
     if (!person || person.isGuest) return NextResponse.json({ error: 'Person not found' }, { status: 404 });
-    // "Was the one I sent with this key saved?": the answer a sheet needs after a try that got no answer, however many other grants
-    // run for the person
-    const key = request.nextUrl.searchParams.get('key');
-    if (key) {
-      const grant = await prisma.meterGrant.findUnique({ where: { grantKey: `${id}:${key}`.slice(0, 255) }, select: { personId: true } });
-      return NextResponse.json({ saved: grant?.personId === id });
-    }
     return NextResponse.json(await personUsage(id, new Date(), viewer.id));
   } catch (error) {
     console.error('[ExtraUsage] Could not read:', error instanceof Error ? error.message : 'unknown');

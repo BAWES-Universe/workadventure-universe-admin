@@ -188,21 +188,19 @@ describe('giving extra usage', () => {
   });
 
   describe('when an answer never came back and the admin changes what they give', () => {
-    /** The first try gets no answer (`first`); asking whether it was saved answers `check`. */
-    const setUpOffline = (check: () => Promise<unknown>, first = 503) => {
+    /** The first try gets no answer (`first`); the same thing sent again gets `again`, and anything after that is saved. */
+    const setUpOffline = (first: { status: number } | 'offline', again: { ok: boolean; status: number } | 'offline') => {
       let attempt = 0;
-      fetchMock.mockImplementation((url: string, init?: RequestInit) => {
-        if (init?.method !== 'POST') {
-          if (String(url).includes('?key=')) return check();
-          return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(usage()) });
-        }
+      fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method !== 'POST') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(usage()) });
         attempt += 1;
-        if (attempt === 1) return Promise.resolve({ ok: false, status: first, json: () => Promise.resolve({}) });
+        const turn = attempt === 1 ? first : attempt === 2 ? again : null;
+        if (turn === 'offline') return Promise.reject(new Error('offline'));
+        if (turn) return Promise.resolve({ ok: 'ok' in turn ? turn.ok : false, status: turn.status, json: () => Promise.resolve('ok' in turn && turn.ok ? { usage: usage({ extra: running({ grantKey: 'sara:key-1', multiplier: 5 }) }) } : { error: 'No' }) });
         return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ usage: usage({ extra: running({ grantKey: 'sara:key-2' }) }) }) });
       });
     };
-    const answered = (saved: boolean) => () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ saved }) });
-    const posts = () => fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST');
+    const posts = () => fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST').map(([, init]) => JSON.parse(String((init as RequestInit).body)));
     const tryAndChange = async () => {
       render(<ExtraUsage userId="sara" name="Sara" />);
       fireEvent.click(await screen.findByTestId('extra-usage-give'));
@@ -213,34 +211,39 @@ describe('giving extra usage', () => {
       fireEvent.click(screen.getByTestId('extra-usage-confirm'));
     };
 
-    it('gives nothing more when the server has the first one, even when it is not the grant that shows', async () => {
-      setUpOffline(answered(true));
+    it('sends the first one again, with the same key and the same words, before anything else, and gives nothing more once it went through', async () => {
+      setUpOffline({ status: 503 }, { ok: true, status: 200 });
       await tryAndChange();
-      await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'The last try was saved after all, so nothing more was given.' })));
-      expect(posts()).toHaveLength(1);
-      // It asked about the key it had sent
-      expect(fetchMock.mock.calls.some(([url]) => String(url) === '/api/admin/users/sara/extra-usage?key=key-1')).toBe(true);
+      await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'The last try went through. Use Change if that is not what you want now.' })));
+      expect(posts()).toHaveLength(2);
+      expect(posts()[1]).toEqual(posts()[0]);
+      expect(posts()[1].amount).toBe('five');
     });
 
-    it('gives it with a new key when the server does not have the first one', async () => {
-      setUpOffline(answered(false));
+    it('gives nothing else while the first one still gets no answer, so it can never be given twice', async () => {
+      setUpOffline('offline', 'offline');
       await tryAndChange();
       await waitFor(() => expect(posts()).toHaveLength(2));
-      expect(JSON.parse(String(posts()[1][1].body)).grantKey).not.toBe(JSON.parse(String(posts()[0][1].body)).grantKey);
+      expect(posts()[1].grantKey).toBe(posts()[0].grantKey);
+      // Still nothing else sent, and it can be tried again
+      await waitFor(() => expect((screen.getByTestId('extra-usage-confirm') as HTMLButtonElement).disabled).toBe(false));
+      expect(posts()).toHaveLength(2);
     });
 
-    it('gives nothing, and says so, when it cannot find out whether the first one was saved', async () => {
-      setUpOffline(() => Promise.reject(new Error('offline')));
+    it('gives the new one with a new key once the server has clearly turned the first one down', async () => {
+      setUpOffline({ status: 503 }, { ok: false, status: 400 });
       await tryAndChange();
-      await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'We couldn’t check whether the last try was saved. Try again in a moment.' })));
-      expect(posts()).toHaveLength(1);
+      await waitFor(() => expect(posts()).toHaveLength(3));
+      expect(posts()[2].grantKey).not.toBe(posts()[0].grantKey);
+      expect(posts()[2].amount).toBe('double');
     });
 
-    it('treats a session that ran out like an answer that never came: the first try may have been saved', async () => {
-      setUpOffline(answered(true), 403);
+    it('treats a session that ran out like an answer that never came: the first one is sent again, never dropped', async () => {
+      setUpOffline({ status: 403 }, { ok: true, status: 200 });
       await tryAndChange();
-      await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'The last try was saved after all, so nothing more was given.' })));
-      expect(posts()).toHaveLength(1);
+      await waitFor(() => expect(posts()).toHaveLength(2));
+      expect(posts()[1].grantKey).toBe(posts()[0].grantKey);
+      await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'The last try went through. Use Change if that is not what you want now.' })));
     });
   });
 

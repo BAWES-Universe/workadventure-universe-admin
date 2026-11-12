@@ -361,23 +361,6 @@ run('usage for people, and cost for us, in a real database', () => {
       }
     });
 
-    it('says whether extra usage given with a key was saved, whatever else runs for the person', async () => {
-      await setUp();
-      const sara = await person('sara');
-      const faisal = await person('faisal');
-      asAdmin();
-      const post = (key: string, amount: string) => personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, { grantKey: key, amount, endsAt: new Date(Date.now() + 5 * 86_400_000).toISOString(), settlement: 'gift' }), { params: Promise.resolve({ id: sara.id }) });
-      await post('small', 'double');
-      await post('big', 'five');
-      const ask = (id: string, key: string) => personGet(adminCall(`/api/admin/users/${id}/extra-usage?key=${key}`), { params: Promise.resolve({ id }) }).then((response) => response.json());
-      // The smaller one does not show on the page any more, and it is still found
-      expect((await ask(sara.id, 'small')).saved).toBe(true);
-      expect((await ask(sara.id, 'big')).saved).toBe(true);
-      expect((await ask(sara.id, 'never-sent')).saved).toBe(false);
-      // A key belongs to one person
-      expect((await ask(faisal.id, 'small')).saved).toBe(false);
-    });
-
     it('is given once however many times it is sent: a double tap, a retry', async () => {
       const sara = await person('sara');
       asAdmin();

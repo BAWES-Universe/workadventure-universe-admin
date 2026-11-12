@@ -44,7 +44,7 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
   const [note, setNote] = useState('');
   // One key per thing the admin asked for: a double tap, or a second try after an answer that never came back, gives the extra
   // usage once. It is kept until the server has answered (saved or refused), and a different request gets a new key.
-  const pendingKey = useRef<{ key: string; sig: string } | null>(null);
+  const pendingKey = useRef<{ key: string; sig: string; request: Record<string, unknown> } | null>(null);
   const [saving, setSaving] = useState(false);
 
   const read = useCallback(async (): Promise<PersonUsage> => {
@@ -260,32 +260,23 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
                 }
                 const sig = JSON.stringify({ amount, until, date: until === 'date' ? date : null, bill, note: bill === 'to_bill' ? note : null });
                 if (pendingKey.current && pendingKey.current.sig !== sig) {
-                  // The last try got no answer and this is something else: look at what the server has before giving again, since
-                  // that one may have been saved
-                  setSaving(true);
-                  let saved: boolean | null = null;
-                  try {
-                    const { authenticatedFetch } = await import('@/lib/client-auth');
-                    const response = await authenticatedFetch(`/api/admin/users/${encodeURIComponent(userId)}/extra-usage?key=${encodeURIComponent(pendingKey.current.key)}`);
-                    if (response.ok) saved = ((await response.json()) as { saved?: boolean }).saved === true;
-                  } catch {
-                    saved = null;
-                  }
-                  setSaving(false);
-                  if (saved === null) {
-                    addToast({ description: 'We couldn’t check whether the last try was saved. Try again in a moment.', variant: 'error' });
-                    return;
-                  }
-                  if (saved) {
-                    pendingKey.current = null;
-                    await load();
-                    addToast({ description: 'The last try was saved after all, so nothing more was given.', variant: 'success' });
+                  // The last try got no answer and this is something else. That one may still be saved, even late, so it is sent
+                  // again first with the same key: the server gives it once, however many times it is sent, and says what became of it.
+                  // Nothing else is given until that is known.
+                  const earlier = await send('POST', pendingKey.current.request);
+                  if (earlier === 'unsure') return;
+                  pendingKey.current = null;
+                  if (earlier === 'done') {
+                    addToast({ description: 'The last try went through. Use Change if that is not what you want now.', variant: 'success' });
                     setOpen(false);
                     return;
                   }
                 }
-                if (pendingKey.current?.sig !== sig) pendingKey.current = { key: crypto.randomUUID(), sig };
-                const outcome = await send('POST', { grantKey: pendingKey.current.key, amount, endsAt: ends.toISOString(), settlement: bill, note: bill === 'to_bill' ? note : null });
+                if (pendingKey.current?.sig !== sig) {
+                  const key = crypto.randomUUID();
+                  pendingKey.current = { key, sig, request: { grantKey: key, amount, endsAt: ends.toISOString(), settlement: bill, note: bill === 'to_bill' ? note : null } };
+                }
+                const outcome = await send('POST', pendingKey.current.request);
                 if (outcome !== 'unsure') pendingKey.current = null;
                 if (outcome === 'done') setOpen(false);
               }}
