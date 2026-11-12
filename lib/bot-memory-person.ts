@@ -91,10 +91,14 @@ export async function forgetKeys(botId: string, userUuids: string[], keys: Map<s
   const people = [...new Set(userUuids)];
   await prisma.$transaction(async (tx) => {
     await lockPeople(tx, botId, people);
-    const fresh = await tx.botsMemory.findMany({ where: { botId, userUuid: { in: people } }, select: { id: true, memories: true } });
+    const fresh = await tx.botsMemory.findMany({ where: { botId, userUuid: { in: people } }, select: { id: true, userUuid: true, memories: true } });
+    // With a time (a late report), a thing said after the Forget stays in the rows too; without one, every match goes
+    const asked = new Map<string, Map<string, Date>>();
     for (const userUuid of people) {
+      asked.set(userUuid, new Map());
       for (const [itemKey, kind] of keys) {
         const kept = at ? await tx.botMemoryItemForget.findUnique({ where: { botId_userUuid_itemKey: { botId, userUuid, itemKey } }, select: { createdAt: true } }) : null;
+        if (at) asked.get(userUuid)!.set(itemKey, kept && kept.createdAt > now ? kept.createdAt : now);
         await tx.botMemoryItemForget.upsert({
           where: { botId_userUuid_itemKey: { botId, userUuid, itemKey } },
           // Forgotten again after it was said again: the Forget is as new as the second one (never older than one already kept)
@@ -104,7 +108,7 @@ export async function forgetKeys(botId: string, userUuids: string[], keys: Map<s
       }
     }
     for (const row of fresh) {
-      await tx.botsMemory.update({ where: { id: row.id }, data: { memories: (withoutItems(row.memories, ids).data ?? Prisma.DbNull) as Prisma.InputJsonValue } });
+      await tx.botsMemory.update({ where: { id: row.id }, data: { memories: (withoutItems(row.memories, ids, at ? asked.get(row.userUuid) : undefined).data ?? Prisma.DbNull) as Prisma.InputJsonValue } });
     }
   });
 }
