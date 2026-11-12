@@ -400,7 +400,7 @@ run('a Brick’s computer, in a real database', () => {
       await giveComputer(sara.brickId, sara.id);
       expect(await takeOver(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'nothing_waiting' });
       expect(await handBack(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'nothing_waiting' });
-      expect(await fillInDetails(sara.brickId, sara.id, { what: 'Your details', where: 'Step 1' })).toEqual({ ok: false, reason: 'not_in_control' });
+      expect(await fillInDetails(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'not_in_control' });
     });
 
     it('never pays or submits: those are the person’s, with or without a take over', async () => {
@@ -424,22 +424,36 @@ run('a Brick’s computer, in a real database', () => {
       expect(await planEffect(jobId, { key: 'd1', kind: 'details' })).toEqual({ ok: true, already: false });
     });
 
-    it('"Fill in my details" names what and where, once; Brick claims it once, and a retry looks up what happened', async () => {
+    it('"Fill in my details" approves exactly what Brick named and where, once; Brick claims it once, and a retry looks up what happened', async () => {
       const { sara, jobId } = await waitingJob();
-      await requestHandover(jobId, 'details', minutes(1));
+      const ready = { what: 'Your name, passport number, date of birth and nationality', where: 'visa-portal.example' };
+      const named = await requestHandover(jobId, 'details', minutes(1), ready);
+      expect(named).toMatchObject({ waitingFor: 'details', ready });
+      // Before the person took over there is nothing to approve
+      expect(await fillInDetails(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'not_in_control' });
       await takeOver(sara.brickId, sara.id);
-      const asked = await fillInDetails(sara.brickId, sara.id, { what: 'Your details', where: 'Step 1 · You' });
-      expect(asked.ok && asked.job.detailsToFill).toEqual([{ key: 'details:Your details:Step 1 · You', what: 'Your details', where: 'Step 1 · You' }]);
+      const asked = await fillInDetails(sara.brickId, sara.id);
+      const key = `details:${ready.what}:${ready.where}`;
+      expect(asked.ok && asked.job.detailsToFill).toEqual([{ key, what: ready.what, where: ready.where }]);
       // Asked twice, still one
-      const again = await fillInDetails(sara.brickId, sara.id, { what: 'Your details', where: 'Step 1 · You' });
+      const again = await fillInDetails(sara.brickId, sara.id);
       expect(again.ok && again.job.detailsToFill).toHaveLength(1);
-      const key = 'details:Your details:Step 1 · You';
       const claims = await Promise.all([planEffect(jobId, { key, kind: 'details' }), planEffect(jobId, { key, kind: 'details' })]);
       expect(claims.filter((claim) => claim.ok)).toHaveLength(1);
       expect(claims.filter((claim) => !claim.ok && claim.reason === 'look_up')).toHaveLength(1);
       expect(await settleEffect(jobId, key, 'done', 'visa-portal.example/apply step 1')).toBe(true);
       expect(await planEffect(jobId, { key, kind: 'details' })).toEqual({ ok: true, already: 'done', evidence: 'visa-portal.example/apply step 1' });
       expect((await computerView(sara.brickId, sara.id))?.job?.detailsToFill).toEqual([]);
+    });
+
+    it('fills in nothing Brick did not name: with nothing ready the tap does nothing, and handing back forgets what was named', async () => {
+      const { sara, jobId } = await waitingJob();
+      await requestHandover(jobId, 'details', minutes(1));
+      await takeOver(sara.brickId, sara.id);
+      expect(await fillInDetails(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'nothing_ready' });
+      await requestHandover(jobId, 'details', minutes(2), { what: 'Your details', where: 'Step 1' });
+      expect((await handBack(sara.brickId, sara.id)).ok && true).toBe(true);
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ readyWhat: null, readyWhere: null });
     });
 
     it('never does an outside effect twice: a retry of a send whose answer was lost looks it up, and only a confirmed failure may be tried again', async () => {

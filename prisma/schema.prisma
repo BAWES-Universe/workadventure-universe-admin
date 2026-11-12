@@ -2074,6 +2074,10 @@ model ComputerJob {
   stepLabel      String?   @map("step_label") @db.VarChar(200)
   // What it waits for: details, signin, upload, pay, submit or answer
   waitingFor     String?   @map("waiting_for") @db.VarChar(10)
+  // What Brick is ready to put in at the hand-over, and where: "Your name, passport number…" and "visa-portal.example". Brick
+  // names it before it hands over; the person's one tap fills in exactly this and nothing else.
+  readyWhat      String?   @map("ready_what") @db.VarChar(150)
+  readyWhere     String?   @map("ready_where") @db.VarChar(150)
   // Who has the mouse and keyboard: brick or person
   control        String    @default("brick") @db.VarChar(10)
   reservationKey String?   @map("reservation_key") @db.VarChar(255)

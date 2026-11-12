@@ -101,7 +101,7 @@ describe('the owner’s calls', () => {
       stop(call('/x'), params),
       takeOverRoute(call('/x'), params),
       handBackRoute(call('/x'), params),
-      fillRoute(call('/x', { body: { what: 'Your details', where: 'Step 1' } }), params),
+      fillRoute(call('/x'), params),
     ]);
     expect(answers.map((a) => a.status)).toEqual(Array(8).fill(404));
   });
@@ -129,15 +129,15 @@ describe('the owner’s calls', () => {
     expect((await handBackRoute(call('/x'), params)).status).toBe(409);
   });
 
-  it('takes "Fill in my details" only with what and where, and only after a take over', async () => {
-    expect((await fillRoute(call('/x', { body: { what: 'Your details' } }), params)).status).toBe(400);
-    expect((await fillRoute(call('/x', { body: { what: 'Your details', where: 'Step 1', pay: true } }), params)).status).toBe(400);
-    expect(lib.fillInDetails).not.toHaveBeenCalled();
+  it('takes "Fill in my details" as one tap with no body: the person approves what Brick named, and only after a take over', async () => {
     lib.fillInDetails.mockResolvedValue({ ok: false, reason: 'not_in_control' });
-    expect((await fillRoute(call('/x', { body: { what: 'Your details', where: 'Step 1' } }), params)).status).toBe(409);
+    expect((await fillRoute(call('/x', { body: { what: 'Everything', where: 'anywhere' } }), params)).status).toBe(409);
+    lib.fillInDetails.mockResolvedValue({ ok: false, reason: 'nothing_ready' });
+    expect((await fillRoute(call('/x'), params)).status).toBe(409);
     lib.fillInDetails.mockResolvedValue({ ok: true, job: { id: JOB } as never });
-    expect((await fillRoute(call('/x', { body: { what: 'Your details', where: 'Step 1' } }), params)).status).toBe(200);
-    expect(lib.fillInDetails).toHaveBeenLastCalledWith(BRICK, 'u-sara', { what: 'Your details', where: 'Step 1' });
+    expect((await fillRoute(call('/x'), params)).status).toBe(200);
+    // Whatever was in the body, only the person and the Brick are asked for: nothing typed there reaches the filling
+    expect(lib.fillInDetails).toHaveBeenLastCalledWith(BRICK, 'u-sara');
   });
 });
 
@@ -189,8 +189,8 @@ describe('the bot server’s calls', () => {
     await jobAction(asBot('/x', { body: { action: 'progress', stepDone: 2, stepTotal: 5, label: 'Your visa form' } }), jobParams);
     expect(lib.reportProgress).toHaveBeenCalledWith(JOB, { stepDone: 2, stepTotal: 5, label: 'Your visa form' });
     expect(await (await jobAction(asBot('/x', { body: { action: 'renew' } }), jobParams)).json()).toEqual({ ok: false, reason: 'allowance' });
-    await jobAction(asBot('/x', { body: { action: 'handover', waitingFor: 'pay' } }), jobParams);
-    expect(lib.requestHandover).toHaveBeenCalledWith(JOB, 'pay');
+    await jobAction(asBot('/x', { body: { action: 'handover', waitingFor: 'details', ready: { what: 'Your details', where: 'visa-portal.example' } } }), jobParams);
+    expect(lib.requestHandover).toHaveBeenCalledWith(JOB, 'details', expect.any(Date), { what: 'Your details', where: 'visa-portal.example' });
     await jobAction(asBot('/x', { body: { action: 'finish', outcome: 'done' } }), jobParams);
     expect(lib.finishJob).toHaveBeenCalledWith(JOB, 'done');
     expect(await (await jobAction(asBot('/x', { body: { action: 'plan-effect', key: 'pr-1', kind: 'publish' } }), jobParams)).json()).toEqual({ ok: false, reason: 'look_up', evidence: 'draft pull request' });

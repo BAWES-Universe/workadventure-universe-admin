@@ -37,6 +37,8 @@ CREATE TABLE "computer_jobs" (
     "step_total" INTEGER,
     "step_label" VARCHAR(200),
     "waiting_for" VARCHAR(10),
+    "ready_what" VARCHAR(150),
+    "ready_where" VARCHAR(150),
     "control" VARCHAR(10) NOT NULL DEFAULT 'brick',
     "reservation_key" VARCHAR(255),
     "seconds_run" INTEGER NOT NULL DEFAULT 0,

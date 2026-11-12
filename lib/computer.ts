@@ -53,6 +53,8 @@ export interface JobView {
   stepLabel: string | null;
   waitingFor: WaitingFor | null;
   control: 'brick' | 'person';
+  /** What Brick is ready to put in at the hand-over and where, as it named it: the person's one tap fills in this and nothing else. */
+  ready: { what: string; where: string } | null;
   startedAt: Date | null;
   endedAt: Date | null;
   /** Details the person asked Brick to fill in, still to be done: what and where. Brick does only these, and only now. */
@@ -89,6 +91,8 @@ type JobRow = {
   stepTotal: number | null;
   stepLabel: string | null;
   waitingFor: string | null;
+  readyWhat: string | null;
+  readyWhere: string | null;
   control: string;
   startedAt: Date | null;
   endedAt: Date | null;
@@ -115,6 +119,7 @@ function jobView(row: JobRow): JobView {
     stepLabel: row.stepLabel,
     waitingFor: row.waitingFor as WaitingFor | null,
     control: row.control === 'person' ? 'person' : 'brick',
+    ready: row.readyWhat && row.readyWhere ? { what: row.readyWhat, where: row.readyWhere } : null,
     startedAt: row.startedAt,
     endedAt: row.endedAt,
     detailsToFill,
@@ -434,7 +439,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   const seconds = job.secondsRun + stretch;
   const ended = await prisma.computerJob.updateMany({
     where: { id: jobId, status: job.status },
-    data: { status, endedBy, endedAt: now, queuedFor: null, waitingFor: null, control: 'brick', stretchStarted: null, secondsRun: seconds },
+    data: { status, endedBy, endedAt: now, queuedFor: null, waitingFor: null, readyWhat: null, readyWhere: null, control: 'brick', stretchStarted: null, secondsRun: seconds },
   });
   // Someone else ended it between the read and the write: that one counts and settles
   if (ended.count === 0) return;
@@ -546,15 +551,16 @@ export async function watchComputer(botId: string, ownerId: string): Promise<Wat
  * The job needs its person: before it sends their details, signs in, uploads, pays or submits. It waits, holding the machine for
  * them, and the person's Take over appears. Asked by the bot server.
  */
-export async function requestHandover(jobId: string, waitingFor: WaitingFor, now: Date = new Date()): Promise<JobView | null> {
+export async function requestHandover(jobId: string, waitingFor: WaitingFor, now: Date = new Date(), ready?: { what: string; where: string } | null): Promise<JobView | null> {
+  const readyData = waitingFor === 'details' && ready ? { readyWhat: ready.what.trim().slice(0, 150) || null, readyWhere: ready.where.trim().slice(0, 150) || null } : { readyWhat: null, readyWhere: null };
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (!job) return null;
   if (job.status === 'running') {
     // The stretch so far is counted, and the machine stays awake for them
     const stretch = job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
-    await prisma.computerJob.updateMany({ where: { id: jobId, status: 'running' }, data: { status: 'waiting', waitingFor, control: 'brick', secondsRun: job.secondsRun + stretch, stretchStarted: now } });
+    await prisma.computerJob.updateMany({ where: { id: jobId, status: 'running' }, data: { status: 'waiting', waitingFor, control: 'brick', secondsRun: job.secondsRun + stretch, stretchStarted: now, ...readyData } });
   } else if (job.status === 'waiting') {
-    await prisma.computerJob.updateMany({ where: { id: jobId, status: 'waiting', control: 'brick' }, data: { waitingFor } });
+    await prisma.computerJob.updateMany({ where: { id: jobId, status: 'waiting', control: 'brick' }, data: { waitingFor, ...readyData } });
   }
   const after = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return after ? jobView(after) : null;
@@ -575,28 +581,28 @@ export async function takeOver(botId: string, ownerId: string): Promise<Control>
 /** Hand back: Brick carries on from where the person left it. What they entered is theirs and is not read back by this call. */
 export async function handBack(botId: string, ownerId: string): Promise<Control> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
-  await prisma.computerJob.updateMany({ where: { botId, status: 'waiting', control: 'person' }, data: { status: 'running', control: 'brick', waitingFor: null } });
+  await prisma.computerJob.updateMany({ where: { botId, status: 'waiting', control: 'person' }, data: { status: 'running', control: 'brick', waitingFor: null, readyWhat: null, readyWhere: null } });
   const job = await prisma.computerJob.findFirst({ where: { botId, status: { in: ['running', 'waiting'] } }, include: JOB_INCLUDE });
   if (!job) return { ok: false, reason: 'nothing_waiting' };
   return { ok: true, job: jobView(job) };
 }
 
-export type Filling = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'not_in_control' };
+export type Filling = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'not_in_control' | 'nothing_ready' };
 
 /**
- * "Fill in my details": only while the person has taken over, and only for what they name. It says what Brick fills in and where,
- * and only that is allowed; paying and submitting are never in it. The bot server reads it from the job, plans it (which claims it
- * once) and settles it.
+ * "Fill in my details": only while the person has taken over, and only for what Brick named it was ready to put in, and where (the
+ * person's tap approves exactly that: they can't name something else, and Brick can't fill something it did not name). Paying and
+ * submitting are never in it. The bot server reads it from the job, plans it (which claims it once) and settles it.
  */
-export async function fillInDetails(botId: string, ownerId: string, fill: { what: string; where: string }): Promise<Filling> {
+export async function fillInDetails(botId: string, ownerId: string): Promise<Filling> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
   const job = await prisma.computerJob.findFirst({ where: { botId, status: 'waiting', control: 'person' } });
   if (!job) return { ok: false, reason: 'not_in_control' };
-  const what = fill.what.trim().slice(0, 150);
-  const where = fill.where.trim().slice(0, 150);
+  if (!job.readyWhat || !job.readyWhere) return { ok: false, reason: 'nothing_ready' };
+  const key = `details:${job.readyWhat}:${job.readyWhere}`.slice(0, 255);
   await prisma.computerEffect.upsert({
-    where: { jobId_effectKey: { jobId: job.id, effectKey: `details:${what}:${where}` } },
-    create: { jobId: job.id, effectKey: `details:${what}:${where}`.slice(0, 255), kind: 'details', state: 'approved', evidence: `${what} → ${where}` },
+    where: { jobId_effectKey: { jobId: job.id, effectKey: key } },
+    create: { jobId: job.id, effectKey: key, kind: 'details', state: 'approved', evidence: `${job.readyWhat} → ${job.readyWhere}` },
     update: {},
   });
   const after = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id }, include: JOB_INCLUDE });
