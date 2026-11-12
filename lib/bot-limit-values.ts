@@ -82,6 +82,8 @@ export interface BrickLimits {
   runsPerDay: number;
   /** Minutes a run may take before it is given up and counted as failed. */
   longestRun: number;
+  /** Minutes a computer waits for a person to take over after Brick handed over; then the job ends and its room goes back (game #2000). */
+  computerWait: number;
 }
 
 /** What a super admin sets, all in one place. */
@@ -99,7 +101,7 @@ export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, 
 export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 };
 export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0, guestDays: 1 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
-export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10 };
+export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
 export const FAIR_USAGE_WINDOW_HOURS = 5;
 
@@ -167,6 +169,7 @@ const BRICK_RANGES: Record<keyof BrickLimits, Range> = {
   shortestRepeat: { min: 1, max: 525_600, whole: true },
   runsPerDay: { min: 1, max: 100_000, whole: true },
   longestRun: { min: 1, max: 1_440, whole: true },
+  computerWait: { min: 1, max: 1_440, whole: true },
 };
 
 /** The values each group can hold, for the pages to say ("Between 1 and 100 files") before anything is sent. */

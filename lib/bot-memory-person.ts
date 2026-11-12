@@ -81,26 +81,34 @@ export async function saveMemoryRow<T>(botId: string, userUuid: string, memories
  * Put a Forget down for good for these people, and drop its thing from their rows, in one go. Under the same lock as a
  * save, the rows are read again inside the transaction, so a save that arrived after the first read is never written
  * over, and one that comes after is stripped by the Forget written here. A person with no row still gets the Forget.
+ * `at` is when the person asked, when the bot server tells us late (a report it had to retry): a thing they said again
+ * after that is theirs to keep, so a late report must not make the Forget newer than it was. A Forget already kept as
+ * newer stays as it is.
  */
-export async function forgetKeys(botId: string, userUuids: string[], keys: Map<string, MemoryItemKind>): Promise<void> {
-  const now = new Date();
+export async function forgetKeys(botId: string, userUuids: string[], keys: Map<string, MemoryItemKind>, at?: Date): Promise<void> {
+  const now = at ?? new Date();
   const ids = new Set(keys.keys());
   const people = [...new Set(userUuids)];
   await prisma.$transaction(async (tx) => {
     await lockPeople(tx, botId, people);
-    const fresh = await tx.botsMemory.findMany({ where: { botId, userUuid: { in: people } }, select: { id: true, memories: true } });
+    const fresh = await tx.botsMemory.findMany({ where: { botId, userUuid: { in: people } }, select: { id: true, userUuid: true, memories: true } });
+    // With a time (a late report), a thing said after the Forget stays in the rows too; without one, every match goes
+    const asked = new Map<string, Map<string, Date>>();
     for (const userUuid of people) {
+      asked.set(userUuid, new Map());
       for (const [itemKey, kind] of keys) {
+        const kept = at ? await tx.botMemoryItemForget.findUnique({ where: { botId_userUuid_itemKey: { botId, userUuid, itemKey } }, select: { createdAt: true } }) : null;
+        if (at) asked.get(userUuid)!.set(itemKey, kept && kept.createdAt > now ? kept.createdAt : now);
         await tx.botMemoryItemForget.upsert({
           where: { botId_userUuid_itemKey: { botId, userUuid, itemKey } },
-          // Forgotten again after it was said again: the Forget is as new as the second one
-          update: { createdAt: now, droppedAt: null },
+          // Forgotten again after it was said again: the Forget is as new as the second one (never older than one already kept)
+          update: kept && kept.createdAt > now ? { droppedAt: null } : { createdAt: now, droppedAt: null },
           create: { botId, userUuid, itemKey, kind, createdAt: now },
         });
       }
     }
     for (const row of fresh) {
-      await tx.botsMemory.update({ where: { id: row.id }, data: { memories: (withoutItems(row.memories, ids).data ?? Prisma.DbNull) as Prisma.InputJsonValue } });
+      await tx.botsMemory.update({ where: { id: row.id }, data: { memories: (withoutItems(row.memories, ids, at ? asked.get(row.userUuid) : undefined).data ?? Prisma.DbNull) as Prisma.InputJsonValue } });
     }
   });
 }
@@ -159,8 +167,8 @@ export async function forgetMyEverything(botId: string, who: Remembering): Promi
  * The bot server's own Forget of one thing it holds for a person, by its key (a "forget that" said in the chat). It may
  * hold a thing Orbit has not saved yet, so this needs no row: the key is kept as forgotten, and a row that has it loses it.
  */
-export async function forgetItemKey(botId: string, userUuid: string, itemKey: string, kind: MemoryItemKind): Promise<void> {
-  await forgetKeys(botId, [userUuid], new Map([[itemKey, kind]]));
+export async function forgetItemKey(botId: string, userUuid: string, itemKey: string, kind: MemoryItemKind, at?: Date): Promise<void> {
+  await forgetKeys(botId, [userUuid], new Map([[itemKey, kind]]), at);
 }
 
 export const isMemoryItemKind = (value: unknown): value is MemoryItemKind => typeof value === 'string' && (MEMORY_ITEM_KINDS as readonly string[]).includes(value);

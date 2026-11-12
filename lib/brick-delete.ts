@@ -5,6 +5,7 @@ import { endAllApprovals } from '@/lib/bot-actions';
 import { pauseItemsOfDeletedBrick } from '@/lib/brick-items';
 import { deleteWithHiddenBotData } from '@/lib/bot-privacy';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
+import { stopComputerWork, removeMachineBeforeDelete } from '@/lib/computer';
 import { listBricks, listDeletedBricks, type BrickCard, type DeletedBrickCard } from '@/lib/brick-default';
 
 /**
@@ -23,6 +24,9 @@ import { listBricks, listDeletedBricks, type BrickCard, type DeletedBrickCard } 
  * kept aside at the delete to be put back, so nothing that was withdrawn can return: an approval that ended stays ended,
  * and a key that was taken away while it waited is checked again on its next reply like any other day. An action that
  * was running at the delete keeps its own record and is never sent again.
+ *
+ * Its computer (game #2000). At the tap its jobs end and it stops, its files saved and kept. Undo gives the Brick back but starts
+ * no job again. At the second step the machine is removed only after its files were saved.
  *
  * What is never deleted. Everything the Brick made: an artifact belongs to the person who asked for it and only names
  * the Brick that made it (Artifact.makerBotId), so it stays in their artifacts after both steps.
@@ -55,6 +59,8 @@ export async function deleteBrick(brickId: string, ownerId: string, now: Date = 
   });
   // Its tools' sign-in cards on Orbit home go too: nobody manages a deleted Brick (it never throws)
   if (deletedNow) await syncToolSignInNotices(brickId);
+  // Its computer's work stops at once too (game #2000): jobs end, the screen goes, files are saved and kept. Undo never restarts a job
+  if (deletedNow) await stopComputerWork(brickId, 'deleted', now);
   return (await listDeletedBricks(ownerId, now)).find((card) => card.id === brickId) ?? null;
 }
 
@@ -74,6 +80,13 @@ export async function undoBrickDelete(brickId: string, ownerId: string, now: Dat
 
 /** How many Bricks one sweep removes at most; the next sweep takes the rest. */
 const SWEEP_BATCH = 200;
+/** How many pages of that size one sweep reads, so it ends even when many Bricks wait. */
+const SWEEP_PAGES = 10;
+
+/** A deleted Brick that had to wait is marked as looked at now, which sends it behind the ones not looked at yet. */
+async function markWaiting(brickId: string, now: Date): Promise<void> {
+  await prisma.bot.updateMany({ where: { id: brickId, roomId: null, deletedAt: { not: null } }, data: { updatedAt: now } });
+}
 
 /**
  * The second step: every deleted Brick whose days are over is removed for good, with its saved chats and what it
@@ -83,21 +96,41 @@ const SWEEP_BATCH = 200;
  * Nothing waits on this to be right: from the moment its days are over a deleted Brick is in no list and Undo no longer
  * takes it, removed or not. The sweep only clears the rows away.
  */
-export async function removeGoneBricks(now: Date = new Date(), ownerId?: string): Promise<string[]> {
-  const gone = await prisma.bot.findMany({
-    where: { roomId: null, goneAt: { lte: now }, ...(ownerId ? { ownerId } : {}) },
-    select: { id: true },
-    orderBy: { goneAt: 'asc' },
-    take: SWEEP_BATCH,
-  });
+export async function removeGoneBricks(now: Date = new Date(), ownerId?: string, batch: number = SWEEP_BATCH, pages: number = SWEEP_PAGES): Promise<string[]> {
   const removed: string[] = [];
-  for (const { id } of gone) {
-    // Still only one whose time has passed: the condition is asked again in the delete itself
-    const where = { id, roomId: null, goneAt: { lte: now } };
-    const { count } = await deleteWithHiddenBotData(where, () => prisma.bot.deleteMany({ where }));
-    if (count === 0) continue;
-    removed.push(id);
-    await syncToolSignInNotices(id);
+  // Bricks that wait for the next sweep (their computer's files were not saved) are skipped by the next page here, so a run of them
+  // never keeps the Bricks behind them from being removed
+  const waiting: string[] = [];
+  for (let page = 0; page < pages; page++) {
+    const gone = await prisma.bot.findMany({
+      where: { roomId: null, goneAt: { lte: now }, ...(ownerId ? { ownerId } : {}), ...(waiting.length ? { id: { notIn: waiting } } : {}) },
+      select: { id: true },
+      // Least recently looked at first: a Brick that waited is marked below and goes behind the rest, so across sweeps none is kept from its turn
+      orderBy: [{ updatedAt: 'asc' }, { goneAt: 'asc' }],
+      take: batch,
+    });
+    if (gone.length === 0) break;
+    for (const { id } of gone) {
+      // Its computer goes only after its files were saved; if that did not happen the Brick waits for the next sweep (game #2000)
+      if (!(await removeMachineBeforeDelete(id, now))) {
+        // Kept for the next sweep, and said so: a computer that cannot be saved or removed (its provider is off or changed) is looked at, not lost quietly
+        console.warn(`[Brick delete] Brick ${id} waits: its computer's files could not be saved, its machine could not be removed or what it ran is not in the books yet`);
+        waiting.push(id);
+        await markWaiting(id, now);
+        continue;
+      }
+      // Still only one whose time has passed: the condition is asked again in the delete itself
+      const where = { id, roomId: null, goneAt: { lte: now } };
+      const { count } = await deleteWithHiddenBotData(where, () => prisma.bot.deleteMany({ where }));
+      if (count === 0) {
+        waiting.push(id);
+        await markWaiting(id, now);
+        continue;
+      }
+      removed.push(id);
+      await syncToolSignInNotices(id);
+    }
+    if (gone.length < batch) break;
   }
   return removed;
 }
