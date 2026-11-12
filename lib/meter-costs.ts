@@ -152,7 +152,10 @@ export function readDay(value: unknown): Date | null {
 
 const isoDay = (date: Date) => date.toISOString().slice(0, 10);
 
-const grantWindow = (grant: { startsAt: Date; endsAt: Date; multiplier: number | null; noLimit: boolean }): GrantWindow => ({
+type GrantRow = { grantKey: string; startsAt: Date; endsAt: Date; multiplier: number | null; noLimit: boolean };
+
+const grantWindow = (grant: GrantRow): GrantWindow => ({
+  key: grant.grantKey,
   startsAt: grant.startsAt,
   endsAt: grant.endsAt,
   multiplier: grant.noLimit ? null : grant.multiplier,
@@ -162,7 +165,7 @@ const grantWindow = (grant: { startsAt: Date; endsAt: Date; multiplier: number |
  * What each of a person's extra usages has cost us above the usual allowance: the computer spending the allowance drew from
  * it, month by month (the usual allowance starts again each month), worked out by the same walk the allowance uses.
  */
-async function aboveUsual(personId: string, base: number | null, grants: { startsAt: Date; endsAt: Date; multiplier: number | null; noLimit: boolean }[], now: Date): Promise<number[]> {
+async function aboveUsual(personId: string, base: number | null, grants: GrantRow[], now: Date): Promise<number[]> {
   if (base === null || grants.length === 0) return grants.map(() => 0);
   const windows = grants.map(grantWindow);
   const first = new Date(Math.min(...grants.map((grant) => grant.startsAt.getTime())));

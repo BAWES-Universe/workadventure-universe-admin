@@ -249,6 +249,8 @@ export type GrantSettlement = (typeof GRANT_SETTLEMENTS)[number];
 
 /** A grant as the allowance reads it. `multiplier` is null when it lifts the member's own limit. */
 export interface GrantWindow {
+  /** The grant's key: the last thing that settles which of two otherwise equal grants is drawn first, so row order never does. */
+  key?: string;
   startsAt: Date;
   endsAt: Date;
   multiplier: number | null;
@@ -291,8 +293,20 @@ export function extraDrawn(base: number, spends: { at: Date; micros: number }[],
   return grants.map((grant) => drawn.get(grant) ?? 0);
 }
 
+/**
+ * Which of two running grants is drawn from first: the larger multiple; of two the same, the one that ends sooner (it is used up
+ * first); then the one that started first; then the smaller key. Nothing depends on the order the grants were read in, so the
+ * allowance a member sees and the cost the Costs page works out always walk the same way.
+ */
+function drawnBefore(grant: GrantWindow, best: GrantWindow): boolean {
+  const rank = (window: GrantWindow) => window.multiplier ?? Infinity;
+  if (rank(grant) !== rank(best)) return rank(grant) > rank(best);
+  if (grant.endsAt.getTime() !== best.endsAt.getTime()) return grant.endsAt < best.endsAt;
+  if (grant.startsAt.getTime() !== best.startsAt.getTime()) return grant.startsAt < best.startsAt;
+  return (grant.key ?? '') < (best.key ?? '');
+}
+
 function walkSpends(base: number, spends: { at: Date; micros: number }[], grants: GrantWindow[]) {
-  const rank = (grant: GrantWindow) => grant.multiplier ?? Infinity;
   const remaining = new Map<GrantWindow, number>();
   const drawn = new Map<GrantWindow, number>();
   for (const grant of grants) remaining.set(grant, grant.multiplier === null ? Infinity : base * (grant.multiplier - 1));
@@ -300,8 +314,7 @@ function walkSpends(base: number, spends: { at: Date; micros: number }[], grants
     let best: GrantWindow | null = null;
     for (const grant of grants) {
       if (grant.startsAt > at || grant.endsAt <= at) continue;
-      // The larger multiple runs; of two the same, the one that ends sooner is used up first
-      if (!best || rank(grant) > rank(best) || (rank(grant) === rank(best) && grant.endsAt < best.endsAt)) best = grant;
+      if (!best || drawnBefore(grant, best)) best = grant;
     }
     return best;
   };

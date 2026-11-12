@@ -223,6 +223,35 @@ describe('what extra usage has cost above the usual (game #1999)', () => {
   });
 });
 
+describe('which of two equal extra usages is drawn first (game #1999)', () => {
+  const BASE = 1000;
+  const now = new Date('2026-11-15T12:00:00Z');
+  const at = (day: number) => new Date(`2026-11-${String(day).padStart(2, '0')}T12:00:00Z`);
+  const spends = [{ at: at(12), micros: 600 }];
+  const a: GrantWindow = { key: 'k-a', startsAt: at(10), endsAt: at(20), multiplier: 2 };
+  const b: GrantWindow = { key: 'k-b', startsAt: at(10), endsAt: at(20), multiplier: 2 };
+
+  /** What each key drew, whatever order the grants were read in. */
+  const drawnByKey = (grants: GrantWindow[]) => Object.fromEntries(grants.map((grant, index) => [grant.key, extraDrawn(BASE, spends, grants)[index]]));
+
+  it('is the smaller key when size, end and start are all the same, whatever the order the rows came in', () => {
+    expect(drawnByKey([a, b])).toEqual({ 'k-a': 600, 'k-b': 0 });
+    expect(drawnByKey([b, a])).toEqual({ 'k-a': 600, 'k-b': 0 });
+  });
+
+  it('leaves the member the same amount whichever order, so the allowance and the Costs page agree', () => {
+    expect(allowanceNow(BASE, spends, [a, b], now)).toEqual(allowanceNow(BASE, spends, [b, a], now));
+  });
+
+  it('is the one that ends sooner, then the one that started first, before the key decides', () => {
+    const soonerButLaterKey: GrantWindow = { key: 'k-z', startsAt: at(10), endsAt: at(18), multiplier: 2 };
+    expect(drawnByKey([a, soonerButLaterKey])).toEqual({ 'k-a': 0, 'k-z': 600 });
+    const earlierStartLaterKey: GrantWindow = { key: 'k-z', startsAt: at(9), endsAt: at(20), multiplier: 2 };
+    expect(drawnByKey([a, earlierStartLaterKey])).toEqual({ 'k-a': 0, 'k-z': 600 });
+    expect(drawnByKey([earlierStartLaterKey, a])).toEqual({ 'k-a': 0, 'k-z': 600 });
+  });
+});
+
 describe('the words under a usage bar (game #1999)', () => {
   it('says out at nothing, low at a fifth or less, and over half above half', () => {
     expect(usageWords(0)).toBe('out');
