@@ -1,17 +1,22 @@
 import { combine, flag, type PermissionKey } from '@/lib/permissions';
 
 /**
- * Per-bot rules (#427, #737): a role's or a person's No / Default / Yes for one bot, for the six things people do with it.
+ * Per-bot rules (#427, #737): a role's or a person's No / Default / Yes for one bot, for the seven things people do with it.
  * A rule is two permission numbers, the shape room overrides will reuse: `allow` has a bit set where the answer is Yes,
  * `deny` where it is No, and a bit in neither is Default (the roles decide).
  */
-export type RuleAction = 'chat' | 'dm' | 'summon' | 'manage' | 'change' | 'deleteOrSend';
+export type RuleAction = 'chat' | 'dm' | 'call' | 'summon' | 'manage' | 'change' | 'deleteOrSend';
 export type RuleValue = 'yes' | 'no' | 'default';
 
-export const RULE_ACTIONS: readonly RuleAction[] = ['chat', 'dm', 'summon', 'manage', 'change', 'deleteOrSend'];
+export const RULE_ACTIONS: readonly RuleAction[] = ['chat', 'dm', 'call', 'summon', 'manage', 'change', 'deleteOrSend'];
 export const RULE_VALUES: readonly RuleValue[] = ['yes', 'no', 'default'];
 
-export const RULE_PERMISSION: Record<RuleAction, PermissionKey> = {
+/**
+ * The role permission each rule action sits on. Call (game #2004) sits on none: no role gives it, so Default always means
+ * No, and only the bot's creator, its universe's owner, super admins, Admin and the people who manage the bot call it
+ * unless a rule says Yes. It has its own bit in the rule numbers only (the Roles page has no switch for it).
+ */
+export const RULE_PERMISSION: Record<Exclude<RuleAction, 'call'>, PermissionKey> = {
   chat: 'CHAT_BOTS_NEARBY',
   dm: 'DM_BOTS',
   summon: 'SUMMON_BOTS',
@@ -20,8 +25,16 @@ export const RULE_PERMISSION: Record<RuleAction, PermissionKey> = {
   deleteOrSend: 'BOTS_DELETE_OR_SEND',
 };
 
-/** The six bits a rule may hold. The database refuses any other. */
-export const RULE_MASK: bigint = combine(...RULE_ACTIONS.map((action) => flag(RULE_PERMISSION[action])));
+/** Call's bit in a rule: bit 19, 524288. Never a role permission. */
+export const CALL_RULE_BIT: bigint = BigInt(1) << BigInt(19);
+
+/** The bit one action has in a rule. */
+export function ruleBit(action: RuleAction): bigint {
+  return action === 'call' ? CALL_RULE_BIT : flag(RULE_PERMISSION[action]);
+}
+
+/** The seven bits a rule may hold. The database refuses any other. */
+export const RULE_MASK: bigint = combine(...RULE_ACTIONS.map((action) => ruleBit(action)));
 
 export interface RuleBits {
   allow: bigint;
@@ -34,7 +47,7 @@ const ZERO = BigInt(0);
 
 /** What one rule says about one action. */
 export function ruleValue(rule: RuleBits, action: RuleAction): RuleValue {
-  const bit = flag(RULE_PERMISSION[action]);
+  const bit = ruleBit(action);
   if (rule.deny & bit) return 'no';
   if (rule.allow & bit) return 'yes';
   return 'default';
@@ -46,7 +59,7 @@ export function withValues(rule: RuleBits, values: Partial<Record<RuleAction, Ru
   for (const action of RULE_ACTIONS) {
     const value = values[action];
     if (!value) continue;
-    const bit = flag(RULE_PERMISSION[action]);
+    const bit = ruleBit(action);
     allow &= ~bit;
     deny &= ~bit;
     if (value === 'yes') allow |= bit;

@@ -106,7 +106,7 @@ export async function usableVisionKey(
  */
 export async function checkVisionPick(
   raw: unknown,
-  context: { current: VisionPick | null; actorId: string | null; makerId: string | null; roomId: string; botId: string | null; mainRef?: string | null }
+  context: { current: VisionPick | null; actorId: string | null; makerId: string | null; roomId: string | null; ownerId?: string | null; botId: string | null; mainRef?: string | null }
 ): Promise<string | null> {
   if (raw === undefined || raw === null) return null;
   const pick = parseVisionPick(raw);
@@ -121,8 +121,8 @@ export async function checkVisionPick(
     const main = await prisma.botsAiProvider.findUnique({ where: { providerId: context.mainRef }, select: { ownerId: true } });
     if (main?.ownerId && main.ownerId !== context.actorId) return OTHER_OWNER_TEXT;
   }
-  // Saved through the room's bot editor, so this is a room bot: it has a room and no owner
-  const usable = await usableVisionKey(pick, { id: context.botId, createdById: context.makerId, roomId: context.roomId, ownerId: null, deletedAt: null });
+  // Saved through the room's bot editor this is a room bot (a room and no owner); a Brick has no room and its owner
+  const usable = await usableVisionKey(pick, { id: context.botId, createdById: context.makerId, roomId: context.roomId, ownerId: context.roomId === null ? context.ownerId ?? null : null, deletedAt: null });
   if (usable.ok) return null;
   switch (usable.problem) {
     case 'no-model':
@@ -143,7 +143,7 @@ const OTHER_OWNER_TEXT = 'This bot runs on someone else’s key, so its images c
 /** The same check for a bot's whole behavior config as it arrives on a save: only a `vision` key in it is judged here. */
 export async function checkConfigVision(
   behaviorConfig: unknown,
-  context: { storedConfig: unknown; actorId: string | null; makerId: string | null; roomId: string; botId: string | null; mainRef?: string | null }
+  context: { storedConfig: unknown; actorId: string | null; makerId: string | null; roomId: string | null; ownerId?: string | null; botId: string | null; mainRef?: string | null }
 ): Promise<string | null> {
   if (!behaviorConfig || typeof behaviorConfig !== 'object' || !('vision' in behaviorConfig)) return null;
   return checkVisionPick((behaviorConfig as Record<string, unknown>).vision, {
@@ -151,6 +151,7 @@ export async function checkConfigVision(
     actorId: context.actorId,
     makerId: context.makerId,
     roomId: context.roomId,
+    ownerId: context.ownerId,
     botId: context.botId,
     mainRef: context.mainRef,
   });

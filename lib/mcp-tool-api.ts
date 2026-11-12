@@ -3,6 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { canManageBotMcpServers } from '@/lib/bot-permissions';
+import { isBrick } from '@/lib/brick';
 import { BotSettingsError } from '@/lib/bot-access-settings';
 import { corsHeaders } from '@/lib/cors';
 
@@ -40,6 +41,8 @@ export async function authorizeToolsRequest(
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { id: true, createdById: true, roomId: true, ownerId: true, deletedAt: true } });
   if (!bot) return { response: json(request, { error: 'Bot not found' }, 404) };
   if (!(await canManageBotMcpServers(sessionUser.id, sessionUser.email ?? null, bot))) {
+    // A Brick is its owner's alone (game #1992): to anyone else, a super admin included, it is a bot that does not exist
+    if (isBrick(bot)) return { response: json(request, { error: 'Bot not found' }, 404) };
     return { response: json(request, { error: 'Forbidden' }, 403) };
   }
   return { person: { id: sessionUser.id } };

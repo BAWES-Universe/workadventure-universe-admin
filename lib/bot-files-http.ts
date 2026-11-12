@@ -9,7 +9,8 @@ import { LIMIT_RANGES } from '@/lib/bot-limit-values';
 
 /**
  * The routes of files in bot chats (game #1508) are called only by the bot server (BOT_SERVICE_TOKEN, or the admin token
- * it falls back to). No browser and no manager's session reaches them, so no Orbit page can list a person's files.
+ * it falls back to). No browser and no manager's session reaches them. The one list a person can read is their own Brick's
+ * files, from their own session, in lib/brick-files.ts (game #2003).
  */
 function hasAdminToken(request: NextRequest): boolean {
   const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '').trim();
