@@ -454,7 +454,10 @@ run('a Brick’s computer, in a real database', () => {
       // Waiting is not enough: the mouse must be theirs
       expect(await planEffect(jobId, { key: 'd1', kind: 'details' })).toEqual({ ok: false, reason: 'hand_over_first' });
       await takeOver(sara.brickId, sara.id);
-      expect(await planEffect(jobId, { key: 'd1', kind: 'details' })).toEqual({ ok: true, already: false });
+      // Theirs now, but they have not tapped "Fill in my details": a key nobody approved is not planned
+      expect(await planEffect(jobId, { key: 'd1', kind: 'details' })).toEqual({ ok: false, reason: 'hand_over_first' });
+      expect(await planEffect(jobId, { key: 'u1', kind: 'upload' })).toEqual({ ok: false, reason: 'hand_over_first' });
+      expect(await prisma.computerEffect.count({ where: { jobId } })).toBe(0);
     });
 
     it('"Fill in my details" approves exactly what Brick named and where, once; Brick claims it once, and a retry looks up what happened', async () => {

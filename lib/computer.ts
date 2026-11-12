@@ -657,6 +657,8 @@ export async function planEffect(jobId: string, input: { key: string; kind: Effe
   if (existing?.state === 'planned') return { ok: false, reason: 'look_up', evidence: existing.evidence };
   if (PERSON_ONLY.includes(input.kind)) return { ok: false, reason: 'person_only' };
   if (AFTER_TAKE_OVER.includes(input.kind) && (job.control !== 'person' || job.status !== 'waiting')) return { ok: false, reason: 'hand_over_first' };
+  // Details and uploads are only ever the person's tap: it wrote the approved row, and a key nobody approved is never planned
+  if (AFTER_TAKE_OVER.includes(input.kind) && !existing) return { ok: false, reason: 'hand_over_first' };
   if (existing) {
     // Approved by the person, or tried and confirmed not done: claimed in one write, so two tries at the same moment do it once
     const claimed = await prisma.computerEffect.updateMany({ where: { id: existing.id, state: { in: ['approved', 'failed'] } }, data: { state: 'planned', settledAt: null } });
