@@ -45,7 +45,12 @@ export async function deleteBrick(brickId: string, ownerId: string, now: Date = 
           "updated_by_id" = ${ownerId}, "updated_at" = ${now}
       WHERE "id" = ${brickId} AND "owner_id" = ${ownerId} AND "room_id" IS NULL AND "deleted_at" IS NULL
       RETURNING "id"`);
-    if (marked.length > 0) await endAllApprovals(tx, brickId, now);
+    if (marked.length > 0) {
+      await endAllApprovals(tx, brickId, now);
+      // It stands nowhere while it waits (game #2005): its home and its visit are withdrawn with everything else, and Undo brings back neither
+      await tx.brickHome.deleteMany({ where: { botId: brickId } });
+      await tx.brickVisit.deleteMany({ where: { botId: brickId } });
+    }
     return marked.length > 0;
   });
   // Its tools' sign-in cards on Orbit home go too: nobody manages a deleted Brick (it never throws)

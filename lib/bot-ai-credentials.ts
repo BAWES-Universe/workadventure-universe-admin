@@ -105,7 +105,7 @@ const loadBot = (botId: string) =>
     },
   });
 
-export async function credentialsForBot(botId: string, options: { asker?: string | null } = {}): Promise<BotAiCredentials> {
+export async function credentialsForBot(botId: string, options: { asker?: string | null; roomUrl?: string | null } = {}): Promise<BotAiCredentials> {
   const bot = await loadBot(botId);
   if (!bot) return { status: 404, error: 'Bot not found' };
   // A Brick its owner deleted runs on nothing while it waits for Undo (game #1996): no key is served for it, Universe
@@ -118,7 +118,8 @@ export async function credentialsForBot(botId: string, options: { asker?: string
   if (bot.roomId === null && options.asker) {
     const asker = await prisma.user.findFirst({ where: { OR: [{ uuid: options.asker }, { email: options.asker }] }, select: { id: true } });
     if (!asker || asker.id !== bot.ownerId) {
-      const here = await whereIsBrick(bot.id, null);
+      // `roomUrl` is the room the asker is in, when the bot server knows it: a Brick with a home and a visit is then judged by that room's place
+      const here = await whereIsBrick(bot.id, options.roomUrl ?? null);
       if (!here) return { status: 404, error: 'Bot not found' };
       others = { universeId: here.universeId };
     }

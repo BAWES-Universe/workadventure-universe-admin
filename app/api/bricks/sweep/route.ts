@@ -3,6 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { removeGoneBricks } from '@/lib/brick-delete';
 import { endStaleVisits } from '@/lib/brick-visit';
+import { dropHomesWithoutAccess } from '@/lib/brick-home';
 
 export const runtime = 'nodejs';
 
@@ -20,13 +21,16 @@ export async function POST(request: NextRequest) {
   try {
     requireServiceToken(request);
     const removed = await removeGoneBricks();
-    // Visits nobody has seen for too long have ended (game #2005); a visit that ran out is ignored whether or not this has run.
+    // Visits nobody has seen for too long have ended (game #2005), and Bricks whose owner can no longer manage bots in their
+    // room leave it (nothing of theirs is deleted); a visit that ran out is ignored whether or not this has run.
     // Failing here must not lose the ids just removed above: the bot server needs them to close those chats.
-    try {
-      await endStaleVisits();
-    } catch (error) {
-      Sentry.captureException(error, { tags: { area: 'bricks' } });
-      console.error('[Bricks] Ending stale visits failed:', error instanceof Error ? error.message : 'unknown');
+    for (const [what, clear] of [['Ending stale visits', endStaleVisits], ['Taking Bricks out of rooms', dropHomesWithoutAccess]] as const) {
+      try {
+        await clear();
+      } catch (error) {
+        Sentry.captureException(error, { tags: { area: 'bricks' } });
+        console.error(`[Bricks] ${what} failed:`, error instanceof Error ? error.message : 'unknown');
+      }
     }
     return NextResponse.json({ removed });
   } catch (error) {

@@ -50,6 +50,7 @@ model User {
   bricks            Bot[] @relation("BotOwner")
   defaultBrick      DefaultBrick?
   brickVisit        BrickVisit?
+  brickHomesPlaced  BrickHome[]
   brickOffers       BrickOffer[]
   guestBrickHandovers GuestBrickHandover[]
   botsCreated       Bot[] @relation("BotCreatedBy")
@@ -387,6 +388,7 @@ model Room {
   bots       Bot[]
   reports    Report[]
   brickVisits BrickVisit[]
+  brickHomes  BrickHome[]
 
   @@unique([worldId, slug]) // Slug unique within world
   @@map("rooms")
@@ -919,6 +921,7 @@ model Bot {
   voiceListenUses VoiceListenUse[]
   defaultBrickOf  DefaultBrick?
   visit           BrickVisit?
+  home            BrickHome?
 
   @@index([roomId])
   @@index([ownerId])
@@ -958,6 +961,28 @@ model BrickVisit {
 
   @@index([roomId, seenAt])
   @@map("brick_visits")
+}
+
+// A Brick that lives in a room (game #2005). The Brick stays its owner's own Brick, with no room of its own: this row only
+// says that it also stands in this room for everyone, like a room bot. A Brick has one home at most (botId is the key).
+// Taking it out, or deleting the room, deletes only this row: nothing of the owner's goes. `placedById` is the owner who
+// put it there; the home holds only while they can still manage bots in the room. `behaviorType` and `behaviorConfig`
+// are how it behaves there (its spot, radius, roaming, routes), written by the same editor as any room bot's.
+model BrickHome {
+  botId          String   @id @map("bot_id")
+  roomId         String   @map("room_id")
+  placedById     String   @map("placed_by_id")
+  behaviorType   String   @default("idle") @map("behavior_type") @db.VarChar(20)
+  behaviorConfig Json     @default("{}") @map("behavior_config")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  bot      Bot  @relation(fields: [botId], references: [id], onDelete: Cascade)
+  room     Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  placedBy User @relation(fields: [placedById], references: [id], onDelete: Cascade)
+
+  @@index([roomId])
+  @@map("brick_homes")
 }
 
 // A reply the Brick for guests gave or was asked for (game #1997). The Brick for guests is Universe's own and has no bot

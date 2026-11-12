@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getBrickLimits } from '@/lib/bot-limits';
 import { mayReadRoomBots } from '@/lib/bot-room-access';
+import { canManageBots } from '@/lib/bot-permissions';
 import { ownsBrick } from '@/lib/brick';
 import { parsePlayUri } from '@/lib/utils';
 
@@ -182,28 +183,46 @@ export async function endStaleVisits(now: Date = new Date()): Promise<number> {
 export interface BrickHere {
   botId: string;
   ownerId: string;
-  kind: 'visiting';
+  /** `home`: its owner gave it a place in the room (game #2005, "Add one of your Bricks"). `visiting`: it walks beside its owner. */
+  kind: 'visiting' | 'home';
   roomId: string;
   universeId: string;
 }
 
 /**
- * Where a Brick is right now, for the people who are not its owner: the room a live visit was last seen in, when that
- * room's universe takes visits. Null: it is nowhere other people can talk to it (at home with its owner's chats only).
- * `roomUrl`, when the caller knows the room the asker is in, must be that room: a Brick is never reached from a room
- * it is not in.
+ * Where a Brick is right now, for the people who are not its owner: the room it has as a home, and the room a live visit
+ * was last seen in (when that room's universe takes visits). Null: it is nowhere other people can talk to it (it is at
+ * home with its owner's chats only). `roomUrl`, when the caller knows the room the asker is in, must be one of those: a
+ * Brick is never reached from a room it is not in. Without it, the room it has as a home comes first, then its visit.
+ *
+ * A home holds only while the person who placed it can still manage bots in that room; one that no longer does is not
+ * a place (and is removed by the next sweep). A Brick that is off or waits deleted is nowhere. A home does not depend on
+ * the Visiting Bricks switch: that switch is about visits.
  */
 export async function whereIsBrick(botId: string, roomUrl: string | null, now: Date = new Date()): Promise<(BrickHere & { place: Omit<Place, 'roomUrl'> }) | null> {
-  const visit = await prisma.brickVisit.findUnique({ where: { botId }, include: { bot: { select: { enabled: true, deletedAt: true, roomId: true } } } });
-  if (!visit || !visit.roomId || !visit.bot.enabled || visit.bot.deletedAt !== null || visit.bot.roomId !== null) return null;
-  if (now.getTime() - visit.seenAt.getTime() > (await visitEndsAfterMs())) return null;
-  const place = await placeOfRoomId(visit.roomId);
-  if (!place || !place.takesVisits) return null;
+  const [home, visit] = await Promise.all([
+    prisma.brickHome.findUnique({ where: { botId }, include: { bot: { select: { enabled: true, deletedAt: true, roomId: true, ownerId: true } } } }),
+    prisma.brickVisit.findUnique({ where: { botId }, include: { bot: { select: { enabled: true, deletedAt: true, roomId: true } } } }),
+  ]);
+  const candidates: { kind: BrickHere['kind']; roomId: string; ownerId: string }[] = [];
+  if (home && home.bot.enabled && home.bot.deletedAt === null && home.bot.roomId === null && home.bot.ownerId === home.placedById && (await canManageBots(home.placedById, home.roomId))) {
+    candidates.push({ kind: 'home', roomId: home.roomId, ownerId: home.placedById });
+  }
+  if (visit && visit.roomId && visit.bot.enabled && visit.bot.deletedAt === null && visit.bot.roomId === null && now.getTime() - visit.seenAt.getTime() <= (await visitEndsAfterMs())) {
+    const place = await placeOfRoomId(visit.roomId);
+    if (place?.takesVisits) candidates.push({ kind: 'visiting', roomId: visit.roomId, ownerId: visit.userId });
+  }
+  if (candidates.length === 0) return null;
+  let chosen = candidates[0];
   if (roomUrl) {
     const asked = await placeOfRoomUrl(roomUrl);
-    if (!asked || asked.roomId !== visit.roomId) return null;
+    const match = asked ? candidates.find((one) => one.roomId === asked.roomId) : undefined;
+    if (!match) return null;
+    chosen = match;
   }
-  return { botId, ownerId: visit.userId, kind: 'visiting', roomId: visit.roomId, universeId: place.universeId, place };
+  const place = await placeOfRoomId(chosen.roomId);
+  if (!place) return null;
+  return { botId, ownerId: chosen.ownerId, kind: chosen.kind, roomId: chosen.roomId, universeId: place.universeId, place };
 }
 
 /**

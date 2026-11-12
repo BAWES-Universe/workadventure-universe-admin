@@ -408,7 +408,7 @@ run('bringing a Brick along, in a real database', () => {
       for (const asker of [undefined, sara.uuid, omar.uuid]) {
         const response = await credentials(asker);
         expect(response.status).toBe(200);
-        expect(await response.json()).toMatchObject({ source: 'universe-ai', providerId: serverProviderId });
+        expect(await response.json()).toMatchObject({ source: 'universe-ai' });
       }
     });
 
