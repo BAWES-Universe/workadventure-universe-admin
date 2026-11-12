@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { getBrickLimits, getUniverseAiReplyLimits } from '@/lib/bot-limits';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
+import { runningExtra } from '@/lib/meter-grants';
 import { ownerAskingThrough } from '@/lib/brick-make';
 import { TIME_ZONE_KEY, WORKWEEK_KEY, firstDue, isTimeZone, nextDue, readCadence, readWorkweek, repeatMinutes, type Cadence } from '@/lib/brick-item-time';
 
@@ -491,15 +492,19 @@ export async function pauseItemsOfDeletedBrick(db: Tx, botId: string): Promise<n
  * on its owner's own key uses its key and is never held here. Returns when it carries on.
  */
 export async function goalsRoom(ownerId: string, now: Date = new Date()): Promise<{ ok: true } | { ok: false; resumesAt: Date }> {
-  const [{ signedIn, windowHours }, { goalsShare }] = await Promise.all([getUniverseAiReplyLimits(), getBrickLimits()]);
+  const [{ signedIn, windowHours }, { goalsShare }, extra] = await Promise.all([getUniverseAiReplyLimits(), getBrickLimits(), runningExtra(ownerId, now)]);
+  // Extra usage a super admin gave (game #1999) raises the person's window while it runs, a multiple of the usual or no limit, so goals and
+  // tasks and their share rise with it, exactly as chat does: a person with room on their usage bar is never held
+  if (extra?.noLimit) return { ok: true };
+  const total = signedIn * (extra?.multiplier ?? 1);
   const window = await prisma.replyWindow.findUnique({ where: { key: `ua:person:${ownerId}` }, select: { startedAt: true } });
   const ends = window ? new Date(window.startedAt.getTime() + windowHours * 60 * MINUTE) : null;
   // No window, or one that has ended, has nothing counted in it
   if (!window || !ends || ends <= now) return { ok: true };
   const mine = { talkedPersonId: ownerId, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: window.startedAt } };
   const [used, byTasks] = await Promise.all([prisma.botsAiUsage.count({ where: mine }), prisma.botsAiUsage.count({ where: { ...mine, channel: 'task' } })]);
-  const share = Math.max(1, Math.floor((signedIn * goalsShare) / 100));
-  return used >= signedIn || byTasks >= share ? { ok: false, resumesAt: ends } : { ok: true };
+  const share = Math.max(1, Math.floor((total * goalsShare) / 100));
+  return used >= total || byTasks >= share ? { ok: false, resumesAt: ends } : { ok: true };
 }
 
 /** Something Brick must tell a person once: their goal or task is waiting for their usage to be back, and when it carries on. */

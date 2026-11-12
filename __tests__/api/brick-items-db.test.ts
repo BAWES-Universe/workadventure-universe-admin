@@ -17,6 +17,7 @@ import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { makeBrick } from '@/lib/brick-make';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, markHeldTold, markTold, claimWork, readItem, type NewItemInput } from '@/lib/brick-items';
+import { recordGrant } from '@/lib/meter-grants';
 import { checkReplyAllowance } from '@/lib/reply-limits';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -847,6 +848,28 @@ run('goals and tasks, in a real database', () => {
       expect(mineIn(work, goal.id)).toEqual([]);
       expect(work.held.map((one) => one.itemId)).toContain(goal.id);
       expect((await prisma.brickItem.findUniqueOrThrow({ where: { id: goal.id } })).heldSince).not.toBeNull();
+    });
+
+    it('lets extra usage raise the room goals and tasks have, as it does for chat: a multiple raises it, no limit lifts it, and it is back to the usual when it ends', async () => {
+      const gsext = await person('gsext');
+      const watch = await set(gsext, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      // 9 replies by goals and tasks is their whole share (30% of 30), 30 is the whole window
+      await usage(gsext, 9, 'task');
+      const grant = { personId: gsext.id, settlement: 'gift' as const, startsAt: at(0), endsAt: at(4 * HOUR), givenById: gsext.id };
+      await recordGrant({ ...grant, grantKey: `gsext-double-${randomUUID()}`, multiplier: 2 });
+      // Twice the window: twice the share (18), so 9 used is room still
+      expect(mineIn(await claimWork(at(HOUR + 2 * MIN)), watch.id)).toHaveLength(1);
+      // The whole raised window (60) used up holds the next one
+      await usage(gsext, 60, 'dm');
+      const full = await set(gsext, { kind: 'watch', words: 'Rate', condition: 'It moves', cadence: { type: 'every', minutes: 60 } });
+      expect(mineIn(await claimWork(at(2 * HOUR + 2 * MIN)), full.id)).toEqual([]);
+      // No limit lifts it whatever is used
+      await recordGrant({ ...grant, grantKey: `gsext-none-${randomUUID()}`, noLimit: true });
+      const free = await set(gsext, { kind: 'watch', words: 'Gold', condition: 'It rises', cadence: { type: 'every', minutes: 60 } });
+      expect(mineIn(await claimWork(at(3 * HOUR + 2 * MIN)), free.id)).toHaveLength(1);
+      // When extra usage has ended the usual room applies again, with the work waiting
+      const later = await set(gsext, { kind: 'watch', words: 'Oil', condition: 'It falls', cadence: { type: 'every', minutes: 60 } });
+      expect(mineIn(await claimWork(at(4 * HOUR + 2 * MIN)), later.id)).toEqual([]);
     });
 
     it('never holds a Brick that runs on its owner’s own key, and never counts a run against the Universe AI bar for it', async () => {
