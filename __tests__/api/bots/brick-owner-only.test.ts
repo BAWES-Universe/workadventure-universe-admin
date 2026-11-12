@@ -220,17 +220,14 @@ describe('what a Brick may run on (GET /api/me/bot-ai)', () => {
 });
 
 describe('a Brick’s voice (PUT /api/bots/:id/voice, PUT /api/bots/:id/voice/draft)', () => {
-  it.each([true, false])('answers "not in a room" when voice is turned %s, and writes nothing', async (enabled) => {
-    const response = await putVoice(request(`/api/bots/${BRICK_ID}/voice`, SARA, { method: 'PUT', body: { enabled } }), params());
-    expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ error: BRICK_HAS_NO_ROOM });
+  // Its owner turns it on and drafts it (see brick-voice.test.ts); anyone else gets "not found" and nothing is written
+  it.each([OMAR, ROOT])('answers "not found" to someone who is not its owner, a super admin included, and writes nothing (%#)', async (who) => {
+    const turnedOn = await putVoice(request(`/api/bots/${BRICK_ID}/voice`, who, { method: 'PUT', body: { enabled: true } }), params());
+    expect(turnedOn.status).toBe(404);
+    expect(await turnedOn.json()).toEqual({ error: 'Bot not found' });
+    const drafted = await putVoiceDraft(request(`/api/bots/${BRICK_ID}/voice/draft`, who, { method: 'PUT', body: { expression: 'restrained' } }), params());
+    expect(drafted.status).toBe(404);
     expect(db.bot.update).not.toHaveBeenCalled();
-  });
-
-  it('answers "not in a room" for a draft, and saves none', async () => {
-    const response = await putVoiceDraft(request(`/api/bots/${BRICK_ID}/voice/draft`, SARA, { method: 'PUT', body: { expression: 'restrained' } }), params());
-    expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ error: BRICK_HAS_NO_ROOM });
     expect(db.botVoiceDraft.upsert).not.toHaveBeenCalled();
   });
 });
