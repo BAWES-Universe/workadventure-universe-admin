@@ -173,7 +173,7 @@ run('usage for people, and cost for us, in a real database', () => {
     it('is only a request: once while it waits, no grant, no debt, and nothing billed', async () => {
       await setUp();
       const sara = await person('sara');
-      await spendComputer(sara, 1_000);
+      await spendComputer(sara, 1_000, new Date());
       session.mockResolvedValue({ id: sara.id, email: 'sara@example.test' });
       const first = await askPost(body('POST', '/api/me/usage/ask-for-more', {}));
       expect(first.status).toBe(201);
@@ -298,6 +298,23 @@ run('usage for people, and cost for us, in a real database', () => {
       await askForMore(sara.id);
       expect((await send()).status).toBe(200);
       expect((await openRequests()).map((request) => request.personId)).toEqual([sara.id]);
+    });
+
+    it('answers an ask made while the grant was still being recorded', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 1_000, new Date());
+      asAdmin();
+      // The ask lands after the grant's start time was taken and before the grant is written
+      const original = prisma.meterGrant.createMany.bind(prisma.meterGrant);
+      const spy = jest.spyOn(prisma.meterGrant, 'createMany').mockImplementationOnce(((args: Parameters<typeof original>[0]) => askForMore(sara.id, new Date()).then(() => original(args))) as unknown as typeof prisma.meterGrant.createMany);
+      try {
+        const given = await personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, { grantKey: randomUUID(), amount: 'five', endsAt: new Date(Date.now() + 10 * 86_400_000).toISOString(), settlement: 'gift' }), { params: Promise.resolve({ id: sara.id }) });
+        expect(given.status).toBe(201);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await openRequests()).toEqual([]);
     });
 
     it('leaves no request waiting when extra usage lands while a person is asking', async () => {

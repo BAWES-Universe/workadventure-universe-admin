@@ -14,6 +14,9 @@ jest.mock('next/link', () => ({ __esModule: true, default: ({ href, children, ..
 import CostsPage from '@/app/admin/ai-providers/costs/page';
 import type { CostsReport } from '@/lib/meter-costs';
 
+// A day at midday where the reader is: it shows as that day in any time zone (the page shows days in the reader's own time)
+const localNoon = (year: number, month: number, day: number) => new Date(year, month - 1, day, 12).toISOString();
+
 const report = (over: Partial<CostsReport> = {}): CostsReport => ({
   from: '2026-11-04',
   to: '2026-11-10',
@@ -28,7 +31,7 @@ const report = (over: Partial<CostsReport> = {}): CostsReport => ({
   people: {
     rows: [
       { id: 'khalid', name: 'Khalid', woka: [], costMicros: 11_900_000, bricks: 3, replies: 264, appUses: 96, computerSeconds: 26 * 3600, extraUntil: null },
-      { id: 'sara', name: 'Sara', woka: [], costMicros: 6_120_000, bricks: 2, replies: 188, appUses: 41, computerSeconds: 9 * 3600, extraUntil: '2026-11-30T12:00:00.000Z' },
+      { id: 'sara', name: 'Sara', woka: [], costMicros: 6_120_000, bricks: 2, replies: 188, appUses: 41, computerSeconds: 9 * 3600, extraUntil: localNoon(2026, 11, 30) },
     ],
     total: 38,
     more: { count: 36, costMicros: 21_780_000 },
@@ -51,8 +54,8 @@ const report = (over: Partial<CostsReport> = {}): CostsReport => ({
   asked: [{ personId: 'sara', name: 'Sara', woka: [], askedAt: new Date().toISOString() }],
   askedMore: 0,
   given: [
-    { grantKey: 'g1', personId: 'sara', name: 'Sara', woka: [], multiplier: 5, noLimit: false, startsAt: '2026-11-10T12:00:00.000Z', endsAt: '2026-11-30T12:00:00.000Z', ended: false, givenByName: 'Khalid', settlement: 'to_bill', billedAt: null, note: null, aboveUsualMicros: 4_200_000 },
-    { grantKey: 'g2', personId: 'faisal', name: 'Faisal', woka: [], multiplier: 2, noLimit: false, startsAt: '2026-11-01T12:00:00.000Z', endsAt: '2026-11-07T12:00:00.000Z', ended: true, givenByName: 'Khalid', settlement: 'gift', billedAt: null, note: null, aboveUsualMicros: 1_100_000 },
+    { grantKey: 'g1', personId: 'sara', name: 'Sara', woka: [], multiplier: 5, noLimit: false, startsAt: localNoon(2026, 11, 10), endsAt: localNoon(2026, 11, 30), ended: false, givenByName: 'Khalid', settlement: 'to_bill', billedAt: null, note: null, aboveUsualMicros: 4_200_000 },
+    { grantKey: 'g2', personId: 'faisal', name: 'Faisal', woka: [], multiplier: 2, noLimit: false, startsAt: localNoon(2026, 11, 1), endsAt: localNoon(2026, 11, 7), ended: true, givenByName: 'Khalid', settlement: 'gift', billedAt: null, note: null, aboveUsualMicros: 1_100_000 },
   ],
   ...over,
 });

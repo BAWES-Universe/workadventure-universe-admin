@@ -187,6 +187,45 @@ describe('giving extra usage', () => {
     expect(keysSent()[2]).not.toBe(keysSent()[1]);
   });
 
+  describe('when an answer never came back and the admin changes what they give', () => {
+    const setUpOffline = (serverHas: (tried: boolean) => PersonUsage) => {
+      let attempt = 0;
+      fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method !== 'POST') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(serverHas(attempt > 0)) });
+        attempt += 1;
+        if (attempt === 1) return Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) });
+        return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ usage: usage({ extra: running({ grantKey: 'sara:key-2' }) }) }) });
+      });
+    };
+    const posts = () => fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST');
+
+    it('gives nothing more when the server already has the first one', async () => {
+      setUpOffline((tried) => (tried ? usage({ extra: running({ grantKey: 'sara:key-1' }) }) : usage()));
+      render(<ExtraUsage userId="sara" name="Sara" />);
+      fireEvent.click(await screen.findByTestId('extra-usage-give'));
+      fireEvent.click(screen.getByTestId('extra-usage-confirm'));
+      await waitFor(() => expect(posts()).toHaveLength(1));
+      await waitFor(() => expect((screen.getByTestId('extra-usage-confirm') as HTMLButtonElement).disabled).toBe(false));
+      fireEvent.click(screen.getByRole('radio', { name: /Double/ }));
+      fireEvent.click(screen.getByTestId('extra-usage-confirm'));
+      await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'The last try was saved after all, so nothing more was given.' })));
+      expect(posts()).toHaveLength(1);
+    });
+
+    it('gives it with a new key when the server does not have the first one', async () => {
+      setUpOffline(() => usage());
+      render(<ExtraUsage userId="sara" name="Sara" />);
+      fireEvent.click(await screen.findByTestId('extra-usage-give'));
+      fireEvent.click(screen.getByTestId('extra-usage-confirm'));
+      await waitFor(() => expect(posts()).toHaveLength(1));
+      await waitFor(() => expect((screen.getByTestId('extra-usage-confirm') as HTMLButtonElement).disabled).toBe(false));
+      fireEvent.click(screen.getByRole('radio', { name: /Double/ }));
+      fireEvent.click(screen.getByTestId('extra-usage-confirm'));
+      await waitFor(() => expect(posts()).toHaveLength(2));
+      expect(JSON.parse(String(posts()[1][1].body)).grantKey).not.toBe(JSON.parse(String(posts()[0][1].body)).grantKey);
+    });
+  });
+
   it('keeps the sheet open and says why when it was turned down', async () => {
     fetchMock.mockImplementation((_url: string, init?: RequestInit) =>
       init?.method === 'POST' ? Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'That key was used for a different grant. The first one stands.' }) }) : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(usage()) }),

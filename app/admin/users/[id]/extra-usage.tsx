@@ -47,17 +47,21 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
   const pendingKey = useRef<{ key: string; sig: string } | null>(null);
   const [saving, setSaving] = useState(false);
 
+  const read = useCallback(async (): Promise<PersonUsage> => {
+    const { authenticatedFetch } = await import('@/lib/client-auth');
+    const response = await authenticatedFetch(`/api/admin/users/${encodeURIComponent(userId)}/extra-usage`);
+    if (!response.ok) throw new Error('load');
+    return (await response.json()) as PersonUsage;
+  }, [userId]);
+
   const load = useCallback(async () => {
     setFailed(false);
     try {
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/users/${encodeURIComponent(userId)}/extra-usage`);
-      if (!response.ok) throw new Error('load');
-      setUsage((await response.json()) as PersonUsage);
+      setUsage(await read());
     } catch {
       setFailed(true);
     }
-  }, [userId]);
+  }, [read]);
 
   useEffect(() => {
     load();
@@ -255,6 +259,29 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
                   return;
                 }
                 const sig = JSON.stringify({ amount, until, date: until === 'date' ? date : null, bill, note: bill === 'to_bill' ? note : null });
+                if (pendingKey.current && pendingKey.current.sig !== sig) {
+                  // The last try got no answer and this is something else: look at what the server has before giving again, since
+                  // that one may have been saved
+                  setSaving(true);
+                  let fresh: PersonUsage | null = null;
+                  try {
+                    fresh = await read();
+                  } catch {
+                    fresh = null;
+                  }
+                  setSaving(false);
+                  if (!fresh) {
+                    addToast({ description: 'We couldn’t check whether the last try was saved. Try again in a moment.', variant: 'error' });
+                    return;
+                  }
+                  setUsage(fresh);
+                  if (fresh.extra?.grantKey === `${userId}:${pendingKey.current.key}`.slice(0, 255)) {
+                    pendingKey.current = null;
+                    addToast({ description: 'The last try was saved after all, so nothing more was given.', variant: 'success' });
+                    setOpen(false);
+                    return;
+                  }
+                }
                 if (pendingKey.current?.sig !== sig) pendingKey.current = { key: crypto.randomUUID(), sig };
                 const outcome = await send('POST', { grantKey: pendingKey.current.key, amount, endsAt: ends.toISOString(), settlement: bill, note: bill === 'to_bill' ? note : null });
                 if (outcome !== 'unsure') pendingKey.current = null;

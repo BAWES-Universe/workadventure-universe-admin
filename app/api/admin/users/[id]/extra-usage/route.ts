@@ -86,8 +86,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       givenById: admin.id,
       note: typeof body.note === 'string' ? body.note : null,
     });
-    // A replay answers only what was asked before the grant began, never a newer ask
-    await answerRequests(id, `${id}:${body.grantKey}`.slice(0, 255), now, grant.startsAt);
+    // A new grant answers every ask made up to now, including one made while it was being recorded. A replay answers only what was
+    // asked before that grant began, never a newer ask.
+    await answerRequests(id, `${id}:${body.grantKey}`.slice(0, 255), now, recorded ? new Date() : grant.startsAt);
     return NextResponse.json({ recorded, usage: await personUsage(id, new Date(), admin.id) }, { status: recorded ? 201 : 200 });
   } catch (error) {
     if (error instanceof GrantRefused) return NextResponse.json({ error: error.message }, { status: 400 });

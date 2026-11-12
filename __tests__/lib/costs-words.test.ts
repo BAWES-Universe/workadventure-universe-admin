@@ -2,6 +2,9 @@
 import { amountWords, computerTime, didLine, dollars, givenDates, givenPill, goesLines } from '@/lib/costs-words';
 import { sureOf } from '@/lib/meter-costs';
 
+// A day at midday where the reader is: it shows as that day in any time zone (the page shows days in the reader's own time)
+const localNoon = (year: number, month: number, day: number) => new Date(year, month - 1, day, 12).toISOString();
+
 describe('money', () => {
   it('shows cents, and a cost under half a cent as under a cent rather than $0.00', () => {
     expect(dollars(11_900_000)).toBe('$11.90');
@@ -31,8 +34,8 @@ describe('extra usage given', () => {
     expect(amountWords({ multiplier: 2, noLimit: false })).toBe('Twice the usual');
     expect(amountWords({ multiplier: 5, noLimit: false })).toBe('5 times the usual');
     expect(amountWords({ multiplier: null, noLimit: true })).toBe('No limit');
-    expect(givenDates({ startsAt: '2026-11-10T12:00:00Z', endsAt: '2026-11-30T12:00:00Z', ended: false })).toBe('10 Nov to 30 Nov');
-    expect(givenDates({ startsAt: '2026-11-01T12:00:00Z', endsAt: '2026-11-07T12:00:00Z', ended: true })).toBe('1 Nov to 7 Nov, ended');
+    expect(givenDates({ startsAt: localNoon(2026, 11, 10), endsAt: localNoon(2026, 11, 30), ended: false })).toBe('10 Nov to 30 Nov');
+    expect(givenDates({ startsAt: localNoon(2026, 11, 1), endsAt: localNoon(2026, 11, 7), ended: true })).toBe('1 Nov to 7 Nov, ended');
   });
 
   it('marks extra usage to bill as "To bill" until it is billed, and a gift as a gift, never billed', () => {
