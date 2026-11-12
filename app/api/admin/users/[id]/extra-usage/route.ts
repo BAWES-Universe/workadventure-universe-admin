@@ -69,7 +69,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (typeof body.grantKey !== 'string' || !body.grantKey) return NextResponse.json({ error: 'grantKey is required' }, { status: 400 });
   if (body.note !== undefined && body.note !== null && typeof body.note !== 'string') return NextResponse.json({ error: 'note must be text' }, { status: 400 });
   // A grant key belongs to one person: the same key for someone else is a different grant, so it is refused rather than reused
-  const key = `${id}:${body.grantKey}`.slice(0, 255);
+  const key = `${id}:${body.grantKey}`;
+  // Never cut short: two long keys sharing their first part would otherwise become one stored key
+  if (key.length > 255) return NextResponse.json({ error: 'grantKey is too long' }, { status: 400 });
   const { settlement } = body;
   try {
     // One key is settled one at a time, from before anything about time is judged to the end: a try that got no answer and is sent

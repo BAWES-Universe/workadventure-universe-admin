@@ -194,7 +194,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
   const until = new Date(to.getTime() + DAY);
   const inRange = Prisma.sql`occurred_at >= ${from} AND occurred_at < ${until}`;
 
-  const [groups, headline, peopleRows, brickRows, ways, guestRows, dayRows, kept, settings] = await Promise.all([
+  const [groups, headline, peopleRows, brickRows, ways, guestRows, dayRows, guestDays, kept, settings] = await Promise.all([
     prisma.$queryRaw<Group[]>(Prisma.sql`
       SELECT kind,
         COALESCE(SUM(cost_micros) FILTER (WHERE payer_kind = 'universe'), 0)::bigint AS ours,
@@ -249,6 +249,10 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
         (COUNT(DISTINCT person_key) FILTER (WHERE person_key LIKE 'person:%'))::int AS people,
         COALESCE(SUM(cost_micros) FILTER (WHERE payer_kind = 'universe'), 0)::bigint AS cost
       FROM meter_events WHERE ${inRange} GROUP BY 1 ORDER BY 1 DESC`),
+    // Guests of a Brick are paid for from their own table, so their days are added to the daily figures as well
+    prisma.$queryRaw<{ day: Date; cost: bigint }[]>(Prisma.sql`
+      SELECT date_trunc('day', created_at) AS day, COALESCE(SUM(cost_micros), 0)::bigint AS cost
+      FROM guest_brick_replies WHERE failed = false AND created_at >= ${from} AND created_at < ${until} GROUP BY 1`),
     // A disk is a level, not something that adds up: the newest size recorded for each bot, as it stood when the dates end
     prisma.$queryRaw<{ bytes: bigint | null }[]>(Prisma.sql`
       SELECT COALESCE(SUM(latest.quantity), 0)::bigint AS bytes FROM (
@@ -382,7 +386,11 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
 
   // Each person's grants are worked out together, so two of them at once share one month's spending the way the allowance does
   const byPerson = new Map<string, typeof grants>();
-  for (const grant of grants) byPerson.set(grant.personId, [...(byPerson.get(grant.personId) ?? []), grant]);
+  for (const grant of grants) {
+    const list = byPerson.get(grant.personId);
+    if (list) list.push(grant);
+    else byPerson.set(grant.personId, [grant]);
+  }
   const above = new Map<string, number>();
   // One read for everyone, not one per person and month: the spending of all of them over the whole span of their grants, sorted out
   // by person and month here
@@ -401,7 +409,11 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
           select: { personKey: true, occurredAt: true, costMicros: true },
         });
   const spendingOf = new Map<string, typeof spending>();
-  for (const event of spending) spendingOf.set(event.personKey, [...(spendingOf.get(event.personKey) ?? []), event]);
+  for (const event of spending) {
+    const list = spendingOf.get(event.personKey);
+    if (list) list.push(event);
+    else spendingOf.set(event.personKey, [event]);
+  }
   for (const [personId, list] of byPerson) {
     const figures = aboveUsual(settings.memberAllowanceMicros, list, spendingOf.get(`person:${personId}`) ?? [], now);
     list.forEach((grant, index) => above.set(grant.grantKey, figures[index]));
@@ -422,6 +434,16 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     note: grant.note,
     aboveUsualMicros: above.get(grant.grantKey) ?? 0,
   }));
+  // Days from the meter and days of guests merged, newest first as before
+  const dayMap = new Map<string, DayRow>();
+  for (const day of dayRows) dayMap.set(isoDay(day.day), { day: isoDay(day.day), people: day.people, costMicros: toNumber(day.cost) });
+  for (const day of guestDays) {
+    const key = isoDay(day.day);
+    const have = dayMap.get(key);
+    if (have) have.costMicros += toNumber(day.cost);
+    else dayMap.set(key, { day: key, people: 0, costMicros: toNumber(day.cost) });
+  }
+  const days = [...dayMap.values()].sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : 0));
   const asked: AskedRow[] = requests.map((request) => ({ personId: request.personId, name: nameOf.get(request.personId) ?? 'Someone', woka: wokas.get(request.personId) ?? [], askedAt: request.createdAt.toISOString() }));
 
   return {
@@ -433,7 +455,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     bricks: { rows: bricks, total: brickRows.length, more: { count: Math.max(0, brickRows.length - COSTS_LISTED), costMicros: rest(brickRows) } },
     ways: wayRows,
     guests,
-    days: dayRows.map((day) => ({ day: isoDay(day.day), people: day.people, costMicros: toNumber(day.cost) })),
+    days: days,
     asked,
     askedMore: Math.max(0, openCount - requests.length),
     given,

@@ -385,6 +385,16 @@ run('usage for people, and cost for us, in a real database', () => {
         expect(await grantRows(sara.id)).toBe(1);
       });
 
+      it('refuses a key too long to keep whole instead of cutting it short', async () => {
+        await setUp();
+        const sara = await person('sara');
+        asAdmin();
+        const long = (tail: string) => ({ grantKey: `${'k'.repeat(250)}${tail}`, amount: 'five', endsAt: new Date(Date.now() + 10 * 86_400_000).toISOString(), settlement: 'gift' });
+        expect((await give(sara, long('a'))).status).toBe(400);
+        expect((await give(sara, long('b'))).status).toBe(400);
+        expect(await grantRows(sara.id)).toBe(0);
+      });
+
       it('is answered as used, not refused, when the saved grant was changed by another admin before it came again', async () => {
         await setUp();
         const sara = await person('sara');
@@ -473,7 +483,8 @@ run('usage for people, and cost for us, in a real database', () => {
         session.mockResolvedValue({ id: who.id, email: `${who.id}@example.test` });
         const grant = (async () => {
           const given = await recordGrant({ grantKey: `g-${tag}-room-${round}`, personId: who.id, settlement: 'gift', multiplier: 5, startsAt: new Date(), endsAt: new Date(Date.now() + 10 * 86_400_000), givenById: who.id });
-          await answerRequests(who.id, given.grant.grantKey, new Date(), given.grant.startsAt);
+          const answeredAt = new Date();
+          await answerRequests(who.id, given.grant.grantKey, answeredAt, answeredAt);
         })();
         const [asked] = await Promise.all([askPost(body('POST', '/api/me/usage/ask-for-more', {})), grant]);
         expect([200, 201, 409]).toContain(asked.status);
@@ -704,6 +715,8 @@ run('usage for people, and cost for us, in a real database', () => {
       ]);
       // Their cost is part of the headline too (a failed reply cost nothing)
       expect(report.totals.costMicros).toBe(650);
+      // ...and of the daily figures: the guests' day shows, with nobody counted as a person
+      expect(report.days).toEqual([{ day: NOW.toISOString().slice(0, 10), people: 0, costMicros: 650 }]);
       await prisma.universe.delete({ where: { id: universe.id } });
     });
 
