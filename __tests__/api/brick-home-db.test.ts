@@ -155,7 +155,10 @@ run('a Brick that lives in a room, in a real database', () => {
   });
 
   describe('the map editor’s list and taking it out', () => {
-    const list = async (user: Person, roomUrl: string) => listRoom(call('GET', `/api/brick-homes?roomUrl=${encodeURIComponent(roomUrl)}`), (as(user), undefined) as never);
+    const list = async (user: Person, roomUrl: string) => {
+      as(user);
+      return listRoom(call('GET', `/api/brick-homes?roomUrl=${encodeURIComponent(roomUrl)}`));
+    };
 
     it('shows a manager the Bricks standing here, their own first, those placed by others each with Take out, and never an email or an instruction', async () => {
       await put(brickId, hosted.roomUrl, { behaviorConfig: SPOT });
