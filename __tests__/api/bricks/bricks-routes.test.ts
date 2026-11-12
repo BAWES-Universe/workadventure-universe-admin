@@ -305,6 +305,18 @@ describe('POST /api/bricks: New Brick (game #1996)', () => {
       });
     });
 
+    it('takes the direction and pause of a route it was saved with', async () => {
+      const response = await changeBrick(
+        request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { behaviorConfig: { loop: false, pauseAtWaypoints: 5 } } }),
+        params(),
+      );
+      expect(response.status).toBe(200);
+      expect(db.bot.update).toHaveBeenLastCalledWith({
+        where: { id: BRICK_ID },
+        data: { behaviorConfig: { ...brick.behaviorConfig, loop: false, pauseAtWaypoints: 5 }, updatedById: SARA.id },
+      });
+    });
+
     it('clears its companion with null, and refuses a behavior it does not know', async () => {
       await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { companionTextureId: null } }), params());
       expect(db.bot.update).toHaveBeenLastCalledWith({ where: { id: BRICK_ID }, data: { companionTextureId: null, updatedById: SARA.id } });

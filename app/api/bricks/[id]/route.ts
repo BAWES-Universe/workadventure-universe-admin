@@ -33,6 +33,8 @@ const brickBehaviorConfigSchema = z
     minTimeBetweenConversations: z.number().min(0).max(86_400_000),
     facing: z.enum(['down', 'left', 'right', 'up']),
     assignedSpace: z.object({ center: z.object({ x: z.number(), y: z.number() }), radius: z.number().min(0).max(100000) }),
+    loop: z.boolean(),
+    pauseAtWaypoints: z.number().min(0).max(86_400),
     vision: z.unknown(),
   })
   .partial()
