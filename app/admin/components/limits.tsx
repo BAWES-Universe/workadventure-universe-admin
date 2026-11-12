@@ -1032,18 +1032,14 @@ export function UniverseAiLimits() {
           </Settings>
           <LimitGroup title="Files in chats, for all bots" limits={fileLimits(limits.files)} onChange={(id, value) => save({ files: { [id]: value } })} />
           <LimitGroup title="Fair usage" limits={fairUsageLimits(limits.fairUsage)} onChange={(id, value) => save({ fairUsage: { [id]: value } })} />
-          {allowanceFailed ? (
-            <LoadError label="the computer allowance" retry={loadAllowance} />
-          ) : !allowance ? (
-            <LoadingRows label="the Bricks limits" rows={2} />
-          ) : (
-            <LimitGroup
-              title="Bricks"
-              note="Every member starts with these, so nothing is switched on per person. The starting values come from our own test on the dev server."
-              limits={[computerAllowanceLimit(allowance.micros), ...brickLimits(limits.bricks)]}
-              onChange={(id, value) => (id === COMPUTER_ALLOWANCE_ID ? saveAllowance(value) : save({ bricks: { [id]: value } }))}
-            />
-          )}
+          {allowanceFailed && <LoadError label="the computer allowance" retry={loadAllowance} />}
+          <LimitGroup
+            title="Bricks"
+            note="Every member starts with these, so nothing is switched on per person. The starting values come from our own test on the dev server."
+            // The Bricks limits that were read stay when only the allowance could not be read; its row comes in once it is
+            limits={[...(allowance ? [computerAllowanceLimit(allowance.micros)] : []), ...brickLimits(limits.bricks)]}
+            onChange={(id, value) => (id === COMPUTER_ALLOWANCE_ID ? saveAllowance(value) : save({ bricks: { [id]: value } }))}
+          />
           {voiceFailed ? (
             <LoadError label="the voice limits" retry={loadVoice} />
           ) : !voice ? (

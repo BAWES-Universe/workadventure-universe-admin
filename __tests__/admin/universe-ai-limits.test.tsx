@@ -209,6 +209,21 @@ describe('Universe AI limits', () => {
     expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/bot-limits' && init?.method === 'PATCH')).toBe(false);
   });
 
+  it('keeps the Brick limits that were read when only the computer allowance could not be (game #1999)', async () => {
+    answer();
+    const ok = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => (url === '/api/admin/meter-settings' ? Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) }) : ok(url, init)));
+    render(<UniverseAiLimits />);
+    expect(await screen.findByText('Days a deleted Brick can be brought back')).toBeTruthy();
+    expect(screen.getByText(/We couldn’t load the computer allowance/)).toBeTruthy();
+    expect(screen.queryByTestId('limit-computerMonth')).toBeNull();
+    // Trying again brings its row in, first
+    fetchMock.mockImplementation(ok);
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    const row = await screen.findByTestId('limit-computerMonth');
+    expect(screen.getByLabelText('Bricks').querySelectorAll('[data-testid^="limit-"]')[0]).toBe(row);
+  });
+
   it('takes a computer allowance of its own in dollars and cents', async () => {
     answer(SERVER_LIMITS_RECOMMENDED, VOICE_LIMITS_RECOMMENDED, 5_000_000);
     render(<UniverseAiLimits />);
