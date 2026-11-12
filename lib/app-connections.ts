@@ -67,6 +67,8 @@ export interface AppUseVerdict {
   reason?: AppUseRefusal;
   /** True when this is a person's connection (a grant); false for an app set up on a bot as before, which this does not decide. */
   viaConnection: boolean;
+  /** True when the app was made through the ready-made adapter: its use is paid by the universe, not the person (the meter's payer). */
+  readyMade?: boolean;
 }
 
 export const useCheckSchema = z
@@ -100,11 +102,12 @@ export async function checkAppUse(botId: string, serverId: string, input: z.infe
   if (!connection) return refuse('gone');
   if (!ownsBrick(row.bot, connection.ownerId)) return refuse('gone');
   if (!row.enabled) return refuse('off');
-  if (input.forOwner === true) return { allowed: true, viaConnection: true };
+  const allowed: AppUseVerdict = { allowed: true, viaConnection: true, ...(connection.source === 'ready_made' ? { readyMade: true } : {}) };
+  if (input.forOwner === true) return allowed;
   if (!input.requesterKey) return refuse('not_owner');
   const asker = await findUserByIdentifier(input.requesterKey);
   if (!asker || asker.isGuest || asker.id !== connection.ownerId) return refuse('not_owner');
-  return { allowed: true, viaConnection: true };
+  return allowed;
 }
 
 /* -------------------------------- connections -------------------------------- */
@@ -130,7 +133,7 @@ export const addConnectionSchema = createMcpServerSchema
   .omit({ enabled: true });
 
 /** A connection made from a person's own input is "link"; the list (lib/app-catalog.ts) adds `catalogKey` for its own. */
-type NewConnection = z.infer<typeof addConnectionSchema> & { catalogKey?: string | null };
+type NewConnection = Omit<z.infer<typeof addConnectionSchema>, 'source'> & { source: 'link' | 'listed' | 'ready_made'; catalogKey?: string | null; providerToolkit?: string | null; providerAccountId?: string | null };
 
 /** The person connects an app. The way in is stored encrypted and never read back by a screen. */
 export async function createConnection(ownerId: string, input: NewConnection): Promise<AppConnection> {
@@ -145,6 +148,8 @@ export async function createConnection(ownerId: string, input: NewConnection): P
       headers: input.headers ?? undefined,
       source: input.source,
       catalogKey: input.catalogKey ?? null,
+      providerToolkit: input.providerToolkit ?? null,
+      providerAccountId: input.providerAccountId ?? null,
     },
   });
 }

@@ -24,6 +24,6 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (body.response) return body.response;
     const verdict = await checkAppUse(id, serverId, body.data);
     if (!verdict) return json(request, { allowed: false, reason: 'gone' }, 404);
-    return json(request, { allowed: verdict.allowed, ...(verdict.allowed ? {} : { reason: verdict.reason }), viaConnection: verdict.viaConnection });
+    return json(request, { allowed: verdict.allowed, ...(verdict.allowed ? {} : { reason: verdict.reason }), viaConnection: verdict.viaConnection, ...(verdict.allowed && verdict.readyMade ? { readyMade: true } : {}) });
   });
 }

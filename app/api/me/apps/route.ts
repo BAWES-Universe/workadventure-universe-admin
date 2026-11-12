@@ -41,7 +41,7 @@ export async function POST(request: NextRequest) {
     }
     const parsed = addConnectionSchema.safeParse(body);
     if (!parsed.success) return respond({ error: 'Invalid input data', details: z.treeifyError(parsed.error) }, 400);
-    const connection = await createConnection(user.id, parsed.data);
+    const connection = await createConnection(user.id, { ...parsed.data, source: 'link' });
     return respond({ id: connection.id, name: connection.name }, 201);
   });
 }
