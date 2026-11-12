@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
-import { startJob } from '@/lib/computer';
+import { computerView, startJob } from '@/lib/computer';
 
 export const runtime = 'nodejs';
 
@@ -15,6 +15,32 @@ const bodySchema = z
     writes: z.boolean().optional(),
   })
   .strict();
+
+/**
+ * GET /api/bots/:id/computer-jobs?userId=&isGuest= - whether this Brick's computer is there for its owner to use, so the bot server only
+ * offers the computer when it is on. Read only: it never makes or wakes anything. Someone else's Brick, or a guest: `{ on: false }`.
+ * Answers { available, on, busy } (busy: a job holds it or waits in line). Auth: service token only.
+ */
+export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    requireServiceToken(request);
+  } catch {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+  try {
+    const { id } = await params;
+    const userId = request.nextUrl.searchParams.get('userId');
+    if (!userId) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
+    const person = await resolveUsagePerson(userId, request.nextUrl.searchParams.get('isGuest') === 'true');
+    const view = person.personId ? await computerView(id, person.personId) : null;
+    if (!view) return NextResponse.json({ available: false, on: false, busy: false });
+    return NextResponse.json({ available: view.available, on: view.on, busy: view.job !== null || view.queued.length > 0 });
+  } catch (error) {
+    Sentry.captureException(error, { tags: { area: 'computer' } });
+    console.error('[Computer] Could not read a computer:', error instanceof Error ? error.message : 'unknown');
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}
 
 /**
  * POST /api/bots/:id/computer-jobs { userId, isGuest?, title, writes? }

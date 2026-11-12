@@ -10,7 +10,7 @@ import { POST as stop } from '@/app/api/bricks/[id]/computer/stop/route';
 import { POST as takeOverRoute } from '@/app/api/bricks/[id]/computer/take-over/route';
 import { POST as handBackRoute } from '@/app/api/bricks/[id]/computer/hand-back/route';
 import { POST as fillRoute } from '@/app/api/bricks/[id]/computer/fill-details/route';
-import { POST as startRoute } from '@/app/api/bots/[id]/computer-jobs/route';
+import { GET as stateRoute, POST as startRoute } from '@/app/api/bots/[id]/computer-jobs/route';
 import { GET as getJobRoute, POST as jobAction } from '@/app/api/bots/[id]/computer-jobs/[jobId]/route';
 import { POST as sweepRoute } from '@/app/api/computer/sweep/route';
 import { prisma } from '@/lib/db';
@@ -143,6 +143,7 @@ describe('the owner’s calls', () => {
 
 describe('the bot server’s calls', () => {
   it.each([
+    ['read whether it is on', () => stateRoute(call('/x?userId=u', { method: 'GET' }), params)],
     ['start a job', () => startRoute(call('/x', { body: { userId: 'u', title: 't' } }), params)],
     ['read a job', () => getJobRoute(call('/x', { method: 'GET' }), jobParams)],
     ['tell a job something', () => jobAction(call('/x', { body: { action: 'renew' } }), jobParams)],
@@ -162,6 +163,20 @@ describe('the bot server’s calls', () => {
     resolve.mockResolvedValue({ personId: null, guest: true });
     expect(await (await startRoute(asBot('/x', { body: { userId: 'wa-guest', isGuest: true, title: 'x' } }), params)).json()).toEqual({ ok: false, reason: 'not_owner' });
     expect(lib.startJob).toHaveBeenCalledTimes(1);
+  });
+
+  it('says whether the computer is on for its owner, read only, and "off" for anyone else', async () => {
+    resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+    lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
+    expect(await (await stateRoute(asBot('/x?userId=wa-sara', { method: 'GET' }), params)).json()).toEqual({ available: true, on: true, busy: false });
+    lib.computerView.mockResolvedValue({ available: true, on: true, job: { id: JOB }, queued: [] } as never);
+    expect(await (await stateRoute(asBot('/x?userId=wa-sara', { method: 'GET' }), params)).json()).toEqual({ available: true, on: true, busy: true });
+    lib.computerView.mockResolvedValue(null);
+    expect(await (await stateRoute(asBot('/x?userId=wa-omar', { method: 'GET' }), params)).json()).toEqual({ available: false, on: false, busy: false });
+    resolve.mockResolvedValue({ personId: null, guest: true });
+    expect(await (await stateRoute(asBot('/x?userId=wa-guest&isGuest=true', { method: 'GET' }), params)).json()).toEqual({ available: false, on: false, busy: false });
+    expect((await stateRoute(asBot('/x', { method: 'GET' }), params)).status).toBe(400);
+    expect(lib.startJob).not.toHaveBeenCalled();
   });
 
   it('says why a job could not start', async () => {
