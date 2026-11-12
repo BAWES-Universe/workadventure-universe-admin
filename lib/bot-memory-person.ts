@@ -53,23 +53,49 @@ export async function listMyMemory(botId: string, who: Remembering): Promise<MyM
   return { items };
 }
 
+/** Everything that writes or forgets one person's memory of one bot takes this first, so they take turns. */
+export type MemoryTx = Prisma.TransactionClient;
+
+export async function lockPeople(tx: MemoryTx, botId: string, userUuids: string[]): Promise<void> {
+  // In one order, so two of them never wait on each other
+  for (const userUuid of [...new Set(userUuids)].sort()) {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`bots_memory:${botId}:${userUuid}`}))`;
+  }
+}
+
 /**
- * Put a Forget down for good, and drop its thing from the row, in one go. The rows are locked and read again inside the
- * transaction, so a save the bot server sent a moment ago is never written over with what was read before it.
+ * One rule for what is written to a person's memory row: the save and every Forget run under the same lock, and a save
+ * takes out what was forgotten as it is when it writes, not as it was when the save began. Whatever a Forget wrote before
+ * the lock was given is read here; whatever comes after waits until the save is written, and then takes it out.
  */
-export async function forgetKeys(botId: string, rows: { id: number; userUuid: string; memories: unknown }[], keys: Map<string, MemoryItemKind>): Promise<void> {
+export async function saveMemoryRow<T>(botId: string, userUuid: string, memories: unknown, write: (tx: MemoryTx, memories: unknown) => Promise<T>): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await lockPeople(tx, botId, [userUuid]);
+    const rows = memories ? await tx.botMemoryItemForget.findMany({ where: { botId, userUuid }, select: { userUuid: true, itemKey: true, createdAt: true } }) : [];
+    const keys: ForgottenKey[] = rows.map(({ itemKey, createdAt }) => ({ itemKey, createdAt }));
+    return write(tx, keys.length > 0 ? withoutForgotten(memories, keys) : memories);
+  });
+}
+
+/**
+ * Put a Forget down for good for these people, and drop its thing from their rows, in one go. Under the same lock as a
+ * save, the rows are read again inside the transaction, so a save that arrived after the first read is never written
+ * over, and one that comes after is stripped by the Forget written here. A person with no row still gets the Forget.
+ */
+export async function forgetKeys(botId: string, userUuids: string[], keys: Map<string, MemoryItemKind>): Promise<void> {
   const now = new Date();
   const ids = new Set(keys.keys());
+  const people = [...new Set(userUuids)];
   await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM bots_memory WHERE id IN (${Prisma.join(rows.map((row) => row.id))}) FOR UPDATE`;
-    const fresh = await tx.botsMemory.findMany({ where: { id: { in: rows.map((row) => row.id) } }, select: { id: true, memories: true } });
-    for (const row of rows) {
+    await lockPeople(tx, botId, people);
+    const fresh = await tx.botsMemory.findMany({ where: { botId, userUuid: { in: people } }, select: { id: true, memories: true } });
+    for (const userUuid of people) {
       for (const [itemKey, kind] of keys) {
         await tx.botMemoryItemForget.upsert({
-          where: { botId_userUuid_itemKey: { botId, userUuid: row.userUuid, itemKey } },
+          where: { botId_userUuid_itemKey: { botId, userUuid, itemKey } },
           // Forgotten again after it was said again: the Forget is as new as the second one
           update: { createdAt: now, droppedAt: null },
-          create: { botId, userUuid: row.userUuid, itemKey, kind, createdAt: now },
+          create: { botId, userUuid, itemKey, kind, createdAt: now },
         });
       }
     }
@@ -89,7 +115,7 @@ export async function forgetMyItem(botId: string, who: Remembering, itemId: stri
   const holding = rows.filter((row) => memoryItemsOf(withoutForgotten(row.memories, forgotten.get(row.userUuid) ?? [])).some((item) => item.id === itemId));
   if (holding.length === 0) return false;
   const kind = memoryItemsOf(holding[0].memories).find((item) => item.id === itemId)?.kind ?? 'fact';
-  await forgetKeys(botId, holding, new Map([[itemId, kind]]));
+  await forgetKeys(botId, holding.map((row) => row.userUuid), new Map([[itemId, kind]]));
   return true;
 }
 
@@ -100,10 +126,11 @@ export async function forgetMyItem(botId: string, who: Remembering, itemId: stri
  * does for a Forget a manager pressed (see lib/bot-privacy.ts). Returns how many things were in the list.
  */
 export async function forgetMyEverything(botId: string, who: Remembering): Promise<number> {
-  const found = await prisma.botsMemory.findMany({ where: rowsWhere(botId, who), select: { id: true } });
+  const found = await prisma.botsMemory.findMany({ where: rowsWhere(botId, who), select: { id: true, userUuid: true } });
   const now = new Date();
   return prisma.$transaction(async (tx) => {
-    // Locked and read again here, so what a save wrote a moment ago is forgotten too
+    // Locked (with every save of theirs) and read again here, so what a save wrote a moment ago is forgotten too
+    await lockPeople(tx, botId, [...who.refs, ...found.map((row) => row.userUuid)]);
     if (found.length > 0) await tx.$queryRaw`SELECT id FROM bots_memory WHERE id IN (${Prisma.join(found.map((row) => row.id))}) FOR UPDATE`;
     const rows = await tx.botsMemory.findMany({ where: rowsWhere(botId, who), select: { id: true, userUuid: true, memories: true } });
     let count = 0;
@@ -133,17 +160,7 @@ export async function forgetMyEverything(botId: string, who: Remembering): Promi
  * hold a thing Orbit has not saved yet, so this needs no row: the key is kept as forgotten, and a row that has it loses it.
  */
 export async function forgetItemKey(botId: string, userUuid: string, itemKey: string, kind: MemoryItemKind): Promise<void> {
-  const row = await prisma.botsMemory.findUnique({ where: { botId_userUuid: { botId, userUuid } }, select: { id: true, userUuid: true, memories: true } });
-  if (row) {
-    await forgetKeys(botId, [row], new Map([[itemKey, kind]]));
-    return;
-  }
-  const now = new Date();
-  await prisma.botMemoryItemForget.upsert({
-    where: { botId_userUuid_itemKey: { botId, userUuid, itemKey } },
-    update: { createdAt: now, droppedAt: null },
-    create: { botId, userUuid, itemKey, kind, createdAt: now },
-  });
+  await forgetKeys(botId, [userUuid], new Map([[itemKey, kind]]));
 }
 
 export const isMemoryItemKind = (value: unknown): value is MemoryItemKind => typeof value === 'string' && (MEMORY_ITEM_KINDS as readonly string[]).includes(value);

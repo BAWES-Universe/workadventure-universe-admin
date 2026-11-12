@@ -17,7 +17,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { createBrick } from '@/lib/brick-create';
 import { memoryItemKey } from '@/lib/bot-memory-items';
-import { forgetKeys } from '@/lib/bot-memory-person';
+import { forgetKeys, lockPeople, saveMemoryRow } from '@/lib/bot-memory-person';
 import { GET as listMine } from '@/app/api/bots/[id]/my-memory/route';
 import { POST as forgetMine } from '@/app/api/bots/[id]/my-memory/forget/route';
 import { GET as readSaved, POST as save } from '@/app/api/bots/memory/[id]/route';
@@ -162,10 +162,55 @@ run('what a bot remembers about a person (real database)', () => {
     const stale = await rows(melodyId, people.sara.uuid);
     // The bot server saves one more thing after Orbit read the row, before the Forget is written
     await prisma.botsMemory.update({ where: { id: stale!.id }, data: { memories: memoryOf({ preferences: [COFFEE, 'lo-fi', 'chess'] }) } });
-    await forgetKeys(melodyId, [{ id: stale!.id, userUuid: stale!.userUuid, memories: stale!.memories }], new Map([[memoryItemKey('pref', null, COFFEE), 'pref']]));
+    await forgetKeys(melodyId, [stale!.userUuid], new Map([[memoryItemKey('pref', null, COFFEE), 'pref']]));
     const text = JSON.stringify((await rows(melodyId, people.sara.uuid))?.memories);
     expect(text).not.toContain(COFFEE);
     expect(text).toContain('chess');
+  });
+
+  it('takes turns with a save: a save that waits for a Forget is written without what it forgot', async () => {
+    const chess = memoryItemKey('pref', null, 'chess');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // A Forget in the middle of its transaction, holding the person's lock
+    const forgetting = prisma.$transaction(async (tx) => {
+      await lockPeople(tx, melodyId, [people.sara.uuid]);
+      await tx.botMemoryItemForget.create({ data: { botId: melodyId, userUuid: people.sara.uuid, itemKey: chess, kind: 'pref', createdAt: new Date() } });
+      await gate;
+    });
+    await settle();
+    // A save that began before the Forget was written: it has to wait, and then it reads what was forgotten
+    const saving = saveMemoryRow(melodyId, people.sara.uuid, memoryOf({ preferences: [COFFEE, 'chess'] }), (tx, clean) =>
+      tx.botsMemory.update({ where: { botId_userUuid: { botId: melodyId, userUuid: people.sara.uuid } }, data: { memories: clean as Prisma.InputJsonValue } }),
+    );
+    await settle();
+    release();
+    await forgetting;
+    await saving;
+    const text = JSON.stringify((await rows(melodyId, people.sara.uuid))?.memories);
+    expect(text).not.toContain('chess');
+    expect(text).toContain(COFFEE);
+  });
+
+  it('takes turns with a save: a Forget that waits for a save takes out what it wrote', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const saving = prisma.$transaction(async (tx) => {
+      await lockPeople(tx, melodyId, [people.sara.uuid]);
+      await tx.botsMemory.update({ where: { botId_userUuid: { botId: melodyId, userUuid: people.sara.uuid } }, data: { memories: memoryOf({ preferences: [COFFEE, 'chess'] }) } });
+      await gate;
+    });
+    await settle();
+    const forgetting = forgetKeys(melodyId, [people.sara.uuid], new Map([[memoryItemKey('pref', null, 'chess'), 'pref']]));
+    await settle();
+    release();
+    await saving;
+    await forgetting;
+    expect(JSON.stringify((await rows(melodyId, people.sara.uuid))?.memories)).not.toContain('chess');
   });
 
   it('keeps only a key, never the words', async () => {

@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { requireServiceToken, validateServiceToken } from '@/lib/service-tokens';
 import { botContentReadDenied } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
-import { takeItemForgets, withoutForgottenFor, withoutForgottenOne } from '@/lib/bot-memory-person';
+import { saveMemoryRow, takeItemForgets, withoutForgottenFor, withoutForgottenOne } from '@/lib/bot-memory-person';
 import { dropForgottenFrom, forgetNotice, isBotHidden, memoryTally, takeForgets } from '@/lib/bot-privacy';
 
 export const runtime = 'nodejs';
@@ -267,33 +267,36 @@ export async function POST(
 
           // Always store userUuid (even for guests with no match)
           // This allows us to track ephemeral guest sessions
-          await prisma.botsMemory.upsert({
-            where: {
-              botId_userUuid: {
-                botId: botId,
-                userUuid: userUuid,
+          // Under the lock every Forget takes, taking out what was forgotten as it is now (game #2003)
+          await saveMemoryRow(botId, userUuid, memoryData, (tx, clean) =>
+            tx.botsMemory.upsert({
+              where: {
+                botId_userUuid: {
+                  botId: botId,
+                  userUuid: userUuid,
+                },
               },
-            },
-            update: {
-              userId: finalUserId,
-              userName: userName || undefined,
-              isGuest: finalIsGuest,
-              memories: memoryData || undefined,
-              emotions: emotions || undefined,
-              lastEmotionUpdate: lastEmotionUpdate ? new Date(lastEmotionUpdate) : undefined,
-              updatedAt: new Date(),
-            },
-            create: {
-              botId,
-              userUuid,
-              userId: finalUserId,
-              userName: userName || null,
-              isGuest: finalIsGuest,
-              memories: memoryData || null,
-              emotions: emotions || null,
-              lastEmotionUpdate: lastEmotionUpdate ? new Date(lastEmotionUpdate) : null,
-            },
-          });
+              update: {
+                userId: finalUserId,
+                userName: userName || undefined,
+                isGuest: finalIsGuest,
+                memories: (clean as typeof memoryData) || undefined,
+                emotions: emotions || undefined,
+                lastEmotionUpdate: lastEmotionUpdate ? new Date(lastEmotionUpdate) : undefined,
+                updatedAt: new Date(),
+              },
+              create: {
+                botId,
+                userUuid,
+                userId: finalUserId,
+                userName: userName || null,
+                isGuest: finalIsGuest,
+                memories: (clean as typeof memoryData) || null,
+                emotions: emotions || null,
+                lastEmotionUpdate: lastEmotionUpdate ? new Date(lastEmotionUpdate) : null,
+              },
+            }),
+          );
           written.push(userUuid);
         }
 
@@ -385,36 +388,39 @@ export async function POST(
 
           fullMemoryData = (await withoutForgottenOne(botId, body.userUuid, fullMemoryData)) as typeof fullMemoryData;
 
-          await prisma.botsMemory.upsert({
-            where: {
-              botId_userUuid: {
-                botId: botId,
-                userUuid: body.userUuid,
+          // Under the lock every Forget takes, taking out what was forgotten as it is now (game #2003)
+          await saveMemoryRow(botId, body.userUuid, fullMemoryData, (tx, clean) =>
+            tx.botsMemory.upsert({
+              where: {
+                botId_userUuid: {
+                  botId: botId,
+                  userUuid: body.userUuid,
+                },
               },
-            },
-            update: {
-              // Always update emotions when provided
-              emotions: body.emotions,
-              // Always update full memory data when provided (regardless of saveType)
-              memories: fullMemoryData !== null ? fullMemoryData : undefined,
-              userId: finalUserId,
-              userName: body.userName || undefined,
-              isGuest: finalIsGuest,
-              lastEmotionUpdate: new Date(),
-              updatedAt: new Date(),
-            },
-            create: {
-              botId,
-              userUuid: body.userUuid,
-              userId: finalUserId,
-              userName: body.userName || null,
-              isGuest: finalIsGuest,
-              // Store full memory data if provided, otherwise null
-              memories: fullMemoryData,
-              emotions: body.emotions,
-              lastEmotionUpdate: new Date(),
-            },
-          });
+              update: {
+                // Always update emotions when provided
+                emotions: body.emotions,
+                // Always update full memory data when provided (regardless of saveType)
+                memories: clean !== null ? (clean as typeof fullMemoryData) : undefined,
+                userId: finalUserId,
+                userName: body.userName || undefined,
+                isGuest: finalIsGuest,
+                lastEmotionUpdate: new Date(),
+                updatedAt: new Date(),
+              },
+              create: {
+                botId,
+                userUuid: body.userUuid,
+                userId: finalUserId,
+                userName: body.userName || null,
+                isGuest: finalIsGuest,
+                // Store full memory data if provided, otherwise null
+                memories: clean as typeof fullMemoryData,
+                emotions: body.emotions,
+                lastEmotionUpdate: new Date(),
+              },
+            }),
+          );
           written.push(body.userUuid);
         }
       } catch (err) {
