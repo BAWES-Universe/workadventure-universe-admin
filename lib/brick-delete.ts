@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getBrickLimits } from '@/lib/bot-limits';
 import { endAllApprovals } from '@/lib/bot-actions';
+import { pauseItemsOfDeletedBrick } from '@/lib/brick-items';
 import { deleteWithHiddenBotData } from '@/lib/bot-privacy';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
 import { listBricks, listDeletedBricks, type BrickCard, type DeletedBrickCard } from '@/lib/brick-default';
@@ -50,6 +51,8 @@ export async function deleteBrick(brickId: string, ownerId: string, now: Date = 
       // It stands nowhere while it waits (game #2005): its home and its visit are withdrawn with everything else, and Undo brings back neither
       await tx.brickHome.deleteMany({ where: { botId: brickId } });
       await tx.brickVisit.deleteMany({ where: { botId: brickId } });
+      // Its goals and tasks stop at the same moment; Undo gives the Brick back without switching any of them on (game #2002)
+      await pauseItemsOfDeletedBrick(tx, brickId);
     }
     return marked.length > 0;
   });
