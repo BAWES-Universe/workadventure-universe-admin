@@ -53,21 +53,30 @@ export async function listMyMemory(botId: string, who: Remembering): Promise<MyM
   return { items };
 }
 
-/** Put a Forget down for good, and drop its thing from the row, in one go. */
-async function forgetKeys(botId: string, rows: { id: number; userUuid: string; memories: unknown }[], keys: Map<string, MemoryItemKind>): Promise<void> {
+/**
+ * Put a Forget down for good, and drop its thing from the row, in one go. The rows are locked and read again inside the
+ * transaction, so a save the bot server sent a moment ago is never written over with what was read before it.
+ */
+export async function forgetKeys(botId: string, rows: { id: number; userUuid: string; memories: unknown }[], keys: Map<string, MemoryItemKind>): Promise<void> {
   const now = new Date();
   const ids = new Set(keys.keys());
-  await prisma.$transaction([
-    ...rows.flatMap((row) => [...keys].map(([itemKey, kind]) =>
-      prisma.botMemoryItemForget.upsert({
-        where: { botId_userUuid_itemKey: { botId, userUuid: row.userUuid, itemKey } },
-        // Forgotten again after it was said again: the Forget is as new as the second one
-        update: { createdAt: now, droppedAt: null },
-        create: { botId, userUuid: row.userUuid, itemKey, kind, createdAt: now },
-      }),
-    )),
-    ...rows.map((row) => prisma.botsMemory.update({ where: { id: row.id }, data: { memories: (withoutItems(row.memories, ids).data ?? Prisma.DbNull) as Prisma.InputJsonValue } })),
-  ]);
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM bots_memory WHERE id IN (${Prisma.join(rows.map((row) => row.id))}) FOR UPDATE`;
+    const fresh = await tx.botsMemory.findMany({ where: { id: { in: rows.map((row) => row.id) } }, select: { id: true, memories: true } });
+    for (const row of rows) {
+      for (const [itemKey, kind] of keys) {
+        await tx.botMemoryItemForget.upsert({
+          where: { botId_userUuid_itemKey: { botId, userUuid: row.userUuid, itemKey } },
+          // Forgotten again after it was said again: the Forget is as new as the second one
+          update: { createdAt: now, droppedAt: null },
+          create: { botId, userUuid: row.userUuid, itemKey, kind, createdAt: now },
+        });
+      }
+    }
+    for (const row of fresh) {
+      await tx.botsMemory.update({ where: { id: row.id }, data: { memories: (withoutItems(row.memories, ids).data ?? Prisma.DbNull) as Prisma.InputJsonValue } });
+    }
+  });
 }
 
 /**

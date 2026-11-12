@@ -17,6 +17,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { createBrick } from '@/lib/brick-create';
 import { memoryItemKey } from '@/lib/bot-memory-items';
+import { forgetKeys } from '@/lib/bot-memory-person';
 import { GET as listMine } from '@/app/api/bots/[id]/my-memory/route';
 import { POST as forgetMine } from '@/app/api/bots/[id]/my-memory/forget/route';
 import { GET as readSaved, POST as save } from '@/app/api/bots/memory/[id]/route';
@@ -155,6 +156,16 @@ run('what a bot remembers about a person (real database)', () => {
     // Her other bot, and Omar's list, are untouched
     expect(await valuesOf('sara', saraBrick)).toContain(COFFEE);
     expect(await valuesOf('omar', melodyId)).toEqual(expect.arrayContaining(['Omar', 'jazz']));
+  });
+
+  it('never writes over a save that arrived after the row was read', async () => {
+    const stale = await rows(melodyId, people.sara.uuid);
+    // The bot server saves one more thing after Orbit read the row, before the Forget is written
+    await prisma.botsMemory.update({ where: { id: stale!.id }, data: { memories: memoryOf({ preferences: [COFFEE, 'lo-fi', 'chess'] }) } });
+    await forgetKeys(melodyId, [{ id: stale!.id, userUuid: stale!.userUuid, memories: stale!.memories }], new Map([[memoryItemKey('pref', null, COFFEE), 'pref']]));
+    const text = JSON.stringify((await rows(melodyId, people.sara.uuid))?.memories);
+    expect(text).not.toContain(COFFEE);
+    expect(text).toContain('chess');
   });
 
   it('keeps only a key, never the words', async () => {
