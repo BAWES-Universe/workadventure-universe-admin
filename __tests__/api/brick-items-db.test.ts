@@ -435,6 +435,18 @@ run('goals and tasks, in a real database', () => {
     expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: check.item.id } })).toMatchObject({ state: 'on' });
   });
 
+  it('a new time zone alone changes nothing for a one-off, even one that is done, and moves a time of day to the new clock', async () => {
+    const zoe = await person('zoe');
+    const once = await set(zoe, { cadence: { type: 'once', at: at(HOUR).toISOString() } });
+    const [run] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === once.id);
+    await finishRun(run.runId, { state: 'done', outcome: 'spoke' }, at(HOUR + 2 * MIN));
+    expect(await changeItem(zoe.brickId, once.id, { userId: zoe.uuid, action: 'change', change: { timeZone: 'Europe/London' } }, at(2 * HOUR))).toMatchObject({ ok: true, item: { state: 'done', timeZone: 'Europe/London' } });
+    const daily = await set(zoe, { kind: 'schedule', words: 'My day', cadence: { type: 'daily', time: '08:00', days: [0, 1, 2, 3, 4, 5, 6] } });
+    const moved = await changeItem(zoe.brickId, daily.id, { userId: zoe.uuid, action: 'change', change: { timeZone: 'UTC' } }, at(MIN));
+    expect(moved).toMatchObject({ ok: true, item: { timeZone: 'UTC' } });
+    expect(moved.ok && moved.item.nextDueAt).not.toBe(daily.nextDueAt);
+  });
+
   it('keeps to the runs a day for watches and goals, but never for reminders', async () => {
     const jo = await person('jo');
     await saveServerLimits({ bricks: { runsPerDay: 2 } }, jo.id);

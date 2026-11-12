@@ -398,7 +398,8 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         const nextCadence = change.cadence === undefined ? cadence : readCadence(change.cadence);
         const waitingFor = change.waitingFor === undefined ? row.waitingFor : change.waitingFor;
         const kind = row.kind as ItemKind;
-        const rescheduled = change.cadence !== undefined || change.timeZone !== undefined;
+        // A one-off is kept as the instant it means, so a new zone alone moves nothing for it; a time of day or a repeat is read on the zone's clock
+        const rescheduled = change.cadence !== undefined || (change.timeZone !== undefined && nextCadence?.type !== 'once');
         if (rescheduled) {
           const problem = cadenceProblem(kind, nextCadence, timeZone, now, limits.shortestRepeat, waitingFor);
           if (problem) return problem;
