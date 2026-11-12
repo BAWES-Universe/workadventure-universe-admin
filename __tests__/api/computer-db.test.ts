@@ -579,6 +579,20 @@ run('a Brick’s computer, in a real database', () => {
       expect((await currentEnvelope(minutes(1))).reservedMicros).toBe(0);
     });
 
+    it('a second start that fails does not rewrite the state of a machine another job is using', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const first = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: false }, NOW);
+      if (!first.ok) throw new Error('no');
+      // The first job is still waking the machine when the second one asks and its wake breaks
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'waking' } });
+      provider.failNext.wake = true;
+      const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, minutes(1));
+      expect(second).toEqual({ ok: false, reason: 'broken_start' });
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machine: 'waking' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: first.job.id } })).toMatchObject({ status: 'running' });
+    });
+
     it('once a machine was removed, says so at once: a retried delete does not save a copy of a machine that is gone', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);

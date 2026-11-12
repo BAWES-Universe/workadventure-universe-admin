@@ -338,9 +338,15 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     await bringUp(job.botId, provider, now);
   } catch (error) {
     console.error('[Computer] A machine did not start:', error instanceof Error ? error.message : 'unknown');
-    // A machine that was never made is not "broken": it is still just not made, and the next job tries again
-    await prisma.brickComputer.updateMany({ where: { botId: job.botId, NOT: { providerRef: null } }, data: { machine: 'broken' } });
-    await prisma.brickComputer.updateMany({ where: { botId: job.botId, providerRef: null }, data: { machine: 'none' } });
+    // Another job holds this machine (it is waking it, or working on it): its state is theirs, and this failure does not rewrite it.
+    // Only when this job was the only one asking is the machine marked, so a failed second start never breaks a machine that works
+    // and never resets one that is still being made.
+    const others = await prisma.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: { in: ['running', 'waiting'] } } });
+    if (others === 0) {
+      // A machine that was never made is not "broken": it is still just not made, and the next job tries again
+      await prisma.brickComputer.updateMany({ where: { botId: job.botId, NOT: { providerRef: null } }, data: { machine: 'broken' } });
+      await prisma.brickComputer.updateMany({ where: { botId: job.botId, providerRef: null }, data: { machine: 'none' } });
+    }
     await endJob(job.id, 'failed', 'error', now);
     return 'failed';
   }
