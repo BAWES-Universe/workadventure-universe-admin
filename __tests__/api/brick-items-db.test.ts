@@ -426,6 +426,55 @@ run('goals and tasks, in a real database', () => {
     expect((await runsOf(item.id)).map((one) => one.deliveredEventId)).toEqual(['$one-event']);
   });
 
+  it('snoozing a done one takes its place again under the same rules as Reopen: the most, and a check only while its goal is on', async () => {
+    const ysolde = await person('ysolde');
+    await saveServerLimits({ bricks: { itemsPerPerson: 2 } }, ysolde.id);
+    try {
+      const first = await set(ysolde);
+      await set(ysolde);
+      await changeItem(ysolde.brickId, first.id, { userId: ysolde.uuid, action: 'done' }, NOW);
+      await set(ysolde);
+      expect(await changeItem(ysolde.brickId, first.id, { userId: ysolde.uuid, action: 'snooze' }, at(MIN))).toMatchObject({ ok: false, status: 422, code: 'too_many', limit: 2 });
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ state: 'done' });
+    } finally {
+      await saveServerLimits({ bricks: { itemsPerPerson: 20 } }, ysolde.id);
+    }
+    const zuri = await person('zuri');
+    const goal = await set(zuri, { kind: 'goal', words: 'Sell the car', outcome: 'Sold', cadence: { type: 'every', minutes: 60 } });
+    const check = await createItem(zuri.brickId, { userId: zuri.uuid, kind: 'reminder', words: 'Ring the buyer', cadence: { type: 'once', at: at(HOUR).toISOString() }, parentId: goal.id }, NOW);
+    if (!check.ok) throw new Error('expected the check');
+    await changeItem(zuri.brickId, check.item.id, { userId: zuri.uuid, action: 'done' }, at(MIN));
+    await changeItem(zuri.brickId, goal.id, { userId: zuri.uuid, action: 'done' }, at(2 * MIN));
+    expect(await changeItem(zuri.brickId, check.item.id, { userId: zuri.uuid, action: 'snooze' }, at(3 * MIN))).toMatchObject({ ok: false, status: 409, code: 'needs_goal' });
+    await changeItem(zuri.brickId, goal.id, { userId: zuri.uuid, action: 'reopen' }, at(4 * MIN));
+    expect(await changeItem(zuri.brickId, check.item.id, { userId: zuri.uuid, action: 'snooze' }, at(5 * MIN))).toMatchObject({ ok: true, item: { state: 'on' } });
+  });
+
+  it('a run given up without a report counts in the failures in a row, and the next reported failure still tells the person, once', async () => {
+    const olga = await person('olga');
+    const reminder = await set(olga, { kind: 'reminder', cadence: { type: 'daily', time: '07:30', days: [0, 1, 2, 3, 4, 5, 6] } });
+    // Day 1: handed out three times and never reported, so given up
+    const base = DAY + 3 * HOUR;
+    const [lost] = (await claimDueRuns(at(base))).filter((one) => one.itemId === reminder.id);
+    for (let step = 1; step <= 3; step++) await claimDueRuns(at(base + step * 11 * MIN));
+    expect((await runsOf(reminder.id)).map((one) => one.state)).toEqual(['failed']);
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: reminder.id } })).toMatchObject({ failuresInRow: 1, failureTold: false });
+    expect(lost).toBeDefined();
+    // Day 2: it fails and is reported: failures in a row is 2, past the "first failure", and the person is told
+    const told: boolean[] = [];
+    for (const day of [2, 3]) {
+      const [one] = (await claimDueRuns(at(day * DAY + 3 * HOUR))).filter((claimed) => claimed.itemId === reminder.id);
+      const done = await finishRun(one.runId, { attempt: one.attempt, state: 'failed', error: 'Chat did not answer' }, at(day * DAY + 3 * HOUR + MIN));
+      if (done.ok) told.push(done.tellPerson);
+    }
+    expect(told).toEqual([true, false]);
+    // One that works starts the count over: the next failure tells again
+    const [good] = (await claimDueRuns(at(4 * DAY + 3 * HOUR))).filter((claimed) => claimed.itemId === reminder.id);
+    await finishRun(good.runId, { attempt: good.attempt, state: 'done', outcome: 'spoke' }, at(4 * DAY + 3 * HOUR + MIN));
+    const [bad] = (await claimDueRuns(at(5 * DAY + 3 * HOUR))).filter((claimed) => claimed.itemId === reminder.id);
+    expect(await finishRun(bad.runId, { attempt: bad.attempt, state: 'failed', error: 'Again' }, at(5 * DAY + 3 * HOUR + MIN))).toMatchObject({ ok: true, tellPerson: true });
+  });
+
   it('tells the person on the first failure of a reminder or briefing, and for a watch only when failures in a row reach the setting', async () => {
     const huda = await person('huda');
     const reminder = await set(huda, { kind: 'reminder', cadence: { type: 'daily', time: '07:30', days: [0, 1, 2, 3, 4, 5, 6] } });

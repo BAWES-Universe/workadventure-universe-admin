@@ -327,6 +327,25 @@ async function goalIsOn(tx: Tx, goalId: string): Promise<boolean> {
 const wrongState = (state: string): Refused => ({ ok: false, status: 409, code: 'wrong_state', error: `That is not possible while it is ${state}` });
 
 /**
+ * A done goal, task or check taking its place again (Reopen, or Snooze on one that was just delivered) keeps to the same rules as
+ * setting a new one: its Brick is on, a check's goal is on, and the person's goals and tasks (or the goal's checks) are under the most.
+ * Asked inside the person's lock, so nothing else of theirs changes meanwhile. Null when it may come back.
+ */
+async function comingBackProblem(tx: Prisma.TransactionClient, row: ItemRow, ownerId: string, limits: Awaited<ReturnType<typeof getBrickLimits>>) {
+  const bot = await tx.bot.findUnique({ where: { id: row.botId }, select: { enabled: true, deletedAt: true } });
+  if (!bot?.enabled || bot.deletedAt) return { ok: false as const, status: 409 as const, code: 'off' as const, error: 'This Brick is switched off' };
+  if (row.parentId) {
+    if (!(await goalIsOn(tx, row.parentId))) return { ok: false as const, status: 409 as const, code: 'needs_goal' as const, error: 'A check comes back only while its goal is on' };
+    const checks = await tx.brickItem.count({ where: { parentId: row.parentId, state: { in: ['on', 'paused'] } } });
+    if (checks >= limits.itemsPerPerson) return { ok: false as const, status: 422 as const, code: 'too_many' as const, limit: limits.itemsPerPerson, error: `${limits.itemsPerPerson} checks for one goal is the most` };
+  } else {
+    const have = await tx.brickItem.count({ where: { ownerId, parentId: null, state: { in: ['on', 'paused'] } } });
+    if (have >= limits.itemsPerPerson) return { ok: false as const, status: 422 as const, code: 'too_many' as const, limit: limits.itemsPerPerson, error: `${limits.itemsPerPerson} goals and tasks at once is the most` };
+  }
+  return null;
+}
+
+/**
  * The owner's change to one item: pause, resume, done (with its result), reopen, delete, or change what it says or when.
  * Every one raises the revision, so a run that already started is dropped at its next outside step, and nothing new starts
  * once the change is saved. Pausing, finishing or deleting a goal does the same to the checks it set, and only those.
@@ -374,21 +393,11 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
       case 'reopen': {
         if (row.state === 'on') return { ok: true as const, item: viewOf(row) };
         if (row.state !== 'done') return wrongState(row.state);
-        const bot = await tx.bot.findUnique({ where: { id: row.botId }, select: { enabled: true, deletedAt: true } });
-        if (!bot?.enabled || bot.deletedAt) return { ok: false as const, status: 409 as const, code: 'off' as const, error: 'This Brick is switched off' };
-        // Reopening takes a place again, so it keeps to the same limits as setting a new one: the person's goals and tasks, and for a check
-        // its goal's checks, and its goal has to be on (this change holds the person's lock, so nothing else of theirs changes meanwhile)
-        if (row.parentId) {
-          if (!(await goalIsOn(tx, row.parentId))) return { ok: false as const, status: 409 as const, code: 'needs_goal' as const, error: 'A check comes back only while its goal is on' };
-          const checks = await tx.brickItem.count({ where: { parentId: row.parentId, state: { in: ['on', 'paused'] } } });
-          if (checks >= limits.itemsPerPerson) return { ok: false as const, status: 422 as const, code: 'too_many' as const, limit: limits.itemsPerPerson, error: `${limits.itemsPerPerson} checks for one goal is the most` };
-        } else {
-          const have = await tx.brickItem.count({ where: { ownerId, parentId: null, state: { in: ['on', 'paused'] } } });
-          if (have >= limits.itemsPerPerson) return { ok: false as const, status: 422 as const, code: 'too_many' as const, limit: limits.itemsPerPerson, error: `${limits.itemsPerPerson} goals and tasks at once is the most` };
-        }
+        const refused = await comingBackProblem(tx, row, ownerId, limits);
+        if (refused) return refused;
         // Starts again from the new revision, counted from now: a one-off that has passed is due now, once
         const due = cadence.type === 'once' ? (firstDue(cadence, row.timeZone, now) ?? now) : firstDue(cadence, row.timeZone, now);
-        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, nextDueAt: due, failuresInRow: 0, ...bump });
+        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, nextDueAt: due, failuresInRow: 0, failureTold: false, ...bump });
       }
       case 'delete': {
         await moveChecks(tx, row.id, ['on', 'paused', 'done'], { state: 'deleted', pausedBy: null }, now, false);
@@ -399,10 +408,15 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (row.kind !== 'reminder' && row.kind !== 'schedule') return { ok: false as const, status: 409 as const, code: 'wrong_state' as const, error: 'Only a reminder or a briefing can be snoozed' };
         if (row.state !== 'on' && row.state !== 'done') return wrongState(row.state);
         if (cadence.type === 'none') return wrongState(row.state);
+        // A done one coming back takes its place again, so it keeps to the same limits as a reopen: the Brick on, the goal on, the most
+        if (row.state === 'done') {
+          const refused = await comingBackProblem(tx, row, ownerId, limits);
+          if (refused) return refused;
+        }
         const later = new Date(now.getTime() + limits.snooze * MINUTE);
         // A one-off comes back at the new time (done ones too: they have just been delivered); a repeating one is moved once and carries on from there
         const moved: Cadence = cadence.type === 'once' ? { type: 'once', at: later.toISOString() } : cadence;
-        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, cadence: moved as unknown as Prisma.InputJsonValue, nextDueAt: later, ...bump });
+        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, cadence: moved as unknown as Prisma.InputJsonValue, nextDueAt: later, ...(row.state === 'done' ? { failuresInRow: 0, failureTold: false } : {}), ...bump });
       }
       case 'change': {
         const change = input.change;
@@ -721,7 +735,11 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
 
     const kind = item.kind as ItemKind;
     const cadence = readCadence(item.cadence);
-    const data: Prisma.BrickItemUpdateInput = { lastRunAt: now, failuresInRow };
+    // Told once, when the failures in a row first reach the number (a run that was given up without a report counts too, and tells
+    // nothing itself): the first reported failure at or past it tells if nobody was told yet in this row, and a run that works starts over
+    const tellAt = kind === 'reminder' || kind === 'schedule' ? 1 : limits.failuresBeforeTelling;
+    const tellPerson = report.state === 'failed' && failuresInRow >= tellAt && !item.failureTold;
+    const data: Prisma.BrickItemUpdateInput = { lastRunAt: now, failuresInRow, failureTold: report.state === 'failed' ? item.failureTold || tellPerson : false };
     if (report.progress && kind === 'goal') {
       if (report.progress.statusLine !== undefined) data.statusLine = report.progress.statusLine;
       if (report.progress.steps !== undefined) data.steps = report.progress.steps;
@@ -741,8 +759,7 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
     const updated = await tx.brickItem.update({ where: { id: item.id }, data });
     // A reminder or a briefing tells the person on the first failure; a watch or a goal after a number of failures in a row that a
     // super admin sets. Told once as it reaches that number, never again for each failure after it.
-    const tellAt = kind === 'reminder' || kind === 'schedule' ? 1 : limits.failuresBeforeTelling;
-    return { ok: true as const, item: viewOf(updated), applied: true, failuresInRow, tellPerson: report.state === 'failed' && failuresInRow === tellAt };
+    return { ok: true as const, item: viewOf(updated), applied: true, failuresInRow, tellPerson };
   });
 }
 

@@ -1033,6 +1033,8 @@ model BrickItem {
   lastRunAt     DateTime? @map("last_run_at")
   // Runs that failed one after another; a good run sets it back to 0
   failuresInRow Int       @default(0) @map("failures_in_row")
+  // Whether the person was told about the failures in a row so far; cleared by the next run that works
+  failureTold   Boolean   @default(false) @map("failure_told")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
