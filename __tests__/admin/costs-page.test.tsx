@@ -148,6 +148,23 @@ describe('the Costs page', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('shows no figures while the first date is after the last, and reads again once they are in order', async () => {
+    answer();
+    render(<CostsPage />);
+    await screen.findByTestId('costs-goes');
+    fetchMock.mockClear();
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: '2999-01-01' } });
+    expect((await screen.findByTestId('costs-dates-note')).textContent).toBe('The first date comes after the last one. Put them in order to see the costs.');
+    expect(screen.queryByTestId('costs-goes')).toBeNull();
+    expect(screen.queryByText('cost to us')).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: '' } });
+    expect((await screen.findByTestId('costs-dates-note')).textContent).toBe('Pick both dates to see the costs.');
+    fireEvent.change(screen.getByLabelText('From'), { target: { value: '2026-10-01' } });
+    expect(await screen.findByTestId('costs-goes')).toBeTruthy();
+    expect(screen.queryByTestId('costs-dates-note')).toBeNull();
+  });
+
   it('sends someone who is not a super admin away, and says when it could not load', async () => {
     answer(403);
     const { unmount } = render(<CostsPage />);

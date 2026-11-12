@@ -54,9 +54,14 @@ export default function CostsPage() {
     }
   }, [range.from, range.to, replacePage]);
 
+  // Figures only ever belong to the dates showing: while the dates are not a usable range, none are shown
+  const datesReady = !!range.from && !!range.to && range.from <= range.to;
+  const datesWords = !range.from || !range.to ? 'Pick both dates to see the costs.' : 'The first date comes after the last one. Put them in order to see the costs.';
+
   useEffect(() => {
-    if (range.from && range.to && range.from <= range.to) load();
-  }, [load, range.from, range.to]);
+    if (datesReady) load();
+    else setReport(null);
+  }, [datesReady, load]);
 
   const asked = report?.asked ?? [];
   const given = report?.given ?? [];
@@ -68,7 +73,7 @@ export default function CostsPage() {
         title="Costs"
         context={<span className="text-sm text-muted-foreground">What Universe AI costs us, by person, Brick and day.</span>}
         stats={
-          report && (
+          datesReady && report && (
             <Figures>
               <Figure value={dollars(report.totals.costMicros)} label="cost to us" />
               <Figure value={report.totals.people} label="people" />
@@ -96,7 +101,11 @@ export default function CostsPage() {
         </div>
       </section>
 
-      {failed ? (
+      {!datesReady ? (
+        <p className="text-sm text-muted-foreground" data-testid="costs-dates-note" role="status">
+          {datesWords}
+        </p>
+      ) : failed ? (
         <LoadError label="the costs" retry={load} />
       ) : !report ? (
         <LoadingRows label="the costs" rows={4} />
