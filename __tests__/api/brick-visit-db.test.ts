@@ -674,12 +674,31 @@ run('bringing a Brick along, in a real database', () => {
       expect(await whereIsBrick(brickId, null)).not.toBeNull();
     });
 
-    it('is seen in the room the bot server names, which must be one that takes visits and that its owner may open', async () => {
+    it('is seen only in the room the visit is in, which must take visits and be one its owner may open', async () => {
       await startVisit(brickId, sara.id, universes.open.roomUrl);
       expect(await keepVisitAlive(brickId, sara.uuid, universes.closed.roomUrl)).toBe(false);
       expect(await keepVisitAlive(brickId, sara.uuid, 'nonsense')).toBe(false);
+      expect(await keepVisitAlive(brickId, sara.uuid, universes.open.otherRoomUrl)).toBe(true);
+    });
+
+    it('is not pulled back by a late sighting from a room its owner has already left: the visit stays where the owner is, and is not ended', async () => {
+      // The owner is in room A; A's sighting is in flight; the owner walks on to B (their own sync moves the visit)
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      await startVisit(brickId, sara.id, universes.second.roomUrl);
+      const before = await visit(sara.id);
+      expect(before?.roomId).toBe(universes.second.roomId);
+      // A's sighting lands now: it neither moves the visit back nor refreshes it, and it does not end it either
+      await prisma.brickVisit.update({ where: { userId: sara.id }, data: { seenAt: new Date(Date.now() - 5 * MIN) } });
+      const stamp = (await visit(sara.id))!.seenAt.getTime();
+      expect(await keepVisitAlive(brickId, sara.uuid, universes.open.roomUrl)).toBe(true);
+      expect(await visit(sara.id)).toMatchObject({ roomId: universes.second.roomId });
+      expect((await visit(sara.id))!.seenAt.getTime()).toBe(stamp);
+      // People in B still reach it, those in A do not
+      expect(await whereIsBrick(brickId, universes.second.roomUrl)).not.toBeNull();
+      expect(await whereIsBrick(brickId, universes.open.roomUrl)).toBeNull();
+      // B's own sighting is the one that counts
       expect(await keepVisitAlive(brickId, sara.uuid, universes.second.roomUrl)).toBe(true);
-      expect((await visit(sara.id))?.roomId).toBe(universes.second.roomId);
+      expect((await visit(sara.id))!.seenAt.getTime()).toBeGreaterThan(stamp + 4 * MIN);
     });
 
     it('is asked for by the bot server only, with a well-formed body', async () => {

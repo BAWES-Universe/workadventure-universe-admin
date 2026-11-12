@@ -196,9 +196,14 @@ export async function keepVisitAlive(botId: string, ownerUuid: string, roomUrl: 
   if (visit.seenAt < stale) return false;
   const place = await placeOfRoomUrl(roomUrl);
   if (!place || !place.takesVisits || !(await mayReadRoomBots(place.room, visit.userId))) return false;
-  // The row is only moved while it is still live, so a visit that ran out between the read and now stays ended
-  const moved = await prisma.brickVisit.updateMany({ where: { botId, userId: visit.userId, seenAt: { gte: stale } }, data: { roomId: place.roomId, seenAt: now } });
-  return moved.count > 0;
+  // A sighting only counts in the room the visit is in: an owner who has already walked on to another room is not seen by the
+  // Brick they left, and a late sighting from there must not pull the visit back (nor end it: the Brick is alive, elsewhere)
+  // The row is only touched while it is still live and still in this room, so a visit that ran out or moved between the read
+  // and now is left as it is
+  const seen = await prisma.brickVisit.updateMany({ where: { botId, userId: visit.userId, roomId: place.roomId, seenAt: { gte: stale } }, data: { seenAt: now } });
+  if (seen.count > 0) return true;
+  const current = await prisma.brickVisit.findUnique({ where: { botId }, select: { userId: true, roomId: true, seenAt: true } });
+  return !!current && current.userId === visit.userId && current.roomId !== place.roomId && current.seenAt >= stale;
 }
 
 /** A Brick that stands, or walks, in a room: who it belongs to and how it got there. */
