@@ -82,7 +82,7 @@ export const itemChangeSchema = z
   })
   .strict();
 
-export const ITEM_ACTIONS = ['pause', 'resume', 'done', 'reopen', 'delete', 'change'] as const;
+export const ITEM_ACTIONS = ['pause', 'resume', 'done', 'reopen', 'delete', 'change', 'snooze'] as const;
 export const itemActionSchema = z
   .object({
     userId: person,
@@ -394,6 +394,16 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         await moveChecks(tx, row.id, ['on', 'paused', 'done'], { state: 'deleted', pausedBy: null }, now, false);
         return finish({ state: 'deleted', pausedBy: null, nextDueAt: null, ...bump });
       }
+      case 'snooze': {
+        // Snooze is for a reminder or a briefing, on the person's tap on the message it just sent (or before it comes)
+        if (row.kind !== 'reminder' && row.kind !== 'schedule') return { ok: false as const, status: 409 as const, code: 'wrong_state' as const, error: 'Only a reminder or a briefing can be snoozed' };
+        if (row.state !== 'on' && row.state !== 'done') return wrongState(row.state);
+        if (cadence.type === 'none') return wrongState(row.state);
+        const later = new Date(now.getTime() + limits.snooze * MINUTE);
+        // A one-off comes back at the new time (done ones too: they have just been delivered); a repeating one is moved once and carries on from there
+        const moved: Cadence = cadence.type === 'once' ? { type: 'once', at: later.toISOString() } : cadence;
+        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, cadence: moved as unknown as Prisma.InputJsonValue, nextDueAt: later, ...bump });
+      }
       case 'change': {
         const change = input.change;
         if (!change || Object.keys(change).length === 0) return { ok: false as const, status: 400 as const, error: 'change says what to change' };
@@ -475,6 +485,10 @@ export interface ClaimedRun {
   attempt: number;
   /** When the run is given up if it has not reported. */
   leaseUntil: string;
+  /** The words this run's message carries somewhere a person can't see, so a run handed out again can find it in the chat before it writes (look for this, then for `deliveredEventId`). */
+  marker: string;
+  /** Set when the message was sent and the run was handed out again before it finished: do not send it again. */
+  deliveredEventId: string | null;
 }
 
 const claimedOf = (run: Prisma.BrickItemRunGetPayload<{ include: { item: { include: { owner: { select: { uuid: true } } } } } }>): ClaimedRun => {
@@ -497,6 +511,8 @@ const claimedOf = (run: Prisma.BrickItemRunGetPayload<{ include: { item: { inclu
     fresh: run.fresh,
     attempt: run.attempts,
     leaseUntil: run.leaseUntil.toISOString(),
+    marker: `brick-run:${run.id}`,
+    deliveredEventId: run.deliveredEventId,
   };
 };
 const RUN_INCLUDE = { item: { include: { owner: { select: { uuid: true } } } } } as const;
@@ -660,7 +676,7 @@ export async function checkRun(runId: string, attempt: number, now: Date = new D
   return { ok: true };
 }
 
-export type RunFinished = { ok: true; item: ItemView; applied: boolean; failuresInRow: number } | { ok: false; status: 404 | 409; error: string };
+export type RunFinished = { ok: true; item: ItemView; applied: boolean; failuresInRow: number; tellPerson: boolean } | { ok: false; status: 404 | 409; error: string };
 
 /**
  * The bot server reports how a run went. The run is recorded as reported, always: every run, failed ones too, is in
@@ -669,6 +685,7 @@ export type RunFinished = { ok: true; item: ItemView; applied: boolean; failures
  * a change or a delete it is not (`applied` false). Reported twice, the first report stands.
  */
 export async function finishRun(runId: string, report: z.infer<typeof runReportSchema>, now: Date = new Date()): Promise<RunFinished> {
+  const limits = await getBrickLimits();
   return prisma.$transaction(async (tx) => {
     const found = await tx.brickItemRun.findUnique({ where: { id: runId }, select: { itemId: true } });
     if (!found) return { ok: false as const, status: 404 as const, error: 'Run not found' };
@@ -697,9 +714,9 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
           where: { id: item.id },
           data: { state: 'done', pausedBy: null, nextDueAt: null, doneAt: now, lastRunAt: now, result: report.result ?? item.result, revision: { increment: 1 } },
         });
-        return { ok: true as const, item: viewOf(ended), applied: false, failuresInRow: item.failuresInRow };
+        return { ok: true as const, item: viewOf(ended), applied: false, failuresInRow: item.failuresInRow, tellPerson: false };
       }
-      return { ok: true as const, item: viewOf(item), applied: false, failuresInRow: item.failuresInRow };
+      return { ok: true as const, item: viewOf(item), applied: false, failuresInRow: item.failuresInRow, tellPerson: false };
     }
 
     const kind = item.kind as ItemKind;
@@ -722,6 +739,25 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
       if (goalReached) await moveChecks(tx, item.id, ['on', 'paused'], { state: 'done', pausedBy: null, doneAt: now }, now, false);
     }
     const updated = await tx.brickItem.update({ where: { id: item.id }, data });
-    return { ok: true as const, item: viewOf(updated), applied: true, failuresInRow };
+    // A reminder or a briefing tells the person on the first failure; a watch or a goal after a number of failures in a row that a
+    // super admin sets. Told once as it reaches that number, never again for each failure after it.
+    const tellAt = kind === 'reminder' || kind === 'schedule' ? 1 : limits.failuresBeforeTelling;
+    return { ok: true as const, item: viewOf(updated), applied: true, failuresInRow, tellPerson: report.state === 'failed' && failuresInRow === tellAt };
   });
 }
+
+/**
+ * The run's message went out: keep where it went, once, right after it was sent and before the run is reported. A run that is
+ * handed out again (its server stopped between the send and the report) is given this event id and does not send again. The
+ * first one stands; the same id twice is fine; a different one is refused so a second send shows up instead of hiding.
+ */
+export async function markDelivered(runId: string, eventId: string, now: Date = new Date()): Promise<{ ok: true; eventId: string; first: boolean } | { ok: false; status: 404 | 409; error: string }> {
+  const run = await prisma.brickItemRun.findUnique({ where: { id: runId }, select: { id: true } });
+  if (!run) return { ok: false, status: 404, error: 'Run not found' };
+  const { count } = await prisma.brickItemRun.updateMany({ where: { id: runId, deliveredEventId: null }, data: { deliveredEventId: eventId, deliveredAt: now } });
+  if (count > 0) return { ok: true, eventId, first: true };
+  const kept = await prisma.brickItemRun.findUniqueOrThrow({ where: { id: runId }, select: { deliveredEventId: true } });
+  return kept.deliveredEventId === eventId ? { ok: true, eventId, first: false } : { ok: false, status: 409, error: 'This run already sent a message' };
+}
+
+export const deliveredSchema = z.object({ eventId: z.string().trim().min(1).max(255) }).strict();

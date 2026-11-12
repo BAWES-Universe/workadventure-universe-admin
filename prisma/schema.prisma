@@ -1073,6 +1073,10 @@ model BrickItemRun {
   result     String?   @db.VarChar(1000)
   error      String?   @db.VarChar(300)
   finishedAt DateTime? @map("finished_at")
+  // The chat event of the message this run sent, once it is sent: a run handed out again looks here (and for its marker in the
+  // chat) before it writes anything, so a message is never sent twice. Never claimed as exactly once outside Universe.
+  deliveredEventId String? @map("delivered_event_id") @db.VarChar(255)
+  deliveredAt      DateTime? @map("delivered_at")
 
   item BrickItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
 

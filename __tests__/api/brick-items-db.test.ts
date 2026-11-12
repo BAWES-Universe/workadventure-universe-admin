@@ -16,7 +16,7 @@ import { ensureDefaultBrick } from '@/lib/brick-default';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { makeBrick } from '@/lib/brick-make';
 import { saveServerLimits } from '@/lib/bot-limits';
-import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, readItem, type NewItemInput } from '@/lib/brick-items';
+import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, readItem, type NewItemInput } from '@/lib/brick-items';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -356,11 +356,93 @@ run('goals and tasks, in a real database', () => {
     const again = claimDueRuns(at(HOUR + 20 * MIN));
     const reports = claimed.map((one) => finishRun(one.runId, { attempt: one.attempt, state: 'done', outcome: 'quiet' }, at(HOUR + 20 * MIN)));
     const [handedOut, finished] = await Promise.all([again, Promise.all(reports)]);
-    expect(finished.every((one) => one.ok)).toBe(true);
-    // Each run is either finished or handed out again, never both lost
-    const states = await prisma.brickItemRun.findMany({ where: { id: { in: claimed.map((one) => one.runId) } }, select: { state: true } });
-    expect(states.every((one) => ['done', 'claimed'].includes(one.state))).toBe(true);
+    // Each run is either finished by its report, or handed out again first (then that try is told so, 409, and the newer try owns it):
+    // never a deadlock, never both, never lost
+    expect(finished.every((one) => one.ok || one.status === 409)).toBe(true);
+    const states = await prisma.brickItemRun.findMany({ where: { id: { in: claimed.map((one) => one.runId) } }, select: { state: true, attempts: true } });
+    expect(states.every((one) => (one.state === 'done' && one.attempts === 1) || (one.state === 'claimed' && one.attempts === 2))).toBe(true);
+    expect(finished.filter((one) => one.ok)).toHaveLength(states.filter((one) => one.state === 'done').length);
     expect(handedOut.filter((one) => claimed.some((c) => c.runId === one.runId)).length).toBeLessThanOrEqual(4);
+  });
+
+  it('snoozes a reminder by the setting: a delivered one-off comes back, a briefing moves once, and a watch or a goal is not snoozed', async () => {
+    const sami = await person('sami');
+    const oneOff = await set(sami);
+    const briefing = await set(sami, { kind: 'schedule', cadence: { type: 'daily', time: '07:30', days: [0, 1, 2, 3, 4, 5, 6] } });
+    const watch = await set(sami, { kind: 'watch', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+    const [ran] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === oneOff.id);
+    await finishRun(ran.runId, { attempt: ran.attempt, state: 'done', outcome: 'spoke', result: 'Reminded' }, at(HOUR + 2 * MIN));
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: oneOff.id } })).toMatchObject({ state: 'done' });
+    // Snooze on the message that was just delivered: back on, due an hour from the tap (the starting setting)
+    const snoozed = await changeItem(sami.brickId, oneOff.id, { userId: sami.uuid, action: 'snooze' }, at(HOUR + 3 * MIN));
+    expect(snoozed).toMatchObject({ ok: true, item: { state: 'on', nextDueAt: at(2 * HOUR + 3 * MIN).toISOString(), result: null, doneAt: null, cadence: { type: 'once', at: at(2 * HOUR + 3 * MIN).toISOString() } } });
+    expect((await claimDueRuns(at(2 * HOUR))).filter((one) => one.itemId === oneOff.id)).toEqual([]);
+    expect((await claimDueRuns(at(2 * HOUR + 4 * MIN))).filter((one) => one.itemId === oneOff.id)).toHaveLength(1);
+    // A briefing moves once and carries on from there
+    expect(await changeItem(sami.brickId, briefing.id, { userId: sami.uuid, action: 'snooze' }, at(MIN))).toMatchObject({ ok: true, item: { state: 'on', nextDueAt: at(HOUR + MIN).toISOString(), cadence: { type: 'daily' } } });
+    expect(await changeItem(sami.brickId, watch.id, { userId: sami.uuid, action: 'snooze' }, at(MIN))).toMatchObject({ ok: false, status: 409 });
+    await saveServerLimits({ bricks: { snooze: 15 } }, sami.id);
+    try {
+      expect(await changeItem(sami.brickId, briefing.id, { userId: sami.uuid, action: 'snooze' }, at(MIN))).toMatchObject({ ok: true, item: { nextDueAt: at(16 * MIN).toISOString() } });
+    } finally {
+      await saveServerLimits({ bricks: { snooze: 60 } }, sami.id);
+    }
+  });
+
+  it('keeps where a run’s message went, once, and gives it back to a run that is handed out again so it never sends twice', async () => {
+    const wael = await person('wael');
+    const item = await set(wael);
+    const [first] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === wael.brickId || one.itemId === item.id);
+    expect(first).toMatchObject({ marker: `brick-run:${first.runId}`, deliveredEventId: null });
+    expect(await markDelivered(first.runId, '$event-1', at(HOUR + 2 * MIN))).toEqual({ ok: true, eventId: '$event-1', first: true });
+    // The same id again is fine, a different one is refused and the first stands
+    expect(await markDelivered(first.runId, '$event-1')).toEqual({ ok: true, eventId: '$event-1', first: false });
+    expect(await markDelivered(first.runId, '$event-2')).toMatchObject({ ok: false, status: 409 });
+    expect(await markDelivered('nope', '$x')).toMatchObject({ ok: false, status: 404 });
+    // The server stopped before it reported: the run comes back with its event id, same run id
+    const again = (await claimDueRuns(at(HOUR + 20 * MIN))).filter((one) => one.runId === first.runId);
+    expect(again).toMatchObject([{ attempt: 2, deliveredEventId: '$event-1', marker: first.marker }]);
+    expect((await runsOf(item.id)).map((one) => one.deliveredEventId)).toEqual(['$event-1']);
+  });
+
+  it('two tries of one run both reaching the destination leave one delivery: they share one marker and one event id', async () => {
+    const nell = await person('nell');
+    const item = await set(nell);
+    const [try1] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === item.id);
+    expect(await checkRun(try1.runId, try1.attempt, at(HOUR + 2 * MIN))).toEqual({ ok: true });
+    // The first try goes quiet past its lease and the run is handed to a second one: same run, same marker, newer attempt
+    const [try2] = (await claimDueRuns(at(HOUR + 20 * MIN))).filter((one) => one.runId === try1.runId);
+    expect(try2).toMatchObject({ attempt: 2, marker: try1.marker });
+    expect(await checkRun(try1.runId, try1.attempt, at(HOUR + 20 * MIN))).toMatchObject({ ok: false });
+    // Both reach the destination before either one knows about the other; sending under one marker the destination answers with one event
+    expect(await markDelivered(try1.runId, '$one-event', at(HOUR + 21 * MIN))).toEqual({ ok: true, eventId: '$one-event', first: true });
+    expect(await markDelivered(try2.runId, '$one-event', at(HOUR + 21 * MIN))).toEqual({ ok: true, eventId: '$one-event', first: false });
+    // A second event for this run (a destination that did not hold to the marker) is refused, never recorded beside the first
+    expect(await markDelivered(try2.runId, '$other-event')).toMatchObject({ ok: false, status: 409 });
+    expect((await runsOf(item.id)).map((one) => one.deliveredEventId)).toEqual(['$one-event']);
+    // Only the latest try reports; the first one is told it can't
+    expect(await finishRun(try1.runId, { attempt: try1.attempt, state: 'done', outcome: 'spoke' }, at(HOUR + 22 * MIN))).toMatchObject({ ok: false, status: 409 });
+    expect(await finishRun(try2.runId, { attempt: try2.attempt, state: 'done', outcome: 'spoke' }, at(HOUR + 22 * MIN))).toMatchObject({ ok: true, applied: true });
+    expect((await runsOf(item.id)).map((one) => one.deliveredEventId)).toEqual(['$one-event']);
+  });
+
+  it('tells the person on the first failure of a reminder or briefing, and for a watch only when failures in a row reach the setting', async () => {
+    const huda = await person('huda');
+    const reminder = await set(huda, { kind: 'reminder', cadence: { type: 'daily', time: '07:30', days: [0, 1, 2, 3, 4, 5, 6] } });
+    const watch = await set(huda, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+    const tells: Record<string, boolean[]> = { [reminder.id]: [], [watch.id]: [] };
+    for (let day = 1; day <= 4; day++) {
+      const when = at(day * DAY + 3 * HOUR);
+      const claimed = (await claimDueRuns(when)).filter((one) => one.itemId === reminder.id || one.itemId === watch.id);
+      for (const one of claimed) {
+        const done = await finishRun(one.runId, { attempt: one.attempt, state: 'failed', error: 'Chat did not answer' }, at(day * DAY + 3 * HOUR + MIN));
+        if (done.ok) tells[one.itemId].push(done.tellPerson);
+      }
+    }
+    // Once, on the first failure, never again for each one after it
+    expect(tells[reminder.id]).toEqual([true, false, false, false]);
+    // The third in a row, once
+    expect(tells[watch.id]).toEqual([false, false, true, false]);
   });
 
   it('a change to a one-off while its run is in flight drops that run and makes it due again with the new words, never stranded', async () => {

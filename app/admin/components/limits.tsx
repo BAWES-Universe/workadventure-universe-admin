@@ -666,6 +666,32 @@ export function brickLimits(values: BrickLimits): Limit[] {
         { value: 30, label: '30 minutes', meaning: 'For longer work.' },
       ],
     },
+    {
+      id: 'snooze',
+      label: 'How long Snooze moves a reminder',
+      hint: 'Tap Snooze on a reminder or briefing and it comes back this much later.',
+      unit: 'minutes',
+      value: values.snooze,
+      recommended: recommended.snooze,
+      options: [
+        { value: 15, label: '15 minutes', meaning: 'A short nudge.' },
+        { value: 60, label: '1 hour', meaning: 'A steady pace.' },
+        { value: 180, label: '3 hours', meaning: 'Well out of the way.' },
+      ],
+    },
+    {
+      id: 'failuresBeforeTelling',
+      label: 'Failed checks in a row before Brick tells the person',
+      hint: 'For a watch or a goal. A reminder or a briefing that fails always tells the person the first time.',
+      unit: 'times',
+      value: values.failuresBeforeTelling,
+      recommended: recommended.failuresBeforeTelling,
+      options: [
+        { value: 2, label: '2 times', meaning: 'Tells early.' },
+        { value: 3, label: '3 times', meaning: 'A steady pace.' },
+        { value: 5, label: '5 times', meaning: 'Only when it keeps failing.' },
+      ],
+    },
   ], LIMIT_RANGES.bricks);
 }
 

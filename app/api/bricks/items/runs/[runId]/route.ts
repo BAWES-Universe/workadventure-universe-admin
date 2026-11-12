@@ -31,7 +31,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
  * POST /api/bricks/items/runs/:runId
  *   { attempt, state: done | failed, outcome?: quiet | spoke | waiting, result?, error?, progress?: { statusLine?, steps?, waitingFor? }, reached? }
  * How the run went. It is recorded as reported, failed ones too; what it means for the item is applied only while the item
- * is still as it was when the run was claimed. Answers { item, applied, failuresInRow }.
+ * is still as it was when the run was claimed. Answers { item, applied, failuresInRow, tellPerson }: `tellPerson` is true once, when a failure is the one Brick must tell
+ * the person about (the first for a reminder or briefing; for a watch or goal the one that reaches the Limits setting).
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ runId: string }> }) {
   try {
@@ -41,7 +42,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (!parsed.success) return NextResponse.json({ error: 'Invalid input data', details: parsed.error.issues }, { status: 400 });
     const answer = await finishRun(runId, parsed.data);
     if (!answer.ok) return NextResponse.json({ error: answer.error }, { status: answer.status });
-    return NextResponse.json({ item: answer.item, applied: answer.applied, failuresInRow: answer.failuresInRow });
+    return NextResponse.json({ item: answer.item, applied: answer.applied, failuresInRow: answer.failuresInRow, tellPerson: answer.tellPerson });
   } catch (error) {
     return itemsFailed(error, 'Reporting a run');
   }
