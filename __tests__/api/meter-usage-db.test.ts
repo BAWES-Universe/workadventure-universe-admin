@@ -280,6 +280,12 @@ run('usage for people, and cost for us, in a real database', () => {
       const answers = await Promise.all([send(key), send(key), send(key)]);
       expect(answers.filter((answer) => answer.status === 201)).toHaveLength(1);
       expect(await prisma.meterGrant.count({ where: { personId: sara.id } })).toBe(1);
+      // A retry a moment later, with a later start and end, is the same grant: nothing is given twice and nothing is refused
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const retry = await send(key, { endsAt: new Date(Date.now() + 5 * 86_400_000 + 5_000).toISOString() });
+      expect(retry.status).toBe(200);
+      expect((await retry.json()).recorded).toBe(false);
+      expect(await prisma.meterGrant.count({ where: { personId: sara.id } })).toBe(1);
       // The same key with another amount is refused, not given as something else
       expect((await send(key, { amount: 'five' })).status).toBe(400);
       expect(await prisma.meterGrant.count({ where: { personId: sara.id } })).toBe(1);

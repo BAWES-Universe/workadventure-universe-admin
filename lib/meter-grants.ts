@@ -99,9 +99,9 @@ export async function recordGrant(input: GrantInput): Promise<{ grant: Grant; re
       row.personId === input.personId &&
       row.settlement === input.settlement &&
       row.multiplier === multiplier &&
-      row.noLimit === noLimit &&
-      row.startsAt.getTime() === input.startsAt.getTime() &&
-      row.endsAt.getTime() === input.endsAt.getTime();
+      row.noLimit === noLimit;
+    // The times are not compared: a retry of the same tap starts a moment later (and "30 days" ends a moment later), and it is
+    // still the same grant. The first one stands.
     if (!same) throw new GrantRefused('That key was used for a different grant. The first one stands.');
   }
   return { grant: view(row), recorded: count > 0 };
