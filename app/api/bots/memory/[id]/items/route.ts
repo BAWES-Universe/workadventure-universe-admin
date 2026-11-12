@@ -13,6 +13,8 @@ const bodySchema = z
     userUuid: z.string().min(1).max(255),
     itemKey: z.string().regex(/^[0-9a-f]{32}$/),
     kind: z.enum(MEMORY_ITEM_KINDS),
+    /** When the person asked (milliseconds), when the bot server had to retry the report. Taken as sent, but never later than now. */
+    at: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -35,7 +37,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const { id: botId } = await params;
     const parsed = bodySchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return NextResponse.json({ error: 'Invalid request data', details: parsed.error.issues }, { status: 400, headers: corsHeaders(request) });
-    await forgetItemKey(botId, parsed.data.userUuid, parsed.data.itemKey, parsed.data.kind);
+    const now = Date.now();
+    const at = parsed.data.at === undefined ? undefined : new Date(Math.min(now, parsed.data.at));
+    await forgetItemKey(botId, parsed.data.userUuid, parsed.data.itemKey, parsed.data.kind, at);
     return NextResponse.json({ forgotten: true }, { headers: corsHeaders(request) });
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'Unauthorized: Invalid service token') {

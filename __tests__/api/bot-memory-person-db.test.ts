@@ -213,6 +213,47 @@ run('what a bot remembers about a person (real database)', () => {
     expect(JSON.stringify((await rows(melodyId, people.sara.uuid))?.memories)).not.toContain('chess');
   });
 
+  it('a late report of a Forget keeps the time the person asked, and never makes an older Forget newer', async () => {
+    const id = memoryItemKey('pref', null, COFFEE);
+    const asked = Date.now() - 60 * 60 * 1000;
+    const late = await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: id, kind: 'pref', at: asked }), params(melodyId));
+    expect(late.status).toBe(200);
+    expect((await prisma.botMemoryItemForget.findFirstOrThrow({ where: { botId: melodyId, itemKey: id } })).createdAt.getTime()).toBe(asked);
+    // The same thing reported again with an older time: the newer Forget stays
+    await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: id, kind: 'pref', at: asked - 1000 }), params(melodyId));
+    expect((await prisma.botMemoryItemForget.findFirstOrThrow({ where: { botId: melodyId, itemKey: id } })).createdAt.getTime()).toBe(asked);
+    // A time in the future is not believed
+    const future = memoryItemKey('pref', null, 'chess');
+    await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: future, kind: 'pref', at: Date.now() + 10 * 60 * 60 * 1000 }), params(melodyId));
+    expect((await prisma.botMemoryItemForget.findFirstOrThrow({ where: { botId: melodyId, itemKey: future } })).createdAt.getTime()).toBeLessThanOrEqual(Date.now());
+    // An old time is kept as the bot server sent it: its report is the truth of when they asked
+    const old = memoryItemKey('pref', null, 'lo-fi');
+    const longAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: old, kind: 'pref', at: longAgo }), params(melodyId));
+    expect((await prisma.botMemoryItemForget.findFirstOrThrow({ where: { botId: melodyId, itemKey: old } })).createdAt.getTime()).toBe(longAgo);
+    // Not a time at all is a bad request
+    expect((await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: id, kind: 'pref', at: 'x' }), params(melodyId))).status).toBe(400);
+  });
+
+  const prefsOf = (row: { memories: unknown } | null | undefined) => ((row?.memories as { personalInfo?: { preferences?: string[] } } | null)?.personalInfo?.preferences ?? []);
+
+  it('a late report of a Forget leaves in the saved row what the person said after they asked', async () => {
+    const id = memoryItemKey('pref', null, COFFEE);
+    const asked = Date.now() - 60 * 60 * 1000;
+    // The row already holds the thing said again 30 minutes after they asked (a save reached Orbit before the retried report)
+    const again = memoryOf({ drawnFrom: { [`pref:${COFFEE}`]: asked + 30 * 60 * 1000 } });
+    await save(asBotServer(`/api/bots/memory/${melodyId}`, { memories: [{ userUuid: people.sara.uuid, isGuest: false, memories: again }] }), params(melodyId));
+    await settle();
+    await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: id, kind: 'pref', at: asked }), params(melodyId));
+    expect(prefsOf(await rows(melodyId, people.sara.uuid))).toContain(COFFEE);
+    // Said before they asked, the same late report takes it out of the row
+    const before = memoryOf({ drawnFrom: { [`pref:${COFFEE}`]: asked - 30 * 60 * 1000 } });
+    await save(asBotServer(`/api/bots/memory/${melodyId}`, { memories: [{ userUuid: people.sara.uuid, isGuest: false, memories: before }] }), params(melodyId));
+    await settle();
+    await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: id, kind: 'pref', at: asked }), params(melodyId));
+    expect(prefsOf(await rows(melodyId, people.sara.uuid))).not.toContain(COFFEE);
+  });
+
   it('keeps only a key, never the words', async () => {
     const id = memoryItemKey('pref', null, COFFEE);
     await forgetMine(as('sara', `/api/bots/${melodyId}/my-memory/forget`, { itemId: id }), params(melodyId));
