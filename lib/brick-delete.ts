@@ -4,6 +4,7 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { endAllApprovals } from '@/lib/bot-actions';
 import { deleteWithHiddenBotData } from '@/lib/bot-privacy';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
+import { stopComputerWork, removeMachineBeforeDelete } from '@/lib/computer';
 import { listBricks, listDeletedBricks, type BrickCard, type DeletedBrickCard } from '@/lib/brick-default';
 
 /**
@@ -22,6 +23,9 @@ import { listBricks, listDeletedBricks, type BrickCard, type DeletedBrickCard } 
  * kept aside at the delete to be put back, so nothing that was withdrawn can return: an approval that ended stays ended,
  * and a key that was taken away while it waited is checked again on its next reply like any other day. An action that
  * was running at the delete keeps its own record and is never sent again.
+ *
+ * Its computer (game #2000). At the tap its jobs end and it stops, its files saved and kept. Undo gives the Brick back but starts
+ * no job again. At the second step the machine is removed only after its files were saved.
  *
  * What is never deleted. Everything the Brick made: an artifact belongs to the person who asked for it and only names
  * the Brick that made it (Artifact.makerBotId), so it stays in their artifacts after both steps.
@@ -50,6 +54,8 @@ export async function deleteBrick(brickId: string, ownerId: string, now: Date = 
   });
   // Its tools' sign-in cards on Orbit home go too: nobody manages a deleted Brick (it never throws)
   if (deletedNow) await syncToolSignInNotices(brickId);
+  // Its computer's work stops at once too (game #2000): jobs end, the screen goes, files are saved and kept. Undo never restarts a job
+  if (deletedNow) await stopComputerWork(brickId, 'deleted', now);
   return (await listDeletedBricks(ownerId, now)).find((card) => card.id === brickId) ?? null;
 }
 
@@ -87,6 +93,8 @@ export async function removeGoneBricks(now: Date = new Date(), ownerId?: string)
   });
   const removed: string[] = [];
   for (const { id } of gone) {
+    // Its computer goes only after its files were saved; if that did not happen the Brick waits for the next sweep (game #2000)
+    if (!(await removeMachineBeforeDelete(id))) continue;
     // Still only one whose time has passed: the condition is asked again in the delete itself
     const where = { id, roomId: null, goneAt: { lte: now } };
     const { count } = await deleteWithHiddenBotData(where, () => prisma.bot.deleteMany({ where }));

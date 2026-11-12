@@ -1,0 +1,683 @@
+import { Prisma } from '@prisma/client';
+import { prisma } from '@/lib/db';
+import { ownsBrick } from '@/lib/brick';
+import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
+import { memberAllowance, releaseRoom, renewRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
+import { monthOf } from '@/lib/meter-values';
+import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
+import {
+  AFTER_TAKE_OVER,
+  HOLDS_MACHINE,
+  PERSON_ONLY,
+  costOfSeconds,
+  isOver,
+  roomFor,
+  type EffectKind,
+  type EndedBy,
+  type MachineState,
+  type QueuedFor,
+  type WaitingFor,
+} from '@/lib/computer-values';
+
+/**
+ * A Brick's computer, and the jobs on it (game #2000, Brick 9).
+ *
+ * What this keeps, in one place:
+ *  - One lasting computer per Brick. Giving a Brick a computer makes no machine; the machine is made by the first job that
+ *    needs it, once, and is never copied, replaced or reset after.
+ *  - No switch per person. The owner gives their own Brick a computer, and the meter's allowance (game #1998) is the bound:
+ *    room is reserved before a job runs and renewed while it does, and when it is used up the job stays queued with its work
+ *    saved and the person can "Ask for more".
+ *  - One WRITING job at a time (the database holds it: computer_jobs_one_writer). Later jobs queue. A job proven read-only
+ *    (`writes` false) may overlap.
+ *  - Choosing a route wakes nothing, and neither does watching: only starting a job calls `create` or `wake`.
+ *  - Brick hands over before it sends the person's details, signs in, uploads, pays or submits, and never pays or submits itself.
+ *  - An effect outside the computer is written before it is tried and once per key, so a retry never does it twice.
+ */
+
+const SECOND = 1000;
+
+type Provider = ComputerProvider;
+
+export type JobStatusWord = 'queued' | 'running' | 'waiting' | 'done' | 'stopped' | 'failed';
+
+export interface JobView {
+  id: string;
+  title: string;
+  status: JobStatusWord;
+  queuedFor: QueuedFor | null;
+  endedBy: EndedBy | null;
+  writes: boolean;
+  stepDone: number;
+  stepTotal: number | null;
+  stepLabel: string | null;
+  waitingFor: WaitingFor | null;
+  control: 'brick' | 'person';
+  startedAt: Date | null;
+  endedAt: Date | null;
+  /** Details the person asked Brick to fill in, still to be done: what and where. Brick does only these, and only now. */
+  detailsToFill: { key: string; what: string; where: string }[];
+}
+
+export interface ComputerView {
+  /** False on a server with no computer provider: nothing is made and the page says computers are not open yet. */
+  available: boolean;
+  /** The owner gave this Brick a computer and has not turned it off. */
+  on: boolean;
+  machine: MachineState;
+  /** The job that has the machine (running, or waiting for its person); null when it rests. */
+  job: JobView | null;
+  /** Jobs in line behind it, or waiting for the person's allowance. */
+  queued: JobView[];
+  /** The person's month for computers: the share left (0 to 1), or null when no allowance is set up yet. Never a count or a price. */
+  month: { leftFraction: number; unlimited: boolean; endsAt: Date } | null;
+  files: { bytes: number; savedAt: Date | null };
+  /** The day its files came from, after a restore from a backup. */
+  restoredFrom: Date | null;
+}
+
+const toNumber = (value: bigint | number | null | undefined): number => (value === null || value === undefined ? 0 : Number(value));
+
+type JobRow = {
+  id: string;
+  title: string;
+  status: string;
+  queuedFor: string | null;
+  endedBy: string | null;
+  writes: boolean;
+  stepDone: number;
+  stepTotal: number | null;
+  stepLabel: string | null;
+  waitingFor: string | null;
+  control: string;
+  startedAt: Date | null;
+  endedAt: Date | null;
+  effects?: { effectKey: string; kind: string; state: string; evidence: string | null }[];
+};
+
+/** What the owner is told about a job. The evidence of an effect is where it went, never what was in it. */
+function jobView(row: JobRow): JobView {
+  const detailsToFill = (row.effects ?? [])
+    .filter((effect) => effect.kind === 'details' && effect.state === 'approved')
+    .map((effect) => {
+      const [what, where] = (effect.evidence ?? '').split(' → ');
+      return { key: effect.effectKey, what: what ?? '', where: where ?? '' };
+    });
+  return {
+    id: row.id,
+    title: row.title,
+    status: row.status as JobStatusWord,
+    queuedFor: row.queuedFor as QueuedFor | null,
+    endedBy: row.endedBy as EndedBy | null,
+    writes: row.writes,
+    stepDone: row.stepDone,
+    stepTotal: row.stepTotal,
+    stepLabel: row.stepLabel,
+    waitingFor: row.waitingFor as WaitingFor | null,
+    control: row.control === 'person' ? 'person' : 'brick',
+    startedAt: row.startedAt,
+    endedAt: row.endedAt,
+    detailsToFill,
+  };
+}
+
+const JOB_INCLUDE = { effects: { select: { effectKey: true, kind: true, state: true, evidence: true } } } as const;
+
+async function brickOf(botId: string, ownerId: string) {
+  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { id: true, roomId: true, ownerId: true, deletedAt: true } });
+  return bot && ownsBrick(bot, ownerId) ? bot : null;
+}
+
+/** The provider for this computer: the server's, when it is the one that holds the machine. A machine of another provider is not reached. */
+function providerFor(row: { provider: string } | null): Provider | null {
+  const provider = getComputerProvider();
+  if (!provider) return null;
+  return row && row.provider !== provider.kind ? null : provider;
+}
+
+/** A person's month as the owner is shown it: a share, never a count or a price. */
+async function monthOfPerson(personId: string, now: Date): Promise<ComputerView['month']> {
+  const settings = await getMeterSettings();
+  const state = await memberAllowance(personId, now, settings);
+  if (!state || settings.memberAllowanceMicros === null) return null;
+  const endsAt = monthOf(now).end;
+  if (state.unlimited || state.leftMicros === null) return { leftFraction: 1, unlimited: true, endsAt };
+  return { leftFraction: Math.max(0, Math.min(1, state.leftMicros / settings.memberAllowanceMicros)), unlimited: false, endsAt };
+}
+
+/** What the owner sees about a Brick's computer. Null when the Brick is not theirs. Reads only: it never makes or wakes anything. */
+export async function computerView(botId: string, ownerId: string, now: Date = new Date()): Promise<ComputerView | null> {
+  if (!(await brickOf(botId, ownerId))) return null;
+  const available = getComputerProvider() !== null;
+  const row = await prisma.brickComputer.findUnique({ where: { botId } });
+  const jobs = await prisma.computerJob.findMany({
+    where: { botId, status: { in: ['running', 'waiting', 'queued'] } },
+    orderBy: { createdAt: 'asc' },
+    include: JOB_INCLUDE,
+  });
+  const holding = jobs.find((job) => HOLDS_MACHINE.includes(job.status as never)) ?? null;
+  return {
+    available,
+    on: !!row && row.enabled,
+    machine: (row?.machine ?? 'none') as MachineState,
+    job: holding ? jobView(holding) : null,
+    queued: jobs.filter((job) => job.status === 'queued').map(jobView),
+    month: row?.enabled ? await monthOfPerson(ownerId, now) : null,
+    files: { bytes: toNumber(row?.filesBytes), savedAt: row?.filesSavedAt ?? null },
+    restoredFrom: row?.restoredFrom ?? null,
+  };
+}
+
+export type Given = { ok: true; view: ComputerView } | { ok: false; reason: 'not_found' | 'not_open' };
+
+/**
+ * "Give Brick a computer": the owner turns it on for their own Brick. No machine is made: that waits for a job that needs one.
+ * Asked twice it is the same computer. Nothing here is per person, and nothing the owner does here costs anything.
+ */
+export async function giveComputer(botId: string, ownerId: string, now: Date = new Date()): Promise<Given> {
+  if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+  const provider = getComputerProvider();
+  if (!provider) return { ok: false, reason: 'not_open' };
+  const existing = await prisma.brickComputer.findUnique({ where: { botId } });
+  if (existing && existing.provider !== provider.kind) return { ok: false, reason: 'not_open' };
+  await prisma.brickComputer.upsert({ where: { botId }, create: { botId, enabled: true, provider: provider.kind }, update: { enabled: true } });
+  return { ok: true, view: (await computerView(botId, ownerId, now)) as ComputerView };
+}
+
+/**
+ * "Turn off computer": whatever it was doing stops at once and its files are saved and kept. Brick goes back to answers and
+ * apps. Asked twice it is the same.
+ */
+export async function turnOffComputer(botId: string, ownerId: string, now: Date = new Date()): Promise<ComputerView | null> {
+  if (!(await brickOf(botId, ownerId))) return null;
+  await stopComputerWork(botId, 'off', now);
+  await prisma.brickComputer.updateMany({ where: { botId }, data: { enabled: false } });
+  return computerView(botId, ownerId, now);
+}
+
+/**
+ * Every job of this Brick stops and the machine rests, for a reason that is not the person's tap: the computer was turned off,
+ * or the Brick was deleted (every right it held is withdrawn at once). Never throws: a delete or a switch must not fail over it.
+ */
+export async function stopComputerWork(botId: string, why: 'off' | 'deleted', now: Date = new Date()): Promise<void> {
+  try {
+    const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['queued', 'running', 'waiting'] } }, select: { id: true } });
+    for (const job of jobs) await endJob(job.id, 'stopped', why, now);
+    const row = await prisma.brickComputer.findUnique({ where: { botId } });
+    const provider = providerFor(row);
+    if (row && row.providerRef && provider && row.machine !== 'none' && row.machine !== 'stopped') {
+      // Stopping keeps the disk, and the files are saved first so Files can show the last saved copy
+      await saveCopy(botId, row.providerRef, provider);
+      await provider.stop(row.providerRef).catch((error) => console.error('[Computer] Could not stop a machine:', error instanceof Error ? error.message : 'unknown'));
+      await prisma.brickComputer.updateMany({ where: { botId }, data: { machine: 'stopped' } });
+    }
+  } catch (error) {
+    console.error('[Computer] Could not stop a Brick’s work:', error instanceof Error ? error.message : 'unknown');
+  }
+}
+
+/**
+ * Saves the machine's home folder and remembers when. A copy that failed says nothing: the last saved day stays as it was, and
+ * "saved" is never claimed for a save that did not happen.
+ */
+async function saveCopy(botId: string, ref: string, provider: Provider): Promise<boolean> {
+  try {
+    const copy = await provider.saveFiles(ref);
+    await prisma.brickComputer.updateMany({ where: { botId }, data: { filesBytes: BigInt(Math.max(0, Math.trunc(copy.bytes))), filesSavedAt: copy.savedAt } });
+    return true;
+  } catch (error) {
+    console.error('[Computer] Could not save a copy of the files:', error instanceof Error ? error.message : 'unknown');
+    return false;
+  }
+}
+
+// ---------- Jobs ----------
+
+export type Started =
+  | { ok: true; job: JobView; restoredFrom: Date | null }
+  /** Not the owner's Brick, or not theirs to ask: only the owner starts computer work on their Brick. */
+  | { ok: false; reason: 'not_owner' | 'off' | 'not_open' | 'broken_start' }
+  /** The meter's controls are not set up yet: a computer does not open before they do. */
+  | { ok: false; reason: 'not_set' };
+
+/** Room is asked for once for each try to run a job: room that was released stays closed, so a later try asks under a new key. */
+const roomKey = (jobId: string, now: Date) => `computer:job:${jobId}:${now.getTime()}`;
+
+const queueReasonOf = (no: NoRoom): QueuedFor | null => (no.reason === 'allowance' ? 'allowance' : no.reason === 'busy' ? 'busy' : no.reason === 'pool' ? 'pool' : null);
+
+/**
+ * Starts a job on a Brick's computer. Only its owner starts work on it. The job is saved first and then tried: if another job
+ * is writing it waits its turn, if the person's allowance or our room is used up it waits with its work saved (and the first
+ * leads to "Ask for more"), and otherwise it runs and the machine is made or woken, here and nowhere else.
+ */
+export async function startJob(input: { botId: string; personId: string; title: string; writes?: boolean }, now: Date = new Date()): Promise<Started> {
+  const bot = await brickOf(input.botId, input.personId);
+  if (!bot) return { ok: false, reason: 'not_owner' };
+  const row = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
+  if (!row || !row.enabled) return { ok: false, reason: 'off' };
+  if (!providerFor(row)) return { ok: false, reason: 'not_open' };
+  const created = await prisma.computerJob.create({
+    data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', writes: input.writes !== false },
+  });
+  const outcome = await tryStart(created.id, now);
+  if (outcome === 'not_set') {
+    // Controls that are not set up: no job was ever going to run, so none is left behind
+    await prisma.computerJob.delete({ where: { id: created.id } });
+    return { ok: false, reason: 'not_set' };
+  }
+  const job = await prisma.computerJob.findUniqueOrThrow({ where: { id: created.id }, include: JOB_INCLUDE });
+  if (job.status === 'failed') return { ok: false, reason: 'broken_start' };
+  const after = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
+  return { ok: true, job: jobView(job), restoredFrom: job.status === 'running' ? (after?.restoredFrom ?? null) : null };
+}
+
+type Tried = 'running' | 'queued' | 'failed' | 'not_set' | 'gone';
+
+/** One try to put a queued job on the machine. Safe to ask again: a job that is no longer queued is left as it is. */
+async function tryStart(jobId: string, now: Date): Promise<Tried> {
+  const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
+  if (!job || job.status !== 'queued') return job ? (job.status === 'running' ? 'running' : 'gone') : 'gone';
+  const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
+  const provider = providerFor(row);
+  if (!row || !row.enabled || !provider) {
+    await endJob(job.id, 'stopped', 'off', now);
+    return 'gone';
+  }
+  const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued' }, data: { queuedFor } });
+
+  // Another job is writing: wait for it. Nothing is reserved while waiting in line.
+  if (job.writes) {
+    const writing = await prisma.computerJob.count({ where: { botId: job.botId, writes: true, status: { in: ['running', 'waiting'] } } });
+    if (writing > 0) {
+      await queue('turn');
+      return 'queued';
+    }
+  }
+
+  const settings = await getMeterSettings();
+  const key = roomKey(job.id, now);
+  const room = await reserveRoom({ key, personId: job.personId, amountMicros: roomFor(settings.renewMinutes, provider.microsPerMinute()), botId: job.botId, jobId: job.id }, now);
+  if (!room.ok) {
+    if (room.reason === 'not_set') return 'not_set';
+    const reason = queueReasonOf(room);
+    if (reason) {
+      await queue(reason);
+      return 'queued';
+    }
+    // Room that was held, lapsed and closed: this is another try, not the same room
+    await queue('busy');
+    return 'queued';
+  }
+
+  // Take the writer's place. The database lets only one writing job hold it; a second one arriving at the same moment queues.
+  try {
+    const claimed = await prisma.computerJob.updateMany({
+      where: { id: job.id, status: 'queued' },
+      data: { status: 'running', queuedFor: null, reservationKey: key, startedAt: now, stretchStarted: now },
+    });
+    if (claimed.count === 0) {
+      await releaseRoom({ key }, now);
+      return 'gone';
+    }
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      await releaseRoom({ key }, now);
+      await queue('turn');
+      return 'queued';
+    }
+    throw error;
+  }
+
+  // The machine: made once, here, or woken. A start that breaks leaves the job over, its room given back and the machine "broken".
+  try {
+    await bringUp(job.botId, provider, now);
+  } catch (error) {
+    console.error('[Computer] A machine did not start:', error instanceof Error ? error.message : 'unknown');
+    // A machine that was never made is not "broken": it is still just not made, and the next job tries again
+    await prisma.brickComputer.updateMany({ where: { botId: job.botId, NOT: { providerRef: null } }, data: { machine: 'broken' } });
+    await prisma.brickComputer.updateMany({ where: { botId: job.botId, providerRef: null }, data: { machine: 'none' } });
+    await endJob(job.id, 'failed', 'error', now);
+    return 'failed';
+  }
+  return 'running';
+}
+
+/**
+ * Makes the machine if this Brick has none yet, and wakes it. Asked while it already works, it does nothing more. The making is
+ * claimed in one write before the provider is called, so two jobs starting at the same moment make ONE computer, never two.
+ */
+async function bringUp(botId: string, provider: Provider, now: Date): Promise<void> {
+  let row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
+  if (row.machine === 'working') return;
+  if (!row.providerRef) {
+    const claim = await prisma.brickComputer.updateMany({ where: { botId, providerRef: null, machine: 'none' }, data: { machine: 'waking' } });
+    if (claim.count === 1) {
+      try {
+        const info = await provider.create(botId);
+        row = await prisma.brickComputer.update({ where: { botId }, data: { providerRef: info.ref, madeAt: now, machine: 'waking' } });
+      } catch (error) {
+        await prisma.brickComputer.updateMany({ where: { botId, providerRef: null }, data: { machine: 'none' } });
+        throw error;
+      }
+    } else {
+      // Another job is making it right now: wait for it to finish rather than make a second one
+      for (let tries = 0; tries < 20 && !row.providerRef; tries++) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
+      }
+      if (!row.providerRef) throw new Error('The computer is still being made by another job');
+    }
+  }
+  const ref = row.providerRef as string;
+  // A broken machine comes back from its last saved copy, and the person is told which day that was
+  const restoring = row.machine === 'broken';
+  await prisma.brickComputer.update({ where: { botId }, data: { machine: restoring ? 'restoring' : 'waking' } });
+  await provider.wake(ref);
+  await prisma.brickComputer.update({ where: { botId }, data: { machine: 'working', lastWorkedAt: now, restoredFrom: restoring ? (row.filesSavedAt ?? now) : null } });
+}
+
+/** Progress a running job reports: step n of m. Only the job's own running or waiting state may report it. */
+export async function reportProgress(jobId: string, progress: { stepDone: number; stepTotal?: number | null; label?: string | null }): Promise<JobView | null> {
+  const stepDone = Math.max(0, Math.trunc(progress.stepDone));
+  const stepTotal = progress.stepTotal === null || progress.stepTotal === undefined ? undefined : Math.max(1, Math.trunc(progress.stepTotal));
+  await prisma.computerJob.updateMany({
+    where: { id: jobId, status: { in: ['running', 'waiting'] } },
+    data: { stepDone, ...(stepTotal !== undefined ? { stepTotal } : {}), ...(progress.label !== undefined ? { stepLabel: progress.label === null ? null : progress.label.slice(0, 200) } : {}) },
+  });
+  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
+  return job ? jobView(job) : null;
+}
+
+/**
+ * A job that keeps running renews its room each stretch. If the allowance or our room is used up, or the room is gone, it saves
+ * and stops safely: what it did stays, nothing new starts and no step is cut in half by this call.
+ */
+export async function renewJob(jobId: string, now: Date = new Date()): Promise<{ ok: true } | { ok: false; reason: 'allowance' | 'pool' | 'closed' | 'over' }> {
+  const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
+  if (!job || isOver(job.status) || !job.reservationKey) return { ok: false, reason: 'over' };
+  if (job.status === 'queued') return { ok: true };
+  const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
+  const provider = providerFor(row);
+  const settings = await getMeterSettings();
+  const room = await renewRoom({ key: job.reservationKey, moreMicros: roomFor(settings.renewMinutes, provider ? provider.microsPerMinute() : null) }, now);
+  if (room.ok) return { ok: true };
+  const reason = room.reason === 'allowance' ? 'allowance' : room.reason === 'closed' ? 'closed' : 'pool';
+  await endJob(jobId, 'stopped', reason === 'allowance' ? 'allowance' : reason === 'closed' ? 'error' : 'pool', now);
+  return { ok: false, reason };
+}
+
+/** The job finished: its machine is saved and rests, what it cost is counted, and the next job in line starts. Safe to say twice. */
+export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date()): Promise<JobView | null> {
+  await endJob(jobId, outcome, outcome === 'failed' ? 'error' : null, now);
+  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
+  return job ? jobView(job) : null;
+}
+
+/** Stop: from the person's tap. The work so far is kept. Null when it is not their Brick. */
+export async function stopJobFor(botId: string, ownerId: string, now: Date = new Date()): Promise<ComputerView | null> {
+  if (!(await brickOf(botId, ownerId))) return null;
+  const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true } });
+  for (const job of jobs) await endJob(job.id, 'stopped', 'person', now);
+  return computerView(botId, ownerId, now);
+}
+
+/**
+ * Ends a job once. Whatever it ran is worked out from the seconds the machine was held for it, recorded in the meter's books as
+ * one event under the job's id, and its reserved room is settled to that. Then the machine rests if no other job holds it, and
+ * the next job in line is tried. A job that is already over is left exactly as it ended.
+ */
+async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date): Promise<void> {
+  const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
+  if (!job || isOver(job.status)) return;
+  const held = job.status === 'running' || job.status === 'waiting';
+  const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
+  const seconds = job.secondsRun + stretch;
+  const ended = await prisma.computerJob.updateMany({
+    where: { id: jobId, status: job.status },
+    data: { status, endedBy, endedAt: now, queuedFor: null, waitingFor: null, control: 'brick', stretchStarted: null, secondsRun: seconds },
+  });
+  // Someone else ended it between the read and the write: that one counts and settles
+  if (ended.count === 0) return;
+
+  const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
+  const provider = providerFor(row);
+  if (job.reservationKey) {
+    if (held) {
+      const cost = costOfSeconds(seconds, provider ? provider.microsPerMinute() : null);
+      await recordMeterEvent({
+        eventId: `computer:${job.id}:time`,
+        kind: 'computer_time',
+        pool: 'computer',
+        occurredAt: now,
+        personKey: `person:${job.personId}`,
+        personId: job.personId,
+        botId: job.botId,
+        brick: true,
+        payerKind: 'universe',
+        payerPersonId: null,
+        route: 'computer',
+        jobId: job.id,
+        quantity: seconds,
+        unit: 'second',
+        costMicros: cost,
+        // Our own count of the seconds a machine was held at the provider's per-minute price: an estimate until the provider's bill settles it
+        basis: cost === null ? 'unknown' : provider && provider.kind === 'real' ? 'measured' : 'estimated',
+        sourceRef: `computer_jobs:${job.id}`,
+        detail: { endedBy, status },
+      }).catch((error) => console.error('[Computer] Could not record computer time:', error instanceof Error ? error.message : 'unknown'));
+      await settleRoom({ key: job.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now);
+    } else {
+      await releaseRoom({ key: job.reservationKey }, now);
+    }
+  }
+
+  if (held && row && row.providerRef && provider) {
+    const stillHeld = await prisma.computerJob.count({ where: { botId: job.botId, status: { in: ['running', 'waiting'] } } });
+    if (stillHeld === 0 && row.machine === 'working') {
+      // Its work is saved before it rests, and a save that failed is not claimed
+      await saveCopy(job.botId, row.providerRef, provider);
+      await provider.rest(row.providerRef).catch((error) => console.error('[Computer] Could not rest a machine:', error instanceof Error ? error.message : 'unknown'));
+      await prisma.brickComputer.updateMany({ where: { botId: job.botId, machine: 'working' }, data: { machine: 'resting' } });
+    }
+  }
+  // The turn passes to the next job in line
+  if (endedBy !== 'off' && endedBy !== 'deleted') await startNext(job.botId, now);
+}
+
+/** The oldest job in line for this Brick's computer gets its turn. */
+async function startNext(botId: string, now: Date): Promise<void> {
+  const next = await prisma.computerJob.findFirst({ where: { botId, status: 'queued' }, orderBy: { createdAt: 'asc' }, select: { id: true } });
+  if (next) await tryStart(next.id, now);
+}
+
+/**
+ * A sweep, asked by the bot server now and then: a running job that stopped renewing its room is stopped safely (its room is
+ * settled to what ran, never left holding the envelope), room that nobody holds a job for is given back, and jobs in line are tried
+ * again (the person's month turned, extra usage was given, another job ended). Safe to run twice at once.
+ */
+export async function sweepComputers(now: Date = new Date()): Promise<{ stopped: number; released: number; started: number }> {
+  let stopped = 0;
+  let released = 0;
+  let started = 0;
+  const lapsed = await prisma.meterReservation.findMany({ where: { state: 'held', expiresAt: { lte: now }, jobId: { not: null }, reservationKey: { startsWith: 'computer:job:' } }, take: 200 });
+  for (const reservation of lapsed) {
+    const job = reservation.jobId ? await prisma.computerJob.findUnique({ where: { id: reservation.jobId } }) : null;
+    if (job && !isOver(job.status) && HOLDS_MACHINE.includes(job.status as never)) {
+      await endJob(job.id, 'stopped', 'error', now);
+      stopped++;
+    } else {
+      await releaseRoom({ key: reservation.reservationKey }, now);
+      released++;
+    }
+  }
+  // A machine that was being made when its job died, and never got a reference: nothing was made, so it can be tried again
+  await prisma.brickComputer.updateMany({ where: { machine: 'waking', providerRef: null, updatedAt: { lte: new Date(now.getTime() - 5 * 60 * 1000) } }, data: { machine: 'none' } });
+  const lines = await prisma.computerJob.findMany({ where: { status: 'queued' }, select: { id: true, botId: true }, orderBy: { createdAt: 'asc' }, take: 200 });
+  const tried = new Set<string>();
+  for (const line of lines) {
+    // One try per Brick: the oldest job in line has the turn
+    if (tried.has(line.botId)) continue;
+    tried.add(line.botId);
+    if ((await tryStart(line.id, now)) === 'running') started++;
+  }
+  return { stopped, released, started };
+}
+
+// ---------- Watching, taking over and handing back ----------
+
+export type Watched = { ok: true; url: string; expiresAt: Date } | { ok: false; reason: 'not_found' | 'resting' };
+
+/**
+ * Watch: the screen of a computer that is working. It only looks. A computer that rests, a job that is over, an old link, a
+ * refresh or a reconnect cause no wake: with nothing to look at, the answer is "resting" and nothing was called to start it.
+ */
+export async function watchComputer(botId: string, ownerId: string): Promise<Watched> {
+  if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+  const row = await prisma.brickComputer.findUnique({ where: { botId } });
+  const provider = providerFor(row);
+  if (!row || !row.enabled || !provider || !row.providerRef || row.machine !== 'working') return { ok: false, reason: 'resting' };
+  const holding = await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } });
+  if (holding === 0) return { ok: false, reason: 'resting' };
+  const session = await provider.watch(row.providerRef).catch(() => null);
+  return session ? { ok: true, url: session.url, expiresAt: session.expiresAt } : { ok: false, reason: 'resting' };
+}
+
+/**
+ * The job needs its person: before it sends their details, signs in, uploads, pays or submits. It waits, holding the machine for
+ * them, and the person's Take over appears. Asked by the bot server.
+ */
+export async function requestHandover(jobId: string, waitingFor: WaitingFor, now: Date = new Date()): Promise<JobView | null> {
+  const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
+  if (!job) return null;
+  if (job.status === 'running') {
+    // The stretch so far is counted, and the machine stays awake for them
+    const stretch = job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
+    await prisma.computerJob.updateMany({ where: { id: jobId, status: 'running' }, data: { status: 'waiting', waitingFor, control: 'brick', secondsRun: job.secondsRun + stretch, stretchStarted: now } });
+  } else if (job.status === 'waiting') {
+    await prisma.computerJob.updateMany({ where: { id: jobId, status: 'waiting', control: 'brick' }, data: { waitingFor } });
+  }
+  const after = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
+  return after ? jobView(after) : null;
+}
+
+export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'nothing_waiting' };
+
+/** Take over: the person has the mouse and keyboard, only while the job waits for them. Their own Brick only. */
+export async function takeOver(botId: string, ownerId: string): Promise<Control> {
+  if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+  const changed = await prisma.computerJob.updateMany({ where: { botId, status: 'waiting', control: 'brick' }, data: { control: 'person' } });
+  const job = await prisma.computerJob.findFirst({ where: { botId, status: 'waiting' }, include: JOB_INCLUDE });
+  // Asked twice it is the same: already theirs is still theirs
+  if (!job || (changed.count === 0 && job.control !== 'person')) return { ok: false, reason: 'nothing_waiting' };
+  return { ok: true, job: jobView(job) };
+}
+
+/** Hand back: Brick carries on from where the person left it. What they entered is theirs and is not read back by this call. */
+export async function handBack(botId: string, ownerId: string): Promise<Control> {
+  if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+  await prisma.computerJob.updateMany({ where: { botId, status: 'waiting', control: 'person' }, data: { status: 'running', control: 'brick', waitingFor: null } });
+  const job = await prisma.computerJob.findFirst({ where: { botId, status: { in: ['running', 'waiting'] } }, include: JOB_INCLUDE });
+  if (!job) return { ok: false, reason: 'nothing_waiting' };
+  return { ok: true, job: jobView(job) };
+}
+
+export type Filling = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'not_in_control' };
+
+/**
+ * "Fill in my details": only while the person has taken over, and only for what they name. It says what Brick fills in and where,
+ * and only that is allowed; paying and submitting are never in it. The bot server reads it from the job, plans it (which claims it
+ * once) and settles it.
+ */
+export async function fillInDetails(botId: string, ownerId: string, fill: { what: string; where: string }): Promise<Filling> {
+  if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+  const job = await prisma.computerJob.findFirst({ where: { botId, status: 'waiting', control: 'person' } });
+  if (!job) return { ok: false, reason: 'not_in_control' };
+  const what = fill.what.trim().slice(0, 150);
+  const where = fill.where.trim().slice(0, 150);
+  await prisma.computerEffect.upsert({
+    where: { jobId_effectKey: { jobId: job.id, effectKey: `details:${what}:${where}` } },
+    create: { jobId: job.id, effectKey: `details:${what}:${where}`.slice(0, 255), kind: 'details', state: 'approved', evidence: `${what} → ${where}` },
+    update: {},
+  });
+  const after = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.id }, include: JOB_INCLUDE });
+  return { ok: true, job: jobView(after) };
+}
+
+// ---------- Effects outside the computer ----------
+
+export type Planned =
+  | { ok: true; already: false }
+  /** Done before: the retry has nothing to do, and says so. */
+  | { ok: true; already: 'done'; evidence: string | null }
+  /** Tried before and the outcome is not known: look up what happened first, then settle it. Never repeat it blind. */
+  | { ok: false; reason: 'look_up'; evidence: string | null }
+  /** Pay and submit are the person's, always. */
+  | { ok: false; reason: 'person_only' }
+  /** Details and uploads wait until the person has taken over and asked. */
+  | { ok: false; reason: 'hand_over_first' }
+  | { ok: false; reason: 'job_over' | 'not_found' };
+
+/**
+ * The job means to do something outside its computer (send, publish, put details in, upload, pay, submit): written BEFORE it is
+ * tried, once per key. A retry of the same key finds it: done means nothing to do, planned means the outcome is not known and the
+ * job must look it up and settle it, never repeat it. Brick never pays or submits itself, and puts details in or uploads only
+ * after the person has taken over and asked it to.
+ */
+export async function planEffect(jobId: string, input: { key: string; kind: EffectKind; evidence?: string | null }): Promise<Planned> {
+  const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
+  if (!job) return { ok: false, reason: 'not_found' };
+  if (isOver(job.status)) return { ok: false, reason: 'job_over' };
+  const existing = await prisma.computerEffect.findUnique({ where: { jobId_effectKey: { jobId, effectKey: input.key } } });
+  if (existing?.state === 'done') return { ok: true, already: 'done', evidence: existing.evidence };
+  // Tried before and the outcome is not known: look it up, never repeat it blind
+  if (existing?.state === 'planned') return { ok: false, reason: 'look_up', evidence: existing.evidence };
+  if (PERSON_ONLY.includes(input.kind)) return { ok: false, reason: 'person_only' };
+  if (AFTER_TAKE_OVER.includes(input.kind) && (job.control !== 'person' || job.status !== 'waiting')) return { ok: false, reason: 'hand_over_first' };
+  if (existing) {
+    // Approved by the person, or tried and confirmed not done: claimed in one write, so two tries at the same moment do it once
+    const claimed = await prisma.computerEffect.updateMany({ where: { id: existing.id, state: { in: ['approved', 'failed'] } }, data: { state: 'planned', settledAt: null } });
+    return claimed.count === 1 ? { ok: true, already: false } : { ok: false, reason: 'look_up', evidence: existing.evidence };
+  }
+  try {
+    await prisma.computerEffect.create({ data: { jobId, effectKey: input.key.slice(0, 255), kind: input.kind, state: 'planned', evidence: input.evidence?.slice(0, 500) ?? null } });
+  } catch (error) {
+    // Two tries at the same moment: the first wrote it, the second finds it and must look up what happened
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return { ok: false, reason: 'look_up', evidence: null };
+    throw error;
+  }
+  return { ok: true, already: false };
+}
+
+/** What happened to an effect, confirmed: done (with where it went, as proof) or failed (confirmed not done, so it may be tried again). */
+export async function settleEffect(jobId: string, key: string, state: 'done' | 'failed', evidence?: string | null): Promise<boolean> {
+  const { count } = await prisma.computerEffect.updateMany({
+    where: { jobId, effectKey: key, state: 'planned' },
+    data: { state, settledAt: new Date(), ...(evidence !== undefined ? { evidence: evidence === null ? null : evidence.slice(0, 500) } : {}) },
+  });
+  return count > 0;
+}
+
+/** The job, for the bot server. Null when it is not there. */
+export async function getJob(jobId: string): Promise<(JobView & { botId: string; personId: string }) | null> {
+  const row = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
+  return row ? { ...jobView(row), botId: row.botId, personId: row.personId } : null;
+}
+
+/**
+ * When a Brick is removed for good: its machine goes only after its files were saved. A save that did not happen leaves the Brick
+ * for the next sweep, and nothing is deleted quietly. True when there is nothing in the way.
+ */
+export async function removeMachineBeforeDelete(botId: string): Promise<boolean> {
+  const row = await prisma.brickComputer.findUnique({ where: { botId } });
+  if (!row || !row.providerRef || row.machine === 'none') return true;
+  const provider = providerFor(row);
+  if (!provider) return false;
+  if (!(await saveCopy(botId, row.providerRef, provider))) return false;
+  try {
+    await provider.remove(row.providerRef);
+    return true;
+  } catch (error) {
+    console.error('[Computer] Could not remove a machine:', error instanceof Error ? error.message : 'unknown');
+    return false;
+  }
+}
