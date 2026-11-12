@@ -1587,6 +1587,25 @@ model BotMemoryForget {
   @@map("bot_memory_forgets")
 }
 
+// One thing a person asked a bot to forget (game #2003), as the key of what it said (a hash: the words themselves are
+// never kept). It stays for good: every memory save and read takes a thing with this key out again, so a copy the bot
+// server still holds, an old row that is restored, or the same words found in older history never bring it back. Only
+// the person saying it again afterwards is learned again. `droppedAt` is when the bot server reported it dropped the thing
+// from what it keeps in memory; until then Orbit keeps telling it.
+model BotMemoryItemForget {
+  id        String    @id @default(uuid())
+  botId     String    @map("bot_id") @db.VarChar(255)
+  userUuid  String    @map("user_uuid") @db.VarChar(255)
+  itemKey   String    @map("item_key") @db.VarChar(64)
+  kind      String    @db.VarChar(10)
+  createdAt DateTime  @default(now()) @map("created_at")
+  droppedAt DateTime? @map("dropped_at")
+
+  @@unique([botId, userUuid, itemKey])
+  @@index([botId, droppedAt])
+  @@map("bot_memory_item_forgets")
+}
+
 // Files in bot chats (game #1508): what a person sent a bot and what a bot sent them, so the bot can find, read and send
 // them again later instead of forgetting them once the message has passed. Artifacts are not copied here: they have their
 // own tables, and the bot finds them there. A file belongs to the person who sent it or who the bot made it for; others
@@ -1644,6 +1663,21 @@ model BotFile {
   @@index([botId, personRef])
   @@index([expiresAt])
   @@map("bot_files")
+}
+
+// A file its person deleted from a Brick's list (game #2003), waiting for the bot server to remove it from the uploader.
+// Orbit cannot reach the uploader, so the row stays until the bot server has confirmed, and a restart never forgets one.
+// Only where the file is, never what it was called or said.
+model BotFileRemoval {
+  id        String   @id @default(uuid())
+  botId     String   @map("bot_id") @db.VarChar(255)
+  bucket    String   @db.VarChar(255)
+  fileId    String   @map("file_id") @db.VarChar(255)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([bucket, fileId])
+  @@index([createdAt])
+  @@map("bot_file_removals")
 }
 
 // The text kept from a file, in parts in order, so a long document is searched by its words and read a part at a time.
