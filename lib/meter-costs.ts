@@ -161,22 +161,27 @@ const grantWindow = (grant: GrantRow): GrantWindow => ({
   multiplier: grant.noLimit ? null : grant.multiplier,
 });
 
+/** The months (UTC) a person's extra usages span, up to now: from the first moment any of them began to the last they ran. */
+function grantSpan(grants: GrantRow[], now: Date): { first: Date; last: Date } {
+  return {
+    first: new Date(Math.min(...grants.map((grant) => grant.startsAt.getTime()))),
+    last: new Date(Math.min(now.getTime(), Math.max(...grants.map((grant) => grant.endsAt.getTime())))),
+  };
+}
+
 /**
  * What each of a person's extra usages has cost us above the usual allowance: the computer spending the allowance drew from
- * it, month by month (the usual allowance starts again each month), worked out by the same walk the allowance uses.
+ * it, month by month (the usual allowance starts again each month), worked out by the same walk the allowance uses. `events` are
+ * that person's computer costs over the whole span of their grants, read once for everyone (see `costsReport`).
  */
-async function aboveUsual(personId: string, base: number | null, grants: GrantRow[], now: Date): Promise<number[]> {
+function aboveUsual(base: number | null, grants: GrantRow[], events: { occurredAt: Date; costMicros: bigint | number | null }[], now: Date): number[] {
   if (base === null || grants.length === 0) return grants.map(() => 0);
   const windows = grants.map(grantWindow);
-  const first = new Date(Math.min(...grants.map((grant) => grant.startsAt.getTime())));
-  const last = new Date(Math.min(now.getTime(), Math.max(...grants.map((grant) => grant.endsAt.getTime()))));
+  const { first, last } = grantSpan(grants, now);
   const totals = grants.map(() => 0);
   for (let month = monthOf(first); month.start <= last; month = monthOf(month.end)) {
-    const events = await prisma.meterEvent.findMany({
-      where: { pool: 'computer', payerKind: 'universe', personKey: `person:${personId}`, costMicros: { not: null }, occurredAt: { gte: month.start, lt: month.end } },
-      select: { occurredAt: true, costMicros: true },
-    });
-    const drawn = extraDrawn(base, events.map((event) => ({ at: event.occurredAt, micros: toNumber(event.costMicros) })), windows);
+    const inMonth = events.filter((event) => event.occurredAt >= month.start && event.occurredAt < month.end);
+    const drawn = extraDrawn(base, inMonth.map((event) => ({ at: event.occurredAt, micros: toNumber(event.costMicros) })), windows);
     drawn.forEach((micros, index) => (totals[index] += micros));
   }
   return totals;
@@ -379,8 +384,26 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
   const byPerson = new Map<string, typeof grants>();
   for (const grant of grants) byPerson.set(grant.personId, [...(byPerson.get(grant.personId) ?? []), grant]);
   const above = new Map<string, number>();
+  // One read for everyone, not one per person and month: the spending of all of them over the whole span of their grants, sorted out
+  // by person and month here
+  const spans = [...byPerson.values()].map((list) => grantSpan(list, now));
+  const spending =
+    settings.memberAllowanceMicros === null || byPerson.size === 0
+      ? []
+      : await prisma.meterEvent.findMany({
+          where: {
+            pool: 'computer',
+            payerKind: 'universe',
+            personKey: { in: [...byPerson.keys()].map((personId) => `person:${personId}`) },
+            costMicros: { not: null },
+            occurredAt: { gte: monthOf(new Date(Math.min(...spans.map((span) => span.first.getTime())))).start, lt: monthOf(new Date(Math.max(...spans.map((span) => span.last.getTime())))).end },
+          },
+          select: { personKey: true, occurredAt: true, costMicros: true },
+        });
+  const spendingOf = new Map<string, typeof spending>();
+  for (const event of spending) spendingOf.set(event.personKey, [...(spendingOf.get(event.personKey) ?? []), event]);
   for (const [personId, list] of byPerson) {
-    const figures = await aboveUsual(personId, settings.memberAllowanceMicros, list, now);
+    const figures = aboveUsual(settings.memberAllowanceMicros, list, spendingOf.get(`person:${personId}`) ?? [], now);
     list.forEach((grant, index) => above.set(grant.grantKey, figures[index]));
   }
   const given: GivenRow[] = shownGrants.map((grant) => ({

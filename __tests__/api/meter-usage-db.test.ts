@@ -634,6 +634,28 @@ run('usage for people, and cost for us, in a real database', () => {
       // And the person’s row says extra usage runs, until when
       expect((await costsReport(new Date('2026-11-01T00:00:00Z'), range.to, NOW)).people.rows.find((row) => row.name === 'sara')?.extraUntil).toBe(days(10).toISOString());
     });
+    it('reads the computer spending once for everyone, whatever the number of people and months their grants span', async () => {
+      await setUp();
+      const sara = await person('sara');
+      const faisal = await person('faisal');
+      // Sara's grant crosses from October into November, Faisal's is in November: three months of grants between them, two people
+      await recordGrant({ grantKey: `g-${tag}-sara`, personId: sara.id, settlement: 'gift', multiplier: 2, startsAt: days(-30), endsAt: days(10), givenById: faisal.id });
+      await recordGrant({ grantKey: `g-${tag}-faisal`, personId: faisal.id, settlement: 'gift', multiplier: 2, startsAt: days(-10), endsAt: days(10), givenById: sara.id });
+      // Extra usage is drawn first, a month at a time: Sara's 400 in October and 600 in November both come from hers, Faisal's 300 from his
+      await spendComputer(sara, 400, days(-20));
+      await spendComputer(sara, 600, days(-2));
+      await spendComputer(faisal, 300, days(-2));
+      const spy = jest.spyOn(prisma.meterEvent, 'findMany');
+      try {
+        const report = await costsReport(range.from, range.to, NOW);
+        expect(spy.mock.calls.filter(([args]) => (args?.where as { pool?: string } | undefined)?.pool === 'computer')).toHaveLength(1);
+        expect(report.given.find((row) => row.grantKey === `g-${tag}-sara`)?.aboveUsualMicros).toBe(1_000);
+        expect(report.given.find((row) => row.grantKey === `g-${tag}-faisal`)?.aboveUsualMicros).toBe(300);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('says the same end on the person’s page and on the Costs page when grants of one size overlap, or a bigger one ends sooner than a smaller one', async () => {
       await setUp();
       const sara = await person('sara');
