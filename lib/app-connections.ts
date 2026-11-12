@@ -9,6 +9,7 @@ import { findUserByIdentifier } from '@/lib/user-identifier';
 import { createMcpServerSchema } from '@/lib/mcp/server-input';
 import { isReconnectRequired, parseOAuthConfig, refreshBlockedReason } from '@/lib/mcp/oauth-token';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
+import { revokeAtApp } from '@/lib/mcp/revoke';
 
 /**
  * Apps a person connects once (game #2001, "Apps").
@@ -128,8 +129,11 @@ export const addConnectionSchema = createMcpServerSchema
   .safeExtend({ source: z.enum(['link', 'listed']).default('link') })
   .omit({ enabled: true });
 
+/** A connection made from a person's own input is "link"; the list (lib/app-catalog.ts) adds `catalogKey` for its own. */
+type NewConnection = z.infer<typeof addConnectionSchema> & { catalogKey?: string | null };
+
 /** The person connects an app. The way in is stored encrypted and never read back by a screen. */
-export async function createConnection(ownerId: string, input: z.infer<typeof addConnectionSchema>): Promise<AppConnection> {
+export async function createConnection(ownerId: string, input: NewConnection): Promise<AppConnection> {
   return prisma.appConnection.create({
     data: {
       ownerId,
@@ -140,6 +144,7 @@ export async function createConnection(ownerId: string, input: z.infer<typeof ad
       authConfig: input.authConfig ? encryptApiKey(input.authConfig) : null,
       headers: input.headers ?? undefined,
       source: input.source,
+      catalogKey: input.catalogKey ?? null,
     },
   });
 }
@@ -286,6 +291,8 @@ export async function disconnect(ownerId: string, connectionId: string): Promise
   });
   // The sign-in cards that were about it go too; a failed report never undoes the disconnect
   for (const botId of bots) await syncToolSignInNotices(botId);
+  // Best effort, after everything above: the app takes the sign-in back when it said where (never throws)
+  await revokeAtApp(connection);
   return true;
 }
 

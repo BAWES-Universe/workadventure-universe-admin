@@ -3,6 +3,7 @@ import { getSessionUser } from '@/lib/auth-session';
 import { getOAuthCallbackUrl, validateOAuthCallbackUrl } from '@/lib/oauth-callback';
 import { resolve4, resolve6 } from 'dns/promises';
 import { corsHeaders } from '@/lib/cors';
+import { nameFromAddress } from '@/lib/mcp/app-names';
 
 export const runtime = 'nodejs';
 
@@ -579,8 +580,16 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    // Where the app takes a sign-in back (RFC 7009), kept with the sign-in so Disconnect can use it. Only a public address.
+    const revocation = (metadata as unknown as { revocation_endpoint?: unknown }).revocation_endpoint;
+    const revocationUrl = typeof revocation === 'string' && isExternalUrl(revocation) ? revocation : null;
+
     return NextResponse.json({
       discovered: true,
+      // "Signs in with Zapier", and the name field filled from the app (game #2001, Add your own app): from the addresses alone
+      name: nameFromAddress(serverUrl),
+      signsInWith: nameFromAddress(authorizeUrl),
+      revocationUrl,
       authorizeUrl,
       tokenUrl,
       scopesSupported,

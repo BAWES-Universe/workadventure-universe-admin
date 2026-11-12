@@ -78,6 +78,18 @@ export const createMcpServerSchema = z.object({
           return;
         }
       }
+      // Where the app takes a sign-in back (RFC 7009), when it says (game #2001): used once, when the person disconnects, so it
+      // gets the same check as the other two addresses
+      if (parsed.revocationUrl !== undefined && parsed.revocationUrl !== null) {
+        if (typeof parsed.revocationUrl !== 'string' || !isAllowedServerUrl(parsed.revocationUrl)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['authConfig'],
+            message: "OAuth 'revocationUrl' must be a valid, public http or https URL",
+          });
+          return;
+        }
+      }
       // If clientSecret is provided, it must be a non-empty string
       if (parsed.clientSecret !== undefined && parsed.clientSecret !== null) {
         if (typeof parsed.clientSecret !== 'string' || !parsed.clientSecret.toString().trim()) {

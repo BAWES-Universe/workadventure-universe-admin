@@ -1084,6 +1084,8 @@ model AppConnection {
   headers     Json?
   // Where it came from: link = the person pasted its link ("Added by you"); listed = an entry of the super admin's list
   source      String   @default("link") @db.VarChar(20)
+  // The entry of the super admin's list it was made from (source = listed), so the list can say "Connected" and a person has one
+  catalogKey  String?  @map("catalog_key") @db.VarChar(60)
   // The one ticket a sign-in page may bring back: set when a sign-in starts, cleared when it is used, so a replayed return, or
   // one from a sign-in that a newer start replaced, is refused
   signInNonce        String?   @map("sign_in_nonce") @db.VarChar(64)
@@ -1102,8 +1104,33 @@ model AppConnection {
   connectedBy User?    @relation("AppConnectionConnectedBy", fields: [connectedById], references: [id], onDelete: SetNull)
   grants      BotMcpServer[]
 
+  @@unique([ownerId, catalogKey])
   @@index([ownerId])
   @@map("app_connections")
+}
+
+// The apps a person can connect with one tap (#2001): a list a super admin keeps, never written in code. Each entry is an app that
+// signs in through its own official link, with what that sign-in needs (the way in is encrypted and never sent to a browser).
+// Connecting one makes a connection that belongs to the person; nothing is shared. An app that has no entry here can still be
+// added by its link.
+model AppCatalogEntry {
+  id          String   @id @default(uuid())
+  key         String   @unique @db.VarChar(60)
+  name        String   @db.VarChar(255)
+  // One line under the name: "Read, draft and send email"
+  blurb       String   @db.VarChar(200)
+  // The icon's name in the game's icon set, such as brand-gmail
+  icon        String   @default("plug") @db.VarChar(60)
+  serverUrl   String   @map("server_url") @db.Text
+  authType    String   @default("oauth") @map("auth_type") @db.VarChar(20)
+  authConfig  String?  @map("auth_config") @db.Text
+  headers     Json?
+  enabled     Boolean  @default(true)
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("app_catalog_entries")
 }
 
 // One tool of a bot's MCP server (#738): what the server says it is, what we suggest it does, and what a person with
