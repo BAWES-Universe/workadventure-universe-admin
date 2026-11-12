@@ -42,6 +42,8 @@ export default function CostsPage() {
 
   const load = useCallback(async () => {
     const mine = ++latest.current;
+    // The figures showing belong to the old dates, so they go while the new dates load
+    setReport(null);
     setFailed(false);
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
