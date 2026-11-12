@@ -22,6 +22,7 @@ import { PUT as putVoiceDraft } from '@/app/api/bots/[id]/voice/draft/route';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { BRICK_HAS_NO_ROOM } from '@/lib/brick';
+import { keyModels } from '@/lib/ai-key-model-list';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/db', () => ({
@@ -30,15 +31,23 @@ jest.mock('@/lib/db', () => ({
     botsMetric: { findMany: jest.fn() },
     botsConversation: { findMany: jest.fn(), findFirst: jest.fn(), count: jest.fn(), deleteMany: jest.fn() },
     botVoiceDraft: { upsert: jest.fn() },
+    botsAiProvider: { findFirst: jest.fn(), findMany: jest.fn(), findUnique: jest.fn() },
+    appSetting: { findUnique: jest.fn() },
+    user: { findUnique: jest.fn() },
   },
 }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
+// Asking a key's company for its models is not part of what is checked here
+jest.mock('@/lib/ai-key-model-list', () => ({ ...jest.requireActual('@/lib/ai-key-model-list'), keyModels: jest.fn() }));
 
 const db = prisma as unknown as {
   bot: Record<'findUnique' | 'findMany' | 'update', jest.Mock>;
   botsMetric: Record<'findMany', jest.Mock>;
   botsConversation: Record<'findMany' | 'findFirst' | 'count' | 'deleteMany', jest.Mock>;
   botVoiceDraft: Record<'upsert', jest.Mock>;
+  botsAiProvider: Record<'findFirst' | 'findMany' | 'findUnique', jest.Mock>;
+  appSetting: Record<'findUnique', jest.Mock>;
+  user: Record<'findUnique', jest.Mock>;
 };
 const session = getSessionUser as jest.Mock;
 
@@ -76,6 +85,12 @@ beforeEach(() => {
   db.botsConversation.findFirst.mockResolvedValue(null);
   db.botsConversation.count.mockResolvedValue(0);
   db.botsConversation.deleteMany.mockResolvedValue({ count: 0 });
+  db.botsAiProvider.findFirst.mockResolvedValue({ providerId: 'universe-ai-provider', model: 'u-1', supportsVision: false, enabled: true });
+  db.botsAiProvider.findMany.mockResolvedValue([]);
+  db.botsAiProvider.findUnique.mockResolvedValue(null);
+  db.appSetting.findUnique.mockResolvedValue(null);
+  (keyModels as jest.Mock).mockResolvedValue({ ok: true, models: ['m-1', 'm-2'] });
+  db.user.findUnique.mockResolvedValue({ id: SARA.id, name: SARA.name });
 });
 
 afterAll(() => {
@@ -180,8 +195,18 @@ describe('what a Brick may run on (GET /api/me/bot-ai)', () => {
     return { status: response.status, body: await response.json() };
   };
 
-  it('tells its owner why: it is not in a room', async () => {
-    expect(await ask(SARA)).toEqual({ status: 404, body: { error: BRICK_HAS_NO_ROOM } });
+  it('offers its owner Universe AI and all of their own keys, with no universe to lend them to', async () => {
+    db.botsAiProvider.findMany.mockResolvedValue([
+      { providerId: 'key-1', name: 'My key', endpoint: null, apiKeyEncrypted: null, settings: {}, model: 'm-1', supportsVision: false, downSince: null, ifDown: 'universe-ai', replyLimits: null, lends: [] },
+    ]);
+    const { status, body } = await ask(SARA);
+    expect(status).toBe(200);
+    expect(body.current).toBe('universe-ai');
+    expect(body.keys).toHaveLength(1);
+    expect(body.keys[0]).toMatchObject({ id: 'key-1', name: 'My key', universeName: '', limited: false });
+    expect(body.keys[0].models.map((model: { id: string }) => model.id)).toEqual(['m-1', 'm-2']);
+    // Their keys, wherever they are lent: a Brick stands in no universe
+    expect(db.botsAiProvider.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { ownerId: SARA.id } }));
   });
 
   it('answers anyone else, a super admin included, as for a bot that does not exist', async () => {
@@ -195,17 +220,14 @@ describe('what a Brick may run on (GET /api/me/bot-ai)', () => {
 });
 
 describe('a Brick’s voice (PUT /api/bots/:id/voice, PUT /api/bots/:id/voice/draft)', () => {
-  it.each([true, false])('answers "not in a room" when voice is turned %s, and writes nothing', async (enabled) => {
-    const response = await putVoice(request(`/api/bots/${BRICK_ID}/voice`, SARA, { method: 'PUT', body: { enabled } }), params());
-    expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ error: BRICK_HAS_NO_ROOM });
+  // Its owner turns it on and drafts it (see brick-voice.test.ts); anyone else gets "not found" and nothing is written
+  it.each([OMAR, ROOT])('answers "not found" to someone who is not its owner, a super admin included, and writes nothing (%#)', async (who) => {
+    const turnedOn = await putVoice(request(`/api/bots/${BRICK_ID}/voice`, who, { method: 'PUT', body: { enabled: true } }), params());
+    expect(turnedOn.status).toBe(404);
+    expect(await turnedOn.json()).toEqual({ error: 'Bot not found' });
+    const drafted = await putVoiceDraft(request(`/api/bots/${BRICK_ID}/voice/draft`, who, { method: 'PUT', body: { expression: 'restrained' } }), params());
+    expect(drafted.status).toBe(404);
     expect(db.bot.update).not.toHaveBeenCalled();
-  });
-
-  it('answers "not in a room" for a draft, and saves none', async () => {
-    const response = await putVoiceDraft(request(`/api/bots/${BRICK_ID}/voice/draft`, SARA, { method: 'PUT', body: { expression: 'restrained' } }), params());
-    expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ error: BRICK_HAS_NO_ROOM });
     expect(db.botVoiceDraft.upsert).not.toHaveBeenCalled();
   });
 });

@@ -421,8 +421,8 @@ describe('reading a bot’s settings', () => {
     const settings = await readBotSettings('bot-1');
     expect(settings!.roles.map((role) => role.key)).toEqual(['everyone', 'accountant']);
     expect(settings!.roles.map((role) => role.id)).not.toContain('r-admin');
-    expect(settings!.roles[0].defaults).toEqual({ chat: true, dm: true, summon: true, manage: false, change: false, deleteOrSend: false });
-    expect(settings!.roles[1].defaults).toEqual({ chat: false, dm: false, summon: false, manage: false, change: false, deleteOrSend: false });
+    expect(settings!.roles[0].defaults).toEqual({ chat: true, dm: true, call: false, summon: true, manage: false, change: false, deleteOrSend: false });
+    expect(settings!.roles[1].defaults).toEqual({ chat: false, dm: false, call: false, summon: false, manage: false, change: false, deleteOrSend: false });
     state.roles.find((role) => role.id === 'r-acc')!.permissions = flag('MANAGE_BOTS');
     expect((await readBotSettings('bot-1'))!.roles[1].defaults.manage).toBe(true);
   });
