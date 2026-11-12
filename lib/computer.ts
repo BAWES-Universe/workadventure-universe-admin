@@ -422,7 +422,9 @@ export async function renewJob(jobId: string, now: Date = new Date()): Promise<{
 
 /** The job finished: its machine is saved and rests, what it cost is counted, and the next job in line starts. Safe to say twice. */
 export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date()): Promise<JobView | null> {
-  await endJob(jobId, outcome, outcome === 'failed' ? 'error' : null, now);
+  // A job that never started (still in line) did not finish: it is stopped by the person or starts, never "done"
+  const current = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
+  if (current && current.status !== 'queued') await endJob(jobId, outcome, outcome === 'failed' ? 'error' : null, now);
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return job ? jobView(job) : null;
 }
@@ -523,6 +525,9 @@ async function startNext(botId: string, now: Date): Promise<void> {
   if (next) await tryStart(next.id, now);
 }
 
+/** How long before a person's room lapses the sweep renews it: more than the bot server's sweep gap, so one sweep always lands inside it. */
+const PERSON_RENEW_AHEAD_MS = 2 * 60 * 1000;
+
 /**
  * A sweep, asked by the bot server now and then: a running job that stopped renewing its room is stopped safely (its room is
  * settled to what ran, never left holding the envelope), room that nobody holds a job for is given back, and jobs in line are tried
@@ -532,6 +537,16 @@ export async function sweepComputers(now: Date = new Date()): Promise<{ stopped:
   let stopped = 0;
   let released = 0;
   let started = 0;
+  // A person at the keyboard is not a job that went quiet: while the worker waits for them it renews nothing, so the sweep renews
+  // the room for them, a little before it would lapse. If the allowance cannot give more, the job still stops safely.
+  const soon = await prisma.meterReservation.findMany({
+    where: { state: 'held', expiresAt: { gt: now, lte: new Date(now.getTime() + PERSON_RENEW_AHEAD_MS) }, jobId: { not: null }, reservationKey: { startsWith: 'computer:job:' } },
+    take: 200,
+  });
+  for (const reservation of soon) {
+    const job = reservation.jobId ? await prisma.computerJob.findUnique({ where: { id: reservation.jobId } }) : null;
+    if (job && job.status === 'waiting' && job.control === 'person' && job.reservationKey === reservation.reservationKey) await renewJob(job.id, now);
+  }
   const lapsed = await prisma.meterReservation.findMany({ where: { state: 'held', expiresAt: { lte: now }, jobId: { not: null }, reservationKey: { startsWith: 'computer:job:' } }, take: 200 });
   for (const reservation of lapsed) {
     const job = reservation.jobId ? await prisma.computerJob.findUnique({ where: { id: reservation.jobId } }) : null;

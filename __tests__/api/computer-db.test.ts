@@ -386,6 +386,35 @@ run('a Brick’s computer, in a real database', () => {
       expect(names[names.length - 1]).toBe('wake');
     });
 
+    it('keeps the room of a person who is at the keyboard: the sweep renews it before it lapses, and a job that went quiet still stops', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!a.ok) throw new Error('no');
+      await takeOver(sara.brickId, sara.id, minutes(1));
+      // Well past the 10 minutes of the first room, a sweep every minute: the person is still working on it
+      for (let at = 2; at <= 35; at++) await sweepComputers(minutes(at));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'waiting', control: 'person' });
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+      // Handed back, Brick's own job renews its own room: when it goes quiet it is stopped as before
+      await handBack(sara.brickId, sara.id);
+      await sweepComputers(minutes(60));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: a.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'error' });
+    });
+
+    it('a job still in line cannot be finished: only one that started can be done or failed', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      const b = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, NOW);
+      if (!a.ok || !b.ok) throw new Error('no');
+      expect(b.job.status).toBe('queued');
+      expect(await finishJob(b.job.id, 'done', minutes(1))).toMatchObject({ status: 'queued' });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: b.job.id } })).toMatchObject({ status: 'queued', endedAt: null });
+      await finishJob(a.job.id, 'done', minutes(2));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: b.job.id } })).toMatchObject({ status: 'running' });
+    });
+
     it('never says a save happened that did not: a failed save leaves the last saved day as it was', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
