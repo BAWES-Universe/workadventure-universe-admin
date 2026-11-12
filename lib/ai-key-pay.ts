@@ -72,8 +72,10 @@ export const KEY_FOR_BOT_TEXT: Record<Exclude<KeyForBot, { ok: true }>['reason']
  */
 export type KeyForOthers = { ok: true; lendModels: string[] | null } | { ok: false; reason: 'not-lent' | 'not-owners' };
 
-export async function checkKeyForOthers(botId: string, universeId: string): Promise<KeyForOthers> {
-  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { aiProviderRef: true, ownerId: true } });
+export async function checkKeyForOthers(botId: string, universeId: string, known?: { aiProviderRef: string | null; ownerId: string | null }): Promise<KeyForOthers> {
+  // `known` is the bot as the caller read it: a reply that is about to be served on that key is checked against that same key, never
+  // against a second read of the bot (the owner may have changed it between the two), so what is checked is what is served
+  const bot = known ?? (await prisma.bot.findUnique({ where: { id: botId }, select: { aiProviderRef: true, ownerId: true } }));
   const ref = bot?.aiProviderRef;
   if (!bot || !ref) return { ok: true, lendModels: null };
   const key = await prisma.botsAiProvider.findUnique({ where: { providerId: ref }, select: { ownerId: true } });

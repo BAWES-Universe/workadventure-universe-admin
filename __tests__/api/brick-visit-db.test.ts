@@ -18,6 +18,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { createBrick } from '@/lib/brick-create';
 import { checkBotAccess } from '@/lib/bot-access';
+import { checkKeyForOthers } from '@/lib/ai-key-pay';
 import { credentialsForBot } from '@/lib/bot-ai-credentials';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
 import { endStaleVisits, keepVisitAlive, placeOfRoomUrl, startVisit, visitState, whereIsBrick } from '@/lib/brick-visit';
@@ -231,10 +232,31 @@ run('bringing a Brick along, in a real database', () => {
       expect(await feed(universes.closed.roomUrl, [sara.uuid])).toHaveLength(0);
       const kept = await visit(sara.id);
       expect(kept!.seenAt.getTime()).toBeGreaterThan(before.getTime() + 8 * MIN);
-      // Where it was last seen on a map that takes visits is kept, so nothing says it walks in the closed place
-      expect(kept!.roomId).toBe(universes.open.roomId);
+      // The visit is kept, but not standing in the room she left: people there cannot reach a Brick whose person is elsewhere now
+      expect(kept!.roomId).toBeNull();
+      expect(await whereIsBrick(brickId, universes.open.roomUrl)).toBeNull();
+      expect(await whereIsBrick(brickId, null)).toBeNull();
       expect(await whereIsBrick(brickId, universes.closed.roomUrl)).toBeNull();
+      expect((await chat(brickId, omar, 'chat', universes.open.roomUrl)).allowed).toBe(false);
+      // Back where visits are taken, it follows her again
       expect(await feed(universes.second.roomUrl, [sara.uuid])).toHaveLength(1);
+    });
+
+    it('does not describe the room a visit was last in to an owner who may no longer open it (CodeRabbit on #927)', async () => {
+      await startVisit(brickId, sara.id, universes.second.roomUrl);
+      expect(await visitState(brickId, sara.id, null)).toMatchObject({ state: 'visiting' });
+      await prisma.universe.update({ where: { id: universes.second.id }, data: { isPublic: false } });
+      await prisma.room.updateMany({ where: { world: { universeId: universes.second.id } }, data: { isPublic: false } });
+      await prisma.world.updateMany({ where: { universeId: universes.second.id }, data: { isPublic: false } });
+      try {
+        // The same answer as the Brick's reachability (nobody reaches it there) and as the explicit-address branch
+        expect(await whereIsBrick(brickId, null)).toBeNull();
+        expect(await visitState(brickId, sara.id, null)).toEqual({ state: 'none', place: null });
+      } finally {
+        await prisma.universe.update({ where: { id: universes.second.id }, data: { isPublic: true } });
+        await prisma.room.updateMany({ where: { world: { universeId: universes.second.id } }, data: { isPublic: true } });
+        await prisma.world.updateMany({ where: { universeId: universes.second.id }, data: { isPublic: true } });
+      }
     });
 
     it('says nothing of a visit for a Brick that is switched off, and has it again when it is switched back on (Sentry on #927)', async () => {
@@ -296,8 +318,10 @@ run('bringing a Brick along, in a real database', () => {
     });
 
     it('looks people up once for the whole room, never once for each (Sentry on #927)', async () => {
-      await startVisit(brickId, sara.id, universes.open.roomUrl);
-      await startVisit(secondBrickId, omar.id, universes.open.roomUrl).catch(() => undefined);
+      // Two people with a Brick of their own each, both visiting: both reach the batched check
+      const omarsBrick = await createBrick({ ownerId: omar.id, name: 'Omar Brick' });
+      expect((await startVisit(brickId, sara.id, universes.open.roomUrl)).ok).toBe(true);
+      expect((await startVisit(omarsBrick.id, omar.id, universes.open.roomUrl)).ok).toBe(true);
       const one = jest.spyOn(prisma.user, 'findUnique');
       const many = jest.spyOn(prisma.user, 'findMany');
       const memberOne = jest.spyOn(prisma.worldMember, 'findUnique');
@@ -481,6 +505,16 @@ run('bringing a Brick along, in a real database', () => {
       await prisma.aiKeyLend.deleteMany({ where: { providerId: keyId } });
       await prisma.aiKeyLend.create({ data: { providerId: keyId, universeId: universes.second.id } });
       expect(await (await credentials(omar.uuid)).json()).toMatchObject({ source: 'universe-ai', standingInFor: keyId });
+    });
+
+    it('2a. checks the lend against the key the reply is served on, never a second read of the bot (CodeRabbit on #927)', async () => {
+      await onKey();
+      // The owner moves the Brick to Universe AI right after the credentials were read on their key (which is not lent here)
+      await prisma.bot.update({ where: { id: brickId }, data: { aiProviderRef: UNIVERSE_AI_REF } });
+      // A second read of the bot would say "nothing of the owner's to lend": the key that was read is the key that is checked
+      expect(await checkKeyForOthers(brickId, universes.open.id)).toEqual({ ok: true, lendModels: null });
+      expect(await checkKeyForOthers(brickId, universes.open.id, { aiProviderRef: keyId, ownerId: sara.id })).toEqual({ ok: false, reason: 'not-lent' });
+      await prisma.bot.update({ where: { id: brickId }, data: { aiProviderRef: keyId } });
     });
 
     it('2b. refuses with the line only when nothing else can answer: Universe AI is not there to stand in', async () => {

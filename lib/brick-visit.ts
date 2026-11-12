@@ -111,7 +111,7 @@ export async function visitState(brickId: string, ownerId: string, roomUrl: stri
     if (found && (await mayReadRoomBots(found.room, ownerId))) place = found;
   } else if (mine?.roomId) {
     const found = await placeOfRoomId(mine.roomId);
-    if (found) place = found;
+    if (found && (await mayReadRoomBots(found.room, ownerId))) place = found;
   }
   // A place that can't be told (a room that is gone, or one the person may not see) is never shown as a blank name
   if (!place) return { state: 'none', place: null };
@@ -271,9 +271,15 @@ export async function bricksForRoom(roomUrl: string, peopleUuids: string[], now:
   if (seen.length === 0) return { place, ...none };
   const userIds = seen.map((row) => row.userId);
   const sightedAt = enteredAt && enteredAt.getTime() < now.getTime() ? enteredAt : now;
+  // Somewhere else: it moves here unless this sighting is older than the move that put it there, by the same page load's clock
+  const newer = clientId ? [{ roomSince: null }, { roomClient: null }, { roomClient: { not: clientId } }, { roomSince: { lt: sightedAt } }] : undefined;
   if (!place.takesVisits) {
-    // Not on this map, but the person is still here: the visit is kept alive where it was, for the places that take it
-    await prisma.brickVisit.updateMany({ where: { userId: { in: userIds } }, data: { seenAt: now } });
+    // Not on this map, but the person is still here: the visit is kept alive for the places that take it, and it is not left
+    // standing in the room they came from, where people could still reach a Brick whose person is elsewhere now
+    await prisma.brickVisit.updateMany({
+      where: { userId: { in: userIds }, ...(newer ? { AND: [{ OR: newer }] } : {}) },
+      data: { roomId: null, roomSince: sightedAt, roomClient: clientId ?? null, seenAt: now },
+    });
     return { place, ...none };
   }
   // Already in this room: seen now. Somewhere else: moved here only when this sighting is newer than the move that put it there
@@ -281,8 +287,6 @@ export async function bricksForRoom(roomUrl: string, peopleUuids: string[], now:
   await prisma.brickVisit.updateMany({ where: { userId: { in: userIds }, roomId: place.roomId }, data: { seenAt: now } });
   // A visit that began in this room has no time yet: this sighting is the first
   await prisma.brickVisit.updateMany({ where: { userId: { in: userIds }, roomId: place.roomId, roomSince: null }, data: { roomSince: sightedAt, roomClient: clientId ?? null } });
-  // Somewhere else: it moves here unless this sighting is older than the move that put it there, by the same page load's clock
-  const newer = clientId ? [{ roomSince: null }, { roomClient: null }, { roomClient: { not: clientId } }, { roomSince: { lt: sightedAt } }] : undefined;
   await prisma.brickVisit.updateMany({
     where: { userId: { in: userIds }, OR: [{ roomId: null }, { roomId: { not: place.roomId } }], ...(newer ? { AND: [{ OR: newer }] } : {}) },
     data: { roomId: place.roomId, roomSince: sightedAt, roomClient: clientId ?? null, seenAt: now },

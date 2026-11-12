@@ -231,7 +231,7 @@ async function mainCredentials(bot: BotForCredentials, others: Others | null = n
   // the Brick is NOT moved off its key, which is its owner's setup. A Brick is never refused while something can answer,
   // so this person is served Universe AI, on their own allowance like anyone: never the owner's key, never their own.
   // Only when Universe AI itself cannot serve is the person told it can't answer them here.
-  const lent = others ? await checkKeyForOthers(bot.id, others.universeId) : null;
+  const lent = others ? await checkKeyForOthers(bot.id, others.universeId, { aiProviderRef: ref, ownerId: bot.ownerId }) : null;
   if (lent && !lent.ok) {
     const standIn = await universeAi();
     if (standIn.status === 200 && standIn.body.source === 'universe-ai') return { status: 200, body: { ...standIn.body, standingInFor: ref } };
