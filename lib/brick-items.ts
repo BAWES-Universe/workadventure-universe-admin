@@ -203,12 +203,14 @@ export async function readItem(viaBrickId: string, itemId: string, userId: strin
   return row ? { ok: true, item: viewOf(row) } : { ok: false, status: 404, error: 'Not found' };
 }
 
-/** Which cadences make sense for each kind: a reminder is a moment or a daily time; a watch or briefing repeats; a goal may also just wait. */
+/** Which cadences make sense for each kind: a reminder is a moment or a daily time; a watch or briefing repeats; a goal repeats or just waits, never a single moment. */
 function cadenceFits(kind: ItemKind, cadence: Cadence): boolean {
   if (kind === 'reminder') return cadence.type === 'once' || cadence.type === 'daily';
   if (kind === 'schedule') return cadence.type === 'daily' || cadence.type === 'every';
   if (kind === 'watch') return cadence.type === 'every' || cadence.type === 'daily';
-  return true;
+  // A goal lasts until its outcome is reached, so it is never a single moment: a date it cares about is a check it sets (a reminder or a
+  // watch under it). It repeats, or it just waits and says for what.
+  return cadence.type !== 'once';
 }
 
 /**

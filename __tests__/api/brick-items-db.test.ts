@@ -291,17 +291,18 @@ run('goals and tasks, in a real database', () => {
     expect(listed.ok && listed.items.filter((one) => one.state === 'on')).toEqual([]);
   });
 
-  it('a goal whose first check is one moment is not closed by that check unless the outcome was reached', async () => {
+  it('a goal is never a single moment: it repeats or waits, and a date it cares about is a check it sets', async () => {
     const pippa = await person('pippa');
-    const goal = await set(pippa, { kind: 'goal', words: 'Renew my passport', outcome: 'The passport is renewed', cadence: { type: 'once', at: at(HOUR).toISOString() } });
-    const check = await createItem(pippa.brickId, { userId: pippa.uuid, kind: 'watch', words: 'The office page', condition: 'It says ready', cadence: { type: 'every', minutes: 120 }, parentId: goal.id }, NOW);
-    if (!check.ok) throw new Error('expected the check');
+    expect(await createItem(pippa.brickId, { ...remind({ kind: 'goal', outcome: 'The passport is renewed', cadence: { type: 'once', at: at(HOUR).toISOString() } }), userId: pippa.uuid }, NOW)).toMatchObject({ ok: false, status: 400 });
+    const goal = await set(pippa, { kind: 'goal', words: 'Renew my passport', outcome: 'The passport is renewed', cadence: { type: 'every', minutes: 60 } });
+    expect(await changeItem(pippa.brickId, goal.id, { userId: pippa.uuid, action: 'change', change: { cadence: { type: 'once', at: at(2 * HOUR).toISOString() } } }, NOW)).toMatchObject({ ok: false, status: 400 });
+    const check = await createItem(pippa.brickId, { userId: pippa.uuid, kind: 'reminder', words: 'Collect it', cadence: { type: 'once', at: at(3 * HOUR).toISOString() }, parentId: goal.id }, NOW);
+    expect(check).toMatchObject({ ok: true, item: { setBy: 'brick' } });
+    // A report that is not "reached" leaves the goal on and due again; only reaching the outcome closes it, and its checks with it
     const [first] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === goal.id);
-    expect(await finishRun(first.runId, { attempt: first.attempt, state: 'done', progress: { statusLine: 'Still waiting on the office' } }, at(HOUR + 2 * MIN))).toMatchObject({ ok: true, applied: true, item: { state: 'on', statusLine: 'Still waiting on the office' } });
-    // Its own check carries on
-    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: check.item.id } })).toMatchObject({ state: 'on' });
+    expect(await finishRun(first.runId, { attempt: first.attempt, state: 'done', progress: { statusLine: 'Still waiting on the office' } }, at(HOUR + 2 * MIN))).toMatchObject({ ok: true, applied: true, item: { state: 'on', nextDueAt: at(2 * HOUR).toISOString() } });
     expect(await changeItem(pippa.brickId, goal.id, { userId: pippa.uuid, action: 'done' }, at(2 * HOUR))).toMatchObject({ ok: true, item: { state: 'done' } });
-    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: check.item.id } })).toMatchObject({ state: 'done' });
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: (check as { item: { id: string } }).item.id } })).toMatchObject({ state: 'done' });
   });
 
   it('does not let a person at their runs a day fill the batch ahead of everyone else', async () => {
