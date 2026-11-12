@@ -129,6 +129,8 @@ export interface RoomBrickRow {
 }
 
 export interface RoomBricks {
+  /** The room's name, for "It stands at a spot you choose in Headquarters". */
+  roomName: string;
   /** The Bricks standing in this room. Those placed by others come after the viewer's own. */
   here: RoomBrickRow[];
   /** The viewer's own Bricks that can be placed here: every one of theirs that is on, and not at home in this room. */
@@ -163,7 +165,8 @@ export async function bricksOfRoom(roomUrl: string, viewerId: string): Promise<R
   const mine = (await listBricks(viewerId))
     .filter((card) => card.enabled && homesOf.get(card.id) !== place.roomId)
     .map((card) => ({ ...card, homeElsewhere: homesOf.has(card.id) }));
-  return { here: [...rows.filter((row) => row.mine), ...rows.filter((row) => !row.mine)], mine };
+  const room = await prisma.room.findUnique({ where: { id: place.roomId }, select: { name: true } });
+  return { roomName: room?.name ?? '', here: [...rows.filter((row) => row.mine), ...rows.filter((row) => !row.mine)], mine };
 }
 
 /**

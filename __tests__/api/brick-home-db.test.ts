@@ -165,6 +165,7 @@ run('a Brick that lives in a room, in a real database', () => {
       const asHost = await list(host, hosted.roomUrl);
       expect(asHost.status).toBe(200);
       const body = await asHost.json();
+      expect(body.roomName).toBe((await prisma.room.findUniqueOrThrow({ where: { id: hosted.roomId }, select: { name: true } })).name);
       expect(body.here.map((row: { name: string; mine: boolean }) => [row.name, row.mine])).toEqual([['Host Brick', true], ['Brick', false]]);
       expect(body.here.every((row: { canTakeOut: boolean }) => row.canTakeOut)).toBe(true);
       expect(body.here[1].ownerName).toBe('sara');
