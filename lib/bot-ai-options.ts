@@ -5,7 +5,7 @@ import { isIfDown } from '@/lib/ai-key-health';
 import { resolveUniverseAiProvider, UNIVERSE_AI_REF } from '@/lib/universe-ai';
 import { allowedModels, canCallTools, keyModels, lendModels, modelFactsOf, modelSupportsVision, servedModel } from '@/lib/ai-key-model-list';
 import { getServerLimits, keyReplyLimits } from '@/lib/bot-limits';
-import { brickHasNoRoomText, isBrick } from '@/lib/brick';
+import { brickHasNoRoomText, isBrick, ownsBrick } from '@/lib/brick';
 import type { ReplyLimits } from '@/lib/bot-limit-values';
 import { keyVisionModels, readVisionPick, usableVisionKey, type AnotherProblem, type VisionPick } from '@/lib/bot-vision';
 
@@ -74,28 +74,33 @@ export async function botAiOptions(input: {
       })
     : null;
   if (input.botId && !bot) return { ok: false, status: 404, error: 'Bot not found' };
-  // A Brick (game #1992) has no room: what it may run on is not a room's to offer, and its own picker comes with Bricks.
-  // The room in the request is never read for a bot that exists, so a Brick is never judged by a room it is not in.
-  // Only its owner is told why: to anyone else, a super admin included, it is a bot that does not exist.
-  if (bot && isBrick(bot)) return { ok: false, status: 404, error: brickHasNoRoomText(bot, { userId: input.viewer.id }) };
+  // A Brick (game #1992) has no room, so no universe lends it keys and no room's rules say who may choose. Only its owner
+  // chooses, and only from their own keys, all of them, with all of each key's models. To anyone else, a super admin
+  // included, it is a bot that does not exist.
+  const brickOfViewer = bot && isBrick(bot) ? bot : null;
+  if (brickOfViewer && !ownsBrick(brickOfViewer, input.viewer.id)) return { ok: false, status: 404, error: brickHasNoRoomText(brickOfViewer, { userId: input.viewer.id }) };
   const roomId = bot?.roomId ?? input.roomId;
-  if (!roomId) return { ok: false, status: 404, error: 'Room not found' };
+  if (!brickOfViewer && !roomId) return { ok: false, status: 404, error: 'Room not found' };
 
-  const room = await prisma.room.findUnique({
-    where: { id: roomId },
-    select: { world: { select: { universe: { select: { id: true, name: true } } } } },
-  });
-  if (!room) return { ok: false, status: 404, error: 'Room not found' };
+  const room = roomId
+    ? await prisma.room.findUnique({
+        where: { id: roomId },
+        select: { world: { select: { universe: { select: { id: true, name: true } } } } },
+      })
+    : null;
+  if (!brickOfViewer && !room) return { ok: false, status: 404, error: 'Room not found' };
   // Choosing what a bot runs on is part of managing bots there; for a bot that exists, the same bar as reading its
   // configuration, so a bot's own Manage rules also decide who learns whose key it runs on
-  const allowed = input.viewer.isSuperAdmin
+  const allowed = brickOfViewer
+    || input.viewer.isSuperAdmin
     || (bot
-      ? await canManageThisBot(input.viewer.id, null, { id: bot.id, createdById: bot.createdById, roomId, ownerId: null, deletedAt: null }, { creatorPasses: false })
-      : await canManageBots(input.viewer.id, roomId));
+      ? await canManageThisBot(input.viewer.id, null, { id: bot.id, createdById: bot.createdById, roomId: roomId ?? null, ownerId: null, deletedAt: null }, { creatorPasses: false })
+      : await canManageBots(input.viewer.id, roomId as string));
   if (!allowed) {
     return { ok: false, status: 403, error: 'You do not have permission to manage bots in this room' };
   }
-  const universe = room.world.universe;
+  // A Brick stands in no universe: its keys are not lent anywhere, and nothing is limited by a lend
+  const universe = room ? room.world.universe : null;
 
   const viewer = await prisma.user.findUnique({ where: { id: input.viewer.id }, select: { id: true, name: true } });
   const maker = bot ? bot.createdBy : viewer;
@@ -104,12 +109,12 @@ export async function botAiOptions(input: {
   const [universeAi, ownKeys, current, serverLimits] = await Promise.all([
     resolveUniverseAiProvider(),
     prisma.botsAiProvider.findMany({
-      where: { ownerId: input.viewer.id, lends: { some: { universeId: universe.id } } },
+      where: { ownerId: input.viewer.id, ...(universe ? { lends: { some: { universeId: universe.id } } } : {}) },
       orderBy: { createdAt: 'asc' },
-      select: { providerId: true, name: true, endpoint: true, apiKeyEncrypted: true, settings: true, model: true, supportsVision: true, downSince: true, ifDown: true, replyLimits: true, lends: { where: { universeId: universe.id }, select: { models: true } } },
+      select: { providerId: true, name: true, endpoint: true, apiKeyEncrypted: true, settings: true, model: true, supportsVision: true, downSince: true, ifDown: true, replyLimits: true, lends: { where: { universeId: universe?.id ?? '' }, select: { models: true } } },
     }),
     bot?.aiProviderRef && bot.aiProviderRef !== UNIVERSE_AI_REF
-      ? prisma.botsAiProvider.findUnique({ where: { providerId: bot.aiProviderRef }, select: { providerId: true, name: true, ownerId: true, owner: { select: { name: true } }, settings: true, model: true, supportsVision: true, downSince: true, ifDown: true, replyLimits: true, lends: { where: { universeId: universe.id }, select: { models: true } } } })
+      ? prisma.botsAiProvider.findUnique({ where: { providerId: bot.aiProviderRef }, select: { providerId: true, name: true, ownerId: true, owner: { select: { name: true } }, settings: true, model: true, supportsVision: true, downSince: true, ifDown: true, replyLimits: true, lends: { where: { universeId: universe?.id ?? '' }, select: { models: true } } } })
       : Promise.resolve(null),
     getServerLimits(),
   ]);
@@ -128,7 +133,7 @@ export async function botAiOptions(input: {
   const currentModel = current && bot ? servedModel(bot, current, currentLend) : null;
 
   const saved = readVisionPick(bot?.behaviorConfig);
-  const savedKey = saved?.choice === 'another' && bot ? await savedVisionKey(saved, { id: bot.id, createdById: bot.createdById, roomId }, current?.ownerId ?? null, input.viewer.id) : null;
+  const savedKey = saved?.choice === 'another' && bot ? await savedVisionKey(saved, { id: bot.id, createdById: bot.createdById, roomId: bot.roomId, ownerId: bot.ownerId, deletedAt: bot.deletedAt }, current?.ownerId ?? null, input.viewer.id) : null;
 
   return {
     ok: true,
@@ -141,7 +146,7 @@ export async function botAiOptions(input: {
       keys: ownKeys.map((key, index) => {
         const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
         const { lend, models, problem } = keyLists[index];
-        return { id: key.providerId, name: key.name, kind: info?.kind ?? null, kindLabel: info?.label ?? 'AI', logo: info?.logo ?? null, plainIcon: info?.logo ? null : info?.plainIcon ?? 'chip', group: info?.group ?? null, universeName: universe.name, status: key.downSince ? 'down' : 'working', ifDown: isIfDown(key.ifDown) ? key.ifDown : 'universe-ai', model: key.model, output: key.model ? modelFactsOf(key, key.model).output ?? null : null, supportsVision: key.supportsVision, visionModels: keyVisionModels(key).filter((model) => !lend || lend.includes(model)), models, modelsProblem: problem, limited: !!lend, limits: ceilingOf(keyReplyLimits(key)) };
+        return { id: key.providerId, name: key.name, kind: info?.kind ?? null, kindLabel: info?.label ?? 'AI', logo: info?.logo ?? null, plainIcon: info?.logo ? null : info?.plainIcon ?? 'chip', group: info?.group ?? null, universeName: universe?.name ?? '', status: key.downSince ? 'down' : 'working', ifDown: isIfDown(key.ifDown) ? key.ifDown : 'universe-ai', model: key.model, output: key.model ? modelFactsOf(key, key.model).output ?? null : null, supportsVision: key.supportsVision, visionModels: keyVisionModels(key).filter((model) => !lend || lend.includes(model)), models, modelsProblem: problem, limited: !!lend, limits: ceilingOf(keyReplyLimits(key)) };
       }),
       // The model the bot is served, and the key's own Vision models, as the server reads them when it picks one for images
       currentKey:
@@ -157,12 +162,12 @@ export async function botAiOptions(input: {
 /** The key picked for "Another model", by name, and why it can't be used now (null when it can). */
 async function savedVisionKey(
   saved: Extract<VisionPick, { choice: 'another' }>,
-  bot: { id: string; createdById: string | null; roomId: string },
+  bot: { id: string; createdById: string | null; roomId: string | null; ownerId: string | null; deletedAt: Date | null },
   mainKeyOwnerId: string | null,
   viewerId: string
 ): Promise<{ name: string; problem: AnotherProblem | null }> {
-  // Only a room bot gets this far (botAiOptions answers "not in a room" for a Brick)
-  const usable = await usableVisionKey(saved, { ...bot, ownerId: null, deletedAt: null }, { mainKeyOwnerId });
+  // A room bot has a room and no owner; a Brick its owner and no room
+  const usable = await usableVisionKey(saved, bot, { mainKeyOwnerId });
   const problem = usable.ok ? null : usable.problem;
   if (!usable.key) return { name: 'A key that was removed', problem };
   // Someone else's key is named by whose it is, as the key the bot runs on is (#709)
