@@ -727,11 +727,18 @@ run('a Brick’s computer, in a real database', () => {
       await sweepComputers(minutes(10));
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
       expect(provider.calls.filter((call) => call.name === 'rest')).toHaveLength(2);
-      // A rest claimed and never finished (the server stopped there) is let go after a while and rested again
-      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting' } });
-      await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = ${minutes(0)} WHERE "bot_id" = ${sara.brickId}`;
+      // A rest that finished is not claimed any more: later sweeps never rest it again, however long it stays
       await sweepComputers(minutes(30));
+      await sweepComputers(minutes(60));
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
+      expect(provider.calls.filter((call) => call.name === 'rest')).toHaveLength(2);
+      // A rest claimed and never finished (the server stopped there) is let go after a while and rested again
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting', restClaimedAt: minutes(60) } });
+      await sweepComputers(minutes(62));
+      expect(provider.calls.filter((call) => call.name === 'rest')).toHaveLength(2);
+      await sweepComputers(minutes(80));
       expect(provider.calls.filter((call) => call.name === 'rest')).toHaveLength(3);
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).restClaimedAt).toBeNull();
     });
 
     it('computer time the books missed is written however old it is, and newer jobs never push an older one out', async () => {
@@ -826,6 +833,31 @@ run('a Brick’s computer, in a real database', () => {
       await sweepComputers(minutes(3));
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.ok ? reader.job.id : '' } })).toMatchObject({ status: 'running' });
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'running', control: 'brick' });
+    });
+
+    it('a take over that found nothing running, with a job starting before it moves the waiting one, still leaves nothing under Brick’s hands', async () => {
+      const { sara, jobId } = await waitingJob();
+      await requestHandover(jobId, 'details', minutes(1));
+      // The take over has looked for running jobs and found none; a read-only job starts right then
+      const original = prisma.computerJob.findMany.bind(prisma.computerJob);
+      let started: Awaited<ReturnType<typeof startJob>> | null = null;
+      const spy = jest.spyOn(prisma.computerJob, 'findMany').mockImplementation(((...args: Parameters<typeof original>) => {
+        const result = original(...args);
+        if (started === null && (args[0]?.where as { status?: string } | undefined)?.status === 'running') {
+          started = { ok: false, reason: 'off' };
+          return result.then(async (rows) => {
+            spy.mockRestore();
+            started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, minutes(2));
+            return rows;
+          });
+        }
+        return result;
+      }) as typeof prisma.computerJob.findMany);
+      await takeOver(sara.brickId, sara.id, minutes(2));
+      spy.mockRestore();
+      const jobs = await prisma.computerJob.findMany({ where: { botId: sara.brickId } });
+      expect(jobs.filter((job) => job.status === 'running')).toEqual([]);
+      expect(jobs.find((job) => job.id === jobId)).toMatchObject({ status: 'waiting', control: 'person' });
     });
 
     it('a take over and a job starting at the same moment never leave a job running under Brick’s hands while the person has the machine', async () => {

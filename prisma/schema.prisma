@@ -2217,6 +2217,8 @@ model BrickComputer {
   filesBytes    BigInt    @default(0) @map("files_bytes")
   filesSavedAt  DateTime? @map("files_saved_at")
   restoredFrom  DateTime? @map("restored_from")
+  // Set while a rest is claimed and not finished, empty once it is done: a rest a stopped server left half way is told apart from a finished one
+  restClaimedAt DateTime? @map("rest_claimed_at")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 

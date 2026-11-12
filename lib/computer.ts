@@ -395,11 +395,11 @@ async function restIfUnheld(botId: string, now: Date): Promise<boolean> {
   if (!row || !row.providerRef || !provider) return false;
   const holders = () => prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } });
   if ((await holders()) > 0) return false;
-  const claim = await prisma.brickComputer.updateMany({ where: { botId, machine: 'working' }, data: { machine: 'resting' } });
+  const claim = await prisma.brickComputer.updateMany({ where: { botId, machine: 'working' }, data: { machine: 'resting', restClaimedAt: now } });
   if (claim.count !== 1) return false;
   if ((await holders()) > 0) {
     // A job took its place between the count and the claim: the machine is still working
-    await prisma.brickComputer.updateMany({ where: { botId, machine: 'resting' }, data: { machine: 'working' } });
+    await prisma.brickComputer.updateMany({ where: { botId, machine: 'resting' }, data: { machine: 'working', restClaimedAt: null } });
     return false;
   }
   // Its work is saved before it rests, and a save that failed is not claimed
@@ -409,13 +409,15 @@ async function restIfUnheld(botId: string, now: Date): Promise<boolean> {
   } catch (error) {
     console.error('[Computer] Could not rest a machine:', error instanceof Error ? error.message : 'unknown');
     // Still awake: it is "working" again, so the sweep finds it and tries once more
-    await prisma.brickComputer.updateMany({ where: { botId, machine: 'resting' }, data: { machine: 'working' } });
+    await prisma.brickComputer.updateMany({ where: { botId, machine: 'resting' }, data: { machine: 'working', restClaimedAt: null } });
     return false;
   }
+  // The rest is done: no longer claimed, so the sweep never mistakes it for one that was left half way
+  await prisma.brickComputer.updateMany({ where: { botId, machine: 'resting' }, data: { restClaimedAt: null } });
   if ((await holders()) > 0) {
     // A job started while the machine was resting and its wake may have come before the rest: wake it again, so it works
     await provider.wake(row.providerRef).catch((error) => console.error('[Computer] Could not wake a machine:', error instanceof Error ? error.message : 'unknown'));
-    await prisma.brickComputer.updateMany({ where: { botId, machine: 'resting' }, data: { machine: 'working', lastWorkedAt: now } });
+    await prisma.brickComputer.updateMany({ where: { botId, machine: 'resting' }, data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null } });
   }
   return true;
 }
@@ -451,7 +453,7 @@ async function bringUp(botId: string, provider: Provider, now: Date): Promise<vo
   const restoring = row.machine === 'broken';
   await prisma.brickComputer.update({ where: { botId }, data: { machine: restoring ? 'restoring' : 'waking' } });
   await provider.wake(ref);
-  await prisma.brickComputer.update({ where: { botId }, data: { machine: 'working', lastWorkedAt: now, restoredFrom: restoring ? (row.filesSavedAt ?? now) : null } });
+  await prisma.brickComputer.update({ where: { botId }, data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: restoring ? (row.filesSavedAt ?? now) : null } });
 }
 
 /** Progress a running job reports: step n of m. Only the job's own running or waiting state may report it. */
@@ -654,10 +656,10 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   await prisma.brickComputer.updateMany({ where: { machine: 'waking', providerRef: null, updatedAt: { lte: new Date(now.getTime() - 5 * 60 * 1000) } }, data: { machine: 'none' } });
   // A machine that works while no job holds it (a stop that broke half way, a start that finished after a turn off) is put to rest
   // A rest that was claimed and never finished (the server stopped half way) is not left claimed: with no job holding it, it goes back to "working" and the next sweep rests it
-  const stuck = await prisma.brickComputer.findMany({ where: { machine: 'resting', NOT: { providerRef: null }, updatedAt: { lte: new Date(now.getTime() - 5 * 60 * 1000) } }, select: { botId: true }, take: 200 });
+  const stuck = await prisma.brickComputer.findMany({ where: { machine: 'resting', NOT: { providerRef: null }, restClaimedAt: { lte: new Date(now.getTime() - 5 * 60 * 1000) } }, select: { botId: true }, take: 200 });
   for (const machine of stuck) {
     if ((await prisma.computerJob.count({ where: { botId: machine.botId, status: { in: ['running', 'waiting'] } } })) === 0) {
-      await prisma.brickComputer.updateMany({ where: { botId: machine.botId, machine: 'resting' }, data: { machine: 'working' } });
+      await prisma.brickComputer.updateMany({ where: { botId: machine.botId, machine: 'resting' }, data: { machine: 'working', restClaimedAt: null } });
     }
   }
   const idle = await prisma.brickComputer.findMany({ where: { machine: 'working', NOT: { providerRef: null }, updatedAt: { lte: new Date(now.getTime() - 2 * 60 * 1000) } }, select: { botId: true }, take: 200 });
@@ -736,9 +738,11 @@ export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_fou
  */
 export async function takeOver(botId: string, ownerId: string, now: Date = new Date()): Promise<Control> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+  // The jobs already waiting for the person are theirs first: from here a job that starts sees the person has the machine and waits
+  const changed = await prisma.computerJob.updateMany({ where: { botId, status: 'waiting', control: 'brick' }, data: { control: 'person' } });
   // Every job working on the machine is the person's to step in on, the one that writes and any that only read: none is left running
-  // under Brick's hands while the person has the keyboard
-  // Asked again until none is left: a job that began while the others were being moved is found by the next look
+  // under Brick's hands while the person has the keyboard. Asked again until none is left: a job that began while the others were
+  // being moved is found by the next look, and one that begins after sees the person's control above.
   let moved = 0;
   for (let round = 0; round < 5; round++) {
     const runningJobs = await prisma.computerJob.findMany({ where: { botId, status: 'running' } });
@@ -752,7 +756,6 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
       });
     }
   }
-  const changed = await prisma.computerJob.updateMany({ where: { botId, status: 'waiting', control: 'brick' }, data: { control: 'person' } });
   const job = await prisma.computerJob.findFirst({ where: { botId, status: 'waiting' }, orderBy: [{ writes: 'desc' }, { createdAt: 'asc' }], include: JOB_INCLUDE });
   // Asked twice it is the same: already theirs is still theirs
   if (!job || (changed.count === 0 && job.control !== 'person' && moved === 0)) return { ok: false, reason: 'nothing_waiting' };
