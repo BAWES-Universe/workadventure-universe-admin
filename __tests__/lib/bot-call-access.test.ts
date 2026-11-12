@@ -135,10 +135,6 @@ describe('the Call row starts as No', () => {
     for (const action of ['chat', 'dm', 'summon'] as const) expect(await allowed(action, signedIn(USERS.sara))).toBe(true);
   });
 
-  it('never lets Everyone call, whatever Everyone has: the number carries no Call bit', async () => {
-    expect((state.everyone & flag('CALL_BOTS')) === ZERO).toBe(true);
-  });
-
   it('a guest is asked to sign in, even where a rule says Yes for Everyone', async () => {
     state.rules.push({ roleId: 'r-everyone', userId: null, ...withValues(NO_RULE, { call: 'yes' }) });
     expect(await ask('call', GUEST)).toEqual({ allowed: false, code: 'sign_in_required', reason: 'Sign in to call Nora.' });
@@ -178,13 +174,13 @@ describe('a Yes', () => {
     expect(await allowed('call', signedIn(USERS.omar))).toBe(false);
   });
 
-  it('from a role’s rule, or from the role’s own permission, lets its holders call', async () => {
+  it('from a role’s rule lets its holders call, and no role permission does it by itself', async () => {
     join(USERS.sara, [everywhere(ACCOUNTANT)]);
-    join(USERS.omar, [everywhere(role('callers', flag('CALL_BOTS')))]);
+    join(USERS.omar, [everywhere(role('everything', ALL_PERMISSIONS & ~flag('ADMINISTRATOR')))]);
     join(USERS.mishari);
     rule({ roleId: ACCOUNTANT.id }, { call: 'yes' });
     expect(await allowed('call', signedIn(USERS.sara))).toBe(true);
-    expect(await allowed('call', signedIn(USERS.omar))).toBe(true);
+    expect(await allowed('call', signedIn(USERS.omar))).toBe(false);
     expect(await allowed('call', signedIn(USERS.mishari))).toBe(false);
   });
 

@@ -1,4 +1,4 @@
-// Builds a throwaway Postgres (PGlite) from every migration before the Call bots permission (game #2004), saves roles
+// Builds a throwaway Postgres (PGlite) from every migration before the Call rule bit (game #2004), saves roles
 // the way Orbit has them today (plus a few an owner might have changed) and a bot with a rule, runs the migration twice,
 // and prints the roles before, after one run and after two, plus what a bot rule may now hold. It runs as its own process
 // because PGlite loads itself with dynamic imports, which Jest does not allow.
@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
 
 const MIGRATIONS = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../prisma/migrations');
-const TARGET = '20261112080000_call_bots_permission';
+const TARGET = '20261112082000_call_rule_bit';
 
 const db = new PGlite();
 const names = fs

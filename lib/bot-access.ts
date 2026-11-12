@@ -27,10 +27,10 @@ export type BotAction = 'chat' | 'dm' | 'call' | 'summon' | 'change' | 'deleteOr
 
 export const BOT_ACTIONS: readonly BotAction[] = ['chat', 'dm', 'call', 'summon', 'change', 'deleteOrSend'];
 
-const ACTION_PERMISSION: Record<BotAction, PermissionKey> = {
+/** The role permission behind each action. A call has none: only a Yes in a rule, or being the creator, owner, super admin, Admin or a manager, lets someone call. */
+const ACTION_PERMISSION: Record<Exclude<BotAction, 'call'>, PermissionKey> = {
   chat: 'CHAT_BOTS_NEARBY',
   dm: 'DM_BOTS',
-  call: 'CALL_BOTS',
   summon: 'SUMMON_BOTS',
   change: 'BOTS_CHANGE_THINGS',
   deleteOrSend: 'BOTS_DELETE_OR_SEND',
@@ -119,7 +119,7 @@ export function decideBotAccess(input: {
     if (verdict === 'no') return refusal('not_allowed', action, botName, input.fixedReply);
     // Private bot decides who may use the bot at all; changing, deleting and sending are the roles' to decide
     const shutOut = input.privateBot && (action === 'chat' || action === 'dm' || action === 'call' || action === 'summon');
-    if (verdict === 'none' && (shutOut || !has(input.permissions, ACTION_PERMISSION[action]))) {
+    if (verdict === 'none' && (shutOut || (action === 'call' || !has(input.permissions, ACTION_PERMISSION[action])))) {
       return refusal('not_allowed', action, botName, input.fixedReply);
     }
   }

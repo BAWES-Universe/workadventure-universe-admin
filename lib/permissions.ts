@@ -31,7 +31,6 @@ export type PermissionKey =
   | 'SUMMON_BOTS'
   | 'BOTS_CHANGE_THINGS'
   | 'BOTS_DELETE_OR_SEND'
-  | 'CALL_BOTS'
   | 'ADMINISTRATOR';
 
 export type PermissionGroup = 'people' | 'places' | 'broadcast' | 'calls' | 'bots' | 'owner';
@@ -65,7 +64,6 @@ export const PERMISSIONS: readonly PermissionInfo[] = [
   { key: 'SUMMON_BOTS', bit: 16, group: 'bots', label: 'Summon bots', description: 'Lets people, including guests, summon a bot to them in its own room.' },
   { key: 'BOTS_CHANGE_THINGS', bit: 17, group: 'bots', label: 'Have bots change things', description: 'Lets people have a bot create or edit things with its apps, like a Linear issue or a post. Each bot chooses whether it asks first.' },
   { key: 'BOTS_DELETE_OR_SEND', bit: 18, group: 'bots', label: 'Have bots delete or send', description: 'Lets people have a bot delete things, or send email and messages outside Universe, with its apps.' },
-  { key: 'CALL_BOTS', bit: 19, group: 'bots', label: 'Call bots', description: "Lets signed-in people talk out loud with a bot that has a voice, from anywhere. Today's voice, access and usage limits still apply." },
   { key: 'ADMINISTRATOR', bit: 30, group: 'owner', label: 'Administrator', description: "Like owning {universe}: all permissions in every world, gets past every room and area rule, and can't be limited to some worlds." },
 ];
 

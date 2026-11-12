@@ -190,7 +190,7 @@ export async function readBotSettings(botId: string) {
     /** Roles a row can name. Admin is left out: it always passes, so a rule for it would do nothing. */
     roles: roles.map((role) => {
       const permissions = parsePermissions(role.permissions) ?? BigInt(0);
-      const given = (action: RuleAction) => has(permissions, RULE_PERMISSION[action]);
+      const given = (action: RuleAction) => action !== 'call' && has(permissions, RULE_PERMISSION[action]);
       return {
         id: role.id,
         key: role.key,

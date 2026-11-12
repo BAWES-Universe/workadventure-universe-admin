@@ -50,7 +50,7 @@ const role = (over: Partial<RoleRow> & Pick<RoleRow, 'id' | 'key' | 'name'>): Ro
 const EVERYONE_DEFAULT_PERMISSIONS = fromKeys(['CHAT_BOTS_NEARBY', 'DM_BOTS', 'SUMMON_BOTS']);
 
 const ROLES: RoleRow[] = [
-  role({ id: 'admin', key: 'admin', name: 'Admin', builtIn: true, position: 1_000_000, permissions: '1048575', people: 1, color: '#F87171' }),
+  role({ id: 'admin', key: 'admin', name: 'Admin', builtIn: true, position: 1_000_000, permissions: '524287', people: 1, color: '#F87171' }),
   role({ id: 'lead', key: 'lead', name: 'Lead', position: 40, people: 1, canEdit: false }),
   role({ id: 'mod', key: 'moderator', name: 'Moderator', position: 13, people: 1, permissions: toWire(fromKeys(['MODERATE_CALLS'])) }),
   role({ id: 'acc', key: 'accountant', name: 'Accountant', position: 12, people: 2 }),
@@ -344,11 +344,11 @@ describe('a role page', () => {
     for (const group of ['People', 'Places', 'Broadcast', 'Calls and chat', 'Bots', 'Owner level']) {
       expect(screen.getByRole('heading', { name: group })).toBeTruthy();
     }
-    expect(screen.getAllByRole('switch')).toHaveLength(21);
+    expect(screen.getAllByRole('switch')).toHaveLength(20);
     // The universe's name is filled in
     expect(screen.getByText('Reach all of BAWES')).toBeTruthy();
     // Everyone's three bot permissions are on, so they count
-    expect(screen.getByText('3 of 20 on, all from Everyone.', { exact: false })).toBeTruthy();
+    expect(screen.getByText('3 of 19 on, all from Everyone.', { exact: false })).toBeTruthy();
   });
 
   it('shows what Member and Editor inherit on and locked, and saves none of it', async () => {
@@ -370,7 +370,7 @@ describe('a role page', () => {
 
     open('editor');
     await screen.findByRole('heading', { name: 'People' });
-    expect(screen.getByText('4 of 20 on. 3 come from Everyone.', { exact: false })).toBeTruthy();
+    expect(screen.getByText('4 of 19 on. 3 come from Everyone.', { exact: false })).toBeTruthy();
     expect(screen.getByRole('switch', { name: 'Summon bots' }).getAttribute('aria-checked')).toBe('true');
     fireEvent.click(screen.getByRole('switch', { name: 'Go live' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
@@ -475,7 +475,7 @@ describe('a role page', () => {
     open('admin');
     await screen.findByRole('heading', { name: 'People' });
     const switches = screen.getAllByRole('switch') as HTMLButtonElement[];
-    expect(switches).toHaveLength(20);
+    expect(switches).toHaveLength(19);
     expect(switches.every((toggle) => toggle.disabled && toggle.getAttribute('aria-checked') === 'true')).toBe(true);
     expect(screen.getByText(/Admin always has every permission/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Duplicate' })).toBeNull();
@@ -552,7 +552,6 @@ describe('a role page', () => {
       'perm-SUMMON_BOTS',
       'perm-BOTS_CHANGE_THINGS',
       'perm-BOTS_DELETE_OR_SEND',
-      'perm-CALL_BOTS',
     ]);
     expect(within(bots).getByText('Chat with bots nearby')).toBeTruthy();
     expect(within(bots).getByText('Lets people walk up to a bot on the map and chat in its bubble. Everyone in the bubble sees it.')).toBeTruthy();
@@ -580,7 +579,7 @@ describe('a role page', () => {
     // Everyone, guests included, can't have a bot change or delete things until someone turns it on
     expect(on('Have bots change things')).toBe('false');
     expect(on('Have bots delete or send')).toBe('false');
-    expect(screen.getByText('3 of 20 on', { exact: false })).toBeTruthy();
+    expect(screen.getByText('3 of 19 on', { exact: false })).toBeTruthy();
     expect(screen.getByText(/Chat, DM and Summon bots start on/)).toBeTruthy();
   });
 
@@ -588,7 +587,7 @@ describe('a role page', () => {
     serve((url, init) => (url.endsWith('/roles/everyone') && init?.method === 'PATCH' ? json({ role: {} }) : undefined));
     open('everyone');
     fireEvent.click(await screen.findByRole('switch', { name: 'Summon bots' }));
-    expect(screen.getByText('2 of 20 on', { exact: false })).toBeTruthy();
+    expect(screen.getByText('2 of 19 on', { exact: false })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await waitFor(() => {
       const patch = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');

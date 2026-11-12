@@ -34,14 +34,13 @@ describe('role permissions', () => {
       SUMMON_BOTS: 16,
       BOTS_CHANGE_THINGS: 17,
       BOTS_DELETE_OR_SEND: 18,
-      CALL_BOTS: 19,
       ADMINISTRATOR: 30,
     });
     expect(new Set(PERMISSIONS.map((info) => info.bit)).size).toBe(PERMISSIONS.length);
   });
 
-  it('has 20 permissions plus Administrator, and Admin gets all 20', () => {
-    expect(ALL_PERMISSIONS).toBe(BigInt(1048575));
+  it('has 19 permissions plus Administrator, and Admin gets all 19', () => {
+    expect(ALL_PERMISSIONS).toBe(BigInt(524287));
     expect(has(ALL_PERMISSIONS, 'ADMINISTRATOR')).toBe(false);
   });
 
