@@ -17,14 +17,19 @@ export interface OpenRequest {
 
 /** Asks for more. Returns the open request and whether this call made it (a second ask while one waits makes nothing new). */
 export async function askForMore(personId: string, now: Date = new Date()): Promise<{ request: OpenRequest; created: boolean }> {
-  // The partial unique index makes two taps at the same moment one request
-  const created = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
-    INSERT INTO "meter_requests" ("id", "person_id", "what", "created_at")
-    VALUES (${randomUUID()}, ${personId}, 'computer', ${now})
-    ON CONFLICT ("person_id", "what") WHERE "answered_at" IS NULL DO NOTHING
-    RETURNING "id"`);
-  const open = await prisma.meterRequest.findFirstOrThrow({ where: { personId, what: 'computer', answeredAt: null } });
-  return { request: { id: open.id, personId: open.personId, what: open.what, createdAt: open.createdAt }, created: created.length > 0 };
+  // The partial unique index makes two taps at the same moment one request. If an admin answers the open one between the
+  // insert finding it and our read of it, the next round simply asks again.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const made = await prisma.$queryRaw<{ id: string; person_id: string; what: string; created_at: Date }[]>(Prisma.sql`
+      INSERT INTO "meter_requests" ("id", "person_id", "what", "created_at")
+      VALUES (${randomUUID()}, ${personId}, 'computer', ${now})
+      ON CONFLICT ("person_id", "what") WHERE "answered_at" IS NULL DO NOTHING
+      RETURNING "id", "person_id", "what", "created_at"`);
+    if (made[0]) return { request: { id: made[0].id, personId: made[0].person_id, what: made[0].what, createdAt: made[0].created_at }, created: true };
+    const open = await prisma.meterRequest.findFirst({ where: { personId, what: 'computer', answeredAt: null } });
+    if (open) return { request: { id: open.id, personId: open.personId, what: open.what, createdAt: open.createdAt }, created: false };
+  }
+  throw new Error('Could not record the ask for more');
 }
 
 /** The request a person has open, if any. */
