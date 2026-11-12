@@ -213,6 +213,25 @@ run('goals and tasks, in a real database', () => {
     expect(await runsOf(briefing.id)).toHaveLength(1);
   });
 
+  it('a one-off that was sent while it was being paused is Done, so Resume never sends it twice', async () => {
+    const wen = await person('wen');
+    const sent = await set(wen, { cadence: { type: 'once', at: at(HOUR).toISOString() } });
+    const [run] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === sent.id);
+    await changeItem(wen.brickId, sent.id, { userId: wen.uuid, action: 'pause' }, at(HOUR + 2 * MIN));
+    // The reminder had already gone out when the report comes in
+    expect(await finishRun(run.runId, { attempt: run.attempt, state: 'done', outcome: 'spoke', result: 'Sent it' }, at(HOUR + 3 * MIN))).toMatchObject({ ok: true, applied: false, item: { state: 'done' } });
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: sent.id } })).toMatchObject({ state: 'done', nextDueAt: null });
+    expect(await changeItem(wen.brickId, sent.id, { userId: wen.uuid, action: 'resume' }, at(2 * HOUR))).toMatchObject({ ok: false, status: 409 });
+    expect(await claimDueRuns(at(3 * HOUR))).toEqual([]);
+    expect(await runsOf(sent.id)).toHaveLength(1);
+    // One that failed while paused is not done: Resume tries it again
+    const failed = await set(wen, { cadence: { type: 'once', at: at(HOUR).toISOString() } });
+    const [bad] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === failed.id);
+    await changeItem(wen.brickId, failed.id, { userId: wen.uuid, action: 'pause' }, at(HOUR + 2 * MIN));
+    expect(await finishRun(bad.runId, { attempt: bad.attempt, state: 'failed', error: 'No answer' }, at(HOUR + 3 * MIN))).toMatchObject({ ok: true, applied: false, item: { state: 'paused' } });
+    expect(await changeItem(wen.brickId, failed.id, { userId: wen.uuid, action: 'resume' }, at(2 * HOUR))).toMatchObject({ ok: true, item: { state: 'on' } });
+  });
+
   it('a change stops what already started: the run is told no at its next step and its report changes nothing', async () => {
     const eli = await person('eli');
     const item = await set(eli, { kind: 'schedule', cadence: { type: 'every', minutes: 60 } });

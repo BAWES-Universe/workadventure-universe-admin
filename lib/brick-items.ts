@@ -686,6 +686,19 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
     const applied = item.revision === run.revision && item.state === 'on';
     const failuresInRow = report.state === 'failed' ? item.failuresInRow + 1 : 0;
     if (!applied) {
+      // The one change since the claim was a pause, and the run it stopped had already done its work: a reminder that was sent, or a watch
+      // that spoke. Resume would otherwise start the same moment again (a one-off whose time has passed is due now), so it is Done
+      // already, with Reopen. Anything else changed in between (new words, a new time) is meant to run again, and stays as it is.
+      const pausedOnly = item.state === 'paused' && item.revision === run.revision + 1;
+      const cadenceNow = readCadence(item.cadence);
+      const workDone = report.state === 'done' && ((item.kind !== 'goal' && cadenceNow?.type === 'once') || (item.kind === 'watch' && report.outcome === 'spoke'));
+      if (pausedOnly && workDone) {
+        const ended = await tx.brickItem.update({
+          where: { id: item.id },
+          data: { state: 'done', pausedBy: null, nextDueAt: null, doneAt: now, lastRunAt: now, result: report.result ?? item.result, revision: { increment: 1 } },
+        });
+        return { ok: true as const, item: viewOf(ended), applied: false, failuresInRow: item.failuresInRow };
+      }
       return { ok: true as const, item: viewOf(item), applied: false, failuresInRow: item.failuresInRow };
     }
 
