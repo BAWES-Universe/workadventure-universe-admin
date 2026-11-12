@@ -124,6 +124,8 @@ export interface RoomBrickRow {
   canTakeOut: boolean;
   behaviorType: string;
   behaviorConfig: unknown;
+  /** Since when it has lived here (the row's first day), for "here since 10 Nov". */
+  since: string;
 }
 
 export interface RoomBricks {
@@ -143,7 +145,7 @@ export async function bricksOfRoom(roomUrl: string, viewerId: string): Promise<R
   await dropHomesWithoutAccess(place.roomId);
   const homes = await prisma.brickHome.findMany({
     where: { roomId: place.roomId, bot: { enabled: true, deletedAt: null } },
-    select: { botId: true, placedById: true, behaviorType: true, behaviorConfig: true, bot: { select: { name: true, characterTextureId: true, ownerId: true, owner: { select: { name: true } } } } },
+    select: { botId: true, placedById: true, behaviorType: true, behaviorConfig: true, createdAt: true, bot: { select: { name: true, characterTextureId: true, ownerId: true, owner: { select: { name: true } } } } },
     orderBy: { createdAt: 'asc' },
   });
   const rows: RoomBrickRow[] = homes.map((home) => ({
@@ -155,6 +157,7 @@ export async function bricksOfRoom(roomUrl: string, viewerId: string): Promise<R
     canTakeOut: true,
     behaviorType: home.behaviorType,
     behaviorConfig: home.behaviorConfig,
+    since: home.createdAt.toISOString(),
   }));
   const homesOf = new Map((await prisma.brickHome.findMany({ where: { placedById: viewerId }, select: { botId: true, roomId: true } })).map((home) => [home.botId, home.roomId]));
   const mine = (await listBricks(viewerId))

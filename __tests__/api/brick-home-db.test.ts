@@ -168,6 +168,8 @@ run('a Brick that lives in a room, in a real database', () => {
       expect(body.here.map((row: { name: string; mine: boolean }) => [row.name, row.mine])).toEqual([['Host Brick', true], ['Brick', false]]);
       expect(body.here.every((row: { canTakeOut: boolean }) => row.canTakeOut)).toBe(true);
       expect(body.here[1].ownerName).toBe('sara');
+      // "Khalid's Brick · here since 10 Nov": the day it came
+      expect(new Date(body.here[1].since).getTime()).toBeGreaterThan(Date.now() - 60_000);
       expect(JSON.stringify(body)).not.toMatch(/example\.test|secret instructions/);
       await prisma.bot.delete({ where: { id: own2.id } });
     });
