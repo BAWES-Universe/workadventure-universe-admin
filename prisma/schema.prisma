@@ -1035,6 +1035,10 @@ model BrickItem {
   lastRunAt     DateTime? @map("last_run_at")
   // Runs that failed one after another; a good run sets it back to 0
   failuresInRow Int       @default(0) @map("failures_in_row")
+  // Whether the person was told about the failures in a row so far; cleared by the next run that works
+  failureTold   Boolean   @default(false) @map("failure_told")
+  // The run that was asked to tell the person about this row of failures, until it confirms (markTold) or the row starts over
+  tellRunId     String?   @map("tell_run_id") @db.VarChar(36)
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
@@ -1075,6 +1079,10 @@ model BrickItemRun {
   result     String?   @db.VarChar(1000)
   error      String?   @db.VarChar(300)
   finishedAt DateTime? @map("finished_at")
+  // The chat event of the message this run sent, once it is sent: a run handed out again looks here (and for its marker in the
+  // chat) before it writes anything, so a message is never sent twice. Never claimed as exactly once outside Universe.
+  deliveredEventId String? @map("delivered_event_id") @db.VarChar(255)
+  deliveredAt      DateTime? @map("delivered_at")
 
   item BrickItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
 

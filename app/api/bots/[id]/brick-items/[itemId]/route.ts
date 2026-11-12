@@ -25,7 +25,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
 /**
  * PATCH /api/bots/:id/brick-items/:itemId
- *   { userId, action: pause | resume | done | reopen | delete | change, result? (done), change? }
+ *   { userId, action: pause | resume | done | reopen | delete | change | snooze, result? (done), change? }
+ *   snooze: a reminder or briefing comes back after the Limits setting "Snooze" (starting value 1 hour); a one-off that was just delivered is switched on again for that time
  *   change: { words?, condition?, outcome?, cadence?, timeZone?, waitingFor?, statusLine?, steps? }
  * Every action raises the item's revision, so a run that already started is stopped at its next step. Asking twice gives
  * the item as it is. Answers { item }.

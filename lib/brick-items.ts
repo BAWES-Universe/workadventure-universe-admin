@@ -82,7 +82,7 @@ export const itemChangeSchema = z
   })
   .strict();
 
-export const ITEM_ACTIONS = ['pause', 'resume', 'done', 'reopen', 'delete', 'change'] as const;
+export const ITEM_ACTIONS = ['pause', 'resume', 'done', 'reopen', 'delete', 'change', 'snooze'] as const;
 export const itemActionSchema = z
   .object({
     userId: person,
@@ -327,6 +327,25 @@ async function goalIsOn(tx: Tx, goalId: string): Promise<boolean> {
 const wrongState = (state: string): Refused => ({ ok: false, status: 409, code: 'wrong_state', error: `That is not possible while it is ${state}` });
 
 /**
+ * A done goal, task or check taking its place again (Reopen, or Snooze on one that was just delivered) keeps to the same rules as
+ * setting a new one: its Brick is on, a check's goal is on, and the person's goals and tasks (or the goal's checks) are under the most.
+ * Asked inside the person's lock, so nothing else of theirs changes meanwhile. Null when it may come back.
+ */
+async function comingBackProblem(tx: Prisma.TransactionClient, row: ItemRow, ownerId: string, limits: Awaited<ReturnType<typeof getBrickLimits>>) {
+  const bot = await tx.bot.findUnique({ where: { id: row.botId }, select: { enabled: true, deletedAt: true } });
+  if (!bot?.enabled || bot.deletedAt) return { ok: false as const, status: 409 as const, code: 'off' as const, error: 'This Brick is switched off' };
+  if (row.parentId) {
+    if (!(await goalIsOn(tx, row.parentId))) return { ok: false as const, status: 409 as const, code: 'needs_goal' as const, error: 'A check comes back only while its goal is on' };
+    const checks = await tx.brickItem.count({ where: { parentId: row.parentId, state: { in: ['on', 'paused'] } } });
+    if (checks >= limits.itemsPerPerson) return { ok: false as const, status: 422 as const, code: 'too_many' as const, limit: limits.itemsPerPerson, error: `${limits.itemsPerPerson} checks for one goal is the most` };
+  } else {
+    const have = await tx.brickItem.count({ where: { ownerId, parentId: null, state: { in: ['on', 'paused'] } } });
+    if (have >= limits.itemsPerPerson) return { ok: false as const, status: 422 as const, code: 'too_many' as const, limit: limits.itemsPerPerson, error: `${limits.itemsPerPerson} goals and tasks at once is the most` };
+  }
+  return null;
+}
+
+/**
  * The owner's change to one item: pause, resume, done (with its result), reopen, delete, or change what it says or when.
  * Every one raises the revision, so a run that already started is dropped at its next outside step, and nothing new starts
  * once the change is saved. Pausing, finishing or deleting a goal does the same to the checks it set, and only those.
@@ -374,25 +393,35 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
       case 'reopen': {
         if (row.state === 'on') return { ok: true as const, item: viewOf(row) };
         if (row.state !== 'done') return wrongState(row.state);
-        const bot = await tx.bot.findUnique({ where: { id: row.botId }, select: { enabled: true, deletedAt: true } });
-        if (!bot?.enabled || bot.deletedAt) return { ok: false as const, status: 409 as const, code: 'off' as const, error: 'This Brick is switched off' };
-        // Reopening takes a place again, so it keeps to the same limits as setting a new one: the person's goals and tasks, and for a check
-        // its goal's checks, and its goal has to be on (this change holds the person's lock, so nothing else of theirs changes meanwhile)
-        if (row.parentId) {
-          if (!(await goalIsOn(tx, row.parentId))) return { ok: false as const, status: 409 as const, code: 'needs_goal' as const, error: 'A check comes back only while its goal is on' };
-          const checks = await tx.brickItem.count({ where: { parentId: row.parentId, state: { in: ['on', 'paused'] } } });
-          if (checks >= limits.itemsPerPerson) return { ok: false as const, status: 422 as const, code: 'too_many' as const, limit: limits.itemsPerPerson, error: `${limits.itemsPerPerson} checks for one goal is the most` };
-        } else {
-          const have = await tx.brickItem.count({ where: { ownerId, parentId: null, state: { in: ['on', 'paused'] } } });
-          if (have >= limits.itemsPerPerson) return { ok: false as const, status: 422 as const, code: 'too_many' as const, limit: limits.itemsPerPerson, error: `${limits.itemsPerPerson} goals and tasks at once is the most` };
-        }
+        const refused = await comingBackProblem(tx, row, ownerId, limits);
+        if (refused) return refused;
         // Starts again from the new revision, counted from now: a one-off that has passed is due now, once
         const due = cadence.type === 'once' ? (firstDue(cadence, row.timeZone, now) ?? now) : firstDue(cadence, row.timeZone, now);
-        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, nextDueAt: due, failuresInRow: 0, ...bump });
+        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, nextDueAt: due, failuresInRow: 0, failureTold: false, tellRunId: null, ...bump });
       }
       case 'delete': {
         await moveChecks(tx, row.id, ['on', 'paused', 'done'], { state: 'deleted', pausedBy: null }, now, false);
         return finish({ state: 'deleted', pausedBy: null, nextDueAt: null, ...bump });
+      }
+      case 'snooze': {
+        // Snooze is for a reminder or a briefing, on the person's tap on the message it just sent (or before it comes)
+        if (row.kind !== 'reminder' && row.kind !== 'schedule') return { ok: false as const, status: 409 as const, code: 'wrong_state' as const, error: 'Only a reminder or a briefing can be snoozed' };
+        if (row.state !== 'on' && row.state !== 'done') return wrongState(row.state);
+        if (cadence.type === 'none') return wrongState(row.state);
+        // A repeating one the person marked Done stays done (Reopen is how it comes back); only a delivered one-off comes back by Snooze
+        if (row.state === 'done' && cadence.type !== 'once') return wrongState(row.state);
+        // A done one coming back takes its place again, so it keeps to the same limits as a reopen: the Brick on, the goal on, the most
+        if (row.state === 'done') {
+          const refused = await comingBackProblem(tx, row, ownerId, limits);
+          if (refused) return refused;
+        }
+        // A one-off that is not due yet moves from the moment it was due (an early or stale tap only ever puts it later, never earlier);
+        // anything else comes back this much after the tap, a repeating one then carrying on from there
+        const from = cadence.type === 'once' && row.state === 'on' && row.nextDueAt && row.nextDueAt > now ? row.nextDueAt : now;
+        const later = new Date(from.getTime() + limits.snooze * MINUTE);
+        // A one-off comes back at the new time (done ones too: they have just been delivered); a repeating one is moved once and carries on from there
+        const moved: Cadence = cadence.type === 'once' ? { type: 'once', at: later.toISOString() } : cadence;
+        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, cadence: moved as unknown as Prisma.InputJsonValue, nextDueAt: later, ...(row.state === 'done' ? { failuresInRow: 0, failureTold: false, tellRunId: null } : {}), ...bump });
       }
       case 'change': {
         const change = input.change;
@@ -475,6 +504,10 @@ export interface ClaimedRun {
   attempt: number;
   /** When the run is given up if it has not reported. */
   leaseUntil: string;
+  /** The words this run's message carries somewhere a person can't see, so a run handed out again can find it in the chat before it writes (look for this, then for `deliveredEventId`). */
+  marker: string;
+  /** Set when the message was sent and the run was handed out again before it finished: do not send it again. */
+  deliveredEventId: string | null;
 }
 
 const claimedOf = (run: Prisma.BrickItemRunGetPayload<{ include: { item: { include: { owner: { select: { uuid: true } } } } } }>): ClaimedRun => {
@@ -497,6 +530,8 @@ const claimedOf = (run: Prisma.BrickItemRunGetPayload<{ include: { item: { inclu
     fresh: run.fresh,
     attempt: run.attempts,
     leaseUntil: run.leaseUntil.toISOString(),
+    marker: `brick-run:${run.id}`,
+    deliveredEventId: run.deliveredEventId,
   };
 };
 const RUN_INCLUDE = { item: { include: { owner: { select: { uuid: true } } } } } as const;
@@ -660,7 +695,7 @@ export async function checkRun(runId: string, attempt: number, now: Date = new D
   return { ok: true };
 }
 
-export type RunFinished = { ok: true; item: ItemView; applied: boolean; failuresInRow: number } | { ok: false; status: 404 | 409; error: string };
+export type RunFinished = { ok: true; item: ItemView; applied: boolean; failuresInRow: number; tellPerson: boolean } | { ok: false; status: 404 | 409; error: string };
 
 /**
  * The bot server reports how a run went. The run is recorded as reported, always: every run, failed ones too, is in
@@ -669,6 +704,7 @@ export type RunFinished = { ok: true; item: ItemView; applied: boolean; failures
  * a change or a delete it is not (`applied` false). Reported twice, the first report stands.
  */
 export async function finishRun(runId: string, report: z.infer<typeof runReportSchema>, now: Date = new Date()): Promise<RunFinished> {
+  const limits = await getBrickLimits();
   return prisma.$transaction(async (tx) => {
     const found = await tx.brickItemRun.findUnique({ where: { id: runId }, select: { itemId: true } });
     if (!found) return { ok: false as const, status: 404 as const, error: 'Run not found' };
@@ -697,14 +733,19 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
           where: { id: item.id },
           data: { state: 'done', pausedBy: null, nextDueAt: null, doneAt: now, lastRunAt: now, result: report.result ?? item.result, revision: { increment: 1 } },
         });
-        return { ok: true as const, item: viewOf(ended), applied: false, failuresInRow: item.failuresInRow };
+        return { ok: true as const, item: viewOf(ended), applied: false, failuresInRow: item.failuresInRow, tellPerson: false };
       }
-      return { ok: true as const, item: viewOf(item), applied: false, failuresInRow: item.failuresInRow };
+      return { ok: true as const, item: viewOf(item), applied: false, failuresInRow: item.failuresInRow, tellPerson: false };
     }
 
     const kind = item.kind as ItemKind;
     const cadence = readCadence(item.cadence);
-    const data: Prisma.BrickItemUpdateInput = { lastRunAt: now, failuresInRow };
+    // Told once per row of failures: the first reported failure at or past the number tells if nobody was told yet (a run that was given up
+    // without a report counts in the row and tells nothing itself), and a run that works starts the row over
+    const tellAt = kind === 'reminder' || kind === 'schedule' ? 1 : limits.failuresBeforeTelling;
+    // It is kept as told only when the bot server says it did tell (markTold), so a tell that failed is asked for again with the next failure
+    const tellPerson = report.state === 'failed' && failuresInRow >= tellAt && !item.failureTold;
+    const data: Prisma.BrickItemUpdateInput = { lastRunAt: now, failuresInRow, ...(report.state === 'failed' ? (tellPerson ? { tellRunId: runId } : {}) : { failureTold: false, tellRunId: null }) };
     if (report.progress && kind === 'goal') {
       if (report.progress.statusLine !== undefined) data.statusLine = report.progress.statusLine;
       if (report.progress.steps !== undefined) data.steps = report.progress.steps;
@@ -722,6 +763,38 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
       if (goalReached) await moveChecks(tx, item.id, ['on', 'paused'], { state: 'done', pausedBy: null, doneAt: now }, now, false);
     }
     const updated = await tx.brickItem.update({ where: { id: item.id }, data });
-    return { ok: true as const, item: viewOf(updated), applied: true, failuresInRow };
+    // A reminder or a briefing tells the person on the first failure; a watch or a goal after a number of failures in a row that a
+    // super admin sets. Told once as it reaches that number, never again for each failure after it.
+    return { ok: true as const, item: viewOf(updated), applied: true, failuresInRow, tellPerson };
   });
 }
+
+/**
+ * The run's message went out: keep where it went, once, right after it was sent and before the run is reported. A run that is
+ * handed out again (its server stopped between the send and the report) is given this event id and does not send again. The
+ * first one stands; the same id twice is fine; a different one is refused so a second send shows up instead of hiding.
+ */
+export async function markDelivered(runId: string, eventId: string, now: Date = new Date()): Promise<{ ok: true; eventId: string; first: boolean } | { ok: false; status: 404 | 409; error: string }> {
+  const run = await prisma.brickItemRun.findUnique({ where: { id: runId }, select: { id: true } });
+  if (!run) return { ok: false, status: 404, error: 'Run not found' };
+  const { count } = await prisma.brickItemRun.updateMany({ where: { id: runId, deliveredEventId: null }, data: { deliveredEventId: eventId, deliveredAt: now } });
+  if (count > 0) return { ok: true, eventId, first: true };
+  const kept = await prisma.brickItemRun.findUniqueOrThrow({ where: { id: runId }, select: { deliveredEventId: true } });
+  return kept.deliveredEventId === eventId ? { ok: true, eventId, first: false } : { ok: false, status: 409, error: 'This run already sent a message' };
+}
+
+/**
+ * The bot server told the person about a row of failures (the run's `tellPerson` was true): keep that it was told, so the next
+ * failure in the same row does not tell again. Called only after the tell went through; if it never comes, the next failure asks for
+ * the tell again, so a tell that failed is never lost. Only the run that was asked to tell can confirm it, so a late call never marks a newer row of failures.
+ */
+export async function markTold(runId: string): Promise<{ ok: true; told: boolean } | { ok: false; status: 404; error: string }> {
+  const run = await prisma.brickItemRun.findUnique({ where: { id: runId }, select: { itemId: true } });
+  if (!run) return { ok: false, status: 404, error: 'Run not found' };
+  // Only the run that was asked to tell, and only while its row of failures is still the item's: a late confirmation from a row that has
+  // since started over (a run worked, or the item was reopened) matches nothing and marks nothing
+  const { count } = await prisma.brickItem.updateMany({ where: { id: run.itemId, tellRunId: runId, failureTold: false }, data: { failureTold: true, tellRunId: null } });
+  return { ok: true, told: count > 0 };
+}
+
+export const deliveredSchema = z.object({ eventId: z.string().trim().min(1).max(255) }).strict();
