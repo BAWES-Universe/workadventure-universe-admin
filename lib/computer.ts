@@ -399,8 +399,10 @@ export async function reportProgress(jobId: string, progress: { stepDone: number
  */
 export async function renewJob(jobId: string, now: Date = new Date()): Promise<{ ok: true } | { ok: false; reason: 'allowance' | 'pool' | 'closed' | 'over' }> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
-  if (!job || isOver(job.status) || !job.reservationKey) return { ok: false, reason: 'over' };
+  if (!job || isOver(job.status)) return { ok: false, reason: 'over' };
+  // A job in line has no room yet: nothing to renew, and it is not over
   if (job.status === 'queued') return { ok: true };
+  if (!job.reservationKey) return { ok: false, reason: 'over' };
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
   const settings = await getMeterSettings();
@@ -421,7 +423,8 @@ export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: 
 /** Stop: from the person's tap. The work so far is kept. Null when it is not their Brick. */
 export async function stopJobFor(botId: string, ownerId: string, now: Date = new Date()): Promise<ComputerView | null> {
   if (!(await brickOf(botId, ownerId))) return null;
-  const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true } });
+  // Stop ends what is running or waiting for them, and what is in line too (a job waiting for the allowance must not start later)
+  const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting', 'queued'] } }, select: { id: true } });
   for (const job of jobs) await endJob(job.id, 'stopped', 'person', now);
   return computerView(botId, ownerId, now);
 }
@@ -568,13 +571,24 @@ export async function requestHandover(jobId: string, waitingFor: WaitingFor, now
 
 export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'nothing_waiting' };
 
-/** Take over: the person has the mouse and keyboard, only while the job waits for them. Their own Brick only. */
-export async function takeOver(botId: string, ownerId: string): Promise<Control> {
+/**
+ * Take over: the person has the mouse and keyboard. Offered while the job waits for them, and while it works too (the mock lets
+ * them step in at any time): a working job then waits for them, its stretch so far counted, the machine staying awake. Their own Brick only.
+ */
+export async function takeOver(botId: string, ownerId: string, now: Date = new Date()): Promise<Control> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+  const running = await prisma.computerJob.findFirst({ where: { botId, status: 'running' } });
+  if (running) {
+    const stretch = running.stretchStarted ? Math.max(0, Math.round((now.getTime() - running.stretchStarted.getTime()) / SECOND)) : 0;
+    await prisma.computerJob.updateMany({
+      where: { id: running.id, status: 'running' },
+      data: { status: 'waiting', waitingFor: null, control: 'person', secondsRun: running.secondsRun + stretch, stretchStarted: now, readyWhat: null, readyWhere: null },
+    });
+  }
   const changed = await prisma.computerJob.updateMany({ where: { botId, status: 'waiting', control: 'brick' }, data: { control: 'person' } });
   const job = await prisma.computerJob.findFirst({ where: { botId, status: 'waiting' }, include: JOB_INCLUDE });
   // Asked twice it is the same: already theirs is still theirs
-  if (!job || (changed.count === 0 && job.control !== 'person')) return { ok: false, reason: 'nothing_waiting' };
+  if (!job || (changed.count === 0 && job.control !== 'person' && !running)) return { ok: false, reason: 'nothing_waiting' };
   return { ok: true, job: jobView(job) };
 }
 
@@ -660,6 +674,11 @@ export async function settleEffect(jobId: string, key: string, state: 'done' | '
     where: { jobId, effectKey: key, state: 'planned' },
     data: { state, settledAt: new Date(), ...(evidence !== undefined ? { evidence: evidence === null ? null : evidence.slice(0, 500) } : {}) },
   });
+  if (count > 0) {
+    // What Brick named is put in (or confirmed not): the tap is spent, and the next hand-over names its own
+    const effect = await prisma.computerEffect.findUnique({ where: { jobId_effectKey: { jobId, effectKey: key } }, select: { kind: true } });
+    if (effect?.kind === 'details') await prisma.computerJob.updateMany({ where: { id: jobId }, data: { readyWhat: null, readyWhere: null } });
+  }
   return count > 0;
 }
 
@@ -681,9 +700,15 @@ export async function removeMachineBeforeDelete(botId: string): Promise<boolean>
   if (!(await saveCopy(botId, row.providerRef, provider))) return false;
   try {
     await provider.remove(row.providerRef);
-    return true;
   } catch (error) {
     console.error('[Computer] Could not remove a machine:', error instanceof Error ? error.message : 'unknown');
     return false;
   }
+  // The machine is gone: say so at once, so a later try (if the Brick's own delete fails) does not save a copy of a machine that is not there
+  try {
+    await prisma.brickComputer.update({ where: { botId }, data: { providerRef: null, machine: 'none' } });
+  } catch (error) {
+    console.error('[Computer] A machine was removed but its record was not cleared:', error instanceof Error ? error.message : 'unknown');
+  }
+  return true;
 }

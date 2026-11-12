@@ -275,6 +275,16 @@ run('a Brick’s computer, in a real database', () => {
       expect((await computerView(sara.brickId, sara.id))?.machine).toBe('resting');
     });
 
+    it('renewing a job that is still in line is fine, not over', async () => {
+      const sara = await person('sara');
+      await setUp({ memberAllowanceMicros: 50_000 });
+      await giveComputer(sara.brickId, sara.id);
+      const queued = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!queued.ok) throw new Error('no');
+      expect(queued.job.status).toBe('queued');
+      expect(await renewJob(queued.job.id, minutes(1))).toEqual({ ok: true });
+    });
+
     it('keeps a renewing job going while there is room, and gives every held room back when a job ends or lapses', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
@@ -395,6 +405,29 @@ run('a Brick’s computer, in a real database', () => {
       expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true, job: { status: 'running' } });
     });
 
+    it('lets the person take over while the job is still working: it waits for them, the stretch so far is counted, and hand back carries on', async () => {
+      const { sara, jobId } = await waitingJob();
+      const taken = await takeOver(sara.brickId, sara.id, minutes(2));
+      expect(taken).toMatchObject({ ok: true, job: { status: 'waiting', control: 'person', waitingFor: null } });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ secondsRun: 120 });
+      // Asked twice it is the same and counts nothing more
+      expect(await takeOver(sara.brickId, sara.id, minutes(3))).toMatchObject({ ok: true, job: { control: 'person' } });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ secondsRun: 120 });
+      expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true, job: { status: 'running', control: 'brick' } });
+    });
+
+    it('clears what Brick named once the details were put in (or confirmed not), so the tap is spent', async () => {
+      const { sara, jobId } = await waitingJob();
+      await requestHandover(jobId, 'details', minutes(1), { what: 'Your details', where: 'Step 1' });
+      await takeOver(sara.brickId, sara.id);
+      const asked = await fillInDetails(sara.brickId, sara.id);
+      const key = asked.ok ? asked.job.detailsToFill[0].key : '';
+      await planEffect(jobId, { key, kind: 'details' });
+      expect(await settleEffect(jobId, key, 'done', 'step 1')).toBe(true);
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ readyWhat: null, readyWhere: null });
+      expect(await fillInDetails(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'nothing_ready' });
+    });
+
     it('nothing is waiting, nothing to take over', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
@@ -493,6 +526,30 @@ run('a Brick’s computer, in a real database', () => {
       await undoBrickDelete(sara.brickId, sara.id, minutes(2));
       expect(provider.calls.length).toBe(before);
       expect(await prisma.computerJob.count({ where: { botId: sara.brickId, status: { in: ['queued', 'running', 'waiting'] } } })).toBe(0);
+    });
+
+    it('Stop ends a job waiting for the allowance too, so it never starts later', async () => {
+      const sara = await person('sara');
+      await setUp({ memberAllowanceMicros: 50_000 });
+      await giveComputer(sara.brickId, sara.id);
+      const queued = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!queued.ok) throw new Error('no');
+      const view = await stopJobFor(sara.brickId, sara.id, minutes(1));
+      expect(view?.queued).toEqual([]);
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: queued.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'person' });
+    });
+
+    it('once a machine was removed, says so at once: a retried delete does not save a copy of a machine that is gone', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      await finishJob(job.job.id, 'done', minutes(1));
+      expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ providerRef: null, machine: 'none' });
+      const calls = provider.calls.length;
+      expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
+      expect(provider.calls.length).toBe(calls);
     });
 
     it('removes the machine for good only after its files were saved; a save that failed leaves it for the next sweep', async () => {

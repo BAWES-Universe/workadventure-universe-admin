@@ -94,7 +94,11 @@ export async function removeGoneBricks(now: Date = new Date(), ownerId?: string)
   const removed: string[] = [];
   for (const { id } of gone) {
     // Its computer goes only after its files were saved; if that did not happen the Brick waits for the next sweep (game #2000)
-    if (!(await removeMachineBeforeDelete(id))) continue;
+    if (!(await removeMachineBeforeDelete(id))) {
+      // Kept for the next sweep, and said so: a computer that cannot be saved or removed (its provider is off or changed) is looked at, not lost quietly
+      console.warn(`[Brick delete] Brick ${id} waits: its computer's files could not be saved or its machine could not be removed`);
+      continue;
+    }
     // Still only one whose time has passed: the condition is asked again in the delete itself
     const where = { id, roomId: null, goneAt: { lte: now } };
     const { count } = await deleteWithHiddenBotData(where, () => prisma.bot.deleteMany({ where }));
