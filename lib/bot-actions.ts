@@ -743,6 +743,26 @@ export async function endAllApprovals(db: Db, botId: string, now: Date = new Dat
   return { grants: grants.count, requests };
 }
 
+/** Why a remembered approval ended when the app it was for was taken away from a Brick or disconnected (game #2001). */
+export const ENDED_BY_APP_REMOVED = 'app_removed';
+
+/**
+ * An app that a Brick used is taken away from it, or disconnected (game #2001): every remembered approval for it ends, and every
+ * card for it that waits, or was approved and has not started, is closed, so nothing a person said yes to before can still send
+ * or change anything through it. `serverIds` are the Brick's rows for the app, which is what the bot server names a connection
+ * by (`connectionRef`). A request already running keeps its own record, as with a deleted Brick.
+ */
+export async function endApprovalsForServers(db: Db, serverIds: string[], now: Date = new Date()): Promise<{ grants: number; requests: number }> {
+  if (serverIds.length === 0) return { grants: 0, requests: 0 };
+  const grants = await db.botActionGrant.updateMany({ where: { connectionRef: { in: serverIds }, revokedAt: null }, data: { revokedAt: now, revokedReason: ENDED_BY_APP_REMOVED } });
+  const open = await db.botActionRequest.findMany({ where: { connectionRef: { in: serverIds }, status: { in: ['waiting', 'approved'] } }, select: { id: true, revision: true } });
+  let requests = 0;
+  for (const row of open) {
+    if (await move(db, row, ['waiting', 'approved'], { status: 'closed', closedReason: 'revoked', finishedAt: now }, 'revoke', null)) requests += 1;
+  }
+  return { grants: grants.count, requests };
+}
+
 /** One remembered approval that is still alive, as the bot's Approvals page lists it ("Allowed more right now"). */
 export interface ActiveGrantView {
   id: string;

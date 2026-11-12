@@ -1,11 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { resolveRequestedScopes } from '@/lib/mcp/oauth-token';
+import { startOAuth } from '@/lib/mcp/oauth-start';
+import { effectiveServer, newSignInNonce } from '@/lib/app-connections';
 import { getSessionUser } from '@/lib/auth-session';
 import { canManageBotMcpServers } from '@/lib/bot-permissions';
-import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
-import { getOAuthCallbackUrl, getOAuthCallbackBase, validateOAuthCallbackUrl } from '@/lib/oauth-callback';
-import crypto from 'crypto';
+import { decryptApiKey } from '@/lib/encryption';
 import { corsHeaders } from '@/lib/cors';
 
 export const runtime = 'nodejs';
@@ -56,12 +55,14 @@ export async function GET(
     // Load the MCP server config
     const server = await prisma.botMcpServer.findUnique({
       where: { id: serverId },
-      include: { bot: { select: { id: true, createdById: true, roomId: true, ownerId: true, deletedAt: true, name: true } } },
+      include: { bot: { select: { id: true, createdById: true, roomId: true, ownerId: true, deletedAt: true, name: true } }, connection: true },
     });
 
     if (!server || server.botId !== botId) {
       return NextResponse.json({ error: 'Server not found' }, { status: 404, headers: corsHeaders(request) });
     }
+    // A Brick's grant on a person's connection signs in through the connection: its link and way in are the connection's
+    const effective = effectiveServer(server);
 
     // Gate: admin token, or someone who can manage this bot's MCP servers
     if (!isAdminToken) {
@@ -74,7 +75,7 @@ export async function GET(
       }
     }
 
-    if (server.authType !== 'oauth') {
+    if (effective.authType !== 'oauth') {
       return NextResponse.json(
         { error: 'Server authType must be "oauth" to start OAuth flow' },
         { status: 400, headers: corsHeaders(request) }
@@ -90,7 +91,7 @@ export async function GET(
       scopesSupported?: string[] | null;
     };
     try {
-      const decrypted = decryptApiKey(server.authConfig!);
+      const decrypted = decryptApiKey(effective.authConfig!);
       oauthConfig = JSON.parse(decrypted);
     } catch {
       return NextResponse.json(
@@ -113,126 +114,21 @@ export async function GET(
       );
     }
 
-    // Get redirect URL from query param or build default
-    // Must always be absolute — it's stored in the state token and later passed to
-    // new URL() in the callback endpoint. Relative paths like "/admin/bots/..." would
-    // throw TypeError: Invalid URL.
-    const { searchParams } = new URL(request.url);
-    const requestOrigin = new URL(request.url).origin;
-    let redirectUrl = searchParams.get('redirectUrl');
-    if (redirectUrl) {
-      // Validate redirectUrl against allowed origins to prevent open redirect
-      const allowedOrigins = [
-        requestOrigin,
-        ...(process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean),
-      ];
-      const isAllowed = allowedOrigins.some((origin) => {
-        try {
-          return new URL(redirectUrl!).origin === origin;
-        } catch {
-          return false;
-        }
-      });
-      if (!isAllowed) {
-        redirectUrl = `${requestOrigin}/admin/bots/${botId}`;
-      }
-    } else {
-      const origin = process.env.CORS_ALLOWED_ORIGINS?.split(',')[0] || requestOrigin;
-      redirectUrl = `${origin}/admin/bots/${botId}`;
-    }
-
-    // Callback URL is always the admin API's OAuth callback endpoint.
-    // ADMIN_API_URL must be set to a browser-accessible URL (not an internal Docker hostname).
-    const callbackUrl = getOAuthCallbackUrl();
-    if (!callbackUrl) {
-      return NextResponse.json(
-        { error: 'ADMIN_API_URL environment variable is not configured' },
-        { status: 500, headers: corsHeaders(request) }
-      );
-    }
-    const callbackValidation = validateOAuthCallbackUrl(callbackUrl);
-    if (callbackValidation) {
-      return NextResponse.json(
-        { error: callbackValidation },
-        { status: 500, headers: corsHeaders(request) }
-      );
-    }
-    const callbackBase = getOAuthCallbackBase()!;
-    const redirectUri = callbackUrl;
-
-    // Generate PKCE code verifier and challenge (S256)
-    const codeVerifier = crypto.randomBytes(32).toString('base64url');
-    const codeChallenge = crypto
-      .createHash('sha256')
-      .update(codeVerifier)
-      .digest('base64url');
-
-    // Build state token: encrypted JSON with the full callback URI so the
-    // callback endpoint can use the same redirect_uri for the token exchange
-    // as was used in the authorization request (critical for OAuth compliance).
-    // Include an exp claim (10 minute expiry) to enforce state token freshness.
-    const statePayload = JSON.stringify({
-      botId, serverId, redirectUrl,
-      // The resource this authorization request is addressed to, carried through to the
-      // token request. RFC 8707 requires both requests to name the same resource, and the
-      // row's serverUrl can be edited while the state is in flight (#188 review).
-      ...(server.serverUrl ? { resource: server.serverUrl } : {}),
-      codeVerifier, redirectUri,
-      // Who is connecting it, remembered on the connection: the person told if its sign-in expires (game #1819)
-      ...(userId ? { personId: userId } : {}),
-      ts: Date.now(),
-      exp: Math.floor(Date.now() / 1000) + 600, // 10 minutes from now
+    const started = startOAuth({
+      request,
+      oauthConfig,
+      serverUrl: effective.serverUrl,
+      fallbackPath: `/admin/bots/${botId}`,
+      state: {
+        botId,
+        serverId,
+        ...(server.connectionId ? { connectionId: server.connectionId, nonce: await newSignInNonce(server.connectionId) } : {}),
+        // Who is connecting it, remembered on the connection: the person told if its sign-in expires (game #1819)
+        ...(userId ? { personId: userId } : {}),
+      },
     });
-    const stateToken = encryptApiKey(statePayload);
-
-    // Validate authorizeUrl before constructing the redirect
-    try {
-      const parsedAuthUrl = new URL(oauthConfig.authorizeUrl);
-      if (parsedAuthUrl.protocol !== 'http:' && parsedAuthUrl.protocol !== 'https:') {
-        return NextResponse.json(
-          { error: 'Invalid authorizeUrl in authConfig — must use http or https protocol' },
-          { status: 400, headers: corsHeaders(request) }
-        );
-      }
-    } catch {
-      return NextResponse.json(
-        { error: 'Invalid authorizeUrl in authConfig — must be a valid, absolute URL' },
-        { status: 400, headers: corsHeaders(request) }
-      );
-    }
-
-    // Build authorize URL from the provider's configured endpoint
-    const authorizeUrl = new URL(oauthConfig.authorizeUrl);
-    authorizeUrl.searchParams.set('response_type', 'code');
-    authorizeUrl.searchParams.set('client_id', oauthConfig.clientId);
-    authorizeUrl.searchParams.set('redirect_uri', `${callbackBase}/api/oauth/mcp-callback`);
-    // `offline_access` is what asks a provider for a refresh token, and it is only
-    // ever requested from a server that advertises it — asking for an unpublished
-    // scope is a request the provider may reject. With no advertised list stored,
-    // the configured scopes are sent unchanged (#187).
-    authorizeUrl.searchParams.set(
-      'scope',
-      resolveRequestedScopes(oauthConfig.scopes, oauthConfig.scopesSupported) || ''
-    );
-    authorizeUrl.searchParams.set('state', stateToken);
-    authorizeUrl.searchParams.set('code_challenge', codeChallenge);
-    authorizeUrl.searchParams.set('code_challenge_method', 'S256');
-    // RFC 8707 resource indicator, addressed to this MCP server. MCP clients MUST
-    // send it on both the authorization request and the token request regardless
-    // of whether the authorization server supports it, and servers that enforce
-    // audience binding reject tokens that are not addressed to them (#185).
-    // The stored serverUrl is used verbatim: for every configured connection it is
-    // byte-identical to the canonical resource the server advertises.
-    // Guarded to match the token request: an empty value would emit `resource=`,
-    // which some authorization servers reject as malformed — worse than omitting it.
-    if (server.serverUrl) {
-      authorizeUrl.searchParams.set('resource', server.serverUrl);
-    }
-
-    return NextResponse.json(
-      { authorizeUrl: authorizeUrl.toString() },
-      { headers: corsHeaders(request) }
-    );
+    if (!started.ok) return NextResponse.json({ error: started.error }, { status: started.status, headers: corsHeaders(request) });
+    return NextResponse.json({ authorizeUrl: started.authorizeUrl }, { headers: corsHeaders(request) });
   } catch (error) {
     console.error('[OAuthStart] Error:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500, headers: corsHeaders(request) });

@@ -38,10 +38,10 @@ function clampAt(at: Date | undefined, now = new Date()): Date {
 async function peopleWhoCanManageTools(botId: string): Promise<Set<string>> {
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
-    select: { id: true, createdById: true, roomId: true, ownerId: true, deletedAt: true, mcpServers: { select: { connectedById: true } } },
+    select: { id: true, createdById: true, roomId: true, ownerId: true, deletedAt: true, mcpServers: { select: { connectedById: true, connection: { select: { connectedById: true } } } } },
   });
   if (!bot) return new Set();
-  const candidates = new Set([bot.createdById, ...bot.mcpServers.map((server) => server.connectedById)].filter((id): id is string => !!id));
+  const candidates = new Set([bot.createdById, ...bot.mcpServers.map((server) => server.connection?.connectedById ?? server.connectedById)].filter((id): id is string => !!id));
   const told = new Set<string>();
   for (const userId of candidates) {
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
@@ -70,13 +70,17 @@ export async function syncToolSignInNotices(botId: string, fresh?: { serverId: s
         where: { id: botId },
         select: { id: true, name: true, createdById: true, room: { select: { world: { select: { universe: { select: { name: true } } } } } } },
       });
-      const lost = bot
+      // A grant on a person's connection is down when its connection is: the app's own fields are the ones read (game #2001)
+      const downRows = bot
         ? await tx.botMcpServer.findMany({
-            where: { botId, signInLostAt: { not: null } },
-            select: { id: true, name: true, authType: true, signInLostAt: true, connectedById: true },
-            orderBy: { signInLostAt: 'asc' },
+            where: { botId, OR: [{ signInLostAt: { not: null }, connectionId: null }, { connection: { signInLostAt: { not: null } } }] },
+            select: { id: true, name: true, authType: true, signInLostAt: true, connectedById: true, connectionId: true, connection: { select: { name: true, authType: true, signInLostAt: true, connectedById: true } } },
           })
         : [];
+      const lost = downRows
+        .map((row) => (row.connection ? { id: row.id, name: row.connection.name, authType: row.connection.authType, signInLostAt: row.connection.signInLostAt, connectedById: row.connection.connectedById } : row))
+        .filter((row) => row.signInLostAt !== null)
+        .sort((a, b) => (a.signInLostAt as Date).getTime() - (b.signInLostAt as Date).getTime());
       const byPerson = new Map<string, typeof lost>();
       for (const server of lost) {
         // The one who connected it; the bot's maker when that person can no longer manage it (or never was recorded)
@@ -133,9 +137,11 @@ export async function syncToolSignInNotices(botId: string, fresh?: { serverId: s
  * stored moved. Null when the bot has no such server.
  */
 export async function reportToolSignIn(botId: string, serverId: string, report: ToolSignInReport): Promise<{ changed: boolean } | null> {
-  const server = await prisma.botMcpServer.findFirst({ where: { id: serverId, botId }, select: { id: true } });
+  const server = await prisma.botMcpServer.findFirst({ where: { id: serverId, botId }, select: { id: true, connectionId: true } });
   if (!server) return null;
   const at = clampAt(report.at);
+  // A grant on a person's connection reports on the connection, so one Reconnect fixes every Brick that uses it (game #2001)
+  if (server.connectionId) return reportConnectionSignIn(server.connectionId, report, at);
   const afterLastReconnect = { OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: at } }] };
 
   if (report.state === 'expired') {
@@ -222,4 +228,34 @@ export async function dropOrphanedToolSignInNotices(userId: string): Promise<voi
     Sentry.captureException(error, { tags: { area: 'tool-signin' } });
     console.error('[ToolSignIn] Could not check the cards for deleted bots:', error instanceof Error ? error.message : 'unknown');
   }
+}
+
+/** The same report, for the connection a grant belongs to: its fields move, and the cards of every Brick that uses it follow. */
+async function reportConnectionSignIn(connectionId: string, report: ToolSignInReport, at: Date): Promise<{ changed: boolean }> {
+  const afterLastReconnect = { OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: at } }] };
+  const botsOf = async () => (await prisma.botMcpServer.findMany({ where: { connectionId }, select: { id: true, botId: true } }));
+
+  if (report.state === 'expired') {
+    const result = await prisma.appConnection.updateMany({
+      where: { id: connectionId, signInLostAt: null, ...afterLastReconnect },
+      data: { signInLostAt: at, signInLostStatus: report.status ?? null, noAnswerAt: null },
+    });
+    if (result.count === 1) for (const row of await botsOf()) await syncToolSignInNotices(row.botId, { serverId: row.id, at });
+    return { changed: result.count === 1 };
+  }
+  if (report.state === 'no-answer') {
+    const result = await prisma.appConnection.updateMany({
+      where: { id: connectionId, signInLostAt: null, noAnswerAt: null, ...afterLastReconnect },
+      data: { noAnswerAt: at },
+    });
+    return { changed: result.count === 1 };
+  }
+  await prisma.appConnection.updateMany({ where: { id: connectionId, ...afterLastReconnect }, data: { reconnectedAt: at } });
+  const lost = await prisma.appConnection.updateMany({
+    where: { id: connectionId, signInLostAt: { lte: at } },
+    data: { signInLostAt: null, signInLostStatus: null, noAnswerAt: null },
+  });
+  const unanswered = lost.count === 1 ? { count: 0 } : await prisma.appConnection.updateMany({ where: { id: connectionId, noAnswerAt: { lte: at } }, data: { noAnswerAt: null } });
+  if (lost.count === 1) for (const row of await botsOf()) await syncToolSignInNotices(row.botId);
+  return { changed: lost.count === 1 || unanswered.count === 1 };
 }
