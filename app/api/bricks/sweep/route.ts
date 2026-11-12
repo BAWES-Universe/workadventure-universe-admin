@@ -20,8 +20,14 @@ export async function POST(request: NextRequest) {
   try {
     requireServiceToken(request);
     const removed = await removeGoneBricks();
-    // Visits nobody has seen for too long have ended (game #2005); a visit that ran out is ignored whether or not this has run
-    await endStaleVisits();
+    // Visits nobody has seen for too long have ended (game #2005); a visit that ran out is ignored whether or not this has run.
+    // Failing here must not lose the ids just removed above: the bot server needs them to close those chats.
+    try {
+      await endStaleVisits();
+    } catch (error) {
+      Sentry.captureException(error, { tags: { area: 'bricks' } });
+      console.error('[Bricks] Ending stale visits failed:', error instanceof Error ? error.message : 'unknown');
+    }
     return NextResponse.json({ removed });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized: Invalid service token') {

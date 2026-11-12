@@ -213,7 +213,11 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
       return named ? { ...answer, person: named } : answer;
     }
     if (ownsBrick(bot, user?.id)) return named ? { ...ALLOWED, person: named } : ALLOWED;
-    const here = (action === 'chat' || action === 'dm') && bot.deletedAt === null ? await whereIsBrick(bot.id, request.roomUrl ?? null) : null;
+    // Talking nearby is talking in a room, so it is only ever answered for a room the caller names, and that must be the room the
+    // Brick is in. Callers that name none (the files and artifacts of a reply, a tool) get the answer of a Brick that is not there.
+    // Only a direct message may come from anywhere, as with any bot.
+    const roomNamed = action === 'dm' || !!request.roomUrl;
+    const here = (action === 'chat' || action === 'dm') && bot.deletedAt === null && roomNamed ? await whereIsBrick(bot.id, request.roomUrl ?? null) : null;
     if (!here) {
       const answer = refusal('not_allowed', action, bot.name);
       return named ? { ...answer, person: named } : answer;

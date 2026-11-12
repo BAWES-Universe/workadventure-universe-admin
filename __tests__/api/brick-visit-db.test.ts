@@ -294,6 +294,18 @@ run('bringing a Brick along, in a real database', () => {
       expect(await visit(sara.id)).toBeNull();
     });
 
+    it('still answers with the Bricks it removed when clearing visits fails', async () => {
+      const spy = jest.spyOn(prisma.brickVisit, 'deleteMany').mockRejectedValueOnce(new Error('database blinked'));
+      try {
+        const response = await sweep(call('POST', '/api/bricks/sweep', undefined, service));
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ removed: expect.any(Array) });
+        expect(spy).toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('needs the bot server’s token and a well-formed body', async () => {
       expect((await roomFeed(call('POST', '/api/brick-visits/room', { roomUrl: universes.open.roomUrl, people: [] }))).status).toBe(401);
       expect((await roomFeed(call('POST', '/api/brick-visits/room', { roomUrl: 'nonsense' }, service))).status).toBe(400);
@@ -343,6 +355,15 @@ run('bringing a Brick along, in a real database', () => {
       }
       // The universe's owner is nobody's bot owner here: a chat is as for any member
       expect(await chat(brickId, host, 'chat', universes.open.roomUrl)).toMatchObject({ allowed: true });
+    });
+
+    it('is not reached by a caller that names no room (the files, artifacts and tools of a reply), but is in a direct message', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      await feed(universes.open.roomUrl, [sara.uuid]);
+      expect(await chat(brickId, omar, 'chat')).toMatchObject({ allowed: false, code: 'not_allowed' });
+      expect(await chat(brickId, omar, 'chat', universes.open.roomUrl)).toMatchObject({ allowed: true });
+      expect(await chat(brickId, omar, 'dm')).toMatchObject({ allowed: true });
+      expect(await chat(brickId, sara, 'chat')).toMatchObject({ allowed: true });
     });
 
     it('is reached only from the room it is in, and only where the universe takes visits', async () => {
