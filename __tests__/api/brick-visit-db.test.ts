@@ -293,6 +293,24 @@ run('bringing a Brick along, in a real database', () => {
       expect((await whoMayReadRoomBots((await placeOfRoomUrl(universes.second.roomUrl))!.room, [])).size).toBe(0);
     });
 
+    it('looks people up once for the whole room, never once for each (Sentry on #927)', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      await startVisit(secondBrickId, omar.id, universes.open.roomUrl).catch(() => undefined);
+      const one = jest.spyOn(prisma.user, 'findUnique');
+      const many = jest.spyOn(prisma.user, 'findMany');
+      const memberOne = jest.spyOn(prisma.worldMember, 'findUnique');
+      const memberMany = jest.spyOn(prisma.worldMember, 'findMany');
+      try {
+        await feed(universes.open.roomUrl, [sara.uuid, omar.uuid, host.uuid]);
+        expect(one).not.toHaveBeenCalled();
+        expect(memberOne).not.toHaveBeenCalled();
+        expect(many.mock.calls.filter(([args]) => JSON.stringify(args).includes('"in"'))).toHaveLength(1);
+        expect(memberMany).toHaveBeenCalledTimes(1);
+      } finally {
+        for (const spy of [one, many, memberOne, memberMany]) spy.mockRestore();
+      }
+    });
+
     it('stops bringing a Brick when its universe turns the switch off, and when the Brick is switched off or deleted', async () => {
       await startVisit(brickId, sara.id, universes.open.roomUrl);
       expect(await feed(universes.open.roomUrl, [sara.uuid])).toHaveLength(1);
