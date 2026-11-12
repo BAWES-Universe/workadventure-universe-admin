@@ -6,6 +6,7 @@
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/meter-usage-db.test.ts
  */
 import { randomUUID } from 'node:crypto';
+import type { Prisma } from '@prisma/client';
 import { NextRequest } from 'next/server';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
@@ -76,6 +77,28 @@ const addUsage = async (who: { id: string; uuid: string; brickId: string }, coun
 const adminCall = (url: string) => new NextRequest(`http://localhost:3333${url}`);
 const body = (method: string, url: string, json: unknown) => new NextRequest(`http://localhost:3333${url}`, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(json) });
 const asAdmin = () => session.mockResolvedValue({ id: 'admin-user', email: 'admin@example.test' });
+
+/**
+ * The next grant is written through its transaction (the one holding the key's lock), so this runs `before` ahead of that write and
+ * can give the transaction another time limit. Gives back what undoes it.
+ */
+const beforeNextGrantWrite = (before: () => Promise<unknown>, timeout?: number) => {
+  const original = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+  const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((fn: (tx: Prisma.TransactionClient) => Promise<unknown>, options?: object) =>
+    original(
+      (tx: Prisma.TransactionClient) =>
+        fn(
+          new Proxy(tx, {
+            get: (target, key) =>
+              key === 'meterGrant'
+                ? new Proxy(target.meterGrant, { get: (grants, method) => (method === 'createMany' ? (args: never) => before().then(() => grants.createMany(args)) : (grants as never)[method as never]) })
+                : (target as never)[key as never],
+          }),
+        ),
+      timeout ? { ...options, timeout } : options,
+    )) as never);
+  return () => spy.mockRestore();
+};
 
 run('usage for people, and cost for us, in a real database', () => {
   beforeAll(async () => {
@@ -326,7 +349,7 @@ run('usage for people, and cost for us, in a real database', () => {
         const again = await give(sara, first);
         expect(again.status).toBe(200);
         expect((await again.json()).recorded).toBe(false);
-        expect((await give(sara, { ...first, amount: 'double' })).status).toBe(400);
+        expect((await give(sara, { ...first, amount: 'double' })).status).toBe(409);
         expect(await grantRows(sara.id)).toBe(1);
       });
 
@@ -346,8 +369,7 @@ run('usage for people, and cost for us, in a real database', () => {
         const key = randomUUID();
         const first = { grantKey: key, amount: 'five', endsAt: new Date(Date.now() + 600).toISOString(), settlement: 'gift' };
         // The first try has passed its checks and is slow to write: the end date passes while it is
-        const original = prisma.meterGrant.createMany.bind(prisma.meterGrant);
-        const spy = jest.spyOn(prisma.meterGrant, 'createMany').mockImplementationOnce(((args: Parameters<typeof original>[0]) => new Promise((resolve) => setTimeout(resolve, 900)).then(() => original(args))) as unknown as typeof prisma.meterGrant.createMany);
+        const restore = beforeNextGrantWrite(() => new Promise((resolve) => setTimeout(resolve, 900)));
         try {
           const slow = give(sara, first);
           await new Promise((resolve) => setTimeout(resolve, 750));
@@ -358,8 +380,44 @@ run('usage for people, and cost for us, in a real database', () => {
           expect((await again.json()).recorded).toBe(false);
           expect((await slow).status).toBe(201);
         } finally {
-          spy.mockRestore();
+          restore();
         }
+        expect(await grantRows(sara.id)).toBe(1);
+      });
+
+      it('is answered as used, not refused, when the saved grant was changed by another admin before it came again', async () => {
+        await setUp();
+        const sara = await person('sara');
+        asAdmin();
+        const first = { grantKey: randomUUID(), amount: 'five', endsAt: new Date(Date.now() + 10 * 86_400_000).toISOString(), settlement: 'gift' };
+        expect((await give(sara, first)).status).toBe(201);
+        // Another admin changes the amount; the sheet's try that got no answer comes again with the old figures
+        await prisma.meterGrant.updateMany({ where: { personId: sara.id }, data: { multiplier: 2 } });
+        const again = await give(sara, first);
+        expect(again.status).toBe(409);
+        expect(await again.json()).toMatchObject({ code: 'key_used', usage: expect.anything() });
+        expect(await grantRows(sara.id)).toBe(1);
+      });
+
+      it('undoes a try whole when its transaction runs out of time, so nothing of it lands late and the next try gives one grant', async () => {
+        await setUp();
+        const sara = await person('sara');
+        asAdmin();
+        const first = { grantKey: randomUUID(), amount: 'five', endsAt: new Date(Date.now() + 10 * 86_400_000).toISOString(), settlement: 'gift' };
+        // The write is slower than the transaction's time limit
+        const restore = beforeNextGrantWrite(() => new Promise((resolve) => setTimeout(resolve, 900)), 300);
+        const errors = jest.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+          expect((await give(sara, first)).status).toBe(500);
+        } finally {
+          restore();
+          errors.mockRestore();
+        }
+        // Long after the write would have landed, nothing did
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        expect(await grantRows(sara.id)).toBe(0);
+        // Sent again, it is given once
+        expect((await give(sara, first)).status).toBe(201);
         expect(await grantRows(sara.id)).toBe(1);
       });
 
@@ -380,13 +438,12 @@ run('usage for people, and cost for us, in a real database', () => {
       await spendComputer(sara, 1_000, new Date());
       asAdmin();
       // The ask lands after the grant's start time was taken and before the grant is written
-      const original = prisma.meterGrant.createMany.bind(prisma.meterGrant);
-      const spy = jest.spyOn(prisma.meterGrant, 'createMany').mockImplementationOnce(((args: Parameters<typeof original>[0]) => askForMore(sara.id, new Date()).then(() => original(args))) as unknown as typeof prisma.meterGrant.createMany);
+      const restore = beforeNextGrantWrite(() => askForMore(sara.id, new Date()));
       try {
         const given = await personPost(body('POST', `/api/admin/users/${sara.id}/extra-usage`, { grantKey: randomUUID(), amount: 'five', endsAt: new Date(Date.now() + 10 * 86_400_000).toISOString(), settlement: 'gift' }), { params: Promise.resolve({ id: sara.id }) });
         expect(given.status).toBe(201);
       } finally {
-        spy.mockRestore();
+        restore();
       }
       expect(await openRequests()).toEqual([]);
       // It was answered after it was asked, never before
@@ -441,8 +498,8 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(retry.status).toBe(200);
       expect((await retry.json()).recorded).toBe(false);
       expect(await prisma.meterGrant.count({ where: { personId: sara.id } })).toBe(1);
-      // The same key with another amount is refused, not given as something else
-      expect((await send(key, { amount: 'five' })).status).toBe(400);
+      // The same key with another amount is not given as something else: something is saved under it, so it says so (409)
+      expect((await send(key, { amount: 'five' })).status).toBe(409);
       expect(await prisma.meterGrant.count({ where: { personId: sara.id } })).toBe(1);
     });
 

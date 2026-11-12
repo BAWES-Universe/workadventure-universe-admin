@@ -196,7 +196,7 @@ describe('giving extra usage', () => {
         attempt += 1;
         const turn = attempt === 1 ? first : attempt === 2 ? again : null;
         if (turn === 'offline') return Promise.reject(new Error('offline'));
-        if (turn) return Promise.resolve({ ok: 'ok' in turn ? turn.ok : false, status: turn.status, json: () => Promise.resolve('ok' in turn && turn.ok ? { usage: usage({ extra: running({ grantKey: 'sara:key-1', multiplier: 5 }) }) } : { error: 'No' }) });
+        if (turn) return Promise.resolve({ ok: 'ok' in turn ? turn.ok : false, status: turn.status, json: () => Promise.resolve('ok' in turn && turn.ok ? { usage: usage({ extra: running({ grantKey: 'sara:key-1', multiplier: 5 }) }) } : { error: 'No', ...(turn.status === 409 ? { code: 'key_used' } : {}) }) });
         return Promise.resolve({ ok: true, status: 201, json: () => Promise.resolve({ usage: usage({ extra: running({ grantKey: 'sara:key-2' }) }) }) });
       });
     };
@@ -218,6 +218,14 @@ describe('giving extra usage', () => {
       expect(posts()).toHaveLength(2);
       expect(posts()[1]).toEqual(posts()[0]);
       expect(posts()[1].amount).toBe('five');
+    });
+
+    it('counts the first one as given when the server says that key is already used (changed since by another admin), and gives nothing more', async () => {
+      setUpOffline({ status: 503 }, { ok: false, status: 409 });
+      await tryAndChange();
+      await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'The last try went through. Use Change if that is not what you want now.' })));
+      expect(posts()).toHaveLength(2);
+      expect(posts()[1].grantKey).toBe(posts()[0].grantKey);
     });
 
     it('gives nothing else while the first one still gets no answer, so it can never be given twice', async () => {

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { prisma } from '@/lib/db';
-import { GrantRefused, changeGrant, endGrantNow, markGrantBilled, recordGrant } from '@/lib/meter-grants';
+import { GrantKeyUsed, GrantRefused, changeGrant, endGrantNow, markGrantBilled, recordGrant } from '@/lib/meter-grants';
 import { answerRequests } from '@/lib/meter-requests';
 import { personUsage } from '@/lib/meter-person';
 
@@ -72,39 +72,52 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const key = `${id}:${body.grantKey}`.slice(0, 255);
   const { settlement } = body;
   try {
-    // One key is settled one at a time, from before anything about the time is judged to the end: a try that got no answer and is sent
+    // One key is settled one at a time, from before anything about time is judged to the end: a try that got no answer and is sent
     // again waits for the first to finish, then finds what it saved. So "was it saved?" always has an answer before a new grant is
-    // given, and a key that was saved is answered as saved even when the end date has passed since.
-    return await prisma.$transaction(
-      async (lock) => {
-        await lock.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`grant:${key}`}))`;
+    // given, and a key that was saved answers as saved even when the end date has passed since. The write is made in the same
+    // transaction that holds the lock, so a try that runs out of time is undone whole and nothing of it can land late.
+    const outcome = await prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`grant:${key}`}))`;
         const now = new Date();
-        const person = await prisma.user.findUnique({ where: { id }, select: { id: true, isGuest: true } });
-        if (!person || person.isGuest) return NextResponse.json({ error: 'Person not found' }, { status: 404 });
-        const saved = await prisma.meterGrant.findUnique({ where: { grantKey: key }, select: { startsAt: true, endsAt: true } });
+        const person = await tx.user.findUnique({ where: { id }, select: { id: true, isGuest: true } });
+        if (!person || person.isGuest) return { status: 404 as const };
+        const saved = await tx.meterGrant.findUnique({ where: { grantKey: key }, select: { startsAt: true, endsAt: true } });
         // What was saved stands, with the times it was saved with; a new grant needs an end in the future
         const endsAt = saved ? saved.endsAt : endsAtOf(body.endsAt, now);
-        if (!endsAt) return NextResponse.json({ error: 'endsAt must be a date in the future, within a year' }, { status: 400 });
-        const { recorded, grant } = await recordGrant({
-          grantKey: key,
-          personId: id,
-          settlement,
-          multiplier: amount.multiplier,
-          noLimit: amount.noLimit,
-          startsAt: saved ? saved.startsAt : now,
-          endsAt,
-          givenById: admin.id,
-          note: typeof body.note === 'string' ? body.note : null,
-        });
-        // A new grant answers every ask made up to now, including one made while it was being recorded. A replay answers only what was
-        // asked before that grant began, never a newer ask.
-        const answeredAt = new Date();
-        await answerRequests(id, key, answeredAt, recorded ? answeredAt : grant.startsAt);
-        return NextResponse.json({ recorded, usage: await personUsage(id, new Date(), admin.id) }, { status: recorded ? 201 : 200 });
+        if (!endsAt) return { status: 400 as const };
+        return recordGrant(
+          {
+            grantKey: key,
+            personId: id,
+            settlement,
+            multiplier: amount.multiplier,
+            noLimit: amount.noLimit,
+            startsAt: saved ? saved.startsAt : now,
+            endsAt,
+            givenById: admin.id,
+            note: typeof body.note === 'string' ? body.note : null,
+          },
+          tx,
+        );
       },
       { timeout: 30_000, maxWait: 10_000 },
     );
+    if ('status' in outcome) {
+      return NextResponse.json({ error: outcome.status === 404 ? 'Person not found' : 'endsAt must be a date in the future, within a year' }, { status: outcome.status });
+    }
+    const { recorded, grant } = outcome;
+    // A new grant answers every ask made up to now, including one made while it was being recorded. A replay answers only what was
+    // asked before that grant began, never a newer ask.
+    const answeredAt = new Date();
+    await answerRequests(id, key, answeredAt, recorded ? answeredAt : grant.startsAt);
+    return NextResponse.json({ recorded, usage: await personUsage(id, new Date(), admin.id) }, { status: recorded ? 201 : 200 });
   } catch (error) {
+    // Something is saved under this key, with other figures than these (changed since, most likely): not a refusal, so the sheet
+    // never reads it as "nothing was given" and gives again
+    if (error instanceof GrantKeyUsed) {
+      return NextResponse.json({ error: error.message, code: 'key_used', usage: await personUsage(id, new Date(), admin.id).catch(() => null) }, { status: 409 });
+    }
     if (error instanceof GrantRefused) return NextResponse.json({ error: error.message }, { status: 400 });
     console.error('[ExtraUsage] Could not give:', error instanceof Error ? error.message : 'unknown');
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });

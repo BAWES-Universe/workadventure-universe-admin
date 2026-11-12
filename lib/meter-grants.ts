@@ -48,6 +48,9 @@ export interface Grant {
 
 export class GrantRefused extends Error {}
 
+/** The key was already used, for figures that are not these (most likely changed since by another admin): something is saved under it. */
+export class GrantKeyUsed extends GrantRefused {}
+
 const view = (row: { id: string; grantKey: string; personId: string; settlement: string; multiplier: number | null; noLimit: boolean; startsAt: Date; endsAt: Date; givenById: string; note: string | null; billedAt: Date | null }): Grant => ({
   id: row.id,
   grantKey: row.grantKey,
@@ -66,7 +69,7 @@ const view = (row: { id: string; grantKey: string; personId: string; settlement:
  * Records a grant once. Returns it and whether this call wrote it. The same key with other figures is refused (GrantRefused):
  * the first record stands, and whoever asked twice for different things is told so instead of getting one of them quietly.
  */
-export async function recordGrant(input: GrantInput): Promise<{ grant: Grant; recorded: boolean }> {
+export async function recordGrant(input: GrantInput, db: Pick<Prisma.TransactionClient, 'user' | 'meterGrant'> = prisma): Promise<{ grant: Grant; recorded: boolean }> {
   if (!input.grantKey || input.grantKey.length > 255) throw new GrantRefused('grantKey is required (up to 255 characters)');
   if (!(GRANT_SETTLEMENTS as readonly string[]).includes(input.settlement)) throw new GrantRefused('settlement must be gift or to_bill');
   const noLimit = input.noLimit === true;
@@ -75,10 +78,10 @@ export async function recordGrant(input: GrantInput): Promise<{ grant: Grant; re
   if (!noLimit && (multiplier === null || !Number.isInteger(multiplier) || multiplier < 2)) throw new GrantRefused('multiplier must be a whole number, 2 or more (or no limit)');
   if (!(input.endsAt > input.startsAt)) throw new GrantRefused('Extra usage must end after it starts');
   if (input.note && input.note.length > 1000) throw new GrantRefused('note is too long (up to 1000 characters)');
-  const person = await prisma.user.findUnique({ where: { id: input.personId }, select: { id: true } });
+  const person = await db.user.findUnique({ where: { id: input.personId }, select: { id: true } });
   if (!person) throw new GrantRefused('That person does not exist');
 
-  const { count } = await prisma.meterGrant.createMany({
+  const { count } = await db.meterGrant.createMany({
     data: [
       {
         grantKey: input.grantKey,
@@ -94,7 +97,7 @@ export async function recordGrant(input: GrantInput): Promise<{ grant: Grant; re
     ],
     skipDuplicates: true,
   });
-  const row = await prisma.meterGrant.findUniqueOrThrow({ where: { grantKey: input.grantKey } });
+  const row = await db.meterGrant.findUniqueOrThrow({ where: { grantKey: input.grantKey } });
   if (count === 0) {
     const same =
       row.personId === input.personId &&
@@ -103,7 +106,7 @@ export async function recordGrant(input: GrantInput): Promise<{ grant: Grant; re
       row.noLimit === noLimit;
     // The times are not compared: a retry of the same tap starts a moment later (and "30 days" ends a moment later), and it is
     // still the same grant. The first one stands.
-    if (!same) throw new GrantRefused('That key was used for a different grant. The first one stands.');
+    if (!same) throw new GrantKeyUsed('That key was used for a different grant. The first one stands.');
   }
   return { grant: view(row), recorded: count > 0 };
 }

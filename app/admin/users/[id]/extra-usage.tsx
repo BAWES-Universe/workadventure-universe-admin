@@ -95,7 +95,12 @@ export function ExtraUsage({ userId, name }: { userId: string; name: string }) {
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/admin/users/${encodeURIComponent(userId)}/extra-usage`, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      const data = (await response.json().catch(() => null)) as { usage?: PersonUsage; error?: string } | null;
+      const data = (await response.json().catch(() => null)) as { usage?: PersonUsage; error?: string; code?: string } | null;
+      // Something is already saved under this key (changed since, most likely): it was given once, so it counts as saved and nothing else is given
+      if (response.status === 409 && data?.code === 'key_used') {
+        if (data.usage) setUsage(data.usage);
+        return 'done';
+      }
       if (!response.ok) {
         addToast({ description: data?.error || 'That didn’t save. Try again.', variant: 'error' });
         // A 5xx may have saved before it failed, and a session that ran out (401, 403) says nothing about an earlier try; anything else is a plain no
