@@ -423,6 +423,18 @@ run('goals and tasks, in a real database', () => {
     expect(await changeItem(kiran.brickId, check.item.id, { userId: kiran.uuid, action: 'reopen' }, at(5 * MIN))).toMatchObject({ ok: true, item: { state: 'on' } });
   });
 
+  it('a check cannot be resumed on its own while its goal is paused', async () => {
+    const xia = await person('xia');
+    const goal = await set(xia, { kind: 'goal', words: 'Plan the trip', outcome: 'Booked', cadence: { type: 'every', minutes: 60 } });
+    const check = await createItem(xia.brickId, { userId: xia.uuid, kind: 'watch', words: 'Flights', condition: 'It drops', cadence: { type: 'every', minutes: 60 }, parentId: goal.id }, NOW);
+    if (!check.ok) throw new Error('expected the check');
+    await changeItem(xia.brickId, goal.id, { userId: xia.uuid, action: 'pause' }, at(MIN));
+    expect(await changeItem(xia.brickId, check.item.id, { userId: xia.uuid, action: 'resume' }, at(2 * MIN))).toMatchObject({ ok: false, status: 409, code: 'needs_goal' });
+    expect((await claimDueRuns(at(3 * HOUR))).filter((one) => one.itemId === check.item.id)).toEqual([]);
+    await changeItem(xia.brickId, goal.id, { userId: xia.uuid, action: 'resume' }, at(3 * MIN));
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: check.item.id } })).toMatchObject({ state: 'on' });
+  });
+
   it('keeps to the runs a day for watches and goals, but never for reminders', async () => {
     const jo = await person('jo');
     await saveServerLimits({ bricks: { runsPerDay: 2 } }, jo.id);

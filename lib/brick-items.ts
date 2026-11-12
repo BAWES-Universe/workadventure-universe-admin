@@ -311,6 +311,11 @@ async function moveChecks(tx: Tx, goalId: string, from: ItemState[], data: Prism
   }
 }
 
+/** Whether the goal a check belongs to is on. */
+async function goalIsOn(tx: Tx, goalId: string): Promise<boolean> {
+  return (await tx.brickItem.findUnique({ where: { id: goalId }, select: { state: true } }))?.state === 'on';
+}
+
 const wrongState = (state: string): Refused => ({ ok: false, status: 409, code: 'wrong_state', error: `That is not possible while it is ${state}` });
 
 /**
@@ -324,6 +329,9 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
   if (!ownerId) return { ok: false, status: 404, error: 'Brick not found' };
   const limits = await getBrickLimits();
   return prisma.$transaction(async (tx) => {
+    // The person's lock comes first, before any row, the same order as setting one (createItem): so a change, a reopen and a new check
+    // under the same goal can never wait on each other in a circle
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-items:${ownerId}`}))`;
     const row = await lockedItem(tx, { id: itemId, ownerId, botId: viaBrickId });
     if (!row || row.state === 'deleted') return { ok: false as const, status: 404 as const, error: 'Not found' };
     const cadence = readCadence(row.cadence) ?? ({ type: 'none' } as Cadence);
@@ -342,6 +350,8 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (row.state !== 'paused') return wrongState(row.state);
         const bot = await tx.bot.findUnique({ where: { id: row.botId }, select: { enabled: true, deletedAt: true } });
         if (!bot?.enabled || bot.deletedAt) return { ok: false as const, status: 409 as const, code: 'off' as const, error: 'This Brick is switched off' };
+        // A check runs only while its goal is on: it is brought back by its goal's Resume, not on its own under a paused goal
+        if (row.parentId && !(await goalIsOn(tx, row.parentId))) return { ok: false as const, status: 409 as const, code: 'needs_goal' as const, error: 'A check comes back only while its goal is on' };
         // One that was meant for a moment that has passed while it was paused is due now, once; the rest carry on from now
         const due = cadence.type === 'once' ? (firstDue(cadence, row.timeZone, now) ?? now) : firstDue(cadence, row.timeZone, now);
         // Only the checks its own pause (or the deleted Brick) stopped: one the person paused by itself stays paused
@@ -359,12 +369,9 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         const bot = await tx.bot.findUnique({ where: { id: row.botId }, select: { enabled: true, deletedAt: true } });
         if (!bot?.enabled || bot.deletedAt) return { ok: false as const, status: 409 as const, code: 'off' as const, error: 'This Brick is switched off' };
         // Reopening takes a place again, so it keeps to the same limits as setting a new one: the person's goals and tasks, and for a check
-        // its goal's checks, and its goal has to be on. One at a time per person, like creating one.
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-items:${ownerId}`}))`;
+        // its goal's checks, and its goal has to be on (this change holds the person's lock, so nothing else of theirs changes meanwhile)
         if (row.parentId) {
-          // Read without locking the goal: a goal's own change locks the goal and then its checks, and this holds the check
-          const goal = await tx.brickItem.findUnique({ where: { id: row.parentId }, select: { state: true } });
-          if (goal?.state !== 'on') return { ok: false as const, status: 409 as const, code: 'needs_goal' as const, error: 'A check comes back only while its goal is on' };
+          if (!(await goalIsOn(tx, row.parentId))) return { ok: false as const, status: 409 as const, code: 'needs_goal' as const, error: 'A check comes back only while its goal is on' };
           const checks = await tx.brickItem.count({ where: { parentId: row.parentId, state: { in: ['on', 'paused'] } } });
           if (checks >= limits.itemsPerPerson) return { ok: false as const, status: 422 as const, code: 'too_many' as const, limit: limits.itemsPerPerson, error: `${limits.itemsPerPerson} checks for one goal is the most` };
         } else {
