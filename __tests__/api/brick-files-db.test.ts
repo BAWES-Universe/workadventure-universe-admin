@@ -113,9 +113,11 @@ run('a Brick’s files (real database)', () => {
     await file(brickId, people.sara.id, { name: 'dm.pdf', chatKind: 'dm', seenBy: [people.sara.uuid] });
     await file(brickId, people.sara.id, { name: 'alone-nearby.pdf', chatKind: 'nearby', seenBy: [people.sara.uuid] });
     await file(brickId, people.sara.id, { name: 'crowd.pdf', chatKind: 'nearby', seenBy: [people.sara.uuid, 'omar-uuid', 'noura-uuid'] });
+    // From before it was recorded who was there: never called private
+    await file(brickId, people.sara.id, { name: 'old-nearby.pdf', chatKind: 'nearby', seenBy: [] });
     const { body } = await read('sara');
     const byName = Object.fromEntries(body.sent.files.map((f) => [f.name, f.audience]));
-    expect(byName).toEqual({ 'dm.pdf': 'you', 'alone-nearby.pdf': 'you', 'crowd.pdf': 'chat' });
+    expect(byName).toEqual({ 'dm.pdf': 'you', 'alone-nearby.pdf': 'you', 'crowd.pdf': 'chat', 'old-nearby.pdf': 'chat' });
   });
 
   it('lists only this Brick’s files and only the owner’s own, never another person’s or another Brick’s', async () => {

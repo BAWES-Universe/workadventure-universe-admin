@@ -71,9 +71,13 @@ type Row = {
 
 const SELECT = { id: true, name: true, kind: true, sizeBytes: true, bucket: true, fileId: true, url: true, chatKind: true, seenBy: true, expiresAt: true, createdAt: true } as const;
 
-/** In a direct message nobody else is there; in a nearby chat, only if nobody but the sender was named. */
+/**
+ * In a direct message nobody else is there. In a nearby chat, only the sender is named when nobody else was. An empty
+ * list means nothing was recorded (a file from before it was), and the page never says "only you" for what it cannot know.
+ */
 export function audienceOf(row: Pick<Row, 'chatKind' | 'seenBy'>): FileAudience {
-  return row.chatKind === 'dm' || row.seenBy.length <= 1 ? 'you' : 'chat';
+  if (row.chatKind === 'dm') return 'you';
+  return row.seenBy.length === 1 ? 'you' : 'chat';
 }
 
 function viewOf(row: Row): BrickFile | null {
