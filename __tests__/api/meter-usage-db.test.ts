@@ -19,6 +19,7 @@ import { recordMeterEvent, saveMeterSettings } from '@/lib/meter';
 import { GrantRefused, changeGrant, endGrantNow, markGrantBilled, recordGrant, runningExtra } from '@/lib/meter-grants';
 import { askForMore, openRequests } from '@/lib/meter-requests';
 import { memberUsage } from '@/lib/meter-usage';
+import { personUsage } from '@/lib/meter-person';
 import { costsReport } from '@/lib/meter-costs';
 import { checkReplyAllowance } from '@/lib/reply-limits';
 import { readMeterEvent, type MeterEventInput } from '@/lib/meter-values';
@@ -195,6 +196,17 @@ run('usage for people, and cost for us, in a real database', () => {
       session.mockResolvedValue({ id: sara.id, email: 'sara@example.test' });
       expect((await askPost(body('POST', '/api/me/usage/ask-for-more', {}))).status).toBe(409);
       expect(await prisma.meterRequest.count({})).toBe(0);
+    });
+  });
+
+  describe('a person’s page', () => {
+    it('says unlimited from the running grant itself, even while no computer allowance is set', async () => {
+      const sara = await person('sara');
+      const faisal = await person('faisal');
+      await recordGrant({ grantKey: `g-${tag}-nolimit`, personId: sara.id, settlement: 'gift', noLimit: true, startsAt: days(-1), endsAt: days(5), givenById: faisal.id });
+      const usage = await personUsage(sara.id, NOW, faisal.id);
+      expect(usage).toMatchObject({ allowanceSet: false, noLimit: true, allowanceMicros: null });
+      expect(usage.extra?.noLimit).toBe(true);
     });
   });
 
@@ -472,6 +484,25 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(byFaisal).toMatchObject({ name: 'faisal', settlement: 'gift', ended: true, aboveUsualMicros: 1_000 });
       // And the person’s row says extra usage runs, until when
       expect((await costsReport(new Date('2026-11-01T00:00:00Z'), range.to, NOW)).people.rows.find((row) => row.name === 'sara')?.extraUntil).toBe(days(10).toISOString());
+    });
+    it('keeps a grant still running and a grant still to bill in the list however many newer ones have ended', async () => {
+      await setUp();
+      const sara = await person('sara');
+      const faisal = await person('faisal');
+      const old = new Date('2026-09-01T00:00:00Z');
+      // Two old ones that still matter: one running now, one that ended long ago and was never billed
+      await prisma.meterGrant.create({ data: { grantKey: `g-${tag}-running`, personId: sara.id, settlement: 'gift', multiplier: 2, startsAt: days(-30), endsAt: days(30), givenById: faisal.id, createdAt: old } });
+      await prisma.meterGrant.create({ data: { grantKey: `g-${tag}-unbilled`, personId: sara.id, settlement: 'to_bill', multiplier: 2, startsAt: new Date('2026-09-02T00:00:00Z'), endsAt: new Date('2026-09-09T00:00:00Z'), givenById: faisal.id, createdAt: old } });
+      // And sixty newer ones that ended and need nothing
+      await prisma.meterGrant.createMany({
+        data: Array.from({ length: 60 }, (_, index) => ({ grantKey: `g-${tag}-done-${index}`, personId: faisal.id, settlement: 'gift', multiplier: 2, startsAt: new Date('2026-10-01T00:00:00Z'), endsAt: new Date('2026-10-02T00:00:00Z'), givenById: sara.id, createdAt: new Date(old.getTime() + (index + 1) * 60_000) })),
+      });
+      const report = await costsReport(range.from, range.to, NOW);
+      const keys = report.given.map((row) => row.grantKey);
+      expect(keys).toContain(`g-${tag}-running`);
+      expect(keys).toContain(`g-${tag}-unbilled`);
+      // The ended ones that need nothing are only the latest fifty
+      expect(keys.filter((key) => key.includes('-done-'))).toHaveLength(50);
     });
   });
 });

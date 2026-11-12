@@ -191,15 +191,16 @@ export default function CostsPage() {
                   title={brick.name}
                   context={brick.ownerName && brick.ownerId ? <Context parts={[{ label: brick.ownerName, kind: 'people' }]} /> : undefined}
                   meta={
-                    <StatLine
-                      items={
-                        brick.sure === 'Paid by someone else'
-                          ? [`${brick.ownKeyReplies.toLocaleString('en')} ${brick.ownKeyReplies === 1 ? 'reply' : 'replies'} on their own key`]
-                          : [dollars(brick.costMicros), ...didLine(brick)]
-                      }
-                    />
+                    brick.sure === 'Paid by someone else' ? (
+                      // The pill goes under the words, so a narrow phone wraps it instead of scrolling sideways
+                      <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                        <StatLine items={[`${brick.ownKeyReplies.toLocaleString('en')} ${brick.ownKeyReplies === 1 ? 'reply' : 'replies'} on their own key`]} />
+                        <SurePill how="Paid by someone else" />
+                      </span>
+                    ) : (
+                      <StatLine items={[dollars(brick.costMicros), ...didLine(brick)]} />
+                    )
                   }
-                  aside={brick.sure === 'Paid by someone else' ? <SurePill how="Paid by someone else" /> : undefined}
                 />
               ))}
             </div>

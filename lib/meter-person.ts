@@ -82,12 +82,14 @@ export async function personUsage(personId: string, now: Date = new Date(), view
     }
   }
   const base = settings.memberAllowanceMicros;
+  // Unlimited comes from the running grant itself, so it is true even while no allowance is set
+  const noLimit = !!(extra?.noLimit || allowance?.unlimited);
   return {
     chatWeekMicros: Number(chat._sum.costMicros ?? 0),
     bricks,
     computerMonthMicros: Number(computer._sum.costMicros ?? 0),
-    allowanceMicros: base === null ? null : allowance?.unlimited ? null : base * (extra?.multiplier ?? 1),
-    noLimit: !!allowance?.unlimited,
+    allowanceMicros: base === null ? null : noLimit ? null : base * (extra?.multiplier ?? 1),
+    noLimit,
     allowanceSet: base !== null,
     keptBytes: Number(kept[0]?.bytes ?? 0),
     asked: open ? { at: open.createdAt.toISOString() } : null,

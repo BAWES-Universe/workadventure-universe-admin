@@ -203,6 +203,8 @@ describe('Universe AI limits', () => {
     const patch = fetchMock.mock.calls.find(([url, init]) => url === '/api/admin/meter-settings' && init?.method === 'PATCH')!;
     expect(JSON.parse(String(patch[1].body))).toEqual({ memberAllowanceMicros: 5_000_000 });
     await waitFor(() => expect(screen.getByTestId('limit-computerMonth').textContent).toContain('$5'));
+    // Once set it still names no recommended value, never "Recommended: -1 dollars"
+    expect(screen.getByTestId('limit-computerMonth').textContent).not.toContain('Recommended');
     // Never saved through the bot limits route
     expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/bot-limits' && init?.method === 'PATCH')).toBe(false);
   });
@@ -212,6 +214,7 @@ describe('Universe AI limits', () => {
     render(<UniverseAiLimits />);
     const row = await screen.findByTestId('limit-computerMonth');
     expect(row.textContent).toContain('$5');
+    expect(row.textContent).not.toContain('Recommended');
     fireEvent.click(row);
     fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
     fireEvent.change(screen.getByLabelText(/Computer allowance for each member, a month, in dollars/), { target: { value: '7.50' } });

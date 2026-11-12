@@ -131,6 +131,8 @@ export interface CostsReport {
 }
 
 /** How many people and Bricks are listed one by one; the rest are counted in one line. */
+/** How many of the grants that already ended the given list keeps, beside the ones running and the ones still to bill. */
+export const GIVEN_RECENT = 50;
 export const COSTS_LISTED = 10;
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -285,11 +287,19 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
   // Names, Wokas and extra usage for the people and Bricks listed
   const listedPeople = peopleRows.slice(0, COSTS_LISTED);
   const listedBricks = brickRows.slice(0, COSTS_LISTED);
-  const [grants, requests, bots] = await Promise.all([
-    prisma.meterGrant.findMany({ orderBy: { createdAt: 'desc' }, take: 50 }),
+  // The given list is every grant still running or waiting to start, every one still to bill, and the latest few that ended. A cap
+  // on all of them would drop a running or unbilled grant once enough newer ones exist.
+  const recentIds = (await prisma.meterGrant.findMany({ orderBy: { createdAt: 'desc' }, take: GIVEN_RECENT, select: { id: true } })).map((grant) => grant.id);
+  const [shownGrants, requests, bots] = await Promise.all([
+    prisma.meterGrant.findMany({
+      where: { OR: [{ endsAt: { gt: now } }, { settlement: 'to_bill', billedAt: null }, { id: { in: recentIds } }] },
+      orderBy: { createdAt: 'desc' },
+    }),
     prisma.meterRequest.findMany({ where: { answeredAt: null }, orderBy: { createdAt: 'asc' }, take: 200 }),
     prisma.bot.findMany({ where: { id: { in: listedBricks.map((brick) => brick.bot_id) } }, select: { id: true, name: true, ownerId: true } }),
   ]);
+  // Each person's other grants count too: two that overlap a month share its spending, so the figures need all of a person's grants
+  const grants = await prisma.meterGrant.findMany({ where: { personId: { in: [...new Set([...shownGrants.map((grant) => grant.personId), ...listedPeople.map((person) => person.person_id)])] } }, orderBy: { createdAt: 'desc' } });
   const personIds = [...new Set([...listedPeople.map((person) => person.person_id), ...bots.flatMap((bot) => (bot.ownerId ? [bot.ownerId] : [])), ...grants.flatMap((grant) => [grant.personId, grant.givenById]), ...requests.map((request) => request.personId)])];
   const [users, wokas] = await Promise.all([
     prisma.user.findMany({ where: { id: { in: personIds } }, select: { id: true, name: true, email: true } }),
@@ -361,7 +371,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     const figures = await aboveUsual(personId, settings.memberAllowanceMicros, list, now);
     list.forEach((grant, index) => above.set(grant.grantKey, figures[index]));
   }
-  const given: GivenRow[] = grants.map((grant) => ({
+  const given: GivenRow[] = shownGrants.map((grant) => ({
     grantKey: grant.grantKey,
     personId: grant.personId,
     name: nameOf.get(grant.personId) ?? 'Someone',

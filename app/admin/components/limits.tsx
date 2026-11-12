@@ -80,8 +80,8 @@ export function RecommendedPill() {
 /** One row: what it is, what it does, and its value; the whole row opens the choices. */
 export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }) {
   const isRecommended = limit.value === limit.recommended;
-  // A limit nobody has a recommended value for yet is only "Not set"
-  const mark = limit.unset ? null : isRecommended ? <RecommendedPill /> : <span className="text-[11px] text-muted-foreground">Recommended: {shown(limit, limit.recommended)}</span>;
+  // A limit with no recommended value (a negative one) shows its value alone, and "Not set" while nothing is set
+  const mark = limit.unset || limit.recommended < 0 ? null : isRecommended ? <RecommendedPill /> : <span className="text-[11px] text-muted-foreground">Recommended: {shown(limit, limit.recommended)}</span>;
   return (
     <button
       type="button"
