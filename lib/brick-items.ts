@@ -699,6 +699,9 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH): Pr
           }
         }
 
+        // There is room: the wait is over, whether or not this check goes on to run (the runs a day below can still hold it back)
+        if (item.heldSince !== null) await tx.brickItem.update({ where: { id }, data: NOT_HELD });
+
         // Runs a day: watches, schedules and goals together, per person. A reminder is fixed text with no AI and never uses them.
         if (item.kind !== 'reminder') {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-runs:${item.ownerId}`}))`;
