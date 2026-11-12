@@ -465,6 +465,14 @@ const claimedOf = (run: Prisma.BrickItemRunGetPayload<{ include: { item: { inclu
 };
 const RUN_INCLUDE = { item: { include: { owner: { select: { uuid: true } } } } } as const;
 
+/** A one-off (a single moment, never a goal) has no next time: when its run fails for good it ends, it is never left on with nothing due. */
+function endsOnFailure(item: { kind: string; cadence: Prisma.JsonValue }): boolean {
+  return item.kind !== 'goal' && readCadence(item.cadence)?.type === 'once';
+}
+function endedOneOff(now: Date): Prisma.BrickItemUpdateInput {
+  return { state: 'done', nextDueAt: null, doneAt: now, revision: { increment: 1 } };
+}
+
 /**
  * What the bot server runs now. First the runs it was handed and never reported, whose lease is over: handed out again with
  * the same run id (so a message that went out is found by that id, never written twice), or, after the third try, failed.
@@ -495,7 +503,7 @@ export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH):
         }
         if (run.attempts >= MAX_TRIES) {
           await tx.brickItemRun.update({ where: { id }, data: { state: 'failed', error: 'It did not finish in time', finishedAt: now } });
-          await tx.brickItem.update({ where: { id: run.itemId }, data: { failuresInRow: { increment: 1 }, lastRunAt: now } });
+          await tx.brickItem.update({ where: { id: run.itemId }, data: { failuresInRow: { increment: 1 }, lastRunAt: now, ...(endsOnFailure(item) ? endedOneOff(now) : {}) } });
           return null;
         }
         return tx.brickItemRun.update({ where: { id }, data: { attempts: { increment: 1 }, leaseUntil: lease }, include: RUN_INCLUDE });
@@ -637,8 +645,9 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
       if (report.progress.steps !== undefined) data.steps = report.progress.steps;
       if (report.progress.waitingFor !== undefined) data.waitingFor = report.progress.waitingFor;
     }
-    // A one-off ends with its one run, once it was sent. One that failed stays on, with that failed run in "Everything Brick did".
-    const oneOffSent = cadence?.type === 'once' && report.state === 'done';
+    // A one-off ends with its one run: once it was sent, or when that run failed (it has no next time to come back on, so left on
+    // it would sit there forever and count against the person's limit). The failed run stays in "Everything Brick did".
+    const oneOffSent = cadence?.type === 'once' && (report.state === 'done' || (report.state === 'failed' && kind !== 'goal'));
     // A watch speaks only when its condition is met, says so once, then moves to Done (Reopen starts it again)
     const watchSpoke = kind === 'watch' && report.state === 'done' && report.outcome === 'spoke';
     const goalReached = kind === 'goal' && report.state === 'done' && report.reached === true;

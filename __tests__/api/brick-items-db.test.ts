@@ -258,6 +258,25 @@ run('goals and tasks, in a real database', () => {
     expect((await prisma.brickItem.findUniqueOrThrow({ where: { id: item.id } })).failuresInRow).toBe(1);
   });
 
+  it('a one-off whose run fails, or is never reported, ends instead of staying on with nothing due', async () => {
+    const odin = await person('odin');
+    const reported = await set(odin);
+    const lost = await set(odin);
+    const claimed = (await claimDueRuns(at(HOUR + MIN))).filter((one) => [reported.id, lost.id].includes(one.itemId));
+    expect(claimed).toHaveLength(2);
+    const failed = await finishRun(claimed.find((one) => one.itemId === reported.id)!.runId, { state: 'failed', error: 'The chat did not answer' }, at(HOUR + 2 * MIN));
+    expect(failed).toMatchObject({ ok: true, applied: true, item: { state: 'done', nextDueAt: null } });
+    // The one never reported is handed out again twice, then given up: the item ends too
+    await claimDueRuns(at(HOUR + 20 * MIN));
+    await claimDueRuns(at(HOUR + 40 * MIN));
+    await claimDueRuns(at(HOUR + 60 * MIN));
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: lost.id } })).toMatchObject({ state: 'done', nextDueAt: null });
+    expect((await runsOf(lost.id))[0]).toMatchObject({ state: 'failed' });
+    // Neither counts against the person's limit any more
+    const listed = await listItems(odin.brickId, odin.uuid);
+    expect(listed.ok && listed.items.filter((one) => one.state === 'on')).toEqual([]);
+  });
+
   it('does not let a person at their runs a day fill the batch ahead of everyone else', async () => {
     const ivy = await person('ivy');
     const kai = await person('kai');
