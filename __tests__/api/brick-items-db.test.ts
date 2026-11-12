@@ -295,6 +295,18 @@ run('goals and tasks, in a real database', () => {
     expect(handedOut.filter((one) => claimed.some((c) => c.runId === one.runId)).length).toBeLessThanOrEqual(4);
   });
 
+  it('a change to a one-off while its run is in flight drops that run and makes it due again with the new words, never stranded', async () => {
+    const pia = await person('pia');
+    const item = await set(pia, { words: 'Call the dentist' });
+    const [inFlight] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === item.id);
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: item.id } })).toMatchObject({ state: 'on', nextDueAt: null });
+    await changeItem(pia.brickId, item.id, { userId: pia.uuid, action: 'change', change: { words: 'Call the dentist about the crown' } }, at(HOUR + 2 * MIN));
+    expect(await checkRun(inFlight.runId)).toEqual({ ok: false, reason: 'changed' });
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: item.id } })).toMatchObject({ state: 'on', nextDueAt: at(HOUR + 2 * MIN) });
+    const again = (await claimDueRuns(at(HOUR + 3 * MIN))).filter((one) => one.itemId === item.id && one.runId !== inFlight.runId);
+    expect(again).toMatchObject([{ words: 'Call the dentist about the crown', revision: 2, attempt: 1 }]);
+  });
+
   it('keeps to the runs a day for watches and goals, but never for reminders', async () => {
     const jo = await person('jo');
     await saveServerLimits({ bricks: { runsPerDay: 2 } }, jo.id);

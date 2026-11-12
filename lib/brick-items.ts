@@ -381,7 +381,9 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (kind === 'watch' && change.condition === null) return { ok: false as const, status: 400 as const, error: 'a watch needs the condition it speaks for' };
         if (kind === 'goal' && change.outcome === null) return { ok: false as const, status: 400 as const, error: 'a goal needs the outcome the person named' };
         const settled = nextCadence as Cadence;
-        const due = row.state === 'on' ? (rescheduled ? firstDue(settled, timeZone, now) : row.nextDueAt) : null;
+        // A one-off that was claimed has no next due time while its run is in flight. Changing it drops that run (its revision moved), so it is
+        // due again now, with its new words: never left on with nothing due
+        const due = row.state === 'on' ? (rescheduled ? firstDue(settled, timeZone, now) : (row.nextDueAt ?? (settled.type === 'once' ? now : null))) : null;
         return finish({
           words: change.words ?? row.words,
           condition: kind === 'watch' && change.condition !== undefined ? change.condition : row.condition,
