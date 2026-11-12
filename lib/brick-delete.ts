@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getBrickLimits } from '@/lib/bot-limits';
 import { endAllApprovals } from '@/lib/bot-actions';
+import { pauseItemsOfDeletedBrick } from '@/lib/brick-items';
 import { deleteWithHiddenBotData } from '@/lib/bot-privacy';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
 import { stopComputerWork, removeMachineBeforeDelete } from '@/lib/computer';
@@ -49,7 +50,11 @@ export async function deleteBrick(brickId: string, ownerId: string, now: Date = 
           "updated_by_id" = ${ownerId}, "updated_at" = ${now}
       WHERE "id" = ${brickId} AND "owner_id" = ${ownerId} AND "room_id" IS NULL AND "deleted_at" IS NULL
       RETURNING "id"`);
-    if (marked.length > 0) await endAllApprovals(tx, brickId, now);
+    if (marked.length > 0) {
+      await endAllApprovals(tx, brickId, now);
+      // Its goals and tasks stop at the same moment; Undo gives the Brick back without switching any of them on (game #2002)
+      await pauseItemsOfDeletedBrick(tx, brickId);
+    }
     return marked.length > 0;
   });
   // Its tools' sign-in cards on Orbit home go too: nobody manages a deleted Brick (it never throws)

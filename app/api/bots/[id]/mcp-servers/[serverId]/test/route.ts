@@ -7,6 +7,7 @@ import { ensureFreshOAuthConfig } from '@/lib/mcp/oauth-refresh';
 import { extractErrorCode, readBodyWithLimit, truncateDetail } from '@/lib/mcp/test-result';
 import { isAllowedServerIp, isAllowedServerUrl } from '@/lib/mcp/outbound-guard';
 import { corsHeaders } from '@/lib/cors';
+import { WITH_CONNECTION, effectiveServer } from '@/lib/app-connections';
 
 export const runtime = 'nodejs';
 
@@ -501,13 +502,16 @@ export async function POST(
     }
 
     // Fetch the MCP server record (includes encrypted authConfig)
-    const server = await prisma.botMcpServer.findUnique({
+    const row = await prisma.botMcpServer.findUnique({
       where: { id: serverId },
+      include: WITH_CONNECTION,
     });
 
-    if (!server || server.botId !== botId) {
-      return NextResponse.json({ error: 'MCP server not found' }, { status: 404, headers: corsHeaders(request) });
+    if (!row || row.botId !== botId) {
+      return NextResponse.json({ error: 'App not found' }, { status: 404, headers: corsHeaders(request) });
     }
+    // A grant on a person's connection is tested with the connection's link and sign-in (game #2001); the result is the Brick's
+    const server = effectiveServer(row);
 
     // lastTestedAt and lastTestResult are persisted below.
 
@@ -520,6 +524,7 @@ export async function POST(
     if (server.authType === 'oauth' && server.authConfig) {
       const outcome = await ensureFreshOAuthConfig({
         serverId,
+        connectionId: server.connectionId,
         authConfig: server.authConfig,
         serverUrl: server.serverUrl,
       });

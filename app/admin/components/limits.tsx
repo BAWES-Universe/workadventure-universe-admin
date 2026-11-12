@@ -266,7 +266,7 @@ export function replyLimits(values: ReplyLimits): Limit[] {
     {
       id: 'steps',
       label: 'Steps in one reply',
-      hint: 'Tools a bot may use before it answers: searching, reading, building.',
+      hint: 'How many times a bot may use an app before it answers: searching, reading, building.',
       unit: 'steps',
       value: values.steps,
       recommended: recommended.steps,
@@ -612,6 +612,58 @@ export function brickLimits(values: BrickLimits): Limit[] {
       options: [
         { value: 200, label: '200 replies', meaning: every },
         { value: 500, label: '500 replies', meaning: every },
+      ],
+    },
+    {
+      id: 'itemsPerPerson',
+      label: 'Goals and tasks one person can have going',
+      hint: 'Reminders, schedules, watches and goals together, paused ones included. Done ones do not count.',
+      unit: 'goals and tasks',
+      value: values.itemsPerPerson,
+      recommended: recommended.itemsPerPerson,
+      options: [
+        { value: 10, label: '10', meaning: 'Keeps it small.' },
+        { value: 20, label: '20', meaning: 'Room for a good few.' },
+        { value: 50, label: '50', meaning: 'For people who keep a lot going.' },
+      ],
+    },
+    {
+      id: 'shortestRepeat',
+      label: 'Shortest wait between two runs of one goal or task',
+      hint: 'A Brick that is asked to check more often says so and offers this instead.',
+      unit: 'minutes',
+      value: values.shortestRepeat,
+      recommended: recommended.shortestRepeat,
+      options: [
+        { value: 15, label: '15 minutes', meaning: 'Checks often.' },
+        { value: 30, label: '30 minutes', meaning: 'A steady pace.' },
+        { value: 60, label: '1 hour', meaning: 'Gentle on usage.' },
+      ],
+    },
+    {
+      id: 'runsPerDay',
+      label: 'Runs a day for one person’s goals and tasks',
+      hint: 'Watches, schedules and goals together. Reminders are fixed text with no AI, so they never use these.',
+      unit: 'runs',
+      value: values.runsPerDay,
+      recommended: recommended.runsPerDay,
+      options: [
+        { value: 12, label: '12 runs', meaning: 'Each day.' },
+        { value: 24, label: '24 runs', meaning: 'Each day.' },
+        { value: 48, label: '48 runs', meaning: 'Each day.' },
+      ],
+    },
+    {
+      id: 'longestRun',
+      label: 'Longest one run can take',
+      hint: 'After this the run is given up, shown as failed, and the next one starts fresh.',
+      unit: 'minutes',
+      value: values.longestRun,
+      recommended: recommended.longestRun,
+      options: [
+        { value: 5, label: '5 minutes', meaning: 'For short checks.' },
+        { value: 10, label: '10 minutes', meaning: 'A steady pace.' },
+        { value: 30, label: '30 minutes', meaning: 'For longer work.' },
       ],
     },
   ], LIMIT_RANGES.bricks);

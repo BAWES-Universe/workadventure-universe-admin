@@ -64,7 +64,7 @@ describe('the words of the card', () => {
     expect(words).toEqual({
       title: 'Tavily Researcher can’t use Tavily',
       badge: 'Sign-in expired',
-      body: 'In autonode-labs. Tavily stopped accepting this bot’s sign-in at 12:54 PM. Until it’s reconnected, this bot answers without its tools and tells people who ask for them.',
+      body: 'In autonode-labs. Tavily stopped accepting this bot’s sign-in at 12:54 PM. Until it’s reconnected, this bot answers without its apps and tells people who ask for them.',
     });
   });
 
@@ -80,19 +80,19 @@ describe('the words of the card', () => {
   it('calls a rejected key a key, and sends the person to the bot’s page to paste a new one', () => {
     const words = describeToolSignIn(data([{ ...at(T1.toISOString()), name: 'Tavily', kind: 'key' }]), () => '12:54 PM');
     expect(words.badge).toBe('Key rejected');
-    expect(words.body).toBe('In autonode-labs. Tavily stopped accepting this bot’s API key at 12:54 PM. Tap to open this bot’s tools page, remove it there and add it again with a new key.');
+    expect(words.body).toBe('In autonode-labs. Tavily stopped accepting this bot’s API key at 12:54 PM. Tap to open this bot’s apps page, remove it there and add it again with a new key.');
   });
 });
 
 describe('the words for a server with no sign-in at all', () => {
-  it('is not called a key, and the hint is for the tools page', () => {
+  it('is not called a key, and the hint is for the apps page', () => {
     const words = describeToolSignIn(data([{ ...at(T1.toISOString()), name: 'Open', kind: 'open' }]), () => '12:54 PM');
     expect(words.badge).not.toBe('Key rejected');
     expect(words.body).not.toMatch(/API key/);
-    expect(words.body).toMatch(/tools page/);
+    expect(words.body).toMatch(/apps page/);
   });
 
-  it('names the tools page for the ones that need a new key when the card is mixed', () => {
+  it('names the apps page for the ones that need a new key when the card is mixed', () => {
     const words = describeToolSignIn(data([{ ...at(T1.toISOString()), name: 'Tavily', kind: 'key' }, { ...at(T2.toISOString()), id: 'y', name: 'Attio', kind: 'oauth' }]), () => '12:54 PM');
     expect(words.body).toContain('where the ones that need a new key can be removed and added again');
   });

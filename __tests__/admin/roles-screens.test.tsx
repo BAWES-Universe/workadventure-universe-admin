@@ -561,10 +561,10 @@ describe('a role page', () => {
     expect(within(bots).getByText('Lets people, including guests, summon a bot to them in its own room.')).toBeTruthy();
     expect(within(bots).getByText('Have bots change things')).toBeTruthy();
     expect(
-      within(bots).getByText('Lets people have a bot create or edit things with its tools, like a Linear issue or a post. Each bot chooses whether it asks first.'),
+      within(bots).getByText('Lets people have a bot create or edit things with its apps, like a Linear issue or a post. Each bot chooses whether it asks first.'),
     ).toBeTruthy();
     expect(within(bots).getByText('Have bots delete or send')).toBeTruthy();
-    expect(within(bots).getByText('Lets people have a bot delete things, or send email and messages outside Universe, with its tools.')).toBeTruthy();
+    expect(within(bots).getByText('Lets people have a bot delete things, or send email and messages outside Universe, with its apps.')).toBeTruthy();
   });
 
   it('shows the three bot switches on for Everyone, so bots work as they always have', async () => {

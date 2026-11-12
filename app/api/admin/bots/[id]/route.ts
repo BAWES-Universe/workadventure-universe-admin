@@ -30,10 +30,10 @@ export async function PATCH(
     return NextResponse.json({ showToolCalls });
   } catch (error) {
     if (error instanceof z.ZodError || error instanceof SyntaxError) {
-      return NextResponse.json({ error: 'Show tool calls must be a boolean' }, { status: 400 });
+      return NextResponse.json({ error: 'Show app use must be a boolean' }, { status: 400 });
     }
     console.error('Error saving bot tool-call setting:', error);
-    return NextResponse.json({ error: 'Could not save Show tool calls' }, { status: 500 });
+    return NextResponse.json({ error: 'Could not save Show app use' }, { status: 500 });
   }
 }
 

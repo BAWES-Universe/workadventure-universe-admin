@@ -5,6 +5,7 @@ import { normalizeExpiresIn } from '@/lib/mcp/oauth-token';
 import { checkOutboundUrl } from '@/lib/mcp/outbound-guard';
 import { getOAuthCallbackBase } from '@/lib/oauth-callback';
 import { markToolReconnected } from '@/lib/tool-signin';
+import { markConnectionReconnected, takeSignInNonce } from '@/lib/app-connections';
 
 export const runtime = 'nodejs';
 
@@ -98,16 +99,35 @@ export async function GET(request: NextRequest) {
       return new NextResponse('Invalid state token', { status: 400 });
     }
 
-    const { botId, serverId, redirectUrl, codeVerifier, redirectUri, resource, personId } = stateData;
+    const { botId, serverId, redirectUrl, codeVerifier, redirectUri, resource, personId, connectionId, nonce } = stateData;
     const openerBase = getOpenerBase(redirectUrl);
 
-    // Load the MCP server config to get OAuth provider config
-    const server = await prisma.botMcpServer.findUnique({
-      where: { id: serverId },
-      select: { id: true, botId: true, authType: true, authConfig: true, serverUrl: true },
-    });
+    // Load the config that holds the OAuth provider settings: a person's connection (game #2001), or a bot's own server
+    let server: { id: string; authType: string; authConfig: string | null; serverUrl: string } | null;
+    if (connectionId) {
+      const connection = await prisma.appConnection.findUnique({
+        where: { id: connectionId },
+        select: { id: true, ownerId: true, authType: true, authConfig: true, serverUrl: true },
+      });
+      // Only the person who owns it can sign it in, and a connection that is gone has nothing to sign in
+      server = connection && connection.authType === 'oauth' && personId === connection.ownerId ? connection : null;
+      // One ticket per sign-in: a replayed return, or the return of a sign-in that a newer one replaced, is refused before
+      // the code is spent (check 38)
+      if (server && !(await takeSignInNonce(server.id, nonce))) {
+        console.error('[OAuthCallback] Stale or replayed sign-in return for a connection');
+        if (redirectUrl) return popupRedirect(openerBase, { oauth: 'error', message: 'sign_in_expired' });
+        return new NextResponse('This sign-in was already used or replaced. Start it again.', { status: 409 });
+      }
+    } else {
+      const row = await prisma.botMcpServer.findUnique({
+        where: { id: serverId },
+        select: { id: true, botId: true, authType: true, authConfig: true, serverUrl: true, connectionId: true },
+      });
+      // A grant never signs in on its own: its connection does (the start route sends it there)
+      server = row && row.botId === botId && !row.connectionId ? row : null;
+    }
 
-    if (!server || server.botId !== botId || server.authType !== 'oauth') {
+    if (!server || server.authType !== 'oauth') {
       console.error('[OAuthCallback] Server not found or not OAuth type');
       if (redirectUrl) {
         return popupRedirect(openerBase, { oauth: 'error', message: 'server_not_found' });
@@ -236,7 +256,7 @@ export async function GET(request: NextRequest) {
     //   authorization server: the new tokens are carried onto what the row holds now;
     // - the server URL, an endpoint or the client changed: these tokens are not that
     //   connection's, so nothing is written and the login reports the change.
-    const stored = await storeAuthorizedTokens(server.id, server.serverUrl, server.authConfig!, updatedOAuthConfig);
+    const stored = await storeAuthorizedTokens(!!connectionId, server.id, server.serverUrl, server.authConfig!, updatedOAuthConfig);
     if (stored === 'busy') {
       // Every attempt lost to another write that kept this connection's settings: nothing
       // changed that invalidates the login, the row was just being written at the time.
@@ -259,10 +279,11 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    console.log(`[OAuthCallback] Tokens stored for server ${serverId} (bot ${botId})`);
+    console.log(`[OAuthCallback] Tokens stored for ${connectionId ? `connection ${connectionId}` : `server ${serverId} (bot ${botId})`}`);
 
-    // A fresh sign-in: remember who made it and clear a lost one at once (game #1819)
-    await markToolReconnected(serverId, personId ?? null);
+    // A fresh sign-in: remember who made it and clear a lost one at once (game #1819). A connection's clears for every Brick.
+    if (connectionId) await markConnectionReconnected(connectionId, personId ?? null);
+    else await markToolReconnected(serverId, personId ?? null);
 
     // Redirect to the popup callback page on the opener's origin.
     // This ensures the popup navigates to the same origin as the page that
@@ -287,6 +308,7 @@ const STORE_ATTEMPTS = 3;
  * attempt lost to writes that kept it the same connection, so connecting again works.
  */
 async function storeAuthorizedTokens(
+  onConnection: boolean,
   serverId: string,
   serverUrl: string,
   expectedAuthConfig: string,
@@ -295,16 +317,15 @@ async function storeAuthorizedTokens(
   let expected = expectedAuthConfig;
   let toStore = authorized;
   for (let attempt = 0; attempt < STORE_ATTEMPTS; attempt += 1) {
-    const result = await prisma.botMcpServer.updateMany({
-      where: { id: serverId, serverUrl, authConfig: expected },
-      data: { authConfig: encryptApiKey(JSON.stringify(toStore)) },
-    });
+    const where = { id: serverId, serverUrl, authConfig: expected };
+    const data = { authConfig: encryptApiKey(JSON.stringify(toStore)) };
+    const result = onConnection ? await prisma.appConnection.updateMany({ where, data }) : await prisma.botMcpServer.updateMany({ where, data });
     if (result.count === 1) return 'stored';
 
-    const row = await prisma.botMcpServer.findUnique({
-      where: { id: serverId },
-      select: { authType: true, authConfig: true, serverUrl: true },
-    });
+    const select = { authType: true, authConfig: true, serverUrl: true } as const;
+    const row = onConnection
+      ? await prisma.appConnection.findUnique({ where: { id: serverId }, select })
+      : await prisma.botMcpServer.findUnique({ where: { id: serverId }, select });
     if (!row || row.authType !== 'oauth' || !row.authConfig || row.serverUrl !== serverUrl) return 'changed';
     let current: OAuthConfig;
     try {
@@ -334,7 +355,7 @@ async function storeAuthorizedTokens(
  * Parse the encrypted state token.
  * Checks the `exp` claim (epoch seconds) and returns null if expired.
  */
-function parseStateToken(state: string | null): { botId: string; serverId: string; redirectUrl: string; codeVerifier?: string; redirectUri?: string; resource?: string; personId?: string } | null {
+function parseStateToken(state: string | null): { botId: string; serverId: string; redirectUrl: string; codeVerifier?: string; redirectUri?: string; resource?: string; personId?: string; connectionId?: string; nonce?: string } | null {
   if (!state) return null;
   try {
     const decrypted = decryptApiKey(state);
