@@ -6,4 +6,5 @@ ALTER TABLE "brick_item_runs" ADD COLUMN "delivered_event_id" VARCHAR(255),
 ADD COLUMN "delivered_at" TIMESTAMP(3);
 
 -- AlterTable
-ALTER TABLE "brick_items" ADD COLUMN "failure_told" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "brick_items" ADD COLUMN "failure_told" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN "tell_run_id" VARCHAR(36);

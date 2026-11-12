@@ -501,7 +501,13 @@ run('goals and tasks, in a real database', () => {
     // A run that works starts the row over, and the next failure tells again
     const [good] = (await claimDueRuns(at(4 * DAY + 3 * HOUR))).filter((claimed) => claimed.itemId === reminder.id);
     await finishRun(good.runId, { attempt: good.attempt, state: 'done', outcome: 'spoke' }, at(4 * DAY + 3 * HOUR + MIN));
-    expect((await fail(5)).tell).toBe(true);
+    const asked = await fail(5);
+    expect(asked.tell).toBe(true);
+    // A late confirmation from an earlier row (its run is not the one asked now) marks nothing, so the new row is still told
+    expect(await markTold(second.runId)).toEqual({ ok: true, told: false });
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: reminder.id } })).toMatchObject({ failureTold: false, tellRunId: asked.runId });
+    expect(await markTold(asked.runId)).toEqual({ ok: true, told: true });
+    expect((await fail(6)).tell).toBe(false);
   });
 
   it('a run given up without a report counts in the failures in a row, and the next reported failure still tells the person, once', async () => {

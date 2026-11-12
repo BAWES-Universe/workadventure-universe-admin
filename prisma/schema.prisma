@@ -1035,6 +1035,8 @@ model BrickItem {
   failuresInRow Int       @default(0) @map("failures_in_row")
   // Whether the person was told about the failures in a row so far; cleared by the next run that works
   failureTold   Boolean   @default(false) @map("failure_told")
+  // The run that was asked to tell the person about this row of failures, until it confirms (markTold) or the row starts over
+  tellRunId     String?   @map("tell_run_id") @db.VarChar(36)
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 

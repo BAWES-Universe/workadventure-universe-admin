@@ -397,7 +397,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (refused) return refused;
         // Starts again from the new revision, counted from now: a one-off that has passed is due now, once
         const due = cadence.type === 'once' ? (firstDue(cadence, row.timeZone, now) ?? now) : firstDue(cadence, row.timeZone, now);
-        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, nextDueAt: due, failuresInRow: 0, failureTold: false, ...bump });
+        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, nextDueAt: due, failuresInRow: 0, failureTold: false, tellRunId: null, ...bump });
       }
       case 'delete': {
         await moveChecks(tx, row.id, ['on', 'paused', 'done'], { state: 'deleted', pausedBy: null }, now, false);
@@ -421,7 +421,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         const later = new Date(from.getTime() + limits.snooze * MINUTE);
         // A one-off comes back at the new time (done ones too: they have just been delivered); a repeating one is moved once and carries on from there
         const moved: Cadence = cadence.type === 'once' ? { type: 'once', at: later.toISOString() } : cadence;
-        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, cadence: moved as unknown as Prisma.InputJsonValue, nextDueAt: later, ...(row.state === 'done' ? { failuresInRow: 0, failureTold: false } : {}), ...bump });
+        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, cadence: moved as unknown as Prisma.InputJsonValue, nextDueAt: later, ...(row.state === 'done' ? { failuresInRow: 0, failureTold: false, tellRunId: null } : {}), ...bump });
       }
       case 'change': {
         const change = input.change;
@@ -745,7 +745,7 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
     const tellAt = kind === 'reminder' || kind === 'schedule' ? 1 : limits.failuresBeforeTelling;
     // It is kept as told only when the bot server says it did tell (markTold), so a tell that failed is asked for again with the next failure
     const tellPerson = report.state === 'failed' && failuresInRow >= tellAt && !item.failureTold;
-    const data: Prisma.BrickItemUpdateInput = { lastRunAt: now, failuresInRow, ...(report.state === 'failed' ? {} : { failureTold: false }) };
+    const data: Prisma.BrickItemUpdateInput = { lastRunAt: now, failuresInRow, ...(report.state === 'failed' ? (tellPerson ? { tellRunId: runId } : {}) : { failureTold: false, tellRunId: null }) };
     if (report.progress && kind === 'goal') {
       if (report.progress.statusLine !== undefined) data.statusLine = report.progress.statusLine;
       if (report.progress.steps !== undefined) data.steps = report.progress.steps;
@@ -786,14 +786,14 @@ export async function markDelivered(runId: string, eventId: string, now: Date = 
 /**
  * The bot server told the person about a row of failures (the run's `tellPerson` was true): keep that it was told, so the next
  * failure in the same row does not tell again. Called only after the tell went through; if it never comes, the next failure asks for
- * the tell again, so a tell that failed is never lost. Nothing happens for a run whose item has since gone or started over.
+ * the tell again, so a tell that failed is never lost. Only the run that was asked to tell can confirm it, so a late call never marks a newer row of failures.
  */
 export async function markTold(runId: string): Promise<{ ok: true; told: boolean } | { ok: false; status: 404; error: string }> {
-  const run = await prisma.brickItemRun.findUnique({ where: { id: runId }, select: { itemId: true, state: true } });
+  const run = await prisma.brickItemRun.findUnique({ where: { id: runId }, select: { itemId: true } });
   if (!run) return { ok: false, status: 404, error: 'Run not found' };
-  // Only a run that failed can have asked for a tell, and only while that row of failures is still going
-  if (run.state !== 'failed') return { ok: true, told: false };
-  const { count } = await prisma.brickItem.updateMany({ where: { id: run.itemId, failuresInRow: { gt: 0 }, failureTold: false }, data: { failureTold: true } });
+  // Only the run that was asked to tell, and only while its row of failures is still the item's: a late confirmation from a row that has
+  // since started over (a run worked, or the item was reopened) matches nothing and marks nothing
+  const { count } = await prisma.brickItem.updateMany({ where: { id: run.itemId, tellRunId: runId, failureTold: false }, data: { failureTold: true, tellRunId: null } });
   return { ok: true, told: count > 0 };
 }
 
