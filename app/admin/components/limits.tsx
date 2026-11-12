@@ -266,7 +266,7 @@ export function replyLimits(values: ReplyLimits): Limit[] {
     {
       id: 'steps',
       label: 'Steps in one reply',
-      hint: 'Tools a bot may use before it answers: searching, reading, building.',
+      hint: 'How many times a bot may use an app before it answers: searching, reading, building.',
       unit: 'steps',
       value: values.steps,
       recommended: recommended.steps,

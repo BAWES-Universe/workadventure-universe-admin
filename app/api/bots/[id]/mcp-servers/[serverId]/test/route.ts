@@ -506,7 +506,7 @@ export async function POST(
     });
 
     if (!server || server.botId !== botId) {
-      return NextResponse.json({ error: 'MCP server not found' }, { status: 404, headers: corsHeaders(request) });
+      return NextResponse.json({ error: 'App not found' }, { status: 404, headers: corsHeaders(request) });
     }
 
     // lastTestedAt and lastTestResult are persisted below.

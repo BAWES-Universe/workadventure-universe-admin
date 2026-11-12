@@ -213,7 +213,7 @@ export function toolsState(legacyText: boolean, tools: readonly { state: 'confir
 
 async function loadServer(db: Prisma.TransactionClient | typeof prisma, botId: string, serverId: string): Promise<ServerRow> {
   const server = await db.botMcpServer.findUnique({ where: { id: serverId }, select: SERVER_SELECT });
-  if (!server || server.botId !== botId) throw new BotSettingsError(404, 'MCP server not found');
+  if (!server || server.botId !== botId) throw new BotSettingsError(404, 'App not found');
   return server;
 }
 

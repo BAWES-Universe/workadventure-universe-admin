@@ -239,7 +239,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
           setError('Bot not found');
           return;
         }
-        throw new Error('Failed to fetch MCP servers');
+        throw new Error('Failed to fetch apps');
       }
       const data = await response.json();
       setServers(data);
@@ -292,9 +292,9 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
       if (!response.ok) {
         const data = await response.json();
         if (response.status === 422) {
-          setFormError('Maximum of 5 MCP servers per bot reached');
+          setFormError('Maximum of 5 apps per bot reached');
         } else {
-          setFormError(data.error || 'Failed to create MCP server');
+          setFormError(data.error || 'Failed to add the app');
         }
         return;
       }
@@ -498,7 +498,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
   if (!authChecked || (loading && servers.length === 0 && !error)) {
     return (
       <div className="grid min-w-0 gap-6">
-        <LoadingRows label="MCP servers" rows={3} />
+        <LoadingRows label="apps" rows={3} />
       </div>
     );
   }
@@ -509,7 +509,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
         {error === 'Bot not found' ? (
           <EmptyCard kind="bot" title="This bot doesn’t exist." text="It may have been deleted." href="/admin/bots" action="All bots" />
         ) : (
-          <LoadError label="this bot’s MCP servers" retry={fetchServers} />
+          <LoadError label="this bot’s apps" retry={fetchServers} />
         )}
       </div>
     );
@@ -519,10 +519,10 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
     <div className="grid min-w-0 gap-6">
       <PageHeader
         kind="bot"
-        title="MCP servers"
+        title="Apps"
         context={
           <span>
-            An MCP (Model Context Protocol) server gives this bot extra tools. A bot can have up to five.
+            An app gives this bot more it can do. A bot can have up to five.
           </span>
         }
         stats={
@@ -534,13 +534,13 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
           <Dialog open={addDialogOpen} onOpenChange={handleAddDialogOpenChange}>
             <DialogTrigger asChild>
               <Button disabled={servers.length >= 5}>
-                <Plus aria-hidden="true" /> Add server
+                <Plus aria-hidden="true" /> Add your own app
               </Button>
             </DialogTrigger>
             <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-[500px]">
               <DialogHeader>
-                <DialogTitle>Add MCP server</DialogTitle>
-                <DialogDescription>Connect an external MCP server so this bot can use its tools.</DialogDescription>
+                <DialogTitle>Add your own app</DialogTitle>
+                <DialogDescription>Paste its MCP link, like Firecrawl</DialogDescription>
               </DialogHeader>
 
             {formError && (
@@ -555,14 +555,14 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                 <Input
                   className="h-11"
                   id="name"
-                  placeholder="My MCP Server"
+                  placeholder="My app"
                   value={formData.name}
                   onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                 />
               </div>
 
               <div className="grid gap-2">
-                <Label htmlFor="serverUrl">Server URL</Label>
+                <Label htmlFor="serverUrl">Link</Label>
                 <Input
                   className="h-11"
                   id="serverUrl"
@@ -805,7 +805,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
               <SettingSwitch
                 id="enabled"
                 label="Enabled"
-                hint="On: the bot can use this server’s tools as soon as it’s added. Off: added but unused."
+                hint="On: the bot can use this app as soon as it’s added. Off: added but unused."
                 checked={formData.enabled}
                 onChange={(checked) => setFormData({ ...formData, enabled: checked })}
               />
@@ -821,7 +821,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                   disabled={submitting || oauthDiscovery === 'discovering' || (formData.authType === 'oauth' && oauthDiscovery === 'idle') || !formData.name || !formData.serverUrl}
                 >
                   {submitting ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
-                  Add server
+                  Add app
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -831,16 +831,16 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
 
       {servers.length === 0 ? (
         <div className="grid gap-3">
-          <EmptyCard kind="bot" title="No MCP servers yet." text="Add one to give this bot custom tools." />
+          <EmptyCard kind="bot" title="No apps yet." text="Add one to give this bot more it can do." />
           <div>
             <Button variant="outline" className="h-11" onClick={() => setAddDialogOpen(true)}>
-              <Plus aria-hidden="true" /> Add a server
+              <Plus aria-hidden="true" /> Add your own app
             </Button>
           </div>
         </div>
       ) : (
         <section aria-labelledby="mcp-list" className="min-w-0">
-          <SectionHeader id="mcp-list" title="Servers" count={servers.length} />
+          <SectionHeader id="mcp-list" title="Apps" count={servers.length} />
           <div className="grid min-w-0 gap-3">
             {servers.map((server) => {
               const live = testResults[server.id];
@@ -901,7 +901,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                   </div>
 
                   <div className="min-w-0 text-xs">
-                    <span className="font-medium text-muted-foreground">Tools: </span>
+                    <span className="font-medium text-muted-foreground">What it can do: </span>
                     {testingId === server.id ? (
                       <span className="text-muted-foreground">Testing…</span>
                     ) : (
@@ -969,10 +969,10 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                       </AlertDialogTrigger>
                       <AlertDialogContent>
                         <AlertDialogHeader>
-                          <AlertDialogTitle>Delete MCP server</AlertDialogTitle>
+                          <AlertDialogTitle>Delete app</AlertDialogTitle>
                           <AlertDialogDescription>
                             Are you sure you want to delete &ldquo;{server.name}&rdquo;? This action cannot be
-                            undone. The bot will lose access to this MCP server&rsquo;s tools.
+                            undone. The bot will lose access to this app.
                           </AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>

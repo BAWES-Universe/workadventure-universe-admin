@@ -387,7 +387,7 @@ export async function POST(
   } catch (error) {
     if (error instanceof Error && error.message === 'MaxServersReached') {
       return NextResponse.json(
-        { error: 'Maximum of 5 MCP servers per bot reached' },
+        { error: 'Maximum of 5 apps per bot reached' },
         { status: 422, headers: corsHeaders(request) }
       );
     }
