@@ -219,15 +219,21 @@ export async function bricksForRoom(roomUrl: string, peopleUuids: string[], now:
       bot: { select: VISITING_BOT_SELECT },
     },
   });
-  if (here.length === 0) return { place, visiting: [] as VisitingBrickRow[] };
-  const userIds = here.map((row) => row.userId);
+  // A person is only seen in a room they may see: the bot server is told where people are by the game, and a visit never
+  // moves to a room its person could not open
+  const seen: typeof here = [];
+  for (const row of here) {
+    if (await mayReadRoomBots(place.room, row.userId)) seen.push(row);
+  }
+  if (seen.length === 0) return { place, visiting: [] as VisitingBrickRow[] };
+  const userIds = seen.map((row) => row.userId);
   if (!place.takesVisits) {
     // Not on this map, but the person is still here: the visit is kept alive where it was, for the places that take it
     await prisma.brickVisit.updateMany({ where: { userId: { in: userIds } }, data: { seenAt: now } });
     return { place, visiting: [] as VisitingBrickRow[] };
   }
   await prisma.brickVisit.updateMany({ where: { userId: { in: userIds } }, data: { roomId: place.roomId, seenAt: now } });
-  return { place, visiting: here.map((row) => ({ ownerUuid: row.user.uuid, ownerName: row.user.name, bot: row.bot })) };
+  return { place, visiting: seen.map((row) => ({ ownerUuid: row.user.uuid, ownerName: row.user.name, bot: row.bot })) };
 }
 
 export const VISITING_BOT_SELECT = {

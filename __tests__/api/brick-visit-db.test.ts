@@ -240,6 +240,22 @@ run('bringing a Brick along, in a real database', () => {
       expect(await visitState(brickId, sara.id, null)).toEqual({ state: 'none', place: null });
     });
 
+    it('never moves a visit into a room its person could not open (Sentry on #2023)', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      await prisma.universe.update({ where: { id: universes.second.id }, data: { isPublic: false } });
+      await prisma.room.updateMany({ where: { world: { universeId: universes.second.id } }, data: { isPublic: false } });
+      await prisma.world.updateMany({ where: { universeId: universes.second.id }, data: { isPublic: false } });
+      try {
+        expect(await feed(universes.second.roomUrl, [sara.uuid])).toHaveLength(0);
+        expect((await visit(sara.id))?.roomId).toBe(universes.open.roomId);
+      } finally {
+        await prisma.universe.update({ where: { id: universes.second.id }, data: { isPublic: true } });
+        await prisma.room.updateMany({ where: { world: { universeId: universes.second.id } }, data: { isPublic: true } });
+        await prisma.world.updateMany({ where: { universeId: universes.second.id }, data: { isPublic: true } });
+      }
+      expect(await feed(universes.second.roomUrl, [sara.uuid])).toHaveLength(1);
+    });
+
     it('stops bringing a Brick when its universe turns the switch off, and when the Brick is switched off or deleted', async () => {
       await startVisit(brickId, sara.id, universes.open.roomUrl);
       expect(await feed(universes.open.roomUrl, [sara.uuid])).toHaveLength(1);
