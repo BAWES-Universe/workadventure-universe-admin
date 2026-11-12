@@ -222,13 +222,15 @@ run('what a bot remembers about a person (real database)', () => {
     // The same thing reported again with an older time: the newer Forget stays
     await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: id, kind: 'pref', at: asked - 1000 }), params(melodyId));
     expect((await prisma.botMemoryItemForget.findFirstOrThrow({ where: { botId: melodyId, itemKey: id } })).createdAt.getTime()).toBe(asked);
-    // A time in the future, or older than the bot server keeps trying, is not believed
+    // A time in the future is not believed
     const future = memoryItemKey('pref', null, 'chess');
     await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: future, kind: 'pref', at: Date.now() + 10 * 60 * 60 * 1000 }), params(melodyId));
     expect((await prisma.botMemoryItemForget.findFirstOrThrow({ where: { botId: melodyId, itemKey: future } })).createdAt.getTime()).toBeLessThanOrEqual(Date.now());
+    // An old time is kept as the bot server sent it: its report is the truth of when they asked
     const old = memoryItemKey('pref', null, 'lo-fi');
-    await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: old, kind: 'pref', at: 5 }), params(melodyId));
-    expect((await prisma.botMemoryItemForget.findFirstOrThrow({ where: { botId: melodyId, itemKey: old } })).createdAt.getTime()).toBeGreaterThan(Date.now() - 25 * 60 * 60 * 1000);
+    const longAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
+    await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: old, kind: 'pref', at: longAgo }), params(melodyId));
+    expect((await prisma.botMemoryItemForget.findFirstOrThrow({ where: { botId: melodyId, itemKey: old } })).createdAt.getTime()).toBe(longAgo);
     // Not a time at all is a bad request
     expect((await forgetByKey(asBotServer(`/api/bots/memory/${melodyId}/items`, { userUuid: people.sara.uuid, itemKey: id, kind: 'pref', at: 'x' }), params(melodyId))).status).toBe(400);
   });
