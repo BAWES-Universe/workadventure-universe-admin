@@ -14,7 +14,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   try {
     requireServiceToken(request);
     const { id } = await params;
-    // `asker`: who is about to be answered, by their WorkAdventure id or email. Only a Brick that walks beside its owner (game #2005) reads it
+    // `asker`: who is about to be answered, by their WorkAdventure id, email or Orbit id. Only a Brick (game #2005) reads it
     const asker = new URL(request.url).searchParams.get('asker')?.trim().slice(0, 320) || null;
     const result = await credentialsForBot(id, { asker });
     if (result.status !== 200) return NextResponse.json({ error: result.error, ...('code' in result ? { code: result.code } : {}) }, { status: result.status });

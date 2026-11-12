@@ -536,10 +536,29 @@ run('bringing a Brick along, in a real database', () => {
       expect(await (await credentials(omar.uuid)).json()).toMatchObject({ source: 'own-key', forOthers: true });
       // A person the bot server cannot name is nobody's owner
       expect(await (await credentials('unknown')).json()).toMatchObject({ forOthers: true });
-      // Its owner is never flagged, by uuid or email
-      for (const asker of [sara.uuid, sara.email, undefined]) {
+      // Its owner is never flagged, by WorkAdventure id, email or Orbit id
+      for (const asker of [sara.uuid, sara.email, sara.id]) {
         expect((await (await credentials(asker)).json()).forOthers).toBeUndefined();
       }
+    });
+
+    it('fails closed for a visiting Brick when nobody is named: never the owner’s key, and never refused', async () => {
+      await startVisit(brickId, sara.id, universes.open.roomUrl);
+      await feed(universes.open.roomUrl, [sara.uuid]);
+      await onKey();
+      // The owner's key is not lent here: a call that names nobody is stood in for on Universe AI and flagged, like any stranger
+      const unnamed = await credentials();
+      expect(unnamed.status).toBe(200);
+      expect(await unnamed.json()).toMatchObject({ source: 'universe-ai', standingInFor: keyId, forOthers: true });
+      expect(await credentialsForBot(brickId)).toMatchObject({ status: 200, body: { source: 'universe-ai', forOthers: true } });
+      // Naming its owner (by any of the three) is how the Brick's own calls get its key
+      for (const owner of [sara.uuid, sara.email, sara.id]) {
+        expect(await (await credentials(owner)).json()).toMatchObject({ source: 'own-key', providerId: keyId, keyOwnerId: sara.id });
+      }
+      // Not visiting anywhere: nobody to protect it from, so naming nobody is the Brick's own business, as it always was
+      await prisma.brickVisit.deleteMany({ where: { userId: sara.id } });
+      expect(await (await credentials()).json()).toMatchObject({ source: 'own-key', providerId: keyId });
+      expect((await credentials(omar.uuid)).status).toBe(404);
     });
 
     it('answers nobody but its owner when the Brick is not visiting anywhere (a restart, a room that takes no visits, a visit that ran out)', async () => {

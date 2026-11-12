@@ -119,17 +119,20 @@ export async function credentialsForBot(botId: string, options: { asker?: string
   if (bot.deletedAt !== null) return { status: 404, error: 'Bot not found' };
   // A Brick asked for by someone other than its owner (game #2005): only while it walks beside its owner in a place
   // that takes visiting Bricks, and then on what it runs on there. `asker` is who is about to be answered, by their
-  // WorkAdventure id or email. Without it, or for its owner, the answer is the one it always was. The bot server (service token only,
-  // never a browser) names the asker for every reply and small call that is for a person, and an asker it cannot name goes as
-  // 'unknown', which is never the owner; what names nobody is the Brick's own business (its owner's tool headings, which key a
-  // greeting would run on), and failing those closed would stop a Brick working for its owner.
+  // WorkAdventure id, email or Orbit id; the bot server names the owner for the Brick's own small calls. While a visit is live a call
+  // that names nobody is treated as someone else's (never the owner's key or things): an old bot server that names nobody is
+  // answered on Universe AI for that while, not refused, and nothing is served on the owner's key by default.
   let others: Others | null = null;
-  if (bot.roomId === null && options.asker) {
-    const asker = await prisma.user.findFirst({ where: { OR: [{ uuid: options.asker }, { email: options.asker }] }, select: { id: true } });
+  if (bot.roomId === null) {
+    const asker = options.asker
+      ? await prisma.user.findFirst({ where: { OR: [{ uuid: options.asker }, { email: options.asker }, { id: options.asker }] }, select: { id: true } })
+      : null;
     if (!asker || asker.id !== bot.ownerId) {
       const here = await whereIsBrick(bot.id, null);
-      if (!here) return { status: 404, error: 'Bot not found' };
-      others = { universeId: here.universeId };
+      if (here) others = { universeId: here.universeId };
+      // Someone named, and not its owner, while it is not visiting anywhere: nobody to serve. Nothing named and not visiting is
+      // the Brick's own business, as it always was.
+      else if (options.asker) return { status: 404, error: 'Bot not found' };
     }
   }
   const main = await mainCredentials(bot, others);
