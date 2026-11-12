@@ -41,6 +41,8 @@ export interface Limit {
   value: number;
   recommended: number;
   options: LimitOption[];
+  /** Nothing is set yet and no value is suggested (game #1999: a computer's money comes from our own test): the row says "Not set", with no recommended mark. */
+  unset?: boolean;
   /** Shown under the choices in the sheet: cost or what it affects. */
   note?: string;
   /** No "Other" box (a choice between fixed steps). */
@@ -61,6 +63,7 @@ export interface ModelCap {
 }
 
 export function shown(limit: Limit, value = limit.value): string {
+  if (limit.unset && value === limit.value) return 'Not set';
   const option = limit.options.find((entry) => entry.value === value);
   return option ? option.label : `${value.toLocaleString('en')} ${limit.unit}`;
 }
@@ -77,6 +80,8 @@ export function RecommendedPill() {
 /** One row: what it is, what it does, and its value; the whole row opens the choices. */
 export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }) {
   const isRecommended = limit.value === limit.recommended;
+  // A limit with no recommended value (a negative one) shows its value alone, and "Not set" while nothing is set
+  const mark = limit.unset || limit.recommended < 0 ? null : isRecommended ? <RecommendedPill /> : <span className="text-[11px] text-muted-foreground">Recommended: {shown(limit, limit.recommended)}</span>;
   return (
     <button
       type="button"
@@ -95,12 +100,12 @@ export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }
         )}
         <span className="mt-1.5 flex flex-wrap items-center gap-2 sm:hidden">
           <span className="text-sm font-bold">{shown(limit)}</span>
-          {isRecommended ? <RecommendedPill /> : <span className="text-[11px] text-muted-foreground">Recommended: {shown(limit, limit.recommended)}</span>}
+          {mark}
         </span>
       </span>
       <span className="hidden shrink-0 justify-items-end gap-1 sm:grid">
         <span className="text-sm font-bold">{shown(limit)}</span>
-        {isRecommended ? <RecommendedPill /> : <span className="text-[11px] text-muted-foreground">Recommended: {shown(limit, limit.recommended)}</span>}
+        {mark}
       </span>
       <ChevronRight size={18} aria-hidden="true" className="shrink-0 text-muted-foreground" />
     </button>
@@ -109,9 +114,9 @@ export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }
 
 /** The choices for one limit: radio cards with what each means, the recommended one marked, and Other. */
 export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone: (value: number) => Promise<void> | void; onCancel: () => void }) {
-  const known = limit.options.some((option) => option.value === limit.value);
+  const known = !limit.unset && limit.options.some((option) => option.value === limit.value);
   const [picked, setPicked] = useState<number | 'other'>(known ? limit.value : 'other');
-  const [other, setOther] = useState(known ? '' : String(limit.value));
+  const [other, setOther] = useState(known || limit.unset ? '' : String(limit.value));
   const [saving, setSaving] = useState(false);
   // What was typed is read as it is, with commas and spaces as thousands marks: "-50" or "1e2" is refused, not turned into 50 or 12
   const typed = other.replace(/[,\s]/g, '');
@@ -683,6 +688,34 @@ export function brickLimits(values: BrickLimits): Limit[] {
   ], LIMIT_RANGES.bricks);
 }
 
+/**
+ * The first row of Limits, Bricks (game #1999): the computer allowance for each member, a month. Every member starts with it, so
+ * nothing is switched on per person. It has no suggested value: the starting value comes from our own test on the dev server, so
+ * until a super admin sets it the row says "Not set" and Bricks' computers stay closed. Shown in dollars; kept in millionths.
+ */
+export const COMPUTER_ALLOWANCE_ID = 'computerMonth';
+export const dollarsToMicros = (dollars: number) => Math.round(dollars * 1_000_000);
+
+export function computerAllowanceLimit(micros: number | null): Limit {
+  const month = 'a month, for each member';
+  return {
+    id: COMPUTER_ALLOWANCE_ID,
+    label: 'Computer allowance for each member, a month',
+    hint: 'What a member’s Bricks can use on computers in a month. When it runs out, Brick offers “Ask for more”. Chat and voice keep the fair usage above.',
+    unit: 'dollars',
+    value: micros === null ? 0 : micros / 1_000_000,
+    recommended: -1,
+    unset: micros === null,
+    options: [
+      { value: 3, label: '$3', meaning: month },
+      { value: 5, label: '$5', meaning: month },
+      { value: 10, label: '$10', meaning: month },
+    ],
+    note: micros === null ? 'Not set yet. Brick computers stay closed until it is. The starting value comes from our own test on the dev server.' : undefined,
+    range: { min: 0.01, max: 1_000_000 },
+  };
+}
+
 /** The id without its maker's prefix: "openai/gpt-4o-mini" is "gpt-4o-mini". */
 const shortModel = (id: string) => (id.includes('/') ? id.slice(id.indexOf('/') + 1) : id);
 const listOf = (names: string[]) => new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(names);
@@ -953,6 +986,9 @@ export function UniverseAiLimits() {
   const [failed, setFailed] = useState(false);
   const [voiceFailed, setVoiceFailed] = useState(false);
   const [savingGuard, setSavingGuard] = useState(false);
+  // The meter's computer allowance for each member (game #1999): null until a super admin sets it
+  const [allowance, setAllowance] = useState<{ micros: number | null } | null>(null);
+  const [allowanceFailed, setAllowanceFailed] = useState(false);
 
   async function load() {
     setFailed(false);
@@ -979,10 +1015,34 @@ export function UniverseAiLimits() {
     }
   }
 
+  async function loadAllowance() {
+    setAllowanceFailed(false);
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/meter-settings');
+      if (!response.ok) throw new Error('load');
+      setAllowance({ micros: ((await response.json()) as { settings: { memberAllowanceMicros: number | null } }).settings.memberAllowanceMicros });
+    } catch {
+      setAllowanceFailed(true);
+    }
+  }
+
   useEffect(() => {
     load();
     loadVoice();
+    loadAllowance();
   }, []);
+
+  async function saveAllowance(dollars: number): Promise<boolean> {
+    const result = await sendLimits('/api/admin/meter-settings', { memberAllowanceMicros: dollarsToMicros(dollars) });
+    if (!result.ok) {
+      addToast({ description: result.error, variant: 'error' });
+      return false;
+    }
+    setAllowance({ micros: (result.data as { settings: { memberAllowanceMicros: number | null } }).settings.memberAllowanceMicros });
+    addToast({ description: 'Saved', variant: 'success', duration: 2000 });
+    return true;
+  }
 
   async function saveVoice(change: Record<string, unknown>): Promise<boolean> {
     const result = await sendLimits('/api/admin/voice-limits', change);
@@ -1038,7 +1098,14 @@ export function UniverseAiLimits() {
           </Settings>
           <LimitGroup title="Files in chats, for all bots" limits={fileLimits(limits.files)} onChange={(id, value) => save({ files: { [id]: value } })} />
           <LimitGroup title="Fair usage" limits={fairUsageLimits(limits.fairUsage)} onChange={(id, value) => save({ fairUsage: { [id]: value } })} />
-          <LimitGroup title="Bricks" limits={brickLimits(limits.bricks)} onChange={(id, value) => save({ bricks: { [id]: value } })} />
+          {allowanceFailed && <LoadError label="the computer allowance" retry={loadAllowance} />}
+          <LimitGroup
+            title="Bricks"
+            note="Every member starts with these, so nothing is switched on per person. The starting values come from our own test on the dev server."
+            // The Bricks limits that were read stay when only the allowance could not be read; its row comes in once it is
+            limits={[...(allowance ? [computerAllowanceLimit(allowance.micros)] : []), ...brickLimits(limits.bricks)]}
+            onChange={(id, value) => (id === COMPUTER_ALLOWANCE_ID ? saveAllowance(value) : save({ bricks: { [id]: value } }))}
+          />
           {voiceFailed ? (
             <LoadError label="the voice limits" retry={loadVoice} />
           ) : !voice ? (

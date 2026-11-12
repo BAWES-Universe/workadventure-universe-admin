@@ -249,6 +249,8 @@ export type GrantSettlement = (typeof GRANT_SETTLEMENTS)[number];
 
 /** A grant as the allowance reads it. `multiplier` is null when it lifts the member's own limit. */
 export interface GrantWindow {
+  /** The grant's key: the last thing that settles which of two otherwise equal grants is drawn first, so row order never does. */
+  key?: string;
   startsAt: Date;
   endsAt: Date;
   multiplier: number | null;
@@ -275,15 +277,44 @@ export interface AllowanceState {
  * `spends` are the costs this month. A spend whose cost is not known is not here: those are counted apart, never as 0.
  */
 export function allowanceNow(base: number, spends: { at: Date; micros: number }[], grants: GrantWindow[], now: Date): AllowanceState {
-  const rank = (grant: GrantWindow) => grant.multiplier ?? Infinity;
+  const { used, baseUsed, remaining, runningAt } = walkSpends(base, spends, grants);
+  const current = runningAt(now);
+  if (current && current.multiplier === null) return { unlimited: true, usedMicros: used, leftMicros: null };
+  const extraLeft = current ? remaining.get(current)! : 0;
+  return { unlimited: false, usedMicros: used, leftMicros: Math.max(0, base - baseUsed) + extraLeft };
+}
+
+/**
+ * What each extra usage has taken so far above the usual allowance, in the order the grants came in: the cost drawn from it, in
+ * millionths of a dollar. The same walk as `allowanceNow`, so the Costs page and the allowance never disagree about it.
+ */
+export function extraDrawn(base: number, spends: { at: Date; micros: number }[], grants: GrantWindow[]): number[] {
+  const { drawn } = walkSpends(base, spends, grants);
+  return grants.map((grant) => drawn.get(grant) ?? 0);
+}
+
+/**
+ * Which of two running grants is drawn from first: the larger multiple; of two the same, the one that ends sooner (it is used up
+ * first); then the one that started first; then the smaller key. Nothing depends on the order the grants were read in, so the
+ * allowance a member sees and the cost the Costs page works out always walk the same way.
+ */
+function drawnBefore(grant: GrantWindow, best: GrantWindow): boolean {
+  const rank = (window: GrantWindow) => window.multiplier ?? Infinity;
+  if (rank(grant) !== rank(best)) return rank(grant) > rank(best);
+  if (grant.endsAt.getTime() !== best.endsAt.getTime()) return grant.endsAt < best.endsAt;
+  if (grant.startsAt.getTime() !== best.startsAt.getTime()) return grant.startsAt < best.startsAt;
+  return (grant.key ?? '') < (best.key ?? '');
+}
+
+function walkSpends(base: number, spends: { at: Date; micros: number }[], grants: GrantWindow[]) {
   const remaining = new Map<GrantWindow, number>();
+  const drawn = new Map<GrantWindow, number>();
   for (const grant of grants) remaining.set(grant, grant.multiplier === null ? Infinity : base * (grant.multiplier - 1));
   const runningAt = (at: Date): GrantWindow | null => {
     let best: GrantWindow | null = null;
     for (const grant of grants) {
       if (grant.startsAt > at || grant.endsAt <= at) continue;
-      // The larger multiple runs; of two the same, the one that ends sooner is used up first
-      if (!best || rank(grant) > rank(best) || (rank(grant) === rank(best) && grant.endsAt < best.endsAt)) best = grant;
+      if (!best || drawnBefore(grant, best)) best = grant;
     }
     return best;
   };
@@ -294,11 +325,32 @@ export function allowanceNow(base: number, spends: { at: Date; micros: number }[
     const grant = runningAt(spend.at);
     const room = grant ? remaining.get(grant)! : 0;
     const fromExtra = grant ? Math.min(spend.micros, room) : 0;
-    if (grant && fromExtra > 0) remaining.set(grant, room - fromExtra);
+    if (grant && fromExtra > 0) {
+      remaining.set(grant, room - fromExtra);
+      drawn.set(grant, (drawn.get(grant) ?? 0) + fromExtra);
+    }
     baseUsed += spend.micros - fromExtra;
   }
-  const current = runningAt(now);
-  if (current && current.multiplier === null) return { unlimited: true, usedMicros: used, leftMicros: null };
-  const extraLeft = current ? remaining.get(current)! : 0;
-  return { unlimited: false, usedMicros: used, leftMicros: Math.max(0, base - baseUsed) + extraLeft };
+  return { used, baseUsed, remaining, drawn, runningAt };
+}
+
+// ---------- What a person is told about their usage ----------
+
+/** A bar says what is left, so a full bar is plenty and an empty one is out. */
+export const LOW_LEFT = 0.2;
+
+/** The plain words under a bar. Never a count of replies and never a price (plan S9). */
+export type UsageWords = 'plenty' | 'half' | 'low' | 'out';
+
+/** What is left, 0 to 1, in words: out at nothing, low at a fifth or less, "over half" above half, plenty for chat. */
+export function usageWords(left: number): UsageWords {
+  if (left <= 0) return 'out';
+  if (left <= LOW_LEFT) return 'low';
+  if (left > 0.5) return 'plenty';
+  return 'half';
+}
+
+/** The first moment of next month, UTC: when a month's computer allowance starts again. */
+export function nextMonthStart(now: Date): Date {
+  return monthOf(now).end;
 }

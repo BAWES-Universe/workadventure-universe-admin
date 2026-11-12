@@ -75,12 +75,12 @@ export async function memberAllowance(personId: string, now: Date, settings: Met
       where: { pool: 'computer', payerKind: 'universe', personKey: `person:${personId}`, costMicros: { not: null }, occurredAt: { gte: month.start, lt: month.end } },
       select: { occurredAt: true, costMicros: true },
     }),
-    db.meterGrant.findMany({ where: { personId, endsAt: { gt: month.start }, startsAt: { lt: month.end } }, select: { startsAt: true, endsAt: true, multiplier: true, noLimit: true } }),
+    db.meterGrant.findMany({ where: { personId, endsAt: { gt: month.start }, startsAt: { lt: month.end } }, select: { grantKey: true, startsAt: true, endsAt: true, multiplier: true, noLimit: true } }),
   ]);
   return allowanceNow(
     settings.memberAllowanceMicros,
     events.map((event) => ({ at: event.occurredAt, micros: asNumber(event.costMicros) })),
-    grants.map((grant) => ({ startsAt: grant.startsAt, endsAt: grant.endsAt, multiplier: grant.noLimit ? null : grant.multiplier })),
+    grants.map((grant) => ({ key: grant.grantKey, startsAt: grant.startsAt, endsAt: grant.endsAt, multiplier: grant.noLimit ? null : grant.multiplier })),
     now,
   );
 }
