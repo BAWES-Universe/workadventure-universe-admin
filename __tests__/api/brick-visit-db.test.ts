@@ -358,14 +358,14 @@ run('bringing a Brick along, in a real database', () => {
       }
     });
 
-    it('2. on its owner’s key, answers its owner on that key and others only where the owner lent it', async () => {
+    it('2. on its owner’s key, answers its owner on that key, others on it where the owner lent it, and others on Universe AI where not', async () => {
       await onKey();
       const owner = await credentials(sara.uuid);
       expect(await owner.json()).toMatchObject({ source: 'own-key', providerId: keyId, keyOwnerId: sara.id });
-      // Not lent: others are refused with a line that says why. The Brick is NOT moved off its owner's key
-      const refused = await credentials(omar.uuid);
-      expect(refused.status).toBe(403);
-      expect(await refused.json()).toMatchObject({ code: 'key_not_lent' });
+      // Not lent: others are served Universe AI on their own allowance, never the owner's key. The Brick is NOT moved off its owner's key
+      const stoodIn = await credentials(omar.uuid);
+      expect(stoodIn.status).toBe(200);
+      expect(await stoodIn.json()).toMatchObject({ source: 'universe-ai', providerId: serverProviderId, standingInFor: keyId });
       expect((await prisma.bot.findUniqueOrThrow({ where: { id: brickId } })).aiProviderRef).toBe(keyId);
       // Lent to this universe: others are served that key, with the models the lend allows
       await prisma.aiKeyLend.create({ data: { providerId: keyId, universeId: universes.open.id } });
@@ -375,7 +375,21 @@ run('bringing a Brick along, in a real database', () => {
       // Lent to another universe only: still not here
       await prisma.aiKeyLend.deleteMany({ where: { providerId: keyId } });
       await prisma.aiKeyLend.create({ data: { providerId: keyId, universeId: universes.second.id } });
-      expect((await credentials(omar.uuid)).status).toBe(403);
+      expect(await (await credentials(omar.uuid)).json()).toMatchObject({ source: 'universe-ai', standingInFor: keyId });
+    });
+
+    it('2b. refuses with the line only when nothing else can answer: Universe AI is not there to stand in', async () => {
+      await onKey();
+      await prisma.botsAiProvider.update({ where: { providerId: serverProviderId }, data: { enabled: false } });
+      try {
+        const refused = await credentials(omar.uuid);
+        expect(refused.status).toBe(403);
+        expect(await refused.json()).toMatchObject({ code: 'key_not_lent' });
+        // Its owner is served their own key as always
+        expect((await (await credentials(sara.uuid)).json()).source).toBe('own-key');
+      } finally {
+        await prisma.botsAiProvider.update({ where: { providerId: serverProviderId }, data: { enabled: true } });
+      }
     });
 
     it('3. never runs on the key of the person chatting: the only key ever served is the Brick’s own, and the asker’s own key is never read', async () => {

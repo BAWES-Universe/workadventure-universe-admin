@@ -216,9 +216,15 @@ async function mainCredentials(bot: BotForCredentials, others: Others | null = n
   }
 
   // Someone other than a Brick's owner is served its owner's key only where the owner lent it (game #2005). Not lent:
-  // the Brick is NOT moved off its key, which is its owner's setup; this person is just told it can't answer them here
+  // the Brick is NOT moved off its key, which is its owner's setup. A Brick is never refused while something can answer,
+  // so this person is served Universe AI, on their own allowance like anyone: never the owner's key, never their own.
+  // Only when Universe AI itself cannot serve is the person told it can't answer them here.
   const lent = others ? await checkKeyForOthers(bot.id, others.universeId) : null;
-  if (lent && !lent.ok) return { status: 403, error: 'This Brick cannot answer people here: its owner has not lent the key it runs on to this universe', code: 'key_not_lent' };
+  if (lent && !lent.ok) {
+    const standIn = await universeAi();
+    if (standIn.status === 200 && standIn.body.source === 'universe-ai') return { status: 200, body: { ...standIn.body, standingInFor: ref } };
+    return { status: 403, error: 'This Brick cannot answer people here: its owner has not lent the key it runs on to this universe', code: 'key_not_lent' };
+  }
   const verdict = await checkKeyForBot({ keyId: ref, keyOwnerId: provider.ownerId, bot: { id: bot.id, createdById: bot.createdById, roomId: bot.roomId, ownerId: bot.ownerId, deletedAt: bot.deletedAt } });
   if (verdict.ok) {
     const health = await recheckIfDue(provider);
