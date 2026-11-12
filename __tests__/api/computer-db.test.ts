@@ -788,6 +788,32 @@ run('a Brick’s computer, in a real database', () => {
       expect(await prisma.bot.count({ where: { id: brick.id } })).toBe(0);
     });
 
+    it('a rest that finished while the sweep was letting go of a stale claim is not undone by it', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const a = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!a.ok) throw new Error('no');
+      await finishJob(a.job.id, 'done', minutes(1));
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting', restClaimedAt: minutes(1) } });
+      const original = prisma.brickComputer.findMany.bind(prisma.brickComputer);
+      const spy = jest.spyOn(prisma.brickComputer, 'findMany').mockImplementation(((...args: Parameters<typeof original>) => {
+        const result = original(...args);
+        if ((args[0]?.where as { machine?: string } | undefined)?.machine !== 'resting') return result;
+        // The sweep has seen the stale claim; the rest then finishes and clears it
+        return result.then(async (rows) => {
+          spy.mockRestore();
+          await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { restClaimedAt: null } });
+          return rows;
+        });
+      }) as typeof prisma.brickComputer.findMany);
+      const rests = provider.calls.filter((call) => call.name === 'rest').length;
+      await sweepComputers(minutes(30));
+      spy.mockRestore();
+      await sweepComputers(minutes(40));
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
+      expect(provider.calls.filter((call) => call.name === 'rest').length).toBe(rests);
+    });
+
     it('computer time the books missed is written however old it is, and newer jobs never push an older one out', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
@@ -947,6 +973,74 @@ run('a Brick’s computer, in a real database', () => {
       // "A:B" with "C" and "A" with "B:C" used to be one key
       expect(detailsKey('A:B', 'C')).not.toEqual(detailsKey('A', 'B:C'));
       expect(detailsKey('A', 'B')).toEqual(detailsKey('A', 'B'));
+    });
+
+    it('with two jobs in the person’s hands after a take over, the tap goes to the one that named something: the writer, even when a read-only one is older and named nothing', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, NOW);
+      const writer = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Write' }, NOW);
+      if (!reader.ok || !writer.ok) throw new Error('no');
+      const ready = { what: 'Your name', where: 'visa-portal.example' };
+      await requestHandover(writer.job.id, 'details', minutes(1), ready);
+      await takeOver(sara.brickId, sara.id, minutes(2));
+      // The read-only job was only working: it is theirs now too, and named nothing
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.job.id } })).toMatchObject({ status: 'waiting', control: 'person', readyWhat: null });
+      const asked = await fillInDetails(sara.brickId, sara.id, ready);
+      expect(asked.ok).toBe(true);
+      expect(await prisma.computerEffect.count({ where: { jobId: writer.job.id, kind: 'details', state: 'approved' } })).toBe(1);
+      expect(await prisma.computerEffect.count({ where: { jobId: reader.job.id } })).toBe(0);
+    });
+
+    it('with two jobs that both named something, the tap goes to the one the screen showed', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, NOW);
+      const writer = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Write' }, NOW);
+      if (!reader.ok || !writer.ok) throw new Error('no');
+      const first = { what: 'Your name', where: 'visa-portal.example' };
+      const second = { what: 'Your passport number', where: 'other-portal.example' };
+      await requestHandover(writer.job.id, 'details', minutes(1), first);
+      await requestHandover(reader.job.id, 'details', minutes(1), second);
+      await takeOver(sara.brickId, sara.id, minutes(2));
+      expect((await fillInDetails(sara.brickId, sara.id, second)).ok).toBe(true);
+      expect(await prisma.computerEffect.count({ where: { jobId: reader.job.id, state: 'approved' } })).toBe(1);
+      expect(await prisma.computerEffect.count({ where: { jobId: writer.job.id } })).toBe(0);
+    });
+
+    it('a job that joins the person while they hand back is not left in their hands with nobody to hand it back', async () => {
+      const { sara, jobId } = await waitingJob();
+      await requestHandover(jobId, 'details', minutes(1));
+      const original = prisma.computerJob.count.bind(prisma.computerJob);
+      let calls = 0;
+      const spy = jest.spyOn(prisma.computerJob, 'count').mockImplementation(((...args: Parameters<typeof original>) => {
+        const where = (args[0]?.where ?? {}) as { status?: string; control?: string; id?: unknown };
+        const result = original(...args);
+        if (where.status !== 'waiting' || where.control !== 'person') return result;
+        calls++;
+        if (calls === 1) {
+          // The job has passed the first look: the person takes over now
+          return result.then(async (found) => {
+            await takeOver(sara.brickId, sara.id, minutes(2));
+            return found;
+          });
+        }
+        if (calls === 2) {
+          // It claimed its place and saw the person had the machine: the person hands back now
+          return result.then(async (found) => {
+            await handBack(sara.brickId, sara.id);
+            spy.mockRestore();
+            return found;
+          });
+        }
+        return result;
+      }) as typeof prisma.computerJob.count);
+      const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, minutes(2));
+      spy.mockRestore();
+      expect(reader.ok).toBe(true);
+      const jobs = await prisma.computerJob.findMany({ where: { botId: sara.brickId } });
+      expect(jobs.filter((job) => job.status === 'waiting' && job.control === 'person')).toEqual([]);
+      expect(jobs.filter((job) => job.status === 'running').length).toBe(2);
     });
 
     it('a tap from a page that showed nothing approves nothing', async () => {
