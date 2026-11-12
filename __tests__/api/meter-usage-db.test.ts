@@ -17,7 +17,7 @@ import { getSessionUser } from '@/lib/auth-session';
 import { createBrick } from '@/lib/brick-create';
 import { recordMeterEvent, saveMeterSettings } from '@/lib/meter';
 import { GrantRefused, changeGrant, endGrantNow, markGrantBilled, recordGrant, runningExtra } from '@/lib/meter-grants';
-import { askForMore, openRequests } from '@/lib/meter-requests';
+import { answerRequests, askForMore, openRequests } from '@/lib/meter-requests';
 import { memberUsage } from '@/lib/meter-usage';
 import { personUsage } from '@/lib/meter-person';
 import { costsReport } from '@/lib/meter-costs';
@@ -187,6 +187,18 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(await prisma.meterEvent.count({ where: { eventId: { startsWith: 'grant' } } })).toBe(0);
       expect((await memberUsage(sara.id, NOW)).computer?.asked).toBe(true);
       expect((await openRequests()).map((request) => request.personId)).toEqual([sara.id]);
+    });
+
+    it('never fails when an admin answers the request while a person asks again', async () => {
+      await setUp();
+      const sara = await person('sara');
+      // Many rounds of asking at the same moment as the answer: every ask returns a request, none throws
+      for (let round = 0; round < 15; round += 1) {
+        await askForMore(sara.id);
+        const asks = await Promise.all([askForMore(sara.id), askForMore(sara.id), answerRequests(sara.id, `race-${round}`).then(() => null)]);
+        for (const ask of asks.filter((item) => item !== null)) expect(ask?.request.personId).toBe(sara.id);
+      }
+      expect(await prisma.meterRequest.count({ where: { personId: sara.id, answeredAt: null } })).toBeLessThanOrEqual(1);
     });
 
     it('is refused while computer time is not used up, so asking is never a way around a limit', async () => {
