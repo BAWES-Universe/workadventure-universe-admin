@@ -510,6 +510,29 @@ run('goals and tasks, in a real database', () => {
     expect((await fail(6)).tell).toBe(false);
   });
 
+  it('two runs of one item failing together are each asked correctly: only the latest asked can confirm, and the row is told once it does', async () => {
+    const quin = await person('quin');
+    const watch = await set(quin, { kind: 'schedule', cadence: { type: 'every', minutes: 30 } });
+    const [one] = (await claimDueRuns(at(HOUR))).filter((claimed) => claimed.itemId === watch.id);
+    // The first one is still out (never reported) when the next one falls due; it is handed out again beside it
+    const both = (await claimDueRuns(at(2 * HOUR))).filter((claimed) => claimed.itemId === watch.id);
+    expect(both.map((claimed) => claimed.runId)).toContain(one.runId);
+    const other = both.find((claimed) => claimed.runId !== one.runId);
+    const first = both.find((claimed) => claimed.runId === one.runId);
+    if (!other || !first) throw new Error('expected two runs');
+    const a = await finishRun(first.runId, { attempt: first.attempt, state: 'failed', error: 'No answer' }, at(2 * HOUR + MIN));
+    const b = await finishRun(other.runId, { attempt: other.attempt, state: 'failed', error: 'No answer' }, at(2 * HOUR + 2 * MIN));
+    expect(a).toMatchObject({ ok: true, tellPerson: true });
+    expect(b).toMatchObject({ ok: true, tellPerson: true });
+    // Both were asked before either confirmed. The first one's confirmation arrives: it is not the run on record, so it marks nothing
+    expect(await markTold(first.runId)).toEqual({ ok: true, told: false });
+    expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).toMatchObject({ failureTold: false, tellRunId: other.runId });
+    // The one on record confirms: the row is told, and nothing asks again
+    expect(await markTold(other.runId)).toEqual({ ok: true, told: true });
+    const [later] = (await claimDueRuns(at(3 * HOUR))).filter((claimed) => claimed.itemId === watch.id);
+    expect(await finishRun(later.runId, { attempt: later.attempt, state: 'failed', error: 'No answer' }, at(3 * HOUR + MIN))).toMatchObject({ ok: true, tellPerson: false });
+  });
+
   it('a run given up without a report counts in the failures in a row, and the next reported failure still tells the person, once', async () => {
     const olga = await person('olga');
     const reminder = await set(olga, { kind: 'reminder', cadence: { type: 'daily', time: '07:30', days: [0, 1, 2, 3, 4, 5, 6] } });
