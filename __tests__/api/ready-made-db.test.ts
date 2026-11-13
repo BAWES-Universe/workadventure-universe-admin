@@ -310,7 +310,7 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect(writtenWhenCalled).toBe(1);
     const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ eventId: `app:${callId}`, payerKind: 'universe', route: 'app', unit: 'use', basis: 'estimated', costMicros: BigInt(5000), botId: saraBrick });
+    expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, payerKind: 'universe', route: 'app', unit: 'use', basis: 'estimated', costMicros: BigInt(5000), botId: saraBrick });
     expect(events[0].detail).toEqual({ toolkit: KEY, tool: 'GMAIL_FETCH_EMAILS' });
   });
 
@@ -339,6 +339,20 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect((await retry.json()).code).toBe('already_asked');
     expect(adapter.use).toHaveBeenCalledTimes(1);
     expect(await prisma.meterEvent.count({ where: { personId: sara, kind: 'app_use' } })).toBe(1);
+  });
+
+  it('counts the same call id from two different Bricks as two calls', async () => {
+    const { adapter, serverId } = await connectedAndGranted();
+    const other = (await createBrick({ ownerId: sara, name: 'Second Brick' })).id;
+    await grantToBrick(sara, (await prisma.appConnection.findFirstOrThrow({ where: { ownerId: sara } })).id, other);
+    const otherServer = (await prisma.botMcpServer.findFirstOrThrow({ where: { botId: other } })).id;
+    expect((await useIt({ serverId, callId: 'shared-id' })).status).toBe(200);
+    expect((await useIt({ botId: other, serverId: otherServer, callId: 'shared-id' })).status).toBe(200);
+    expect(adapter.use).toHaveBeenCalledTimes(2);
+    expect(await prisma.meterEvent.count({ where: { personId: sara, kind: 'app_use' } })).toBe(2);
+    // And a retry from the same Brick is still the same call
+    expect((await useIt({ serverId, callId: 'shared-id' })).status).toBe(409);
+    expect(adapter.use).toHaveBeenCalledTimes(2);
   });
 
   it('a provider that is down is "could not be reached", the use is still on the books, and nothing is hidden as free', async () => {
@@ -416,7 +430,7 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(adapter.callLink).toHaveBeenCalledTimes(1);
       const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
       expect(events).toHaveLength(1);
-      expect(events[0]).toMatchObject({ eventId: `app:${callId}`, basis: 'estimated', payerKind: 'universe' });
+      expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, basis: 'estimated', payerKind: 'universe' });
       // What was asked is not written down: only which app and which tool
       expect(JSON.stringify(events[0].detail)).not.toContain('secret code');
     });
