@@ -19,7 +19,7 @@ import { makeBrick } from '@/lib/brick-make';
 import { claimDueRuns, createItem, finishRun, type NewItemInput } from '@/lib/brick-items';
 import { GET as listAll } from '@/app/api/bricks/items/route';
 import { GET as listOne } from '@/app/api/bricks/[id]/items/route';
-import { PATCH as tap } from '@/app/api/bricks/[id]/items/[itemId]/route';
+import { GET as readOne, PATCH as tap } from '@/app/api/bricks/[id]/items/[itemId]/route';
 import { GET as did } from '@/app/api/bricks/[id]/did/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -155,5 +155,40 @@ run('goals and tasks screens, in a real database', () => {
     // Rows only: nothing that was said anywhere
     expect(Object.keys(page.runs[0]).sort()).toEqual(['brickId', 'dueAt', 'error', 'finishedAt', 'fresh', 'itemId', 'kind', 'late', 'outcome', 'result', 'runId', 'state', 'words']);
     expect((await did(req(`/api/bricks/${eli.brickId}/did?before=soon`), idParams(eli.brickId))).status).toBe(400);
+  });
+
+  it('reads one item for its owner only: another person, a signed-out visitor and an item that is not there all get nothing', async () => {
+    const lena = await person('lena');
+    const other = await person('lenaother');
+    const item = await set(lena, { words: 'Water the plants' });
+    const read = (brickId: string, itemId: string) => readOne(req(`/api/bricks/${brickId}/items/${itemId}`), itemParams(brickId, itemId));
+    signedInAs(lena.id);
+    expect(await (await read(lena.brickId, item.id)).json()).toMatchObject({ item: { id: item.id, words: 'Water the plants', state: 'on' } });
+    expect((await read(lena.brickId, 'no-such-item')).status).toBe(404);
+    signedInAs(other.id);
+    expect((await read(lena.brickId, item.id)).status).toBe(404);
+    signedInAs(null);
+    expect((await read(lena.brickId, item.id)).status).toBe(401);
+  });
+
+  it('pages through everything Brick did without skipping runs claimed in the same moment', async () => {
+    const nora = await person('nora');
+    const watch = await set(nora, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+    // 120 runs claimed at one instant: a page is 50, so a page boundary falls inside them
+    const claimedAt = at(2 * HOUR);
+    await prisma.brickItemRun.createMany({
+      data: Array.from({ length: 120 }, (_, i) => ({ itemId: watch.id, dueAt: at(HOUR + i * 60_000), revision: 1, claimedAt, leaseUntil: at(3 * HOUR), state: 'done', outcome: 'quiet', finishedAt: claimedAt })),
+    });
+    signedInAs(nora.id);
+    const seen: string[] = [];
+    let before = '';
+    for (let pages = 0; pages < 10; pages++) {
+      const page = await (await did(req(`/api/bricks/${nora.brickId}/did${before}`), idParams(nora.brickId))).json();
+      seen.push(...page.runs.map((one: { runId: string }) => one.runId));
+      if (!page.next) break;
+      before = `?before=${encodeURIComponent(page.next)}`;
+    }
+    expect(seen).toHaveLength(120);
+    expect(new Set(seen).size).toBe(120);
   });
 });

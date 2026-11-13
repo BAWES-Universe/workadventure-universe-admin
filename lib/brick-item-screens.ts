@@ -65,13 +65,23 @@ export interface DidRun {
 
 const PAGE = 50;
 
+/** Where the last page ended: the claim time and the run's id, the same two the list is ordered by, so runs claimed in the same moment are never skipped. */
+export function readDidCursor(value: string): { at: Date; id: string } | null {
+  const [time, id, ...rest] = value.split('|');
+  const at = new Date(time ?? '');
+  return rest.length || !id || Number.isNaN(at.getTime()) ? null : { at, id };
+}
+
 /**
  * Everything one Brick did for its owner by itself, newest first, failed runs and quiet checks included: nothing it did on its own is
- * hidden. `before` (a due time from the last page) asks for the next page; `next` is the cursor for it, or null at the end.
+ * hidden. `before` (the cursor from the last page) asks for the next page; `next` is the cursor for it, or null at the end.
  */
-export async function didByBrick(ownerId: string, brickId: string, before?: Date): Promise<{ runs: DidRun[]; next: string | null }> {
+export async function didByBrick(ownerId: string, brickId: string, before?: { at: Date; id: string }): Promise<{ runs: DidRun[]; next: string | null }> {
   const rows = await prisma.brickItemRun.findMany({
-    where: { item: { ownerId, botId: brickId }, ...(before ? { claimedAt: { lt: before } } : {}) },
+    where: {
+      item: { ownerId, botId: brickId },
+      ...(before ? { OR: [{ claimedAt: { lt: before.at } }, { claimedAt: before.at, id: { lt: before.id } }] } : {}),
+    },
     orderBy: [{ claimedAt: 'desc' }, { id: 'desc' }],
     take: PAGE + 1,
     include: { item: { select: { words: true, kind: true, botId: true } } },
@@ -93,7 +103,7 @@ export async function didByBrick(ownerId: string, brickId: string, before?: Date
       late: run.late,
       fresh: run.fresh,
     })),
-    next: rows.length > PAGE ? page[page.length - 1].claimedAt.toISOString() : null,
+    next: rows.length > PAGE ? `${page[page.length - 1].claimedAt.toISOString()}|${page[page.length - 1].id}` : null,
   };
 }
 

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import * as Sentry from '@sentry/nextjs';
 import { brickJson, brickOwner } from '@/lib/brick-api';
 import { corsHeaders } from '@/lib/cors';
-import { didByBrick, ownsBrickNow } from '@/lib/brick-item-screens';
+import { didByBrick, ownsBrickNow, readDidCursor } from '@/lib/brick-item-screens';
 
 export const runtime = 'nodejs';
 
@@ -23,8 +23,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (owner.response) return owner.response;
     if (!(await ownsBrickNow(id, owner.userId))) return brickJson(request, { error: 'Brick not found' }, 404);
     const cursor = request.nextUrl.searchParams.get('before');
-    const before = cursor ? new Date(cursor) : undefined;
-    if (before && Number.isNaN(before.getTime())) return brickJson(request, { error: 'before is not a time' }, 400);
+    const before = cursor ? readDidCursor(cursor) : undefined;
+    if (before === null) return brickJson(request, { error: 'before is not a cursor from this page' }, 400);
     return brickJson(request, await didByBrick(owner.userId, id, before));
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'brick-items' } });

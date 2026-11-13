@@ -3,12 +3,31 @@ import * as Sentry from '@sentry/nextjs';
 import { brickJson, brickOwner } from '@/lib/brick-api';
 import { corsHeaders } from '@/lib/cors';
 import { itemActionSchema } from '@/lib/brick-items';
-import { changeFromScreen } from '@/lib/brick-item-screens';
+import { changeFromScreen, readFromScreen } from '@/lib/brick-item-screens';
 
 export const runtime = 'nodejs';
 
 export async function OPTIONS(request: NextRequest) {
   return NextResponse.json({}, { headers: corsHeaders(request) });
+}
+
+/**
+ * GET /api/bricks/:id/items/:itemId
+ * One goal or task of the signed-in owner, as the screens show it. Anyone else gets the same answer as for one that does not exist.
+ */
+export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string; itemId: string }> }) {
+  try {
+    const { id, itemId } = await params;
+    const owner = await brickOwner(request);
+    if (owner.response) return owner.response;
+    const answer = await readFromScreen(owner.userId, id, itemId);
+    if (answer.ok) return brickJson(request, { item: answer.item });
+    return brickJson(request, { error: answer.error }, answer.status);
+  } catch (error) {
+    Sentry.captureException(error, { tags: { area: 'brick-items' } });
+    console.error('Error reading a goal or task:', error);
+    return brickJson(request, { error: 'Internal server error' }, 500);
+  }
 }
 
 const tapSchema = itemActionSchema.omit({ userId: true });
