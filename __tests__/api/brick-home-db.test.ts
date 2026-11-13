@@ -522,5 +522,21 @@ run('a Brick that lives in a room, in a real database', () => {
       expect(await prisma.brickHome.count({ where: { botId: { in: made } } })).toBe(0);
       await prisma.worldMember.create({ data: { userId: sara.id, worldId: world.id, tags: ['admin'] } });
     });
+    it('does not apply a denial found on an early page to homes whose placer has access again by the time the sweep ends', async () => {
+      const world = await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } });
+      const made: string[] = [];
+      for (let i = 0; i < 4; i++) made.push((await createBrick({ ownerId: sara.id, name: `Late ${i}` })).id);
+      for (const id of made) await put(id, hosted.roomUrl);
+      await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: world.id } });
+      const real = jest.requireActual('@/lib/bot-permissions').canManageBots as typeof canManageBots;
+      // Page one finds the placer denied; before the sweep ends their access is back
+      (canManageBots as jest.Mock).mockImplementationOnce(async (...args: Parameters<typeof canManageBots>) => {
+        const answer = await real(...args);
+        await prisma.worldMember.create({ data: { userId: sara.id, worldId: world.id, tags: ['admin'] } });
+        return answer;
+      });
+      expect(await dropHomesWithoutAccess(undefined, 2)).toBe(0);
+      expect(await prisma.brickHome.count({ where: { botId: { in: made } } })).toBe(4);
+    });
   });
 });

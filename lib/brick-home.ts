@@ -217,9 +217,18 @@ export async function dropHomesWithoutAccess(roomId?: string, pageSize = 200): P
     after = homes[homes.length - 1].botId;
   }
   if (gone.length === 0) return 0;
-  // Each row that failed the check, exactly as it was read (its `updatedAt` is its placement's marker): a home placed again since stays
+  // A denial found on an early page may be old by the time the sweep ends: each person and room pair is asked again now, and
+  // only the rows whose pair is still denied go. Each goes exactly as it was read (its `updatedAt` is its placement's marker),
+  // so a home placed again since stays.
+  const still = new Map<string, boolean>();
+  const confirmed: typeof gone = [];
+  for (const row of gone) {
+    const key = `${row.placedById}:${row.roomId}`;
+    if (!still.has(key)) still.set(key, !(await canManageBots(row.placedById, row.roomId)));
+    if (still.get(key)) confirmed.push(row);
+  }
   let dropped = 0;
-  for (let i = 0; i < gone.length; i += 200) dropped += (await prisma.brickHome.deleteMany({ where: { OR: gone.slice(i, i + 200) } })).count;
+  for (let i = 0; i < confirmed.length; i += 200) dropped += (await prisma.brickHome.deleteMany({ where: { OR: confirmed.slice(i, i + 200) } })).count;
   return dropped;
 }
 
