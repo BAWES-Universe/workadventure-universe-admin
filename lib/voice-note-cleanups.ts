@@ -1,6 +1,6 @@
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
-import { sweepVoiceNoteBuffers } from '@/lib/voice-note-turns';
+import { sweepStaleReservations, sweepVoiceNoteBuffers } from '@/lib/voice-note-turns';
 
 /**
  * What a listening provider still holds after a voice note was heard (game: every bot hears voice notes, plan v3 section 6): a file
@@ -54,11 +54,13 @@ export interface CleanupJob {
 
 /**
  * Hands out up to `limit` jobs that are due, each held for 2 minutes, transcriptions before files (a file goes once its
- * transcription has). Also deletes the kept answers whose time is over, since the bot server asks here every minute or so.
+ * transcription has). Also deletes the kept answers whose time is over and gives back reservations never started, since the bot
+ * server asks here every minute or so.
  */
 export async function claimVoiceNoteCleanups(input: { limit?: unknown }, now: Date = new Date()): Promise<CleanupJob[]> {
   const limit = typeof input.limit === 'number' && Number.isInteger(input.limit) && input.limit > 0 ? Math.min(input.limit, 50) : 10;
   await sweepVoiceNoteBuffers(now);
+  await sweepStaleReservations(now);
   const due = await prisma.voiceNoteCleanup.findMany({
     where: { state: 'pending', nextAt: { lte: now }, OR: [{ leaseUntil: null }, { leaseUntil: { lt: now } }] },
     orderBy: [{ kind: 'desc' }, { nextAt: 'asc' }],

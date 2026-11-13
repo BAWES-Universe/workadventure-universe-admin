@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { Prisma, type VoiceNoteTurn } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getVoiceLimits } from '@/lib/voice-limits';
-import { VOICE_RANGES, savedVoiceKeyLimits, type VoiceLimits } from '@/lib/voice-limit-values';
+import { VOICE_RANGES, savedVoiceKeyLimits } from '@/lib/voice-limit-values';
 import { checkReplyAllowance, type ReplyAllowance } from '@/lib/reply-limits';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import { placeFor } from '@/lib/guest-brick';
@@ -17,7 +17,8 @@ import { botHearing, universeAiHearing, type NoteHearing } from '@/lib/voice-not
  *    never both take the last minute:
  *    - Universe AI hearing: the person's note minutes for the day (a guest's on the Brick for guests, and their universe's), the
  *      minutes Universe AI hears in an hour and the notes it hears at once, for everyone;
- *    - a bot's own daily listening minutes (the same minutes group listening counts on), with a lent key's own limit on its key.
+ *    - an owner's key: the bot's daily listening (the same minutes group listening counts on), stopped at the day the owner set on
+ *      that key. A note Universe AI hears never counts on, or is stopped by, a bot's live listening.
  *    The same turn asked again is the same turn: never reserved twice, and its answer comes back while it is kept.
  * 2. `leaseVoiceNoteStage`: hearing and answering each run under a lease with a generation, so two bot servers never run the same
  *    paid step and a late one is fenced out. An expired lease is not a free retry: a hearing whose provider ids are known is looked
@@ -135,7 +136,7 @@ export type Reservation =
   | { ok: false; reason: 'reply-limit'; allowance: Extract<ReplyAllowance, { allowed: false }> }
   /**
    * Note minutes for the day are used up. `person`: the person's own (a guest's on the Brick for guests), the limit card.
-   * `universe`: the universe's guests together on the Brick for guests. `bot`: the bot's daily listening.
+   * `universe`: the universe's guests together on the Brick for guests. `bot`: the day the owner set on the key that hears it.
    */
   | { ok: false; reason: 'note-minutes'; limit: 'person' | 'universe' | 'bot'; resetsAt: string }
   /** Too many notes for everyone right now: "Couldn't listen to this note right now. Type it instead." */
@@ -159,15 +160,21 @@ function replay(turn: VoiceNoteTurn, now: Date): Reservation {
   return { ok: true, turn: view(turn), replay: true };
 }
 
-/** A bot's daily listening limit for notes: a lent listening key's own when the owner pays, the server's otherwise. */
-async function botDayLimitSeconds(hearing: NoteHearing, limits: VoiceLimits): Promise<number> {
-  let minutes = limits.listenMinutesPerDay;
-  if (hearing.payer === 'owner' && hearing.provider) {
-    const row = await prisma.voiceProvider.findUnique({ where: { id: hearing.provider.id }, select: { voiceLimits: true } });
-    minutes = savedVoiceKeyLimits(row?.voiceLimits).listenMinutesPerDay ?? minutes;
-  }
-  return Math.max(0, Math.round(minutes * 60));
+/**
+ * The daily listening limit a note counts on, in seconds, or null when none applies. Only the owner's own key that hears it, with
+ * the limit the owner set on that key: the owner's money and the owner's limit. A note Universe AI hears is never stopped by a
+ * bot's live listening ("Listening a day" is for live voice, and "Never" there must not stop notes): the person's note minutes,
+ * the hour's minutes and the notes heard at once bound it instead, and it leaves the bot's live listening day alone.
+ */
+async function ownerKeyDayLimitSeconds(hearing: NoteHearing): Promise<number | null> {
+  if (hearing.payer !== 'owner' || !hearing.provider) return null;
+  const row = await prisma.voiceProvider.findUnique({ where: { id: hearing.provider.id }, select: { voiceLimits: true } });
+  const minutes = savedVoiceKeyLimits(row?.voiceLimits).listenMinutesPerDay;
+  return minutes === undefined || minutes === null ? null : Math.max(0, Math.round(minutes * 60));
 }
+
+/** Whether a turn's seconds are on its bot's listening day: notes an owner's key hears. */
+const onBotDay = (turn: Pick<VoiceNoteTurn, 'botId' | 'payer'>) => Boolean(turn.botId) && turn.payer === 'owner';
 
 /**
  * Reserves one voice note before anything is paid. `seconds` is the length the bot server measured from the audio itself (never the
@@ -239,7 +246,7 @@ export async function reserveVoiceNote(
     }
   }
 
-  const botDayLimit = scope === 'bot' ? await botDayLimitSeconds(hearing, limits) : 0;
+  const ownerDayLimit = scope === 'bot' ? await ownerKeyDayLimitSeconds(hearing) : null;
   const day = dayOf(now);
   const tomorrow = new Date(day.getTime() + DAY).toISOString();
   const universeAi = hearing.payer === 'universe-ai';
@@ -274,10 +281,11 @@ export async function reserveVoiceNote(
       if (atOnce >= limits.notesAtOnce) return { ok: false, reason: 'busy' };
     }
 
-    if (scope === 'bot') {
-      // The bot's day: the same minutes its group listening counts on (lib/voice-listening.ts), so a note counts there too
+    if (scope === 'bot' && !universeAi) {
+      // The owner's key: the same day its group listening counts on (lib/voice-listening.ts), so a note counts there too. Only a
+      // note that fits whole is taken, as on every other pool: the length is known before anything is paid
       const used = (await tx.voiceListenUse.findUnique({ where: { botId_day: { botId: botId!, day } }, select: { seconds: true } }))?.seconds ?? 0;
-      if (used >= botDayLimit) return { ok: false, reason: 'note-minutes', limit: 'bot', resetsAt: tomorrow };
+      if (ownerDayLimit !== null && used + seconds > ownerDayLimit) return { ok: false, reason: 'note-minutes', limit: 'bot', resetsAt: tomorrow };
       await tx.voiceListenUse.upsert({ where: { botId_day: { botId: botId!, day } }, create: { botId: botId!, day, seconds }, update: { seconds: { increment: seconds } } });
     }
 
@@ -290,7 +298,7 @@ export async function reserveVoiceNote(
 
 /** Gives back a reservation that was never used: its seconds stop counting, on the bot's day too. */
 async function release(turn: VoiceNoteTurn, db: Prisma.TransactionClient | typeof prisma = prisma) {
-  if (turn.botId) {
+  if (onBotDay(turn)) {
     await db.$executeRaw(
       Prisma.sql`UPDATE "voice_listen_uses" SET "seconds" = GREATEST("seconds" - ${turn.seconds}, 0), "updated_at" = NOW() WHERE "bot_id" = ${turn.botId} AND "day" = ${dayOf(turn.createdAt).toISOString().slice(0, 10)}::date`
     );
@@ -471,4 +479,29 @@ export async function recordVoiceNote(id: string, input: Record<string, unknown>
 export async function sweepVoiceNoteBuffers(now: Date = new Date()): Promise<number> {
   const done = await prisma.voiceNoteTurn.updateMany({ where: { bufferUntil: { lt: now } }, data: { buffer: null, bufferUntil: null } });
   return done.count;
+}
+
+/**
+ * Gives back reservations that were never started: a bot server that crashed or lost its connection between reserving and
+ * leasing leaves a turn "reserved" that would keep counting on the person's minutes, the hour's minutes and the owner key's day
+ * until midnight. Each is marked failed and given back once, guarded on its state, so a lease that comes in at the same moment
+ * is never given back twice. The same turn asked again then answers as failed: a new send is a new turn.
+ */
+export async function sweepStaleReservations(now: Date = new Date(), limit = 200): Promise<number> {
+  const stale = await prisma.voiceNoteTurn.findMany({
+    where: { state: 'reserved', released: false, createdAt: { lt: new Date(now.getTime() - STARTING_MS) } },
+    orderBy: { createdAt: 'asc' },
+    take: limit,
+  });
+  let released = 0;
+  for (const turn of stale) {
+    // One at a time, each in its own transaction: few, and each must be given back exactly once
+    released += await prisma.$transaction(async (tx) => {
+      const done = await tx.voiceNoteTurn.updateMany({ where: { id: turn.id, state: 'reserved', released: false }, data: { state: 'failed', released: true, leaseUntil: null } });
+      if (done.count !== 1) return 0;
+      await release(turn, tx);
+      return 1;
+    });
+  }
+  return released;
 }

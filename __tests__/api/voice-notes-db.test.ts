@@ -10,11 +10,25 @@
 import { randomUUID } from 'node:crypto';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn(), captureMessage: jest.fn() }));
+// Bots named here hear with their owner's key (the key row given); every other bot as the real code says
+const ownerKeyBots = new Map<string, string>();
+jest.mock('@/lib/voice-note-hearing', () => {
+  const actual = jest.requireActual('@/lib/voice-note-hearing');
+  return {
+    ...actual,
+    botHearing: async (id: string, adapters: Set<string>) => {
+      const key = ownerKeyBots.get(id);
+      if (!key) return actual.botHearing(id, adapters);
+      const row = await jest.requireActual('@/lib/db').prisma.voiceProvider.findUniqueOrThrow({ where: { id: key } });
+      return { v: 1, route: 'owner-key', reason: null, payer: 'owner', provider: { id: row.id, adapter: row.adapter, name: row.name, endpoint: null, region: null, apiKeyEncrypted: 'x' }, model: 'stt', language: null };
+    },
+  };
+});
 
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { saveVoiceLimits } from '@/lib/voice-limits';
-import { leaseVoiceNoteStage, recordVoiceNote, reserveVoiceNote, type Reservation } from '@/lib/voice-note-turns';
+import { leaseVoiceNoteStage, recordVoiceNote, reserveVoiceNote, sweepStaleReservations, type Reservation } from '@/lib/voice-note-turns';
 import { addVoiceNoteCleanup, claimVoiceNoteCleanups, settleVoiceNoteCleanup } from '@/lib/voice-note-cleanups';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -114,10 +128,68 @@ run('voice notes for every bot, in a real database', () => {
       await expect(reserve(lina, { clientTurnId, contentHash: 'note-b' })).rejects.toMatchObject({ status: 409 });
     });
 
-    it('stops at the bot\'s daily listening, which group listening counts on too', async () => {
+    it('never stops a Universe AI note at the bot\'s live listening, even set to "Never", and leaves that day alone', async () => {
       const quiet = await newBot('Quiet');
       await prisma.voiceListenUse.create({ data: { botId: quiet, day: today(), seconds: 3_600 } });
-      expect(await reserveFor(quiet, `noor-${randomUUID()}`)).toMatchObject({ ok: false, reason: 'note-minutes', limit: 'bot' });
+      await saveVoiceLimits({ listenMinutesPerDay: 0 }, makerId);
+      try {
+        expect(await reserveFor(quiet, `noor-${randomUUID()}`)).toMatchObject({ ok: true, turn: { payer: 'universe-ai' } });
+        expect(await botDay(quiet)).toBe(3_600);
+      } finally {
+        await saveVoiceLimits({ listenMinutesPerDay: 60 }, makerId);
+      }
+    });
+
+    it('stops an owner\'s key at the day the owner set on it, taking only a note that fits whole', async () => {
+      const key = await prisma.voiceProvider.create({
+        data: { adapter: 'soniox', name: `Own ${tag}`, ownerId: makerId, recognition: true, enabled: true, apiKeyEncrypted: 'iv:tag:own', voiceLimits: { listenMinutesPerDay: 10 } },
+      });
+      providers.push(key.id);
+      const owned = await newBot('Owned');
+      ownerKeyBots.set(owned, key.id);
+      await prisma.voiceListenUse.create({ data: { botId: owned, day: today(), seconds: 590 } });
+      const ask = (seconds: number) => reserveFor(owned, `k-${randomUUID()}`, { seconds });
+      // 600 seconds a day, 590 used: a 30-second note would run over, a 10-second one fits
+      expect(await ask(30)).toMatchObject({ ok: false, reason: 'note-minutes', limit: 'bot' });
+      expect(await ask(10)).toMatchObject({ ok: true, turn: { payer: 'owner', seconds: 10 } });
+      expect(await botDay(owned)).toBe(600);
+      // The day used up exactly: no note at all
+      expect(await ask(1)).toMatchObject({ ok: false, reason: 'note-minutes', limit: 'bot' });
+
+      // A key with no day of its own is not stopped by the server's live listening, and still counts its notes on the day
+      const open = await prisma.voiceProvider.create({ data: { adapter: 'soniox', name: `Open ${tag}`, ownerId: makerId, recognition: true, enabled: true, apiKeyEncrypted: 'iv:tag:open' } });
+      providers.push(open.id);
+      const free = await newBot('Free');
+      ownerKeyBots.set(free, open.id);
+      await prisma.voiceListenUse.create({ data: { botId: free, day: today(), seconds: 99_000 } });
+      expect(await reserveFor(free, `k-${randomUUID()}`, { seconds: 20 })).toMatchObject({ ok: true, turn: { payer: 'owner' } });
+      expect(await botDay(free)).toBe(99_020);
+    });
+
+    it('gives back a reservation never started, once, and leaves fresh and started ones alone', async () => {
+      const key = await prisma.voiceProvider.create({ data: { adapter: 'soniox', name: `Sweep ${tag}`, ownerId: makerId, recognition: true, enabled: true, apiKeyEncrypted: 'iv:tag:sweep' } });
+      providers.push(key.id);
+      const swept = await newBot('Swept');
+      ownerKeyBots.set(swept, key.id);
+      const reserveHere = async () => turnOf(await reserveFor(swept, `s-${randomUUID()}`, { seconds: 30 }));
+      const stale = await reserveHere();
+      const started = await reserveHere();
+      const fresh = await reserveHere();
+      await leaseVoiceNoteStage(started.id, { stage: 'hearing', adapters: ADAPTERS });
+      const old = new Date(Date.now() - 3 * 60_000);
+      await prisma.voiceNoteTurn.updateMany({ where: { id: { in: [stale.id, started.id] } }, data: { createdAt: old } });
+      // Today's row is keyed by the day the turn was made: keep the stale one on today
+      expect(old.toISOString().slice(0, 10)).toBe(new Date().toISOString().slice(0, 10));
+      expect(await botDay(swept)).toBe(90);
+
+      await sweepStaleReservations();
+      expect(await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: stale.id } })).toMatchObject({ state: 'failed', released: true });
+      expect(await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: started.id } })).toMatchObject({ state: 'hearing', released: false });
+      expect(await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: fresh.id } })).toMatchObject({ state: 'reserved', released: false });
+      expect(await botDay(swept)).toBe(60);
+      // Run again: nothing more is given back
+      await sweepStaleReservations();
+      expect(await botDay(swept)).toBe(60);
     });
 
     it('stops at the hour\'s minutes and the notes heard at once, for everyone, with "busy"', async () => {
@@ -212,7 +284,8 @@ run('voice notes for every bot, in a real database', () => {
       await leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: ADAPTERS });
       await recordVoiceNote(turn.id, { event: 'hearing-failed', generation: 1, charged: 'no' });
       expect(await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: turn.id } })).toMatchObject({ state: 'failed', released: true });
-      expect(await botDay()).toBe(before - 60);
+      // A Universe AI note never counted on the bot's live listening day, so nothing comes off it
+      expect(await botDay()).toBe(before);
 
       const timedOut = await fresh();
       await leaseVoiceNoteStage(timedOut.id, { stage: 'hearing', adapters: ADAPTERS });
