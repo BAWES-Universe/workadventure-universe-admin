@@ -12,6 +12,11 @@ describe('voice limits', () => {
       listenMinutesPerDay: 60,
       followUpSeconds: 30,
       voicesShownFirst: 5,
+      noteMinutesPerPerson: 30,
+      guestNoteMinutesPerGuest: 10,
+      guestNoteMinutesPerUniverse: 120,
+      notesAtOnce: 8,
+      noteMinutesPerHour: 300,
     });
   });
 
