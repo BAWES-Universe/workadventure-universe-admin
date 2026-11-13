@@ -96,6 +96,10 @@ export async function GET(
     const lends = universeId && servers.some((row) => row.connectionId)
       ? await prisma.appLend.findMany({ where: { universeId, connectionId: { in: servers.map((row) => row.connectionId).filter((id): id is string => !!id) } }, select: { connectionId: true, things: true, usesPerDay: true } })
       : [];
+    // A grant on someone else's connection (lent to this universe, or the universe's own) shows its manager the app's name and state,
+    // never its address or headers: the address can carry a key, and the lender never agreed to show it to everyone who manages bots.
+    // A ready-made app's address is the provider's and is never shown to a person. Only the bot server (admin token) is handed them.
+    const seesWay = (s: (typeof servers)[number]) => isAdminToken || !s.connection || (s.connection.ownerId === userId && s.connection.source !== 'ready_made');
     const lendOf = new Map(lends.map((lend) => [lend.connectionId, lend]));
     const transformed = await Promise.all(
       servers.map(async (s) => {
@@ -149,7 +153,7 @@ export async function GET(
             id: s.id,
             botId: s.botId,
             name: s.name,
-            serverUrl: s.serverUrl,
+            serverUrl: seesWay(s) ? s.serverUrl : '',
             authType: s.authType,
             ...(isAdminToken ? { authConfig: authConfigToServe } : {}),
             oauthConnected,
@@ -168,7 +172,7 @@ export async function GET(
             // A server that existed before its tools were checked keeps working in text, and reads Not checked yet (#738)
             notCheckedYet: s.legacyText === true,
             policyRevision: s.policyRevision ?? 1,
-            headers: s.headers,
+            headers: seesWay(s) ? s.headers : null,
             lastTestedAt: s.lastTestedAt,
             lastTestResult: s.lastTestResult,
             // What the bot server saw when it really used the server, not only the last Test (game #1819)

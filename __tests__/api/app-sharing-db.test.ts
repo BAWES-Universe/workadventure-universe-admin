@@ -224,6 +224,23 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       await expect(prisma.botMcpServer.create({ data: { botId: guide, connectionId: app.id, name: 'Tavily', serverUrl: '' } })).rejects.toThrow(/can only be used/);
     });
 
+    it('never shows the lender’s address or headers to someone else who manages the bot, and hands them to the bot server only', async () => {
+      const { app, serverId } = await lentAndLet({ things: ['lookUp'] });
+      await prisma.appConnection.update({ where: { id: app.id }, data: { headers: { 'x-tenant': 'lender-only' } } });
+      const read = async (token?: string) => json(await listServers(request(`/api/bots/${guide}/mcp-servers`, token ? { token } : {}), params({ id: guide })));
+      as(omar);
+      const seen = (await read()).find((row: { id: string }) => row.id === serverId);
+      expect(seen).toMatchObject({ name: 'Tavily', serverUrl: '', headers: null });
+      expect(JSON.stringify(seen)).not.toMatch(/lender-only|tvly-secret/);
+      expect(JSON.stringify(seen)).not.toContain(LINK);
+      // The lender sees their own app's way in, as before
+      as(sara);
+      expect((await read()).find((row: { id: string }) => row.id === serverId)).toMatchObject({ serverUrl: LINK, headers: { 'x-tenant': 'lender-only' } });
+      // The bot server is handed it, because it is the one that calls it
+      mockUser.current = null;
+      expect((await read(ADMIN_TOKEN)).find((row: { id: string }) => row.id === serverId)).toMatchObject({ serverUrl: LINK, headers: { 'x-tenant': 'lender-only' } });
+    });
+
     it('shows the bot’s page what was lent, and the person’s own page lists the bot with its uses', async () => {
       const { app, serverId } = await lentAndLet({ things: ['lookUp'], usesPerDay: 200 });
       await check(guide, serverId, { callId: 'one', heading: 'lookUp' });
