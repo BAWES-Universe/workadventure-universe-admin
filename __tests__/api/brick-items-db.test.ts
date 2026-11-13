@@ -911,6 +911,35 @@ run('goals and tasks, in a real database', () => {
       expect(work.held.filter((one) => one.userId === gsmix.uuid)).toEqual([]);
     });
 
+    it('a call a run has already written takes the place of its reservation, so nothing is counted twice', async () => {
+      const gsonce = await person('gsonce');
+      const first = await set(gsonce, { kind: 'watch', words: 'One', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      // Set a little later, so it falls due after the first one's run has been handed out
+      const second = await set(gsonce, { kind: 'watch', words: 'Two', condition: 'It drops', cadence: { type: 'every', minutes: 60 } }, at(3 * MIN));
+      // 7 of the 9 calls goals and tasks may use are used
+      await usage(gsonce, 7, 'task');
+      expect(mineIn(await claimWork(at(HOUR + 2 * MIN)), first.id)).toHaveLength(1);
+      // The run writes one call while it is still open: 8 are counted, and its reservation is that call, not one more
+      await prisma.botsAiUsage.create({ data: { botId: gsonce.brickId, providerId: 'universe-ai', talkedPersonId: gsonce.id, channel: 'task', timestamp: at(HOUR + 3 * MIN) } });
+      const work = await claimWork(at(HOUR + 5 * MIN));
+      expect(mineIn(work, second.id)).toHaveLength(1);
+      expect(work.held.filter((one) => one.userId === gsonce.uuid)).toEqual([]);
+    });
+
+    it('lets a waiting item carry on before its window ends when room comes back: extra usage, or its Brick moved to its own key', async () => {
+      const gsback = await person('gsback');
+      const watch = await set(gsback, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      await usage(gsback, 9, 'task');
+      const first = await claimWork(at(HOUR + 2 * MIN));
+      expect(first.held.map((one) => one.itemId)).toContain(watch.id);
+      // Still used up: nothing changes, it keeps waiting
+      expect(mineIn(await claimWork(at(HOUR + 20 * MIN)), watch.id)).toEqual([]);
+      // No limit is given: the next ask carries it on, and what it was waiting for is cleared
+      await recordGrant({ personId: gsback.id, settlement: 'gift', startsAt: at(0), endsAt: at(4 * HOUR), givenById: gsback.id, grantKey: `gsback-none-${randomUUID()}`, noLimit: true });
+      expect(mineIn(await claimWork(at(HOUR + 25 * MIN)), watch.id)).toHaveLength(1);
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).toMatchObject({ heldSince: null, heldToldAt: null, heldNoticeAt: null });
+    });
+
     it('lets extra usage raise the room goals and tasks have, as it does for chat: a multiple raises it, no limit lifts it, and it is back to the usual when it ends', async () => {
       const gsext = await person('gsext');
       const watch = await set(gsext, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });

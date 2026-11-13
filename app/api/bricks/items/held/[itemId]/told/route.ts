@@ -16,8 +16,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     requireServiceToken(request);
     const { itemId } = await params;
-    const body = heldToldSchema.parse(await request.json());
-    const answer = await markHeldTold(itemId, body.waitId);
+    const parsed = heldToldSchema.safeParse(await request.json().catch(() => null));
+    if (!parsed.success) return NextResponse.json({ error: 'Invalid input data', details: parsed.error.issues }, { status: 400 });
+    const answer = await markHeldTold(itemId, parsed.data.waitId);
     if (!answer.ok) return NextResponse.json({ error: answer.error }, { status: answer.status });
     return NextResponse.json({ told: answer.told });
   } catch (error) {

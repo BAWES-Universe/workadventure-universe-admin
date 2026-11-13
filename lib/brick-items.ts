@@ -511,20 +511,36 @@ export async function goalsRoom(ownerId: string, now: Date = new Date()): Promis
     prisma.botsAiUsage.count({ where: { ...mine, channel: 'task' } }),
     // A run handed out and not yet finished has not written its model calls yet. It counts as one each, so a batch that falls due together
     // is held to the room there is, instead of every one of them seeing the same count. A reminder is fixed text and takes none.
-    // Only a Brick on Universe AI: a run on the owner's own key writes nothing to this bar and takes none of it.
-    prisma
-      .$queryRaw<{ n: bigint }[]>(Prisma.sql`
-        SELECT count(*) AS n FROM "brick_item_runs" r
-        JOIN "brick_items" i ON i."id" = r."item_id"
-        JOIN "bots" b ON b."id" = i."bot_id"
-        WHERE r."state" = 'claimed' AND r."lease_until" > ${now}
-          AND i."owner_id" = ${ownerId} AND i."kind" <> 'reminder' AND b."ai_provider_ref" = ${UNIVERSE_AI_REF}`)
-      .then((rows) => Number(rows[0]?.n ?? 0)),
+    inFlightRuns(ownerId, now),
   ]);
   const used = counted + inFlight;
   const byTasks = countedByTasks + inFlight;
   const share = Math.max(1, Math.floor((total * goalsShare) / 100));
   return used >= total || byTasks >= share ? { ok: false, resumesAt: ends } : { ok: true };
+}
+
+/**
+ * What runs already handed out will use of the owner's Universe AI room, that their model calls do not show yet. A run handed out and not
+ * finished counts as one call, so a batch that falls due together is held to the room there is, instead of every one of them seeing the same
+ * count; a call a Brick has written since its runs were handed out takes the place of one of those, so nothing is counted twice. Only a
+ * Brick on Universe AI: a run on the owner's own key writes nothing to this bar and takes none of it. A reminder is fixed text and takes none.
+ */
+async function inFlightRuns(ownerId: string, now: Date): Promise<number> {
+  const bricks = await prisma.$queryRaw<{ bot_id: string; n: bigint; since: Date }[]>(Prisma.sql`
+    SELECT i."bot_id", count(*) AS n, min(r."claimed_at") AS since FROM "brick_item_runs" r
+    JOIN "brick_items" i ON i."id" = r."item_id"
+    JOIN "bots" b ON b."id" = i."bot_id"
+    WHERE r."state" = 'claimed' AND r."lease_until" > ${now}
+      AND i."owner_id" = ${ownerId} AND i."kind" <> 'reminder' AND b."ai_provider_ref" = ${UNIVERSE_AI_REF}
+    GROUP BY i."bot_id"`);
+  let reserved = 0;
+  for (const brick of bricks) {
+    const written = await prisma.botsAiUsage.count({
+      where: { botId: brick.bot_id, talkedPersonId: ownerId, keyOwnerId: null, error: false, greeting: false, channel: 'task', timestamp: { gte: brick.since } },
+    });
+    reserved += Math.max(0, Number(brick.n) - written);
+  }
+  return reserved;
 }
 
 /** Something Brick must tell a person once: their goal or task is waiting for their usage to be back, and when it carries on. */
@@ -664,6 +680,29 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH): Pr
     }
   }
 
+  // A wait for usage ends before its window does when there is room again: extra usage was given, the allowance went up, or the Brick moved
+  // to its owner's own key. Such an item is made due now (its work is saved), and the claim below checks the room again under the person's lock.
+  const waiting = await prisma.$queryRaw<{ id: string; owner_id: string; ai_provider_ref: string | null }[]>(Prisma.sql`
+    SELECT i."id", i."owner_id", b."ai_provider_ref" FROM "brick_items" i
+    JOIN "bots" b ON b."id" = i."bot_id"
+    WHERE i."state" = 'on' AND i."held_since" IS NOT NULL AND i."next_due_at" > ${now}
+      AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
+    ORDER BY i."held_since" ASC, i."id" ASC
+    LIMIT ${limit}`);
+  const roomOf = new Map<string, boolean>();
+  for (const one of waiting) {
+    try {
+      let ok = one.ai_provider_ref !== UNIVERSE_AI_REF;
+      if (!ok) {
+        if (!roomOf.has(one.owner_id)) roomOf.set(one.owner_id, (await goalsRoom(one.owner_id, now)).ok);
+        ok = roomOf.get(one.owner_id)!;
+      }
+      if (ok) await prisma.brickItem.updateMany({ where: { id: one.id, state: 'on', heldSince: { not: null }, nextDueAt: { gt: now } }, data: { nextDueAt: now, ...NOT_HELD } });
+    } catch (error) {
+      console.error('[BrickItems] Could not look again at a waiting item:', error instanceof Error ? error.message : 'unknown');
+    }
+  }
+
   // What has fallen due. Only an item that is on, whose Brick is on and not deleted and still its owner's
   const due = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
     SELECT i."id" FROM "brick_items" i
@@ -701,6 +740,9 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH): Pr
         // is fixed text with no AI: it always comes, and a Brick on its owner's own key never uses the Universe AI bar.
         let onUniverse = false;
         if (item.kind !== 'reminder') {
+          // The person's lock comes before the usage is read and is held until the run is made: two items of theirs claimed at the same moment
+          // are checked one after the other, each seeing the run the other made, so the last place in their room is never given twice
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-runs:${item.ownerId}`}))`;
           const bot = await tx.bot.findUniqueOrThrow({ where: { id: item.botId }, select: { aiProviderRef: true } });
           onUniverse = bot.aiProviderRef === UNIVERSE_AI_REF;
           const room = onUniverse ? await goalsRoom(item.ownerId, now) : ({ ok: true } as const);
@@ -723,7 +765,6 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH): Pr
 
         // Runs a day: watches, schedules and goals together, per person. A reminder is fixed text with no AI and never uses them.
         if (item.kind !== 'reminder') {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-runs:${item.ownerId}`}))`;
           const today = await tx.brickItemRun.count({ where: { claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' } } } });
           if (today >= limits.runsPerDay) return null;
         }
