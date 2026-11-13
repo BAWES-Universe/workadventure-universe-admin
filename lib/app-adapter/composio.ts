@@ -131,7 +131,7 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
       } catch {
         throw new AdapterError('provider', 'The app link is not a link');
       }
-      if (host.protocol !== 'https:' && host.hostname !== new URL(base).hostname) throw new AdapterError('provider', 'The app link is not secure');
+      if (host.protocol !== 'https:') throw new AdapterError('provider', 'The app link is not secure');
       if (!(host.hostname === 'composio.dev' || host.hostname.endsWith('.composio.dev') || linkHosts.has(host.hostname))) {
         throw new AdapterError('provider', 'The app link is not the provider’s');
       }

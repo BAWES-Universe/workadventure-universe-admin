@@ -139,7 +139,7 @@ describe('the real adapter speaks the provider as its docs say, against a preten
 
     it('never sends the key to a host that is not the provider’s, or over plain http', async () => {
       const adapter = makeLink([]);
-      for (const url of ['https://evil.example.com/mcp', 'https://composio.dev.evil.example.com/mcp', 'http://app.composio.dev/mcp', 'not a link']) {
+      for (const url of ['https://evil.example.com/mcp', 'https://composio.dev.evil.example.com/mcp', 'http://app.composio.dev/mcp', 'http://backend.composio.dev/api/v3.1/tool_router', 'not a link']) {
         await expect(adapter.callLink({ url, message: { method: 'tools/list' }, sessionId: null })).rejects.toThrow();
       }
       expect(calls).toHaveLength(0);
