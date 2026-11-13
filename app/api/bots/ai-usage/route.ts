@@ -138,6 +138,7 @@ export async function POST(request: NextRequest) {
           tokens: { input: row.inputTokens, cached: row.cachedTokens, cacheWrite: row.cacheWriteTokens, output: row.outputTokens, reasoning: row.reasoningTokens },
           occurredAt: row.timestamp,
           // The run the call was made for, in the books only when it is one of this Brick's own (the bot server's word is checked, never trusted)
+          runKey: row.brickRunId,
           runId: await runOfBrick(botId, row.brickRunId),
         }),
       )

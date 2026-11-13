@@ -120,7 +120,9 @@ export interface ModelCallFacts {
   costMicros: number | null;
   tokens?: { input?: number | null; cached?: number | null; cacheWrite?: number | null; output?: number | null; reasoning?: number | null };
   occurredAt: Date;
-  /** The run of a goal or task the call was made for, once checked to be this Brick's: it is in the event's id and detail. */
+  /** The run the bot server named for the call, as it sent it: the event's id is made from it, so a retried report has the same id whatever a lookup said. */
+  runKey?: string | null;
+  /** That run, once checked to be this Brick's own: only this goes in the event's detail. Empty when it was not checked or could not be (a lookup that failed once). */
   runId?: string | null;
 }
 
@@ -139,9 +141,9 @@ export async function recordModelCall(facts: ModelCallFacts, db: Db & Pick<typeo
     const route = facts.sentProviderId === UNIVERSE_AI_REF ? 'universe-ai' : paidByOther ? 'own-key' : 'provider';
     return await recordMeterEvent(
       {
-        // A call a run made is under the run's own id, so the books can say what one run cost and a retried report is still one event
-        eventId: facts.runId
-          ? `run:${facts.runId}:model:${facts.clientEventId ?? `row-${facts.usageRowId}`}`.slice(0, 255)
+        // A call a run made is under the run's own id as the bot server sent it (never as a lookup answered it), so a retried report is still one event
+        eventId: facts.runKey
+          ? `run:${facts.runKey}:model:${facts.clientEventId ?? `row-${facts.usageRowId}`}`.slice(0, 255)
           : facts.clientEventId
             ? `model:${facts.botId}:${facts.clientEventId}`.slice(0, 255)
             : `ai-usage:${facts.usageRowId}`,

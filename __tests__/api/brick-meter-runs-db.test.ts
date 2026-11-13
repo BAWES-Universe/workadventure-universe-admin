@@ -94,9 +94,9 @@ run('money and the run, in a real database', () => {
     expect(await runOfBrick(sara.brickId, 'nope')).toBeNull();
     expect(await runOfBrick(sara.brickId, null)).toBeNull();
 
-    const first = await recordModelCall(call(sara.brickId, { clientEventId: 'c1', runId: mine.runId }) as never);
+    const first = await recordModelCall(call(sara.brickId, { clientEventId: 'c1', runKey: mine.runId, runId: mine.runId }) as never);
     expect(first).toEqual({ recorded: true, conflict: false });
-    const again = await recordModelCall(call(sara.brickId, { clientEventId: 'c1', runId: mine.runId, usageRowId: 5 }) as never);
+    const again = await recordModelCall(call(sara.brickId, { clientEventId: 'c1', runKey: mine.runId, runId: mine.runId, usageRowId: 5 }) as never);
     expect(again).toMatchObject({ recorded: false });
     const events = await prisma.meterEvent.findMany({ where: { eventId: { startsWith: `run:${mine.runId}:` } } });
     expect(events).toHaveLength(1);
@@ -107,8 +107,38 @@ run('money and the run, in a real database', () => {
     await recordModelCall(call(sara.brickId, { clientEventId: 'c2' }) as never);
     expect(await prisma.meterEvent.count({ where: { eventId: `model:${sara.brickId}:c2` } })).toBe(1);
     // Without the bot server's own id for the call, the report's row stands in for it, so a different report is a different call
-    await recordModelCall(call(sara.brickId, { runId: mine.runId, usageRowId: 77 }) as never);
+    await recordModelCall(call(sara.brickId, { runKey: mine.runId, runId: mine.runId, usageRowId: 77 }) as never);
     expect(await prisma.meterEvent.count({ where: { eventId: `run:${mine.runId}:model:row-77` } })).toBe(1);
+  });
+
+  it('books one event for one call even when the run could not be looked up the first time, and keeps a run that is not this Brick’s out of the detail', async () => {
+    const sara = await person('sara');
+    const omar = await person('omar');
+    const mine = await goalRun(sara);
+    const theirs = await goalRun(omar);
+
+    // The first report: the lookup of the run fails once (a transient database error), so the run is not kept; the retry's lookup works
+    const lookup = jest.spyOn(prisma.brickItemRun, 'findFirst').mockRejectedValueOnce(new Error('connection reset'));
+    const first = await runOfBrick(sara.brickId, mine.runId);
+    expect(first).toBeNull();
+    expect(lookup).toHaveBeenCalledTimes(1);
+    const retried = await runOfBrick(sara.brickId, mine.runId);
+    expect(retried).toBe(mine.runId);
+    lookup.mockRestore();
+
+    await recordModelCall(call(sara.brickId, { clientEventId: 'again', runKey: mine.runId, runId: first }) as never);
+    const second = await recordModelCall(call(sara.brickId, { clientEventId: 'again', runKey: mine.runId, runId: retried, usageRowId: 9 }) as never);
+    expect(second).toMatchObject({ recorded: false });
+    // One event, under the id made from what the bot server sent, whatever the lookups said
+    const events = await prisma.meterEvent.findMany({ where: { eventId: `run:${mine.runId}:model:again` } });
+    expect(events).toHaveLength(1);
+    expect(await prisma.meterEvent.count({ where: { eventId: `model:${sara.brickId}:again` } })).toBe(0);
+
+    // A run that is not this Brick's is booked, with no run in its detail
+    await recordModelCall(call(sara.brickId, { clientEventId: 'foreign', runKey: theirs.runId, runId: await runOfBrick(sara.brickId, theirs.runId) }) as never);
+    const foreign = await prisma.meterEvent.findFirst({ where: { eventId: { endsWith: ':model:foreign' } } });
+    expect(foreign).not.toBeNull();
+    expect((foreign?.detail as Record<string, unknown>).runId).toBeUndefined();
   });
 
   it('starts one computer job for a run, ever, and a run that is not the person’s starts none', async () => {
