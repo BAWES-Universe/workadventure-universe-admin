@@ -107,6 +107,24 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect((await useIt()).status).toBe(404);
   });
 
+  it('opens one account at the provider when the same person taps connect twice at the same moment', async () => {
+    const adapter = fake();
+    // A slow provider, so both taps are in flight at once
+    adapter.startConnect.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return { redirectUrl: 'https://connect.example/sign-in', providerAccountId: `ca_${tag}`, expiresAt: null };
+    });
+    setAdapterForTests(adapter);
+    await list();
+    asSara();
+    const [one, two] = await Promise.all([connect(), connect()]);
+    const bodies = [await one.json(), await two.json()];
+    expect([one.status, two.status].sort()).toEqual([200, 201]);
+    expect(bodies[0].id).toBe(bodies[1].id);
+    expect(adapter.startConnect).toHaveBeenCalledTimes(1);
+    expect(await prisma.appConnection.count({ where: { ownerId: sara, providerToolkit: KEY } })).toBe(1);
+  });
+
   it('keeps its list for a super admin only, when on', async () => {
     setAdapterForTests(fake());
     asSara();
