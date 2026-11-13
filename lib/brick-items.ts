@@ -585,8 +585,8 @@ export interface HeldNotice {
   itemId: string;
   brickId: string;
   userId: string;
-  /** The owner's chat (Matrix) id, where Brick speaks to them; null when they have none, and then nothing can be said. */
-  chatId: string | null;
+  /** The owner's Matrix user id (like @user:domain), the person Brick speaks to; null when they have none, and then nothing can be said. */
+  matrixUserId: string | null;
   kind: ItemKind;
   words: string;
   resumesAt: string;
@@ -600,8 +600,8 @@ export interface ClaimedRun {
   brickId: string;
   /** The owner as the bot server names people: their game uuid. */
   userId: string;
-  /** The owner's chat (Matrix) id, where Brick speaks to them; null when they have none, and then nothing can be said. */
-  chatId: string | null;
+  /** The owner's Matrix user id (like @user:domain), the person Brick speaks to; null when they have none, and then nothing can be said. */
+  matrixUserId: string | null;
   kind: ItemKind;
   words: string;
   condition: string | null;
@@ -633,7 +633,7 @@ const claimedOf = (run: Prisma.BrickItemRunGetPayload<{ include: { item: { inclu
     itemId: run.itemId,
     brickId: run.item.botId,
     userId: run.item.owner.uuid,
-    chatId: run.item.owner.matrixChatId,
+    matrixUserId: run.item.owner.matrixChatId,
     kind: run.item.kind as ItemKind,
     words: run.item.words,
     condition: run.item.condition,
@@ -667,15 +667,21 @@ function endedOneOff(now: Date): Prisma.BrickItemUpdateInput {
  * Then everything that has fallen due, one run each. One item per transaction under a row lock that skips what another
  * server holds, so two asks at the same moment split the work and never share it.
  */
-export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH): Promise<ClaimedRun[]> {
-  return (await claimWork(now, limit)).runs;
+export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH, kinds?: readonly ItemKind[]): Promise<ClaimedRun[]> {
+  return (await claimWork(now, limit, WAITING_PAGE, kinds)).runs;
 }
 
 /**
  * Everything the bot server does next: the runs to run, and the goals and tasks that are now waiting because their person's usage is
  * used up, each to be told once ("held"). A held item is not run: it carries on at the moment the usage is back, with its work saved.
+ * `kinds` is what the bot server can run: it is handed nothing else, and nothing else is claimed, handed out again, counted as a try or
+ * counted as a failure for it (a watch or goal that nothing tried is never failed). Without `kinds`, every kind.
  */
-export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, waitingPage = WAITING_PAGE): Promise<{ runs: ClaimedRun[]; held: HeldNotice[] }> {
+export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, waitingPage = WAITING_PAGE, kinds?: readonly ItemKind[]): Promise<{ runs: ClaimedRun[]; held: HeldNotice[] }> {
+  const kindList = kinds ? [...new Set(kinds)] : null;
+  // An empty list is "nothing": no run is claimed for it
+  if (kindList && kindList.length === 0) return { runs: [], held: [] };
+  const ofKinds = kindList ? Prisma.sql`AND i."kind" IN (${Prisma.join(kindList)})` : Prisma.empty;
   const limits = await getBrickLimits();
   // Read once: the room check and the window start take these, so neither needs another connection while a transaction is open
   const universe = await getUniverseAiReplyLimits();
@@ -686,7 +692,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
   const noticeRetry = limits.longestRun * MINUTE;
 
   // Runs handed out and never reported
-  const lapsed = await prisma.brickItemRun.findMany({ where: { state: 'claimed', leaseUntil: { lte: now } }, orderBy: { leaseUntil: 'asc' }, take: limit, select: { id: true, itemId: true } });
+  const lapsed = await prisma.brickItemRun.findMany({ where: { state: 'claimed', leaseUntil: { lte: now }, ...(kindList ? { item: { kind: { in: kindList } } } : {}) }, orderBy: { leaseUntil: 'asc' }, take: limit, select: { id: true, itemId: true } });
   for (const { id, itemId } of lapsed) {
     try {
       const again = await prisma.$transaction(async (tx) => {
@@ -738,6 +744,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
       JOIN "bots" b ON b."id" = i."bot_id"
       WHERE i."state" = 'on' AND i."held_since" IS NOT NULL AND i."next_due_at" > ${now} AND i."id" > ${after}
         AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
+        ${ofKinds}
       ORDER BY i."id" ASC
       LIMIT ${waitingPage}`);
     for (const one of waiting) {
@@ -762,6 +769,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
     JOIN "bots" b ON b."id" = i."bot_id"
     WHERE i."state" = 'on' AND i."next_due_at" <= ${now}
       AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
+      ${ofKinds}
       -- A person who is at their runs a day is left out here, so what they hold back never fills the batch ahead of everyone else
       AND (i."kind" = 'reminder' OR (
         SELECT count(*) FROM "brick_item_runs" r JOIN "brick_items" j ON j."id" = r."item_id"
@@ -779,6 +787,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
           JOIN "bots" b ON b."id" = i."bot_id"
           WHERE i."id" = ${id} AND i."state" = 'on' AND i."next_due_at" <= ${now}
             AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
+            ${ofKinds}
           FOR UPDATE OF i SKIP LOCKED`);
         if (!locked.length) return null;
         const item = await tx.brickItem.findUniqueOrThrow({ where: { id } });
@@ -807,7 +816,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
             await tx.brickItem.update({ where: { id }, data: { nextDueAt: room.resumesAt, heldSince: since, ...(owed ? { heldNoticeAt: now } : {}) } });
             if (owed) {
               const owner = await tx.user.findUniqueOrThrow({ where: { id: item.ownerId }, select: { uuid: true, matrixChatId: true } });
-              notice = { itemId: item.id, brickId: item.botId, userId: owner.uuid, chatId: owner.matrixChatId, kind: item.kind as ItemKind, words: item.words, resumesAt: room.resumesAt.toISOString(), waitId: since.toISOString() };
+              notice = { itemId: item.id, brickId: item.botId, userId: owner.uuid, matrixUserId: owner.matrixChatId, kind: item.kind as ItemKind, words: item.words, resumesAt: room.resumesAt.toISOString(), waitId: since.toISOString() };
             }
             return null;
           }
@@ -855,6 +864,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
     WHERE i."state" = 'on' AND i."held_since" IS NOT NULL AND i."held_told_at" IS NULL AND i."next_due_at" > ${now}
       AND (i."held_notice_at" IS NULL OR i."held_notice_at" <= ${new Date(now.getTime() - noticeRetry)})
       AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
+      ${ofKinds}
     ORDER BY i."held_since" ASC, i."id" ASC
     LIMIT ${limit}`);
   for (const { id } of owing) {
@@ -869,7 +879,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
         const item = await tx.brickItem.findUniqueOrThrow({ where: { id }, include: { owner: { select: { uuid: true, matrixChatId: true } } } });
         if (!item.heldSince || !item.nextDueAt) return null;
         await tx.brickItem.update({ where: { id }, data: { heldNoticeAt: now } });
-        return { itemId: item.id, brickId: item.botId, userId: item.owner.uuid, chatId: item.owner.matrixChatId, kind: item.kind as ItemKind, words: item.words, resumesAt: item.nextDueAt.toISOString(), waitId: item.heldSince.toISOString() } satisfies HeldNotice;
+        return { itemId: item.id, brickId: item.botId, userId: item.owner.uuid, matrixUserId: item.owner.matrixChatId, kind: item.kind as ItemKind, words: item.words, resumesAt: item.nextDueAt.toISOString(), waitId: item.heldSince.toISOString() } satisfies HeldNotice;
       });
       if (notice) held.push(notice);
     } catch (error) {
