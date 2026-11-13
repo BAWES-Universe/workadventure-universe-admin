@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { endApprovalsForServers } from '@/lib/bot-actions';
 import { canManageBotMcpServers } from '@/lib/bot-permissions';
-import { lendAccess, lendableUniverses, type LendableUniverse } from '@/lib/ai-key-lend';
+import { lendAccess, lendAccessMany, lendableUniverses, type LendableUniverse } from '@/lib/ai-key-lend';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
 import { addConnectionSchema, AppConnectionError, HEADINGS, NOT_FOUND, connectedState, type Heading } from '@/lib/app-connections';
 import { encryptApiKey } from '@/lib/encryption';
@@ -198,9 +198,9 @@ export async function currentManagers(connectionId: string, universeId: string):
   ]);
   const people = new Map<string, Person>();
   if (universe) people.set(universe.owner.id, { id: universe.owner.id, name: universe.owner.name ?? 'Someone' });
+  const stillManage = await lendAccessMany(named.map(({ user }) => user.id), universeId);
   for (const { user } of named) {
-    if (people.has(user.id)) continue;
-    if (await lendAccess(user.id, universeId)) people.set(user.id, { id: user.id, name: user.name ?? 'Someone' });
+    if (!people.has(user.id) && stillManage.has(user.id)) people.set(user.id, { id: user.id, name: user.name ?? 'Someone' });
   }
   return [...people.values()];
 }
@@ -242,13 +242,8 @@ export async function teamAppView(connection: AppConnection, viewerId: string): 
 export async function listTeamApps(userId: string, universeId: string): Promise<TeamAppView[] | null> {
   if (!(await lendAccess(userId, universeId))) return null;
   const rows = await prisma.appConnection.findMany({ where: { universeId }, orderBy: { createdAt: 'asc' } });
-  const views: TeamAppView[] = [];
-  for (const row of rows) {
-    if (!(await managesTeamApp(userId, row))) continue;
-    const view = await teamAppView(row, userId);
-    if (view) views.push(view);
-  }
-  return views;
+  const views = await Promise.all(rows.map(async (row) => ((await managesTeamApp(userId, row)) ? teamAppView(row, userId) : null)));
+  return views.filter((view): view is TeamAppView => view !== null);
 }
 
 /** One universe's own app, for a person who manages it; anyone else gets null, the same as an app that is not there. */
@@ -271,12 +266,9 @@ export async function managerCandidates(userId: string, connectionId: string): P
   ]);
   const have = new Set(current.map((person) => person.id));
   const ids = [...new Set([universe?.ownerId, ...world.map((row) => row.userId), ...member.map((row) => row.userId)].filter((id): id is string => !!id))].filter((id) => !have.has(id));
-  const out: Person[] = [];
-  for (const id of ids) {
-    if (!(await lendAccess(id, universeId))) continue;
-    const user = await prisma.user.findUnique({ where: { id }, select: { id: true, name: true, isGuest: true } });
-    if (user && !user.isGuest) out.push({ id: user.id, name: user.name ?? 'Someone' });
-  }
+  const eligible = await lendAccessMany(ids, universeId);
+  const users = await prisma.user.findMany({ where: { id: { in: [...eligible] }, isGuest: false }, select: { id: true, name: true } });
+  const out: Person[] = users.map((user) => ({ id: user.id, name: user.name ?? 'Someone' }));
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 

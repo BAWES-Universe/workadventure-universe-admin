@@ -40,6 +40,34 @@ export async function lendAccess(userId: string, universeId: string): Promise<Le
   return null;
 }
 
+/**
+ * `lendAccess` for many people at once: who of `userIds` has it in this universe. The universe and its worlds are read once and
+ * the people's world memberships in one query (not once for each person), and the permission checks run a few at a time. The same
+ * answer as asking for each of them alone.
+ */
+export async function lendAccessMany(userIds: readonly string[], universeId: string): Promise<Set<string>> {
+  const ids = [...new Set(userIds)];
+  const allowed = new Set<string>();
+  if (ids.length === 0) return allowed;
+  const [universe, members] = await Promise.all([
+    prisma.universe.findUnique({ where: { id: universeId }, select: { ownerId: true, worlds: { select: { id: true } } } }),
+    prisma.worldMember.findMany({ where: { userId: { in: ids }, world: { universeId } }, select: { userId: true, worldId: true, tags: true } }),
+  ]);
+  if (!universe) return allowed;
+  const tagsOf = new Map(members.map((member) => [`${member.userId}:${member.worldId}`, member.tags]));
+  const check = async (userId: string) => {
+    if (universe.ownerId === userId) return allowed.add(userId);
+    for (const world of universe.worlds) {
+      const permissions = await permissionsForWorld({ userId, worldId: world.id, universeId, worldTags: tagsOf.get(`${userId}:${world.id}`) ?? [] });
+      if (has(permissions, 'MANAGE_BOTS')) return allowed.add(userId);
+    }
+  };
+  // A few at a time: no one waits for hundreds of checks in a row, and the database is not asked for hundreds at once
+  const AT_ONCE = 8;
+  for (let index = 0; index < ids.length; index += AT_ONCE) await Promise.all(ids.slice(index, index + AT_ONCE).map(check));
+  return allowed;
+}
+
 /** The universes this person could lend a key to, by name. */
 export async function lendableUniverses(userId: string): Promise<LendableUniverse[]> {
   const [owned, worldMemberships, universeMemberships] = await Promise.all([
