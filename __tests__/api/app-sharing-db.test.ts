@@ -418,6 +418,19 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect((await check(guide, serverId, { callId: 'after', heading: 'lookUp' })).body).toMatchObject({ allowed: false, reason: 'gone' });
     });
 
+    it('never deadlocks when an app is disconnected at the very moment it is used', async () => {
+      for (let round = 0; round < 8; round += 1) {
+        const { app, serverId } = await lentAndLet({ usesPerDay: 5 });
+        const settled = await Promise.allSettled([
+          recordUse({ connectionId: app.id, universeId: universeA, botId: guide, callId: `race-${round}`, limit: 5, serverId, lend: true }),
+          prisma.appConnection.delete({ where: { id: app.id } }),
+        ]);
+        expect(settled.map((one) => one.status)).toEqual(['fulfilled', 'fulfilled']);
+        expect(['recorded', 'gone']).toContain((settled[0] as PromiseFulfilledResult<string>).value);
+        expect(await prisma.appUse.count({ where: { connectionId: app.id } })).toBe(0);
+      }
+    });
+
     it('counts a use on the day it is written, whichever moment the transaction began', async () => {
       const { app, serverId } = await lentAndLet({ usesPerDay: 1 });
       const before = new Date();
