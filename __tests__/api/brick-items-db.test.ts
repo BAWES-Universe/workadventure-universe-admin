@@ -940,6 +940,23 @@ run('goals and tasks, in a real database', () => {
       expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).toMatchObject({ heldSince: null, heldToldAt: null, heldNoticeAt: null });
     });
 
+    it('looks again at every waiting item, so ones that stay held never keep a later one from carrying on', async () => {
+      const stay = [await person('gsstay1'), await person('gsstay2'), await person('gsstay3')];
+      const later = await person('gslater');
+      const watches = [];
+      for (const one of [...stay, later]) {
+        await usage(one, 9, 'task');
+        watches.push(await set(one, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } }));
+      }
+      await claimWork(at(HOUR + 2 * MIN));
+      for (const watch of watches) expect((await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).heldSince).not.toBeNull();
+      // Room comes back only for the last one's owner, with a page of two: the first pages are all still held
+      await recordGrant({ personId: later.id, settlement: 'gift', startsAt: at(0), endsAt: at(4 * HOUR), givenById: later.id, grantKey: `gslater-none-${randomUUID()}`, noLimit: true });
+      const work = await claimWork(at(HOUR + 25 * MIN), 50, 2);
+      expect(mineIn(work, watches[3].id)).toHaveLength(1);
+      for (const watch of watches.slice(0, 3)) expect(mineIn(work, watch.id)).toEqual([]);
+    });
+
     it('lets extra usage raise the room goals and tasks have, as it does for chat: a multiple raises it, no limit lifts it, and it is back to the usual when it ends', async () => {
       const gsext = await person('gsext');
       const watch = await set(gsext, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });

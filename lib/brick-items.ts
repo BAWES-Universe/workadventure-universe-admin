@@ -44,6 +44,8 @@ const LATE_GRACE = 15 * MINUTE;
 const DAY = 24 * 60 * MINUTE;
 /** How many due items one ask for work looks at. The next ask takes the rest. */
 const CLAIM_BATCH = 50;
+/** How many waiting items are looked at again in one go (all of them are, a page at a time). */
+const WAITING_PAGE = 200;
 
 export const stepsSchema = z.array(z.object({ text: z.string().trim().min(1).max(200), state: z.enum(['todo', 'doing', 'done']) }).strict()).max(30);
 const person = z.string().trim().min(1).max(320);
@@ -633,7 +635,7 @@ export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH):
  * Everything the bot server does next: the runs to run, and the goals and tasks that are now waiting because their person's usage is
  * used up, each to be told once ("held"). A held item is not run: it carries on at the moment the usage is back, with its work saved.
  */
-export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH): Promise<{ runs: ClaimedRun[]; held: HeldNotice[] }> {
+export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, waitingPage = WAITING_PAGE): Promise<{ runs: ClaimedRun[]; held: HeldNotice[] }> {
   const limits = await getBrickLimits();
   const lease = new Date(now.getTime() + limits.longestRun * MINUTE);
   const out: ClaimedRun[] = [];
@@ -682,25 +684,32 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH): Pr
 
   // A wait for usage ends before its window does when there is room again: extra usage was given, the allowance went up, or the Brick moved
   // to its owner's own key. Such an item is made due now (its work is saved), and the claim below checks the room again under the person's lock.
-  const waiting = await prisma.$queryRaw<{ id: string; owner_id: string; ai_provider_ref: string | null }[]>(Prisma.sql`
-    SELECT i."id", i."owner_id", b."ai_provider_ref" FROM "brick_items" i
-    JOIN "bots" b ON b."id" = i."bot_id"
-    WHERE i."state" = 'on' AND i."held_since" IS NOT NULL AND i."next_due_at" > ${now}
-      AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
-    ORDER BY i."held_since" ASC, i."id" ASC
-    LIMIT ${limit}`);
+  // Every waiting item is looked at, a page at a time by id: one that stays held never keeps a later one from being looked at. Waiting items
+  // are few (a person has them only while their usage is used up), and the room is read once for each person.
   const roomOf = new Map<string, boolean>();
-  for (const one of waiting) {
-    try {
-      let ok = one.ai_provider_ref !== UNIVERSE_AI_REF;
-      if (!ok) {
-        if (!roomOf.has(one.owner_id)) roomOf.set(one.owner_id, (await goalsRoom(one.owner_id, now)).ok);
-        ok = roomOf.get(one.owner_id)!;
+  let after = '';
+  for (;;) {
+    const waiting = await prisma.$queryRaw<{ id: string; owner_id: string; ai_provider_ref: string | null }[]>(Prisma.sql`
+      SELECT i."id", i."owner_id", b."ai_provider_ref" FROM "brick_items" i
+      JOIN "bots" b ON b."id" = i."bot_id"
+      WHERE i."state" = 'on' AND i."held_since" IS NOT NULL AND i."next_due_at" > ${now} AND i."id" > ${after}
+        AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
+      ORDER BY i."id" ASC
+      LIMIT ${waitingPage}`);
+    for (const one of waiting) {
+      try {
+        let ok = one.ai_provider_ref !== UNIVERSE_AI_REF;
+        if (!ok) {
+          if (!roomOf.has(one.owner_id)) roomOf.set(one.owner_id, (await goalsRoom(one.owner_id, now)).ok);
+          ok = roomOf.get(one.owner_id)!;
+        }
+        if (ok) await prisma.brickItem.updateMany({ where: { id: one.id, state: 'on', heldSince: { not: null }, nextDueAt: { gt: now } }, data: { nextDueAt: now, ...NOT_HELD } });
+      } catch (error) {
+        console.error('[BrickItems] Could not look again at a waiting item:', error instanceof Error ? error.message : 'unknown');
       }
-      if (ok) await prisma.brickItem.updateMany({ where: { id: one.id, state: 'on', heldSince: { not: null }, nextDueAt: { gt: now } }, data: { nextDueAt: now, ...NOT_HELD } });
-    } catch (error) {
-      console.error('[BrickItems] Could not look again at a waiting item:', error instanceof Error ? error.message : 'unknown');
     }
+    if (waiting.length < waitingPage) break;
+    after = waiting[waiting.length - 1].id;
   }
 
   // What has fallen due. Only an item that is on, whose Brick is on and not deleted and still its owner's
