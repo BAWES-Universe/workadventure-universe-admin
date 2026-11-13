@@ -347,4 +347,19 @@ run('the list of apps to connect, in a real database', () => {
     expect(new URLSearchParams(bodies[0]).get('token')).toBe('refresh-new');
     expect(await prisma.appConnection.count({ where: { id } })).toBe(0);
   });
+
+  it('two disconnects at the same moment: one disconnects, the other is told it was not there, and neither waits on a lease that is gone', async () => {
+    await add(entry('gmail'));
+    mockUser.current = { id: sara };
+    const { id } = await (await connectApp(request('/api/me/apps', { method: 'POST', body: { catalogKey: key('gmail') } }))).json();
+    const started = Date.now();
+    const answers = await Promise.all([disconnect(sara, id), disconnect(sara, id), disconnect(sara, id)]);
+    expect(answers.filter(Boolean)).toHaveLength(1);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(await prisma.appConnection.count({ where: { id } })).toBe(0);
+    // The lease of a row that does not exist is not waited for either
+    const letGo = await (await import('@/lib/mcp/oauth-refresh')).holdRefreshLease(id);
+    await letGo();
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
 });
