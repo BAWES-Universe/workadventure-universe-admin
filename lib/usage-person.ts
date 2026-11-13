@@ -24,7 +24,8 @@ export function readUsageChannel(value: unknown): UsageChannel | null {
   return null;
 }
 
-export async function resolveUsagePerson(talkedUserId: unknown, isGuest: unknown): Promise<UsagePerson> {
+/** `db` is the caller's transaction when it asks while holding a lock, so the lookup never waits for a second connection. */
+export async function resolveUsagePerson(talkedUserId: unknown, isGuest: unknown, db: Pick<typeof prisma, 'user'> = prisma): Promise<UsagePerson> {
   // A bot server from before this sends neither, and its rows stay "not told"
   if (typeof talkedUserId !== 'string' || !talkedUserId) {
     return { personId: null, guest: typeof isGuest === 'boolean' ? isGuest : null };
@@ -33,7 +34,7 @@ export async function resolveUsagePerson(talkedUserId: unknown, isGuest: unknown
   // A guest is never looked up, unless the id is an email, which only a signed-in person has
   if (isGuest === true && !isEmail) return { personId: null, guest: true };
   try {
-    const user = await prisma.user.findUnique({
+    const user = await db.user.findUnique({
       where: isEmail ? { email: talkedUserId } : { uuid: talkedUserId },
       select: { id: true, isGuest: true },
     });

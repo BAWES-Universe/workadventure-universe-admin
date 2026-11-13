@@ -270,7 +270,7 @@ export async function reserveVoiceNote(
     if (scope === 'bot' && personKey.startsWith('guest:') && signedIn) {
       // A signed-in person Orbit had no account for a moment ago: looked up again under the lock, so an ask that found the account
       // in the meantime and reserved this note under it is found here, and the note is never two turns
-      const again = await resolveUsagePerson(userId, false);
+      const again = await resolveUsagePerson(userId, false, tx);
       if (!again.personId && again.guest !== true) throw new VoiceNoteError('Who sent this note can\'t be looked up now', 503);
       if (again.personId) {
         personKey = `person:${again.personId}`;
