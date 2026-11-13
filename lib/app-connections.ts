@@ -1,6 +1,7 @@
 import { randomBytes } from 'crypto';
 import { Prisma, type AppConnection, type BotMcpServer } from '@prisma/client';
 import { z } from 'zod';
+import { confirmReadyMade } from '@/lib/app-adapter/confirm';
 import { prisma } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { endApprovalsForServers } from '@/lib/bot-actions';
@@ -68,6 +69,8 @@ export interface AppUseVerdict {
   reason?: AppUseRefusal;
   /** True when this is a person's connection (a grant); false for an app set up on a bot as before, which this does not decide. */
   viaConnection: boolean;
+  /** True when the app was made through the ready-made adapter: its use is paid by the universe, not the person (the meter's payer). */
+  readyMade?: boolean;
 }
 
 export const useCheckSchema = z
@@ -101,11 +104,12 @@ export async function checkAppUse(botId: string, serverId: string, input: z.infe
   if (!connection) return refuse('gone');
   if (!ownsBrick(row.bot, connection.ownerId)) return refuse('gone');
   if (!row.enabled) return refuse('off');
-  if (input.forOwner === true) return { allowed: true, viaConnection: true };
+  const allowed: AppUseVerdict = { allowed: true, viaConnection: true, ...(connection.source === 'ready_made' ? { readyMade: true } : {}) };
+  if (input.forOwner === true) return allowed;
   if (!input.requesterKey) return refuse('not_owner');
   const asker = await findUserByIdentifier(input.requesterKey);
   if (!asker || asker.isGuest || asker.id !== connection.ownerId) return refuse('not_owner');
-  return { allowed: true, viaConnection: true };
+  return allowed;
 }
 
 /* -------------------------------- connections -------------------------------- */
@@ -131,7 +135,7 @@ export const addConnectionSchema = createMcpServerSchema
   .omit({ enabled: true });
 
 /** A connection made from a person's own input is "link"; the list (lib/app-catalog.ts) adds `catalogKey` for its own. */
-type NewConnection = z.infer<typeof addConnectionSchema> & { catalogKey?: string | null };
+type NewConnection = Omit<z.infer<typeof addConnectionSchema>, 'source'> & { source: 'link' | 'listed' | 'ready_made'; catalogKey?: string | null; providerToolkit?: string | null; providerAccountId?: string | null };
 
 /** The person connects an app. The way in is stored encrypted and never read back by a screen. */
 export async function createConnection(ownerId: string, input: NewConnection, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<AppConnection> {
@@ -146,6 +150,8 @@ export async function createConnection(ownerId: string, input: NewConnection, db
       headers: input.headers ?? undefined,
       source: input.source,
       catalogKey: input.catalogKey ?? null,
+      providerToolkit: input.providerToolkit ?? null,
+      providerAccountId: input.providerAccountId ?? null,
     },
   });
 }
@@ -176,6 +182,8 @@ export interface Headings {
 }
 
 function connectedState(connection: AppConnection): { connected: boolean; reconnectRequired: boolean } {
+  // A ready-made app is connected only once the provider confirmed the sign-in (lib/app-adapter/confirm.ts), never from the tap
+  if (connection.source === 'ready_made') return { connected: !!connection.providerConfirmedAt && !connection.signInLostAt, reconnectRequired: false };
   if (connection.authType !== 'oauth') return { connected: true, reconnectRequired: false };
   if (!connection.authConfig) return { connected: false, reconnectRequired: false };
   try {
@@ -215,17 +223,24 @@ function toView(connection: ConnectionWithGrants): ConnectionView {
   };
 }
 
+/** A ready-made app whose sign-in is not confirmed yet is asked about once more before it is shown, so a finished sign-in reads connected. */
+async function confirmIfPending<T extends AppConnection>(row: T): Promise<T> {
+  if (row.source !== 'ready_made' || row.providerConfirmedAt) return row;
+  const confirmedAt = await confirmReadyMade(row);
+  return confirmedAt ? { ...row, providerConfirmedAt: confirmedAt } : row;
+}
+
 const GRANTS = { grants: { include: { bot: { select: { id: true, name: true, deletedAt: true } } }, orderBy: { createdAt: 'asc' as const } } };
 
 /** Every app the person connected, oldest first, with the Bricks of theirs that use each. Only theirs. */
 export async function listConnections(ownerId: string): Promise<ConnectionView[]> {
   const rows = await prisma.appConnection.findMany({ where: { ownerId }, include: GRANTS, orderBy: { createdAt: 'asc' } });
-  return rows.map(toView);
+  return (await Promise.all(rows.map(confirmIfPending))).map(toView);
 }
 
 export async function readConnection(connectionId: string, ownerId: string): Promise<ConnectionView | null> {
   const row = await prisma.appConnection.findFirst({ where: { id: connectionId, ownerId }, include: GRANTS });
-  return row ? toView(row) : null;
+  return row ? toView(await confirmIfPending(row)) : null;
 }
 
 /** The Bricks the person has, so the app's page can offer "Let it use Gmail" for each one that does not use it yet. */

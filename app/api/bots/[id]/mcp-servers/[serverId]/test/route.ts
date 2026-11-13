@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { testReadyMade } from '@/lib/app-adapter/ready-made';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { canManageBotMcpServers } from '@/lib/bot-permissions';
@@ -534,7 +535,10 @@ export async function POST(
       }
     }
 
-    const result = reconnectReason
+    const result = row.connection?.source === 'ready_made'
+      ? // A ready-made app's link needs the provider key, which only Orbit holds: tested through the adapter
+        await testReadyMade(row.connection)
+      : reconnectReason
       ? {
           success: false as const,
           toolCount: 0,

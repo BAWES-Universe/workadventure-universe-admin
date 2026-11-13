@@ -174,11 +174,19 @@ export interface MeterSettings {
   atOnceMember: number | null;
   /** Jobs going at once, everyone together. */
   atOnceAll: number | null;
+  /** What one use of a ready-made app costs us (the adapter's own price). Empty means the built-in estimate (APP_USE_MICROS_DEFAULT) is used. Not needed to open anything. */
+  appUseMicros: number | null;
   /** How long room is held before a job must renew it, in minutes. */
   renewMinutes: number;
 }
 
 export const METER_RENEW_MINUTES_RECOMMENDED = 10;
+
+/**
+ * What one use of a ready-made app is counted at while no price is saved: the provider's published price for a call beyond its
+ * included ones ($0.005 a call, composio.dev/pricing, read 13 Nov 2026). It is an estimate, written as such; a saved price replaces it.
+ */
+export const APP_USE_MICROS_DEFAULT = 5_000;
 
 export const METER_SETTINGS_EMPTY: MeterSettings = {
   memberAllowanceMicros: null,
@@ -187,6 +195,7 @@ export const METER_SETTINGS_EMPTY: MeterSettings = {
   storageMicrosPerGbMonth: null,
   atOnceMember: null,
   atOnceAll: null,
+  appUseMicros: null,
   renewMinutes: METER_RENEW_MINUTES_RECOMMENDED,
 };
 
@@ -203,6 +212,7 @@ export const METER_RANGES: Record<keyof MeterSettings, MeterRange> = {
   storageMicrosPerGbMonth: { min: 0, max: 1_000_000_000_000 },
   atOnceMember: { min: 1, max: 100_000 },
   atOnceAll: { min: 1, max: 1_000_000 },
+  appUseMicros: { min: 0, max: 1_000_000_000 },
   renewMinutes: { min: 1, max: 1_440 },
 };
 
@@ -227,7 +237,7 @@ export function checkMeterSettings(input: unknown): Checked<Partial<MeterSetting
   for (const [key, value] of Object.entries(input)) {
     const range = Object.prototype.hasOwnProperty.call(METER_RANGES, key) ? METER_RANGES[key as keyof MeterSettings] : undefined;
     if (!range) return { ok: false, error: `Unknown setting: ${key}` };
-    if (value === null && NEEDED.includes(key as keyof MeterSettings)) {
+    if (value === null && (NEEDED.includes(key as keyof MeterSettings) || key === 'appUseMicros')) {
       (out as Record<string, null>)[key] = null;
       continue;
     }
