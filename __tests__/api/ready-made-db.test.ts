@@ -545,6 +545,16 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(result.toolNames[19]).toBe('T20');
     });
 
+    it('says the list is incomplete when the app keeps offering a cursor it already gave', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      adapter.callLink.mockImplementation(async (input: { message: Record<string, unknown> }) => {
+        if (input.message.method === 'initialize') return answerOf(200, '{"jsonrpc":"2.0","id":1,"result":{}}', 's1');
+        if (input.message.method !== 'tools/list') return answerOf(202, '');
+        return answerOf(200, JSON.stringify({ jsonrpc: '2.0', id: input.message.id, result: { tools: [{ name: 'A' }], nextCursor: 'same' } }));
+      });
+      expect(await (await test(serverId)).json()).toMatchObject({ success: true, toolNames: ['A'], incomplete: true });
+    });
+
     it('reports a refusal by the link as a failed test with its status, and an unfinished sign-in as one to reconnect', async () => {
       const { adapter, serverId } = await connectedAndGranted();
       adapter.callLink.mockResolvedValueOnce(answerOf(401, 'nope'));

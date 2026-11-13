@@ -316,9 +316,13 @@ export async function testReadyMade(connection: { id: string; source: string; se
           names.push(tool.name);
         }
       }
-      if (typeof result.nextCursor !== 'string' || !result.nextCursor || seenCursors.has(result.nextCursor)) break;
-      // Another page is offered after the last one that is read: the list says so rather than pass for everything
-      if (page === MAX_TOOL_PAGES - 1) incomplete = true;
+      if (typeof result.nextCursor !== 'string' || !result.nextCursor) break;
+      // A page is still offered but is not read (a cursor already followed, or past the last page that is read): the list says so
+      // rather than pass for everything
+      if (seenCursors.has(result.nextCursor) || page === MAX_TOOL_PAGES - 1) {
+        incomplete = true;
+        break;
+      }
       seenCursors.add(result.nextCursor);
       cursor = result.nextCursor;
     }

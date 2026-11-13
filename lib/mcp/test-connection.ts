@@ -478,9 +478,13 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
         }
       }
       const next = (result as { nextCursor?: unknown }).nextCursor;
-      if (typeof next !== 'string' || !next || seenCursors.has(next)) break;
-      // Another page is offered after the last one that is read: the list says so rather than pass for everything
-      if (page === MAX_TOOL_PAGES) incomplete = true;
+      if (typeof next !== 'string' || !next) break;
+      // A page is still offered but is not read (a cursor already followed, or past the last page that is read): the list says so
+      // rather than pass for everything
+      if (seenCursors.has(next) || page === MAX_TOOL_PAGES) {
+        incomplete = true;
+        break;
+      }
       seenCursors.add(next);
       cursor = next;
     }
