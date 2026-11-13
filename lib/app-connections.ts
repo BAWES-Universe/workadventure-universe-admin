@@ -11,6 +11,7 @@ import { createMcpServerSchema } from '@/lib/mcp/server-input';
 import { isReconnectRequired, parseOAuthConfig, refreshBlockedReason } from '@/lib/mcp/oauth-token';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
 import { revokeAtApp } from '@/lib/mcp/revoke';
+import { holdRefreshLease } from '@/lib/mcp/oauth-refresh';
 
 /**
  * Apps a person connects once (game #2001, "Apps").
@@ -295,15 +296,25 @@ export async function removeGrant(ownerId: string, connectionId: string, botId: 
  * approval for them ends. Nothing in the person's account at the app is touched. False when it is not theirs.
  */
 export async function disconnect(ownerId: string, connectionId: string): Promise<boolean> {
-  const connection = await getOwnedConnection(connectionId, ownerId);
-  if (!connection) return false;
-  const bots = await prisma.$transaction(async (tx) => {
-    const rows = await tx.botMcpServer.findMany({ where: { connectionId }, select: { id: true, botId: true } });
-    await endApprovalsForServers(tx, rows.map((row) => row.id));
-    // The rows go with it (onDelete cascade); the connection is gone in the same statement as the rows are
-    await tx.appConnection.delete({ where: { id: connectionId } });
-    return [...new Set(rows.map((row) => row.botId))];
-  });
+  if (!(await getOwnedConnection(connectionId, ownerId))) return false;
+  // A renewal of the sign-in may be in flight: wait for it, then read the sign-in as it is now, so the app is asked to take back the
+  // newest token and not one the renewal has just replaced
+  const letGo = await holdRefreshLease(connectionId);
+  let connection: AppConnection | null;
+  let bots: string[];
+  try {
+    connection = await getOwnedConnection(connectionId, ownerId);
+    if (!connection) return false;
+    bots = await prisma.$transaction(async (tx) => {
+      const rows = await tx.botMcpServer.findMany({ where: { connectionId }, select: { id: true, botId: true } });
+      await endApprovalsForServers(tx, rows.map((row) => row.id));
+      // The rows go with it (onDelete cascade); the connection is gone in the same statement as the rows are
+      await tx.appConnection.delete({ where: { id: connectionId } });
+      return [...new Set(rows.map((row) => row.botId))];
+    });
+  } finally {
+    await letGo();
+  }
   // The sign-in cards that were about it go too; a failed report never undoes the disconnect
   for (const botId of bots) await syncToolSignInNotices(botId);
   // Best effort, after everything above: the app takes the sign-in back when it said where (never throws)
