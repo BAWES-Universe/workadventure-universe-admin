@@ -150,7 +150,7 @@ export function profileProblem(profile: VoiceProfile, providers: Map<string, Voi
 }
 
 /** Where a bot lives and who made it: what decides whose keys it may speak on. */
-interface Home {
+export interface Home {
   /** Whose keys it may speak on: its maker for a room bot, its owner for a Brick. */
   createdById: string | null;
   /** The universe its room is in. Null for a Brick (game #1992): it stands in none, so no universe lends it a key or allows it a voice. */
@@ -166,7 +166,7 @@ export const NO_UNIVERSE = '00000000-0000-0000-0000-000000000000';
  * switch to ask (game Slice 13). The routes have already checked the person is its owner (lib/mcp-tool-api.ts); a Brick that
  * waits deleted is not there.
  */
-async function homeOf(botId: string): Promise<Home> {
+export async function homeOf(botId: string): Promise<Home> {
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { createdById: true, ownerId: true, roomId: true, deletedAt: true, room: { select: { world: { select: { universeId: true } } } } } });
   if (!bot) throw new BotSettingsError(404, 'Bot not found');
   if (isBrick(bot)) {
@@ -199,7 +199,7 @@ export async function ownServerLentToBot(provider: Pick<VoiceProvider, 'id' | 'o
  * out, so the profile reads as naming a provider that doesn't exist. When a part names a server provider that is off, the server's
  * providers that are on come too, so it can borrow Universe AI's current default (borrowUniverseAi).
  */
-async function providersFor(profile: VoiceProfile, home: Home): Promise<{ providers: Map<string, VoiceProvider>; lent: Lends }> {
+export async function providersFor(profile: VoiceProfile, home: Home): Promise<{ providers: Map<string, VoiceProvider>; lent: Lends }> {
   const ids = [...new Set([profile.recognition.providerId, profile.speech.providerId])];
   const rows = await prisma.voiceProvider.findMany({
     where: { id: { in: ids } },
