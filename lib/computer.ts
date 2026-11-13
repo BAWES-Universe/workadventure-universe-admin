@@ -283,7 +283,7 @@ async function saveCopy(botId: string, ref: string, provider: Provider): Promise
 export type Started =
   | { ok: true; job: JobView; restoredFrom: Date | null }
   /** Not the owner's Brick, or not theirs to ask: only the owner starts computer work on their Brick. */
-  | { ok: false; reason: 'not_owner' | 'off' | 'not_open' | 'broken_start' }
+  | { ok: false; reason: 'not_owner' | 'off' | 'not_open' | 'broken_start' | 'no_run' }
   /** The meter's controls are not set up yet: a computer does not open before they do. */
   | { ok: false; reason: 'not_set' };
 
@@ -297,25 +297,75 @@ const queueReasonOf = (no: NoRoom): QueuedFor | null => (no.reason === 'allowanc
  * is writing it waits its turn, if the person's allowance or our room is used up it waits with its work saved (and the first
  * leads to "Ask for more"), and otherwise it runs and the machine is made or woken, here and nowhere else.
  */
-export async function startJob(input: { botId: string; personId: string; title: string; writes?: boolean }, now: Date = new Date()): Promise<Started> {
+export async function startJob(input: { botId: string; personId: string; title: string; writes?: boolean; runId?: string | null }, now: Date = new Date()): Promise<Started> {
   const bot = await brickOf(input.botId, input.personId);
   if (!bot) return { ok: false, reason: 'not_owner' };
   const row = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
   if (!row || !row.enabled) return { ok: false, reason: 'off' };
   if (!providerFor(row)) return { ok: false, reason: 'not_open' };
-  const created = await prisma.computerJob.create({
-    data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', writes: input.writes !== false },
-  });
+  // A run of a goal or task (game #2002) starts one job, ever: the same run again (it was handed out again) finds that job, whatever it
+  // came to, and takes no second room. The run must be this person's, on this Brick.
+  if (input.runId) {
+    if (!(await runIsTheirs(input.botId, input.personId, input.runId))) return { ok: false, reason: 'no_run' };
+    const again = await reuseRunJob(input.botId, input.runId, now);
+    if (again) return again;
+  }
+  let created;
+  try {
+    created = await prisma.computerJob.create({
+      data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', writes: input.writes !== false, runId: input.runId ?? null },
+    });
+  } catch (error) {
+    // Two asks for the same run at once: the first made the job, the second finds it
+    if (input.runId && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      const winner = await reuseRunJob(input.botId, input.runId, now);
+      if (winner) return winner;
+      // The first ask made the job and took it away again before this one could look (the only thing that takes a run's job away is
+      // "controls not set up"): the same answer, not an error
+      return { ok: false, reason: 'not_set' };
+    }
+    throw error;
+  }
   const outcome = await tryStart(created.id, now);
   if (outcome === 'not_set') {
-    // Controls that are not set up: no job was ever going to run, so none is left behind
-    await prisma.computerJob.delete({ where: { id: created.id } });
+    // Controls that are not set up: no job was ever going to run, so none is left behind (a second ask for the same run may have taken it away already)
+    await prisma.computerJob.deleteMany({ where: { id: created.id } });
     return { ok: false, reason: 'not_set' };
   }
-  const job = await prisma.computerJob.findUniqueOrThrow({ where: { id: created.id }, include: JOB_INCLUDE });
+  const job = await prisma.computerJob.findUnique({ where: { id: created.id }, include: JOB_INCLUDE });
+  // A second ask for the same run found this job while it waited for its first try, saw the controls not set up and took it away
+  if (!job) return { ok: false, reason: 'not_set' };
   if (job.status === 'failed') return { ok: false, reason: 'broken_start' };
   const after = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
   return { ok: true, job: jobView(job), restoredFrom: job.status === 'running' ? (after?.restoredFrom ?? null) : null };
+}
+
+/**
+ * The job a run already started, or null when it has none. Never a job that is still waiting for its first try or is being taken away:
+ * a job still queued is tried again here (a try is safe to repeat, and only one claims the machine), and one the first ask removed
+ * ("controls not set up") answers the same way for this ask. A job that is running, over or in line is returned as it stands.
+ */
+async function reuseRunJob(botId: string, runId: string, now: Date): Promise<Started | null> {
+  const where = { botId_runId: { botId, runId } };
+  let found = await prisma.computerJob.findUnique({ where, include: JOB_INCLUDE });
+  if (!found) return null;
+  if (found.status === 'queued') {
+    if ((await tryStart(found.id, now)) === 'not_set') {
+      await prisma.computerJob.deleteMany({ where: { id: found.id, status: 'queued' } });
+      return { ok: false, reason: 'not_set' };
+    }
+    found = await prisma.computerJob.findUnique({ where, include: JOB_INCLUDE });
+    // The first ask took it away while this one looked again: the controls are not set up
+    if (!found) return { ok: false, reason: 'not_set' };
+  }
+  if (found.status === 'failed') return { ok: false, reason: 'broken_start' };
+  return { ok: true, job: jobView(found), restoredFrom: null };
+}
+
+/** Whether the run is one of this person's goals or tasks on this Brick. */
+async function runIsTheirs(botId: string, personId: string, runId: string): Promise<boolean> {
+  const run = await prisma.brickItemRun.findUnique({ where: { id: runId }, select: { item: { select: { botId: true, ownerId: true } } } });
+  return !!run && run.item.botId === botId && run.item.ownerId === personId;
 }
 
 type Tried = 'running' | 'queued' | 'failed' | 'not_set' | 'gone';
@@ -578,7 +628,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     if (job.reservationKey) {
       if (held) {
         // What ran is written to the books first, and a write that fails is written again by the next sweep (same event id, so never twice)
-        const cost = await recordComputerTime({ id: job.id, botId: job.botId, personId: job.personId }, seconds, now, { endedBy, status });
+        const cost = await recordComputerTime({ id: job.id, botId: job.botId, personId: job.personId, runId: job.runId }, seconds, now, { endedBy, status });
         await settleRoom({ key: job.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now);
       } else {
         await releaseRoom({ key: job.reservationKey }, now);
@@ -598,7 +648,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
  * Writes what a job ran into the meter's books as one event under the job's id; asked twice it is the same event. Returns the cost
  * it worked out (null when the provider has no price). The write never throws: a failure is logged and the sweep writes it again.
  */
-async function recordComputerTime(job: { id: string; botId: string; personId: string }, seconds: number, at: Date, why: { endedBy: EndedBy | null; status: string }): Promise<number | null> {
+async function recordComputerTime(job: { id: string; botId: string; personId: string; runId?: string | null }, seconds: number, at: Date, why: { endedBy: EndedBy | null; status: string }): Promise<number | null> {
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
   const cost = costOfSeconds(seconds, provider ? provider.microsPerMinute() : null);
@@ -621,7 +671,8 @@ async function recordComputerTime(job: { id: string; botId: string; personId: st
     // Our own count of the seconds a machine was held at the provider's per-minute price: an estimate until the provider's bill settles it
     basis: cost === null ? 'unknown' : provider && provider.kind === 'real' ? 'measured' : 'estimated',
     sourceRef: `computer_jobs:${job.id}`,
-    detail: { endedBy: why.endedBy, status: why.status },
+    // The run of a goal or task that started the job, when one did, so its computer time is on the books with its model calls
+    detail: { endedBy: why.endedBy, status: why.status, ...(job.runId ? { runId: job.runId } : {}) },
   }).catch((error) => console.error('[Computer] Could not record computer time:', error instanceof Error ? error.message : 'unknown'));
   return cost;
 }
@@ -647,8 +698,8 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
   // A job that ended a moment ago may still be writing its own event: the sweep leaves it a minute. One Brick's, before its removal, does not wait.
   const cutoff = botId ? now : new Date(now.getTime() - 60 * 1000);
   const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
-  const ended = await prisma.$queryRaw<Array<{ id: string; botId: string; personId: string; secondsRun: number; status: string; endedBy: string | null; endedAt: Date | null }>>(Prisma.sql`
-    SELECT j."id", j."bot_id" AS "botId", j."person_id" AS "personId", j."seconds_run" AS "secondsRun", j."status", j."ended_by" AS "endedBy", j."ended_at" AS "endedAt"
+  const ended = await prisma.$queryRaw<Array<{ id: string; botId: string; personId: string; runId: string | null; secondsRun: number; status: string; endedBy: string | null; endedAt: Date | null }>>(Prisma.sql`
+    SELECT j."id", j."bot_id" AS "botId", j."person_id" AS "personId", j."run_id" AS "runId", j."seconds_run" AS "secondsRun", j."status", j."ended_by" AS "endedBy", j."ended_at" AS "endedAt"
     FROM "computer_jobs" j
     WHERE j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0 AND j."ended_at" <= ${cutoff} ${only}
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')

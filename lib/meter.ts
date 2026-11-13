@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
@@ -120,6 +121,20 @@ export interface ModelCallFacts {
   costMicros: number | null;
   tokens?: { input?: number | null; cached?: number | null; cacheWrite?: number | null; output?: number | null; reasoning?: number | null };
   occurredAt: Date;
+  /** The run the bot server named for the call, as it sent it: the event's id is made from it, so a retried report has the same id whatever a lookup said. */
+  runKey?: string | null;
+  /** That run, once checked to be this Brick's own: only this goes in the event's detail. Empty when it was not checked or could not be (a lookup that failed once). */
+  runId?: string | null;
+}
+
+/**
+ * The event id of a call a run made: the Brick, the run as the bot server sent it (with its length) and the call's own id, so two Bricks can never share one
+ * even when they send the same run and call ids. One that would not fit is made from a hash of all three, never cut short (a cut could join two).
+ */
+export function runCallEventId(botId: string, runKey: string, callId: string): string {
+  // The run key's length goes in front of it, so what comes after it can never be read as part of it (and two different pairs never make one id)
+  const whole = `run:${botId}:${runKey.length}:${runKey}:model:${callId}`;
+  return whole.length <= 255 ? whole : `run:${createHash('sha256').update(whole).digest('hex')}`;
 }
 
 /**
@@ -137,7 +152,12 @@ export async function recordModelCall(facts: ModelCallFacts, db: Db & Pick<typeo
     const route = facts.sentProviderId === UNIVERSE_AI_REF ? 'universe-ai' : paidByOther ? 'own-key' : 'provider';
     return await recordMeterEvent(
       {
-        eventId: facts.clientEventId ? `model:${facts.botId}:${facts.clientEventId}`.slice(0, 255) : `ai-usage:${facts.usageRowId}`,
+        // A call a run made is under the run's own id as the bot server sent it (never as a lookup answered it), so a retried report is still one event
+        eventId: facts.runKey
+          ? runCallEventId(facts.botId, facts.runKey, facts.clientEventId ?? `row-${facts.usageRowId}`)
+          : facts.clientEventId
+            ? `model:${facts.botId}:${facts.clientEventId}`.slice(0, 255)
+            : `ai-usage:${facts.usageRowId}`,
         kind: 'model_call',
         pool: 'chat',
         occurredAt: facts.occurredAt,
@@ -160,6 +180,7 @@ export async function recordModelCall(facts: ModelCallFacts, db: Db & Pick<typeo
           channel: facts.channel,
           error: facts.error,
           greeting: facts.greeting,
+          ...(facts.runId ? { runId: facts.runId } : {}),
           // Attributed to a Brick's owner because nobody talked to it: today's reply counts have no person for these, so shadow checks leave them out
           byOwner: !facts.talkedPersonId && personId !== null,
           tokensUsed: facts.tokensUsed,
