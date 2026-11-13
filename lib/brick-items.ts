@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { getBrickLimits, getUniverseAiReplyLimits } from '@/lib/bot-limits';
+import { endTaskCards } from '@/lib/bot-actions';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
 import { runningExtra } from '@/lib/meter-grants';
 import { windowStart } from '@/lib/reply-limits';
@@ -332,6 +333,8 @@ async function moveChecks(tx: Tx, goalId: string, from: ItemState[], data: Prism
     // A one-off check whose moment passed while its goal was paused is due now, once, like a one-off that is resumed on its own
     const due = recompute && cadence ? (firstDue(cadence, check.timeZone, now) ?? (cadence.type === 'once' ? now : null)) : null;
     await tx.brickItem.update({ where: { id: check.id }, data: { ...data, ...NOT_HELD, nextDueAt: due, revision: { increment: 1 } } });
+    // A check that is over has no card that can still be said yes to
+    if (data.state === 'done' || data.state === 'deleted') await endTaskCards(tx, check.botId, check.id, now);
   }
 }
 
@@ -413,6 +416,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
       case 'done': {
         if (row.state === 'done') return { ok: true as const, item: viewOf(row) };
         await moveChecks(tx, row.id, ['on', 'paused'], { state: 'done', pausedBy: null, doneAt: now }, now, false);
+        await endTaskCards(tx, row.botId, row.id, now);
         return finish({ state: 'done', pausedBy: null, nextDueAt: null, doneAt: now, result: input.result ?? row.result, ...NOT_ASKING, ...bump });
       }
       case 'reopen': {
@@ -426,6 +430,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
       }
       case 'delete': {
         await moveChecks(tx, row.id, ['on', 'paused', 'done'], { state: 'deleted', pausedBy: null }, now, false);
+        await endTaskCards(tx, row.botId, row.id, now);
         return finish({ state: 'deleted', pausedBy: null, nextDueAt: null, ...NOT_ASKING, ...bump });
       }
       case 'snooze': {
@@ -991,6 +996,7 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
     if (oneOffSent || watchSpoke || goalReached) {
       Object.assign(data, { state: 'done', nextDueAt: null, doneAt: now, result: report.result ?? item.result, ...NOT_HELD, ...(goalReached ? NOT_ASKING : {}), revision: { increment: 1 } });
       if (goalReached) await moveChecks(tx, item.id, ['on', 'paused'], { state: 'done', pausedBy: null, doneAt: now }, now, false);
+      await endTaskCards(tx, item.botId, item.id, now);
     }
     const updated = await tx.brickItem.update({ where: { id: item.id }, data });
     // A reminder or a briefing tells the person on the first failure; a watch or a goal after a number of failures in a row that a

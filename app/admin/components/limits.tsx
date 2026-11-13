@@ -699,6 +699,20 @@ export function brickLimits(values: BrickLimits): Limit[] {
       ],
     },
     {
+      id: 'scheduledCardWait',
+      label: 'How long a card from a goal or task waits for a person',
+      hint: 'When a goal or task needs a yes before it goes on, its card waits this long. If it is the same thing again on a later check, that check joins the waiting card: no second card, no second message. When the time is up the card ends.',
+      unit: 'minutes',
+      value: values.scheduledCardWait,
+      recommended: recommended.scheduledCardWait,
+      note: 'Applies to cards from now on. A card already waiting keeps the time it had. A card in chat has its own wait.',
+      options: [
+        { value: 240, label: '4 hours', meaning: 'Gone by the end of the day.' },
+        { value: 1440, label: '1 day', meaning: 'Time to come back to it.' },
+        { value: 4320, label: '3 days', meaning: 'For people who step away.' },
+      ],
+    },
+    {
       id: 'snooze',
       label: 'How long Snooze moves a reminder',
       hint: 'Tap Snooze on a reminder or briefing and it comes back this much later.',
