@@ -20,6 +20,7 @@ import { encryptApiKey } from '@/lib/encryption';
 import { managerCandidates } from '@/lib/app-sharing';
 import { maxAppsPerBot, saveServerLimits } from '@/lib/bot-limits';
 import { createConnection, grantToBrick, markConnectionReconnected, checkAppUse } from '@/lib/app-connections';
+import { recordUse } from '@/lib/app-uses';
 import { GET as getApp } from '@/app/api/me/apps/[connectionId]/route';
 import { POST as lend } from '@/app/api/me/apps/[connectionId]/lends/route';
 import { PATCH as changeLendRoute, DELETE as takeBackRoute } from '@/app/api/me/apps/[connectionId]/lends/[universeId]/route';
@@ -362,6 +363,24 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       }
     });
 
+    it('answers the same app asked for twice at the very same moment, at the limit, with the one grant and no refusal', async () => {
+      const app = await keyApp(sara, { name: 'Only' });
+      as(sara);
+      expect((await lendTo(app.id, { universeId: universeA })).status).toBe(201);
+      const roomId = (await prisma.bot.findUniqueOrThrow({ where: { id: guide }, select: { roomId: true } })).roomId;
+      const busy = await prisma.bot.create({ data: { roomId, name: 'Busy two', createdById: sara, behaviorConfig: {} } });
+      try {
+        await saveServerLimits({ bricks: { appsPerBot: 1 } }, sara);
+        const answers = await Promise.all([letGuide(sara, app.id, busy.id), letGuide(sara, app.id, busy.id)]);
+        expect(answers.map((answer) => answer.status)).toEqual([201, 201]);
+        expect(await prisma.botMcpServer.count({ where: { botId: busy.id } })).toBe(1);
+      } finally {
+        await saveServerLimits({ bricks: { appsPerBot: 5 } }, sara);
+        await prisma.botMcpServer.deleteMany({ where: { botId: busy.id } });
+        await prisma.bot.delete({ where: { id: busy.id } });
+      }
+    });
+
     it('lets two apps arrive at the very same moment without passing the limit', async () => {
       const first = await keyApp(sara, { name: 'One' });
       const second = await keyApp(sara, { name: 'Two' });
@@ -379,6 +398,34 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
         await prisma.botMcpServer.deleteMany({ where: { botId: busy.id } });
         await prisma.bot.delete({ where: { id: busy.id } });
       }
+    });
+
+    it('finds the app taken back when a check was waiting for it, and records and lets through nothing', async () => {
+      const { app, serverId } = await lentAndLet({ usesPerDay: 5 });
+      const universeId = universeA;
+      let waiting: Promise<string> | null = null;
+      await prisma.$transaction(async (tx) => {
+        // What taking it back holds first: the lend, for update. A check that starts now has to wait for it.
+        await tx.$queryRaw`SELECT "id" FROM "app_lends" WHERE "connection_id" = ${app.id} AND "universe_id" = ${universeId} FOR UPDATE`;
+        waiting = recordUse({ connectionId: app.id, universeId, botId: guide, callId: 'late', limit: 5, serverId, lend: true });
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await tx.botMcpServer.delete({ where: { id: serverId } });
+        await tx.appLend.deleteMany({ where: { connectionId: app.id, universeId } });
+      });
+      expect(await waiting).toBe('gone');
+      expect(await prisma.appUse.count({ where: { botId: guide } })).toBe(0);
+      // And a check made afterwards finds nothing to use at all
+      expect((await check(guide, serverId, { callId: 'after', heading: 'lookUp' })).body).toMatchObject({ allowed: false, reason: 'gone' });
+    });
+
+    it('counts a use on the day it is written, whichever moment the transaction began', async () => {
+      const { app, serverId } = await lentAndLet({ usesPerDay: 1 });
+      const before = new Date();
+      expect(await recordUse({ connectionId: app.id, universeId: universeA, botId: guide, callId: 'one', limit: 1, serverId, lend: true })).toBe('recorded');
+      const row = await prisma.appUse.findFirstOrThrow({ where: { botId: guide, callId: 'one' } });
+      // Written with the moment the count was taken, not the database's own clock for the transaction
+      expect(row.usedAt.getTime()).toBeGreaterThanOrEqual(before.getTime() - 5);
+      expect(await recordUse({ connectionId: app.id, universeId: universeA, botId: guide, callId: 'two', limit: 1, serverId, lend: true })).toBe('limit_reached');
     });
 
     it('counts the same call id of two different bots as two uses, so one bot cannot hide behind another’s id', async () => {

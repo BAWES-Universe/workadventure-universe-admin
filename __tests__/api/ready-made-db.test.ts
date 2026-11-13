@@ -519,6 +519,18 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(await (await test(serverId)).json()).toMatchObject({ success: true, toolCount: 1, toolNames: ['GMAIL_FETCH_EMAILS'] });
     });
 
+    it('reads every page of a long list of tools', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      adapter.callLink
+        .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":1,"result":{}}'))
+        .mockResolvedValueOnce(answerOf(202, ''))
+        .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"A"}],"nextCursor":"page-2"}}'))
+        .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"B"},{"name":"A"}]}}'));
+      expect(await (await test(serverId)).json()).toMatchObject({ success: true, toolCount: 2, toolNames: ['A', 'B'] });
+      const listed = adapter.callLink.mock.calls.map((call: unknown[]) => (call[0] as { message: { method: string; params?: { cursor?: string } } }).message).filter((message: { method: string }) => message.method === 'tools/list');
+      expect(listed.map((message: { params?: { cursor?: string } }) => message.params?.cursor)).toEqual([undefined, 'page-2']);
+    });
+
     it('reports a refusal by the link as a failed test with its status, and an unfinished sign-in as one to reconnect', async () => {
       const { adapter, serverId } = await connectedAndGranted();
       adapter.callLink.mockResolvedValueOnce(answerOf(401, 'nope'));

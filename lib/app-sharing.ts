@@ -5,7 +5,7 @@ import { endApprovalsForServers } from '@/lib/bot-actions';
 import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { lendAccess, lendAccessMany, lendableUniverses, type LendableUniverse } from '@/lib/ai-key-lend';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
-import { claimAppSlot } from '@/lib/bot-limits';
+import { claimAppSlot, lockBotForApps } from '@/lib/bot-limits';
 import { addConnectionSchema, AppConnectionError, HEADINGS, NOT_FOUND, connectedState, type Heading } from '@/lib/app-connections';
 import { encryptApiKey } from '@/lib/encryption';
 import { botUniverseId, startOfDay, startOfMonth } from '@/lib/app-uses';
@@ -381,6 +381,9 @@ export async function grantSharedToBot(userId: string, connectionId: string, bot
         const lend = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_lends" WHERE "connection_id" = ${connectionId} AND "universe_id" = ${universeId} FOR SHARE`;
         if (lend.length === 0) return null;
       }
+      // The bot's row is held before anything is read about its apps, as when adding one by hand: two requests for the same app at
+      // the cap then run one after the other, and the second finds the grant the first made
+      await lockBotForApps(tx, botId);
       // Asked twice is the same grant, so it is never turned away for the cap
       const already = await tx.botMcpServer.findFirst({ where: { botId, connectionId } });
       if (already) return already;

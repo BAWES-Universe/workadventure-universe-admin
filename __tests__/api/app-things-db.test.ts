@@ -108,7 +108,8 @@ run('what an app can do, in a real database', () => {
     }) as unknown as typeof fetch;
     mockUser.current = { id: sara };
     expect(await (await ask(own.id)).json()).toEqual({ things: ['Find Events', 'Create Event'] });
-    expect(sent).toEqual(['initialize', 'tools/list']);
+    // The session is told it is open before anything is listed
+    expect(sent).toEqual(['initialize', 'notifications/initialized', 'tools/list']);
 
     global.fetch = jest.fn(async () => { throw new Error('down'); }) as unknown as typeof fetch;
     expect(await (await ask(own.id)).json()).toEqual({ things: [] });
