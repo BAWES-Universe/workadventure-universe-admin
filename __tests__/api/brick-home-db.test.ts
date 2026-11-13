@@ -289,6 +289,21 @@ run('a Brick that lives in a room, in a real database', () => {
       expect(await (await homeFeed(call('POST', '/api/brick-homes/room', { roomUrl: own.otherRoomUrl }, service))).json()).toEqual([]);
     });
 
+    it('never lets a room manager’s edit reach what is the owner’s to set: only the spot and how it moves pass', async () => {
+      await prisma.bot.update({ where: { id: brickId }, data: { behaviorConfig: { showToolCalls: true, vision: { mode: 'own' } } } });
+      await put(brickId, hosted.roomUrl, { behaviorConfig: { ...SPOT, vision: { mode: 'x' }, showToolCalls: false } });
+      as(host);
+      const pushed = { ...SPOT, speed: 40, vision: { mode: 'steal', keyId: 'k' }, showToolCalls: false, chatInstructions: 'x' };
+      expect((await moveHome(call('PATCH', `/api/brick-homes/${brickId}`, { behaviorConfig: pushed }), ids(brickId))).status).toBe(200);
+      expect((await home(brickId))?.behaviorConfig).toEqual({ ...SPOT, speed: 40 });
+      // A row stored before this rule is cleaned on the way out too
+      await prisma.brickHome.update({ where: { botId: brickId }, data: { behaviorConfig: pushed } });
+      const feed = await (await homeFeed(call('POST', '/api/brick-homes/room', { roomUrl: hosted.roomUrl }, service))).json();
+      expect(feed[0].behaviorConfig).toMatchObject({ speed: 40, showToolCalls: true, vision: { mode: 'own' } });
+      expect(feed[0].behaviorConfig.chatInstructions).toBeUndefined();
+      await prisma.bot.update({ where: { id: brickId }, data: { behaviorConfig: {} } });
+    });
+
     it('needs the bot server’s token', async () => {
       expect((await homeFeed(call('POST', '/api/brick-homes/room', { roomUrl: own.roomUrl }))).status).toBe(401);
       expect((await homeFeed(call('POST', '/api/brick-homes/room', {}, service))).status).toBe(400);

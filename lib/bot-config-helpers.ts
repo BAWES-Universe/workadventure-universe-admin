@@ -267,6 +267,25 @@ export function transformVisitingBrickToServerFormat(
 }
 
 /**
+ * What a home may say about where its Brick stands and how it moves there: the same keys the room bot editor writes for
+ * the spot, roaming, route and walking up to people. Nothing else passes, so a room manager who moves a Brick cannot
+ * reach what is its owner's to set (Vision, Show tool calls, anything the bot server reads for the Brick itself).
+ */
+const HOME_BEHAVIOR_KEYS = [
+  'assignedSpace', 'moves', 'goesToPeople', 'facing', 'patrolWaypoints', 'waypoints', 'loop', 'pauseAtWaypoints', 'speed',
+  'respondToPlayers', 'conversationRadius', 'minTimeBetweenConversations', 'maxConversationDuration',
+  'conversationHistorySize', 'respectPlayerStatus', 'maxConcurrentConversations', 'wanderSpeed', 'approachDistance',
+] as const;
+
+export function homeBehaviorConfig(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const source = raw as Record<string, unknown>;
+  const kept: Record<string, unknown> = {};
+  for (const key of HOME_BEHAVIOR_KEYS) if (key in source) kept[key] = source[key];
+  return kept;
+}
+
+/**
  * A Brick that lives in a room (game #2005): the Brick's own fields, with the room it stands in and how it behaves
  * there (the home's spot, radius, roaming and routes, written by the same editor as any room bot's), and `brick.home`
  * saying whose it is. Its voice stays off, as for every Brick.
@@ -280,7 +299,7 @@ export function transformHomedBrickToServerFormat(
   const base = transformBrickToServerFormat(bot, isDefault);
   const url = new URL(home.roomUrl);
   const parts = url.pathname.split('/').filter(Boolean);
-  const stored: Record<string, unknown> = home.behaviorConfig && typeof home.behaviorConfig === 'object' && !Array.isArray(home.behaviorConfig) ? (home.behaviorConfig as Record<string, unknown>) : {};
+  const stored = homeBehaviorConfig(home.behaviorConfig);
   const assignedSpace = (stored.assignedSpace as { center: { x: number; y: number }; radius: number } | undefined) ?? { center: { x: 0, y: 0 }, radius: 0 };
   const behaviorType = home.behaviorType === 'patrol' || home.behaviorType === 'social' ? home.behaviorType : 'idle';
   return {

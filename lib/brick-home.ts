@@ -4,7 +4,7 @@ import { checkKeyForOthers } from '@/lib/ai-key-pay';
 import { ownsBrick } from '@/lib/brick';
 import { listBricks, type BrickCard } from '@/lib/brick-default';
 import { placeOfRoomId, placeOfRoomUrl } from '@/lib/brick-visit';
-import { resolvePlayUriFromRoomId } from '@/lib/bot-config-helpers';
+import { homeBehaviorConfig, resolvePlayUriFromRoomId } from '@/lib/bot-config-helpers';
 
 /**
  * A Brick that lives in a room (game #2005, "Add one of your Bricks").
@@ -60,7 +60,7 @@ export async function placeBrick(input: { brickId: string; ownerId: string; room
   const place = await placeOfRoomUrl(input.roomUrl);
   if (!place) return { ok: false, reason: 'no_room' };
   if (!(await canManageBots(input.ownerId, place.roomId))) return { ok: false, reason: 'no_access' };
-  const data = { roomId: place.roomId, placedById: input.ownerId, behaviorType: input.behaviorType ?? 'idle', behaviorConfig: (input.behaviorConfig ?? {}) as object };
+  const data = { roomId: place.roomId, placedById: input.ownerId, behaviorType: input.behaviorType ?? 'idle', behaviorConfig: homeBehaviorConfig(input.behaviorConfig) as object };
   await prisma.brickHome.upsert({ where: { botId: brick.id }, create: { botId: brick.id, ...data }, update: data });
   const key = await checkKeyForOthers(brick.id, place.universeId);
   const card = await homeCardOf(place.roomId);
@@ -107,7 +107,7 @@ export async function moveBrick(brickId: string, actorId: string, behavior: Home
   if (!home || !(await canManageBots(actorId, home.roomId))) return false;
   await prisma.brickHome.update({
     where: { botId: brickId },
-    data: { ...(behavior.behaviorType ? { behaviorType: behavior.behaviorType } : {}), ...(behavior.behaviorConfig ? { behaviorConfig: behavior.behaviorConfig as object } : {}) },
+    data: { ...(behavior.behaviorType ? { behaviorType: behavior.behaviorType } : {}), ...(behavior.behaviorConfig ? { behaviorConfig: homeBehaviorConfig(behavior.behaviorConfig) as object } : {}) },
   });
   return true;
 }
@@ -158,7 +158,7 @@ export async function bricksOfRoom(roomUrl: string, viewerId: string): Promise<R
     mine: home.bot.ownerId === viewerId,
     canTakeOut: true,
     behaviorType: home.behaviorType,
-    behaviorConfig: home.behaviorConfig,
+    behaviorConfig: homeBehaviorConfig(home.behaviorConfig),
     since: home.createdAt.toISOString(),
   }));
   const homesOf = new Map((await prisma.brickHome.findMany({ where: { placedById: viewerId }, select: { botId: true, roomId: true } })).map((home) => [home.botId, home.roomId]));
