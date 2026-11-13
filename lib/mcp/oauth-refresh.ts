@@ -269,6 +269,30 @@ export async function ensureFreshOAuthConfig(params: {
 }
 
 /**
+ * Holds a connection's refresh lease for something that must not run while a renewal is in flight (taking its sign-in back at the
+ * app: a provider that rotates the refresh token would otherwise be handed the one a renewal just replaced). Waits for the renewal
+ * that has it, up to the lease length; if it is still not free by then it carries on without, since it is best effort. The returned
+ * function lets go (a row that is already gone is not an error).
+ */
+export async function holdRefreshLease(connectionId: string): Promise<() => Promise<void>> {
+  const claim = () =>
+    prisma.appConnection.updateMany({
+      where: { id: connectionId, OR: [{ refreshLeaseUntil: null }, { refreshLeaseUntil: { lt: new Date() } }] },
+      data: { refreshLeaseUntil: new Date(Date.now() + LEASE_MS) },
+    });
+  const deadline = Date.now() + LEASE_MS;
+  for (;;) {
+    if ((await claim()).count === 1) {
+      return async () => {
+        await prisma.appConnection.updateMany({ where: { id: connectionId }, data: { refreshLeaseUntil: null } }).catch(() => undefined);
+      };
+    }
+    if (Date.now() > deadline) return async () => undefined;
+    await new Promise((resolve) => setTimeout(resolve, WAIT_STEP_MS));
+  }
+}
+
+/**
  * A connection's refresh, one at a time across every server that runs Orbit (#2001): the request that wins the lease renews the
  * token; the others wait for it and use what it stored. Two Bricks (or two requests) never present the same refresh token, so a
  * provider that rotates it never signs the person out. The lease ends by itself after `LEASE_MS`, so a crash never blocks a

@@ -320,4 +320,31 @@ run('the list of apps to connect, in a real database', () => {
       }
     });
   });
+
+  it('waits for a renewal of the sign-in that is in flight, and asks the app to take back the newest token', async () => {
+    await add(entry('gmail', { authConfig: JSON.stringify({ clientId: 'platform-client', authorizeUrl: 'https://accounts.example.com/auth', tokenUrl: 'https://accounts.example.com/token', revocationUrl: 'https://accounts.example.com/revoke' }) }));
+    mockUser.current = { id: sara };
+    const { id } = await (await connectApp(request('/api/me/apps', { method: 'POST', body: { catalogKey: key('gmail') } }))).json();
+    const stored = JSON.parse(decryptApiKey((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).authConfig!));
+    const { encryptApiKey } = await import('@/lib/encryption');
+    const signedIn = (token: string) => encryptApiKey(JSON.stringify({ ...stored, accessToken: `access-${token}`, refreshToken: `refresh-${token}` }));
+    // A renewal holds the lease; the provider rotates the refresh token, so the old one is already dead when it finishes
+    await prisma.appConnection.update({ where: { id }, data: { authConfig: signedIn('old'), refreshLeaseUntil: new Date(Date.now() + 5_000) } });
+    const bodies: string[] = [];
+    const before = global.fetch;
+    global.fetch = jest.fn(async (_address: string | URL | Request, init?: RequestInit) => { bodies.push(String(init?.body)); return new Response('', { status: 200 }); }) as unknown as typeof fetch;
+    try {
+      const gone = disconnect(sara, id);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(bodies).toEqual([]);
+      expect(await prisma.appConnection.count({ where: { id } })).toBe(1);
+      await prisma.appConnection.update({ where: { id }, data: { authConfig: signedIn('new'), refreshLeaseUntil: null } });
+      expect(await gone).toBe(true);
+    } finally {
+      global.fetch = before;
+    }
+    expect(bodies).toHaveLength(1);
+    expect(new URLSearchParams(bodies[0]).get('token')).toBe('refresh-new');
+    expect(await prisma.appConnection.count({ where: { id } })).toBe(0);
+  });
 });
