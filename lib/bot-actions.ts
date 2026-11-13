@@ -3,6 +3,8 @@ import { z } from 'zod';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
+import { getBrickLimits } from '@/lib/bot-limits';
+import { findUserByIdentifier } from '@/lib/user-identifier';
 
 /**
  * A saved record for each bot action that waits for a tap (#739).
@@ -214,6 +216,13 @@ export const createRequestSchema = z
 export type CreateRequestInput = z.infer<typeof createRequestSchema>;
 
 /**
+ * A card that a goal or task puts up has its own conversation, `task:{itemId}`, never the chat's: so a person's next message in chat
+ * (which replaces the cards of that chat) never touches it, and its wait is the super admin's "Scheduled card wait" in Limits.
+ */
+const TASK_KEY = /^task:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+export const taskConversationKey = (itemId: string) => `task:${itemId}`;
+
+/**
  * Save a request that waits for a tap. The same `proposalKey` again returns the request already saved (a bot server that
  * restarted between saving and showing the card must not make a second one); the same key with different content (the
  * arguments, requester, conversation, heading, tool fingerprint, policy revision or what may be remembered) is refused. Remembering is never offered for deleting or sending.
@@ -252,6 +261,39 @@ export async function createRequest(
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { id: true } });
   if (!bot) throw new BotActionError(404, 'bot_not_found', 'Bot not found');
 
+  let waitMinutes = input.reviewMinutes ?? DEFAULTS.reviewMinutes;
+  if (input.conversationKey.startsWith('task:')) {
+    const itemId = TASK_KEY.exec(input.conversationKey)?.[1];
+    if (!itemId) throw new BotActionError(400, 'task_key_invalid', 'A task card names its goal or task');
+    // Only the person it belongs to is asked, and only for a goal or task of this Brick that is still going
+    const item = await prisma.brickItem.findFirst({ where: { id: itemId, botId }, select: { ownerId: true, state: true } });
+    if (!item || item.state === 'deleted' || item.state === 'done') throw new BotActionError(404, 'task_not_found', 'No such goal or task of this Brick is going');
+    const asker = await findUserByIdentifier(input.requesterKey);
+    if (!asker || asker.isGuest || asker.id !== item.ownerId) throw new BotActionError(403, 'not_owner', 'Only the person the goal or task belongs to is asked');
+    // The same thing asked again on a later check joins the card that is waiting: no second card and no second message
+    const waiting = await prisma.botActionRequest.findMany({
+      where: {
+        botId,
+        conversationKey: input.conversationKey,
+        requesterKey: input.requesterKey,
+        argumentsDigest: digest,
+        heading: input.heading,
+        toolFingerprint: input.toolFingerprint,
+        policyRevision: input.policyRevision,
+        connectionRef,
+        status: 'waiting',
+        reviewExpiresAt: { gt: now },
+      },
+      include: { attempts: true },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+    });
+    const joined = waiting.find((row) => canonicalJson(row.rememberScope ?? null) === canonicalJson(input.rememberScope ?? null));
+    if (joined) return { action: toView(joined), created: false };
+    // Its own wait, set by a super admin: whatever the bot server says about a chat card's wait does not apply here
+    waitMinutes = (await getBrickLimits()).scheduledCardWait;
+  }
+
   try {
     const row = await prisma.botActionRequest.create({
       data: {
@@ -267,7 +309,7 @@ export async function createRequest(
         arguments: encryptApiKey(encoded),
         argumentsDigest: digest,
         rememberScope: (input.rememberScope as Prisma.InputJsonValue | null | undefined) ?? undefined,
-        reviewExpiresAt: new Date(now.getTime() + minutes(input.reviewMinutes ?? DEFAULTS.reviewMinutes)),
+        reviewExpiresAt: new Date(now.getTime() + minutes(waitMinutes)),
       },
       include: { attempts: true },
     });
@@ -462,12 +504,27 @@ export async function extendReview(
     const used = (await tx.botActionDecision.findMany({ where: { requestId: row.id, event: 'extend' } })).length;
     if (used >= MAX_EXTENSIONS) throw new BotActionError(409, 'no_more_time', 'This card cannot wait any longer');
 
-    const wait = new Date(now.getTime() + minutes(input.reviewMinutes ?? DEFAULTS.reviewMinutes));
+    // A card from a goal or task has the one wait a super admin set, here too
+    const more = TASK_KEY.test(row.conversationKey) ? (await getBrickLimits()).scheduledCardWait : (input.reviewMinutes ?? DEFAULTS.reviewMinutes);
+    const wait = new Date(now.getTime() + minutes(more));
     const until = wait > row.reviewExpiresAt ? wait : row.reviewExpiresAt;
     const won = await move(tx, row, ['waiting'], { reviewExpiresAt: until }, 'extend', input.actorKey, { reviewExpiresAt: { gt: now } });
     if (!won) return lost();
     return { outcome: 'changed' as const, action: toView(await load(tx, botId, id)) };
   });
+}
+
+/**
+ * The goal or task ended (done, or deleted): its cards that wait for a tap, or were approved and not yet started, end with it, so
+ * nobody can say yes to a step for something that is over. Safe to call twice. Pass the transaction the item changed in.
+ */
+export async function endTaskCards(db: Db, botId: string, itemId: string, now: Date = new Date()): Promise<number> {
+  const rows = await db.botActionRequest.findMany({ where: { botId, conversationKey: taskConversationKey(itemId), status: { in: ['waiting', 'approved'] } } });
+  let ended = 0;
+  for (const row of rows) {
+    if (await move(db, row, ['waiting', 'approved'], { status: 'closed', closedReason: 'cancelled', finishedAt: now }, 'cancel', null)) ended += 1;
+  }
+  return ended;
 }
 
 /* --------------------------------- running ---------------------------------- */
