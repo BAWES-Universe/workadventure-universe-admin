@@ -109,6 +109,62 @@ describe('the real adapter speaks the provider as its docs say, against a preten
     expect((await adapter.appLink({ person: 'p', toolkits: ['gmail'] })).headers).toEqual({ 'x-thing': 'v' });
   });
 
+  describe('the app link', () => {
+    const linkAnswer = (status: number, body: string, headers: Record<string, string> = {}) =>
+      ({ ok: status < 400, status, headers: { get: (name: string) => headers[name.toLowerCase()] ?? null }, text: async () => body }) as unknown as Response;
+    const makeLink = (replies: Response[], extra: Partial<Parameters<typeof createComposioAdapter>[0]> = {}) =>
+      createComposioAdapter({
+        apiKey: 'secret-key',
+        authConfigFor: async () => null,
+        sleep: async (ms) => void waits.push(ms),
+        fetchImpl: (async (url: string, init: RequestInit) => {
+          calls.push({ url, init });
+          return replies.shift() as Response;
+        }) as unknown as typeof fetch,
+        ...extra,
+      });
+    const waits: number[] = [];
+    beforeEach(() => (waits.length = 0));
+
+    it('sends the provider key and the link’s session on every message, and gives back the answer and the new session', async () => {
+      const adapter = makeLink([linkAnswer(200, '{"result":{}}', { 'content-type': 'application/json', 'mcp-session-id': 's2' })]);
+      const out = await adapter.callLink({ url: 'https://app.composio.dev/tool_router/v3/trs_1/mcp', message: { jsonrpc: '2.0', id: 1, method: 'tools/list' }, sessionId: 's1' });
+      expect(out).toEqual({ status: 200, contentType: 'application/json', sessionId: 's2', body: '{"result":{}}' });
+      const headers = calls[0].init.headers as Record<string, string>;
+      expect(headers['x-api-key']).toBe('secret-key');
+      expect(headers['mcp-session-id']).toBe('s1');
+      expect(headers.accept).toContain('text/event-stream');
+      expect(sent()).toEqual({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    });
+
+    it('never sends the key to a host that is not the provider’s, or over plain http', async () => {
+      const adapter = makeLink([]);
+      for (const url of ['https://evil.example.com/mcp', 'https://composio.dev.evil.example.com/mcp', 'http://app.composio.dev/mcp', 'not a link']) {
+        await expect(adapter.callLink({ url, message: { method: 'tools/list' }, sessionId: null })).rejects.toThrow();
+      }
+      expect(calls).toHaveLength(0);
+    });
+
+    it('asks again after the wait the provider names when it says too many, and gives up after a few', async () => {
+      const ok = linkAnswer(200, '{}');
+      const slow = (seconds: string) => linkAnswer(429, '', { 'retry-after': seconds });
+      const adapter = makeLink([slow('2'), slow('30'), ok]);
+      expect((await adapter.callLink({ url: 'https://app.composio.dev/x/mcp', message: { method: 'tools/list' }, sessionId: null })).status).toBe(200);
+      expect(waits).toEqual([2000, 5000]);
+      const stubborn = makeLink([slow('1'), slow('1'), slow('1'), slow('1')]);
+      expect((await stubborn.callLink({ url: 'https://app.composio.dev/x/mcp', message: { method: 'tools/list' }, sessionId: null })).status).toBe(429);
+    });
+
+    it('does the same for its own calls', async () => {
+      const adapter = makeLink([
+        { ok: false, status: 429, headers: { get: () => null }, json: async () => ({}) } as unknown as Response,
+        answer({ status: 'ACTIVE' }),
+      ]);
+      expect(await adapter.connectionStatus({ providerAccountId: 'ca_1' })).toBe('active');
+      expect(waits).toEqual([1000]);
+    });
+  });
+
   it('runs one tool for one person and reports the provider’s answer', async () => {
     const adapter = make([answer({ successful: true, data: { events: [] }, error: null, log_id: 'log_9' })]);
     const result = await adapter.use({ person: 'p', toolkit: 'gmail', tool: 'GMAIL_FETCH_EMAILS', arguments: { n: 1 }, providerAccountId: 'ca_1', callId: 'c1' });
