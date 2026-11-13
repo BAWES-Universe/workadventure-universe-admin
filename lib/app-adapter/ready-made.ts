@@ -193,6 +193,10 @@ export interface ReadyMadeTestResult {
   toolNames: string[];
   error?: string;
   status?: number | null;
+  statusText?: string | null;
+  errorCode?: string | null;
+  wwwAuthenticate?: string | null;
+  errorBody?: string | null;
 }
 
 /** The JSON of a link's answer, which may be plain JSON or an event stream holding it. */
