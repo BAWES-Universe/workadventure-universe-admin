@@ -38,6 +38,11 @@ export type UseOutcome = 'recorded' | 'again' | 'limit_reached' | 'gone';
 export async function recordUse(input: { connectionId: string; universeId: string; botId: string; callId: string; limit: number | null; serverId?: string; lend?: boolean }): Promise<UseOutcome> {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-use:${input.connectionId}:${input.universeId}`}))`;
+    // The app's own row first, the same first lock as taking an app back or letting a bot use it: disconnecting deletes this row
+    // before the rows that hang on it, so it waits here (holding nothing a check needs) or finds the app gone, and never waits
+    // on a lend or a grant that a check holds while the check waits on the other
+    const held = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_connections" WHERE "id" = ${input.connectionId} FOR SHARE`;
+    if (held.length === 0) return 'gone';
     if (input.lend) {
       const lend = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_lends" WHERE "connection_id" = ${input.connectionId} AND "universe_id" = ${input.universeId} FOR SHARE`;
       if (lend.length === 0) return 'gone';
