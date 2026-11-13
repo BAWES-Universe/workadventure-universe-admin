@@ -72,6 +72,8 @@ export interface BrickLimits {
   guestReplies: number;
   /** Replies all guests together get from the Brick for guests in one universe in each window. */
   universePool: number;
+  /** Minutes a visiting Brick stays after the bot server last found its person in a room: it is how a visit ends when the person leaves Universe (game #2005). */
+  visitEndsMinutes: number;
   /** Goals and tasks one person can have going at once, paused ones included (game #2002); done ones do not count. */
   itemsPerPerson: number;
   /** The shortest wait between two runs of one reminder, schedule, watch or goal, in minutes. */
@@ -103,7 +105,7 @@ export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, 
 export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 };
 export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0, guestDays: 1 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
-export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, snooze: 60, failuresBeforeTelling: 3 };
+export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, snooze: 60, failuresBeforeTelling: 3 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
 export const FAIR_USAGE_WINDOW_HOURS = 5;
 
@@ -166,6 +168,7 @@ const BRICK_RANGES: Record<keyof BrickLimits, Range> = {
   offerAfter: { min: 2, max: 100, whole: true },
   guestReplies: { min: 1, max: 1_000_000, whole: true },
   universePool: { min: 1, max: 1_000_000, whole: true },
+  visitEndsMinutes: { min: 1, max: 1_440, whole: true },
   itemsPerPerson: { min: 1, max: 10_000, whole: true },
   shortestRepeat: { min: 1, max: 525_600, whole: true },
   runsPerDay: { min: 1, max: 100_000, whole: true },

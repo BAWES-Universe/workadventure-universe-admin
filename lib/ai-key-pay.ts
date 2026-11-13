@@ -59,3 +59,34 @@ export const KEY_FOR_BOT_TEXT: Record<Exclude<KeyForBot, { ok: true }>['reason']
   'no-access': 'You need Manage bots here to run this bot on your key.',
   'no-room': 'That room isn’t there.',
 };
+
+/**
+ * A Brick that walks beside its owner in a place (game #2005) answers the people there too. Whose key runs it for them
+ * is decided here, and the rule is the lending rule every bot has:
+ *   - On Universe AI, or on a server provider, nothing of the owner's is spent: each person's own allowance is counted
+ *     as it is for any bot (lib/reply-limits.ts), and the answer is yes.
+ *   - On its owner's own key, only where the owner lent that key to this universe, and with the models that lend allows.
+ *   - Never on the key of the person who is chatting: a Brick has one key, its owner's, and that is the only one asked.
+ * A key that is gone is not a reason to refuse: the Brick is moved to Universe AI when its owner next talks to it, and
+ * until then it is served from Universe AI, like any bot whose key went.
+ */
+export type KeyForOthers = { ok: true; lendModels: string[] | null } | { ok: false; reason: 'not-lent' | 'not-owners' };
+
+export async function checkKeyForOthers(botId: string, universeId: string, known?: { aiProviderRef: string | null; ownerId: string | null }): Promise<KeyForOthers> {
+  // `known` is the bot as the caller read it: a reply that is about to be served on that key is checked against that same key, never
+  // against a second read of the bot (the owner may have changed it between the two), so what is checked is what is served
+  const bot = known ?? (await prisma.bot.findUnique({ where: { id: botId }, select: { aiProviderRef: true, ownerId: true } }));
+  const ref = bot?.aiProviderRef;
+  if (!bot || !ref) return { ok: true, lendModels: null };
+  const key = await prisma.botsAiProvider.findUnique({ where: { providerId: ref }, select: { ownerId: true } });
+  // Universe AI, a server provider or a key that is gone: nothing of the owner's to lend
+  if (!key || !key.ownerId) return { ok: true, lendModels: null };
+  if (key.ownerId !== bot.ownerId) return { ok: false, reason: 'not-owners' };
+  const lent = await prisma.aiKeyLend.findUnique({ where: { providerId_universeId: { providerId: ref, universeId } }, select: { models: true } });
+  return lent ? { ok: true, lendModels: lendModels(lent.models) } : { ok: false, reason: 'not-lent' };
+}
+
+/** Whether a Brick may answer other people in this universe at all, on what runs it. */
+export async function keyServesOthersIn(botId: string, universeId: string): Promise<boolean> {
+  return (await checkKeyForOthers(botId, universeId)).ok;
+}
