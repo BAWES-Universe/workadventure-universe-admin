@@ -86,6 +86,11 @@ run('the list of apps to connect, in a real database', () => {
       expect((await add(entry('gmail', { authConfig: JSON.stringify({ ...setup, ...extra }) }))).status).toBe(400);
     }
     expect((await add(entry('gmail', { authType: 'none', authConfig: JSON.stringify(setup) }))).status).toBe(400);
+    // Nor a header, which would be copied into every connection as a token would
+    for (const headers of [{ Authorization: 'Bearer shared' }, { 'x-api-key': 'shared' }, { 'X-Anything': 'x' }]) {
+      expect((await add(entry('gmail', { headers }))).status).toBe(400);
+      expect((await add(entry('gmail', { authType: 'none', authConfig: undefined, headers }))).status).toBe(400);
+    }
     expect((await add(entry('gmail'))).status).toBe(201);
     expect((await add(entry('gmail'))).status).toBe(409);
     expect((await add(entry('weather', { authType: 'none', authConfig: null }))).status).toBe(201);
