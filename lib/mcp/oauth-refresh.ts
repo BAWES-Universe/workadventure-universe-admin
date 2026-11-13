@@ -287,6 +287,8 @@ export async function holdRefreshLease(connectionId: string): Promise<() => Prom
         await prisma.appConnection.updateMany({ where: { id: connectionId }, data: { refreshLeaseUntil: null } }).catch(() => undefined);
       };
     }
+    // A row that is gone (disconnected at the same moment) has no lease to wait for: stop looking at once
+    if (!(await prisma.appConnection.findUnique({ where: { id: connectionId }, select: { id: true } }))) return async () => undefined;
     if (Date.now() > deadline) return async () => undefined;
     await new Promise((resolve) => setTimeout(resolve, WAIT_STEP_MS));
   }
