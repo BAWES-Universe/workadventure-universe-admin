@@ -39,8 +39,8 @@ export interface UseResult {
 }
 
 export interface ReadyMadeAdapter {
-  /** Starts a person's sign-in to one app on the provider's own page. `person` is our id for them, never their email. */
-  startConnect(input: { person: string; toolkit: string; returnUrl: string }): Promise<ConnectStart>;
+  /** Starts a person's sign-in to one app on the provider's own page. `person` is our id for them, never their email. `authConfigId` is the sign-in setup already read by the caller (null: the provider's managed one); left out, the adapter reads the setting itself. A caller holding a database transaction passes it so no second connection is taken from the pool. */
+  startConnect(input: { person: string; toolkit: string; returnUrl: string; authConfigId?: string | null }): Promise<ConnectStart>;
   /** Whether the person finished signing in for a connection started by `startConnect`: `active` once they did, `pending` while the page is still open, `failed` when it expired or was refused. */
   connectionStatus(input: { providerAccountId: string }): Promise<'active' | 'pending' | 'failed'>;
   /** The person's own app link at the provider. `accounts` pins each toolkit to the one connected account the person last signed in with, so a link never reaches an older account of theirs. The provider's code-running sandbox is ON in whatever it makes (the owner's rule: nothing ships off); it works only on data from the person's own connected apps, and each run is counted like an app step by the bot server. */

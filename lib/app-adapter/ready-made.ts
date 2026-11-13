@@ -39,36 +39,45 @@ export async function connectReadyMade(ownerId: string, key: string, returnUrl: 
   // One person's connect of one app at a time: the lock is taken before looking for an existing connection and held until the
   // connection is saved, so a second tap at the same moment waits, then finds the first one's connection, instead of opening a
   // second account at the provider that nothing would ever use
-  return prisma.$transaction(
-    async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`ready-made:${ownerId}:${key}`}, 0))`;
-      const existing = await tx.appConnection.findFirst({ where: { ownerId, providerToolkit: key } });
-      if (existing) return restartIfNotSignedIn(ownerId, existing, key, returnUrl, adapter, tx);
+  let createFailed = false;
+  try {
+    return await prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`ready-made:${ownerId}:${key}`}, 0))`;
+        const existing = await tx.appConnection.findFirst({ where: { ownerId, providerToolkit: key } });
+        if (existing) return await restartIfNotSignedIn(ownerId, existing, key, returnUrl, adapter, tx, app.authConfigId);
 
-      const start = await adapter.startConnect({ person: ownerId, toolkit: key, returnUrl });
-      const link = await adapter.appLink({ person: ownerId, toolkits: [key], accounts: { [key]: start.providerAccountId } });
-      try {
-        const connection = await createConnection(ownerId, {
-          name: app.name,
-          serverUrl: link.url,
-          // No sign-in method and no headers stored, ever: the link needs the provider key, which only Orbit holds and sends itself
-          // (callLink), so it is never written to a row, a screen or the bot server
-          authType: 'none',
-          authConfig: undefined,
-          source: 'ready_made',
-          providerToolkit: key,
-          providerAccountId: start.providerAccountId,
-        }, tx);
-        return { id: connection.id, redirectUrl: start.redirectUrl, created: true as boolean };
-      } catch (error) {
-        // Anything else that made it first (read outside the transaction: a failed statement has already ended it)
-        const again = await prisma.appConnection.findFirst({ where: { ownerId, providerToolkit: key } });
-        if (again) return { id: again.id, redirectUrl: null, created: false as boolean };
-        throw error;
-      }
-    },
-    { maxWait: 15_000, timeout: 90_000 },
-  );
+        const start = await adapter.startConnect({ person: ownerId, toolkit: key, returnUrl, authConfigId: app.authConfigId });
+        const link = await adapter.appLink({ person: ownerId, toolkits: [key], accounts: { [key]: start.providerAccountId } });
+        try {
+          const connection = await createConnection(ownerId, {
+            name: app.name,
+            serverUrl: link.url,
+            // No sign-in method and no headers stored, ever: the link needs the provider key, which only Orbit holds and sends itself
+            // (callLink), so it is never written to a row, a screen or the bot server
+            authType: 'none',
+            authConfig: undefined,
+            source: 'ready_made',
+            providerToolkit: key,
+            providerAccountId: start.providerAccountId,
+          }, tx);
+          return { id: connection.id, redirectUrl: start.redirectUrl, created: true as boolean };
+        } catch (error) {
+          // A failed statement has already ended the transaction, so nothing more is read inside it: the error leaves, and the
+          // lookup below runs after the rollback
+          createFailed = true;
+          throw error;
+        }
+      },
+      { maxWait: 15_000, timeout: 90_000 },
+    );
+  } catch (error) {
+    if (!createFailed) throw error;
+    // Anything else that made it first (read outside the transaction, after it rolled back)
+    const again = await prisma.appConnection.findFirst({ where: { ownerId, providerToolkit: key } });
+    if (again) return { id: again.id, redirectUrl: null, created: false as boolean };
+    throw error;
+  }
 }
 
 async function restartIfNotSignedIn(
@@ -78,6 +87,7 @@ async function restartIfNotSignedIn(
   returnUrl: string,
   adapter: NonNullable<ReturnType<typeof getAdapter>>,
   db: Prisma.TransactionClient | typeof prisma = prisma,
+  authConfigId?: string | null,
 ): Promise<{ id: string; redirectUrl: string | null; created: false }> {
   // Signed in and not lost: nothing to do. A sign-in the bot server saw lost (`signInLostAt`) is asked for again even though it was
   // once confirmed, otherwise it could never be recovered.
@@ -86,7 +96,7 @@ async function restartIfNotSignedIn(
   // lost is cleared with it, and the app reads connected again only when the provider confirms the new sign-in. The app link is
   // made again for the new account, so it never reaches an older one the person still has at the provider, and a failure seen
   // before this moment cannot mark the new sign-in lost.
-  const start = await adapter.startConnect({ person: ownerId, toolkit: key, returnUrl });
+  const start = await adapter.startConnect({ person: ownerId, toolkit: key, returnUrl, authConfigId });
   const link = await adapter.appLink({ person: ownerId, toolkits: [key], accounts: { [key]: start.providerAccountId } });
   await db.appConnection.update({
     where: { id: existing.id },
