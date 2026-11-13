@@ -19,29 +19,36 @@ export function thingName(toolName: string, toolkit: string | null): string {
  * What an app of this person's can do, in plain names, from the app itself ("Connected · it can do 3 things"). Only for the
  * person's own connection: null for anyone else's, the same as for one that does not exist. An app that is not signed in, or that
  * cannot be reached right now, has no list (an empty one), never an error: the sheet then just says "Connected". Nothing of the
- * link or the sign-in is returned.
+ * link or the sign-in is returned. A long list is read up to a bound; when the app has more than that, `incomplete` is true and the
+ * screens say "and more" instead of presenting the names as everything.
  */
-export async function thingsForOwnApp(connectionId: string, ownerId: string): Promise<string[] | null> {
+export async function thingsForOwnApp(connectionId: string, ownerId: string): Promise<{ things: string[]; incomplete: boolean } | null> {
   const found = await prisma.appConnection.findFirst({ where: { id: connectionId, ownerId } });
   if (!found) return null;
   const connection = await confirmIfPending(found);
-  if (!connectedState(connection).connected) return [];
+  const none = { things: [], incomplete: false };
+  if (!connectedState(connection).connected) return none;
   let toolNames: string[] = [];
+  let incomplete = false;
   try {
     if (connection.source === 'ready_made') {
       // The link of a ready-made app needs the provider key, which only Orbit holds: asked through the adapter
-      toolNames = (await testReadyMade(connection)).toolNames;
+      const listed = await testReadyMade(connection);
+      toolNames = listed.toolNames;
+      incomplete = !!listed.incomplete;
     } else {
       let authConfig = connection.authConfig;
       if (connection.authType === 'oauth' && authConfig) {
         const outcome = await ensureFreshOAuthConfig({ serverId: connection.id, connectionId: connection.id, authConfig, serverUrl: connection.serverUrl });
-        if (outcome.status === 'reconnect_required') return [];
+        if (outcome.status === 'reconnect_required') return none;
         if (outcome.authConfig) authConfig = outcome.authConfig;
       }
-      toolNames = (await testMcpConnection({ serverUrl: connection.serverUrl, authType: connection.authType, authConfig, headers: connection.headers as Record<string, string> | null })).toolNames;
+      const listed = await testMcpConnection({ serverUrl: connection.serverUrl, authType: connection.authType, authConfig, headers: connection.headers as Record<string, string> | null });
+      toolNames = listed.toolNames;
+      incomplete = !!listed.incomplete;
     }
   } catch {
-    return [];
+    return none;
   }
-  return [...new Set(toolNames.map((name) => thingName(name, connection.providerToolkit)).filter(Boolean))];
+  return { things: [...new Set(toolNames.map((name) => thingName(name, connection.providerToolkit)).filter(Boolean))], incomplete };
 }

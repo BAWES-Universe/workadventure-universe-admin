@@ -531,6 +531,20 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(listed.map((message: { params?: { cursor?: string } }) => message.params?.cursor)).toEqual([undefined, 'page-2']);
     });
 
+    it('says the list is incomplete when a page is still offered after the 20th, and keeps the first 20 pages', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      adapter.callLink.mockImplementation(async (input: { message: Record<string, unknown> }) => {
+        if (input.message.method === 'initialize') return answerOf(200, '{"jsonrpc":"2.0","id":1,"result":{}}', 's1');
+        if (input.message.method !== 'tools/list') return answerOf(202, '');
+        const page = (input.message.id as number) - 1;
+        return answerOf(200, JSON.stringify({ jsonrpc: '2.0', id: input.message.id, result: { tools: [{ name: `T${page}` }], nextCursor: `page-${page + 1}` } }));
+      });
+      const result = await (await test(serverId)).json();
+      expect(result).toMatchObject({ success: true, toolCount: 20, incomplete: true });
+      expect(result.toolNames[0]).toBe('T1');
+      expect(result.toolNames[19]).toBe('T20');
+    });
+
     it('reports a refusal by the link as a failed test with its status, and an unfinished sign-in as one to reconnect', async () => {
       const { adapter, serverId } = await connectedAndGranted();
       adapter.callLink.mockResolvedValueOnce(answerOf(401, 'nope'));

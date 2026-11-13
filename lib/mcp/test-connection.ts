@@ -1,5 +1,5 @@
 import { decryptApiKey } from '@/lib/encryption';
-import { extractErrorCode, readBodyWithLimit, truncateDetail } from '@/lib/mcp/test-result';
+import { extractErrorCode, readBodyWithLimit, truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
 import { isAllowedServerIp, isAllowedServerUrl } from '@/lib/mcp/outbound-guard';
 
 interface McpToolDescriptor {
@@ -163,9 +163,6 @@ async function describeFailure(
   };
 }
 
-/** The most pages of a long list of tools that are read: a server that keeps offering another page is stopped here. */
-const MAX_TOOL_PAGES = 20;
-
 /** What a server's error answer says, redacted and cut like every other text a server sends back: it may echo the credentials it was sent. */
 function rpcErrorText(error: unknown): string {
   const message = error && typeof error === 'object' ? (error as { message?: unknown }).message : undefined;
@@ -177,6 +174,8 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
   success: boolean;
   toolCount: number;
   toolNames: string[];
+  /** True when the app has more pages of tools than are read: the list is the first pages, not everything. */
+  incomplete?: boolean;
   error?: string;
   status?: number | null;
   statusText?: string | null;
@@ -428,6 +427,7 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
     const seenNames = new Set<string>();
     let cursor: string | undefined;
     const seenCursors = new Set<string>();
+    let incomplete = false;
     for (let page = 1; page <= MAX_TOOL_PAGES; page += 1) {
       const resultResponse = await sendMcpRequest(
         JSON.stringify({
@@ -468,8 +468,8 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
         return { success: false, toolCount: 0, toolNames: [], error: 'The app did not answer the list of what it can do' };
       }
       for (const tool of tools as McpToolDescriptor[]) {
-        const named = tool && typeof tool === 'object' ? (tool.name ?? tool.function?.name ?? 'unknown') : undefined;
-        if (typeof named !== 'string') {
+        const named = tool && typeof tool === 'object' ? (tool.name ?? tool.function?.name) : undefined;
+        if (typeof named !== 'string' || !named.trim()) {
           return { success: false, toolCount: 0, toolNames: [], error: 'The app sent a tool without a name' };
         }
         if (!seenNames.has(named)) {
@@ -479,6 +479,8 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
       }
       const next = (result as { nextCursor?: unknown }).nextCursor;
       if (typeof next !== 'string' || !next || seenCursors.has(next)) break;
+      // Another page is offered after the last one that is read: the list says so rather than pass for everything
+      if (page === MAX_TOOL_PAGES) incomplete = true;
       seenCursors.add(next);
       cursor = next;
     }
@@ -486,6 +488,7 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
       success: true,
       toolCount: toolNames.length,
       toolNames,
+      ...(incomplete ? { incomplete: true } : {}),
     };
   } catch (error: unknown) {
     const err = error as Record<string, unknown>;
