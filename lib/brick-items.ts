@@ -511,7 +511,15 @@ export async function goalsRoom(ownerId: string, now: Date = new Date()): Promis
     prisma.botsAiUsage.count({ where: { ...mine, channel: 'task' } }),
     // A run handed out and not yet finished has not written its model calls yet. It counts as one each, so a batch that falls due together
     // is held to the room there is, instead of every one of them seeing the same count. A reminder is fixed text and takes none.
-    prisma.brickItemRun.count({ where: { state: 'claimed', leaseUntil: { gt: now }, item: { ownerId, kind: { not: 'reminder' } } } }),
+    // Only a Brick on Universe AI: a run on the owner's own key writes nothing to this bar and takes none of it.
+    prisma
+      .$queryRaw<{ n: bigint }[]>(Prisma.sql`
+        SELECT count(*) AS n FROM "brick_item_runs" r
+        JOIN "brick_items" i ON i."id" = r."item_id"
+        JOIN "bots" b ON b."id" = i."bot_id"
+        WHERE r."state" = 'claimed' AND r."lease_until" > ${now}
+          AND i."owner_id" = ${ownerId} AND i."kind" <> 'reminder' AND b."ai_provider_ref" = ${UNIVERSE_AI_REF}`)
+      .then((rows) => Number(rows[0]?.n ?? 0)),
   ]);
   const used = counted + inFlight;
   const byTasks = countedByTasks + inFlight;

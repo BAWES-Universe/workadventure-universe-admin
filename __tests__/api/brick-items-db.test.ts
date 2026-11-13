@@ -897,6 +897,20 @@ run('goals and tasks, in a real database', () => {
       expect(work.held.filter((one) => one.userId === gsbat.uuid)).toHaveLength(1);
     });
 
+    it('a run on the owner’s own key is not counted against the Universe AI room of their other Bricks', async () => {
+      const gsmix = await person('gsmix');
+      const own = await makeBrick(gsmix.id, { name: 'Own key Brick' });
+      await prisma.bot.update({ where: { id: own.id }, data: { aiProviderRef: 'my-own-key' } });
+      // 8 of the 9 calls goals and tasks may use are used; the room is one more
+      await usage(gsmix, 8, 'task');
+      const onOwnKey = await set({ uuid: gsmix.uuid, brickId: own.id }, { kind: 'watch', words: 'Mine', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      const onUniverse = await set(gsmix, { kind: 'watch', words: 'Ours', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      // The own-key run is handed out first (it is never held) and takes none of the room: the Universe AI one still runs
+      const work = await claimWork(at(HOUR + 2 * MIN));
+      expect(mineIn(work, onOwnKey.id, onUniverse.id)).toHaveLength(2);
+      expect(work.held.filter((one) => one.userId === gsmix.uuid)).toEqual([]);
+    });
+
     it('lets extra usage raise the room goals and tasks have, as it does for chat: a multiple raises it, no limit lifts it, and it is back to the usual when it ends', async () => {
       const gsext = await person('gsext');
       const watch = await set(gsext, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
