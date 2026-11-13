@@ -295,6 +295,6 @@ describe('the Brick for guests', () => {
 describe('what this Orbit can do for voice notes', () => {
   it('says which parts are here and which are still to come', async () => {
     const response = await getCapabilities(new NextRequest('http://localhost:3333/api/voice-notes/capabilities', { headers: asBotServer }));
-    expect(await response.json()).toEqual({ voiceNotes: { v: 1, hearing: true, reservations: true, turns: true, receipts: false, carry: false } });
+    expect(await response.json()).toEqual({ voiceNotes: { v: 1, hearing: true, reservations: true, turns: true, receipts: false, carry: true } });
   });
 });

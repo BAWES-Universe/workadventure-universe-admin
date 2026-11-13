@@ -8,7 +8,7 @@
  * - turns: turn records with leased stages, so a retried turn is never paid twice, the answer kept for a moment for a reply
  *   that got lost, and the provider's copies deleted until it confirms (/api/voice-notes/turns/:id, /api/voice-notes/cleanups).
  * - receipts: proof that an upload is the sender's own.
- * - carry: a guest's files and voice notes coming along when they sign in.
+ * - carry: a guest's files and voice notes coming along when they sign in (POST /api/guest-brick/handover).
  */
 export const VOICE_NOTE_CAPABILITIES = {
   v: 1,
@@ -16,5 +16,5 @@ export const VOICE_NOTE_CAPABILITIES = {
   reservations: true,
   turns: true,
   receipts: false,
-  carry: false,
+  carry: true,
 } as const;
