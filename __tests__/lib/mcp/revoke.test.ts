@@ -41,6 +41,13 @@ describe('taking a sign-in back at the app (best effort)', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('never sends the token or the client secret over plain http, even to a public address', async () => {
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+    expect(await revokeAtApp({ authType: 'oauth', authConfig: config({ revocationUrl: 'http://auth.example.com/revoke' }) })).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('never sends the token to an address that fails the destination check', async () => {
     (checkOutboundUrl as jest.Mock).mockResolvedValue({ allowed: false });
     const fetchMock = jest.fn();
