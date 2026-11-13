@@ -7,6 +7,7 @@
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/brick-items-db.test.ts
  */
 import { randomUUID } from 'node:crypto';
+import type { z } from 'zod';
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 jest.mock('@/lib/tool-signin', () => ({ syncToolSignInNotices: jest.fn(async () => undefined) }));
@@ -16,7 +17,7 @@ import { ensureDefaultBrick } from '@/lib/brick-default';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { makeBrick } from '@/lib/brick-make';
 import { saveServerLimits } from '@/lib/bot-limits';
-import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, markHeldTold, markTold, claimWork, goalsRoom, readItem, type NewItemInput } from '@/lib/brick-items';
+import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, markHeldTold, markTold, claimWork, goalsRoom, markAsked, readItem, runReportSchema, type NewItemInput } from '@/lib/brick-items';
 import { recordGrant } from '@/lib/meter-grants';
 import { checkReplyAllowance, windowStart } from '@/lib/reply-limits';
 
@@ -769,6 +770,112 @@ run('goals and tasks, in a real database', () => {
     expect(await prisma.brickItem.findUnique({ where: { id: check2.item.id } })).toMatchObject({ state: 'paused', nextDueAt: null });
     await changeItem(noor.brickId, goal2.id, { userId: noor.uuid, action: 'resume' }, at(HOUR));
     expect(await prisma.brickItem.findUnique({ where: { id: check2.item.id } })).toMatchObject({ state: 'on', nextDueAt: at(2 * HOUR) });
+  });
+
+  describe('a goal that is not sure, or whose date has passed, asks its person once', () => {
+    async function newGoal(name: string) {
+      const who = await person(name);
+      const goal = await set(who, { kind: 'goal', words: 'Get my visa', outcome: 'The visa is issued', cadence: { type: 'every', minutes: 60 } });
+      return { who, goal };
+    }
+    // One check of the goal, at the given hour, reported as the bot server would
+    async function check(goal: { id: string }, hour: number, report: Omit<z.infer<typeof runReportSchema>, 'attempt'>) {
+      const [one] = (await claimDueRuns(at(hour * HOUR + MIN))).filter((run) => run.itemId === goal.id);
+      if (!one) throw new Error('no run was due');
+      const done = await finishRun(one.runId, { ...report, attempt: one.attempt }, at(hour * HOUR + 2 * MIN));
+      if (!done.ok) throw new Error(done.error);
+      return { ...done, runId: one.runId };
+    }
+    const unsure = { state: 'done' as const, outcome: 'waiting' as const, result: 'Not sure the visa is issued yet', ask: 'unsure' as const };
+    const itemRow = (id: string) => prisma.brickItem.findUniqueOrThrow({ where: { id } });
+
+    it('asks once: owed until the bot server confirms, never again while it is open, and the same question is asked again only while unconfirmed', async () => {
+      const { goal } = await newGoal('askone');
+      const first = await check(goal, 1, unsure);
+      expect(first.askPerson).toBe('unsure');
+      expect(first.item.asking).toBe('unsure');
+      // The question never went out (no confirm): the next run that asks it is told to ask it again, with its own run as the one to confirm
+      const second = await check(goal, 2, unsure);
+      expect(second.askPerson).toBe('unsure');
+      // A late confirm from the first run marks nothing; the newest run's confirm does, once
+      expect(await markAsked(first.runId)).toEqual({ ok: true, asked: false });
+      expect(await markAsked('00000000-0000-4000-8000-000000000000')).toMatchObject({ ok: false, status: 404 });
+      expect(await markAsked(second.runId)).toEqual({ ok: true, asked: true });
+      expect(await markAsked(second.runId)).toEqual({ ok: true, asked: false });
+      // Open and asked: later checks add nothing, whatever they find, and a different question waits behind it
+      const third = await check(goal, 3, unsure);
+      expect(third.askPerson).toBeNull();
+      expect((await check(goal, 4, { ...unsure, ask: 'date_passed' })).askPerson).toBeNull();
+      expect((await itemRow(goal.id)).askKind).toBe('unsure');
+    });
+
+    it('keep going answers it: the goal carries on untouched and that question is never asked of this goal again', async () => {
+      const { who, goal } = await newGoal('askkeep');
+      const asked = await check(goal, 1, unsure);
+      await markAsked(asked.runId);
+      const before = await itemRow(goal.id);
+      const kept = await changeItem(who.brickId, goal.id, { userId: who.uuid, action: 'keep' }, at(HOUR + 5 * MIN));
+      expect(kept).toMatchObject({ ok: true, item: { state: 'on', asking: null } });
+      // Nothing it runs changed: same revision, still due as before
+      expect(await itemRow(goal.id)).toMatchObject({ revision: before.revision, nextDueAt: before.nextDueAt, askKind: null, askKept: 'unsure' });
+      expect((await check(goal, 2, unsure)).askPerson).toBeNull();
+      // Another kind of question is still its to ask, once
+      const date = await check(goal, 3, { ...unsure, ask: 'date_passed', result: 'The date has passed' });
+      expect(date.askPerson).toBe('date_passed');
+      // Keep going with nothing open does nothing, and only a goal asks
+      expect(await changeItem(who.brickId, goal.id, { userId: who.uuid, action: 'keep' }, at(4 * HOUR))).toMatchObject({ ok: true });
+      expect(await changeItem(who.brickId, goal.id, { userId: who.uuid, action: 'keep' }, at(4 * HOUR))).toMatchObject({ ok: true, item: { asking: null } });
+      const reminder = await set(who, { words: 'Call mum' });
+      expect(await changeItem(who.brickId, reminder.id, { userId: who.uuid, action: 'keep' }, at(4 * HOUR))).toMatchObject({ ok: false, code: 'wrong_state' });
+    });
+
+    it('closing it or changing it answers it too, and a changed or reopened goal can ask afresh', async () => {
+      const closing = await newGoal('askclose');
+      await check(closing.goal, 1, unsure);
+      expect(await changeItem(closing.who.brickId, closing.goal.id, { userId: closing.who.uuid, action: 'done', result: 'No longer needed' }, at(HOUR + 5 * MIN))).toMatchObject({ ok: true, item: { state: 'done', asking: null } });
+      expect(await itemRow(closing.goal.id)).toMatchObject({ askKind: null, askRunId: null, askToldAt: null });
+
+      const changing = await newGoal('askchange');
+      const asked = await check(changing.goal, 1, unsure);
+      await markAsked(asked.runId);
+      await changeItem(changing.who.brickId, changing.goal.id, { userId: changing.who.uuid, action: 'keep' }, at(HOUR + 3 * MIN));
+      expect(await itemRow(changing.goal.id)).toMatchObject({ askKept: 'unsure' });
+      // New terms are a new goal as far as its questions go: what was kept no longer applies, and it can ask again
+      await changeItem(changing.who.brickId, changing.goal.id, { userId: changing.who.uuid, action: 'change', change: { outcome: 'A visa for two years is issued' } }, at(HOUR + 4 * MIN));
+      expect(await itemRow(changing.goal.id)).toMatchObject({ askKept: null, askKind: null });
+      expect((await check(changing.goal, 2, unsure)).askPerson).toBe('unsure');
+      // Closing and reopening starts over as well
+      await changeItem(changing.who.brickId, changing.goal.id, { userId: changing.who.uuid, action: 'done' }, at(2 * HOUR + 5 * MIN));
+      await changeItem(changing.who.brickId, changing.goal.id, { userId: changing.who.uuid, action: 'reopen' }, at(3 * HOUR));
+      expect(await itemRow(changing.goal.id)).toMatchObject({ askKind: null, askKept: null });
+    });
+
+    it('reaching the outcome closes the goal, needs the evidence, and ends its question', async () => {
+      const { goal } = await newGoal('askreach');
+      await check(goal, 1, unsure);
+      // A goal says so with the result, and is never done and asking at once
+      expect(runReportSchema.safeParse({ state: 'done', attempt: 1, reached: true }).success).toBe(false);
+      expect(runReportSchema.safeParse({ state: 'done', attempt: 1, reached: true, result: '  ' }).success).toBe(false);
+      expect(runReportSchema.safeParse({ state: 'done', attempt: 1, reached: true, result: 'Issued', ask: 'unsure' }).success).toBe(false);
+      expect(runReportSchema.safeParse({ state: 'done', attempt: 1, reached: true, result: 'Visa issued on 12 Nov' }).success).toBe(true);
+      const ended = await check(goal, 2, { state: 'done', outcome: 'spoke', result: 'The visa was issued on 12 Nov', reached: true });
+      expect(ended).toMatchObject({ askPerson: null, item: { state: 'done', asking: null } });
+      expect(await itemRow(goal.id)).toMatchObject({ askKind: null, askRunId: null });
+    });
+
+    it('asks only for a goal, only while its run is still the item, and never for a failed run', async () => {
+      const who = await person('askonly');
+      const watch = await set(who, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      expect((await check(watch, 1, unsure)).askPerson).toBeNull();
+      const goal = await set(who, { kind: 'goal', words: 'Visa', outcome: 'Issued', cadence: { type: 'every', minutes: 60 } });
+      expect((await check(goal, 1, { state: 'failed', error: 'The site did not answer', ask: 'unsure' })).askPerson).toBeNull();
+      // Changed after the run was claimed: nothing of what it reports is applied, and nothing is asked
+      const [one] = (await claimDueRuns(at(2 * HOUR + MIN))).filter((run) => run.itemId === goal.id);
+      await changeItem(who.brickId, goal.id, { userId: who.uuid, action: 'change', change: { words: 'Get my work visa' } }, at(2 * HOUR + 2 * MIN));
+      const late = await finishRun(one.runId, { ...unsure, attempt: one.attempt }, at(2 * HOUR + 3 * MIN));
+      expect(late).toMatchObject({ ok: true, applied: false, askPerson: null });
+      expect((await itemRow(goal.id)).askKind).toBeNull();
+    });
   });
 
   it('an account that never asked for one has nothing: no items, no runs, whatever the clock says', async () => {

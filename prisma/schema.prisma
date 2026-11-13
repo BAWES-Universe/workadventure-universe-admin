@@ -1096,6 +1096,13 @@ model BrickItem {
   failureTold   Boolean   @default(false) @map("failure_told")
   // The run that was asked to tell the person about this row of failures, until it confirms (markTold) or the row starts over
   tellRunId     String?   @map("tell_run_id") @db.VarChar(36)
+  // A goal's one open question to the person ("unsure" about reaching its outcome, or its "date_passed"): which, the run that was asked to
+  // ask it until it confirms (markAsked) and when it did. Open until the person answers (done, keep going, change) or the goal ends. The kinds
+  // they answered "keep going" to are kept (comma apart), so the same question is never asked of them again for this goal.
+  askKind       String?   @map("ask_kind") @db.VarChar(12)
+  askRunId      String?   @map("ask_run_id") @db.VarChar(36)
+  askToldAt     DateTime? @map("ask_told_at")
+  askKept       String?   @map("ask_kept") @db.VarChar(40)
   // Set while a run waits because the person's Universe AI usage for goals and tasks is used up (it carries on when it is back), and
   // when Brick was last asked to say so (asked again after a while until it confirms) and when it confirmed: told once per wait
   heldSince   DateTime?   @map("held_since")
