@@ -7,6 +7,7 @@
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/brick-meter-runs-db.test.ts --runInBand
  */
 import { randomUUID } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 
 jest.mock('@/lib/tool-signin', () => ({ syncToolSignInNotices: jest.fn(async () => undefined) }));
 
@@ -199,5 +200,18 @@ run('money and the run, in a real database', () => {
     expect(again.ok && again.job.id).toBe(queued.ok ? queued.job.id : '');
     expect(again.ok && again.job.status).toBe('running');
     expect(await prisma.computerJob.count({ where: { botId: sara.brickId, runId: mine.runId } })).toBe(1);
+  });
+
+  it('answers not_set, never an error, when the first ask for a run made its job and took it away before the second could look', async () => {
+    const sara = await person('sara');
+    expect((await giveComputer(sara.brickId, sara.id)).ok).toBe(true);
+    const mine = await goalRun(sara);
+    // The second ask's insert hits the unique key (the first one's job), and the job is gone by the time it looks
+    const create = jest
+      .spyOn(prisma.computerJob, 'create')
+      .mockRejectedValueOnce(new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' }));
+    expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'For the run', runId: mine.runId }, NOW)).toEqual({ ok: false, reason: 'not_set' });
+    create.mockRestore();
+    expect(await prisma.computerJob.count({ where: { botId: sara.brickId, runId: mine.runId } })).toBe(0);
   });
 });

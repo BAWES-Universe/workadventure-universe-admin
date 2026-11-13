@@ -320,6 +320,9 @@ export async function startJob(input: { botId: string; personId: string; title: 
     if (input.runId && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
       const winner = await reuseRunJob(input.botId, input.runId, now);
       if (winner) return winner;
+      // The first ask made the job and took it away again before this one could look (the only thing that takes a run's job away is
+      // "controls not set up"): the same answer, not an error
+      return { ok: false, reason: 'not_set' };
     }
     throw error;
   }
