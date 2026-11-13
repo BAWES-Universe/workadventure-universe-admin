@@ -112,6 +112,11 @@ async function meterUse(input: { botId: string; ownerId: string; toolkit: string
   });
 }
 
+/** Whether the app is on the list and not turned off: a super admin turning one off stops every use of it at once, connections included. */
+async function appIsOn(toolkit: string): Promise<boolean> {
+  return (await readReadyMadeApps()).some((app) => app.key === toolkit && app.enabled);
+}
+
 export type ReadyMadeLinkOutcome =
   | { status: 'done'; answer: LinkAnswer }
   | { status: 'off' | 'gone' | 'not_owner' | 'already_asked' | 'unavailable' | 'refused' };
@@ -131,6 +136,7 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
   if (!LINK_METHODS.has(method)) return { status: 'refused' };
   const connection = await prisma.appConnection.findFirst({ where: { id: input.connectionId, ownerId: input.ownerId, source: 'ready_made' } });
   if (!connection || !connection.providerToolkit) return { status: 'gone' };
+  if (!(await appIsOn(connection.providerToolkit))) return { status: 'off' };
   if (!(await confirmReadyMade(connection))) return { status: 'unavailable' };
   const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true } });
   if (!bot || bot.roomId !== null || bot.ownerId !== input.ownerId) return { status: 'not_owner' };
@@ -163,6 +169,7 @@ export async function useReadyMade(input: { botId: string; connectionId: string;
   if (!adapter) return { status: 'off' };
   const connection = await prisma.appConnection.findFirst({ where: { id: input.connectionId, ownerId: input.ownerId, source: 'ready_made' } });
   if (!connection || !connection.providerToolkit) return { status: 'gone' };
+  if (!(await appIsOn(connection.providerToolkit))) return { status: 'off' };
   // Not signed in at the provider yet: nothing to use, and nothing is counted
   if (!(await confirmReadyMade(connection))) return { status: 'unavailable' };
   const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true } });
@@ -229,6 +236,7 @@ export async function testReadyMade(connection: { id: string; source: string; se
   const adapter = getAdapter();
   const failed = (error: string, status: number | null = null): ReadyMadeTestResult => ({ success: false, toolCount: 0, toolNames: [], error, status });
   if (!adapter) return failed('This app is not available right now.');
+  if (!connection.providerToolkit || !(await appIsOn(connection.providerToolkit))) return failed('This app is not available right now.');
   if (!(await confirmReadyMade(connection))) return failed('Reconnect required: the sign-in for this app is not finished.');
   try {
     const opened = await adapter.callLink({

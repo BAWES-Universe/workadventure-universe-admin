@@ -365,6 +365,31 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect(adapter.use).not.toHaveBeenCalled();
   });
 
+  it('turning an app off stops every use of it at once, connections and Bricks that already have it included, and nothing is counted', async () => {
+    const { adapter, serverId } = await connectedAndGranted();
+    const metered = () => prisma.meterEvent.count({ where: { personId: sara } });
+    const link = () => linkApp(request('/api/ready-made/link', { method: 'POST', token: SERVICE_TOKEN, body: { botId: saraBrick, serverId, requesterKey: `sara-${tag}`, message: { jsonrpc: '2.0', id: 1, method: 'tools/list' } } }));
+    const test = () => { asSara(); return testServer(request(`/api/bots/${saraBrick}/mcp-servers/${serverId}/test`, { method: 'POST' }), params({ id: saraBrick, serverId })); };
+    expect((await useIt({ serverId })).status).toBe(200);
+    const before = await metered();
+
+    await saveReadyMadeApps({ apps: { [KEY]: { name: 'Gmail', authConfigId: 'ac_1', enabled: false } } }, boss);
+    adapter.use.mockClear();
+    adapter.callLink.mockClear();
+    expect((await useIt({ serverId })).status).toBe(404);
+    expect((await link()).status).toBe(404);
+    const tested = await (await test()).json();
+    expect(tested.success).toBe(false);
+    expect(adapter.use).not.toHaveBeenCalled();
+    expect(adapter.callLink).not.toHaveBeenCalled();
+    expect(await metered()).toBe(before);
+
+    // Turned on again, the same connection works as before
+    await saveReadyMadeApps({ apps: { [KEY]: { name: 'Gmail', authConfigId: 'ac_1', enabled: true } } }, boss);
+    expect((await useIt({ serverId })).status).toBe(200);
+    expect((await link()).status).toBe(200);
+  });
+
   describe('the app link, which only Orbit may call because it needs the provider key', () => {
     const link = (serverId: string, extra: Record<string, unknown> = {}) =>
       linkApp(request('/api/ready-made/link', { method: 'POST', token: SERVICE_TOKEN, body: { botId: saraBrick, serverId, requesterKey: `sara-${tag}`, message: { jsonrpc: '2.0', id: 1, method: 'tools/list' }, ...extra } }));
