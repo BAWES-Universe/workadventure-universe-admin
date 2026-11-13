@@ -869,6 +869,22 @@ run('goals and tasks, in a real database', () => {
       expect(fresh!.waitId).not.toBe(first.held.find((one) => one.itemId === watch.id)!.waitId);
     });
 
+    it('a goal or task that is the first use of a window starts it, so what goals and tasks use is counted and held against their share', async () => {
+      const gswin = await person('gswin');
+      const watch = await set(gswin, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      expect(await prisma.replyWindow.findUnique({ where: { key: `ua:person:${gswin.id}` } })).toBeNull();
+      const started = (await claimWork(at(HOUR + 2 * MIN))).runs.find((one) => one.itemId === watch.id)!;
+      expect(started).toBeDefined();
+      await finishRun(started.runId, { attempt: started.attempt, state: 'done', outcome: 'quiet' }, at(HOUR + 3 * MIN));
+      expect((await prisma.replyWindow.findUniqueOrThrow({ where: { key: `ua:person:${gswin.id}` } })).startedAt).toEqual(at(HOUR + 2 * MIN));
+      // The model calls of those runs are counted from the start of that window: 9 is their whole share
+      await prisma.botsAiProvider.upsert({ where: { providerId: 'universe-ai' }, create: { providerId: 'universe-ai', name: 'Universe AI', type: 'universe-ai', enabled: true }, update: {} });
+      await prisma.botsAiUsage.createMany({ data: Array.from({ length: 9 }, () => ({ botId: gswin.brickId, providerId: 'universe-ai', talkedPersonId: gswin.id, channel: 'task', timestamp: at(HOUR + 3 * MIN) })) });
+      const next = await claimWork(at(2 * HOUR + 5 * MIN));
+      expect(mineIn(next, watch.id)).toEqual([]);
+      expect(next.held.map((one) => one.itemId)).toContain(watch.id);
+    });
+
     it('lets extra usage raise the room goals and tasks have, as it does for chat: a multiple raises it, no limit lifts it, and it is back to the usual when it ends', async () => {
       const gsext = await person('gsext');
       const watch = await set(gsext, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });

@@ -5,6 +5,7 @@ import { prisma } from '@/lib/db';
 import { getBrickLimits, getUniverseAiReplyLimits } from '@/lib/bot-limits';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
 import { runningExtra } from '@/lib/meter-grants';
+import { windowStart } from '@/lib/reply-limits';
 import { ownerAskingThrough } from '@/lib/brick-make';
 import { TIME_ZONE_KEY, WORKWEEK_KEY, firstDue, isTimeZone, nextDue, readCadence, readWorkweek, repeatMinutes, type Cadence } from '@/lib/brick-item-time';
 
@@ -682,9 +683,11 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH): Pr
         // Usage: a watch, briefing or goal that runs on Universe AI uses the owner's usage, inside the share goals and tasks may use. When it
         // is used up the item waits, with its work saved, and is due again the moment it is back; Brick says so once per wait. A reminder
         // is fixed text with no AI: it always comes, and a Brick on its owner's own key never uses the Universe AI bar.
+        let onUniverse = false;
         if (item.kind !== 'reminder') {
           const bot = await tx.bot.findUniqueOrThrow({ where: { id: item.botId }, select: { aiProviderRef: true } });
-          const room = bot.aiProviderRef === UNIVERSE_AI_REF ? await goalsRoom(item.ownerId, now) : ({ ok: true } as const);
+          onUniverse = bot.aiProviderRef === UNIVERSE_AI_REF;
+          const room = onUniverse ? await goalsRoom(item.ownerId, now) : ({ ok: true } as const);
           if (!room.ok) {
             // The notice is owed until the bot server confirms it (markHeldTold); it is handed out now, and handed out again after the
             // retry interval if no confirm came, so an answer that never arrived does not lose it and a quick second ask does not repeat it
@@ -720,6 +723,9 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH): Pr
         // A run is being made, so nothing is waiting any more
         await tx.brickItem.update({ where: { id }, data: { nextDueAt: next, heldSince: null, heldToldAt: null, heldNoticeAt: null } });
         if (!made.length) return null;
+        // A run on Universe AI is the person's first use of the window when none is running, exactly as their first chat reply is: it
+        // starts the window, so what goals and tasks use is counted in it and held against their share, never left outside any window
+        if (onUniverse) await windowStart(`ua:person:${item.ownerId}`, (await getUniverseAiReplyLimits()).windowHours, now);
         return tx.brickItemRun.findUniqueOrThrow({ where: { id: made[0].id }, include: RUN_INCLUDE });
       });
     } catch (error) {
