@@ -21,6 +21,8 @@ const updateUniverseSchema = z.object({
   // Hide bot conversations (#435). Like the rest of this route, only the owner and super admins can change it.
   hideBotConversations: z.boolean().optional(),
   allowVoiceBots: z.boolean().optional(),
+  // Visiting Bricks (game #2005): whether people may bring their own Brick along here.
+  allowVisitingBricks: z.boolean().optional(),
 });
 
 // GET /api/admin/universes/[id] - Get a single universe
@@ -273,6 +275,7 @@ export async function PATCH(
     if (data.featured !== undefined) updateData.featured = data.featured;
     if (data.hideBotConversations !== undefined) updateData.hideBotConversations = data.hideBotConversations;
     if (data.allowVoiceBots !== undefined) updateData.allowVoiceBots = data.allowVoiceBots;
+    if (data.allowVisitingBricks !== undefined) updateData.allowVisitingBricks = data.allowVisitingBricks;
     if (data.thumbnailUrl !== undefined) {
       updateData.thumbnailUrl = data.thumbnailUrl || null;
     }

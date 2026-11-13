@@ -1,7 +1,8 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { providerPayload } from '@/lib/ai-provider-payload';
-import { checkKeyForBot, type KeyForBot } from '@/lib/ai-key-pay';
+import { checkKeyForBot, checkKeyForOthers, type KeyForBot } from '@/lib/ai-key-pay';
+import { whereIsBrick } from '@/lib/brick-visit';
 import { addNotice } from '@/lib/notices';
 import { UNIVERSE_AI_MISSING, UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 import { isTypedEndpoint, kindInfo } from '@/lib/ai-key-kinds';
@@ -41,6 +42,12 @@ type ServedProvider = ReturnType<typeof providerPayload> & {
   source: 'provider' | 'universe-ai' | 'own-key';
   movedFromKey?: string;
   standingInFor?: string;
+  /**
+   * Set when the asker is not the Brick's owner (game #2005): the answer is for someone the Brick does not belong to, so the
+   * bot server keeps its owner's apps, files and computer out of the reply. Decided here, from who asked, and never from what
+   * the bot server believes about where the Brick stands.
+   */
+  forOthers?: boolean;
   vision?: VisionPlan;
   limits?: ServedLimits;
 } & Partial<OwnKeyFacts>;
@@ -48,7 +55,18 @@ type ServedProvider = ReturnType<typeof providerPayload> & {
 export type BotAiCredentials =
   | { status: 200; body: ServedProvider }
   | { status: 200; body: { source: 'resting'; keyOwnerId: string; restingLine: string } }
-  | { status: 400 | 404 | 503; error: string };
+  | { status: 400 | 404 | 503; error: string }
+  /** A Brick that cannot answer this person here: its owner's own key is not lent to the place it visits (game #2005). */
+  | { status: 403; error: string; code: 'key_not_lent' };
+
+/**
+ * Who is asking, when it is not the Brick's owner: a person talking to a Brick that walks beside its owner (game #2005).
+ * Their talk runs on what the Brick runs on and never on their own key; the owner's key serves them only where it is
+ * lent to this universe (lib/ai-key-pay.ts).
+ */
+interface Others {
+  universeId: string;
+}
 
 /** What only a personal key's answer carries: whose it is, what kind it is, where it runs, and how the bot server should treat it. */
 export interface OwnKeyFacts {
@@ -93,18 +111,38 @@ const loadBot = (botId: string) =>
     },
   });
 
-export async function credentialsForBot(botId: string): Promise<BotAiCredentials> {
+export async function credentialsForBot(botId: string, options: { asker?: string | null; roomUrl?: string | null } = {}): Promise<BotAiCredentials> {
   const bot = await loadBot(botId);
   if (!bot) return { status: 404, error: 'Bot not found' };
   // A Brick its owner deleted runs on nothing while it waits for Undo (game #1996): no key is served for it, Universe
   // AI's included, so a reply that was about to start for it cannot
   if (bot.deletedAt !== null) return { status: 404, error: 'Bot not found' };
-  const main = await mainCredentials(bot);
+  // A Brick asked for by someone other than its owner (game #2005): only while it walks beside its owner in a place
+  // that takes visiting Bricks, and then on what it runs on there. `asker` is who is about to be answered, by their
+  // WorkAdventure id, email or Orbit id; the bot server names the owner for the Brick's own small calls. While a visit is live a call
+  // that names nobody is treated as someone else's (never the owner's key or things): an old bot server that names nobody is
+  // answered on Universe AI for that while, not refused, and nothing is served on the owner's key by default.
+  let others: Others | null = null;
+  if (bot.roomId === null) {
+    const asker = options.asker
+      ? await prisma.user.findFirst({ where: { OR: [{ uuid: options.asker }, { email: options.asker }, { id: options.asker }] }, select: { id: true } })
+      : null;
+    if (!asker || asker.id !== bot.ownerId) {
+      // `roomUrl` is the room the asker is in, when the bot server knows it: a Brick with a home and a visit is then judged by that room's place
+      const here = await whereIsBrick(bot.id, options.roomUrl ?? null);
+      if (here) others = { universeId: here.universeId };
+      // Someone named, and not its owner, while it is not visiting anywhere: nobody to serve. Nothing named and not visiting is
+      // the Brick's own business, as it always was. A call that names a room is not that: where the Brick stands somewhere else
+      // it is answered for nobody, so the owner's key is not served to a call from a room the Brick is not in.
+      else if (options.asker || (options.roomUrl && (await whereIsBrick(bot.id, null)))) return { status: 404, error: 'Bot not found' };
+    }
+  }
+  const main = await mainCredentials(bot, others);
   if (main.status !== 200 || main.body.source === 'resting') return main;
-  const answer = { status: 200 as const, body: await withLimits(bot, main.body) };
+  const answer = { status: 200 as const, body: { ...(await withLimits(bot, main.body)), ...(others ? { forOthers: true } : {}) } };
   // Only a bot on Universe AI or a person's own key has its images decided here; a pinned server provider stays as it was
   if (answer.body.source === 'provider') return answer;
-  const vision = await visionPlan(bot, answer.body);
+  const vision = await visionPlan(bot, answer.body, others);
   return vision ? { status: 200, body: { ...answer.body, vision } } : answer;
 }
 
@@ -124,12 +162,15 @@ async function withLimits(bot: BotForCredentials, body: ServedProvider): Promise
  * A key picked for images that can't be used now (taken away, unlent, Down, or its model changed) never falls back to Universe
  * AI on its own: the images are then left to the bot's own model, and `problem: 'key'` says so.
  */
-async function visionPlan(bot: BotForCredentials, main: ServedProvider): Promise<VisionPlan | undefined> {
+async function visionPlan(bot: BotForCredentials, main: ServedProvider, others: Others | null = null): Promise<VisionPlan | undefined> {
   const picked = readVisionPick(bot.behaviorConfig);
+  // Another of the owner's keys describes images only for the owner: for other people the images are left to the model that answers (game #2005)
+  if (others && picked?.choice === 'another') return { choice: 'this' };
   const own = main.source === 'own-key';
   // Another model on the same key only when the lend there allows it (#575). A Brick stands in no universe: its
   // owner's key runs it with all of its models (lib/ai-key-pay.ts), so there is no lend to narrow them.
-  const lend = own && !picked && bot.room ? await lentModelsHere(main.providerId, bot.room.world.universe.id) : null;
+  const lendUniverseId = bot.room?.world.universe.id ?? others?.universeId ?? null;
+  const lend = own && !picked && lendUniverseId ? await lentModelsHere(main.providerId, lendUniverseId) : null;
   const mainSees = resolveVisionSupport(main.model ?? '', main.supportsVision);
   // A bot on its own model still has the key's check model to look at images when that one sees (#575)
   const key =
@@ -171,7 +212,7 @@ async function lentModelsHere(providerId: string, universeId: string): Promise<s
   return lendModels(lent?.models);
 }
 
-async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials> {
+async function mainCredentials(bot: BotForCredentials, others: Others | null = null): Promise<BotAiCredentials> {
   const ref = bot.aiProviderRef;
   if (!ref) return { status: 404, error: 'This bot has no AI provider' };
 
@@ -188,6 +229,16 @@ async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials
     return { status: 200, body: { ...providerPayload(provider), source: 'provider' } };
   }
 
+  // Someone other than a Brick's owner is served its owner's key only where the owner lent it (game #2005). Not lent:
+  // the Brick is NOT moved off its key, which is its owner's setup. A Brick is never refused while something can answer,
+  // so this person is served Universe AI, on their own allowance like anyone: never the owner's key, never their own.
+  // Only when Universe AI itself cannot serve is the person told it can't answer them here.
+  const lent = others ? await checkKeyForOthers(bot.id, others.universeId, { aiProviderRef: ref, ownerId: bot.ownerId }) : null;
+  if (lent && !lent.ok) {
+    const standIn = await universeAi();
+    if (standIn.status === 200 && standIn.body.source === 'universe-ai') return { status: 200, body: { ...standIn.body, standingInFor: ref } };
+    return { status: 403, error: 'This Brick cannot answer people here: its owner has not lent the key it runs on to this universe', code: 'key_not_lent' };
+  }
   const verdict = await checkKeyForBot({ keyId: ref, keyOwnerId: provider.ownerId, bot: { id: bot.id, createdById: bot.createdById, roomId: bot.roomId, ownerId: bot.ownerId, deletedAt: bot.deletedAt } });
   if (verdict.ok) {
     const health = await recheckIfDue(provider);
@@ -200,7 +251,8 @@ async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials
     const key = health === provider ? provider : ((await prisma.botsAiProvider.findUnique({ where: { providerId: ref } })) ?? provider);
     const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
     // The bot's own model on this key; the bot server reads `model` and `supportsVision`, so it needs nothing new
-    const model = servedModel(bot, key, verdict.lendModels) ?? key.model;
+    // For other people the lend to this universe decides which of the key's models may run (#575), as for any bot
+    const model = servedModel(bot, key, lent?.ok ? lent.lendModels : verdict.lendModels) ?? key.model;
     return {
       status: 200,
       body: {

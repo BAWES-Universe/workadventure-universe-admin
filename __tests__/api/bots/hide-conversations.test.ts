@@ -36,6 +36,7 @@ jest.mock('@/lib/db', () => ({
     botsMemory: { findMany: jest.fn(), findFirst: jest.fn(), count: jest.fn(), aggregate: jest.fn(), upsert: jest.fn(), delete: jest.fn(), deleteMany: jest.fn() },
     botsAiUsage: { count: jest.fn() },
     botMemoryForget: { findMany: jest.fn(), create: jest.fn(), deleteMany: jest.fn(), updateMany: jest.fn() },
+    botMemoryItemForget: { findMany: jest.fn(), deleteMany: jest.fn(), updateMany: jest.fn() },
     botFile: { deleteMany: jest.fn() },
   },
 }));
@@ -70,7 +71,10 @@ beforeEach(() => {
   process.env.ADMIN_API_TOKEN = 'admin-secret';
   process.env.BOT_SERVICE_TOKEN = 'service-secret';
   for (const group of Object.values(db)) if (typeof group === 'object') for (const fn of Object.values(group)) fn.mockReset();
-  db.$transaction.mockReset().mockImplementation(async (steps: Promise<unknown>[]) => Promise.all(steps));
+  // Both forms: a list of steps, or an interactive callback (a save runs its lock, read and write in one).
+  db.$transaction.mockReset().mockImplementation(async (steps: Promise<unknown>[] | ((tx: unknown) => Promise<unknown>)) =>
+    typeof steps === 'function' ? steps(prisma) : Promise.all(steps),
+  );
   session.mockReset().mockResolvedValue({ id: 'u-sara', email: 'sara@example.com', isSuperAdmin: false });
   manages.mockReset().mockResolvedValue(true);
   botIs(null);
@@ -83,6 +87,7 @@ beforeEach(() => {
   db.botsMemory.aggregate.mockResolvedValue({ _count: { _all: 3 }, _max: { updatedAt: new Date(9000) } });
   db.botsAiUsage.count.mockResolvedValue(12);
   db.botMemoryForget.findMany.mockResolvedValue([]);
+  db.botMemoryItemForget.findMany.mockResolvedValue([]);
   db.bot.findMany.mockResolvedValue([]);
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
   jest.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -410,7 +415,9 @@ describe('Forget', () => {
     expect(db.botMemoryForget.create).toHaveBeenCalledWith({ data: { botId: 'bot-1', userUuid: 'bob@example.com' } });
     expect(db.botsMemory.deleteMany).toHaveBeenCalledWith({ where: { id: 5 } });
     // And that they were there when someone else's file was put in a chat (game #1993), for this bot's files alone
-    const [sql, ...values] = (prisma as unknown as { $executeRaw: jest.Mock }).$executeRaw.mock.calls[0];
+    // (the first raw call is the per-person lock a Forget takes; this is the seen-by one)
+    const raw = (prisma as unknown as { $executeRaw: jest.Mock }).$executeRaw.mock.calls as [string[], ...unknown[]][];
+    const [sql, ...values] = raw.find(([text]) => text.join('?').startsWith('UPDATE "bot_files"')) ?? [[]];
     expect((sql as string[]).join('?')).toBe('UPDATE "bot_files" SET "seen_by" = array_remove("seen_by", ?) WHERE "bot_id" = ? AND ? = ANY("seen_by")');
     expect(values).toEqual(['bob@example.com', 'bot-1', 'bob@example.com']);
     expect((await call(forget, 'POST', { body: { userUuid: 'x' } })).status).toBe(400);
@@ -639,7 +646,8 @@ describe('deleting a bot, room, world or universe', () => {
     expect(db.botsConversation.deleteMany).toHaveBeenCalledWith(where);
     expect(db.botsMemory.deleteMany).toHaveBeenCalledWith(where);
     expect(db.botMemoryForget.deleteMany).toHaveBeenCalledWith(where);
-    expect(db.$transaction.mock.calls[0][0]).toHaveLength(4);
+    expect(db.botMemoryItemForget.deleteMany).toHaveBeenCalledWith(where);
+    expect(db.$transaction.mock.calls[0][0]).toHaveLength(5);
   });
 
   it('does not take the data of a bot that does not hide, and takes nothing if the delete cannot happen', async () => {

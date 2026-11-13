@@ -9,13 +9,18 @@ import { prisma } from '@/lib/db';
  */
 export type UsagePerson = { personId: string | null; guest: boolean | null };
 
-export const USAGE_CHANNELS = ['dm', 'nearby'] as const;
+export const USAGE_CHANNELS = ['dm', 'nearby', 'task'] as const;
 export type UsageChannel = (typeof USAGE_CHANNELS)[number];
 
-/** "dm" or "nearby"; the bot server's own word for nearby chat ("world") counts too. Anything else is not recorded. */
+/**
+ * "dm" or "nearby"; the bot server's own word for nearby chat ("world") counts too. "task" is a model call a goal or task made on its
+ * owner's behalf (game #2002): usage of the owner like any other, counted in the same window, and the part goals and tasks may use is
+ * measured by it. Anything else is not recorded.
+ */
 export function readUsageChannel(value: unknown): UsageChannel | null {
   if (value === 'dm') return 'dm';
   if (value === 'nearby' || value === 'world') return 'nearby';
+  if (value === 'task') return 'task';
   return null;
 }
 
