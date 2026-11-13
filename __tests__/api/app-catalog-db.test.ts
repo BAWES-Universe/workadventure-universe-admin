@@ -116,6 +116,8 @@ run('the list of apps to connect, in a real database', () => {
     const mine = (apps: { key: string }[]) => apps.filter((app) => app.key.endsWith(tag)).map((app) => app.key).sort();
     expect(mine(all.apps)).toEqual([key('gmail'), key('notion')].sort());
     expect(JSON.stringify(all)).not.toMatch(/platform|authConfig|serverUrl|example\.com/);
+    // Only the name, what it does, its icon and whether they have it: nothing else of an entry ever reaches a person
+    for (const app of all.apps) expect(Object.keys(app).sort()).toEqual(['blurb', 'connectionId', 'icon', 'key', 'name']);
     const found = await (await catalog(request('/api/me/apps/catalog?q=DOCS'))).json();
     expect(mine(found.apps)).toEqual([key('notion')]);
     const byLine = await (await catalog(request('/api/me/apps/catalog?q=send%20email'))).json();
