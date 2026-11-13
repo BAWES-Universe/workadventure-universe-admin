@@ -364,6 +364,22 @@ run('a Brick that lives in a room, in a real database', () => {
       expect(await (await credentials(omar.uuid)).json()).toMatchObject({ source: 'own-key', providerId: keyId, keyOwnerId: sara.id });
     });
 
+    it('serves its owner’s own calls on the owner’s key and things when they name the owner, and anyone else’s, or nobody’s, as for others', async () => {
+      await put(brickId, own.roomUrl);
+      await prisma.bot.update({ where: { id: brickId }, data: { aiProviderRef: keyId } });
+      await prisma.aiKeyLend.deleteMany({ where: { providerId: keyId } });
+      const ownerNamed = await (await credentials(sara.uuid)).json();
+      expect(ownerNamed).toMatchObject({ source: 'own-key', providerId: keyId });
+      expect(ownerNamed.forOthers).toBeUndefined();
+      expect(await (await credentials(sara.email)).json()).toMatchObject({ source: 'own-key', providerId: keyId });
+      // Nobody named (an old bot server): never the owner's key and things, and never refused
+      const unnamed = await aiCredentials(call('GET', `/api/bots/${brickId}/ai-credentials`, undefined, service), ids(brickId));
+      expect(unnamed.status).toBe(200);
+      expect(await unnamed.json()).toMatchObject({ source: 'universe-ai', forOthers: true });
+      // Someone else named
+      expect(await (await credentials(omar.uuid)).json()).toMatchObject({ source: 'universe-ai', forOthers: true });
+    });
+
     it('stands in one place at a time: placing it ends its visit, and a Brick with a home is not brought along', async () => {
       await prisma.universe.update({ where: { id: hosted.universeId }, data: { allowVisitingBricks: true } });
       // Visit first, then home: the visit ends, nothing else of it changes
