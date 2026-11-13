@@ -523,26 +523,20 @@ export async function goalsRoom(ownerId: string, now: Date = new Date()): Promis
 
 /**
  * What runs already handed out will use of the owner's Universe AI room, that their model calls do not show yet. A run handed out and not
- * finished counts as one call, so a batch that falls due together is held to the room there is, instead of every one of them seeing the same
- * count; a call a Brick has written since its runs were handed out takes the place of one of those, so nothing is counted twice. Only a
- * Brick on Universe AI: a run on the owner's own key writes nothing to this bar and takes none of it. A reminder is fixed text and takes none.
+ * finished holds one place, so a batch that falls due together is held to the room there is, instead of every one of them seeing the same
+ * count. A run that has written a call (the bot server names the run on the call) is using its room and holds nothing more: its calls are counted
+ * as usage. A call never takes the place of another run's, and a bot server that does not name the run leaves it holding its place, which can only
+ * hold too early, never too late. Only a Brick on Universe AI: a run on the owner's own key writes nothing to this bar. A reminder takes none.
  */
 async function inFlightRuns(ownerId: string, now: Date): Promise<number> {
-  const bricks = await prisma.$queryRaw<{ bot_id: string; n: bigint; since: Date }[]>(Prisma.sql`
-    SELECT i."bot_id", count(*) AS n, min(r."claimed_at") AS since FROM "brick_item_runs" r
+  const rows = await prisma.$queryRaw<{ n: bigint }[]>(Prisma.sql`
+    SELECT count(*) AS n FROM "brick_item_runs" r
     JOIN "brick_items" i ON i."id" = r."item_id"
     JOIN "bots" b ON b."id" = i."bot_id"
     WHERE r."state" = 'claimed' AND r."lease_until" > ${now}
       AND i."owner_id" = ${ownerId} AND i."kind" <> 'reminder' AND b."ai_provider_ref" = ${UNIVERSE_AI_REF}
-    GROUP BY i."bot_id"`);
-  let reserved = 0;
-  for (const brick of bricks) {
-    const written = await prisma.botsAiUsage.count({
-      where: { botId: brick.bot_id, talkedPersonId: ownerId, keyOwnerId: null, error: false, greeting: false, channel: 'task', timestamp: { gte: brick.since } },
-    });
-    reserved += Math.max(0, Number(brick.n) - written);
-  }
-  return reserved;
+      AND NOT EXISTS (SELECT 1 FROM "bots_ai_usage" a WHERE a."brick_run_id" = r."id")`);
+  return Number(rows[0]?.n ?? 0);
 }
 
 /** Something Brick must tell a person once: their goal or task is waiting for their usage to be back, and when it carries on. */

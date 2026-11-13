@@ -34,6 +34,7 @@ export async function POST(request: NextRequest) {
       timestamp = new Date(),
       greeting = false,
       eventId: clientEventId = null,
+      runId: sentRunId = null,
     } = body;
 
     // A bot on Universe AI is paid for by the provider that is the Default, so that is the row the usage belongs to
@@ -95,6 +96,8 @@ export async function POST(request: NextRequest) {
           talkedGuest: person.guest,
           // A greeting the bot made on its own: still the payer's usage, never counted against the person it greeted
           greeting: greeting === true,
+          // The run of a goal or task the call was made for (game #2002), kept only as the bot server's word for it
+          brickRunId: typeof sentRunId === 'string' && sentRunId ? sentRunId.slice(0, 36) : null,
         },
       })
       // The meter's books (game #1998) copy the call from the row that was just counted. They never hold up or fail the report

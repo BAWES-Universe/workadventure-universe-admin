@@ -1386,6 +1386,9 @@ model BotsAiUsage {
   // usage, but it is never counted against the person it greeted: not in their Universe AI window, not in a bot's own limit per
   // person and not in the guests' pool.
   greeting        Boolean  @default(false)
+  // The run of a goal or task this call was made for (game #2002), when the bot server says. A run with a call here has started using its
+  // room, so it no longer holds a place in it. Null for chat and for a bot server that does not send it.
+  brickRunId      String?  @map("brick_run_id") @db.VarChar(36)
 
   provider        BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
   talkedPerson    User?          @relation("UsageTalkedPerson", fields: [talkedPersonId], references: [id], onDelete: SetNull)
@@ -1396,6 +1399,7 @@ model BotsAiUsage {
   @@index([botId, providerId, timestamp])
   @@index([talkedPersonId, timestamp])
   @@index([talkedUserId, timestamp])
+  @@index([brickRunId])
   @@map("bots_ai_usage")
 }
 
