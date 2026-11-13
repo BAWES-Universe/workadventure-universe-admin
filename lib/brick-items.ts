@@ -506,7 +506,15 @@ export async function goalsRoom(ownerId: string, now: Date = new Date()): Promis
   // No window, or one that has ended, has nothing counted in it
   if (!window || !ends || ends <= now) return { ok: true };
   const mine = { talkedPersonId: ownerId, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: window.startedAt } };
-  const [used, byTasks] = await Promise.all([prisma.botsAiUsage.count({ where: mine }), prisma.botsAiUsage.count({ where: { ...mine, channel: 'task' } })]);
+  const [counted, countedByTasks, inFlight] = await Promise.all([
+    prisma.botsAiUsage.count({ where: mine }),
+    prisma.botsAiUsage.count({ where: { ...mine, channel: 'task' } }),
+    // A run handed out and not yet finished has not written its model calls yet. It counts as one each, so a batch that falls due together
+    // is held to the room there is, instead of every one of them seeing the same count. A reminder is fixed text and takes none.
+    prisma.brickItemRun.count({ where: { state: 'claimed', leaseUntil: { gt: now }, item: { ownerId, kind: { not: 'reminder' } } } }),
+  ]);
+  const used = counted + inFlight;
+  const byTasks = countedByTasks + inFlight;
   const share = Math.max(1, Math.floor((total * goalsShare) / 100));
   return used >= total || byTasks >= share ? { ok: false, resumesAt: ends } : { ok: true };
 }

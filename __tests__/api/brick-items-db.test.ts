@@ -885,6 +885,18 @@ run('goals and tasks, in a real database', () => {
       expect(next.held.map((one) => one.itemId)).toContain(watch.id);
     });
 
+    it('counts the runs already handed out, so a batch that falls due together is held to the room there is', async () => {
+      const gsbat = await person('gsbat');
+      const first = await set(gsbat, { kind: 'watch', words: 'One', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      const second = await set(gsbat, { kind: 'watch', words: 'Two', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      const third = await set(gsbat, { kind: 'watch', words: 'Three', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      // 7 of the 9 calls goals and tasks may use are used: room for two more, not three
+      await usage(gsbat, 7, 'task');
+      const work = await claimWork(at(HOUR + 2 * MIN));
+      expect(mineIn(work, first.id, second.id, third.id)).toHaveLength(2);
+      expect(work.held.filter((one) => one.userId === gsbat.uuid)).toHaveLength(1);
+    });
+
     it('lets extra usage raise the room goals and tasks have, as it does for chat: a multiple raises it, no limit lifts it, and it is back to the usual when it ends', async () => {
       const gsext = await person('gsext');
       const watch = await set(gsext, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
