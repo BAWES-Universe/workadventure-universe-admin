@@ -20,7 +20,7 @@ import { createBrick } from '@/lib/brick-create';
 import { deleteBrick } from '@/lib/brick-delete';
 import { checkBotAccess } from '@/lib/bot-access';
 import { startVisit, whereIsBrick } from '@/lib/brick-visit';
-import { dropHomesWithoutAccess } from '@/lib/brick-home';
+import { dropHomesWithoutAccess, moveBrick, takeOutBrick } from '@/lib/brick-home';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
 import { GET as getHome, PUT as putHome, DELETE as deleteHome } from '@/app/api/bricks/[id]/home/route';
 import { GET as listRoom } from '@/app/api/brick-homes/route';
@@ -212,8 +212,9 @@ run('a Brick that lives in a room, in a real database', () => {
       expect(await home(brickId)).toBeNull();
       expect(await prisma.bot.findUnique({ where: { id: brickId }, select: { ownerId: true, enabled: true, name: true } })).toEqual({ ownerId: sara.id, enabled: true, name: 'Brick' });
 
-      await put(secondBrickId, own.roomUrl);
       as(sara);
+      expect((await put(secondBrickId, own.roomUrl)).status).toBe(200);
+      expect(await home(secondBrickId)).not.toBeNull();
       for (let i = 0; i < 2; i++) expect((await deleteHome(call('DELETE', `/api/bricks/${secondBrickId}/home`), ids(secondBrickId))).status).toBe(200);
       expect(await home(secondBrickId)).toBeNull();
     });
@@ -246,13 +247,14 @@ run('a Brick that lives in a room, in a real database', () => {
 
     it('the sweep reads every home, page after page, so a stale one is never left behind healthy ones', async () => {
       const world = await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } });
-      await put(brickId, own.roomUrl);
-      await put(secondBrickId, hosted.roomUrl);
+      // The healthy home is the one that sorts first, so the stale one is on the second page
+      const [healthyId, staleId] = [brickId, secondBrickId].sort();
+      await put(healthyId, own.roomUrl);
+      await put(staleId, hosted.roomUrl);
       await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: world.id } });
-      // One home per page: the healthy one may come first, the stale one is still reached
       expect(await dropHomesWithoutAccess(undefined, 1)).toBe(1);
-      expect(await home(secondBrickId)).toBeNull();
-      expect(await home(brickId)).not.toBeNull();
+      expect(await home(staleId)).toBeNull();
+      expect(await home(healthyId)).not.toBeNull();
       await prisma.worldMember.create({ data: { userId: sara.id, worldId: world.id, tags: ['admin'] } });
     });
 
@@ -378,6 +380,10 @@ run('a Brick that lives in a room, in a real database', () => {
       expect(await unnamed.json()).toMatchObject({ source: 'universe-ai', forOthers: true });
       // Someone else named
       expect(await (await credentials(omar.uuid)).json()).toMatchObject({ source: 'universe-ai', forOthers: true });
+      // Nobody named, from a room the Brick does not stand in: refused, never the owner's key; from its own room it is as for others
+      const call404 = (roomUrl: string) => aiCredentials(call('GET', `/api/bots/${brickId}/ai-credentials?roomUrl=${encodeURIComponent(roomUrl)}`, undefined, service), ids(brickId));
+      expect((await call404(hosted.roomUrl)).status).toBe(404);
+      expect(await (await call404(own.roomUrl)).json()).toMatchObject({ source: 'universe-ai', forOthers: true });
     });
 
     it('stands in one place at a time: placing it ends its visit, and a Brick with a home is not brought along', async () => {
@@ -439,6 +445,27 @@ run('a Brick that lives in a room, in a real database', () => {
       expect((await home(brickId))?.behaviorConfig).toEqual({ ...SPOT, speed: 30, goesToPeople: true });
       expect((await moveHome(call('PATCH', `/api/brick-homes/${brickId}`, { behaviorConfig: { speed: 60 } }), ids(brickId))).status).toBe(200);
       expect((await home(brickId))?.behaviorConfig).toEqual({ ...SPOT, speed: 60, goesToPeople: true });
+    });
+    it('two edits of different keys at once both stay', async () => {
+      await put(brickId, hosted.roomUrl, { behaviorConfig: SPOT });
+      await Promise.all([
+        moveBrick(brickId, host.id, { behaviorConfig: { speed: 70 } }),
+        moveBrick(brickId, sara.id, { behaviorConfig: { goesToPeople: true } }),
+        moveBrick(brickId, host.id, { behaviorConfig: { wanderSpeed: 25 } }),
+      ]);
+      expect((await home(brickId))?.behaviorConfig).toEqual({ ...SPOT, speed: 70, goesToPeople: true, wanderSpeed: 25 });
+    });
+
+    it('a manager’s edit or removal is for the room they were checked in: a Brick moved on since is left alone', async () => {
+      await put(brickId, hosted.roomUrl, { behaviorConfig: SPOT });
+      // The owner moves it to their own universe's room; the manager of the old room still holds the old reading
+      await put(brickId, own.roomUrl, { behaviorConfig: SPOT });
+      expect(await moveBrick(brickId, host.id, { behaviorConfig: { speed: 99 } })).toBe(false);
+      expect(await takeOutBrick(brickId, host.id)).toBe('not_found');
+      const row = await home(brickId);
+      expect(row?.roomId).toBe(own.roomId);
+      expect(row?.behaviorConfig).toEqual(SPOT);
+      expect(await takeOutBrick(brickId, sara.id)).toBe('taken_out');
     });
   });
 });

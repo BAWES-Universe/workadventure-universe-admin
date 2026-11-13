@@ -84,7 +84,8 @@ export async function homeOfBrick(brickId: string, ownerId: string): Promise<Hom
   const home = await prisma.brickHome.findUnique({ where: { botId: brickId } });
   if (!home) return null;
   if (!(await canManageBots(home.placedById, home.roomId))) {
-    await prisma.brickHome.deleteMany({ where: { botId: brickId, placedById: home.placedById } });
+    // Only the row that failed the check: one moved to another room since is a newer placement
+    await prisma.brickHome.deleteMany({ where: { botId: brickId, roomId: home.roomId, placedById: home.placedById } });
     return null;
   }
   return homeCardOf(home.roomId);
@@ -103,9 +104,11 @@ export async function takeOutBrick(brickId: string, actorId: string): Promise<Ta
     const brick = await prisma.bot.findUnique({ where: { id: brickId }, select: { id: true, roomId: true, ownerId: true, deletedAt: true } });
     return brick && ownsBrick(brick, actorId) ? 'taken_out' : 'not_found';
   }
-  if (home.bot.ownerId !== actorId && !(await canManageBots(actorId, home.roomId))) return 'not_found';
-  await prisma.brickHome.deleteMany({ where: { botId: brickId } });
-  return 'taken_out';
+  const byOwner = home.bot.ownerId === actorId;
+  if (!byOwner && !(await canManageBots(actorId, home.roomId))) return 'not_found';
+  // A manager's removal is for the room they were checked in: if its owner has moved it elsewhere since, they take out nothing
+  const removed = await prisma.brickHome.deleteMany({ where: byOwner ? { botId: brickId } : { botId: brickId, roomId: home.roomId } });
+  return byOwner || removed.count > 0 ? 'taken_out' : 'not_found';
 }
 
 /**
@@ -113,15 +116,21 @@ export async function takeOutBrick(brickId: string, actorId: string): Promise<Ta
  * one: only its owner does. Null when there is nothing of that kind in a room they manage.
  */
 export async function moveBrick(brickId: string, actorId: string, behavior: HomeBehavior): Promise<boolean> {
-  const home = await prisma.brickHome.findUnique({ where: { botId: brickId }, select: { roomId: true, behaviorConfig: true } });
+  const home = await prisma.brickHome.findUnique({ where: { botId: brickId }, select: { roomId: true } });
   if (!home || !(await canManageBots(actorId, home.roomId))) return false;
-  // Only the keys sent change: a body that says only how it walks up to people keeps its spot and route
-  const behaviorConfig = behavior.behaviorConfig ? { ...homeBehaviorConfig(home.behaviorConfig), ...homeBehaviorConfig(behavior.behaviorConfig) } : undefined;
-  await prisma.brickHome.update({
-    where: { botId: brickId },
-    data: { ...(behavior.behaviorType ? { behaviorType: behavior.behaviorType } : {}), ...(behaviorConfig ? { behaviorConfig: behaviorConfig as object } : {}) },
+  // The home's row is held while its settings are read, merged and written, so two edits of different keys both stay; and
+  // only the room the manager was checked in is written, so a Brick its owner has moved since is left as it is
+  return prisma.$transaction(async (tx) => {
+    const held = await tx.$queryRaw<{ behavior_config: unknown }[]>(Prisma.sql`SELECT "behavior_config" FROM "brick_homes" WHERE "bot_id" = ${brickId} AND "room_id" = ${home.roomId} FOR UPDATE`);
+    if (held.length === 0) return false;
+    // Only the keys sent change: a body that says only how it walks up to people keeps its spot and route
+    const behaviorConfig = behavior.behaviorConfig ? { ...homeBehaviorConfig(held[0].behavior_config), ...homeBehaviorConfig(behavior.behaviorConfig) } : undefined;
+    await tx.brickHome.update({
+      where: { botId: brickId },
+      data: { ...(behavior.behaviorType ? { behaviorType: behavior.behaviorType } : {}), ...(behaviorConfig ? { behaviorConfig: behaviorConfig as object } : {}) },
+    });
+    return true;
   });
-  return true;
 }
 
 /** One row of the map editor's list of a room's Bricks. */
@@ -188,7 +197,7 @@ export async function bricksOfRoom(roomUrl: string, viewerId: string): Promise<R
  * went. The Bricks stay.
  */
 export async function dropHomesWithoutAccess(roomId?: string, pageSize = 200): Promise<number> {
-  const gone: string[] = [];
+  const gone: { botId: string; roomId: string; placedById: string }[] = [];
   const memo = new Map<string, boolean>();
   let after: string | undefined;
   for (;;) {
@@ -202,13 +211,16 @@ export async function dropHomesWithoutAccess(roomId?: string, pageSize = 200): P
     for (const home of homes) {
       const key = `${home.placedById}:${home.roomId}`;
       if (!memo.has(key)) memo.set(key, await canManageBots(home.placedById, home.roomId));
-      if (!memo.get(key)) gone.push(home.botId);
+      if (!memo.get(key)) gone.push({ botId: home.botId, roomId: home.roomId, placedById: home.placedById });
     }
     if (homes.length < pageSize) break;
     after = homes[homes.length - 1].botId;
   }
   if (gone.length === 0) return 0;
-  return (await prisma.brickHome.deleteMany({ where: { botId: { in: gone } } })).count;
+  // Each row that failed the check, as it was read: a home placed again since, in another room or by another person, stays
+  let dropped = 0;
+  for (let i = 0; i < gone.length; i += 200) dropped += (await prisma.brickHome.deleteMany({ where: { OR: gone.slice(i, i + 200) } })).count;
+  return dropped;
 }
 
 /**
