@@ -12,10 +12,18 @@ import { randomUUID } from 'node:crypto';
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn(), captureMessage: jest.fn() }));
 // Bots named here hear with their owner's key (the key row given); every other bot as the real code says
 const ownerKeyBots = new Map<string, string>();
+// Runs while Universe AI's hearing is looked up, to make something happen in the middle of a lease
+let duringHearing: (() => Promise<void>) | null = null;
 jest.mock('@/lib/voice-note-hearing', () => {
   const actual = jest.requireActual('@/lib/voice-note-hearing');
   return {
     ...actual,
+    universeAiHearing: async (adapters: Set<string>) => {
+      const run = duringHearing;
+      duringHearing = null;
+      if (run) await run();
+      return actual.universeAiHearing(adapters);
+    },
     botHearing: async (id: string, adapters: Set<string>) => {
       const key = ownerKeyBots.get(id);
       if (!key) return actual.botHearing(id, adapters);
@@ -48,8 +56,8 @@ const turnId = () => `turn-${randomUUID()}`;
 const reserveFor = (botForTurn: string, userId: string, changes: Record<string, unknown> = {}, now?: Date) =>
   reserveVoiceNote({ scope: 'bot', botId: botForTurn, userId, isGuest: true, clientTurnId: turnId(), contentHash: randomUUID(), seconds: 60, adapters: ADAPTERS, source: 'own-key', ...changes }, now);
 const reserve = (userId: string, changes: Record<string, unknown> = {}) => reserveFor(botId, userId, changes);
-const guestBrick = (guestId: string, changes: Record<string, unknown> = {}) =>
-  reserveVoiceNote({ scope: 'guest-brick', roomUrl, userId: guestId, clientTurnId: turnId(), contentHash: randomUUID(), seconds: 60, adapters: ADAPTERS, ...changes });
+const guestBrick = (guestId: string, changes: Record<string, unknown> = {}, now?: Date) =>
+  reserveVoiceNote({ scope: 'guest-brick', roomUrl, userId: guestId, clientTurnId: turnId(), contentHash: randomUUID(), seconds: 60, adapters: ADAPTERS, ...changes }, now);
 const turnOf = (reservation: Reservation) => {
   if (!reservation.ok) throw new Error(`not reserved: ${JSON.stringify(reservation)}`);
   return reservation.turn;
@@ -215,6 +223,48 @@ run('voice notes for every bot, in a real database', () => {
       expect(await leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: ADAPTERS })).toEqual({ granted: false, reason: 'no-hearing' });
       expect(await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: turn.id } })).toMatchObject({ state: 'failed', released: true });
       expect(await botDay(swapped)).toBe(0);
+    });
+
+    it('never starts a reservation that grew too old while its hearing was being looked up, once another took its place', async () => {
+      await saveVoiceLimits({ notesAtOnce: 1 }, makerId);
+      const later = new Date(Date.now() + 3 * 24 * 60 * 60_000);
+      try {
+        const first = turnOf(await guestBrick(`r1-${randomUUID()}`, {}, later));
+        const realNow = Date.now.bind(Date);
+        let second: Reservation | null = null;
+        // While the first lease looks the hearing up, the clock passes the first note's start-by time and a second note is reserved
+        duringHearing = async () => {
+          jest.spyOn(Date, 'now').mockImplementation(() => realNow() + 5_000);
+          second = await guestBrick(`r2-${randomUUID()}`, {}, new Date(later.getTime() + 2 * 60_000 + 1));
+        };
+        let lease;
+        try {
+          lease = await leaseVoiceNoteStage(first.id, { stage: 'hearing', adapters: ADAPTERS }, new Date(later.getTime() + 2 * 60_000 - 1_000));
+        } finally {
+          jest.restoreAllMocks();
+          jest.spyOn(console, 'error').mockImplementation(() => undefined);
+        }
+        expect(second).toMatchObject({ ok: true });
+        expect(lease).toEqual({ granted: false, reason: 'expired' });
+        expect(await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ state: 'failed', released: true });
+        // The second one is the only one heard
+        const next = turnOf(second!);
+        expect(await leaseVoiceNoteStage(next.id, { stage: 'hearing', adapters: ADAPTERS }, new Date(later.getTime() + 2 * 60_000 + 2))).toMatchObject({ granted: true });
+        await prisma.voiceNoteTurn.update({ where: { id: next.id }, data: { state: 'failed', released: true, leaseUntil: null } });
+      } finally {
+        await saveVoiceLimits({ notesAtOnce: 1_000 }, makerId);
+      }
+    });
+
+    it('is the same turn for a signed-in person whose account Orbit only learns of between two asks', async () => {
+      const uuid = `late-${randomUUID()}`;
+      const clientTurnId = turnId();
+      // No account yet: counted as a guest
+      const first = turnOf(await reserve(uuid, { isGuest: false, clientTurnId, contentHash: 'same' }));
+      const person = await prisma.user.create({ data: { uuid, email: `${uuid}@example.test`, name: 'Late' } });
+      people.push(person.id);
+      expect(await reserve(uuid, { isGuest: false, clientTurnId, contentHash: 'same' })).toMatchObject({ ok: true, replay: true, turn: { id: first.id } });
+      expect(await prisma.voiceNoteTurn.count({ where: { clientTurnId } })).toBe(1);
     });
 
     it('refuses a signed-in person it can\'t look up just now, rather than file their note as a guest\'s', async () => {

@@ -222,13 +222,14 @@ export async function reserveVoiceNote(
     personKey = `guest:${userId}`;
     target = `gb:${universeKey}`;
   }
-  const key = { scope_personKey_target_clientTurnId: { scope, personKey, target, clientTurnId } };
+  // The same note from a signed-in person Orbit had no account for yet was filed under their guest key: it is still that turn
+  const asked = { scope, target, clientTurnId, personKey: { in: personKey.startsWith('person:') ? [personKey, `guest:${userId}`] : [personKey] } };
   const same = (turn: VoiceNoteTurn) => {
     if (turn.fingerprint !== fingerprint) throw new VoiceNoteError('This turn id was used for something else', 409);
     return replay(turn, now);
   };
 
-  const earlier = await prisma.voiceNoteTurn.findUnique({ where: key });
+  const earlier = await prisma.voiceNoteTurn.findFirst({ where: asked, orderBy: { createdAt: 'asc' } });
   if (earlier) return same(earlier);
 
   // Read now, so a change on the Limits page counts from the next note
@@ -256,7 +257,7 @@ export async function reserveVoiceNote(
   return prisma.$transaction(async (tx): Promise<Reservation> => {
     // One lock for every reservation: they are short and few, and nothing can take the last minute twice
     await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext('voice-note-reserve'))`);
-    const raced = await tx.voiceNoteTurn.findUnique({ where: key });
+    const raced = await tx.voiceNoteTurn.findFirst({ where: asked, orderBy: { createdAt: 'asc' } });
     if (raced) return same(raced);
 
     const counted = { released: false };
@@ -356,6 +357,7 @@ async function hearingFor(turn: VoiceNoteTurn, adapters: Set<string>): Promise<N
 
 /** Asks to run a stage of a turn: "hearing" (send the note to the provider) or "answer" (run the model on the words). */
 export async function leaseVoiceNoteStage(id: string, input: { stage?: unknown; adapters?: unknown }, now: Date = new Date()): Promise<Lease> {
+  const entered = Date.now();
   const stage = input.stage;
   if (stage !== 'hearing' && stage !== 'answer') throw new VoiceNoteError('stage must be hearing or answer', 400);
   const turn = await findTurn(id);
@@ -385,9 +387,28 @@ export async function leaseVoiceNoteStage(id: string, input: { stage?: unknown; 
       else await moveOn(turn, { state: 'uncertain', leaseUntil: null });
       return { granted: false, reason: 'no-hearing' };
     }
+    if (turn.state === 'reserved') {
+      // Started under the reservations' lock, still young enough at that moment (the clock moved on while the hearing was looked
+      // up): a reservation counts as being heard until it is too old, then never starts, so nothing passes the notes at once
+      const started = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext('voice-note-reserve'))`);
+        const at = now.getTime() + (Date.now() - entered);
+        return tx.voiceNoteTurn.updateMany({
+          where: { id: turn.id, state: 'reserved', generation: turn.generation, createdAt: { gt: new Date(at - STARTING_MS) } },
+          data: { state: 'hearing', generation, leaseUntil },
+        });
+      });
+      if (started.count === 0) {
+        const after = await findTurn(turn.id);
+        if (after.state !== 'reserved') return { granted: false, reason: 'held' };
+        await failUnused(after);
+        return { granted: false, reason: 'expired' };
+      }
+      return { ...granted, hearing };
+    }
     const done = await moveOn(turn, { state: 'hearing', generation, leaseUntil });
     if (done.count === 0) return { granted: false, reason: 'held' };
-    return { ...granted, hearing, ...(turn.state === 'hearing' ? { reconcile: turn.providerRefs } : {}) };
+    return { ...granted, hearing, reconcile: turn.providerRefs };
   }
 
   if (turn.state === 'answering' && live) return { granted: false, reason: 'held' };
