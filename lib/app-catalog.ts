@@ -114,9 +114,18 @@ export async function changeCatalogEntry(id: string, patch: z.infer<typeof catal
   return adminView(await prisma.appCatalogEntry.findUniqueOrThrow({ where: { id } }));
 }
 
-/** Takes an app off the list. Connections people already made from it are theirs and keep working. */
+/**
+ * Takes an app off the list. Connections people already made from it are theirs and keep working, but they let go of the entry's
+ * key in the same step: a new entry that later takes the same key is a different app, and must not count them as connected to it
+ * or hold them to the old link.
+ */
 export async function removeCatalogEntry(id: string): Promise<boolean> {
-  return (await prisma.appCatalogEntry.deleteMany({ where: { id } })).count === 1;
+  return prisma.$transaction(async (tx) => {
+    const entry = await tx.appCatalogEntry.findUnique({ where: { id }, select: { key: true } });
+    if (!entry) return false;
+    await tx.appConnection.updateMany({ where: { catalogKey: entry.key }, data: { catalogKey: null } });
+    return (await tx.appCatalogEntry.deleteMany({ where: { id } })).count === 1;
+  });
 }
 
 /** One row of "Connect another": what a person may know of an app on the list. */
