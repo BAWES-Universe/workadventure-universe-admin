@@ -507,36 +507,34 @@ export async function goalsRoom(ownerId: string, now: Date = new Date()): Promis
   const ends = window ? new Date(window.startedAt.getTime() + windowHours * 60 * MINUTE) : null;
   // No window, or one that has ended, has nothing counted in it
   if (!window || !ends || ends <= now) return { ok: true };
-  const mine = { talkedPersonId: ownerId, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: window.startedAt } };
-  const [counted, countedByTasks, inFlight] = await Promise.all([
-    prisma.botsAiUsage.count({ where: mine }),
-    prisma.botsAiUsage.count({ where: { ...mine, channel: 'task' } }),
-    // A run handed out and not yet finished has not written its model calls yet. It counts as one each, so a batch that falls due together
-    // is held to the room there is, instead of every one of them seeing the same count. A reminder is fixed text and takes none.
-    inFlightRuns(ownerId, now),
-  ]);
-  const used = counted + inFlight;
-  const byTasks = countedByTasks + inFlight;
+  // What was used and what runs still hold are read in ONE statement, so both come from the same snapshot: a call recorded while this reads is
+  // either counted as usage or still holds its run's place, never neither. A run still holds its place until a call of its own that is counted
+  // here (the same rows as the count: not an error, not a greeting, not on a personal key, inside the window) has been written, so a failed call
+  // that is tried again keeps its place, and a call is never counted for one run and subtracted from another. A reminder is fixed text and takes none.
+  const rows = await prisma.$queryRaw<{ counted: bigint; counted_tasks: bigint; in_flight: bigint }[]>(Prisma.sql`
+    SELECT
+      (SELECT count(*) FROM "bots_ai_usage" a WHERE ${countedUsage(ownerId, window.startedAt)}) AS counted,
+      (SELECT count(*) FROM "bots_ai_usage" a WHERE ${countedUsage(ownerId, window.startedAt)} AND a."channel" = 'task') AS counted_tasks,
+      (SELECT count(*) FROM "brick_item_runs" r
+        JOIN "brick_items" i ON i."id" = r."item_id"
+        JOIN "bots" b ON b."id" = i."bot_id"
+        WHERE r."state" = 'claimed' AND r."lease_until" > ${now}
+          AND i."owner_id" = ${ownerId} AND i."kind" <> 'reminder' AND b."ai_provider_ref" = ${UNIVERSE_AI_REF}
+          AND NOT EXISTS (SELECT 1 FROM "bots_ai_usage" a WHERE a."brick_run_id" = r."id" AND ${countedUsage(ownerId, window.startedAt)})) AS in_flight`);
+  const inFlight = Number(rows[0]?.in_flight ?? 0);
+  const used = Number(rows[0]?.counted ?? 0) + inFlight;
+  const byTasks = Number(rows[0]?.counted_tasks ?? 0) + inFlight;
   const share = Math.max(1, Math.floor((total * goalsShare) / 100));
   return used >= total || byTasks >= share ? { ok: false, resumesAt: ends } : { ok: true };
 }
 
 /**
- * What runs already handed out will use of the owner's Universe AI room, that their model calls do not show yet. A run handed out and not
- * finished holds one place, so a batch that falls due together is held to the room there is, instead of every one of them seeing the same
- * count. A run that has written a call (the bot server names the run on the call) is using its room and holds nothing more: its calls are counted
- * as usage. A call never takes the place of another run's, and a bot server that does not name the run leaves it holding its place, which can only
- * hold too early, never too late. Only a Brick on Universe AI: a run on the owner's own key writes nothing to this bar. A reminder takes none.
+ * The usage rows that count against a person's Universe AI window: theirs, on the server's own provider (not a personal key), not a failed
+ * call, not a greeting, inside the window. A run handed out and not finished holds one place until a row like this names it (the bot server
+ * names the run on the call); a bot server that does not name the run leaves it holding its place, which can only hold too early, never too late.
  */
-async function inFlightRuns(ownerId: string, now: Date): Promise<number> {
-  const rows = await prisma.$queryRaw<{ n: bigint }[]>(Prisma.sql`
-    SELECT count(*) AS n FROM "brick_item_runs" r
-    JOIN "brick_items" i ON i."id" = r."item_id"
-    JOIN "bots" b ON b."id" = i."bot_id"
-    WHERE r."state" = 'claimed' AND r."lease_until" > ${now}
-      AND i."owner_id" = ${ownerId} AND i."kind" <> 'reminder' AND b."ai_provider_ref" = ${UNIVERSE_AI_REF}
-      AND NOT EXISTS (SELECT 1 FROM "bots_ai_usage" a WHERE a."brick_run_id" = r."id")`);
-  return Number(rows[0]?.n ?? 0);
+function countedUsage(ownerId: string, since: Date): Prisma.Sql {
+  return Prisma.sql`a."talked_person_id" = ${ownerId} AND a."key_owner_id" IS NULL AND a."error" = false AND a."greeting" = false AND a."timestamp" >= ${since}`;
 }
 
 /** Something Brick must tell a person once: their goal or task is waiting for their usage to be back, and when it carries on. */

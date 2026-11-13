@@ -69,7 +69,13 @@ export async function POST(request: NextRequest) {
 
     // Who talked, matched to their Orbit account so the bot page can name them (#491); a guest is only counted
     const talked = typeof talkedUserId === 'string' && talkedUserId ? talkedUserId.slice(0, 255) : null;
-    const person = await resolveUsagePerson(talked, isGuest);
+    let person = await resolveUsagePerson(talked, isGuest);
+    // A model call a goal or task made is the usage of the Brick's owner whoever the bot server names (it may name nobody), so it is
+    // always counted in their window and against the share goals and tasks may use, never left uncounted
+    if (readUsageChannel(channel) === 'task') {
+      const brick = await prisma.bot.findUnique({ where: { id: botId }, select: { ownerId: true } });
+      if (brick?.ownerId) person = { personId: brick.ownerId, guest: false };
+    }
 
     // Fire-and-forget: Don't await, just start the operation
     // This ensures bot operation isn't blocked if tracking fails

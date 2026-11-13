@@ -999,6 +999,25 @@ run('goals and tasks, in a real database', () => {
       for (const one of items) expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: one.id } })).toMatchObject({ heldSince: null, heldToldAt: null, heldNoticeAt: null });
     });
 
+    it('a call that is not counted (a failed one) leaves its run holding its place, so a retry is never crowded out', async () => {
+      const gsfail = await person('gsfail');
+      const a = await set(gsfail, { kind: 'watch', words: 'A', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      const b = await set(gsfail, { kind: 'watch', words: 'B', condition: 'It drops', cadence: { type: 'every', minutes: 60 } }, at(3 * MIN));
+      // 8 of the 9 calls goals and tasks may use are used: room for one run
+      await usage(gsfail, 8, 'task');
+      const first = await claimWork(at(HOUR + 2 * MIN));
+      expect(mineIn(first, a.id)).toHaveLength(1);
+      expect(mineIn(first, b.id)).toEqual([]);
+      const runA = first.runs.find((one) => one.itemId === a.id)!;
+      // A's call failed: it is not counted, so A still holds its place and B keeps waiting
+      await prisma.botsAiUsage.create({ data: { botId: gsfail.brickId, providerId: 'universe-ai', talkedPersonId: gsfail.id, channel: 'task', error: true, brickRunId: runA.runId, timestamp: at(HOUR + 3 * MIN) } });
+      const next = await claimWork(at(HOUR + 5 * MIN));
+      expect(mineIn(next, b.id)).toEqual([]);
+      // The retry succeeds and is counted: the place is now used by a real call, and still nothing is free for B
+      await prisma.botsAiUsage.create({ data: { botId: gsfail.brickId, providerId: 'universe-ai', talkedPersonId: gsfail.id, channel: 'task', brickRunId: runA.runId, timestamp: at(HOUR + 6 * MIN) } });
+      expect(mineIn(await claimWork(at(HOUR + 7 * MIN)), b.id)).toEqual([]);
+    });
+
     it('a call of one run never takes the place another still-open run holds', async () => {
       const gsover = await person('gsover');
       const a = await set(gsover, { kind: 'watch', words: 'A', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });

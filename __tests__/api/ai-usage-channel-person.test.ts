@@ -13,6 +13,7 @@ jest.mock('@/lib/db', () => ({
     botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn() },
     botsAiUsage: { create: jest.fn(async () => ({})) },
     user: { findUnique: jest.fn() },
+    bot: { findUnique: jest.fn() },
   },
 }));
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
@@ -21,6 +22,7 @@ jest.mock('@/lib/meter', () => ({ recordModelCall: jest.fn(async () => null) }))
 const provider = prisma.botsAiProvider as unknown as Record<'findUnique', jest.Mock>;
 const usage = prisma.botsAiUsage as unknown as Record<'create', jest.Mock>;
 const users = prisma.user as unknown as Record<'findUnique', jest.Mock>;
+const bots = prisma.bot as unknown as Record<'findUnique', jest.Mock>;
 
 const track = (body: object) =>
   trackUsage(new NextRequest('http://localhost:3333/api/bots/ai-usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ botId: 'b1', providerId: 'deepseek-flash', tokensUsed: 900, ...body }) }));
@@ -29,6 +31,7 @@ const saved = () => usage.create.mock.calls[0][0].data;
 beforeEach(() => {
   usage.create.mockReset().mockResolvedValue({});
   users.findUnique.mockReset().mockResolvedValue(null);
+  bots.findUnique.mockReset().mockResolvedValue({ ownerId: 'user-owner' });
   provider.findUnique.mockResolvedValue({ providerId: 'deepseek-flash', ownerId: null });
 });
 
@@ -46,6 +49,23 @@ describe('where a reply was given', () => {
   it('saves anything else as not split', async () => {
     await track({ channel: 'carrier-pigeon' });
     expect(saved().channel).toBeNull();
+  });
+});
+
+describe('a model call a goal or task made', () => {
+  it('is the usage of the Brick’s owner even when the bot server names nobody, or names a guest', async () => {
+    await track({ channel: 'task', runId: 'run-1' });
+    await track({ channel: 'task', userId: 'wa-guest', isGuest: true });
+    expect(usage.create.mock.calls.map((call) => call[0].data)).toEqual([
+      expect.objectContaining({ channel: 'task', talkedPersonId: 'user-owner', talkedGuest: false, brickRunId: 'run-1' }),
+      expect.objectContaining({ channel: 'task', talkedPersonId: 'user-owner', talkedGuest: false }),
+    ]);
+  });
+
+  it('leaves a call of chat as the bot server told it', async () => {
+    await track({ channel: 'dm' });
+    expect(saved().talkedPersonId).toBeNull();
+    expect(bots.findUnique).not.toHaveBeenCalled();
   });
 });
 
