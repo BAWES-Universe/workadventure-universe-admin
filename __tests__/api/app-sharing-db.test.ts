@@ -176,6 +176,14 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect(await prisma.appLend.count({ where: { connectionId: app.id } })).toBe(1);
       const changed = await changeLendRoute(request(`/api/me/apps/${app.id}/lends/${universeA}`, { method: 'PATCH', body: { things: ['lookUp', 'make'], usesPerDay: null } }), params({ connectionId: app.id, universeId: universeA }));
       expect(await json(changed)).toMatchObject({ things: ['lookUp', 'make'], usesPerDay: null });
+      // Four entries with a repeat are three headings, so they narrow the lend; they do not open it to all four
+      const repeated = await changeLendRoute(request(`/api/me/apps/${app.id}/lends/${universeA}`, { method: 'PATCH', body: { things: ['lookUp', 'lookUp', 'make', 'change'] } }), params({ connectionId: app.id, universeId: universeA }));
+      expect(await json(repeated)).toMatchObject({ things: ['lookUp', 'make', 'change'] });
+      expect((await lendTo(app.id, { universeId: universeA, things: ['make', 'make', 'make', 'make'] })).status).toBe(201);
+      expect((await prisma.appLend.findFirstOrThrow({ where: { connectionId: app.id } })).things).toEqual(['make']);
+      const all = await changeLendRoute(request(`/api/me/apps/${app.id}/lends/${universeA}`, { method: 'PATCH', body: { things: ['make', 'lookUp', 'deleteSend', 'change'] } }), params({ connectionId: app.id, universeId: universeA }));
+      expect(all.status).toBe(200);
+      expect((await prisma.appLend.findFirstOrThrow({ where: { connectionId: app.id } })).things).toBeNull();
       expect((await changeLendRoute(request(`/api/me/apps/${app.id}/lends/${universeB}`, { method: 'PATCH', body: { usesPerDay: 5 } }), params({ connectionId: app.id, universeId: universeB }))).status).toBe(404);
     });
   });

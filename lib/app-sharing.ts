@@ -37,8 +37,12 @@ export const lendChangeSchema = z
   })
   .strict();
 
-const uniqueThings = (things: Heading[] | null | undefined): Heading[] | null =>
-  !things || things.length === HEADINGS.length ? null : HEADINGS.filter((heading) => things.includes(heading));
+// Counted after the duplicates are gone: ['lookUp', 'lookUp', 'make', 'change'] is three headings, not all four
+const uniqueThings = (things: Heading[] | null | undefined): Heading[] | null => {
+  if (!things) return null;
+  const kept = HEADINGS.filter((heading) => things.includes(heading));
+  return kept.length === HEADINGS.length ? null : kept;
+};
 
 export type LendResult = 'not_found' | 'not_lendable' | 'no_access';
 
