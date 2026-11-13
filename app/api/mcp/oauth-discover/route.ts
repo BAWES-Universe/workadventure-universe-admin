@@ -3,6 +3,7 @@ import { getSessionUser } from '@/lib/auth-session';
 import { getOAuthCallbackUrl, validateOAuthCallbackUrl } from '@/lib/oauth-callback';
 import { resolve4, resolve6 } from 'dns/promises';
 import { corsHeaders } from '@/lib/cors';
+import { nameFromAddress } from '@/lib/mcp/app-names';
 
 export const runtime = 'nodejs';
 
@@ -15,6 +16,8 @@ interface OAuthMetadata {
   token_endpoint: string;
   registration_endpoint: string | null;
   scopes_supported: string[] | null;
+  /** Where the app takes a sign-in back (RFC 7009), when it says. */
+  revocation_endpoint?: string | null;
   token_endpoint_auth_methods_supported: string[] | null;
 }
 
@@ -240,6 +243,7 @@ function extractOAuthMetadata(body: Record<string, unknown>): OAuthMetadata | nu
     token_endpoint: tokenUrl,
     registration_endpoint: (errorData.registration_endpoint as string) ?? (errorData.registrationEndpoint as string) ?? null,
     scopes_supported: (errorData.scopes_supported as string[]) ?? null,
+    revocation_endpoint: (errorData.revocation_endpoint as string) ?? null,
     token_endpoint_auth_methods_supported: (errorData.token_endpoint_auth_methods_supported as string[]) ?? null,
   };
 }
@@ -579,8 +583,17 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    // Where the app takes a sign-in back (RFC 7009), kept with the sign-in so Disconnect can use it. Only a public address.
+    const revocation = (metadata as unknown as { revocation_endpoint?: unknown }).revocation_endpoint;
+    // Only over https: the sign-in and the client secret are sent there
+    const revocationUrl = typeof revocation === 'string' && revocation.startsWith('https://') && isExternalUrl(revocation) ? revocation : null;
+
     return NextResponse.json({
       discovered: true,
+      // "Signs in with Zapier", and the name field filled from the app (game #2001, Add your own app): from the addresses alone
+      name: nameFromAddress(serverUrl),
+      signsInWith: nameFromAddress(authorizeUrl),
+      revocationUrl,
       authorizeUrl,
       tokenUrl,
       scopesSupported,

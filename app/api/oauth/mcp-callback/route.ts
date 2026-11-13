@@ -23,6 +23,8 @@ interface OAuthConfig {
   scopesSupported?: string[] | null;
   /** Set by the refresh path when a human must re-authorize (#187). */
   reconnectRequired?: { at: string; reason: string } | null;
+  /** Where the app takes a sign-in back (RFC 7009), kept so Disconnect can use it (game #2001). */
+  revocationUrl?: string;
 }
 
 /**
@@ -246,6 +248,7 @@ export async function GET(request: NextRequest) {
       refreshToken: tokenResponse.refresh_token || undefined,
       expiresAt: tokenResponse.expires_in ? Math.floor(Date.now() / 1000) + tokenResponse.expires_in : undefined,
       scopesSupported: oauthConfig.scopesSupported ?? undefined,
+      revocationUrl: oauthConfig.revocationUrl,
       // A fresh authorization clears any previous reconnect-required verdict.
       reconnectRequired: undefined,
     };
