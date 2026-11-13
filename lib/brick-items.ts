@@ -126,7 +126,8 @@ export interface ItemView {
 
 type ItemRow = Prisma.BrickItemGetPayload<object>;
 
-function viewOf(row: ItemRow): ItemView {
+/** An item as everything that reads one sees it. */
+export function viewOf(row: ItemRow): ItemView {
   const steps = stepsSchema.safeParse(row.steps);
   return {
     id: row.id,
