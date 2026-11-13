@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
@@ -127,6 +128,15 @@ export interface ModelCallFacts {
 }
 
 /**
+ * The event id of a call a run made: the Brick, the run as the bot server sent it and the call's own id, so two Bricks can never share one
+ * even when they send the same run and call ids. One that would not fit is made from a hash of all three, never cut short (a cut could join two).
+ */
+export function runCallEventId(botId: string, runKey: string, callId: string): string {
+  const whole = `run:${botId}:${runKey}:model:${callId}`;
+  return whole.length <= 255 ? whole : `run:${createHash('sha256').update(whole).digest('hex')}`;
+}
+
+/**
  * Writes a model call from the place it is already counted (the usage row of POST /api/bots/ai-usage). The person is who talked
  * (a Brick's own person when nobody did), the payer is whoever's key ran it or us, and the figure says how sure its cost is.
  * Never throws: the books are never a reason a reply or its usage report fails.
@@ -143,7 +153,7 @@ export async function recordModelCall(facts: ModelCallFacts, db: Db & Pick<typeo
       {
         // A call a run made is under the run's own id as the bot server sent it (never as a lookup answered it), so a retried report is still one event
         eventId: facts.runKey
-          ? `run:${facts.runKey}:model:${facts.clientEventId ?? `row-${facts.usageRowId}`}`.slice(0, 255)
+          ? runCallEventId(facts.botId, facts.runKey, facts.clientEventId ?? `row-${facts.usageRowId}`)
           : facts.clientEventId
             ? `model:${facts.botId}:${facts.clientEventId}`.slice(0, 255)
             : `ai-usage:${facts.usageRowId}`,

@@ -307,8 +307,8 @@ export async function startJob(input: { botId: string; personId: string; title: 
   // came to, and takes no second room. The run must be this person's, on this Brick.
   if (input.runId) {
     if (!(await runIsTheirs(input.botId, input.personId, input.runId))) return { ok: false, reason: 'no_run' };
-    const started = await prisma.computerJob.findUnique({ where: { botId_runId: { botId: input.botId, runId: input.runId } }, include: JOB_INCLUDE });
-    if (started) return { ok: true, job: jobView(started), restoredFrom: null };
+    const again = await reuseRunJob(input.botId, input.runId, now);
+    if (again) return again;
   }
   let created;
   try {
@@ -318,21 +318,43 @@ export async function startJob(input: { botId: string; personId: string; title: 
   } catch (error) {
     // Two asks for the same run at once: the first made the job, the second finds it
     if (input.runId && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-      const winner = await prisma.computerJob.findUnique({ where: { botId_runId: { botId: input.botId, runId: input.runId } }, include: JOB_INCLUDE });
-      if (winner) return { ok: true, job: jobView(winner), restoredFrom: null };
+      const winner = await reuseRunJob(input.botId, input.runId, now);
+      if (winner) return winner;
     }
     throw error;
   }
   const outcome = await tryStart(created.id, now);
   if (outcome === 'not_set') {
-    // Controls that are not set up: no job was ever going to run, so none is left behind
-    await prisma.computerJob.delete({ where: { id: created.id } });
+    // Controls that are not set up: no job was ever going to run, so none is left behind (a second ask for the same run may have taken it away already)
+    await prisma.computerJob.deleteMany({ where: { id: created.id } });
     return { ok: false, reason: 'not_set' };
   }
   const job = await prisma.computerJob.findUniqueOrThrow({ where: { id: created.id }, include: JOB_INCLUDE });
   if (job.status === 'failed') return { ok: false, reason: 'broken_start' };
   const after = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
   return { ok: true, job: jobView(job), restoredFrom: job.status === 'running' ? (after?.restoredFrom ?? null) : null };
+}
+
+/**
+ * The job a run already started, or null when it has none. Never a job that is still waiting for its first try or is being taken away:
+ * a job still queued is tried again here (a try is safe to repeat, and only one claims the machine), and one the first ask removed
+ * ("controls not set up") answers the same way for this ask. A job that is running, over or in line is returned as it stands.
+ */
+async function reuseRunJob(botId: string, runId: string, now: Date): Promise<Started | null> {
+  const where = { botId_runId: { botId, runId } };
+  let found = await prisma.computerJob.findUnique({ where, include: JOB_INCLUDE });
+  if (!found) return null;
+  if (found.status === 'queued') {
+    if ((await tryStart(found.id, now)) === 'not_set') {
+      await prisma.computerJob.deleteMany({ where: { id: found.id, status: 'queued' } });
+      return { ok: false, reason: 'not_set' };
+    }
+    found = await prisma.computerJob.findUnique({ where, include: JOB_INCLUDE });
+    // The first ask took it away while this one looked again: the controls are not set up
+    if (!found) return { ok: false, reason: 'not_set' };
+  }
+  if (found.status === 'failed') return { ok: false, reason: 'broken_start' };
+  return { ok: true, job: jobView(found), restoredFrom: null };
 }
 
 /** Whether the run is one of this person's goals or tasks on this Brick. */
