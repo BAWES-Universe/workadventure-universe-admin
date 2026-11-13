@@ -14,6 +14,21 @@ jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn(), captureMessage
 const ownerKeyBots = new Map<string, string>();
 // Runs while Universe AI's hearing is looked up, to make something happen in the middle of a lease
 let duringHearing: (() => Promise<void>) | null = null;
+// Runs right after who sent a note is first looked up, to make something happen in the middle of a reservation
+let afterWho: (() => Promise<void>) | null = null;
+jest.mock('@/lib/usage-person', () => {
+  const actual = jest.requireActual('@/lib/usage-person');
+  return {
+    ...actual,
+    resolveUsagePerson: async (...args: unknown[]) => {
+      const found = await actual.resolveUsagePerson(...args);
+      const run = afterWho;
+      afterWho = null;
+      if (run) await run();
+      return found;
+    },
+  };
+});
 jest.mock('@/lib/voice-note-hearing', () => {
   const actual = jest.requireActual('@/lib/voice-note-hearing');
   return {
@@ -264,6 +279,22 @@ run('voice notes for every bot, in a real database', () => {
       const person = await prisma.user.create({ data: { uuid, email: `${uuid}@example.test`, name: 'Late' } });
       people.push(person.id);
       expect(await reserve(uuid, { isGuest: false, clientTurnId, contentHash: 'same' })).toMatchObject({ ok: true, replay: true, turn: { id: first.id } });
+      expect(await prisma.voiceNoteTurn.count({ where: { clientTurnId } })).toBe(1);
+    });
+
+    it('is one turn when the ask that found the account reserves first, and the ask from before it comes after', async () => {
+      const uuid = `race-${randomUUID()}`;
+      const clientTurnId = turnId();
+      let second: Reservation | null = null;
+      // The first ask finds no account; before it reserves, the account appears and a second ask reserves under it
+      afterWho = async () => {
+        const person = await prisma.user.create({ data: { uuid, email: `${uuid}@example.test`, name: 'Race' } });
+        people.push(person.id);
+        second = await reserve(uuid, { isGuest: false, clientTurnId, contentHash: 'same' });
+      };
+      const first = await reserve(uuid, { isGuest: false, clientTurnId, contentHash: 'same' });
+      expect(second).toMatchObject({ ok: true, replay: false });
+      expect(first).toMatchObject({ ok: true, replay: true, turn: { id: turnOf(second!).id } });
       expect(await prisma.voiceNoteTurn.count({ where: { clientTurnId } })).toBe(1);
     });
 

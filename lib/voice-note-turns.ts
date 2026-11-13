@@ -223,7 +223,8 @@ export async function reserveVoiceNote(
     target = `gb:${universeKey}`;
   }
   // The same note from a signed-in person Orbit had no account for yet was filed under their guest key: it is still that turn
-  const asked = { scope, target, clientTurnId, personKey: { in: personKey.startsWith('person:') ? [personKey, `guest:${userId}`] : [personKey] } };
+  const askedFor = (key: string): Prisma.VoiceNoteTurnWhereInput => ({ scope, target, clientTurnId, personKey: { in: key.startsWith('person:') ? [key, `guest:${userId}`] : [key] } });
+  let asked = askedFor(personKey);
   const same = (turn: VoiceNoteTurn) => {
     if (turn.fingerprint !== fingerprint) throw new VoiceNoteError('This turn id was used for something else', 409);
     return replay(turn, now);
@@ -257,6 +258,16 @@ export async function reserveVoiceNote(
   return prisma.$transaction(async (tx): Promise<Reservation> => {
     // One lock for every reservation: they are short and few, and nothing can take the last minute twice
     await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext('voice-note-reserve'))`);
+    if (scope === 'bot' && personKey.startsWith('guest:') && input.isGuest !== true) {
+      // A signed-in person Orbit had no account for a moment ago: looked up again under the lock, so an ask that found the account
+      // in the meantime and reserved this note under it is found here, and the note is never two turns
+      const again = await resolveUsagePerson(userId, input.isGuest);
+      if (!again.personId && again.guest !== true) throw new VoiceNoteError('Who sent this note can\'t be looked up now', 503);
+      if (again.personId) {
+        personKey = `person:${again.personId}`;
+        asked = askedFor(personKey);
+      }
+    }
     const raced = await tx.voiceNoteTurn.findFirst({ where: asked, orderBy: { createdAt: 'asc' } });
     if (raced) return same(raced);
 
