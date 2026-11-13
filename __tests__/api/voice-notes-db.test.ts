@@ -12,6 +12,8 @@ import { randomUUID } from 'node:crypto';
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn(), captureMessage: jest.fn() }));
 // Bots named here hear with their owner's key (the key row given); every other bot as the real code says
 const ownerKeyBots = new Map<string, string>();
+// Bots whose hearing can't be read the next time it is asked (the database away a moment)
+const hearingDown = new Set<string>();
 // Runs while Universe AI's hearing is looked up, to make something happen in the middle of a lease
 let duringHearing: (() => Promise<void>) | null = null;
 // Runs right after who sent a note is first looked up, to make something happen in the middle of a reservation
@@ -40,6 +42,7 @@ jest.mock('@/lib/voice-note-hearing', () => {
       return actual.universeAiHearing(adapters);
     },
     botHearing: async (id: string, adapters: Set<string>) => {
+      if (hearingDown.delete(id)) throw new Error('database away');
       const key = ownerKeyBots.get(id);
       if (!key) return actual.botHearing(id, adapters);
       const row = await jest.requireActual('@/lib/db').prisma.voiceProvider.findUniqueOrThrow({ where: { id: key } });
@@ -225,6 +228,18 @@ run('voice notes for every bot, in a real database', () => {
       expect(await leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: ADAPTERS }, now)).toEqual({ granted: false, reason: 'expired' });
       expect(await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: turn.id } })).toMatchObject({ state: 'failed', released: true });
       expect(await botDay(late)).toBe(0);
+    });
+
+    it('keeps a reservation when its hearing can\'t be read just now, to be asked again', async () => {
+      const key = await prisma.voiceProvider.create({ data: { adapter: 'soniox', name: `Away ${tag}`, ownerId: makerId, recognition: true, enabled: true, apiKeyEncrypted: 'iv:tag:away' } });
+      providers.push(key.id);
+      const away = await newBot('Away');
+      ownerKeyBots.set(away, key.id);
+      const turn = turnOf(await reserveFor(away, `a-${randomUUID()}`, { seconds: 30 }));
+      hearingDown.add(away);
+      await expect(leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: ADAPTERS })).rejects.toThrow('database away');
+      expect(await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: turn.id } })).toMatchObject({ state: 'reserved', released: false });
+      expect(await leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: ADAPTERS })).toMatchObject({ granted: true });
     });
 
     it('hears only with the key a note was reserved with: a key swapped since gives the reservation back', async () => {

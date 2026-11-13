@@ -7,6 +7,7 @@ import { checkReplyAllowance, type ReplyAllowance } from '@/lib/reply-limits';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import { placeFor } from '@/lib/guest-brick';
 import { botHearing, universeAiHearing, type NoteHearing } from '@/lib/voice-note-hearing';
+import { BotSettingsError } from '@/lib/bot-access-settings';
 
 /**
  * Voice note turns (game: every bot hears voice notes, plan v3 sections 2 to 4). The bot server measures a note's real length for
@@ -370,7 +371,15 @@ async function failUnused(turn: VoiceNoteTurn) {
  * checked against its own day, and a hearing being looked up is only ever looked up at the provider that took the note.
  */
 async function hearingFor(turn: VoiceNoteTurn, adapters: Set<string>): Promise<NoteHearing | null> {
-  const now = turn.scope === 'bot' ? await botHearing(turn.botId!, adapters).catch(() => null) : await universeAiHearing(adapters);
+  // Only a bot that is gone has no hearing; anything else (the database away a moment) is thrown, and the turn stays as it is to
+  // be asked again, never given up on
+  const now =
+    turn.scope === 'bot'
+      ? await botHearing(turn.botId!, adapters).catch((error: unknown) => {
+          if (error instanceof BotSettingsError && error.status === 404) return null;
+          throw error;
+        })
+      : await universeAiHearing(adapters);
   return now && now.route !== 'none' && now.payer === turn.payer && (now.provider?.id ?? null) === turn.providerId ? now : null;
 }
 
