@@ -24,7 +24,13 @@ function onlyProviderSetup(authConfig: string | null | undefined): boolean {
   if (!authConfig) return true;
   try {
     const parsed: unknown = JSON.parse(authConfig);
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) && Object.keys(parsed).every((name) => PROVIDER_SETUP_FIELDS.has(name));
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
+    const setup = parsed as Record<string, unknown>;
+    if (!Object.keys(setup).every((name) => PROVIDER_SETUP_FIELDS.has(name))) return false;
+    // A wrong type here would break the sign-in for everyone who taps Connect (the scopes are split as a string)
+    if (setup.scopes !== undefined && setup.scopes !== null && typeof setup.scopes !== 'string') return false;
+    const supported = setup.scopesSupported;
+    return supported === undefined || supported === null || (Array.isArray(supported) && supported.every((scope) => typeof scope === 'string'));
   } catch {
     return false;
   }

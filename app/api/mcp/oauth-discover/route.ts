@@ -16,6 +16,8 @@ interface OAuthMetadata {
   token_endpoint: string;
   registration_endpoint: string | null;
   scopes_supported: string[] | null;
+  /** Where the app takes a sign-in back (RFC 7009), when it says. */
+  revocation_endpoint?: string | null;
   token_endpoint_auth_methods_supported: string[] | null;
 }
 
@@ -241,6 +243,7 @@ function extractOAuthMetadata(body: Record<string, unknown>): OAuthMetadata | nu
     token_endpoint: tokenUrl,
     registration_endpoint: (errorData.registration_endpoint as string) ?? (errorData.registrationEndpoint as string) ?? null,
     scopes_supported: (errorData.scopes_supported as string[]) ?? null,
+    revocation_endpoint: (errorData.revocation_endpoint as string) ?? null,
     token_endpoint_auth_methods_supported: (errorData.token_endpoint_auth_methods_supported as string[]) ?? null,
   };
 }
@@ -582,7 +585,8 @@ export async function GET(request: NextRequest) {
 
     // Where the app takes a sign-in back (RFC 7009), kept with the sign-in so Disconnect can use it. Only a public address.
     const revocation = (metadata as unknown as { revocation_endpoint?: unknown }).revocation_endpoint;
-    const revocationUrl = typeof revocation === 'string' && isExternalUrl(revocation) ? revocation : null;
+    // Only over https: the sign-in and the client secret are sent there
+    const revocationUrl = typeof revocation === 'string' && revocation.startsWith('https://') && isExternalUrl(revocation) ? revocation : null;
 
     return NextResponse.json({
       discovered: true,
