@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { z } from 'zod';
 import { disconnect, renameConnection, NOT_FOUND } from '@/lib/app-connections';
-import { readTeamApp, managerCandidates } from '@/lib/app-sharing';
+import { readTeamApp, managerCandidates, botsToLetUse } from '@/lib/app-sharing';
 import { appsRoute, preflight } from '@/lib/me-apps-route';
 
 export const runtime = 'nodejs';
@@ -15,7 +15,8 @@ export async function OPTIONS(request: NextRequest) {
 
 /**
  * GET /api/me/team-apps/:id - one app that belongs to a universe: who connected it and whether they still manage it, who manages it
- * now, the bots that use it, this month's uses, and the people who could be added as managers. Only for its managers; anyone else
+ * now, the bots that use it, this month's uses, the people who could be added as managers, and the bots of the universe that could
+ * still be let use it (`canLetUse`, only those the person manages). Only for its managers; anyone else
  * gets 404. To sign it in or Reconnect, a manager uses GET /api/me/apps/:id/sign-in.
  */
 export async function GET(request: NextRequest, { params }: Params) {
@@ -23,7 +24,7 @@ export async function GET(request: NextRequest, { params }: Params) {
     const { connectionId } = await params;
     const app = await readTeamApp(user.id, connectionId);
     if (!app) return respond({ error: NOT_FOUND }, 404);
-    return respond({ app, canAddAsManager: (await managerCandidates(user.id, connectionId)) ?? [] });
+    return respond({ app, canAddAsManager: (await managerCandidates(user.id, connectionId)) ?? [], canLetUse: (await botsToLetUse(user.id, connectionId)) ?? [] });
   });
 }
 

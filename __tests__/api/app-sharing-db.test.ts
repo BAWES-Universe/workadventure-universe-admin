@@ -620,6 +620,40 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect((await teamGet(request(`/api/me/team-apps/${id}`), params({ connectionId: id }))).status).toBe(404);
     });
 
+    it('lists on the app’s page the bots of its universe the manager can still let use it, and never another universe’s', async () => {
+      const id = (await json(await addTeam(sara))).id as string;
+      const view = async (person: string) => {
+        as(person);
+        return (await json(await teamGet(request(`/api/me/team-apps/${id}`), params({ connectionId: id })))).canLetUse as { id: string; name: string }[];
+      };
+      expect(await view(sara)).toEqual([{ id: guide, name: 'Guide' }]);
+      // Once it is let use the app, it is no longer offered
+      expect((await letGuide(sara, id)).status).toBe(201);
+      expect(await view(sara)).toEqual([]);
+      // A bot of another universe is never offered, and a person who does not manage the app gets nothing at all
+      expect((await view(sara)).map((bot) => bot.id)).not.toContain(farBot);
+      as(lena);
+      expect((await teamGet(request(`/api/me/team-apps/${id}`), params({ connectionId: id }))).status).toBe(404);
+    });
+
+    it('reads the bots’ own rules once for the page’s bot list, however many bots the universe has', async () => {
+      const id = (await json(await addTeam(sara))).id as string;
+      const roomId = (await prisma.bot.findUniqueOrThrow({ where: { id: guide }, select: { roomId: true } })).roomId;
+      const rules = jest.spyOn(prisma.botAccessRule, 'findMany');
+      const extra: string[] = [];
+      try {
+        for (let index = 0; index < 5; index += 1) extra.push((await prisma.bot.create({ data: { roomId, name: `Extra ${index}`, createdById: sara, behaviorConfig: {} } })).id);
+        as(sara);
+        const view = await json(await teamGet(request(`/api/me/team-apps/${id}`), params({ connectionId: id })));
+        expect(view.canLetUse).toHaveLength(6);
+        // One read of the rules for all six bots, not one for each
+        expect(rules).toHaveBeenCalledTimes(1);
+      } finally {
+        rules.mockRestore();
+        await prisma.bot.deleteMany({ where: { id: { in: extra } } });
+      }
+    });
+
     it('answers "not there" when the universe’s app is removed between the check and the grant, never a plain server error', async () => {
       const id = (await json(await addTeam(sara))).id as string;
       const stale = await prisma.appConnection.findUniqueOrThrow({ where: { id } });

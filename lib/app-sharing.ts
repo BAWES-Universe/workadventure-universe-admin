@@ -2,7 +2,7 @@ import { Prisma, type AppConnection, type BotMcpServer } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { endApprovalsForServers } from '@/lib/bot-actions';
-import { canManageBotMcpServers } from '@/lib/bot-permissions';
+import { canManageBotMcpServers, preloadBotRules, type ManageMemo } from '@/lib/bot-permissions';
 import { lendAccess, lendAccessMany, lendableUniverses, type LendableUniverse } from '@/lib/ai-key-lend';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
 import { claimAppSlot, lockBotForApps } from '@/lib/bot-limits';
@@ -349,6 +349,28 @@ export async function availableForBot(userId: string, botId: string): Promise<Av
     out.push({ connectionId: app.id, name: app.name, kind: 'team' });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * "Let it use" on a universe app's page: the universe's bots this person manages that do not use the app yet. Null when they do
+ * not manage the app. A bot that is full of apps is still listed: letting it use this one answers with the line that says why.
+ */
+export async function botsToLetUse(userId: string, connectionId: string): Promise<{ id: string; name: string }[] | null> {
+  const connection = await prisma.appConnection.findUnique({ where: { id: connectionId } });
+  if (!connection?.universeId || !(await managesTeamApp(userId, connection))) return null;
+  const bots = await prisma.bot.findMany({
+    where: { deletedAt: null, room: { world: { universeId: connection.universeId } }, mcpServers: { none: { connectionId } } },
+    select: { id: true, name: true, createdById: true, roomId: true, ownerId: true, deletedAt: true },
+    orderBy: { name: 'asc' },
+  });
+  if (bots.length === 0) return [];
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+  // One person and one request: their standing in each room is worked out once and the bots' own rules are read in one query,
+  // however many bots the universe has
+  const memo: ManageMemo = new Map();
+  await preloadBotRules(memo, bots.map((bot) => bot.id));
+  const allowed = await Promise.all(bots.map((bot) => canManageBotMcpServers(userId, user?.email ?? null, bot, memo)));
+  return bots.filter((_, index) => allowed[index]).map((bot) => ({ id: bot.id, name: bot.name }));
 }
 
 /**
