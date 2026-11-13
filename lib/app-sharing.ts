@@ -344,6 +344,9 @@ export async function availableForBot(userId: string, botId: string): Promise<Av
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** The most apps one bot uses, the same cap as adding one by hand */
+export const MAX_APPS_PER_BOT = 5;
+
 /**
  * "Let Guide use it": a bot of the universe starts using an app lent there (by the asker) or the universe's own (which the asker
  * manages). The asker must manage the bot. Four headings start at today's defaults, so a change or a send still asks first.
@@ -366,6 +369,13 @@ export async function grantSharedToBot(userId: string, connectionId: string, bot
         // grant is never made after the lend was taken back
         const lend = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_lends" WHERE "connection_id" = ${connectionId} AND "universe_id" = ${universeId} FOR SHARE`;
         if (lend.length === 0) return null;
+      }
+      // Asked twice is the same grant, so it is never turned away for the cap
+      const already = await tx.botMcpServer.findFirst({ where: { botId, connectionId } });
+      if (already) return already;
+      // The same cap as adding an app by hand: a bot uses at most five
+      if ((await tx.botMcpServer.count({ where: { botId } })) >= MAX_APPS_PER_BOT) {
+        throw new AppConnectionError(400, `Maximum of ${MAX_APPS_PER_BOT} apps per bot reached`);
       }
       return tx.botMcpServer.create({
         data: { botId, connectionId, name: connection.name, serverUrl: '', authType: 'none', connectedById: userId },

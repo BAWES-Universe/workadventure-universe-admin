@@ -290,6 +290,34 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect((await check(guide, serverId, { callId: 'back', heading: 'lookUp' })).body.allowed).toBe(true);
     });
 
+    it('stops at five apps on a bot, as adding one by hand does, but still answers a repeated ask with the same grant', async () => {
+      const { app, serverId } = await lentAndLet();
+      const extra = await prisma.bot.create({ data: { roomId: (await prisma.bot.findUniqueOrThrow({ where: { id: guide }, select: { roomId: true } })).roomId, name: 'Crowded', createdById: sara, behaviorConfig: {} } });
+      try {
+        // Four own apps already on the bot, then the lent one makes five
+        for (let n = 0; n < 4; n++) await prisma.botMcpServer.create({ data: { botId: extra.id, name: `Hand ${n}`, serverUrl: `${LINK}/${n}`, authType: 'none' } });
+        const fifth = await letGuide(sara, app.id, extra.id);
+        expect(fifth.status).toBe(201);
+        const fifthServer = (await json(fifth)).serverId as string;
+        // Asked again at the cap: the same grant, not a refusal
+        const again = await letGuide(sara, app.id, extra.id);
+        expect(again.status).toBe(201);
+        expect((await json(again)).serverId).toBe(fifthServer);
+        // A different lent app is the sixth: refused, and nothing is added
+        const other = await keyApp(sara, { name: 'Other' });
+        as(sara);
+        expect((await lendTo(other.id, { universeId: universeA })).status).toBe(201);
+        const sixth = await letGuide(sara, other.id, extra.id);
+        expect(sixth.status).toBe(400);
+        expect((await json(sixth)).error).toMatch(/Maximum of 5 apps/);
+        expect(await prisma.botMcpServer.count({ where: { botId: extra.id } })).toBe(5);
+        expect(serverId).toBeTruthy();
+      } finally {
+        await prisma.botMcpServer.deleteMany({ where: { botId: extra.id } });
+        await prisma.bot.delete({ where: { id: extra.id } });
+      }
+    });
+
     it('counts the same call id of two different bots as two uses, so one bot cannot hide behind another’s id', async () => {
       const { app, serverId } = await lentAndLet({ usesPerDay: 2 });
       const second = await prisma.bot.create({ data: { roomId: (await prisma.bot.findUniqueOrThrow({ where: { id: guide }, select: { roomId: true } })).roomId, name: 'Second', createdById: sara, behaviorConfig: {} } });
