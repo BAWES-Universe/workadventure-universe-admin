@@ -264,6 +264,27 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect((await check(guide, serverId, { callId: 'back', heading: 'lookUp' })).body.allowed).toBe(true);
     });
 
+    it('counts the same call id of two different bots as two uses, so one bot cannot hide behind another’s id', async () => {
+      const { app, serverId } = await lentAndLet({ usesPerDay: 2 });
+      const second = await prisma.bot.create({ data: { roomId: (await prisma.bot.findUniqueOrThrow({ where: { id: guide }, select: { roomId: true } })).roomId, name: 'Second', createdById: sara, behaviorConfig: {} } });
+      try {
+        const grant = await letGuide(sara, app.id, second.id);
+        expect(grant.status).toBe(201);
+        const secondServer = (await json(grant)).serverId as string;
+        expect((await check(guide, serverId, { callId: 'same', heading: 'lookUp' })).body.allowed).toBe(true);
+        expect((await check(second.id, secondServer, { callId: 'same', heading: 'lookUp' })).body.allowed).toBe(true);
+        expect(await prisma.appUse.count({ where: { connectionId: app.id } })).toBe(2);
+        // The day's two uses are gone: a third id, from either bot, is over the limit
+        expect((await check(second.id, secondServer, { callId: 'third', heading: 'lookUp' })).body).toMatchObject({ allowed: false, reason: 'limit_reached' });
+        // And each bot's own retry is still the same use
+        expect((await check(guide, serverId, { callId: 'same', heading: 'lookUp' })).body.allowed).toBe(true);
+        expect(await prisma.appUse.count({ where: { connectionId: app.id } })).toBe(2);
+      } finally {
+        await prisma.botMcpServer.deleteMany({ where: { botId: second.id } });
+        await prisma.bot.delete({ where: { id: second.id } });
+      }
+    });
+
     it('stops at the day’s limit, counts a retry once, and tells the lender once', async () => {
       const { serverId } = await lentAndLet({ usesPerDay: 2 });
       expect((await check(guide, serverId, { callId: 'c1', heading: 'lookUp' })).body.allowed).toBe(true);

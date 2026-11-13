@@ -58,7 +58,7 @@ CREATE UNIQUE INDEX "app_connection_managers_connection_id_user_id_key" ON "app_
 CREATE INDEX "app_uses_connection_id_universe_id_used_at_idx" ON "app_uses"("connection_id", "universe_id", "used_at");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "app_uses_connection_id_call_id_key" ON "app_uses"("connection_id", "call_id");
+CREATE UNIQUE INDEX "app_uses_connection_id_bot_id_call_id_key" ON "app_uses"("connection_id", "bot_id", "call_id");
 
 -- CreateIndex
 CREATE INDEX "app_connections_universe_id_idx" ON "app_connections"("universe_id");

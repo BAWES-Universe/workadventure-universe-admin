@@ -1352,7 +1352,7 @@ model AppUse {
 
   connection AppConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
 
-  @@unique([connectionId, callId])
+  @@unique([connectionId, botId, callId])
   @@index([connectionId, universeId, usedAt])
   @@map("app_uses")
 }

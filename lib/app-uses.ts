@@ -1,8 +1,8 @@
 import { prisma } from '@/lib/db';
 
 /**
- * Uses of a lent app, or of a universe's own app, by a bot of that universe (game #2001 step 7). One row for each call id, so a
- * retried call counts once. These are what "today 12 of 200" and "this month's uses" read. A person's own app used by their own
+ * Uses of a lent app, or of a universe's own app, by a bot of that universe (game #2001 step 7). One row for each call id of each bot (two bots
+ * may use the same id, and neither hides the other's use), so a retried call counts once. These are what "today 12 of 200" and "this month's uses" read. A person's own app used by their own
  * Brick is not written here: that is the meter's alone.
  */
 
@@ -34,7 +34,7 @@ export type UseOutcome = 'recorded' | 'again' | 'limit_reached';
 export async function recordUse(input: { connectionId: string; universeId: string; botId: string; callId: string; limit: number | null }): Promise<UseOutcome> {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-use:${input.connectionId}:${input.universeId}`}))`;
-    const seen = await tx.appUse.findUnique({ where: { connectionId_callId: { connectionId: input.connectionId, callId: input.callId } }, select: { id: true } });
+    const seen = await tx.appUse.findUnique({ where: { connectionId_botId_callId: { connectionId: input.connectionId, botId: input.botId, callId: input.callId } }, select: { id: true } });
     if (seen) return 'again';
     if (input.limit !== null) {
       const today = await tx.appUse.count({ where: { connectionId: input.connectionId, universeId: input.universeId, usedAt: { gte: startOfDay() } } });
