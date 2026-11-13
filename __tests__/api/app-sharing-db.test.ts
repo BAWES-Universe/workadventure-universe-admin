@@ -217,8 +217,8 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
 
     it('shows the bot’s page what was lent, and the person’s own page lists the bot with its uses', async () => {
       const { app, serverId } = await lentAndLet({ things: ['lookUp'], usesPerDay: 200 });
-      await check(guide, serverId, { callId: 'one' });
-      await check(guide, serverId, { callId: 'two' });
+      await check(guide, serverId, { callId: 'one', heading: 'lookUp' });
+      await check(guide, serverId, { callId: 'two', heading: 'lookUp' });
       as(sara);
       const list = await json(await listServers(request(`/api/bots/${guide}/mcp-servers`), params({ id: guide })));
       expect(list).toEqual([expect.objectContaining({ id: serverId, name: 'Tavily', lent: { things: ['lookUp'], usesPerDay: 200 } })]);
@@ -241,30 +241,51 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect(await prisma.appUse.count({ where: { botId: guide } })).toBe(2);
     });
 
+    it('refuses a use that does not say which call or which heading it is: nothing is let through unchecked or uncounted', async () => {
+      const { serverId } = await lentAndLet({ things: ['lookUp'], usesPerDay: 5 });
+      expect((await check(guide, serverId, { heading: 'deleteSend' })).body).toMatchObject({ allowed: false, reason: 'incomplete' });
+      expect((await check(guide, serverId, { callId: 'no-heading' })).body).toMatchObject({ allowed: false, reason: 'incomplete' });
+      expect((await check(guide, serverId, {})).body).toMatchObject({ allowed: false, reason: 'incomplete' });
+      expect(await prisma.appUse.count({ where: { botId: guide } })).toBe(0);
+    });
+
+    it('stops serving the universe when the person who lent it no longer has Manage bots there, and starts again when they do', async () => {
+      const app = await keyApp(nora);
+      as(nora);
+      expect((await lendTo(app.id, { universeId: universeA })).status).toBe(201);
+      const serverId = (await json(await letGuide(nora, app.id))).serverId as string;
+      expect((await check(guide, serverId, { callId: 'before', heading: 'lookUp' })).body).toMatchObject({ allowed: true, paidBy: { kind: 'person', personId: nora } });
+      // nora leaves the universe: the lend row is still there, the app is not served and nothing is billed to her
+      await prisma.worldMember.delete({ where: { userId_worldId: { userId: nora, worldId: worldA } } });
+      expect((await check(guide, serverId, { callId: 'after', heading: 'lookUp' })).body).toMatchObject({ allowed: false, reason: 'gone' });
+      expect(await prisma.appUse.count({ where: { botId: guide, callId: 'after' } })).toBe(0);
+      // They come back with the role: it carries on, as before
+      await prisma.worldMember.create({ data: { worldId: worldA, userId: nora, tags: ['admin'] } });
+      expect((await check(guide, serverId, { callId: 'back', heading: 'lookUp' })).body.allowed).toBe(true);
+    });
+
     it('stops at the day’s limit, counts a retry once, and tells the lender once', async () => {
       const { serverId } = await lentAndLet({ usesPerDay: 2 });
-      expect((await check(guide, serverId, { callId: 'c1' })).body.allowed).toBe(true);
-      expect((await check(guide, serverId, { callId: 'c2' })).body.allowed).toBe(true);
-      const over = await check(guide, serverId, { callId: 'c3' });
+      expect((await check(guide, serverId, { callId: 'c1', heading: 'lookUp' })).body.allowed).toBe(true);
+      expect((await check(guide, serverId, { callId: 'c2', heading: 'lookUp' })).body.allowed).toBe(true);
+      const over = await check(guide, serverId, { callId: 'c3', heading: 'lookUp' });
       expect(over.body).toMatchObject({ allowed: false, reason: 'limit_reached' });
-      expect((await check(guide, serverId, { callId: 'c4' })).body.reason).toBe('limit_reached');
+      expect((await check(guide, serverId, { callId: 'c4', heading: 'lookUp' })).body.reason).toBe('limit_reached');
       // The same call again is the same use, even at the limit
-      expect((await check(guide, serverId, { callId: 'c1' })).body.allowed).toBe(true);
+      expect((await check(guide, serverId, { callId: 'c1', heading: 'lookUp' })).body.allowed).toBe(true);
       expect(await prisma.appUse.count({ where: { botId: guide } })).toBe(2);
       expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-lend-limit' } })).toBe(1);
     });
 
     it('never lets two calls at once take the last use', async () => {
       const { serverId } = await lentAndLet({ usesPerDay: 3 });
-      const results = await Promise.all(Array.from({ length: 8 }, (_, index) => check(guide, serverId, { callId: `p${index}` })));
+      const results = await Promise.all(Array.from({ length: 8 }, (_, index) => check(guide, serverId, { callId: `p${index}`, heading: 'lookUp' })));
       expect(results.filter((result) => result.body.allowed)).toHaveLength(3);
       expect(await prisma.appUse.count({ where: { botId: guide } })).toBe(3);
     });
 
-    it('does not count without a call id, and counts nothing for a person’s own Brick', async () => {
-      const { app, serverId } = await lentAndLet({ usesPerDay: 1 });
-      expect((await check(guide, serverId, {})).body.allowed).toBe(true);
-      expect(await prisma.appUse.count({ where: { botId: guide } })).toBe(0);
+    it('counts nothing for a person’s own Brick, which needs no call id', async () => {
+      const { app } = await lentAndLet({ usesPerDay: 1 });
       const own = await grantToBrick(sara, app.id, saraBrick);
       const verdict = await checkAppUse(saraBrick, own!.id, { requesterKey: `sara-${tag}`, callId: 'x' });
       expect(verdict).toMatchObject({ allowed: true });
@@ -281,7 +302,7 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
     it('has the bot’s switch turn it off', async () => {
       const { serverId } = await lentAndLet();
       await prisma.botMcpServer.update({ where: { id: serverId }, data: { enabled: false } });
-      expect((await check(guide, serverId, { callId: 'z' })).body).toMatchObject({ allowed: false, reason: 'off' });
+      expect((await check(guide, serverId, { callId: 'z', heading: 'lookUp' })).body).toMatchObject({ allowed: false, reason: 'off' });
     });
   });
 
@@ -292,10 +313,10 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       const grant = await prisma.botActionGrant.create({
         data: { ...base, scope: { fixed: {}, varies: [] }, idleMinutes: 60, idleExpiresAt: new Date(Date.now() + 3_600_000), absoluteExpiresAt: new Date(Date.now() + 8 * 3_600_000) },
       });
-      expect((await check(guide, serverId, { callId: 'open' })).body.allowed).toBe(true);
+      expect((await check(guide, serverId, { callId: 'open', heading: 'lookUp' })).body.allowed).toBe(true);
       as(sara);
       expect((await takeBackRoute(request(`/api/me/apps/${app.id}/lends/${universeA}`, { method: 'DELETE' }), params({ connectionId: app.id, universeId: universeA }))).status).toBe(204);
-      expect((await check(guide, serverId, { callId: 'after' })).status).toBe(404);
+      expect((await check(guide, serverId, { callId: 'after', heading: 'lookUp' })).status).toBe(404);
       expect(await prisma.botMcpServer.count({ where: { connectionId: app.id } })).toBe(0);
       expect((await prisma.botActionGrant.findUniqueOrThrow({ where: { id: grant.id } })).revokedAt).not.toBeNull();
       // Lending again later gives Guide nothing
@@ -347,6 +368,12 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect(row.authConfig).not.toContain('ntn-secret');
       expect(created.app).toMatchObject({ name: 'Notion', universeName: 'BAWES Universe', youManage: true, connectedBy: { name: 'Omar', stillManages: true } });
       expect(created.app.managers.map((person: { name: string }) => person.name).sort()).toEqual(['Omar', 'Sara']);
+      // The game's list marks who owns the universe (not removable) and who is asking
+      expect(created.app.managers).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: sara, owner: true, you: false }),
+        expect.objectContaining({ id: omar, owner: false, you: true }),
+      ]));
+      expect(created.app.connectedBy.you).toBe(true);
       expect(JSON.stringify(created)).not.toContain('ntn-secret');
       // A direct write cannot make one that is nobody's or everybody's
       await expect(prisma.appConnection.create({ data: { name: 'x', serverUrl: LINK, ownerId: null, universeId: null } })).rejects.toThrow(/owner_xor_universe/);
@@ -400,6 +427,7 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
     it('is used by the universe’s bot for any visitor, and counted for the universe', async () => {
       const id = (await json(await addTeam(omar))).id as string;
       const serverId = (await json(await letGuide(omar, id))).serverId as string;
+      expect((await check(guide, serverId, {})).body).toMatchObject({ allowed: false, reason: 'incomplete' });
       expect((await check(guide, serverId, { callId: 'u1' })).body).toMatchObject({ allowed: true, paidBy: { kind: 'universe', universeId: universeA } });
       expect((await check(guide, serverId, { requesterKey: `lena-${tag}`, callId: 'u1' })).body.allowed).toBe(true);
       expect((await check(guide, serverId, { callId: 'u2' })).body.allowed).toBe(true);

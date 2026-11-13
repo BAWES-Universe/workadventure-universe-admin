@@ -34,6 +34,8 @@ export interface UseResult {
 export interface ReadyMadeAdapter {
   /** Starts a person's sign-in to one app on the provider's own page. `person` is our id for them, never their email. */
   startConnect(input: { person: string; toolkit: string; returnUrl: string }): Promise<ConnectStart>;
+  /** Whether the person finished signing in for a connection started by `startConnect`: `active` once they did, `pending` while the page is still open, `failed` when it expired or was refused. */
+  connectionStatus(input: { providerAccountId: string }): Promise<'active' | 'pending' | 'failed'>;
   /** The person's own app link at the provider. The provider's code-running sandbox is off in whatever it makes. */
   appLink(input: { person: string; toolkits: string[] }): Promise<AppLink>;
   /** One use of one app tool for one person. `callId` makes a retry the same call. */

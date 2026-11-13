@@ -17,7 +17,7 @@ import { GET as adminGet, PUT as adminPut } from '@/app/api/admin/ready-made-app
 import { POST as useApp } from '@/app/api/ready-made/use/route';
 import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
 import { POST as connectApp } from '@/app/api/me/apps/route';
-import { grantToBrick, createConnection } from '@/lib/app-connections';
+import { grantToBrick, createConnection, readConnection, listConnections } from '@/lib/app-connections';
 import { saveMeterSettings } from '@/lib/meter';
 import { createBrick } from '@/lib/brick-create';
 
@@ -42,6 +42,7 @@ const envBefore = { service: process.env.BOT_SERVICE_TOKEN, key: process.env.ENC
 const fake = () => {
   const adapter = {
     startConnect: jest.fn(async () => ({ redirectUrl: 'https://connect.example/sign-in', providerAccountId: `ca_${tag}`, expiresAt: null })),
+    connectionStatus: jest.fn(async (): Promise<'active' | 'pending' | 'failed'> => 'active'),
     appLink: jest.fn(async () => ({ url: `https://mcp.example/${tag}/mcp`, headers: {} })),
     use: jest.fn(async () => ({ ok: true, data: { free: ['10:00'] }, error: null, providerCallId: 'log_1' })),
   } satisfies ReadyMadeAdapter;
@@ -133,6 +134,52 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect((await again.json()).id).toBe(body.id);
     expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(1);
     expect(adapter.startConnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not read as connected until the provider says the sign-in finished, and a repeat tap starts it again', async () => {
+    const adapter = fake();
+    adapter.connectionStatus.mockResolvedValue('pending');
+    adapter.startConnect
+      .mockResolvedValueOnce({ redirectUrl: 'https://connect.example/first', providerAccountId: `ca_first_${tag}`, expiresAt: null })
+      .mockResolvedValueOnce({ redirectUrl: 'https://connect.example/second', providerAccountId: `ca_second_${tag}`, expiresAt: null });
+    setAdapterForTests(adapter);
+    await list();
+    asSara();
+    const first = await (await connect()).json();
+    expect(first.redirectUrl).toBe('https://connect.example/first');
+    expect((await readConnection(first.id, sara))?.connected).toBe(false);
+
+    // The person closed the provider's page: tapping Connect again gives a page that works, for the same connection
+    const again = await connect();
+    expect(again.status).toBe(200);
+    expect(await again.json()).toEqual({ id: first.id, redirectUrl: 'https://connect.example/second' });
+    expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(1);
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: first.id } })).providerAccountId).toBe(`ca_second_${tag}`);
+    expect(adapter.appLink).toHaveBeenCalledTimes(1);
+
+    // They finished it this time: it reads connected, once and for good, and a tap no longer starts a sign-in
+    adapter.connectionStatus.mockResolvedValue('active');
+    expect((await listConnections(sara))[0].connected).toBe(true);
+    expect(adapter.connectionStatus).toHaveBeenLastCalledWith({ providerAccountId: `ca_second_${tag}` });
+    const after = await connect();
+    expect(await after.json()).toEqual({ id: first.id });
+    expect(adapter.startConnect).toHaveBeenCalledTimes(2);
+  });
+
+  it('is not used, and nothing is counted, while the sign-in is not finished or the provider cannot be asked', async () => {
+    const adapter = fake();
+    adapter.connectionStatus.mockResolvedValue('pending');
+    setAdapterForTests(adapter);
+    await list();
+    asSara();
+    const made = await (await connect()).json();
+    const grant = (await grantToBrick(sara, made.id, saraBrick)) as { id: string };
+    expect((await useIt({ serverId: grant.id })).status).toBe(502);
+    adapter.connectionStatus.mockRejectedValue(new Error('down'));
+    expect((await useIt({ serverId: grant.id })).status).toBe(502);
+    expect(adapter.use).not.toHaveBeenCalled();
+    expect(await prisma.meterEvent.count({ where: { personId: sara, kind: 'app_use' } })).toBe(0);
+    expect((await readConnection(made.id, sara))?.connected).toBe(false);
   });
 
   it('refuses an app that is not on the list or is turned off', async () => {

@@ -52,14 +52,14 @@ describe('the values', () => {
       guard: true,
       fairUsage: { signedIn: 30, guest: 10, guestPool: 200 },
       files: { text: 2_000_000, findable: 0, guestDays: 1 },
-      bricks: { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200 },
+      bricks: { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30 },
     });
   });
 
   it('keeps the two numbers for Bricks as settings: whole numbers, each inside what can be saved (game #1996)', () => {
-    expect(readServerLimits({ bricks: { undoDays: 30 } }).bricks).toEqual({ undoDays: 30, offerAfter: 3, guestReplies: 10, universePool: 200 });
+    expect(readServerLimits({ bricks: { undoDays: 30 } }).bricks).toEqual({ undoDays: 30, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30 });
     // A saved value that can't be saved reads as the recommended one
-    expect(readServerLimits({ bricks: { undoDays: 0, offerAfter: 'often' } }).bricks).toEqual({ undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200 });
+    expect(readServerLimits({ bricks: { undoDays: 0, offerAfter: 'often' } }).bricks).toEqual({ undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30 });
     expect(checkServerLimits({ bricks: { undoDays: 14, offerAfter: 5 } })).toEqual({ ok: true, value: { bricks: { undoDays: 14, offerAfter: 5 } } });
     for (const bad of [0, 366, 2.5]) expect(checkServerLimits({ bricks: { undoDays: bad } })).toMatchObject({ ok: false, error: expect.stringContaining('bricks.undoDays') });
     for (const bad of [1, 101, 3.5]) expect(checkServerLimits({ bricks: { offerAfter: bad } })).toMatchObject({ ok: false, error: expect.stringContaining('bricks.offerAfter') });
@@ -158,25 +158,25 @@ describe('/api/admin/bot-limits', () => {
   });
 
   it('saves the numbers for Bricks on top of what is saved, and gives them to whoever deletes or suggests (game #1996)', async () => {
-    expect(await getBrickLimits()).toEqual({ undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200 });
+    expect(await getBrickLimits()).toEqual({ undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30 });
     settings.findUnique.mockResolvedValue({ key: 'bot-limits', value: { bricks: { offerAfter: 5 } } });
     const response = await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { undoDays: 14 } }));
     expect(response.status).toBe(200);
-    expect((await response.json()).limits.bricks).toEqual({ undoDays: 14, offerAfter: 5, guestReplies: 10, universePool: 200 });
-    expect(settings.upsert.mock.calls[0][0].update.value.bricks).toEqual({ undoDays: 14, offerAfter: 5, guestReplies: 10, universePool: 200 });
-    expect(await getBrickLimits()).toEqual({ undoDays: 7, offerAfter: 5, guestReplies: 10, universePool: 200 });
+    expect((await response.json()).limits.bricks).toEqual({ undoDays: 14, offerAfter: 5, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30 });
+    expect(settings.upsert.mock.calls[0][0].update.value.bricks).toEqual({ undoDays: 14, offerAfter: 5, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30 });
+    expect(await getBrickLimits()).toEqual({ undoDays: 7, offerAfter: 5, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30 });
     expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { undoDays: 0 } }))).status).toBe(400);
   });
 
   it('saves the Brick for guests\' own allowance and pool (game #1997), and turns down what can\'t be saved', async () => {
     const response = await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { guestReplies: 20 } }));
     expect(response.status).toBe(200);
-    expect((await response.json()).limits.bricks).toEqual({ undoDays: 7, offerAfter: 3, guestReplies: 20, universePool: 200 });
-    expect(settings.upsert.mock.calls[0][0].create.value.bricks).toEqual({ undoDays: 7, offerAfter: 3, guestReplies: 20, universePool: 200 });
+    expect((await response.json()).limits.bricks).toEqual({ undoDays: 7, offerAfter: 3, guestReplies: 20, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30 });
+    expect(settings.upsert.mock.calls[0][0].create.value.bricks).toEqual({ undoDays: 7, offerAfter: 3, guestReplies: 20, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30 });
     expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { universePool: 0 } }))).status).toBe(400);
     expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { guestReplies: 1.5 } }))).status).toBe(400);
     expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { bricks: { nothing: 1 } }))).status).toBe(400);
-    expect(await getBrickLimits()).toEqual({ undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200 });
+    expect(await getBrickLimits()).toEqual({ undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30 });
   });
 
   it('turns down "Reads from an earlier file" above "Reads from a page or file", saying why, and saves nothing', async () => {

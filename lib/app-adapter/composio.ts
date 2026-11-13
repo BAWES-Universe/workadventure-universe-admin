@@ -7,6 +7,7 @@ import { AdapterError, type AppLink, type ConnectStart, type ReadyMadeAdapter, t
  *  - API: https://backend.composio.dev/api/v3.1, header `x-api-key`.
  *  - Connect: POST /connected_accounts/link { auth_config_id, user_id, callback_url } -> { redirect_url, connected_account_id, expires_at }.
  *    The auth config is one per app, kept in a super admin setting (never in code) and passed in as the toolkit's config id.
+ *  - Status: GET /connected_accounts/{id} -> { status: ACTIVE | INITIALIZING | INITIATED | FAILED | EXPIRED | INACTIVE }. Only ACTIVE reads as connected.
  *  - Use: POST /tools/execute/{tool_slug} { user_id, connected_account_id, arguments } -> { data, successful, error, log_id }.
  *  - Link: POST /tool_router/session { user_id, toolkits, workbench: { enable: false } } -> { session_id, mcp: { url } }. The docs show no
  *    headers for that link, so none are sent or stored here; if one is needed it is found out on the first real test, with Khalid's OK.
@@ -31,11 +32,11 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
   const doFetch = options.fetchImpl ?? fetch;
   const base = options.baseUrl ?? BASE;
 
-  async function call(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async function call(path: string, body: Record<string, unknown> | null): Promise<Record<string, unknown>> {
     const response = await doFetch(`${base}${path}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': options.apiKey },
-      body: JSON.stringify(body),
+      method: body ? 'POST' : 'GET',
+      headers: { ...(body ? { 'content-type': 'application/json' } : {}), 'x-api-key': options.apiKey },
+      ...(body ? { body: JSON.stringify(body) } : {}),
       signal: AbortSignal.timeout(30_000),
     });
     const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
@@ -54,6 +55,14 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
       const providerAccountId = str(json.connected_account_id);
       if (!redirectUrl || !providerAccountId) throw new AdapterError('provider', 'Provider sent no sign-in page');
       return { redirectUrl, providerAccountId, expiresAt: str(json.expires_at) };
+    },
+
+    async connectionStatus({ providerAccountId }): Promise<'active' | 'pending' | 'failed'> {
+      const json = await call(`/connected_accounts/${encodeURIComponent(providerAccountId)}`, null);
+      const status = typeof json.status === 'string' ? json.status.toUpperCase() : '';
+      if (status === 'ACTIVE') return 'active';
+      if (status === 'INITIALIZING' || status === 'INITIATED') return 'pending';
+      return 'failed';
     },
 
     async appLink({ person, toolkits }): Promise<AppLink> {

@@ -8,8 +8,10 @@ export interface BotContext {
   actorId: string | null;
   /** Who made the bot; for a new bot, the person saving it. */
   makerId: string | null;
-  /** The room the bot will stand in. */
-  roomId: string;
+  /** The room the bot will stand in. Null for a Brick, which has none: then `ownerId` says whose it is. */
+  roomId: string | null;
+  /** A Brick's owner (game #1992). Left out for a room bot. */
+  ownerId?: string | null;
   /** The bot being saved; null for a bot not made yet. */
   botId: string | null;
 }
@@ -91,7 +93,7 @@ export async function checkBotModel(
 /** Someone else's key: its model is its owner's to pick, as the key is theirs to put a bot on. */
 export const ONLY_OWNER_PICKS_MODEL = 'Only the key’s owner can pick its model.';
 
-/** These checks run when a bot is saved through a room's bot editor, so it is a room bot: a room and no owner. */
+/** A bot saved through a room's bot editor is a room bot (a room and no owner); a Brick's owner saving it names no room. */
 function botOf(context: BotContext): BotForKey {
-  return { id: context.botId, createdById: context.makerId, roomId: context.roomId, ownerId: null, deletedAt: null };
+  return { id: context.botId, createdById: context.makerId, roomId: context.roomId, ownerId: context.roomId === null ? context.ownerId ?? null : null, deletedAt: null };
 }

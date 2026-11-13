@@ -1,7 +1,9 @@
 import { randomBytes } from 'crypto';
 import { Prisma, type AppConnection, type BotMcpServer } from '@prisma/client';
 import { z } from 'zod';
+import { confirmReadyMade } from '@/lib/app-adapter/confirm';
 import { prisma } from '@/lib/db';
+import { lendAccess } from '@/lib/ai-key-lend';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { endApprovalsForServers } from '@/lib/bot-actions';
 import { ownsBrick } from '@/lib/brick';
@@ -63,7 +65,7 @@ export function effectiveServer<T extends ServerRow>(row: T): T {
 }
 
 /** Why an app cannot be used for a request. The bot server only ever learns `allowed`, never what the app holds. */
-export type AppUseRefusal = 'gone' | 'off' | 'not_owner' | 'not_lent' | 'limit_reached';
+export type AppUseRefusal = 'gone' | 'off' | 'not_owner' | 'not_lent' | 'limit_reached' | 'incomplete';
 
 /** The four headings a bot's settings are kept under, and what a lend may narrow bots to. */
 export const HEADINGS = ['lookUp', 'make', 'change', 'deleteSend'] as const;
@@ -87,9 +89,9 @@ export const useCheckSchema = z
     requesterKey: z.string().trim().min(1).max(400).optional(),
     /** The Brick is working for its owner on its own, such as a goal they set (game #2002): no one else is asking. */
     forOwner: z.boolean().optional(),
-    /** For a lent or a universe's own app: the bot server's id for this call, so "uses a day" counts a retry once. */
+    /** Required for a lent or a universe's own app (a use without it is refused as `incomplete`): the bot server's id for this call, so "uses a day" counts a retry once. */
     callId: z.string().trim().min(1).max(200).optional(),
-    /** For a lent app: which heading the tool falls under, so what the lender allowed is held at every use. */
+    /** Required for a lent app (a use without it is refused as `incomplete`): which heading the tool falls under, so what the lender allowed is held at every use. */
     heading: z.enum(HEADINGS).optional(),
   })
   .strict();
@@ -123,23 +125,28 @@ export async function checkAppUse(botId: string, serverId: string, input: z.infe
     if (row.bot.deletedAt !== null) return refuse('gone');
     const universeId = await botUniverseId(botId);
     if (!universeId) return refuse('gone');
+    // A use with no call id could not be counted, and one with no heading could not be held to what the lender allowed: both are
+    // refused, never let through unchecked
+    if (!input.callId) return refuse('incomplete');
     if (connection.universeId) {
       if (connection.universeId !== universeId) return refuse('gone');
       if (!row.enabled) return refuse('off');
-      if (input.callId) await recordUse({ connectionId: connection.id, universeId, botId, callId: input.callId, limit: null });
+      await recordUse({ connectionId: connection.id, universeId, botId, callId: input.callId, limit: null });
       return { allowed: true, viaConnection: true, paidBy: { kind: 'universe', universeId } };
     }
     const lend = await prisma.appLend.findUnique({ where: { connectionId_universeId: { connectionId: connection.id, universeId } } });
     if (!lend || !connection.ownerId) return refuse('gone');
+    // The lender must still be allowed to lend here: someone who left the universe, or lost Manage bots, no longer has their app
+    // serving it (and billed to them) just because the lend row is still there
+    if (!lend.lentById || !(await lendAccess(lend.lentById, universeId))) return refuse('gone');
     if (!row.enabled) return refuse('off');
+    if (!input.heading) return refuse('incomplete');
     const things = Array.isArray(lend.things) ? (lend.things as unknown[]) : null;
-    if (input.heading && things && !things.includes(input.heading)) return refuse('not_lent');
-    if (input.callId) {
-      const outcome = await recordUse({ connectionId: connection.id, universeId, botId, callId: input.callId, limit: lend.usesPerDay });
-      if (outcome === 'limit_reached') {
-        await tellLenderOfLimit(lend, connection.name);
-        return refuse('limit_reached');
-      }
+    if (things && !things.includes(input.heading)) return refuse('not_lent');
+    const outcome = await recordUse({ connectionId: connection.id, universeId, botId, callId: input.callId, limit: lend.usesPerDay });
+    if (outcome === 'limit_reached') {
+      await tellLenderOfLimit(lend, connection.name);
+      return refuse('limit_reached');
     }
     return { allowed: true, viaConnection: true, paidBy: { kind: 'person', personId: lend.lentById ?? connection.ownerId } };
   }
@@ -245,6 +252,8 @@ export interface Headings {
 }
 
 export function connectedState(connection: AppConnection): { connected: boolean; reconnectRequired: boolean } {
+  // A ready-made app is connected only once the provider confirmed the sign-in (lib/app-adapter/confirm.ts), never from the tap
+  if (connection.source === 'ready_made') return { connected: !!connection.providerConfirmedAt && !connection.signInLostAt, reconnectRequired: false };
   if (connection.authType !== 'oauth') return { connected: true, reconnectRequired: false };
   if (!connection.authConfig) return { connected: false, reconnectRequired: false };
   try {
@@ -285,17 +294,24 @@ function toView(connection: ConnectionWithGrants): ConnectionView {
   };
 }
 
+/** A ready-made app whose sign-in is not confirmed yet is asked about once more before it is shown, so a finished sign-in reads connected. */
+async function confirmIfPending<T extends AppConnection>(row: T): Promise<T> {
+  if (row.source !== 'ready_made' || row.providerConfirmedAt) return row;
+  const confirmedAt = await confirmReadyMade(row);
+  return confirmedAt ? { ...row, providerConfirmedAt: confirmedAt } : row;
+}
+
 const GRANTS = { grants: { include: { bot: { select: { id: true, name: true, deletedAt: true, roomId: true } } }, orderBy: { createdAt: 'asc' as const } } };
 
 /** Every app the person connected, oldest first, with the Bricks of theirs that use each. Only theirs. */
 export async function listConnections(ownerId: string): Promise<ConnectionView[]> {
   const rows = await prisma.appConnection.findMany({ where: { ownerId }, include: GRANTS, orderBy: { createdAt: 'asc' } });
-  return rows.map(toView);
+  return (await Promise.all(rows.map(confirmIfPending))).map(toView);
 }
 
 export async function readConnection(connectionId: string, ownerId: string): Promise<ConnectionView | null> {
   const row = await prisma.appConnection.findFirst({ where: { id: connectionId, ownerId }, include: GRANTS });
-  return row ? toView(row) : null;
+  return row ? toView(await confirmIfPending(row)) : null;
 }
 
 /** The Bricks the person has, so the app's page can offer "Let it use Gmail" for each one that does not use it yet. */

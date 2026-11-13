@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
     const body = await readBody(request, bodySchema);
     if (body.response) return body.response;
     const { botId, serverId, requesterKey, forOwner, tool, callId } = body.data;
-    const verdict = await checkAppUse(botId, serverId, { requesterKey, forOwner });
+    const verdict = await checkAppUse(botId, serverId, { requesterKey, forOwner, callId });
     if (!verdict) return json(request, { allowed: false, reason: 'gone' }, 404);
     if (!verdict.allowed) return json(request, { allowed: false, reason: verdict.reason }, 403);
     if (!verdict.readyMade) return json(request, { error: 'Not found' }, 404);

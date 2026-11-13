@@ -41,6 +41,8 @@ export interface Limit {
   value: number;
   recommended: number;
   options: LimitOption[];
+  /** Nothing is set yet and no value is suggested (game #1999: a computer's money comes from our own test): the row says "Not set", with no recommended mark. */
+  unset?: boolean;
   /** Shown under the choices in the sheet: cost or what it affects. */
   note?: string;
   /** No "Other" box (a choice between fixed steps). */
@@ -61,6 +63,7 @@ export interface ModelCap {
 }
 
 export function shown(limit: Limit, value = limit.value): string {
+  if (limit.unset && value === limit.value) return 'Not set';
   const option = limit.options.find((entry) => entry.value === value);
   return option ? option.label : `${value.toLocaleString('en')} ${limit.unit}`;
 }
@@ -77,6 +80,8 @@ export function RecommendedPill() {
 /** One row: what it is, what it does, and its value; the whole row opens the choices. */
 export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }) {
   const isRecommended = limit.value === limit.recommended;
+  // A limit with no recommended value (a negative one) shows its value alone, and "Not set" while nothing is set
+  const mark = limit.unset || limit.recommended < 0 ? null : isRecommended ? <RecommendedPill /> : <span className="text-[11px] text-muted-foreground">Recommended: {shown(limit, limit.recommended)}</span>;
   return (
     <button
       type="button"
@@ -95,12 +100,12 @@ export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }
         )}
         <span className="mt-1.5 flex flex-wrap items-center gap-2 sm:hidden">
           <span className="text-sm font-bold">{shown(limit)}</span>
-          {isRecommended ? <RecommendedPill /> : <span className="text-[11px] text-muted-foreground">Recommended: {shown(limit, limit.recommended)}</span>}
+          {mark}
         </span>
       </span>
       <span className="hidden shrink-0 justify-items-end gap-1 sm:grid">
         <span className="text-sm font-bold">{shown(limit)}</span>
-        {isRecommended ? <RecommendedPill /> : <span className="text-[11px] text-muted-foreground">Recommended: {shown(limit, limit.recommended)}</span>}
+        {mark}
       </span>
       <ChevronRight size={18} aria-hidden="true" className="shrink-0 text-muted-foreground" />
     </button>
@@ -109,9 +114,9 @@ export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }
 
 /** The choices for one limit: radio cards with what each means, the recommended one marked, and Other. */
 export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone: (value: number) => Promise<void> | void; onCancel: () => void }) {
-  const known = limit.options.some((option) => option.value === limit.value);
+  const known = !limit.unset && limit.options.some((option) => option.value === limit.value);
   const [picked, setPicked] = useState<number | 'other'>(known ? limit.value : 'other');
-  const [other, setOther] = useState(known ? '' : String(limit.value));
+  const [other, setOther] = useState(known || limit.unset ? '' : String(limit.value));
   const [saving, setSaving] = useState(false);
   // What was typed is read as it is, with commas and spaces as thousands marks: "-50" or "1e2" is refused, not turned into 50 or 12
   const typed = other.replace(/[,\s]/g, '');
@@ -614,7 +619,168 @@ export function brickLimits(values: BrickLimits): Limit[] {
         { value: 500, label: '500 replies', meaning: every },
       ],
     },
+    {
+      id: 'visitEndsMinutes',
+      label: 'Minutes a visiting Brick stays after its person is gone',
+      hint: 'A Brick that walks with someone goes when they leave Universe. This is how long Universe waits without seeing them before it ends the visit.',
+      unit: 'minutes',
+      value: values.visitEndsMinutes,
+      recommended: recommended.visitEndsMinutes,
+      options: [
+        { value: 5, label: '5 minutes', meaning: 'It goes quickly.' },
+        { value: 10, label: '10 minutes', meaning: 'Survives a short break.' },
+        { value: 30, label: '30 minutes', meaning: 'Waits for a longer break.' },
+      ],
+    },
+    {
+      id: 'itemsPerPerson',
+      label: 'Goals and tasks one person can have going',
+      hint: 'Reminders, schedules, watches and goals together, paused ones included. Done ones do not count.',
+      unit: 'goals and tasks',
+      value: values.itemsPerPerson,
+      recommended: recommended.itemsPerPerson,
+      options: [
+        { value: 10, label: '10', meaning: 'Keeps it small.' },
+        { value: 20, label: '20', meaning: 'Room for a good few.' },
+        { value: 50, label: '50', meaning: 'For people who keep a lot going.' },
+      ],
+    },
+    {
+      id: 'shortestRepeat',
+      label: 'Shortest wait between two runs of one goal or task',
+      hint: 'A Brick that is asked to check more often says so and offers this instead.',
+      unit: 'minutes',
+      value: values.shortestRepeat,
+      recommended: recommended.shortestRepeat,
+      options: [
+        { value: 15, label: '15 minutes', meaning: 'Checks often.' },
+        { value: 30, label: '30 minutes', meaning: 'A steady pace.' },
+        { value: 60, label: '1 hour', meaning: 'Gentle on usage.' },
+      ],
+    },
+    {
+      id: 'runsPerDay',
+      label: 'Runs a day for one person’s goals and tasks',
+      hint: 'Watches, schedules and goals together. Reminders are fixed text with no AI, so they never use these.',
+      unit: 'runs',
+      value: values.runsPerDay,
+      recommended: recommended.runsPerDay,
+      options: [
+        { value: 12, label: '12 runs', meaning: 'Each day.' },
+        { value: 24, label: '24 runs', meaning: 'Each day.' },
+        { value: 48, label: '48 runs', meaning: 'Each day.' },
+      ],
+    },
+    {
+      id: 'longestRun',
+      label: 'Longest one run can take',
+      hint: 'After this the run is given up, shown as failed, and the next one starts fresh.',
+      unit: 'minutes',
+      value: values.longestRun,
+      recommended: recommended.longestRun,
+      options: [
+        { value: 5, label: '5 minutes', meaning: 'For short checks.' },
+        { value: 10, label: '10 minutes', meaning: 'A steady pace.' },
+        { value: 30, label: '30 minutes', meaning: 'For longer work.' },
+      ],
+    },
+    {
+      id: 'computerWait',
+      label: 'How long a computer waits for a person to take over',
+      hint: 'When Brick hands over and nobody takes over, the computer waits this long. Then the job ends and its room goes back to the person’s allowance.',
+      unit: 'minutes',
+      value: values.computerWait,
+      recommended: recommended.computerWait,
+      note: 'Applies to jobs already waiting. Jobs past the new limit end on the next check. Once a person has taken over, the job is theirs and is not ended by this.',
+      options: [
+        { value: 30, label: '30 minutes', meaning: 'Frees the room sooner.' },
+        { value: 60, label: '1 hour', meaning: 'Time to come back to it.' },
+        { value: 120, label: '2 hours', meaning: 'For people who step away.' },
+      ],
+    },
+    {
+      id: 'scheduledCardWait',
+      label: 'How long a card from a goal or task waits for a person',
+      hint: 'When a goal or task needs a yes before it goes on, its card waits this long. If it is the same thing again on a later check, that check joins the waiting card: no second card, no second message. When the time is up the card ends.',
+      unit: 'minutes',
+      value: values.scheduledCardWait,
+      recommended: recommended.scheduledCardWait,
+      note: 'Applies to cards from now on. A card already waiting keeps the time it had. A card in chat has its own wait.',
+      options: [
+        { value: 240, label: '4 hours', meaning: 'Gone by the end of the day.' },
+        { value: 1440, label: '1 day', meaning: 'Time to come back to it.' },
+        { value: 4320, label: '3 days', meaning: 'For people who step away.' },
+      ],
+    },
+    {
+      id: 'snooze',
+      label: 'How long Snooze moves a reminder',
+      hint: 'Tap Snooze on a reminder or briefing and it comes back this much later.',
+      unit: 'minutes',
+      value: values.snooze,
+      recommended: recommended.snooze,
+      options: [
+        { value: 15, label: '15 minutes', meaning: 'A short nudge.' },
+        { value: 60, label: '1 hour', meaning: 'A steady pace.' },
+        { value: 180, label: '3 hours', meaning: 'Well out of the way.' },
+      ],
+    },
+    {
+      id: 'failuresBeforeTelling',
+      label: 'Failed checks in a row before Brick tells the person',
+      hint: 'For a watch or a goal. A reminder or a briefing that fails always tells the person the first time.',
+      unit: 'times',
+      value: values.failuresBeforeTelling,
+      recommended: recommended.failuresBeforeTelling,
+      options: [
+        { value: 2, label: '2 times', meaning: 'Tells early.' },
+        { value: 3, label: '3 times', meaning: 'A steady pace.' },
+        { value: 5, label: '5 times', meaning: 'Only when it keeps failing.' },
+      ],
+    },
+    {
+      id: 'goalsShare',
+      label: 'Share of a person’s usage that goals and tasks may use',
+      hint: `Out of the Universe AI usage a signed-in person gets every ${FAIR_USAGE_WINDOW_HOURS} hours. Watches, briefings and goals stop here, so chat always keeps room. A Brick on its owner’s own key never uses it.`,
+      unit: '%',
+      value: values.goalsShare,
+      recommended: recommended.goalsShare,
+      note: 'When it is used up they wait with their work saved and carry on when it is back. Reminders are fixed text and always come.',
+      options: [
+        { value: 20, label: '20%', meaning: 'Chat keeps most of it.' },
+        { value: 30, label: '30%', meaning: 'A steady balance.' },
+        { value: 50, label: '50%', meaning: 'Half for goals and tasks.' },
+      ],
+    },
   ], LIMIT_RANGES.bricks);
+}
+
+/**
+ * The first row of Limits, Bricks (game #1999): the computer allowance for each member, a month. Every member starts with it, so
+ * nothing is switched on per person. It has no suggested value: the starting value comes from our own test on the dev server, so
+ * until a super admin sets it the row says "Not set" and Bricks' computers stay closed. Shown in dollars; kept in millionths.
+ */
+export const COMPUTER_ALLOWANCE_ID = 'computerMonth';
+export const dollarsToMicros = (dollars: number) => Math.round(dollars * 1_000_000);
+
+export function computerAllowanceLimit(micros: number | null): Limit {
+  const month = 'a month, for each member';
+  return {
+    id: COMPUTER_ALLOWANCE_ID,
+    label: 'Computer allowance for each member, a month',
+    hint: 'What a member’s Bricks can use on computers in a month. When it runs out, Brick offers “Ask for more”. Chat and voice keep the fair usage above.',
+    unit: 'dollars',
+    value: micros === null ? 0 : micros / 1_000_000,
+    recommended: -1,
+    unset: micros === null,
+    options: [
+      { value: 3, label: '$3', meaning: month },
+      { value: 5, label: '$5', meaning: month },
+      { value: 10, label: '$10', meaning: month },
+    ],
+    note: micros === null ? 'Not set yet. Brick computers stay closed until it is. The starting value comes from our own test on the dev server.' : undefined,
+    range: { min: 0.01, max: 1_000_000 },
+  };
 }
 
 /** The id without its maker's prefix: "openai/gpt-4o-mini" is "gpt-4o-mini". */
@@ -887,6 +1053,9 @@ export function UniverseAiLimits() {
   const [failed, setFailed] = useState(false);
   const [voiceFailed, setVoiceFailed] = useState(false);
   const [savingGuard, setSavingGuard] = useState(false);
+  // The meter's computer allowance for each member (game #1999): null until a super admin sets it
+  const [allowance, setAllowance] = useState<{ micros: number | null } | null>(null);
+  const [allowanceFailed, setAllowanceFailed] = useState(false);
 
   async function load() {
     setFailed(false);
@@ -913,10 +1082,34 @@ export function UniverseAiLimits() {
     }
   }
 
+  async function loadAllowance() {
+    setAllowanceFailed(false);
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/meter-settings');
+      if (!response.ok) throw new Error('load');
+      setAllowance({ micros: ((await response.json()) as { settings: { memberAllowanceMicros: number | null } }).settings.memberAllowanceMicros });
+    } catch {
+      setAllowanceFailed(true);
+    }
+  }
+
   useEffect(() => {
     load();
     loadVoice();
+    loadAllowance();
   }, []);
+
+  async function saveAllowance(dollars: number): Promise<boolean> {
+    const result = await sendLimits('/api/admin/meter-settings', { memberAllowanceMicros: dollarsToMicros(dollars) });
+    if (!result.ok) {
+      addToast({ description: result.error, variant: 'error' });
+      return false;
+    }
+    setAllowance({ micros: (result.data as { settings: { memberAllowanceMicros: number | null } }).settings.memberAllowanceMicros });
+    addToast({ description: 'Saved', variant: 'success', duration: 2000 });
+    return true;
+  }
 
   async function saveVoice(change: Record<string, unknown>): Promise<boolean> {
     const result = await sendLimits('/api/admin/voice-limits', change);
@@ -972,7 +1165,14 @@ export function UniverseAiLimits() {
           </Settings>
           <LimitGroup title="Files in chats, for all bots" limits={fileLimits(limits.files)} onChange={(id, value) => save({ files: { [id]: value } })} />
           <LimitGroup title="Fair usage" limits={fairUsageLimits(limits.fairUsage)} onChange={(id, value) => save({ fairUsage: { [id]: value } })} />
-          <LimitGroup title="Bricks" limits={brickLimits(limits.bricks)} onChange={(id, value) => save({ bricks: { [id]: value } })} />
+          {allowanceFailed && <LoadError label="the computer allowance" retry={loadAllowance} />}
+          <LimitGroup
+            title="Bricks"
+            note="Every member starts with these, so nothing is switched on per person. The starting values come from our own test on the dev server."
+            // The Bricks limits that were read stay when only the allowance could not be read; its row comes in once it is
+            limits={[...(allowance ? [computerAllowanceLimit(allowance.micros)] : []), ...brickLimits(limits.bricks)]}
+            onChange={(id, value) => (id === COMPUTER_ALLOWANCE_ID ? saveAllowance(value) : save({ bricks: { [id]: value } }))}
+          />
           {voiceFailed ? (
             <LoadError label="the voice limits" retry={loadVoice} />
           ) : !voice ? (

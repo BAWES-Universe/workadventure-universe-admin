@@ -180,9 +180,9 @@ export interface TeamAppView {
   signInLostAt: Date | null;
   connectedAt: Date;
   /** Who connected it, and whether they still manage it. When they do not, the app depends on someone who left and says so. */
-  connectedBy: (Person & { stillManages: boolean }) | null;
-  /** Everyone who manages it now: the universe's owner, and the named managers who still have Manage bots there. */
-  managers: Person[];
+  connectedBy: (Person & { stillManages: boolean; you: boolean }) | null;
+  /** Everyone who manages it now: the universe's owner (`owner`, always, and not removable), and the named managers who still have Manage bots there. `you` marks the person asking. */
+  managers: (Person & { owner: boolean; you: boolean })[];
   /** Bots of the universe that use it. */
   bots: { botId: string; botName: string; serverId: string; enabled: boolean }[];
   usesThisMonth: number;
@@ -209,7 +209,7 @@ export async function teamAppView(connection: AppConnection, viewerId: string): 
   if (!connection.universeId) return null;
   const universeId = connection.universeId;
   const [universe, managers, grants, uses, connector] = await Promise.all([
-    prisma.universe.findUnique({ where: { id: universeId }, select: { name: true } }),
+    prisma.universe.findUnique({ where: { id: universeId }, select: { name: true, ownerId: true } }),
     currentManagers(connection.id, universeId),
     prisma.botMcpServer.findMany({
       where: { connectionId: connection.id, bot: { deletedAt: null } },
@@ -230,8 +230,8 @@ export async function teamAppView(connection: AppConnection, viewerId: string): 
     reconnectRequired: state.reconnectRequired || !!connection.signInLostAt,
     signInLostAt: connection.signInLostAt,
     connectedAt: connection.createdAt,
-    connectedBy: connector ? { id: connector.id, name: connector.name ?? 'Someone', stillManages: managers.some((person) => person.id === connector.id) } : null,
-    managers,
+    connectedBy: connector ? { id: connector.id, name: connector.name ?? 'Someone', stillManages: managers.some((person) => person.id === connector.id), you: connector.id === viewerId } : null,
+    managers: managers.map((person) => ({ ...person, owner: person.id === universe?.ownerId, you: person.id === viewerId })),
     bots: grants.map((grant) => ({ botId: grant.botId, botName: grant.bot.name, serverId: grant.id, enabled: grant.enabled })),
     usesThisMonth: uses,
     youManage: managers.some((person) => person.id === viewerId),
