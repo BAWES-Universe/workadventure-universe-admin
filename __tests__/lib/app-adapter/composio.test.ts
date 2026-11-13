@@ -1,4 +1,4 @@
-import { createComposioAdapter } from '@/lib/app-adapter/composio';
+import { createComposioAdapter, forgetManagedAuthConfigs } from '@/lib/app-adapter/composio';
 import { adapterIsOn, getAdapter, requireAdapter, setAdapterForTests } from '@/lib/app-adapter';
 
 const answer = (body: unknown, status = 200) => ({ ok: status < 400, status, json: async () => body }) as Response;
@@ -52,10 +52,38 @@ describe('the real adapter speaks the provider as its docs say, against a preten
     expect(sent()).toEqual({ auth_config_id: 'ac_gmail', user_id: 'person-1', callback_url: 'https://orbit.example/admin/apps' });
   });
 
-  it('refuses an app that has no sign-in set up, without calling the provider', async () => {
-    const adapter = make([]);
-    await expect(adapter.startConnect({ person: 'p', toolkit: 'notion', returnUrl: 'https://orbit.example' })).rejects.toThrow('No sign-in set up');
-    expect(calls).toHaveLength(0);
+  it('uses the provider’s own managed sign-in setup for an app nobody chose one for: found if there, else made, then remembered', async () => {
+    forgetManagedAuthConfigs();
+    const adapter = make([
+      answer({ items: [] }),
+      answer({ toolkit: { slug: 'notion' }, auth_config: { id: 'ac_made', is_composio_managed: true } }),
+      answer({ redirect_url: 'https://connect.example/n', connected_account_id: 'ca_n', expires_at: null }),
+      answer({ redirect_url: 'https://connect.example/n2', connected_account_id: 'ca_n2', expires_at: null }),
+    ]);
+    await adapter.startConnect({ person: 'p', toolkit: 'notion', returnUrl: 'https://orbit.example' });
+    expect(calls[0].url).toBe('https://backend.composio.dev/api/v3.1/auth_configs?toolkit_slug=notion&is_composio_managed=true&limit=1');
+    expect(calls[0].init.method).toBe('GET');
+    expect(calls[1].url).toBe('https://backend.composio.dev/api/v3.1/auth_configs');
+    expect(sent(1)).toEqual({ toolkit: { slug: 'notion' } });
+    expect(sent(2)).toMatchObject({ auth_config_id: 'ac_made', user_id: 'p' });
+    // The second time nothing is looked up again
+    await adapter.startConnect({ person: 'p', toolkit: 'notion', returnUrl: 'https://orbit.example' });
+    expect(calls).toHaveLength(4);
+    expect(sent(3)).toMatchObject({ auth_config_id: 'ac_made' });
+  });
+
+  it('takes the managed setup the provider already has instead of making another', async () => {
+    forgetManagedAuthConfigs();
+    const adapter = make([answer({ items: [{ id: 'ac_there' }] }), answer({ redirect_url: 'https://connect.example/s', connected_account_id: 'ca_s', expires_at: null })]);
+    await adapter.startConnect({ person: 'p', toolkit: 'slack', returnUrl: 'https://orbit.example' });
+    expect(calls).toHaveLength(2);
+    expect(sent(1)).toMatchObject({ auth_config_id: 'ac_there' });
+  });
+
+  it('fails clearly, without a sign-in page, when the provider gives no setup', async () => {
+    forgetManagedAuthConfigs();
+    const adapter = make([answer({ items: [] }), answer({ auth_config: {} })]);
+    await expect(adapter.startConnect({ person: 'p', toolkit: 'asana', returnUrl: 'https://orbit.example' })).rejects.toThrow('no sign-in setup');
   });
 
   it('reads a sign-in as finished only when the provider says ACTIVE', async () => {
@@ -69,11 +97,11 @@ describe('the real adapter speaks the provider as its docs say, against a preten
     await expect(adapter.connectionStatus({ providerAccountId: 'ca_1' })).rejects.toThrow('Provider answered 404');
   });
 
-  it('asks for the person’s own app link with the provider’s code sandbox switched off', async () => {
+  it('asks for the person’s own app link, with the provider’s code sandbox on', async () => {
     const adapter = make([answer({ session_id: 'trs_1', mcp: { type: 'http', url: 'https://mcp.example/trs_1/mcp' } })]);
     const link = await adapter.appLink({ person: 'person-1', toolkits: ['gmail'] });
     expect(link).toEqual({ url: 'https://mcp.example/trs_1/mcp', headers: {} });
-    expect(sent()).toEqual({ user_id: 'person-1', toolkits: ['gmail'], workbench: { enable: false } });
+    expect(sent()).toEqual({ user_id: 'person-1', toolkits: { enable: ['gmail'] }, workbench: { enable: true } });
   });
 
   it('keeps only headers the provider itself sent', async () => {

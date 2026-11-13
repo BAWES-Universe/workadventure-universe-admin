@@ -22,7 +22,7 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({ apps: await readReadyMadeApps() });
 }
 
-/** PUT /api/admin/ready-made-apps { apps: { [key]: { name, authConfigId, enabled? } | null } } - sets or removes entries. 404 while the adapter is off. */
+/** PUT /api/admin/ready-made-apps { apps: { [key]: { name?, authConfigId?, enabled? } | null } } - changes the built-in list (add, rename, turn off, own sign-in setup); never required. 404 while the adapter is off. */
 export async function PUT(request: NextRequest) {
   const user = await superAdmin(request);
   if (!user) return refused();
