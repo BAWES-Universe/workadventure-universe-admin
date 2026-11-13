@@ -23,5 +23,8 @@ export async function confirmReadyMade(connection: { id: string; source: string;
     where: { id: connection.id, providerAccountId: connection.providerAccountId, providerConfirmedAt: null },
     data: { providerConfirmedAt: now },
   });
-  return marked.count > 0 ? now : null;
+  if (marked.count > 0) return now;
+  // Nothing changed: an overlapping call may have confirmed this same sign-in a moment ago, which is as good as having done it
+  const again = await prisma.appConnection.findUnique({ where: { id: connection.id }, select: { providerAccountId: true, providerConfirmedAt: true } });
+  return again && again.providerAccountId === connection.providerAccountId ? again.providerConfirmedAt : null;
 }
