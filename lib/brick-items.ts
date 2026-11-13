@@ -87,7 +87,11 @@ export const itemChangeSchema = z
   })
   .strict();
 
-export const ITEM_ACTIONS = ['pause', 'resume', 'done', 'reopen', 'delete', 'change', 'snooze'] as const;
+export const ITEM_ACTIONS = ['pause', 'resume', 'done', 'reopen', 'delete', 'change', 'snooze', 'keep'] as const;
+
+/** What a goal can ask its person once: it is not sure it reached its outcome, or the date it cared about has passed. */
+export const GOAL_ASKS = ['unsure', 'date_passed'] as const;
+export type GoalAsk = (typeof GOAL_ASKS)[number];
 export const itemActionSchema = z
   .object({
     userId: person,
@@ -121,6 +125,8 @@ export interface ItemView {
   lastRunAt: string | null;
   /** Since when it waits because the person's usage for goals and tasks is used up; null when it is not waiting. */
   heldSince: string | null;
+  /** The one question this goal has open for its person (close it, keep going, change it), or null. */
+  asking: GoalAsk | null;
   createdAt: string;
 }
 
@@ -151,6 +157,7 @@ export function viewOf(row: ItemRow): ItemView {
     doneAt: row.doneAt?.toISOString() ?? null,
     lastRunAt: row.lastRunAt?.toISOString() ?? null,
     heldSince: row.heldSince?.toISOString() ?? null,
+    asking: row.askKind === 'unsure' || row.askKind === 'date_passed' ? row.askKind : null,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -336,6 +343,12 @@ async function goalIsOn(tx: Tx, goalId: string): Promise<boolean> {
 /** Whatever changes an item's state or time ends a wait for usage: nothing is held or owed any more, and a new wait starts from nothing. */
 const NOT_HELD = { heldSince: null, heldToldAt: null, heldNoticeAt: null } as const;
 
+/** What the person's answer, or the end of the goal, does to its open question: none is open, none is owed. */
+const NOT_ASKING = { askKind: null, askRunId: null, askToldAt: null } as const;
+
+/** The kinds of question a person already answered "keep going" to for this goal. */
+const keptKinds = (row: { askKept: string | null }): string[] => (row.askKept ?? '').split(',').filter(Boolean);
+
 const wrongState = (state: string): Refused => ({ ok: false, status: 409, code: 'wrong_state', error: `That is not possible while it is ${state}` });
 
 /**
@@ -400,7 +413,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
       case 'done': {
         if (row.state === 'done') return { ok: true as const, item: viewOf(row) };
         await moveChecks(tx, row.id, ['on', 'paused'], { state: 'done', pausedBy: null, doneAt: now }, now, false);
-        return finish({ state: 'done', pausedBy: null, nextDueAt: null, doneAt: now, result: input.result ?? row.result, ...bump });
+        return finish({ state: 'done', pausedBy: null, nextDueAt: null, doneAt: now, result: input.result ?? row.result, ...NOT_ASKING, ...bump });
       }
       case 'reopen': {
         if (row.state === 'on') return { ok: true as const, item: viewOf(row) };
@@ -409,11 +422,11 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (refused) return refused;
         // Starts again from the new revision, counted from now: a one-off that has passed is due now, once
         const due = cadence.type === 'once' ? (firstDue(cadence, row.timeZone, now) ?? now) : firstDue(cadence, row.timeZone, now);
-        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, nextDueAt: due, failuresInRow: 0, failureTold: false, tellRunId: null, ...bump });
+        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, nextDueAt: due, failuresInRow: 0, failureTold: false, tellRunId: null, ...NOT_ASKING, askKept: null, ...bump });
       }
       case 'delete': {
         await moveChecks(tx, row.id, ['on', 'paused', 'done'], { state: 'deleted', pausedBy: null }, now, false);
-        return finish({ state: 'deleted', pausedBy: null, nextDueAt: null, ...bump });
+        return finish({ state: 'deleted', pausedBy: null, nextDueAt: null, ...NOT_ASKING, ...bump });
       }
       case 'snooze': {
         // Snooze is for a reminder or a briefing, on the person's tap on the message it just sent (or before it comes)
@@ -472,8 +485,20 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
           waitingFor: settled.type === 'none' ? waitingFor ?? null : null,
           statusLine: change.statusLine === undefined ? row.statusLine : change.statusLine,
           steps: (change.steps ?? row.steps) as Prisma.InputJsonValue,
+          // New terms are a new goal as far as its questions go: what was open or kept no longer applies
+          ...NOT_ASKING,
+          askKept: null,
           ...bump,
         });
+      }
+      case 'keep': {
+        // "Keep going", the person's answer to the question a goal asked: it carries on as it was, and that question is not asked again. Nothing
+        // it runs is changed, so no revision moves and a check in flight is not stopped.
+        if (row.kind !== 'goal') return { ok: false as const, status: 409 as const, code: 'wrong_state' as const, error: 'Only a goal asks a question' };
+        if (row.state !== 'on' && row.state !== 'paused') return wrongState(row.state);
+        if (!row.askKind) return { ok: true as const, item: viewOf(row) };
+        const kept = [...new Set([...keptKinds(row), row.askKind])].join(',');
+        return finish({ ...NOT_ASKING, askKept: kept });
       }
     }
   });
@@ -856,10 +881,14 @@ export const runReportSchema = z
     error: line(300).nullish(),
     /** A goal's progress after this run. Applied only while the item is still the revision the run was claimed for. */
     progress: z.object({ statusLine: line(300).nullish(), steps: stepsSchema.optional(), waitingFor: line(300).nullish() }).strict().optional(),
-    /** A goal that reached the outcome the person named: it closes itself, stops its own checks and moves to Done. */
+    /** A goal that reached the outcome the person named: it closes itself, stops its own checks and moves to Done. It says so with the evidence, in `result`. */
     reached: z.boolean().optional(),
+    /** A goal that is not sure it reached its outcome, or whose date has passed, needs to ask its person once: close it, keep going, or change it. */
+    ask: z.enum(GOAL_ASKS).optional(),
   })
-  .strict();
+  .strict()
+  .refine((report) => report.reached !== true || (typeof report.result === 'string' && report.result.trim() !== ''), { message: 'a goal that reached its outcome says so with the result', path: ['result'] })
+  .refine((report) => report.reached !== true || report.ask === undefined, { message: 'a goal is either done or asking, not both', path: ['ask'] });
 
 export type RunCheck = { ok: true } | { ok: false; reason: 'changed' | 'paused' | 'done' | 'deleted' | 'off' | 'finished' | 'not_found' | 'stale' | 'expired' };
 
@@ -886,7 +915,7 @@ export async function checkRun(runId: string, attempt: number, now: Date = new D
   return { ok: true };
 }
 
-export type RunFinished = { ok: true; item: ItemView; applied: boolean; failuresInRow: number; tellPerson: boolean } | { ok: false; status: 404 | 409; error: string };
+export type RunFinished = { ok: true; item: ItemView; applied: boolean; failuresInRow: number; tellPerson: boolean; askPerson: GoalAsk | null } | { ok: false; status: 404 | 409; error: string };
 
 /**
  * The bot server reports how a run went. The run is recorded as reported, always: every run, failed ones too, is in
@@ -924,9 +953,9 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
           where: { id: item.id },
           data: { state: 'done', pausedBy: null, nextDueAt: null, doneAt: now, lastRunAt: now, result: report.result ?? item.result, ...NOT_HELD, revision: { increment: 1 } },
         });
-        return { ok: true as const, item: viewOf(ended), applied: false, failuresInRow: item.failuresInRow, tellPerson: false };
+        return { ok: true as const, item: viewOf(ended), applied: false, failuresInRow: item.failuresInRow, tellPerson: false, askPerson: null };
       }
-      return { ok: true as const, item: viewOf(item), applied: false, failuresInRow: item.failuresInRow, tellPerson: false };
+      return { ok: true as const, item: viewOf(item), applied: false, failuresInRow: item.failuresInRow, tellPerson: false, askPerson: null };
     }
 
     const kind = item.kind as ItemKind;
@@ -949,14 +978,24 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
     // A watch speaks only when its condition is met, says so once, then moves to Done (Reopen starts it again)
     const watchSpoke = kind === 'watch' && report.state === 'done' && report.outcome === 'spoke';
     const goalReached = kind === 'goal' && report.state === 'done' && report.reached === true;
+    // A goal that is not sure, or whose date has passed, asks its person once. One question is open at a time, owed until the bot server
+    // confirms it (markAsked) and asked again by a later run only while it is unconfirmed; the same question is never asked again once the
+    // person answered "keep going", and later checks add none while one is open (one need is one message).
+    let askPerson: GoalAsk | null = null;
+    if (kind === 'goal' && report.state === 'done' && !goalReached && report.ask && !keptKinds(item).includes(report.ask)) {
+      if (!item.askKind || (item.askKind === report.ask && !item.askToldAt)) {
+        askPerson = report.ask;
+        Object.assign(data, { askKind: report.ask, askRunId: runId, askToldAt: null });
+      }
+    }
     if (oneOffSent || watchSpoke || goalReached) {
-      Object.assign(data, { state: 'done', nextDueAt: null, doneAt: now, result: report.result ?? item.result, ...NOT_HELD, revision: { increment: 1 } });
+      Object.assign(data, { state: 'done', nextDueAt: null, doneAt: now, result: report.result ?? item.result, ...NOT_HELD, ...(goalReached ? NOT_ASKING : {}), revision: { increment: 1 } });
       if (goalReached) await moveChecks(tx, item.id, ['on', 'paused'], { state: 'done', pausedBy: null, doneAt: now }, now, false);
     }
     const updated = await tx.brickItem.update({ where: { id: item.id }, data });
     // A reminder or a briefing tells the person on the first failure; a watch or a goal after a number of failures in a row that a
     // super admin sets. Told once as it reaches that number, never again for each failure after it.
-    return { ok: true as const, item: viewOf(updated), applied: true, failuresInRow, tellPerson };
+    return { ok: true as const, item: viewOf(updated), applied: true, failuresInRow, tellPerson, askPerson };
   });
 }
 
@@ -986,6 +1025,18 @@ export async function markTold(runId: string): Promise<{ ok: true; told: boolean
   // since started over (a run worked, or the item was reopened) matches nothing and marks nothing
   const { count } = await prisma.brickItem.updateMany({ where: { id: run.itemId, tellRunId: runId, failureTold: false }, data: { failureTold: true, tellRunId: null } });
   return { ok: true, told: count > 0 };
+}
+
+/**
+ * The bot server asked the person the goal's one question (the run's report said `askPerson`): keep that it did, so no later check asks it
+ * again. Called only after it was asked; if it never comes, the next run that asks the same question is told to ask it again, so a question
+ * that failed to go out is never lost. Only the run that was asked to ask, and only while that question is still open.
+ */
+export async function markAsked(runId: string): Promise<{ ok: true; asked: boolean } | { ok: false; status: 404; error: string }> {
+  const run = await prisma.brickItemRun.findUnique({ where: { id: runId }, select: { itemId: true } });
+  if (!run) return { ok: false, status: 404, error: 'Run not found' };
+  const { count } = await prisma.brickItem.updateMany({ where: { id: run.itemId, askRunId: runId, askKind: { not: null }, askToldAt: null }, data: { askToldAt: new Date() } });
+  return { ok: true, asked: count > 0 };
 }
 
 export const heldToldSchema = z.object({ waitId: z.string().trim().min(1).max(64) }).strict();
