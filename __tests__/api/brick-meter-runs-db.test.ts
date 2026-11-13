@@ -99,27 +99,29 @@ run('money and the run, in a real database', () => {
     expect(first).toEqual({ recorded: true, conflict: false });
     const again = await recordModelCall(call(sara.brickId, { clientEventId: 'c1', runKey: mine.runId, runId: mine.runId, usageRowId: 5 }) as never);
     expect(again).toMatchObject({ recorded: false });
-    const events = await prisma.meterEvent.findMany({ where: { eventId: { startsWith: `run:${sara.brickId}:${mine.runId}:` } } });
+    const events = await prisma.meterEvent.findMany({ where: { eventId: { startsWith: `run:${sara.brickId}:${mine.runId.length}:${mine.runId}:` } } });
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ eventId: `run:${sara.brickId}:${mine.runId}:model:c1`, kind: 'model_call', botId: sara.brickId, personId: sara.id });
+    expect(events[0]).toMatchObject({ eventId: `run:${sara.brickId}:${mine.runId.length}:${mine.runId}:model:c1`, kind: 'model_call', botId: sara.brickId, personId: sara.id });
     expect(events[0].detail).toMatchObject({ runId: mine.runId, channel: 'task' });
 
     // Two Bricks that send the same run and call ids are two events: the Brick is in the id, so neither is lost to the other
     const omar2 = await person('omar2');
     await recordModelCall(call(omar2.brickId, { clientEventId: 'c1', runKey: mine.runId, runId: null }) as never);
-    expect(await prisma.meterEvent.count({ where: { eventId: { endsWith: `:${mine.runId}:model:c1` } } })).toBe(2);
+    expect(await prisma.meterEvent.count({ where: { eventId: { endsWith: `:${mine.runId.length}:${mine.runId}:model:c1` } } })).toBe(2);
     // An id too long for the column is made from a hash of all of it: never cut short, so two long ones never join
     const long = 'x'.repeat(300);
     expect(runCallEventId(sara.brickId, mine.runId, long)).toHaveLength(68);
     expect(runCallEventId(sara.brickId, mine.runId, long)).not.toBe(runCallEventId(sara.brickId, mine.runId, `${long}y`));
-    expect(runCallEventId(sara.brickId, mine.runId, 'c1')).toBe(`run:${sara.brickId}:${mine.runId}:model:c1`);
+    // A run key that holds the separator can not be read as a different run and call
+    expect(runCallEventId(sara.brickId, 'a:model:b', 'c')).not.toBe(runCallEventId(sara.brickId, 'a', 'b:model:c'));
+    expect(runCallEventId(sara.brickId, mine.runId, 'c1')).toBe(`run:${sara.brickId}:${mine.runId.length}:${mine.runId}:model:c1`);
 
     // A call with no run, or one that was not checked, keeps the ids it always had
     await recordModelCall(call(sara.brickId, { clientEventId: 'c2' }) as never);
     expect(await prisma.meterEvent.count({ where: { eventId: `model:${sara.brickId}:c2` } })).toBe(1);
     // Without the bot server's own id for the call, the report's row stands in for it, so a different report is a different call
     await recordModelCall(call(sara.brickId, { runKey: mine.runId, runId: mine.runId, usageRowId: 77 }) as never);
-    expect(await prisma.meterEvent.count({ where: { eventId: `run:${sara.brickId}:${mine.runId}:model:row-77` } })).toBe(1);
+    expect(await prisma.meterEvent.count({ where: { eventId: `run:${sara.brickId}:${mine.runId.length}:${mine.runId}:model:row-77` } })).toBe(1);
   });
 
   it('books one event for one call even when the run could not be looked up the first time, and keeps a run that is not this Brick’s out of the detail', async () => {
@@ -141,7 +143,7 @@ run('money and the run, in a real database', () => {
     const second = await recordModelCall(call(sara.brickId, { clientEventId: 'again', runKey: mine.runId, runId: retried, usageRowId: 9 }) as never);
     expect(second).toMatchObject({ recorded: false });
     // One event, under the id made from what the bot server sent, whatever the lookups said
-    const events = await prisma.meterEvent.findMany({ where: { eventId: `run:${sara.brickId}:${mine.runId}:model:again` } });
+    const events = await prisma.meterEvent.findMany({ where: { eventId: `run:${sara.brickId}:${mine.runId.length}:${mine.runId}:model:again` } });
     expect(events).toHaveLength(1);
     expect(await prisma.meterEvent.count({ where: { eventId: `model:${sara.brickId}:again` } })).toBe(0);
 

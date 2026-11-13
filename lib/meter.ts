@@ -128,11 +128,12 @@ export interface ModelCallFacts {
 }
 
 /**
- * The event id of a call a run made: the Brick, the run as the bot server sent it and the call's own id, so two Bricks can never share one
+ * The event id of a call a run made: the Brick, the run as the bot server sent it (with its length) and the call's own id, so two Bricks can never share one
  * even when they send the same run and call ids. One that would not fit is made from a hash of all three, never cut short (a cut could join two).
  */
 export function runCallEventId(botId: string, runKey: string, callId: string): string {
-  const whole = `run:${botId}:${runKey}:model:${callId}`;
+  // The run key's length goes in front of it, so what comes after it can never be read as part of it (and two different pairs never make one id)
+  const whole = `run:${botId}:${runKey.length}:${runKey}:model:${callId}`;
   return whole.length <= 255 ? whole : `run:${createHash('sha256').update(whole).digest('hex')}`;
 }
 
