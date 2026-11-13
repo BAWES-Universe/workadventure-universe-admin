@@ -80,6 +80,12 @@ run('the list of apps to connect, in a real database', () => {
     expect((await add(entry('gmail', { key: 'Bad Key!' }))).status).toBe(400);
     expect((await add(entry('gmail', { authConfig: JSON.stringify({ clientId: 'x' }) }))).status).toBe(400);
     expect((await add(entry('gmail', { authConfig: JSON.stringify({ clientId: 'x', authorizeUrl: 'https://a.example.com/a', tokenUrl: 'https://a.example.com/t', revocationUrl: 'http://10.0.0.1/revoke' }) }))).status).toBe(400);
+    // A token in the sign-in setup would be copied into every person's connection: only setup names are taken
+    const setup = { clientId: 'x', authorizeUrl: 'https://a.example.com/a', tokenUrl: 'https://a.example.com/t' };
+    for (const extra of [{ accessToken: 'shared' }, { refreshToken: 'shared' }, { expiresAt: 1 }, { reconnectRequired: true }, { anything: 'else' }]) {
+      expect((await add(entry('gmail', { authConfig: JSON.stringify({ ...setup, ...extra }) }))).status).toBe(400);
+    }
+    expect((await add(entry('gmail', { authType: 'none', authConfig: JSON.stringify(setup) }))).status).toBe(400);
     expect((await add(entry('gmail'))).status).toBe(201);
     expect((await add(entry('gmail'))).status).toBe(409);
     expect((await add(entry('weather', { authType: 'none', authConfig: null }))).status).toBe(201);

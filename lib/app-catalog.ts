@@ -17,6 +17,19 @@ import { createConnection } from '@/lib/app-connections';
 
 const KEY = /^[a-z0-9][a-z0-9-]{0,59}$/;
 
+/** The only names a listed app's sign-in setup may carry: how to start a sign-in, never a token a sign-in produces. */
+const PROVIDER_SETUP_FIELDS = new Set(['clientId', 'clientSecret', 'authorizeUrl', 'tokenUrl', 'scopes', 'scopesSupported', 'revocationUrl']);
+
+function onlyProviderSetup(authConfig: string | null | undefined): boolean {
+  if (!authConfig) return true;
+  try {
+    const parsed: unknown = JSON.parse(authConfig);
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) && Object.keys(parsed).every((name) => PROVIDER_SETUP_FIELDS.has(name));
+  } catch {
+    return false;
+  }
+}
+
 export const catalogEntrySchema = createMcpServerSchema
   .safeExtend({
     key: z.string().trim().regex(KEY, 'key must be lower case letters, digits and dashes'),
@@ -25,7 +38,11 @@ export const catalogEntrySchema = createMcpServerSchema
     sortOrder: z.number().int().min(-1000).max(1000).default(0),
   })
   // A key or token in the list would be one key for everyone: only apps that sign in on their own page, or need none
-  .refine((entry) => entry.authType === 'oauth' || entry.authType === 'none', { path: ['authType'], message: 'A listed app signs in on its own page or needs no sign-in' });
+  .refine((entry) => entry.authType === 'oauth' || entry.authType === 'none', { path: ['authType'], message: 'A listed app signs in on its own page or needs no sign-in' })
+  // The sign-in setup may hold only what sets a sign-in up. A token (access, refresh, expiry, anything a person's own sign-in writes)
+  // would be copied into every connection made from the entry and shared by everyone who taps Connect
+  .refine((entry) => entry.authType !== 'oauth' || onlyProviderSetup(entry.authConfig), { path: ['authConfig'], message: 'A listed app may hold only its sign-in setup, never a token' })
+  .refine((entry) => entry.authType !== 'none' || !entry.authConfig, { path: ['authConfig'], message: 'An app that needs no sign-in has no sign-in setup' });
 
 export const catalogPatchSchema = z
   .object({
