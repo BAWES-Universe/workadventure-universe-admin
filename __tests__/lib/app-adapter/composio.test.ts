@@ -52,6 +52,21 @@ describe('the real adapter speaks the provider as its docs say, against a preten
     expect(sent()).toEqual({ auth_config_id: 'ac_gmail', user_id: 'person-1', callback_url: 'https://orbit.example/admin/apps' });
   });
 
+  it('uses the sign-in setup its caller already read, and never reads the setting itself (a caller inside a transaction holds the connection)', async () => {
+    const authConfigFor = jest.fn(async () => 'ac_from_setting');
+    const adapter = createComposioAdapter({
+      apiKey: 'secret-key',
+      authConfigFor,
+      fetchImpl: (async (url: string, init: RequestInit) => {
+        calls.push({ url, init });
+        return answer({ redirect_url: 'https://connect.example/g', connected_account_id: 'ca_g', expires_at: null });
+      }) as unknown as typeof fetch,
+    });
+    await adapter.startConnect({ person: 'p', toolkit: 'gmail', returnUrl: 'https://orbit.example', authConfigId: 'ac_given' });
+    expect(sent()).toMatchObject({ auth_config_id: 'ac_given' });
+    expect(authConfigFor).not.toHaveBeenCalled();
+  });
+
   it('uses the provider’s own managed sign-in setup for an app nobody chose one for: found if there, else made, then remembered', async () => {
     forgetManagedAuthConfigs();
     const adapter = make([

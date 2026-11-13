@@ -99,8 +99,10 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
   }
 
   return {
-    async startConnect({ person, toolkit, returnUrl }): Promise<ConnectStart> {
-      const authConfigId = (await options.authConfigFor(toolkit)) ?? (await managedAuthConfig(toolkit));
+    async startConnect({ person, toolkit, returnUrl, authConfigId: given }): Promise<ConnectStart> {
+      // A caller that already read the setting passes it (undefined: read it here), so a caller inside a database transaction never
+      // takes a second pooled connection for it
+      const authConfigId = (given !== undefined ? given : await options.authConfigFor(toolkit)) ?? (await managedAuthConfig(toolkit));
       const json = await call('/connected_accounts/link', { auth_config_id: authConfigId, user_id: person, callback_url: returnUrl });
       const redirectUrl = str(json.redirect_url);
       const providerAccountId = str(json.connected_account_id);

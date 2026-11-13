@@ -148,7 +148,7 @@ run('ready-made apps through the adapter, in a real database', () => {
     const body = await first.json();
     expect(first.status).toBe(201);
     expect(body.redirectUrl).toBe('https://connect.example/sign-in');
-    expect(adapter.startConnect).toHaveBeenCalledWith({ person: sara, toolkit: KEY, returnUrl: expect.stringContaining('/admin/apps') });
+    expect(adapter.startConnect).toHaveBeenCalledWith({ person: sara, toolkit: KEY, returnUrl: expect.stringContaining('/admin/apps'), authConfigId: 'ac_1' });
     // The link is pinned to the account the person is signing in with
     expect(adapter.appLink).toHaveBeenCalledWith({ person: sara, toolkits: [KEY], accounts: { [KEY]: `ca_${tag}` } });
     const row = await prisma.appConnection.findUniqueOrThrow({ where: { id: body.id } });
