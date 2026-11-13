@@ -2,7 +2,7 @@ import { Prisma, type AppConnection, type BotMcpServer } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { endApprovalsForServers } from '@/lib/bot-actions';
-import { canManageBotMcpServers } from '@/lib/bot-permissions';
+import { canManageBotMcpServers, preloadBotRules, type ManageMemo } from '@/lib/bot-permissions';
 import { lendAccess, lendAccessMany, lendableUniverses, type LendableUniverse } from '@/lib/ai-key-lend';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
 import { claimAppSlot } from '@/lib/bot-limits';
@@ -359,7 +359,11 @@ export async function botsToLetUse(userId: string, connectionId: string): Promis
   });
   if (bots.length === 0) return [];
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
-  const allowed = await Promise.all(bots.map((bot) => canManageBotMcpServers(userId, user?.email ?? null, bot)));
+  // One person and one request: their standing in each room is worked out once and the bots' own rules are read in one query,
+  // however many bots the universe has
+  const memo: ManageMemo = new Map();
+  await preloadBotRules(memo, bots.map((bot) => bot.id));
+  const allowed = await Promise.all(bots.map((bot) => canManageBotMcpServers(userId, user?.email ?? null, bot, memo)));
   return bots.filter((_, index) => allowed[index]).map((bot) => ({ id: bot.id, name: bot.name }));
 }
 

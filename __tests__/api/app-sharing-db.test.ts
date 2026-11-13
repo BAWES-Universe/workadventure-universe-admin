@@ -547,6 +547,24 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect((await teamGet(request(`/api/me/team-apps/${id}`), params({ connectionId: id }))).status).toBe(404);
     });
 
+    it('reads the bots’ own rules once for the page’s bot list, however many bots the universe has', async () => {
+      const id = (await json(await addTeam(sara))).id as string;
+      const roomId = (await prisma.bot.findUniqueOrThrow({ where: { id: guide }, select: { roomId: true } })).roomId;
+      const rules = jest.spyOn(prisma.botAccessRule, 'findMany');
+      const extra: string[] = [];
+      try {
+        for (let index = 0; index < 5; index += 1) extra.push((await prisma.bot.create({ data: { roomId, name: `Extra ${index}`, createdById: sara, behaviorConfig: {} } })).id);
+        as(sara);
+        const view = await json(await teamGet(request(`/api/me/team-apps/${id}`), params({ connectionId: id })));
+        expect(view.canLetUse).toHaveLength(6);
+        // One read of the rules for all six bots, not one for each
+        expect(rules).toHaveBeenCalledTimes(1);
+      } finally {
+        rules.mockRestore();
+        await prisma.bot.deleteMany({ where: { id: { in: extra } } });
+      }
+    });
+
     it('adds a manager who can manage bots there, and refuses anyone else', async () => {
       const id = (await json(await addTeam(omar))).id as string;
       as(omar);
