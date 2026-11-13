@@ -84,8 +84,8 @@ export async function homeOfBrick(brickId: string, ownerId: string): Promise<Hom
   const home = await prisma.brickHome.findUnique({ where: { botId: brickId } });
   if (!home) return null;
   if (!(await canManageBots(home.placedById, home.roomId))) {
-    // Only the row that failed the check: one moved to another room since is a newer placement
-    await prisma.brickHome.deleteMany({ where: { botId: brickId, roomId: home.roomId, placedById: home.placedById } });
+    // Only the row that failed the check: a home placed again since, in any room, has a newer `updatedAt` and stays
+    await prisma.brickHome.deleteMany({ where: { botId: brickId, roomId: home.roomId, placedById: home.placedById, updatedAt: home.updatedAt } });
     return null;
   }
   return homeCardOf(home.roomId);
@@ -197,13 +197,13 @@ export async function bricksOfRoom(roomUrl: string, viewerId: string): Promise<R
  * went. The Bricks stay.
  */
 export async function dropHomesWithoutAccess(roomId?: string, pageSize = 200): Promise<number> {
-  const gone: { botId: string; roomId: string; placedById: string }[] = [];
+  const gone: { botId: string; roomId: string; placedById: string; updatedAt: Date }[] = [];
   const memo = new Map<string, boolean>();
   let after: string | undefined;
   for (;;) {
     const homes = await prisma.brickHome.findMany({
       where: roomId ? { roomId } : {},
-      select: { botId: true, roomId: true, placedById: true },
+      select: { botId: true, roomId: true, placedById: true, updatedAt: true },
       take: pageSize,
       orderBy: { botId: 'asc' },
       ...(after ? { cursor: { botId: after }, skip: 1 } : {}),
@@ -211,13 +211,13 @@ export async function dropHomesWithoutAccess(roomId?: string, pageSize = 200): P
     for (const home of homes) {
       const key = `${home.placedById}:${home.roomId}`;
       if (!memo.has(key)) memo.set(key, await canManageBots(home.placedById, home.roomId));
-      if (!memo.get(key)) gone.push({ botId: home.botId, roomId: home.roomId, placedById: home.placedById });
+      if (!memo.get(key)) gone.push({ botId: home.botId, roomId: home.roomId, placedById: home.placedById, updatedAt: home.updatedAt });
     }
     if (homes.length < pageSize) break;
     after = homes[homes.length - 1].botId;
   }
   if (gone.length === 0) return 0;
-  // Each row that failed the check, as it was read: a home placed again since, in another room or by another person, stays
+  // Each row that failed the check, exactly as it was read (its `updatedAt` is its placement's marker): a home placed again since stays
   let dropped = 0;
   for (let i = 0; i < gone.length; i += 200) dropped += (await prisma.brickHome.deleteMany({ where: { OR: gone.slice(i, i + 200) } })).count;
   return dropped;

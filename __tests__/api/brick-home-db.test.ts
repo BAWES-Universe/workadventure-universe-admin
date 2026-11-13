@@ -11,6 +11,10 @@ import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
+jest.mock('@/lib/bot-permissions', () => {
+  const actual = jest.requireActual('@/lib/bot-permissions');
+  return { ...actual, canManageBots: jest.fn(actual.canManageBots) };
+});
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/tool-signin', () => ({ syncToolSignInNotices: jest.fn(async () => undefined) }));
 
@@ -20,7 +24,8 @@ import { createBrick } from '@/lib/brick-create';
 import { deleteBrick } from '@/lib/brick-delete';
 import { checkBotAccess } from '@/lib/bot-access';
 import { startVisit, whereIsBrick } from '@/lib/brick-visit';
-import { dropHomesWithoutAccess, moveBrick, takeOutBrick } from '@/lib/brick-home';
+import { dropHomesWithoutAccess, homeOfBrick, moveBrick, takeOutBrick } from '@/lib/brick-home';
+import { canManageBots } from '@/lib/bot-permissions';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
 import { GET as getHome, PUT as putHome, DELETE as deleteHome } from '@/app/api/bricks/[id]/home/route';
 import { GET as listRoom } from '@/app/api/brick-homes/route';
@@ -466,6 +471,25 @@ run('a Brick that lives in a room, in a real database', () => {
       expect(row?.roomId).toBe(own.roomId);
       expect(row?.behaviorConfig).toEqual(SPOT);
       expect(await takeOutBrick(brickId, sara.id)).toBe('taken_out');
+    });
+    it('a home placed again while its old one was being judged stays: only the row that failed the check goes', async () => {
+      const world = await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } });
+      for (const via of ['read', 'sweep'] as const) {
+        await put(brickId, hosted.roomUrl, { behaviorConfig: SPOT });
+        await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: world.id } });
+        // Between the denial and the delete, its placer gets access back and places it again in the same room
+        const real = jest.requireActual('@/lib/bot-permissions').canManageBots as typeof canManageBots;
+        (canManageBots as jest.Mock).mockImplementationOnce(async (...args: Parameters<typeof canManageBots>) => {
+          const answer = await real(...args);
+          await prisma.worldMember.create({ data: { userId: sara.id, worldId: world.id, tags: ['admin'] } });
+          expect((await put(brickId, hosted.roomUrl, { behaviorConfig: { ...SPOT, speed: 77 } })).status).toBe(200);
+          return answer;
+        });
+        if (via === 'read') await homeOfBrick(brickId, sara.id);
+        else await dropHomesWithoutAccess();
+        expect((await home(brickId))?.behaviorConfig).toEqual({ ...SPOT, speed: 77 });
+        await deleteHome(call('DELETE', `/api/bricks/${brickId}/home`), ids(brickId));
+      }
     });
   });
 });
