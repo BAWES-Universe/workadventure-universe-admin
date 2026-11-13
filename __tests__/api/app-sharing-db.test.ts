@@ -531,6 +531,21 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect((await teamGet(request(`/api/me/team-apps/${id}`), params({ connectionId: id }))).status).toBe(404);
     });
 
+    it('answers "not there" when the universe’s app is removed between the check and the grant, never a plain server error', async () => {
+      const id = (await json(await addTeam(sara))).id as string;
+      const stale = await prisma.appConnection.findUniqueOrThrow({ where: { id } });
+      await prisma.appConnection.delete({ where: { id } });
+      // The first read (before the grant's transaction) still sees the app, as if the removal landed just after it
+      const read = jest.spyOn(prisma.appConnection, 'findUnique').mockResolvedValueOnce(stale as never);
+      try {
+        const response = await letGuide(sara, id);
+        expect(response.status).toBe(404);
+        expect(await prisma.botMcpServer.count({ where: { botId: guide } })).toBe(0);
+      } finally {
+        read.mockRestore();
+      }
+    });
+
     it('adds a manager who can manage bots there, and refuses anyone else', async () => {
       const id = (await json(await addTeam(omar))).id as string;
       as(omar);
