@@ -295,7 +295,7 @@ function toView(connection: ConnectionWithGrants): ConnectionView {
 }
 
 /** A ready-made app whose sign-in is not confirmed yet is asked about once more before it is shown, so a finished sign-in reads connected. */
-async function confirmIfPending<T extends AppConnection>(row: T): Promise<T> {
+export async function confirmIfPending<T extends AppConnection>(row: T): Promise<T> {
   if (row.source !== 'ready_made' || row.providerConfirmedAt) return row;
   const confirmedAt = await confirmReadyMade(row);
   return confirmedAt ? { ...row, providerConfirmedAt: confirmedAt } : row;
