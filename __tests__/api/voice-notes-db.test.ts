@@ -409,6 +409,26 @@ run('voice notes for every bot, in a real database', () => {
       expect((await claimVoiceNoteCleanups({ limit: 50 }, later)).some((handed) => handed.id === job.id)).toBe(false);
     });
 
+    it('never takes a job settled by another bot server between reading the due jobs and taking it', async () => {
+      const job = await addVoiceNoteCleanup({ providerId: providers[0], kind: 'file', objectId: `f-${randomUUID()}` });
+      const now = new Date();
+      const read = prisma.voiceNoteCleanup.findMany.bind(prisma.voiceNoteCleanup);
+      // Another bot server settles it with a failure right after this one read it as due
+      const between = jest.spyOn(prisma.voiceNoteCleanup, 'findMany').mockImplementationOnce((async (args: Parameters<typeof read>[0]) => {
+        const due = await read(args);
+        await prisma.voiceNoteCleanup.update({ where: { id: job.id }, data: { nextAt: new Date(now.getTime() + 60_000), leaseUntil: null, attempts: 1 } });
+        return due;
+      }) as never);
+      try {
+        const handed = await claimVoiceNoteCleanups({ limit: 50 }, now);
+        expect(between).toHaveBeenCalled();
+        expect(handed.some((taken) => taken.id === job.id)).toBe(false);
+        expect(await prisma.voiceNoteCleanup.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ leaseUntil: null });
+      } finally {
+        between.mockRestore();
+      }
+    });
+
     it('tries a 409 again in 30 seconds and anything else later each time, and tells the engineers once after a day', async () => {
       const job = await addVoiceNoteCleanup({ providerId: providers[0], kind: 'transcription', objectId: `t-${randomUUID()}` });
       const now = new Date();
