@@ -16,7 +16,9 @@ import { ensureDefaultBrick } from '@/lib/brick-default';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { makeBrick } from '@/lib/brick-make';
 import { saveServerLimits } from '@/lib/bot-limits';
-import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, markTold, readItem, type NewItemInput } from '@/lib/brick-items';
+import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, markHeldTold, markTold, claimWork, goalsRoom, readItem, type NewItemInput } from '@/lib/brick-items';
+import { recordGrant } from '@/lib/meter-grants';
+import { checkReplyAllowance, windowStart } from '@/lib/reply-limits';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -776,5 +778,332 @@ run('goals and tasks, in a real database', () => {
     expect(await prisma.brickItemRun.count({ where: { item: { ownerId: quiet.id } } })).toBe(0);
     expect(await prisma.bot.count({ where: { ownerId: quiet.id } })).toBe(1);
     expect(await prisma.botsAiUsage.count({ where: { botId: quiet.brickId } })).toBe(0);
+  });
+
+  describe('usage: goals and tasks use their owner’s Universe AI inside a share, and wait with their work saved when it is used up', () => {
+    // The first reply of the person's window was at NOW; it lasts 5 hours, so it ends at 11:00 UTC
+    const WINDOW_ENDS = at(5 * HOUR);
+
+    async function usage(who: { id: string; brickId: string }, count: number, channel: 'dm' | 'task') {
+      await prisma.botsAiProvider.upsert({ where: { providerId: 'universe-ai' }, create: { providerId: 'universe-ai', name: 'Universe AI', type: 'universe-ai', enabled: true }, update: {} });
+      await prisma.botsAiUsage.createMany({ data: Array.from({ length: count }, () => ({ botId: who.brickId, providerId: 'universe-ai', talkedPersonId: who.id, channel, timestamp: at(MIN) })) });
+      await prisma.replyWindow.upsert({ where: { key: `ua:person:${who.id}` }, create: { key: `ua:person:${who.id}`, startedAt: NOW }, update: { startedAt: NOW } });
+    }
+    const mineIn = (work: { runs: { itemId: string }[] }, ...ids: string[]) => work.runs.filter((one) => ids.includes(one.itemId));
+
+    it('runs a watch while goals and tasks are inside their share, and leaves live chat its room', async () => {
+      const gsabel = await person('gsabel');
+      const watch = await set(gsabel, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      // 8 of the 9 replies goals and tasks may use (30% of 30) are used
+      await usage(gsabel, 8, 'task');
+      expect(mineIn(await claimWork(at(HOUR + 2 * MIN)), watch.id)).toHaveLength(1);
+      // Chat is far from its limit and still allowed
+      expect(await checkReplyAllowance(gsabel.brickId, { userId: gsabel.uuid, isGuest: false, source: 'universe-ai' }, at(HOUR + 2 * MIN))).toEqual({ allowed: true });
+    });
+
+    it('holds a watch once its share is used, says so once with when it carries on, runs nothing meanwhile and carries on when the usage is back', async () => {
+      const gsbea = await person('gsbea');
+      const watch = await set(gsbea, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      const briefing = await set(gsbea, { kind: 'schedule', words: 'Morning', cadence: { type: 'every', minutes: 60 } });
+      const reminder = await set(gsbea, { words: 'Call mum' });
+      await usage(gsbea, 9, 'task');
+      const first = await claimWork(at(HOUR + 2 * MIN));
+      expect(mineIn(first, watch.id, briefing.id)).toEqual([]);
+      // A reminder is fixed text with no AI: it still comes
+      expect(mineIn(first, reminder.id)).toHaveLength(1);
+      expect(first.held.filter((one) => one.userId === gsbea.uuid).map((one) => one.itemId).sort()).toEqual([watch.id, briefing.id].sort());
+      expect(first.held.find((one) => one.itemId === watch.id)).toMatchObject({ kind: 'watch', brickId: gsbea.brickId, resumesAt: WINDOW_ENDS.toISOString() });
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).toMatchObject({ state: 'on', nextDueAt: WINDOW_ENDS });
+      expect(await runsOf(watch.id)).toHaveLength(0);
+      // Asked again soon, before anything confirmed it: nothing runs and the same notice is not handed out twice in a row
+      const soon = await claimWork(at(HOUR + 5 * MIN));
+      expect(mineIn(soon, watch.id, briefing.id)).toEqual([]);
+      expect(soon.held.filter((one) => one.userId === gsbea.uuid)).toEqual([]);
+      // The answer never reached the bot server and nothing was confirmed: after the retry interval it is handed out again, never lost
+      const retry = await claimWork(at(HOUR + 13 * MIN));
+      expect(retry.held.filter((one) => one.userId === gsbea.uuid).map((one) => one.itemId).sort()).toEqual([watch.id, briefing.id].sort());
+      expect(mineIn(retry, watch.id, briefing.id)).toEqual([]);
+      const offered = retry.held.find((one) => one.itemId === watch.id)!;
+      expect(offered.waitId).toBe(first.held.find((one) => one.itemId === watch.id)!.waitId);
+      // A confirm for another wait marks nothing; the right one keeps it, and it is not handed out again for this wait
+      expect(await markHeldTold(watch.id, new Date(0).toISOString())).toEqual({ ok: true, told: false });
+      expect(await markHeldTold('00000000-0000-4000-8000-000000000000', offered.waitId)).toMatchObject({ ok: false, status: 404 });
+      expect(await markHeldTold(watch.id, offered.waitId)).toEqual({ ok: true, told: true });
+      expect(await markHeldTold(watch.id, offered.waitId)).toEqual({ ok: true, told: false });
+      const after = await claimWork(at(2 * HOUR));
+      expect(mineIn(after, watch.id, briefing.id)).toEqual([]);
+      expect(after.held.filter((one) => one.userId === gsbea.uuid).map((one) => one.itemId)).toEqual([briefing.id]);
+      // The window ends: they carry on, as ordinary runs, and nothing is marked late
+      const back = await claimWork(at(5 * HOUR + MIN));
+      expect(mineIn(back, watch.id, briefing.id)).toHaveLength(2);
+      expect(mineIn(back, watch.id)[0]).toMatchObject({ late: false, fresh: false });
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).toMatchObject({ heldSince: null, heldToldAt: null, heldNoticeAt: null });
+    });
+
+    it('holds a goal while the person’s whole window is used up, even before goals and tasks used their share', async () => {
+      const gscy = await person('gscy');
+      const goal = await set(gscy, { kind: 'goal', words: 'Visa', outcome: 'Issued', cadence: { type: 'every', minutes: 60 } });
+      await usage(gscy, 30, 'dm');
+      const work = await claimWork(at(HOUR + 2 * MIN));
+      expect(mineIn(work, goal.id)).toEqual([]);
+      expect(work.held.map((one) => one.itemId)).toContain(goal.id);
+      expect((await prisma.brickItem.findUniqueOrThrow({ where: { id: goal.id } })).heldSince).not.toBeNull();
+    });
+
+    it('a wait ends when the item is paused, resumed or changed: nothing is owed and nothing stale is handed out, and a new wait is told afresh', async () => {
+      const gspau = await person('gspau');
+      const watch = await set(gspau, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      await usage(gspau, 9, 'task');
+      const first = await claimWork(at(HOUR + 2 * MIN));
+      expect(first.held.map((one) => one.itemId)).toContain(watch.id);
+      // Paused and resumed while the notice was never confirmed: nothing is left owing, so no notice for a wait that is not there
+      await changeItem(gspau.brickId, watch.id, { userId: gspau.uuid, action: 'pause' }, at(HOUR + 3 * MIN));
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).toMatchObject({ heldSince: null, heldToldAt: null, heldNoticeAt: null });
+      await changeItem(gspau.brickId, watch.id, { userId: gspau.uuid, action: 'resume' }, at(HOUR + 4 * MIN));
+      const quiet = await claimWork(at(HOUR + 30 * MIN));
+      expect(quiet.held.filter((one) => one.itemId === watch.id)).toEqual([]);
+      // Still used up when it comes due: a new wait, told afresh with its own wait id
+      const again = await claimWork(at(2 * HOUR + 10 * MIN));
+      const fresh = again.held.find((one) => one.itemId === watch.id);
+      expect(fresh).toBeDefined();
+      expect(fresh!.waitId).not.toBe(first.held.find((one) => one.itemId === watch.id)!.waitId);
+    });
+
+    it('a goal or task that is the first use of a window starts it, so what goals and tasks use is counted and held against their share', async () => {
+      const gswin = await person('gswin');
+      const watch = await set(gswin, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      expect(await prisma.replyWindow.findUnique({ where: { key: `ua:person:${gswin.id}` } })).toBeNull();
+      const started = (await claimWork(at(HOUR + 2 * MIN))).runs.find((one) => one.itemId === watch.id)!;
+      expect(started).toBeDefined();
+      await finishRun(started.runId, { attempt: started.attempt, state: 'done', outcome: 'quiet' }, at(HOUR + 3 * MIN));
+      expect((await prisma.replyWindow.findUniqueOrThrow({ where: { key: `ua:person:${gswin.id}` } })).startedAt).toEqual(at(HOUR + 2 * MIN));
+      // The model calls of those runs are counted from the start of that window: 9 is their whole share
+      await prisma.botsAiProvider.upsert({ where: { providerId: 'universe-ai' }, create: { providerId: 'universe-ai', name: 'Universe AI', type: 'universe-ai', enabled: true }, update: {} });
+      await prisma.botsAiUsage.createMany({ data: Array.from({ length: 9 }, () => ({ botId: gswin.brickId, providerId: 'universe-ai', talkedPersonId: gswin.id, channel: 'task', timestamp: at(HOUR + 3 * MIN) })) });
+      const next = await claimWork(at(2 * HOUR + 5 * MIN));
+      expect(mineIn(next, watch.id)).toEqual([]);
+      expect(next.held.map((one) => one.itemId)).toContain(watch.id);
+    });
+
+    it('counts the runs already handed out, so a batch that falls due together is held to the room there is', async () => {
+      const gsbat = await person('gsbat');
+      const first = await set(gsbat, { kind: 'watch', words: 'One', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      const second = await set(gsbat, { kind: 'watch', words: 'Two', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      const third = await set(gsbat, { kind: 'watch', words: 'Three', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      // 7 of the 9 calls goals and tasks may use are used: room for two more, not three
+      await usage(gsbat, 7, 'task');
+      const work = await claimWork(at(HOUR + 2 * MIN));
+      expect(mineIn(work, first.id, second.id, third.id)).toHaveLength(2);
+      expect(work.held.filter((one) => one.userId === gsbat.uuid)).toHaveLength(1);
+    });
+
+    it('a run on the owner’s own key is not counted against the Universe AI room of their other Bricks', async () => {
+      const gsmix = await person('gsmix');
+      const own = await makeBrick(gsmix.id, { name: 'Own key Brick' });
+      await prisma.bot.update({ where: { id: own.id }, data: { aiProviderRef: 'my-own-key' } });
+      // 8 of the 9 calls goals and tasks may use are used; the room is one more
+      await usage(gsmix, 8, 'task');
+      const onOwnKey = await set({ uuid: gsmix.uuid, brickId: own.id }, { kind: 'watch', words: 'Mine', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      const onUniverse = await set(gsmix, { kind: 'watch', words: 'Ours', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      // The own-key run is handed out first (it is never held) and takes none of the room: the Universe AI one still runs
+      const work = await claimWork(at(HOUR + 2 * MIN));
+      expect(mineIn(work, onOwnKey.id, onUniverse.id)).toHaveLength(2);
+      expect(work.held.filter((one) => one.userId === gsmix.uuid)).toEqual([]);
+    });
+
+    it('a run that has written a call holds no place more, so nothing is counted twice', async () => {
+      const gsonce = await person('gsonce');
+      const first = await set(gsonce, { kind: 'watch', words: 'One', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      // Set a little later, so it falls due after the first one's run has been handed out
+      const second = await set(gsonce, { kind: 'watch', words: 'Two', condition: 'It drops', cadence: { type: 'every', minutes: 60 } }, at(3 * MIN));
+      // 7 of the 9 calls goals and tasks may use are used
+      await usage(gsonce, 7, 'task');
+      expect(mineIn(await claimWork(at(HOUR + 2 * MIN)), first.id)).toHaveLength(1);
+      // The run writes one call, naming itself, while it is still open: 8 are counted, and it holds no place more
+      const started = await prisma.brickItemRun.findFirstOrThrow({ where: { itemId: first.id } });
+      await prisma.botsAiUsage.create({ data: { botId: gsonce.brickId, providerId: 'universe-ai', talkedPersonId: gsonce.id, channel: 'task', brickRunId: started.id, timestamp: at(HOUR + 3 * MIN) } });
+      const work = await claimWork(at(HOUR + 5 * MIN));
+      expect(mineIn(work, second.id)).toHaveLength(1);
+      expect(work.held.filter((one) => one.userId === gsonce.uuid)).toEqual([]);
+    });
+
+    it('lets a waiting item carry on before its window ends when room comes back: extra usage, or its Brick moved to its own key', async () => {
+      const gsback = await person('gsback');
+      const watch = await set(gsback, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      await usage(gsback, 9, 'task');
+      const first = await claimWork(at(HOUR + 2 * MIN));
+      expect(first.held.map((one) => one.itemId)).toContain(watch.id);
+      // Still used up: nothing changes, it keeps waiting
+      expect(mineIn(await claimWork(at(HOUR + 20 * MIN)), watch.id)).toEqual([]);
+      // No limit is given: the next ask carries it on, and what it was waiting for is cleared
+      await recordGrant({ personId: gsback.id, settlement: 'gift', startsAt: at(0), endsAt: at(4 * HOUR), givenById: gsback.id, grantKey: `gsback-none-${randomUUID()}`, noLimit: true });
+      expect(mineIn(await claimWork(at(HOUR + 25 * MIN)), watch.id)).toHaveLength(1);
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).toMatchObject({ heldSince: null, heldToldAt: null, heldNoticeAt: null });
+    });
+
+    it('looks again at every waiting item, so ones that stay held never keep a later one from carrying on', async () => {
+      const stay = [await person('gsstay1'), await person('gsstay2'), await person('gsstay3')];
+      const later = await person('gslater');
+      const owners = [...stay, later];
+      const watches: Awaited<ReturnType<typeof set>>[] = [];
+      for (const one of owners) {
+        await usage(one, 9, 'task');
+        watches.push(await set(one, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } }));
+      }
+      await claimWork(at(HOUR + 2 * MIN));
+      for (const watch of watches) expect((await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).heldSince).not.toBeNull();
+      // Room comes back only for the owner of the item with the highest id, with a page of two: the pages before it are all still held, so the
+      // item that can carry on is surely on a later page
+      const byId = [...watches].sort((a, b) => a.id.localeCompare(b.id));
+      const lastItem = byId[byId.length - 1];
+      const lastOwner = owners[watches.indexOf(lastItem)];
+      await recordGrant({ personId: lastOwner.id, settlement: 'gift', startsAt: at(0), endsAt: at(4 * HOUR), givenById: lastOwner.id, grantKey: `gslater-none-${randomUUID()}`, noLimit: true });
+      const work = await claimWork(at(HOUR + 25 * MIN), 50, 2);
+      expect(mineIn(work, lastItem.id)).toHaveLength(1);
+      for (const watch of byId.slice(0, 3)) expect(mineIn(work, watch.id)).toEqual([]);
+    });
+
+    it('lets room that fits only some of a person’s waiting items carry on only those: the rest keep their wait and are not told again', async () => {
+      const gspart = await person('gspart');
+      const items = [];
+      for (const words of ['A', 'B', 'C']) items.push(await set(gspart, { kind: 'watch', words, condition: 'It drops', cadence: { type: 'every', minutes: 60 } }));
+      await usage(gspart, 9, 'task');
+      const first = await claimWork(at(HOUR + 2 * MIN));
+      expect(first.held.filter((one) => one.userId === gspart.uuid)).toHaveLength(3);
+      // The bot server told them all
+      for (const note of first.held.filter((one) => one.userId === gspart.uuid)) expect(await markHeldTold(note.itemId, note.waitId)).toEqual({ ok: true, told: true });
+      const before = await prisma.brickItem.findMany({ where: { id: { in: items.map((one) => one.id) } } });
+      // One place comes free: only one of the three can carry on
+      const row = await prisma.botsAiUsage.findFirstOrThrow({ where: { talkedPersonId: gspart.id } });
+      await prisma.botsAiUsage.delete({ where: { id: row.id } });
+      const work = await claimWork(at(HOUR + 10 * MIN));
+      expect(mineIn(work, ...items.map((one) => one.id))).toHaveLength(1);
+      expect(work.held.filter((one) => one.userId === gspart.uuid)).toEqual([]);
+      const ranId = mineIn(work, ...items.map((one) => one.id))[0].itemId;
+      for (const was of before) {
+        const now = await prisma.brickItem.findUniqueOrThrow({ where: { id: was.id } });
+        if (was.id === ranId) expect(now).toMatchObject({ heldSince: null, heldToldAt: null, heldNoticeAt: null });
+        else expect(now).toMatchObject({ heldSince: was.heldSince, heldToldAt: was.heldToldAt, heldNoticeAt: was.heldNoticeAt });
+      }
+    });
+
+    it('lets extra usage with no limit carry on all of a person’s waiting items and clear their waits', async () => {
+      const gsall = await person('gsall');
+      const items = [];
+      for (const words of ['A', 'B', 'C']) items.push(await set(gsall, { kind: 'watch', words, condition: 'It drops', cadence: { type: 'every', minutes: 60 } }));
+      await usage(gsall, 9, 'task');
+      await claimWork(at(HOUR + 2 * MIN));
+      await recordGrant({ personId: gsall.id, settlement: 'gift', startsAt: at(0), endsAt: at(4 * HOUR), givenById: gsall.id, grantKey: `gsall-none-${randomUUID()}`, noLimit: true });
+      const work = await claimWork(at(HOUR + 10 * MIN));
+      expect(mineIn(work, ...items.map((one) => one.id))).toHaveLength(3);
+      for (const one of items) expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: one.id } })).toMatchObject({ heldSince: null, heldToldAt: null, heldNoticeAt: null });
+    });
+
+    it('a call that is not counted (a failed one) leaves its run holding its place, so a retry is never crowded out', async () => {
+      const gsfail = await person('gsfail');
+      const a = await set(gsfail, { kind: 'watch', words: 'A', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      const b = await set(gsfail, { kind: 'watch', words: 'B', condition: 'It drops', cadence: { type: 'every', minutes: 60 } }, at(3 * MIN));
+      // 8 of the 9 calls goals and tasks may use are used: room for one run
+      await usage(gsfail, 8, 'task');
+      const first = await claimWork(at(HOUR + 2 * MIN));
+      expect(mineIn(first, a.id)).toHaveLength(1);
+      expect(mineIn(first, b.id)).toEqual([]);
+      const runA = first.runs.find((one) => one.itemId === a.id)!;
+      // A's call failed: it is not counted, so A still holds its place and B keeps waiting
+      await prisma.botsAiUsage.create({ data: { botId: gsfail.brickId, providerId: 'universe-ai', talkedPersonId: gsfail.id, channel: 'task', error: true, brickRunId: runA.runId, timestamp: at(HOUR + 3 * MIN) } });
+      const next = await claimWork(at(HOUR + 5 * MIN));
+      expect(mineIn(next, b.id)).toEqual([]);
+      // The retry succeeds and is counted: the place is now used by a real call, and still nothing is free for B
+      await prisma.botsAiUsage.create({ data: { botId: gsfail.brickId, providerId: 'universe-ai', talkedPersonId: gsfail.id, channel: 'task', brickRunId: runA.runId, timestamp: at(HOUR + 6 * MIN) } });
+      expect(mineIn(await claimWork(at(HOUR + 7 * MIN)), b.id)).toEqual([]);
+    });
+
+    it('a call that names a run but is not a task call does not release the run’s place', async () => {
+      const gsdm = await person('gsdm');
+      const a = await set(gsdm, { kind: 'watch', words: 'A', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      const b = await set(gsdm, { kind: 'watch', words: 'B', condition: 'It drops', cadence: { type: 'every', minutes: 60 } }, at(3 * MIN));
+      await usage(gsdm, 8, 'task');
+      const first = await claimWork(at(HOUR + 2 * MIN));
+      const runA = first.runs.find((one) => one.itemId === a.id)!;
+      await prisma.botsAiUsage.create({ data: { botId: gsdm.brickId, providerId: 'universe-ai', talkedPersonId: gsdm.id, channel: 'dm', brickRunId: runA.runId, timestamp: at(HOUR + 3 * MIN) } });
+      expect(mineIn(await claimWork(at(HOUR + 5 * MIN)), b.id)).toEqual([]);
+    });
+
+    it('the room check and the window start use only the client they are given, never another connection', async () => {
+      const gstx = await person('gstx');
+      const settings = { signedIn: 30, windowHours: 5, goalsShare: 30 };
+      // A stand-in for the claim's transaction that records every read and write made through it
+      const seen: string[] = [];
+      const db = {
+        $queryRaw: async (query: { strings?: readonly string[] }) => {
+          const text = (query.strings ?? []).join('');
+          seen.push(text.includes('reply_windows') ? 'window start' : 'usage');
+          return text.includes('reply_windows') ? [{ started_at: at(HOUR) }] : [{ counted: BigInt(3), counted_tasks: BigInt(3), in_flight: BigInt(0) }];
+        },
+        replyWindow: { findUnique: async () => (seen.push('window') as unknown, { startedAt: at(0) }) },
+        meterGrant: { findMany: async () => (seen.push('extra usage') as unknown, []) },
+      };
+      // The global client must not be touched by either
+      const spies = [jest.spyOn(prisma, '$queryRaw'), jest.spyOn(prisma.replyWindow, 'findUnique'), jest.spyOn(prisma.meterGrant, 'findMany'), jest.spyOn(prisma.botsAiUsage, 'count')];
+      try {
+        expect(await goalsRoom(gstx.id, at(HOUR), db as never, settings)).toEqual({ ok: true });
+        expect(await windowStart(`ua:person:${gstx.id}`, 5, at(HOUR), db as never)).toEqual(at(HOUR));
+        expect(seen.sort()).toEqual(['extra usage', 'usage', 'window', 'window start']);
+        for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+      } finally {
+        for (const spy of spies) spy.mockRestore();
+      }
+    });
+
+    it('a call of one run never takes the place another still-open run holds', async () => {
+      const gsover = await person('gsover');
+      const a = await set(gsover, { kind: 'watch', words: 'A', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      const b = await set(gsover, { kind: 'watch', words: 'B', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      const c = await set(gsover, { kind: 'watch', words: 'C', condition: 'It drops', cadence: { type: 'every', minutes: 60 } }, at(3 * MIN));
+      // 7 of the 9 calls goals and tasks may use are used: room for two runs
+      await usage(gsover, 7, 'task');
+      const first = await claimWork(at(HOUR + 2 * MIN));
+      expect(mineIn(first, a.id, b.id)).toHaveLength(2);
+      // B writes its call and finishes; A has written nothing yet and still holds its place
+      const runB = first.runs.find((one) => one.itemId === b.id)!;
+      await prisma.botsAiUsage.create({ data: { botId: gsover.brickId, providerId: 'universe-ai', talkedPersonId: gsover.id, channel: 'task', brickRunId: runB.runId, timestamp: at(HOUR + 3 * MIN) } });
+      await finishRun(runB.runId, { attempt: runB.attempt, state: 'done', outcome: 'quiet' }, at(HOUR + 4 * MIN));
+      // 8 counted plus A's place is the whole share: C waits
+      const next = await claimWork(at(HOUR + 5 * MIN));
+      expect(mineIn(next, c.id)).toEqual([]);
+      expect(next.held.map((one) => one.itemId)).toContain(c.id);
+    });
+
+    it('lets extra usage raise the room goals and tasks have, as it does for chat: a multiple raises it, no limit lifts it, and it is back to the usual when it ends', async () => {
+      const gsext = await person('gsext');
+      const watch = await set(gsext, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      // 9 replies by goals and tasks is their whole share (30% of 30), 30 is the whole window
+      await usage(gsext, 9, 'task');
+      const grant = { personId: gsext.id, settlement: 'gift' as const, startsAt: at(0), endsAt: at(4 * HOUR), givenById: gsext.id };
+      await recordGrant({ ...grant, grantKey: `gsext-double-${randomUUID()}`, multiplier: 2 });
+      // Twice the window: twice the share (18), so 9 used is room still
+      expect(mineIn(await claimWork(at(HOUR + 2 * MIN)), watch.id)).toHaveLength(1);
+      // The whole raised window (60) used up holds the next one
+      await usage(gsext, 60, 'dm');
+      const full = await set(gsext, { kind: 'watch', words: 'Rate', condition: 'It moves', cadence: { type: 'every', minutes: 60 } });
+      expect(mineIn(await claimWork(at(2 * HOUR + 2 * MIN)), full.id)).toEqual([]);
+      // No limit lifts it whatever is used
+      await recordGrant({ ...grant, grantKey: `gsext-none-${randomUUID()}`, noLimit: true });
+      const free = await set(gsext, { kind: 'watch', words: 'Gold', condition: 'It rises', cadence: { type: 'every', minutes: 60 } });
+      expect(mineIn(await claimWork(at(3 * HOUR + 2 * MIN)), free.id)).toHaveLength(1);
+      // When extra usage has ended the usual room applies again, with the work waiting
+      const later = await set(gsext, { kind: 'watch', words: 'Oil', condition: 'It falls', cadence: { type: 'every', minutes: 60 } });
+      expect(mineIn(await claimWork(at(4 * HOUR + 2 * MIN)), later.id)).toEqual([]);
+    });
+
+    it('never holds a Brick that runs on its owner’s own key, and never counts a run against the Universe AI bar for it', async () => {
+      const gsdev = await person('gsdev');
+      await prisma.bot.update({ where: { id: gsdev.brickId }, data: { aiProviderRef: 'my-own-key' } });
+      const watch = await set(gsdev, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      await usage(gsdev, 30, 'dm');
+      const work = await claimWork(at(HOUR + 2 * MIN));
+      expect(mineIn(work, watch.id)).toHaveLength(1);
+      expect(work.held.filter((one) => one.userId === gsdev.uuid)).toEqual([]);
+    });
   });
 });

@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
-import { getBrickLimits } from '@/lib/bot-limits';
+import { getBrickLimits, getUniverseAiReplyLimits } from '@/lib/bot-limits';
+import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
+import { runningExtra } from '@/lib/meter-grants';
+import { windowStart } from '@/lib/reply-limits';
 import { ownerAskingThrough } from '@/lib/brick-make';
 import { TIME_ZONE_KEY, WORKWEEK_KEY, firstDue, isTimeZone, nextDue, readCadence, readWorkweek, repeatMinutes, type Cadence } from '@/lib/brick-item-time';
 
@@ -41,6 +44,8 @@ const LATE_GRACE = 15 * MINUTE;
 const DAY = 24 * 60 * MINUTE;
 /** How many due items one ask for work looks at. The next ask takes the rest. */
 const CLAIM_BATCH = 50;
+/** How many waiting items are looked at again in one go (all of them are, a page at a time). */
+const WAITING_PAGE = 200;
 
 export const stepsSchema = z.array(z.object({ text: z.string().trim().min(1).max(200), state: z.enum(['todo', 'doing', 'done']) }).strict()).max(30);
 const person = z.string().trim().min(1).max(320);
@@ -114,6 +119,8 @@ export interface ItemView {
   result: string | null;
   doneAt: string | null;
   lastRunAt: string | null;
+  /** Since when it waits because the person's usage for goals and tasks is used up; null when it is not waiting. */
+  heldSince: string | null;
   createdAt: string;
 }
 
@@ -142,6 +149,7 @@ function viewOf(row: ItemRow): ItemView {
     result: row.result,
     doneAt: row.doneAt?.toISOString() ?? null,
     lastRunAt: row.lastRunAt?.toISOString() ?? null,
+    heldSince: row.heldSince?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -315,7 +323,7 @@ async function moveChecks(tx: Tx, goalId: string, from: ItemState[], data: Prism
     const cadence = readCadence(check.cadence);
     // A one-off check whose moment passed while its goal was paused is due now, once, like a one-off that is resumed on its own
     const due = recompute && cadence ? (firstDue(cadence, check.timeZone, now) ?? (cadence.type === 'once' ? now : null)) : null;
-    await tx.brickItem.update({ where: { id: check.id }, data: { ...data, nextDueAt: due, revision: { increment: 1 } } });
+    await tx.brickItem.update({ where: { id: check.id }, data: { ...data, ...NOT_HELD, nextDueAt: due, revision: { increment: 1 } } });
   }
 }
 
@@ -323,6 +331,9 @@ async function moveChecks(tx: Tx, goalId: string, from: ItemState[], data: Prism
 async function goalIsOn(tx: Tx, goalId: string): Promise<boolean> {
   return (await tx.brickItem.findUnique({ where: { id: goalId }, select: { state: true } }))?.state === 'on';
 }
+
+/** Whatever changes an item's state or time ends a wait for usage: nothing is held or owed any more, and a new wait starts from nothing. */
+const NOT_HELD = { heldSince: null, heldToldAt: null, heldNoticeAt: null } as const;
 
 const wrongState = (state: string): Refused => ({ ok: false, status: 409, code: 'wrong_state', error: `That is not possible while it is ${state}` });
 
@@ -362,7 +373,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
     const row = await lockedItem(tx, { id: itemId, ownerId, botId: viaBrickId });
     if (!row || row.state === 'deleted') return { ok: false as const, status: 404 as const, error: 'Not found' };
     const cadence = readCadence(row.cadence) ?? ({ type: 'none' } as Cadence);
-    const bump = { revision: { increment: 1 } };
+    const bump = { ...NOT_HELD, revision: { increment: 1 } };
     const finish = async (data: Prisma.BrickItemUpdateInput) => ({ ok: true as const, item: viewOf(await tx.brickItem.update({ where: { id: row.id }, data })) });
 
     switch (input.action) {
@@ -475,9 +486,79 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
 export async function pauseItemsOfDeletedBrick(db: Tx, botId: string): Promise<number> {
   const { count } = await db.brickItem.updateMany({
     where: { botId, state: 'on' },
-    data: { state: 'paused', pausedBy: 'brick_deleted', nextDueAt: null, revision: { increment: 1 } },
+    data: { state: 'paused', pausedBy: 'brick_deleted', nextDueAt: null, ...NOT_HELD, revision: { increment: 1 } },
   });
   return count;
+}
+
+/** What the room check reads from the settings: read once by a caller that checks many people. */
+export interface RoomSettings {
+  signedIn: number;
+  windowHours: number;
+  goalsShare: number;
+}
+
+/**
+ * Whether a watch, briefing or goal of this person may use their Universe AI now (game #2002). A model run on Universe AI is usage of
+ * the owner in the same window as their chat, and goals and tasks may use only a share of it (a Limits row), so live chat always keeps
+ * room: no while the window is used up, or goals and tasks have used their share. Read only: a check never starts a window. A Brick
+ * on its owner's own key uses its key and is never held here. Returns when it carries on.
+ */
+export async function goalsRoom(ownerId: string, now: Date = new Date(), db: Tx | typeof prisma = prisma, settings?: RoomSettings): Promise<{ ok: true } | { ok: false; resumesAt: Date }> {
+  // A caller inside a transaction passes it, and the settings it has already read, so nothing here takes another connection from the pool
+  const [{ signedIn, windowHours }, { goalsShare }, extra] = await Promise.all([
+    settings ?? getUniverseAiReplyLimits(),
+    settings ?? getBrickLimits(),
+    runningExtra(ownerId, now, db),
+  ]);
+  // Extra usage a super admin gave (game #1999) raises the person's window while it runs, a multiple of the usual or no limit, so goals and
+  // tasks and their share rise with it, exactly as chat does: a person with room on their usage bar is never held
+  if (extra?.noLimit) return { ok: true };
+  const total = signedIn * (extra?.multiplier ?? 1);
+  const window = await db.replyWindow.findUnique({ where: { key: `ua:person:${ownerId}` }, select: { startedAt: true } });
+  const ends = window ? new Date(window.startedAt.getTime() + windowHours * 60 * MINUTE) : null;
+  // No window, or one that has ended, has nothing counted in it
+  if (!window || !ends || ends <= now) return { ok: true };
+  // What was used and what runs still hold are read in ONE statement, so both come from the same snapshot: a call recorded while this reads is
+  // either counted as usage or still holds its run's place, never neither. A run still holds its place until a call of its own that is counted
+  // here (the same rows the task count takes: a task call, not an error, not a greeting, not on a personal key, inside the window) has been written, so a failed call
+  // that is tried again keeps its place, and a call is never counted for one run and subtracted from another. A reminder is fixed text and takes none.
+  const rows = await db.$queryRaw<{ counted: bigint; counted_tasks: bigint; in_flight: bigint }[]>(Prisma.sql`
+    SELECT
+      (SELECT count(*) FROM "bots_ai_usage" a WHERE ${countedUsage(ownerId, window.startedAt)}) AS counted,
+      (SELECT count(*) FROM "bots_ai_usage" a WHERE ${countedUsage(ownerId, window.startedAt)} AND a."channel" = 'task') AS counted_tasks,
+      (SELECT count(*) FROM "brick_item_runs" r
+        JOIN "brick_items" i ON i."id" = r."item_id"
+        JOIN "bots" b ON b."id" = i."bot_id"
+        WHERE r."state" = 'claimed' AND r."lease_until" > ${now}
+          AND i."owner_id" = ${ownerId} AND i."kind" <> 'reminder' AND b."ai_provider_ref" = ${UNIVERSE_AI_REF}
+          AND NOT EXISTS (SELECT 1 FROM "bots_ai_usage" a WHERE a."brick_run_id" = r."id" AND a."channel" = 'task' AND ${countedUsage(ownerId, window.startedAt)})) AS in_flight`);
+  const inFlight = Number(rows[0]?.in_flight ?? 0);
+  const used = Number(rows[0]?.counted ?? 0) + inFlight;
+  const byTasks = Number(rows[0]?.counted_tasks ?? 0) + inFlight;
+  const share = Math.max(1, Math.floor((total * goalsShare) / 100));
+  return used >= total || byTasks >= share ? { ok: false, resumesAt: ends } : { ok: true };
+}
+
+/**
+ * The usage rows that count against a person's Universe AI window: theirs, on the server's own provider (not a personal key), not a failed
+ * call, not a greeting, inside the window. A run handed out and not finished holds one place until a row like this names it (the bot server
+ * names the run on the call); a bot server that does not name the run leaves it holding its place, which can only hold too early, never too late.
+ */
+function countedUsage(ownerId: string, since: Date): Prisma.Sql {
+  return Prisma.sql`a."talked_person_id" = ${ownerId} AND a."key_owner_id" IS NULL AND a."error" = false AND a."greeting" = false AND a."timestamp" >= ${since}`;
+}
+
+/** Something Brick must tell a person once: their goal or task is waiting for their usage to be back, and when it carries on. */
+export interface HeldNotice {
+  itemId: string;
+  brickId: string;
+  userId: string;
+  kind: ItemKind;
+  words: string;
+  resumesAt: string;
+  /** Names this wait (when it began): the confirm carries it, so a late confirm from an earlier wait marks nothing. */
+  waitId: string;
 }
 
 export interface ClaimedRun {
@@ -541,7 +622,7 @@ function endsOnFailure(item: { kind: string; cadence: Prisma.JsonValue }): boole
   return item.kind !== 'goal' && readCadence(item.cadence)?.type === 'once';
 }
 function endedOneOff(now: Date): Prisma.BrickItemUpdateInput {
-  return { state: 'done', nextDueAt: null, doneAt: now, revision: { increment: 1 } };
+  return { state: 'done', nextDueAt: null, doneAt: now, ...NOT_HELD, revision: { increment: 1 } };
 }
 
 /**
@@ -551,9 +632,22 @@ function endedOneOff(now: Date): Prisma.BrickItemUpdateInput {
  * server holds, so two asks at the same moment split the work and never share it.
  */
 export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH): Promise<ClaimedRun[]> {
+  return (await claimWork(now, limit)).runs;
+}
+
+/**
+ * Everything the bot server does next: the runs to run, and the goals and tasks that are now waiting because their person's usage is
+ * used up, each to be told once ("held"). A held item is not run: it carries on at the moment the usage is back, with its work saved.
+ */
+export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, waitingPage = WAITING_PAGE): Promise<{ runs: ClaimedRun[]; held: HeldNotice[] }> {
   const limits = await getBrickLimits();
+  // Read once: the room check and the window start take these, so neither needs another connection while a transaction is open
+  const universe = await getUniverseAiReplyLimits();
+  const roomSettings: RoomSettings = { signedIn: universe.signedIn, windowHours: universe.windowHours, goalsShare: limits.goalsShare };
   const lease = new Date(now.getTime() + limits.longestRun * MINUTE);
   const out: ClaimedRun[] = [];
+  const held: HeldNotice[] = [];
+  const noticeRetry = limits.longestRun * MINUTE;
 
   // Runs handed out and never reported
   const lapsed = await prisma.brickItemRun.findMany({ where: { state: 'claimed', leaseUntil: { lte: now } }, orderBy: { leaseUntil: 'asc' }, take: limit, select: { id: true, itemId: true } });
@@ -595,6 +689,37 @@ export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH):
     }
   }
 
+  // A wait for usage ends before its window does when there is room again: extra usage was given, the allowance went up, or the Brick moved
+  // to its owner's own key. Such an item is made due now (its work is saved) with its wait marks kept: the claim below checks the room again under
+  // the person's lock, clears the marks only for an item it hands a run to, and an item it holds again keeps its wait, so is never announced twice.
+  // Every waiting item is looked at, a page at a time by id: one that stays held never keeps a later one from being looked at. Waiting items
+  // are few (a person has them only while their usage is used up), and the room is read once for each person.
+  const roomOf = new Map<string, boolean>();
+  let after = '';
+  for (;;) {
+    const waiting = await prisma.$queryRaw<{ id: string; owner_id: string; ai_provider_ref: string | null }[]>(Prisma.sql`
+      SELECT i."id", i."owner_id", b."ai_provider_ref" FROM "brick_items" i
+      JOIN "bots" b ON b."id" = i."bot_id"
+      WHERE i."state" = 'on' AND i."held_since" IS NOT NULL AND i."next_due_at" > ${now} AND i."id" > ${after}
+        AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
+      ORDER BY i."id" ASC
+      LIMIT ${waitingPage}`);
+    for (const one of waiting) {
+      try {
+        let ok = one.ai_provider_ref !== UNIVERSE_AI_REF;
+        if (!ok) {
+          if (!roomOf.has(one.owner_id)) roomOf.set(one.owner_id, (await goalsRoom(one.owner_id, now, prisma, roomSettings)).ok);
+          ok = roomOf.get(one.owner_id)!;
+        }
+        if (ok) await prisma.brickItem.updateMany({ where: { id: one.id, state: 'on', heldSince: { not: null }, nextDueAt: { gt: now } }, data: { nextDueAt: now } });
+      } catch (error) {
+        console.error('[BrickItems] Could not look again at a waiting item:', error instanceof Error ? error.message : 'unknown');
+      }
+    }
+    if (waiting.length < waitingPage) break;
+    after = waiting[waiting.length - 1].id;
+  }
+
   // What has fallen due. Only an item that is on, whose Brick is on and not deleted and still its owner's
   const due = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
     SELECT i."id" FROM "brick_items" i
@@ -610,6 +735,7 @@ export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH):
     LIMIT ${limit}`);
   for (const { id } of due) {
     let claimed: Prisma.BrickItemRunGetPayload<{ include: typeof RUN_INCLUDE }> | null = null;
+    let notice: HeldNotice | null = null;
     try {
       claimed = await prisma.$transaction(async (tx) => {
         const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
@@ -626,9 +752,36 @@ export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH):
         const overdue = behind > LATE_GRACE;
         const reminderLike = item.kind === 'reminder' || item.kind === 'schedule';
 
+        // Usage: a watch, briefing or goal that runs on Universe AI uses the owner's usage, inside the share goals and tasks may use. When it
+        // is used up the item waits, with its work saved, and is due again the moment it is back; Brick says so once per wait. A reminder
+        // is fixed text with no AI: it always comes, and a Brick on its owner's own key never uses the Universe AI bar.
+        let onUniverse = false;
+        if (item.kind !== 'reminder') {
+          // The person's lock comes before the usage is read and is held until the run is made: two items of theirs claimed at the same moment
+          // are checked one after the other, each seeing the run the other made, so the last place in their room is never given twice
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-runs:${item.ownerId}`}))`;
+          const bot = await tx.bot.findUniqueOrThrow({ where: { id: item.botId }, select: { aiProviderRef: true } });
+          onUniverse = bot.aiProviderRef === UNIVERSE_AI_REF;
+          const room = onUniverse ? await goalsRoom(item.ownerId, now, tx, roomSettings) : ({ ok: true } as const);
+          if (!room.ok) {
+            // The notice is owed until the bot server confirms it (markHeldTold); it is handed out now, and handed out again after the
+            // retry interval if no confirm came, so an answer that never arrived does not lose it and a quick second ask does not repeat it
+            const since = item.heldSince ?? now;
+            const owed = item.heldToldAt === null && (item.heldNoticeAt === null || item.heldNoticeAt.getTime() <= now.getTime() - noticeRetry);
+            await tx.brickItem.update({ where: { id }, data: { nextDueAt: room.resumesAt, heldSince: since, ...(owed ? { heldNoticeAt: now } : {}) } });
+            if (owed) {
+              const owner = await tx.user.findUniqueOrThrow({ where: { id: item.ownerId }, select: { uuid: true } });
+              notice = { itemId: item.id, brickId: item.botId, userId: owner.uuid, kind: item.kind as ItemKind, words: item.words, resumesAt: room.resumesAt.toISOString(), waitId: since.toISOString() };
+            }
+            return null;
+          }
+        }
+
+        // There is room: the wait is over, whether or not this check goes on to run (the runs a day below can still hold it back)
+        if (item.heldSince !== null) await tx.brickItem.update({ where: { id }, data: NOT_HELD });
+
         // Runs a day: watches, schedules and goals together, per person. A reminder is fixed text with no AI and never uses them.
         if (item.kind !== 'reminder') {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-runs:${item.ownerId}`}))`;
           const today = await tx.brickItemRun.count({ where: { claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' } } } });
           if (today >= limits.runsPerDay) return null;
         }
@@ -641,16 +794,53 @@ export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH):
           RETURNING "id"`);
         // The next one is the first still to come: after an outage everything missed but this one is skipped, never replayed
         const next = cadence ? nextDue(cadence, item.timeZone, dueAt, now) : null;
-        await tx.brickItem.update({ where: { id }, data: { nextDueAt: next } });
+        // A run is being made, so nothing is waiting any more
+        await tx.brickItem.update({ where: { id }, data: { nextDueAt: next, heldSince: null, heldToldAt: null, heldNoticeAt: null } });
         if (!made.length) return null;
+        // A run on Universe AI is the person's first use of the window when none is running, exactly as their first chat reply is: it
+        // starts the window, so what goals and tasks use is counted in it and held against their share, never left outside any window
+        if (onUniverse) await windowStart(`ua:person:${item.ownerId}`, roomSettings.windowHours, now, tx);
         return tx.brickItemRun.findUniqueOrThrow({ where: { id: made[0].id }, include: RUN_INCLUDE });
       });
     } catch (error) {
+      // What was decided inside the transaction did not commit, so nothing is handed out for it: the notice is owed still and comes with a later ask
+      notice = null;
       console.error('[BrickItems] Could not claim a due item:', error instanceof Error ? error.message : 'unknown');
     }
     if (claimed) out.push(claimedOf(claimed));
+    if (notice) held.push(notice);
   }
-  return out;
+
+  // A held notice handed out and never confirmed is handed out again once the retry interval is over: the item itself is not due until its
+  // usage is back, so it is found here, not above
+  const owing = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+    SELECT i."id" FROM "brick_items" i
+    JOIN "bots" b ON b."id" = i."bot_id"
+    WHERE i."state" = 'on' AND i."held_since" IS NOT NULL AND i."held_told_at" IS NULL AND i."next_due_at" > ${now}
+      AND (i."held_notice_at" IS NULL OR i."held_notice_at" <= ${new Date(now.getTime() - noticeRetry)})
+      AND b."enabled" = true AND b."deleted_at" IS NULL AND b."room_id" IS NULL AND b."owner_id" = i."owner_id"
+    ORDER BY i."held_since" ASC, i."id" ASC
+    LIMIT ${limit}`);
+  for (const { id } of owing) {
+    try {
+      const notice = await prisma.$transaction(async (tx) => {
+        const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+          SELECT i."id" FROM "brick_items" i
+          WHERE i."id" = ${id} AND i."state" = 'on' AND i."held_since" IS NOT NULL AND i."held_told_at" IS NULL AND i."next_due_at" > ${now}
+            AND (i."held_notice_at" IS NULL OR i."held_notice_at" <= ${new Date(now.getTime() - noticeRetry)})
+          FOR UPDATE OF i SKIP LOCKED`);
+        if (!locked.length) return null;
+        const item = await tx.brickItem.findUniqueOrThrow({ where: { id }, include: { owner: { select: { uuid: true } } } });
+        if (!item.heldSince || !item.nextDueAt) return null;
+        await tx.brickItem.update({ where: { id }, data: { heldNoticeAt: now } });
+        return { itemId: item.id, brickId: item.botId, userId: item.owner.uuid, kind: item.kind as ItemKind, words: item.words, resumesAt: item.nextDueAt.toISOString(), waitId: item.heldSince.toISOString() } satisfies HeldNotice;
+      });
+      if (notice) held.push(notice);
+    } catch (error) {
+      console.error('[BrickItems] Could not hand a held notice out again:', error instanceof Error ? error.message : 'unknown');
+    }
+  }
+  return { runs: out, held };
 }
 
 export const runReportSchema = z
@@ -731,7 +921,7 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
       if (pausedOnly && workDone) {
         const ended = await tx.brickItem.update({
           where: { id: item.id },
-          data: { state: 'done', pausedBy: null, nextDueAt: null, doneAt: now, lastRunAt: now, result: report.result ?? item.result, revision: { increment: 1 } },
+          data: { state: 'done', pausedBy: null, nextDueAt: null, doneAt: now, lastRunAt: now, result: report.result ?? item.result, ...NOT_HELD, revision: { increment: 1 } },
         });
         return { ok: true as const, item: viewOf(ended), applied: false, failuresInRow: item.failuresInRow, tellPerson: false };
       }
@@ -759,7 +949,7 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
     const watchSpoke = kind === 'watch' && report.state === 'done' && report.outcome === 'spoke';
     const goalReached = kind === 'goal' && report.state === 'done' && report.reached === true;
     if (oneOffSent || watchSpoke || goalReached) {
-      Object.assign(data, { state: 'done', nextDueAt: null, doneAt: now, result: report.result ?? item.result, revision: { increment: 1 } });
+      Object.assign(data, { state: 'done', nextDueAt: null, doneAt: now, result: report.result ?? item.result, ...NOT_HELD, revision: { increment: 1 } });
       if (goalReached) await moveChecks(tx, item.id, ['on', 'paused'], { state: 'done', pausedBy: null, doneAt: now }, now, false);
     }
     const updated = await tx.brickItem.update({ where: { id: item.id }, data });
@@ -794,6 +984,22 @@ export async function markTold(runId: string): Promise<{ ok: true; told: boolean
   // Only the run that was asked to tell, and only while its row of failures is still the item's: a late confirmation from a row that has
   // since started over (a run worked, or the item was reopened) matches nothing and marks nothing
   const { count } = await prisma.brickItem.updateMany({ where: { id: run.itemId, tellRunId: runId, failureTold: false }, data: { failureTold: true, tellRunId: null } });
+  return { ok: true, told: count > 0 };
+}
+
+export const heldToldSchema = z.object({ waitId: z.string().trim().min(1).max(64) }).strict();
+
+/**
+ * The bot server said, to the person, that their goal or task is waiting (a `held` notice from the due call). Call it only after it was
+ * said: a notice that is never confirmed is handed out again by a later due call. Only the wait it names is marked, so a late
+ * confirm from an earlier wait, or for an item that has since carried on, marks nothing. Answers whether it was kept.
+ */
+export async function markHeldTold(itemId: string, waitId: string): Promise<{ ok: true; told: boolean } | { ok: false; status: 404; error: string }> {
+  const since = new Date(waitId);
+  const item = await prisma.brickItem.findUnique({ where: { id: itemId }, select: { id: true } });
+  if (!item) return { ok: false, status: 404, error: 'Item not found' };
+  if (Number.isNaN(since.getTime())) return { ok: true, told: false };
+  const { count } = await prisma.brickItem.updateMany({ where: { id: itemId, heldSince: since, heldToldAt: null }, data: { heldToldAt: new Date() } });
   return { ok: true, told: count > 0 };
 }
 

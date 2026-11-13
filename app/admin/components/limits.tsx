@@ -724,6 +724,20 @@ export function brickLimits(values: BrickLimits): Limit[] {
         { value: 5, label: '5 times', meaning: 'Only when it keeps failing.' },
       ],
     },
+    {
+      id: 'goalsShare',
+      label: 'Share of a person’s usage that goals and tasks may use',
+      hint: `Out of the Universe AI usage a signed-in person gets every ${FAIR_USAGE_WINDOW_HOURS} hours. Watches, briefings and goals stop here, so chat always keeps room. A Brick on its owner’s own key never uses it.`,
+      unit: '%',
+      value: values.goalsShare,
+      recommended: recommended.goalsShare,
+      note: 'When it is used up they wait with their work saved and carry on when it is back. Reminders are fixed text and always come.',
+      options: [
+        { value: 20, label: '20%', meaning: 'Chat keeps most of it.' },
+        { value: 30, label: '30%', meaning: 'A steady balance.' },
+        { value: 50, label: '50%', meaning: 'Half for goals and tasks.' },
+      ],
+    },
   ], LIMIT_RANGES.bricks);
 }
 

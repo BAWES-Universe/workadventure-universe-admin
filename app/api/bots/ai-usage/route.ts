@@ -34,6 +34,7 @@ export async function POST(request: NextRequest) {
       timestamp = new Date(),
       greeting = false,
       eventId: clientEventId = null,
+      runId: sentRunId = null,
     } = body;
 
     // A bot on Universe AI is paid for by the provider that is the Default, so that is the row the usage belongs to
@@ -68,12 +69,25 @@ export async function POST(request: NextRequest) {
 
     // Who talked, matched to their Orbit account so the bot page can name them (#491); a guest is only counted
     const talked = typeof talkedUserId === 'string' && talkedUserId ? talkedUserId.slice(0, 255) : null;
-    const person = await resolveUsagePerson(talked, isGuest);
+    const named = await resolveUsagePerson(talked, isGuest);
+    const task = readUsageChannel(channel) === 'task';
 
     // Fire-and-forget: Don't await, just start the operation
     // This ensures bot operation isn't blocked if tracking fails
-    prisma.botsAiUsage
-      .create({
+    (async () => {
+      // A model call a goal or task made is the usage of the Brick's owner whoever the bot server names (it may name nobody), so it is
+      // always counted in their window and against the share goals and tasks may use. Looked up here, with the write, so a failed lookup is
+      // handled like any other failure of this report and never stops it: the row is still written, as the bot server named the person
+      let person = named;
+      if (task) {
+        try {
+          const brick = await prisma.bot.findUnique({ where: { id: botId }, select: { ownerId: true } });
+          if (brick?.ownerId) person = { personId: brick.ownerId, guest: false };
+        } catch (err) {
+          console.error('Error looking up whose Brick made a task call:', err);
+        }
+      }
+      return prisma.botsAiUsage.create({
         data: {
           botId,
           providerId,
@@ -95,8 +109,11 @@ export async function POST(request: NextRequest) {
           talkedGuest: person.guest,
           // A greeting the bot made on its own: still the payer's usage, never counted against the person it greeted
           greeting: greeting === true,
+          // The run of a goal or task the call was made for (game #2002), kept only as the bot server's word for it
+          brickRunId: typeof sentRunId === 'string' && sentRunId ? sentRunId.slice(0, 36) : null,
         },
-      })
+      });
+    })()
       // The meter's books (game #1998) copy the call from the row that was just counted. They never hold up or fail the report
       .then((row) =>
         recordModelCall({
