@@ -1,4 +1,4 @@
-import { AdapterError, type AppLink, type ConnectStart, type ReadyMadeAdapter, type UseResult } from '@/lib/app-adapter/types';
+import { AdapterError, type AppLink, type ConnectStart, type LinkAnswer, type ReadyMadeAdapter, type UseResult } from '@/lib/app-adapter/types';
 
 /**
  * The real adapter, written from the provider's live docs (docs.composio.dev, read 12 Nov 2026), wired but never switched on
@@ -16,6 +16,9 @@ import { AdapterError, type AppLink, type ConnectStart, type ReadyMadeAdapter, t
  *    GET /auth_configs?toolkit_slug&is_composio_managed, or made with POST /auth_configs { toolkit: { slug } } (its default is
  *    Composio-managed auth), so nobody registers anything with Google or others and nothing needs setting up.
  *
+ * The key is sent on every call to a person's app link too (it answers 401 without it), by Orbit alone (callLink). A 429 is asked again
+ * after the wait the provider names (its limit is 2,000 calls a minute for the account).
+ *
  * The provider's sandbox (its "workbench", which runs code on the person's own data) is ON in every session (the provider's default,
  * stated explicitly); each run is counted like an app step by whoever sends it (the bot server).
  */
@@ -30,7 +33,13 @@ export interface ComposioOptions {
   authConfigFor: (toolkit: string) => Promise<string | null>;
   fetchImpl?: Fetch;
   baseUrl?: string;
+  /** For tests: how a wait is made. */
+  sleep?: (ms: number) => Promise<void>;
 }
+
+/** The provider allows 2,000 calls a minute for the whole account: a refused call is asked again after the wait it names, a few times. */
+const RETRIES = 3;
+const MAX_WAIT_MS = 5_000;
 
 /** The managed auth config found or made for each app, kept for the life of the process. */
 const managedAuthConfigs = new Map<string, string>();
@@ -44,13 +53,26 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
   const doFetch = options.fetchImpl ?? fetch;
   const base = options.baseUrl ?? BASE;
 
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const linkHosts = new Set([new URL(base).hostname]);
+
+  /** Sends one request, and again after the provider's own wait when it says too many (429). */
+  async function send(url: string, init: () => RequestInit): Promise<Response> {
+    for (let attempt = 0; ; attempt += 1) {
+      const response = await doFetch(url, init());
+      if (response.status !== 429 || attempt >= RETRIES) return response;
+      const asked = Number(response.headers?.get?.('retry-after'));
+      await sleep(Math.min(MAX_WAIT_MS, Number.isFinite(asked) && asked > 0 ? asked * 1000 : 1_000 * (attempt + 1)));
+    }
+  }
+
   async function call(path: string, body: Record<string, unknown> | null): Promise<Record<string, unknown>> {
-    const response = await doFetch(`${base}${path}`, {
+    const response = await send(`${base}${path}`, () => ({
       method: body ? 'POST' : 'GET',
       headers: { ...(body ? { 'content-type': 'application/json' } : {}), 'x-api-key': options.apiKey },
       ...(body ? { body: JSON.stringify(body) } : {}),
       signal: AbortSignal.timeout(30_000),
-    });
+    }));
     const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
     if (!response.ok || !json) throw new AdapterError('provider', `Provider answered ${response.status}`);
     return json;
@@ -101,6 +123,38 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
       const headers: Record<string, string> = {};
       for (const [name, value] of Object.entries(sent)) if (typeof value === 'string') headers[name] = value;
       return { url, headers };
+    },
+
+    async callLink({ url, message, sessionId }): Promise<LinkAnswer> {
+      // The key goes only to the provider's own hosts, whatever link was stored
+      let host: URL;
+      try {
+        host = new URL(url);
+      } catch {
+        throw new AdapterError('provider', 'The app link is not a link');
+      }
+      if (host.protocol !== 'https:' && host.hostname !== new URL(base).hostname) throw new AdapterError('provider', 'The app link is not secure');
+      if (!(host.hostname === 'composio.dev' || host.hostname.endsWith('.composio.dev') || linkHosts.has(host.hostname))) {
+        throw new AdapterError('provider', 'The app link is not the provider’s');
+      }
+      const response = await send(url, () => ({
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          'x-api-key': options.apiKey,
+          ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
+        },
+        body: JSON.stringify(message),
+        signal: AbortSignal.timeout(30_000),
+        redirect: 'error',
+      }));
+      return {
+        status: response.status,
+        contentType: response.headers?.get?.('content-type') ?? null,
+        sessionId: response.headers?.get?.('mcp-session-id') ?? null,
+        body: await response.text(),
+      };
     },
 
     async use({ person, toolkit, tool, arguments: args, providerAccountId }): Promise<UseResult> {

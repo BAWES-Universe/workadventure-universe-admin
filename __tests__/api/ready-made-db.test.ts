@@ -15,6 +15,7 @@ import { saveReadyMadeApps } from '@/lib/app-adapter/settings';
 import { GET as listReadyMade, POST as connectReadyMadeApp } from '@/app/api/me/apps/ready-made/route';
 import { GET as adminGet, PUT as adminPut } from '@/app/api/admin/ready-made-apps/route';
 import { POST as useApp } from '@/app/api/ready-made/use/route';
+import { POST as linkApp } from '@/app/api/ready-made/link/route';
 import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
 import { POST as connectApp } from '@/app/api/me/apps/route';
 import { grantToBrick, createConnection, readConnection, listConnections } from '@/lib/app-connections';
@@ -44,6 +45,7 @@ const fake = () => {
     startConnect: jest.fn(async () => ({ redirectUrl: 'https://connect.example/sign-in', providerAccountId: `ca_${tag}`, expiresAt: null })),
     connectionStatus: jest.fn(async (): Promise<'active' | 'pending' | 'failed'> => 'active'),
     appLink: jest.fn(async () => ({ url: `https://mcp.example/${tag}/mcp`, headers: {} })),
+    callLink: jest.fn(async (_input: { url: string; message: Record<string, unknown>; sessionId: string | null }) => ({ status: 200, contentType: 'application/json', sessionId: 'mcp-1', body: '{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}' })),
     use: jest.fn(async () => ({ ok: true, data: { free: ['10:00'] }, error: null, providerCallId: 'log_1' })),
   } satisfies ReadyMadeAdapter;
   return adapter;
@@ -323,6 +325,64 @@ run('ready-made apps through the adapter, in a real database', () => {
     await prisma.appConnection.delete({ where: { id: connectionId } });
     expect((await useIt({ serverId })).status).toBe(404);
     expect(adapter.use).not.toHaveBeenCalled();
+  });
+
+  describe('the app link, which only Orbit may call because it needs the provider key', () => {
+    const link = (serverId: string, extra: Record<string, unknown> = {}) =>
+      linkApp(request('/api/ready-made/link', { method: 'POST', token: SERVICE_TOKEN, body: { botId: saraBrick, serverId, requesterKey: `sara-${tag}`, message: { jsonrpc: '2.0', id: 1, method: 'tools/list' }, ...extra } }));
+
+    it('sends a listing through, with the link’s own address, and hands back what it said and its session id', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      const response = await link(serverId, { sessionId: 'earlier' });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ status: 200, contentType: 'application/json', sessionId: 'mcp-1', body: '{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}' });
+      expect(adapter.callLink).toHaveBeenCalledWith({ url: `https://mcp.example/${tag}/mcp`, message: { jsonrpc: '2.0', id: 1, method: 'tools/list' }, sessionId: 'earlier' });
+      // A listing is not a use
+      expect(await prisma.meterEvent.count({ where: { personId: sara, kind: 'app_use' } })).toBe(0);
+    });
+
+    it('counts a tool run through the link like a use, once for each call id, and needs a call id', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      const message = { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'COMPOSIO_REMOTE_WORKBENCH', arguments: { code: 'secret code' } } };
+      expect((await link(serverId, { message })).status).toBe(400);
+      expect(adapter.callLink).not.toHaveBeenCalled();
+      const callId = `call-${randomUUID()}`;
+      expect((await link(serverId, { message, callId })).status).toBe(200);
+      const retry = await link(serverId, { message, callId });
+      expect(retry.status).toBe(409);
+      expect(adapter.callLink).toHaveBeenCalledTimes(1);
+      const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ eventId: `app:${callId}`, basis: 'estimated', payerKind: 'universe' });
+      // What was asked is not written down: only which app and which tool
+      expect(JSON.stringify(events[0].detail)).not.toContain('secret code');
+    });
+
+    it('passes on nothing but the messages of a session, listing and running', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      for (const method of ['resources/read', 'prompts/get', 'sampling/createMessage', '']) {
+        expect((await link(serverId, { message: { jsonrpc: '2.0', id: 3, method } })).status).toBe(400);
+      }
+      expect(adapter.callLink).not.toHaveBeenCalled();
+    });
+
+    it('is only for the person whose app it is, and only once they are signed in, and not at all while the adapter is off', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      expect((await link(serverId, { requesterKey: `omar-${tag}` })).status).toBe(403);
+      expect((await link(serverId, { requesterKey: undefined })).status).toBe(403);
+      adapter.connectionStatus.mockResolvedValue('pending');
+      await prisma.appConnection.updateMany({ where: { ownerId: sara }, data: { providerConfirmedAt: null } });
+      expect((await link(serverId)).status).toBe(502);
+      expect(adapter.callLink).not.toHaveBeenCalled();
+      setAdapterForTests(null);
+      expect((await link(serverId)).status).toBe(404);
+    });
+
+    it('is a 502 and not a leak when the link cannot be reached', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      adapter.callLink.mockRejectedValueOnce(new Error('down'));
+      expect((await link(serverId)).status).toBe(502);
+    });
   });
 
   it('refuses a person’s own app by link on this route: it only serves ready-made apps', async () => {

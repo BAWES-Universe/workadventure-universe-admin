@@ -22,6 +22,15 @@ export interface AppLink {
   headers: Record<string, string>;
 }
 
+export interface LinkAnswer {
+  status: number;
+  contentType: string | null;
+  /** The link's session header, to send back on the next message. */
+  sessionId: string | null;
+  /** The answer as the link sent it (JSON, or an event stream holding it). */
+  body: string;
+}
+
 export interface UseResult {
   ok: boolean;
   data: unknown;
@@ -38,6 +47,12 @@ export interface ReadyMadeAdapter {
   connectionStatus(input: { providerAccountId: string }): Promise<'active' | 'pending' | 'failed'>;
   /** The person's own app link at the provider. The provider's code-running sandbox is ON in whatever it makes (the owner's rule: nothing ships off); it works only on data from the person's own connected apps, and each run is counted like an app step by the bot server. */
   appLink(input: { person: string; toolkits: string[] }): Promise<AppLink>;
+  /**
+   * One message of the app link's own protocol (a JSON-RPC message), sent to a person's app link WITH the provider key, which the
+   * link needs on every call and which must never leave Orbit: not to a Brick, not to the bot server, not to a screen. `sessionId`
+   * is the link's own session header from an earlier answer, when it gave one.
+   */
+  callLink(input: { url: string; message: Record<string, unknown>; sessionId: string | null }): Promise<LinkAnswer>;
   /** One use of one app tool for one person. `callId` makes a retry the same call. */
   use(input: { person: string; toolkit: string; tool: string; arguments: Record<string, unknown>; providerAccountId: string | null; callId: string }): Promise<UseResult>;
 }
