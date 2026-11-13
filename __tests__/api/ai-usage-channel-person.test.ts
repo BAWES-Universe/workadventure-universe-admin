@@ -53,13 +53,44 @@ describe('where a reply was given', () => {
 });
 
 describe('a model call a goal or task made', () => {
+  // The row is written after the owner is looked up, in the chain that answers the bot server at once
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
   it('is the usage of the Brick’s owner even when the bot server names nobody, or names a guest', async () => {
     await track({ channel: 'task', runId: 'run-1' });
     await track({ channel: 'task', userId: 'wa-guest', isGuest: true });
+    await settle();
     expect(usage.create.mock.calls.map((call) => call[0].data)).toEqual([
       expect.objectContaining({ channel: 'task', talkedPersonId: 'user-owner', talkedGuest: false, brickRunId: 'run-1' }),
       expect.objectContaining({ channel: 'task', talkedPersonId: 'user-owner', talkedGuest: false }),
     ]);
+  });
+
+  it('is still written when the owner cannot be looked up: logged, with the person the bot server named, never dropped', async () => {
+    const log = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      bots.findUnique.mockRejectedValue(new Error('connection lost'));
+      users.findUnique.mockResolvedValue({ id: 'user-sara', isGuest: false });
+      const answer = await track({ channel: 'task', userId: 'wa-uuid-sara', isGuest: false });
+      expect(await answer.json()).toEqual({ status: 'tracked' });
+      await settle();
+      expect(usage.create).toHaveBeenCalledTimes(1);
+      expect(saved()).toMatchObject({ channel: 'task', talkedPersonId: 'user-sara' });
+      expect(log).toHaveBeenCalledWith('Error looking up whose Brick made a task call:', expect.any(Error));
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it('answers at once, before the owner is looked up', async () => {
+    let release: (value: { ownerId: string }) => void = () => undefined;
+    bots.findUnique.mockReturnValue(new Promise((resolve) => (release = resolve)));
+    const answer = await track({ channel: 'task' });
+    expect(await answer.json()).toEqual({ status: 'tracked' });
+    expect(usage.create).not.toHaveBeenCalled();
+    release({ ownerId: 'user-owner' });
+    await settle();
+    expect(saved()).toMatchObject({ talkedPersonId: 'user-owner' });
   });
 
   it('leaves a call of chat as the bot server told it', async () => {
