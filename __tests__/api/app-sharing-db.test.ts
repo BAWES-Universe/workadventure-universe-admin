@@ -212,6 +212,21 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect((await json(await available(request(`/api/bots/${guide}/apps/available`), params({ id: guide })))).apps).toEqual([]);
     });
 
+    it('answers "not there" when the lent app is removed between the check and the grant, never a plain server error', async () => {
+      const app = await keyApp(sara);
+      as(sara);
+      await lendTo(app.id, { universeId: universeA });
+      const stale = await prisma.appConnection.findUniqueOrThrow({ where: { id: app.id } });
+      await prisma.appConnection.delete({ where: { id: app.id } });
+      const read = jest.spyOn(prisma.appConnection, 'findUnique').mockResolvedValueOnce(stale as never);
+      try {
+        expect((await letGuide(sara, app.id)).status).toBe(404);
+        expect(await prisma.botMcpServer.count({ where: { botId: guide } })).toBe(0);
+      } finally {
+        read.mockRestore();
+      }
+    });
+
     it('refuses a bot of a universe it was not lent to, also by a direct write', async () => {
       const app = await keyApp(sara);
       as(sara);

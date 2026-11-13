@@ -362,16 +362,18 @@ export async function grantSharedToBot(userId: string, connectionId: string, bot
   }
   try {
     return await prisma.$transaction(async (tx) => {
+      // The app's own row is held shared first, for a universe's app and a lent one alike, and taking the app away (a delete of the
+      // row, which also removes its lends) holds it for update: a grant is never made for an app just removed (the database would
+      // refuse it with a plain error), and the two never take the row and the lend in opposite orders, which could deadlock
+      const held = connection.universeId
+        ? await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_connections" WHERE "id" = ${connectionId} AND "universe_id" = ${universeId} FOR SHARE`
+        : await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_connections" WHERE "id" = ${connectionId} AND "owner_id" = ${userId} FOR SHARE`;
+      if (held.length === 0) return null;
       if (!connection.universeId) {
         // The lend is held shared while the grant is made, and taking it back holds it for update: one waits for the other, so a
         // grant is never made after the lend was taken back
         const lend = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_lends" WHERE "connection_id" = ${connectionId} AND "universe_id" = ${universeId} FOR SHARE`;
         if (lend.length === 0) return null;
-      } else {
-        // The same for the universe's own app: its row is held shared while the grant is made, and taking the app away holds it for
-        // update, so a grant is never made for an app that was just removed (the database would refuse it with a plain error)
-        const held = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_connections" WHERE "id" = ${connectionId} AND "universe_id" = ${universeId} FOR SHARE`;
-        if (held.length === 0) return null;
       }
       // Asked twice is the same grant, so it is never turned away for the cap
       const already = await tx.botMcpServer.findFirst({ where: { botId, connectionId } });
