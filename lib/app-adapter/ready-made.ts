@@ -90,7 +90,8 @@ async function meterUse(input: { botId: string; ownerId: string; toolkit: string
   // A saved price wins; with none, the built-in estimate: a use is never written free or with no cost
   const cost = settings.appUseMicros ?? APP_USE_MICROS_DEFAULT;
   return recordMeterEvent({
-    eventId: `app:${input.callId}`,
+    // Per Brick: a call id is only known to be unique for the one that made it, so two Bricks never count as one call
+    eventId: `app:${input.botId}:${input.callId}`,
     kind: 'app_use',
     pool: 'chat',
     occurredAt: new Date(),
