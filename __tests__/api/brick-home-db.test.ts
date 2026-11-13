@@ -258,8 +258,9 @@ run('a Brick that lives in a room, in a real database', () => {
 
     it('is withdrawn, with its visit, when its owner deletes the Brick, and Undo does not bring it back', async () => {
       await put(brickId, own.roomUrl);
-      await prisma.universe.update({ where: { id: own.universeId }, data: { allowVisitingBricks: true } });
-      await startVisit(brickId, sara.id, own.roomUrl);
+      // A visit written beside the home (as an old row from before one place at a time would be)
+      await prisma.brickVisit.create({ data: { userId: sara.id, botId: brickId, roomId: own.roomId, startedAt: new Date(), seenAt: new Date() } });
+      expect(await prisma.brickVisit.count({ where: { botId: brickId } })).toBe(1);
       await deleteBrick(brickId, sara.id);
       expect(await home(brickId)).toBeNull();
       expect(await prisma.brickVisit.count({ where: { botId: brickId } })).toBe(0);
@@ -363,17 +364,52 @@ run('a Brick that lives in a room, in a real database', () => {
       expect(await (await credentials(omar.uuid)).json()).toMatchObject({ source: 'own-key', providerId: keyId, keyOwnerId: sara.id });
     });
 
-    it('can be at home in one room and visiting in another at the same time, and each room is answered by its own place', async () => {
+    it('stands in one place at a time: placing it ends its visit, and a Brick with a home is not brought along', async () => {
       await prisma.universe.update({ where: { id: hosted.universeId }, data: { allowVisitingBricks: true } });
-      await put(brickId, own.roomUrl);
-      await startVisit(brickId, sara.id, hosted.roomUrl);
+      // Visit first, then home: the visit ends, nothing else of it changes
+      expect((await startVisit(brickId, sara.id, hosted.roomUrl)).ok).toBe(true);
       await prisma.brickVisit.update({ where: { userId: sara.id }, data: { roomId: hosted.roomId, seenAt: new Date() } });
-      expect((await whereIsBrick(brickId, own.roomUrl))?.kind).toBe('home');
       expect((await whereIsBrick(brickId, hosted.roomUrl))?.kind).toBe('visiting');
-      expect(await whereIsBrick(brickId, closed.roomUrl)).toBeNull();
-      expect(await chat(brickId, omar, 'chat', own.roomUrl)).toMatchObject({ allowed: true });
-      expect(await chat(brickId, omar, 'chat', hosted.roomUrl)).toMatchObject({ allowed: true });
+      expect((await put(brickId, own.roomUrl)).status).toBe(200);
+      expect(await prisma.brickVisit.count({ where: { botId: brickId } })).toBe(0);
+      expect((await whereIsBrick(brickId, own.roomUrl))?.kind).toBe('home');
+      expect(await whereIsBrick(brickId, hosted.roomUrl)).toBeNull();
+      expect(await prisma.bot.findUnique({ where: { id: brickId } })).toMatchObject({ ownerId: sara.id, enabled: true });
+
+      // Home first, then a visit: refused with the room's name, and nothing is written
+      const refused = await startVisit(brickId, sara.id, hosted.roomUrl);
+      expect(refused).toMatchObject({ ok: false, reason: 'lives_in', place: expect.any(String) });
+      expect(await prisma.brickVisit.count({ where: { botId: brickId } })).toBe(0);
+      expect(await prisma.brickHome.count({ where: { botId: brickId } })).toBe(1);
+
+      // The route says it in the same words for the game
+      as(sara);
+      const room = await (await import('@/app/api/bricks/[id]/visit/route')).POST(call('POST', `/api/bricks/${brickId}/visit`, { roomUrl: hosted.roomUrl }), ids(brickId));
+      expect(room.status).toBe(409);
+      expect(await room.json()).toMatchObject({ reason: 'lives_in', place: refused.ok ? null : refused.place });
+
+      // Taking it out of its room frees it for a visit; ending the visit frees it for a home
+      expect((await takeOut(call('DELETE', `/api/brick-homes/${brickId}`), ids(brickId))).status).toBe(200);
+      expect((await startVisit(brickId, sara.id, hosted.roomUrl)).ok).toBe(true);
+      expect((await put(brickId, own.roomUrl)).status).toBe(200);
+      expect(await prisma.brickVisit.count({ where: { botId: brickId } })).toBe(0);
       await prisma.universe.update({ where: { id: hosted.universeId }, data: { allowVisitingBricks: false } });
+    });
+
+    it('gets no home once it has been deleted, so Undo cannot bring one back', async () => {
+      await deleteBrick(brickId, sara.id);
+      expect((await put(brickId, own.roomUrl)).status).toBe(404);
+      expect(await home(brickId)).toBeNull();
+      await prisma.bot.update({ where: { id: brickId }, data: { deletedAt: null, goneAt: null, enabled: true, enabledBeforeDelete: null } });
+    });
+
+    it('changes only the keys a move sends: how it walks up to people keeps its spot', async () => {
+      await put(brickId, hosted.roomUrl, { behaviorConfig: { ...SPOT, speed: 30 } });
+      as(host);
+      expect((await moveHome(call('PATCH', `/api/brick-homes/${brickId}`, { behaviorConfig: { goesToPeople: true } }), ids(brickId))).status).toBe(200);
+      expect((await home(brickId))?.behaviorConfig).toEqual({ ...SPOT, speed: 30, goesToPeople: true });
+      expect((await moveHome(call('PATCH', `/api/brick-homes/${brickId}`, { behaviorConfig: { speed: 60 } }), ids(brickId))).status).toBe(200);
+      expect((await home(brickId))?.behaviorConfig).toEqual({ ...SPOT, speed: 60, goesToPeople: true });
     });
   });
 });

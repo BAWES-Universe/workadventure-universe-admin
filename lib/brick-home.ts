@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { canManageBots } from '@/lib/bot-permissions';
 import { checkKeyForOthers } from '@/lib/ai-key-pay';
@@ -61,7 +62,16 @@ export async function placeBrick(input: { brickId: string; ownerId: string; room
   if (!place) return { ok: false, reason: 'no_room' };
   if (!(await canManageBots(input.ownerId, place.roomId))) return { ok: false, reason: 'no_access' };
   const data = { roomId: place.roomId, placedById: input.ownerId, behaviorType: input.behaviorType ?? 'idle', behaviorConfig: homeBehaviorConfig(input.behaviorConfig) as object };
-  await prisma.brickHome.upsert({ where: { botId: brick.id }, create: { botId: brick.id, ...data }, update: data });
+  // The Brick's row is held while the home is written, as deleting it does: a Brick deleted a moment ago gets no home that
+  // Undo would bring back. It stands in one place only, so a live visit of it ends here: placing it is the later word.
+  const placed = await prisma.$transaction(async (tx) => {
+    const held = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT "id" FROM "bots" WHERE "id" = ${brick.id} AND "deleted_at" IS NULL AND "room_id" IS NULL FOR UPDATE`);
+    if (held.length === 0) return false;
+    await tx.brickVisit.deleteMany({ where: { botId: brick.id } });
+    await tx.brickHome.upsert({ where: { botId: brick.id }, create: { botId: brick.id, ...data }, update: data });
+    return true;
+  });
+  if (!placed) return { ok: false, reason: 'not_found' };
   const key = await checkKeyForOthers(brick.id, place.universeId);
   const card = await homeCardOf(place.roomId);
   return { ok: true, home: card!, keyNote: key.ok ? null : 'not_lent' };
@@ -103,11 +113,13 @@ export async function takeOutBrick(brickId: string, actorId: string): Promise<Ta
  * one: only its owner does. Null when there is nothing of that kind in a room they manage.
  */
 export async function moveBrick(brickId: string, actorId: string, behavior: HomeBehavior): Promise<boolean> {
-  const home = await prisma.brickHome.findUnique({ where: { botId: brickId }, select: { roomId: true } });
+  const home = await prisma.brickHome.findUnique({ where: { botId: brickId }, select: { roomId: true, behaviorConfig: true } });
   if (!home || !(await canManageBots(actorId, home.roomId))) return false;
+  // Only the keys sent change: a body that says only how it walks up to people keeps its spot and route
+  const behaviorConfig = behavior.behaviorConfig ? { ...homeBehaviorConfig(home.behaviorConfig), ...homeBehaviorConfig(behavior.behaviorConfig) } : undefined;
   await prisma.brickHome.update({
     where: { botId: brickId },
-    data: { ...(behavior.behaviorType ? { behaviorType: behavior.behaviorType } : {}), ...(behavior.behaviorConfig ? { behaviorConfig: homeBehaviorConfig(behavior.behaviorConfig) as object } : {}) },
+    data: { ...(behavior.behaviorType ? { behaviorType: behavior.behaviorType } : {}), ...(behaviorConfig ? { behaviorConfig: behaviorConfig as object } : {}) },
   });
   return true;
 }

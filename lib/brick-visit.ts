@@ -135,12 +135,13 @@ async function liveVisit(userId: string, now: Date) {
 
 export type StartAnswer =
   | { ok: true; state: VisitState }
-  | { ok: false; reason: 'not_found' | 'off' | 'no_place' | 'not_taken'; place?: string };
+  | { ok: false; reason: 'not_found' | 'off' | 'no_place' | 'not_taken' | 'lives_in'; place?: string };
 
 /**
  * The owner brings a Brick along, to the room they are in. Not found: it is not theirs, it waits deleted, or it is a room
- * bot. Off: its switch is off. Not taken: this place does not take visiting Bricks. It swaps whichever Brick was
- * walking with them, in one statement, so two taps never leave two.
+ * bot. Off: its switch is off. Not taken: this place does not take visiting Bricks. Lives in: it has a home in a room
+ * (`place` is that room's name), so it cannot also walk beside its owner: one place at a time; taking it out of its room
+ * frees it. It swaps whichever Brick was walking with them, in one statement, so two taps never leave two.
  */
 export async function startVisit(brickId: string, ownerId: string, roomUrl: string, now: Date = new Date()): Promise<StartAnswer> {
   const brick = await prisma.bot.findUnique({ where: { id: brickId }, select: { id: true, roomId: true, ownerId: true, deletedAt: true, enabled: true } });
@@ -153,10 +154,19 @@ export async function startVisit(brickId: string, ownerId: string, roomUrl: stri
   // tries once more, so it ends as the one visit the person has instead of failing
   for (let attempt = 0; ; attempt++) {
     try {
-      await prisma.$transaction(async (tx) => {
+      const livesIn = await prisma.$transaction(async (tx) => {
+        // The Brick's row is held while this decides, as placing it in a room does, so a home and a visit are never both
+        // written for it by two requests at once; a Brick deleted a moment ago is not visited
+        const held = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT "id" FROM "bots" WHERE "id" = ${brickId} AND "deleted_at" IS NULL AND "room_id" IS NULL FOR UPDATE`);
+        if (held.length === 0) return { gone: true as const };
+        const home = await tx.brickHome.findUnique({ where: { botId: brickId }, select: { room: { select: { name: true } } } });
+        if (home) return { room: home.room.name };
         await tx.brickVisit.deleteMany({ where: { OR: [{ userId: ownerId }, { botId: brickId }] } });
         await tx.brickVisit.create({ data: { userId: ownerId, botId: brickId, roomId: place.roomId, startedAt: now, seenAt: now } });
+        return null;
       });
+      if (livesIn && 'gone' in livesIn) return { ok: false, reason: 'not_found' };
+      if (livesIn) return { ok: false, reason: 'lives_in', place: livesIn.room };
       break;
     } catch (error) {
       if (attempt >= 2 || !(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') throw error;
