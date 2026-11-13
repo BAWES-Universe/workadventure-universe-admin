@@ -159,8 +159,10 @@ export async function startVisit(brickId: string, ownerId: string, roomUrl: stri
         // written for it by two requests at once; a Brick deleted a moment ago is not visited
         const held = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT "id" FROM "bots" WHERE "id" = ${brickId} AND "deleted_at" IS NULL AND "room_id" IS NULL FOR UPDATE`);
         if (held.length === 0) return { gone: true as const };
-        const home = await tx.brickHome.findUnique({ where: { botId: brickId }, select: { room: { select: { name: true } } } });
-        if (home) return { room: home.room.name };
+        const home = await tx.brickHome.findUnique({ where: { botId: brickId }, select: { roomId: true, placedById: true, room: { select: { name: true } } } });
+        // A home whose placer can no longer manage bots there has already ended (it goes on every read and in the sweep): it does not keep the Brick from a visit
+        if (home && (await canManageBots(home.placedById, home.roomId))) return { room: home.room.name };
+        if (home) await tx.brickHome.deleteMany({ where: { botId: brickId } });
         await tx.brickVisit.deleteMany({ where: { OR: [{ userId: ownerId }, { botId: brickId }] } });
         await tx.brickVisit.create({ data: { userId: ownerId, botId: brickId, roomId: place.roomId, startedAt: now, seenAt: now } });
         return null;

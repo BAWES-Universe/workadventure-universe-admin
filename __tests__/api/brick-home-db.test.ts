@@ -396,6 +396,19 @@ run('a Brick that lives in a room, in a real database', () => {
       await prisma.universe.update({ where: { id: hosted.universeId }, data: { allowVisitingBricks: false } });
     });
 
+    it('a home whose placer lost the room does not keep the Brick from a visit, before any sweep has run', async () => {
+      await prisma.universe.update({ where: { id: own.universeId }, data: { allowVisitingBricks: true } });
+      const world = await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } });
+      await put(brickId, hosted.roomUrl);
+      await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: world.id } });
+      expect((await startVisit(brickId, sara.id, own.roomUrl)).ok).toBe(true);
+      expect(await home(brickId)).toBeNull();
+      expect(await prisma.brickVisit.count({ where: { botId: brickId } })).toBe(1);
+      await prisma.brickVisit.deleteMany({ where: { botId: brickId } });
+      await prisma.worldMember.create({ data: { userId: sara.id, worldId: world.id, tags: ['admin'] } });
+      await prisma.universe.update({ where: { id: own.universeId }, data: { allowVisitingBricks: false } });
+    });
+
     it('gets no home once it has been deleted, so Undo cannot bring one back', async () => {
       await deleteBrick(brickId, sara.id);
       expect((await put(brickId, own.roomUrl)).status).toBe(404);
