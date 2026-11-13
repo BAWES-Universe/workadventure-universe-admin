@@ -150,7 +150,8 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect(first.status).toBe(201);
     expect(body.redirectUrl).toBe('https://connect.example/sign-in');
     expect(adapter.startConnect).toHaveBeenCalledWith({ person: sara, toolkit: KEY, returnUrl: expect.stringContaining('/admin/apps') });
-    expect(adapter.appLink).toHaveBeenCalledWith({ person: sara, toolkits: [KEY] });
+    // The link is pinned to the account the person is signing in with
+    expect(adapter.appLink).toHaveBeenCalledWith({ person: sara, toolkits: [KEY], accounts: { [KEY]: `ca_${tag}` } });
     const row = await prisma.appConnection.findUniqueOrThrow({ where: { id: body.id } });
     expect(row).toMatchObject({ ownerId: sara, source: 'ready_made', providerToolkit: KEY, serverUrl: `https://mcp.example/${tag}/mcp`, authConfig: null, authType: 'none', headers: null });
 
@@ -167,6 +168,9 @@ run('ready-made apps through the adapter, in a real database', () => {
     adapter.startConnect
       .mockResolvedValueOnce({ redirectUrl: 'https://connect.example/first', providerAccountId: `ca_first_${tag}`, expiresAt: null })
       .mockResolvedValueOnce({ redirectUrl: 'https://connect.example/second', providerAccountId: `ca_second_${tag}`, expiresAt: null });
+    adapter.appLink
+      .mockResolvedValueOnce({ url: `https://mcp.example/${tag}/first` })
+      .mockResolvedValueOnce({ url: `https://mcp.example/${tag}/second` });
     setAdapterForTests(adapter);
     await list();
     asSara();
@@ -179,8 +183,13 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect(again.status).toBe(200);
     expect(await again.json()).toEqual({ id: first.id, redirectUrl: 'https://connect.example/second' });
     expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(1);
-    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: first.id } })).providerAccountId).toBe(`ca_second_${tag}`);
-    expect(adapter.appLink).toHaveBeenCalledTimes(1);
+    const replaced = await prisma.appConnection.findUniqueOrThrow({ where: { id: first.id } });
+    expect(replaced.providerAccountId).toBe(`ca_second_${tag}`);
+    // The link is made again for the new account, never left reaching the older one, and the replaced sign-in cannot be marked lost by an earlier report
+    expect(adapter.appLink).toHaveBeenCalledTimes(2);
+    expect(adapter.appLink).toHaveBeenLastCalledWith({ person: sara, toolkits: [KEY], accounts: { [KEY]: `ca_second_${tag}` } });
+    expect(replaced.serverUrl).toBe(`https://mcp.example/${tag}/second`);
+    expect(replaced.reconnectedAt).not.toBeNull();
 
     // They finished it this time: it reads connected, once and for good, and a tap no longer starts a sign-in
     adapter.connectionStatus.mockResolvedValue('active');
@@ -501,6 +510,15 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(await prisma.meterEvent.count({ where: { personId: sara, kind: 'app_use' } })).toBe(0);
     });
 
+    it('picks the answer to the question out of an event stream that sends a notification first', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      adapter.callLink
+        .mockResolvedValueOnce(answerOf(200, 'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info"}}\n\nevent: message\ndata: {"jsonrpc":"2.0","id":1,"result":{}}\n', 's1'))
+        .mockResolvedValueOnce(answerOf(202, ''))
+        .mockResolvedValueOnce(answerOf(200, 'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress","params":{}}\n\nevent: message\ndata: {"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"GMAIL_FETCH_EMAILS"}]}}\n', 's1'));
+      expect(await (await test(serverId)).json()).toMatchObject({ success: true, toolCount: 1, toolNames: ['GMAIL_FETCH_EMAILS'] });
+    });
+
     it('reports a refusal by the link as a failed test with its status, and an unfinished sign-in as one to reconnect', async () => {
       const { adapter, serverId } = await connectedAndGranted();
       adapter.callLink.mockResolvedValueOnce(answerOf(401, 'nope'));
@@ -528,6 +546,23 @@ run('ready-made apps through the adapter, in a real database', () => {
       const listing = await (await test(serverId)).json();
       expect(listing).toMatchObject({ success: false, toolCount: 0 });
       expect(listing.error).toContain('MCP error: sign-in expired');
+
+      // An answer with no list of tools is not an app with no tools, while an empty list is
+      adapter.callLink
+        .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":1,"result":{}}', 's1'))
+        .mockResolvedValueOnce(answerOf(202, ''))
+        .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":2,"result":{}}', 's1'));
+      expect(await (await test(serverId)).json()).toMatchObject({ success: false, toolCount: 0 });
+      adapter.callLink
+        .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":1,"result":{}}', 's1'))
+        .mockResolvedValueOnce(answerOf(202, ''))
+        .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"nope":1}]}}', 's1'));
+      expect(await (await test(serverId)).json()).toMatchObject({ success: false, toolCount: 0 });
+      adapter.callLink
+        .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":1,"result":{}}', 's1'))
+        .mockResolvedValueOnce(answerOf(202, ''))
+        .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}', 's1'));
+      expect(await (await test(serverId)).json()).toMatchObject({ success: true, toolCount: 0 });
 
       // A 200 that is not an answer at all is not an app with no tools either
       adapter.callLink

@@ -104,6 +104,19 @@ describe('the real adapter speaks the provider as its docs say, against a preten
     expect(sent()).toEqual({ user_id: 'person-1', toolkits: { enable: ['gmail'] }, workbench: { enable: true } });
   });
 
+  it('pins the app link to the connected account the person signed in with, a list of one for the app', async () => {
+    const adapter = make([answer({ mcp: { url: 'https://mcp.example/pinned' } })]);
+    await adapter.appLink({ person: 'person-1', toolkits: ['gmail'], accounts: { gmail: 'ca_9' } });
+    expect(sent()).toEqual({ user_id: 'person-1', toolkits: { enable: ['gmail'] }, workbench: { enable: true }, connected_accounts: { gmail: ['ca_9'] } });
+  });
+
+  it('never follows a redirect on a request that carries the provider key', async () => {
+    const adapter = make([answer({ session_id: 'x', mcp: { url: 'https://mcp.example/y' } })]);
+    await adapter.appLink({ person: 'p', toolkits: ['gmail'] });
+    expect(calls[0].init.redirect).toBe('error');
+    expect((calls[0].init.headers as Record<string, string>)['x-api-key']).toBe('secret-key');
+  });
+
   it('drops whatever headers the provider’s session answer holds: the key is Orbit’s alone', async () => {
     const adapter = make([answer({ mcp: { url: 'https://mcp.example/y', headers: { 'x-api-key': 'k', 'x-thing': 'v' } } })]);
     expect(await adapter.appLink({ person: 'p', toolkits: ['gmail'] })).toEqual({ url: 'https://mcp.example/y' });

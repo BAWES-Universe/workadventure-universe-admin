@@ -43,8 +43,8 @@ export interface ReadyMadeAdapter {
   startConnect(input: { person: string; toolkit: string; returnUrl: string }): Promise<ConnectStart>;
   /** Whether the person finished signing in for a connection started by `startConnect`: `active` once they did, `pending` while the page is still open, `failed` when it expired or was refused. */
   connectionStatus(input: { providerAccountId: string }): Promise<'active' | 'pending' | 'failed'>;
-  /** The person's own app link at the provider. The provider's code-running sandbox is ON in whatever it makes (the owner's rule: nothing ships off); it works only on data from the person's own connected apps, and each run is counted like an app step by the bot server. */
-  appLink(input: { person: string; toolkits: string[] }): Promise<AppLink>;
+  /** The person's own app link at the provider. `accounts` pins each toolkit to the one connected account the person last signed in with, so a link never reaches an older account of theirs. The provider's code-running sandbox is ON in whatever it makes (the owner's rule: nothing ships off); it works only on data from the person's own connected apps, and each run is counted like an app step by the bot server. */
+  appLink(input: { person: string; toolkits: string[]; accounts?: Record<string, string> }): Promise<AppLink>;
   /**
    * One message of the app link's own protocol (a JSON-RPC message), sent to a person's app link WITH the provider key, which the
    * link needs on every call and which must never leave Orbit: not to a Brick, not to the bot server, not to a screen. `sessionId`

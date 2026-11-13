@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getAdapter, AdapterError, type LinkAnswer } from '@/lib/app-adapter';
 import { readReadyMadeApps } from '@/lib/app-adapter/settings';
@@ -41,11 +42,11 @@ export async function connectReadyMade(ownerId: string, key: string, returnUrl: 
   return prisma.$transaction(
     async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`ready-made:${ownerId}:${key}`}, 0))`;
-      const existing = await prisma.appConnection.findFirst({ where: { ownerId, providerToolkit: key } });
-      if (existing) return restartIfNotSignedIn(ownerId, existing, key, returnUrl, adapter);
+      const existing = await tx.appConnection.findFirst({ where: { ownerId, providerToolkit: key } });
+      if (existing) return restartIfNotSignedIn(ownerId, existing, key, returnUrl, adapter, tx);
 
       const start = await adapter.startConnect({ person: ownerId, toolkit: key, returnUrl });
-      const link = await adapter.appLink({ person: ownerId, toolkits: [key] });
+      const link = await adapter.appLink({ person: ownerId, toolkits: [key], accounts: { [key]: start.providerAccountId } });
       try {
         const connection = await createConnection(ownerId, {
           name: app.name,
@@ -57,10 +58,10 @@ export async function connectReadyMade(ownerId: string, key: string, returnUrl: 
           source: 'ready_made',
           providerToolkit: key,
           providerAccountId: start.providerAccountId,
-        });
+        }, tx);
         return { id: connection.id, redirectUrl: start.redirectUrl, created: true as boolean };
       } catch (error) {
-        // Anything else that made it first
+        // Anything else that made it first (read outside the transaction: a failed statement has already ended it)
         const again = await prisma.appConnection.findFirst({ where: { ownerId, providerToolkit: key } });
         if (again) return { id: again.id, redirectUrl: null, created: false as boolean };
         throw error;
@@ -76,16 +77,20 @@ async function restartIfNotSignedIn(
   key: string,
   returnUrl: string,
   adapter: NonNullable<ReturnType<typeof getAdapter>>,
+  db: Prisma.TransactionClient | typeof prisma = prisma,
 ): Promise<{ id: string; redirectUrl: string | null; created: false }> {
   // Signed in and not lost: nothing to do. A sign-in the bot server saw lost (`signInLostAt`) is asked for again even though it was
   // once confirmed, otherwise it could never be recovered.
-  if (!existing.signInLostAt && (await confirmReadyMade(existing))) return { id: existing.id, redirectUrl: null, created: false };
+  if (!existing.signInLostAt && (await confirmReadyMade(existing, db))) return { id: existing.id, redirectUrl: null, created: false };
   // Not signed in yet, or lost: a new sign-in replaces the old one, so a repeat tap always gets a page that works. What was seen
-  // lost is cleared with it, and the app reads connected again only when the provider confirms the new sign-in.
+  // lost is cleared with it, and the app reads connected again only when the provider confirms the new sign-in. The app link is
+  // made again for the new account, so it never reaches an older one the person still has at the provider, and a failure seen
+  // before this moment cannot mark the new sign-in lost.
   const start = await adapter.startConnect({ person: ownerId, toolkit: key, returnUrl });
-  await prisma.appConnection.update({
+  const link = await adapter.appLink({ person: ownerId, toolkits: [key], accounts: { [key]: start.providerAccountId } });
+  await db.appConnection.update({
     where: { id: existing.id },
-    data: { providerAccountId: start.providerAccountId, providerConfirmedAt: null, signInLostAt: null, signInLostStatus: null, noAnswerAt: null },
+    data: { serverUrl: link.url, providerAccountId: start.providerAccountId, providerConfirmedAt: null, signInLostAt: null, signInLostStatus: null, noAnswerAt: null, reconnectedAt: new Date() },
   });
   return { id: existing.id, redirectUrl: start.redirectUrl, created: false };
 }
@@ -218,7 +223,7 @@ export interface ReadyMadeTestResult {
 }
 
 /** The JSON of a link's answer, which may be plain JSON or an event stream holding it. */
-function linkJson(body: string): Record<string, unknown> | null {
+function linkJson(body: string, id?: number): Record<string, unknown> | null {
   const attempt = (text: string) => {
     try {
       const value = JSON.parse(text);
@@ -229,18 +234,21 @@ function linkJson(body: string): Record<string, unknown> | null {
   };
   const whole = attempt(body.trim());
   if (whole) return whole;
+  // An event stream may carry notifications before the answer: the message that answers the question asked (its id) is the one wanted
+  const messages: Record<string, unknown>[] = [];
   for (const line of body.split('\n')) {
     if (line.startsWith('data:')) {
       const found = attempt(line.slice(5).trim());
-      if (found) return found;
+      if (found) messages.push(found);
     }
   }
-  return null;
+  if (id === undefined) return messages[0] ?? null;
+  return messages.find((message) => message.id === id) ?? messages.find((message) => 'result' in message || 'error' in message) ?? null;
 }
 
 /** The text of a JSON-RPC error carried in an answer that came with a 2xx status, or null when there is none. */
-function rpcError(body: string): string | null {
-  const error = linkJson(body)?.error;
+function rpcError(body: string, id?: number): string | null {
+  const error = linkJson(body, id)?.error;
   if (error === undefined || error === null) return null;
   const message = typeof error === 'object' ? (error as { message?: unknown }).message : error;
   return typeof message === 'string' && message ? message.slice(0, 200) : 'the app refused';
@@ -263,18 +271,22 @@ export async function testReadyMade(connection: { id: string; source: string; se
       sessionId: null,
     });
     if (opened.status >= 400) return failed(`The app answered ${opened.status}.`, opened.status);
-    const openError = rpcError(opened.body);
+    const openError = rpcError(opened.body, 1);
     if (openError) return failed(`Initialize error: ${openError}`, opened.status);
     await adapter.callLink({ url: connection.serverUrl, message: { jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId: opened.sessionId });
     const listed = await adapter.callLink({ url: connection.serverUrl, message: { jsonrpc: '2.0', id: 2, method: 'tools/list' }, sessionId: opened.sessionId });
     if (listed.status >= 400) return failed(`The app answered ${listed.status}.`, listed.status);
-    const listError = rpcError(listed.body);
+    const listError = rpcError(listed.body, 2);
     if (listError) return failed(`MCP error: ${listError}`, listed.status);
-    const answer = linkJson(listed.body);
+    const answer = linkJson(listed.body, 2);
     // A 200 that is not an answer to the question is not a working app with no tools
     if (!answer || typeof answer.result !== 'object' || answer.result === null) return failed('The app did not answer the list of what it can do.', listed.status);
-    const result = answer.result as { tools?: unknown };
-    const names = Array.isArray(result?.tools) ? (result.tools as { name?: unknown }[]).map((tool) => tool.name).filter((name): name is string => typeof name === 'string') : [];
+    // The answer to the list of tools has the list: no list is not an app with no tools (an empty list is)
+    const tools = (answer.result as { tools?: unknown }).tools;
+    if (!Array.isArray(tools) || tools.some((tool) => !tool || typeof tool !== 'object' || typeof (tool as { name?: unknown }).name !== 'string')) {
+      return failed('The app did not answer the list of what it can do.', listed.status);
+    }
+    const names = (tools as { name: string }[]).map((tool) => tool.name);
     return { success: true, toolCount: names.length, toolNames: names, status: listed.status };
   } catch (error) {
     console.error('[ReadyMade] Test failed:', error instanceof Error ? error.message : 'unknown');
