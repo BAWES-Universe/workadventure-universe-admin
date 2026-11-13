@@ -93,9 +93,9 @@ describe('testMcpConnection', () => {
     expect(sent.filter((one) => one.message.method === 'tools/list').map((one) => one.message.params?.cursor)).toEqual([undefined, 'p2']);
   });
 
-  it('stops following a cursor the app keeps repeating', async () => {
+  it('stops following a cursor the app keeps repeating, and says the list is incomplete', async () => {
     pretend(({ message }) => (message.method === 'initialize' ? json({ jsonrpc: '2.0', id: 'init', result: {} }) : message.method !== 'tools/list' ? new Response(null, { status: 202 }) : json({ jsonrpc: '2.0', id: message.id, result: { tools: [{ name: 'a' }], nextCursor: 'same' } })));
-    expect(await testMcpConnection(base)).toMatchObject({ success: true, toolNames: ['a'] });
+    expect(await testMcpConnection(base)).toMatchObject({ success: true, toolNames: ['a'], incomplete: true });
   });
 
   it('says the list is incomplete when the app still offers a page after the last one that is read, and not when it ends there', async () => {
