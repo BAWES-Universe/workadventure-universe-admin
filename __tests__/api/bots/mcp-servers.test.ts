@@ -46,6 +46,8 @@ jest.mock('@/lib/db', () => {
         botMcpServer: mockBotMcpServer,
         bot: mockBot,
         user: mockUser,
+        // Holding the bot's row while its apps are counted
+        $queryRaw: jest.fn(async () => []),
       })),
       bot: mockBot,
       user: mockUser,
@@ -55,6 +57,8 @@ jest.mock('@/lib/db', () => {
       universeMember: mockUniverseMember,
       botMcpServer: mockBotMcpServer,
       botAccessRule: mockBotAccessRule,
+      // No saved limits: the app limit is five
+      appSetting: { findUnique: jest.fn(async () => null) },
     },
   };
 });

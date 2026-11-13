@@ -15,6 +15,7 @@ import { confirmReadyMade } from '@/lib/app-adapter/confirm';
 import { saveReadyMadeApps } from '@/lib/app-adapter/settings';
 import { GET as listReadyMade, POST as connectReadyMadeApp } from '@/app/api/me/apps/ready-made/route';
 import { GET as adminGet, PUT as adminPut } from '@/app/api/admin/ready-made-apps/route';
+import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { POST as useApp } from '@/app/api/ready-made/use/route';
 import { POST as linkApp } from '@/app/api/ready-made/link/route';
 import { POST as testServer } from '@/app/api/bots/[id]/mcp-servers/[serverId]/test/route';
@@ -518,6 +519,42 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(await (await test(serverId)).json()).toMatchObject({ success: true, toolCount: 1, toolNames: ['GMAIL_FETCH_EMAILS'] });
     });
 
+    it('reads every page of a long list of tools', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      adapter.callLink
+        .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":1,"result":{}}'))
+        .mockResolvedValueOnce(answerOf(202, ''))
+        .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"A"}],"nextCursor":"page-2"}}'))
+        .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"B"},{"name":"A"}]}}'));
+      expect(await (await test(serverId)).json()).toMatchObject({ success: true, toolCount: 2, toolNames: ['A', 'B'] });
+      const listed = adapter.callLink.mock.calls.map((call: unknown[]) => (call[0] as { message: { method: string; params?: { cursor?: string } } }).message).filter((message: { method: string }) => message.method === 'tools/list');
+      expect(listed.map((message: { params?: { cursor?: string } }) => message.params?.cursor)).toEqual([undefined, 'page-2']);
+    });
+
+    it('says the list is incomplete when a page is still offered after the 20th, and keeps the first 20 pages', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      adapter.callLink.mockImplementation(async (input: { message: Record<string, unknown> }) => {
+        if (input.message.method === 'initialize') return answerOf(200, '{"jsonrpc":"2.0","id":1,"result":{}}', 's1');
+        if (input.message.method !== 'tools/list') return answerOf(202, '');
+        const page = (input.message.id as number) - 1;
+        return answerOf(200, JSON.stringify({ jsonrpc: '2.0', id: input.message.id, result: { tools: [{ name: `T${page}` }], nextCursor: `page-${page + 1}` } }));
+      });
+      const result = await (await test(serverId)).json();
+      expect(result).toMatchObject({ success: true, toolCount: 20, incomplete: true });
+      expect(result.toolNames[0]).toBe('T1');
+      expect(result.toolNames[19]).toBe('T20');
+    });
+
+    it('says the list is incomplete when the app keeps offering a cursor it already gave', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      adapter.callLink.mockImplementation(async (input: { message: Record<string, unknown> }) => {
+        if (input.message.method === 'initialize') return answerOf(200, '{"jsonrpc":"2.0","id":1,"result":{}}', 's1');
+        if (input.message.method !== 'tools/list') return answerOf(202, '');
+        return answerOf(200, JSON.stringify({ jsonrpc: '2.0', id: input.message.id, result: { tools: [{ name: 'A' }], nextCursor: 'same' } }));
+      });
+      expect(await (await test(serverId)).json()).toMatchObject({ success: true, toolNames: ['A'], incomplete: true });
+    });
+
     it('reports a refusal by the link as a failed test with its status, and an unfinished sign-in as one to reconnect', async () => {
       const { adapter, serverId } = await connectedAndGranted();
       adapter.callLink.mockResolvedValueOnce(answerOf(401, 'nope'));
@@ -580,5 +617,17 @@ run('ready-made apps through the adapter, in a real database', () => {
     const own = await createConnection(sara, { name: 'Own', serverUrl: 'https://own.example.com/mcp', authType: 'none', source: 'link' });
     const grant = await grantToBrick(sara, own.id, saraBrick);
     expect((await useIt({ serverId: (grant as { id: string }).id })).status).toBe(404);
+  });
+
+  it('tells the bot server which of a bot’s Apps are ready-made, so it goes through Orbit for them and for no other', async () => {
+    const { serverId } = await connectedAndGranted();
+    const own = await createConnection(sara, { name: 'Own', serverUrl: 'https://own.example.com/mcp', authType: 'none', source: 'link' });
+    const ownGrant = (await grantToBrick(sara, own.id, saraBrick)) as { id: string };
+    const ownServer = await prisma.botMcpServer.create({ data: { botId: saraBrick, name: 'Plain', serverUrl: 'https://plain.example.com/mcp', authType: 'none' } });
+    asSara();
+    const servers = (await (await listServers(request(`/api/bots/${saraBrick}/mcp-servers`), params({ id: saraBrick }))).json()) as { id: string; readyMade: boolean }[];
+    expect(servers.find((s) => s.id === serverId)?.readyMade).toBe(true);
+    expect(servers.find((s) => s.id === ownGrant.id)?.readyMade).toBe(false);
+    expect(servers.find((s) => s.id === ownServer.id)?.readyMade).toBe(false);
   });
 });

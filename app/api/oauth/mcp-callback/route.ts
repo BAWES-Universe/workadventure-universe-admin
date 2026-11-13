@@ -1,3 +1,4 @@
+import { managesConnection } from '@/lib/app-team-access';
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
@@ -109,10 +110,10 @@ export async function GET(request: NextRequest) {
     if (connectionId) {
       const connection = await prisma.appConnection.findUnique({
         where: { id: connectionId },
-        select: { id: true, ownerId: true, authType: true, authConfig: true, serverUrl: true },
+        select: { id: true, ownerId: true, universeId: true, authType: true, authConfig: true, serverUrl: true },
       });
       // Only the person who owns it can sign it in, and a connection that is gone has nothing to sign in
-      server = connection && connection.authType === 'oauth' && personId === connection.ownerId ? connection : null;
+      server = connection && connection.authType === 'oauth' && !!personId && (await managesConnection(personId, connection)) ? connection : null;
       // One ticket per sign-in: a replayed return, or the return of a sign-in that a newer one replaced, is refused before
       // the code is spent (check 38)
       if (server && !(await takeSignInNonce(server.id, nonce))) {

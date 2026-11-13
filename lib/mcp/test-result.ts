@@ -22,6 +22,8 @@ export interface McpTestResult {
   success: boolean;
   toolCount: number;
   toolNames: string[];
+  /** True when the app has more pages of tools than are read. */
+  incomplete?: boolean;
   error?: string | null;
   /** Captured from the failure path; absent on results stored before #186. */
   status?: number | null;
@@ -44,14 +46,18 @@ export interface TestResultSummary {
   detail?: string;
 }
 
+/** The most pages of a long list of tools that are read: a server that keeps offering another page is stopped here (and the list says it is incomplete). */
+export const MAX_TOOL_PAGES = 20;
+
 /** Cap on any stored free text, so one hostile response cannot bloat a row. */
 export const MAX_DETAIL_LENGTH = 300;
 
 const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b/g;
 // A bearer value is a credential; `Bearer resource_metadata="…"` / `Bearer error=…`
-// are RFC 6750 challenge parameters and carry none, so they are left readable —
+// are RFC 6750 challenge parameters (a name, `=`, then a value) and carry none, so they are left readable — a bare `abc=` or `abc==`
+// is a padded token and is redacted —
 // the WWW-Authenticate header is precisely what we want to store and show.
-const BEARER_PATTERN = /(bearer\s+)(?!resource_metadata|[a-z_]+[a-z]=)([A-Za-z0-9._~+/=-]{8,})/gi;
+const BEARER_PATTERN = /(bearer\s+)(?!resource_metadata=|[a-z_]+[a-z]=[^\s,=])([A-Za-z0-9._~+/=-]{1,})/gi;
 const JSON_SECRET_PATTERN =
   /((?:"|')?(?:access_token|refresh_token|id_token|client_secret|api[_-]?key|token)(?:"|')?\s*[:=]\s*(?:"|'))([^"']{4,})(?:"|')/gi;
 const QUERY_SECRET_PATTERN =

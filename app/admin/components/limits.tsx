@@ -752,6 +752,19 @@ export function brickLimits(values: BrickLimits): Limit[] {
         { value: 50, label: '50%', meaning: 'Half for goals and tasks.' },
       ],
     },
+    {
+      id: 'appsPerBot',
+      label: 'Apps one bot or Brick can use',
+      hint: 'Apps added by hand and Apps lent to a universe count together. A bot that is full says so and asks for one to be taken off first.',
+      unit: 'apps',
+      value: values.appsPerBot,
+      recommended: recommended.appsPerBot,
+      options: [
+        { value: 5, label: '5 apps', meaning: 'Plenty for most bots.' },
+        { value: 10, label: '10 apps', meaning: 'For bots that do a lot.' },
+        { value: 20, label: '20 apps', meaning: 'For the busiest bots.' },
+      ],
+    },
   ], LIMIT_RANGES.bricks);
 }
 

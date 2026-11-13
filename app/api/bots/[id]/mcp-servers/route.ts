@@ -1,3 +1,5 @@
+import { AppsFull, claimAppSlot } from '@/lib/bot-limits';
+import { botUniverseId } from '@/lib/app-uses';
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { isReconnectRequired, parseOAuthConfig, refreshBlockedReason } from '@/lib/mcp/oauth-token';
@@ -89,6 +91,17 @@ export async function GET(
     // Transform: remove authConfig from response for security,
     // except for internal bot-server calls authenticated via ADMIN_API_TOKEN
     // For OAuth servers, check if connected (has accessToken) without exposing credentials
+    // Where each grant comes from: one of the bot's own maker's apps (a Brick), a person's app lent to this bot's universe (with what the
+    // lender allowed), or the universe's own app. The bot server holds the limits again at every use (POST .../use).
+    const universeId = bot.roomId ? await botUniverseId(botId) : null;
+    const lends = universeId && servers.some((row) => row.connectionId)
+      ? await prisma.appLend.findMany({ where: { universeId, connectionId: { in: servers.map((row) => row.connectionId).filter((id): id is string => !!id) } }, select: { connectionId: true, things: true, usesPerDay: true } })
+      : [];
+    // A grant on someone else's connection (lent to this universe, or the universe's own) shows its manager the app's name and state,
+    // never its address or headers: the address can carry a key, and the lender never agreed to show it to everyone who manages bots.
+    // A ready-made app's address is the provider's and is never shown to a person. Only the bot server (admin token) is handed them.
+    const seesWay = (s: (typeof servers)[number]) => isAdminToken || !s.connection || (s.connection.ownerId === userId && s.connection.source !== 'ready_made');
+    const lendOf = new Map(lends.map((lend) => [lend.connectionId, lend]));
     const transformed = await Promise.all(
       servers.map(async (s) => {
         let oauthConnected = false;
@@ -141,7 +154,7 @@ export async function GET(
             id: s.id,
             botId: s.botId,
             name: s.name,
-            serverUrl: s.serverUrl,
+            serverUrl: seesWay(s) ? s.serverUrl : '',
             authType: s.authType,
             ...(isAdminToken ? { authConfig: authConfigToServe } : {}),
             oauthConnected,
@@ -152,10 +165,15 @@ export async function GET(
             enabled: s.enabled,
             // Set for a Brick's grant on a person's connection: its link and sign-in are changed on the app's own page
             connectionId: s.connectionId,
+            // A ready-made app: the bot server never calls its link itself (it needs the provider key, which stays in Orbit), it goes through
+            // POST /api/ready-made/link. False for every other server.
+            readyMade: s.connection?.source === 'ready_made',
+            // Set when a person's app is lent to this bot's universe: what the lender allowed (null = all four) and the uses a day
+            ...(lendOf.has(s.connectionId ?? '') ? { lent: { things: lendOf.get(s.connectionId as string)!.things, usesPerDay: lendOf.get(s.connectionId as string)!.usesPerDay } } : {}),
             // A server that existed before its tools were checked keeps working in text, and reads Not checked yet (#738)
             notCheckedYet: s.legacyText === true,
             policyRevision: s.policyRevision ?? 1,
-            headers: s.headers,
+            headers: seesWay(s) ? s.headers : null,
             lastTestedAt: s.lastTestedAt,
             lastTestResult: s.lastTestResult,
             // What the bot server saw when it really used the server, not only the last Test (game #1819)
@@ -258,13 +276,7 @@ export async function POST(
 
     // Soft cap: reject if bot already has 5 servers (atomic check+create)
     const server = await prisma.$transaction(async (tx) => {
-      const existingCount = await tx.botMcpServer.count({
-        where: { botId },
-      });
-
-      if (existingCount >= 5) {
-        throw new Error('MaxServersReached');
-      }
+      await claimAppSlot(tx, botId);
 
       return tx.botMcpServer.create({
         data: {
@@ -298,9 +310,9 @@ export async function POST(
       { status: 201, headers: corsHeaders(request) }
     );
   } catch (error) {
-    if (error instanceof Error && error.message === 'MaxServersReached') {
+    if (error instanceof AppsFull) {
       return NextResponse.json(
-        { error: 'Maximum of 5 apps per bot reached' },
+        { error: error.message },
         { status: 422, headers: corsHeaders(request) }
       );
     }

@@ -20,6 +20,8 @@ import { prisma } from '@/lib/db';
 import { decryptApiKey } from '@/lib/encryption';
 import { GET as adminList, POST as adminAdd } from '@/app/api/admin/app-catalog/route';
 import { PATCH as adminChange, DELETE as adminRemove } from '@/app/api/admin/app-catalog/[id]/route';
+import { GET as offerable } from '@/app/api/bots/[id]/apps/offerable/route';
+import { encryptApiKey } from '@/lib/encryption';
 import { GET as catalog } from '@/app/api/me/apps/catalog/route';
 import { GET as myApps, POST as connectApp } from '@/app/api/me/apps/route';
 import { DELETE as disconnectApp } from '@/app/api/me/apps/[connectionId]/route';
@@ -259,6 +261,64 @@ run('the list of apps to connect, in a real database', () => {
     }
     expect(seen).toEqual(['https://accounts.example.com/revoke']);
     expect(await prisma.appConnection.count({ where: { id } })).toBe(0);
+  });
+
+  describe('what a Brick may offer its owner (GET /api/bots/:id/apps/offerable)', () => {
+    const SERVICE = `service-${tag}`;
+    const serviceBefore = process.env.BOT_SERVICE_TOKEN;
+    beforeAll(() => { process.env.BOT_SERVICE_TOKEN = SERVICE; });
+    afterAll(() => { if (serviceBefore === undefined) delete process.env.BOT_SERVICE_TOKEN; else process.env.BOT_SERVICE_TOKEN = serviceBefore; });
+    const ask = (botId: string, userId: string | null, token: string | null = SERVICE) =>
+      offerable(new NextRequest(`http://localhost/api/bots/${botId}/apps/offerable${userId === null ? '' : `?userId=${encodeURIComponent(userId)}`}`, { headers: token ? { authorization: `Bearer ${token}` } : {} }), params({ id: botId }));
+    const mine = (apps: { key: string }[]) => apps.filter((app) => app.key.endsWith(tag));
+
+    it('lists every app that is on, with the owner’s own connection, whether it works and whether this Brick uses it, and nothing of the link or sign-in', async () => {
+      await add(entry('gmail'));
+      await add(entry('notion'));
+      await add(entry('weather', { authType: 'none', authConfig: null }));
+      await add(entry('slack', { enabled: false }));
+      mockUser.current = { id: sara };
+      const gmail = await (await connectApp(request('/api/me/apps', { method: 'POST', body: { catalogKey: key('gmail') } }))).json();
+      await connectApp(request('/api/me/apps', { method: 'POST', body: { catalogKey: key('weather') } }));
+      mockUser.current = null;
+
+      const first = await (await ask(saraBrick, `sara-${tag}`)).json();
+      expect(mine(first.apps).map((app: { key: string }) => app.key).sort()).toEqual([key('gmail'), key('notion'), key('weather')].sort());
+      const row = (apps: { key: string }[], name: string) => apps.find((app) => app.key === key(name));
+      // Connected from the list but the sign-in not done: it is there, and it does not work yet
+      expect(row(first.apps, 'gmail')).toMatchObject({ connectionId: gmail.id, connected: false, usable: false });
+      expect(row(first.apps, 'notion')).toMatchObject({ connectionId: null, connected: false, usable: false });
+      // An app that needs no sign-in works as soon as it is connected
+      expect(row(first.apps, 'weather')).toMatchObject({ connected: true, usable: false });
+      expect(JSON.stringify(first)).not.toMatch(/platform|authConfig|serverUrl|example\.com/);
+      for (const app of first.apps) expect(Object.keys(app).sort()).toEqual(['blurb', 'connected', 'connectionId', 'key', 'name', 'usable']);
+
+      // They signed in, and the Brick was let use it
+      const signedIn = JSON.parse(decryptApiKey((await prisma.appConnection.findUniqueOrThrow({ where: { id: gmail.id } })).authConfig!));
+      await prisma.appConnection.update({ where: { id: gmail.id }, data: { authConfig: encryptApiKey(JSON.stringify({ ...signedIn, accessToken: 'a', refreshToken: 'r', expiresAt: Math.floor(Date.now() / 1000) + 3600 })) } });
+      expect(row((await (await ask(saraBrick, `sara-${tag}`)).json()).apps, 'gmail')).toMatchObject({ connected: true, usable: false });
+      await grantToBrick(sara, gmail.id, saraBrick);
+      expect(row((await (await ask(saraBrick, `sara-${tag}`)).json()).apps, 'gmail')).toMatchObject({ connected: true, usable: true });
+    });
+
+    it('is for the service token and the Brick’s owner only: anyone else, and a room bot, is told it does not exist', async () => {
+      await add(entry('gmail'));
+      expect((await ask(saraBrick, `sara-${tag}`, null)).status).toBe(401);
+      expect((await ask(saraBrick, `sara-${tag}`, 'wrong')).status).toBe(401);
+      expect((await ask(saraBrick, null)).status).toBe(400);
+      expect((await ask(saraBrick, `omar-${tag}`)).status).toBe(404);
+      expect((await ask(saraBrick, 'nobody-at-all')).status).toBe(404);
+      expect((await ask('no-such-brick', `sara-${tag}`)).status).toBe(404);
+      const universe = await prisma.universe.create({ data: { slug: `o-${tag}`, name: 'Offer test', ownerId: sara } });
+      try {
+        const world = await prisma.world.create({ data: { universeId: universe.id, slug: 'hq', name: 'HQ' } });
+        const room = await prisma.room.create({ data: { worldId: world.id, slug: 'lobby', name: 'Lobby' } });
+        const roomBot = await prisma.bot.create({ data: { roomId: room.id, name: 'Room bot', createdById: sara, behaviorConfig: {} } });
+        expect((await ask(roomBot.id, `sara-${tag}`)).status).toBe(404);
+      } finally {
+        await prisma.universe.delete({ where: { id: universe.id } });
+      }
+    });
   });
 
   it('waits for a renewal of the sign-in that is in flight, and asks the app to take back the newest token', async () => {

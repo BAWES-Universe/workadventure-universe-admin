@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { z } from 'zod';
 import { disconnect, ownBricks, readConnection, renameConnection, NOT_FOUND } from '@/lib/app-connections';
 import { appsRoute, preflight } from '@/lib/me-apps-route';
+import { lendTargets, lentTo } from '@/lib/app-sharing';
 
 export const runtime = 'nodejs';
 
@@ -19,7 +20,14 @@ export async function GET(request: NextRequest, { params }: Params) {
     const app = await readConnection(connectionId, user.id);
     if (!app) return respond({ error: NOT_FOUND }, 404);
     const bricks = await ownBricks(user.id);
-    return respond({ app, canLetUse: bricks.filter((brick) => !app.bricks.some((used) => used.botId === brick.id)) });
+    // "Lent to": where it is lent and what bots there do with it, and the universes it could still be lent to (empty when it cannot be lent)
+    const [lent, targets] = app.lendable ? await Promise.all([lentTo(connectionId), lendTargets(user.id, connectionId)]) : [[], []];
+    return respond({
+      app,
+      canLetUse: bricks.filter((brick) => !app.bricks.some((used) => used.botId === brick.id)),
+      lentTo: lent,
+      canLendTo: targets.filter((universe) => !lent.some((row) => row.universeId === universe.id)),
+    });
   });
 }
 

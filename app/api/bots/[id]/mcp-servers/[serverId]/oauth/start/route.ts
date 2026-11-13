@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { startOAuth } from '@/lib/mcp/oauth-start';
 import { effectiveServer, newSignInNonce } from '@/lib/app-connections';
 import { getSessionUser } from '@/lib/auth-session';
+import { managesConnection } from '@/lib/app-team-access';
 import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { decryptApiKey } from '@/lib/encryption';
 import { corsHeaders } from '@/lib/cors';
@@ -71,6 +72,11 @@ export async function GET(
         select: { email: true },
       });
       if (!(await canManageBotMcpServers(userId!, actorUser?.email ?? null, server.bot))) {
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
+      }
+      // An app lent by someone else, or a universe's own, signs in only through whoever manages the app itself: a bot's manager
+      // starting it would reset the sign-in that person may be in the middle of
+      if (server.connection && !(await managesConnection(userId!, server.connection))) {
         return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
       }
     }

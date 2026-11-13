@@ -6,6 +6,7 @@ import { createConnection } from '@/lib/app-connections';
 import { confirmReadyMade } from '@/lib/app-adapter/confirm';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { APP_USE_MICROS_DEFAULT, personKeyOf } from '@/lib/meter-values';
+import { truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
 
 /**
  * Ready-made apps through the adapter (game #2001, step 8). Everything here answers "not there" while the adapter is off, which
@@ -224,6 +225,8 @@ export interface ReadyMadeTestResult {
   success: boolean;
   toolCount: number;
   toolNames: string[];
+  /** True when the app has more pages of tools than are read: the list is the first pages, not everything. */
+  incomplete?: boolean;
   error?: string;
   status?: number | null;
   statusText?: string | null;
@@ -261,7 +264,7 @@ function rpcError(body: string, id?: number): string | null {
   const error = linkJson(body, id)?.error;
   if (error === undefined || error === null) return null;
   const message = typeof error === 'object' ? (error as { message?: unknown }).message : error;
-  return typeof message === 'string' && message ? message.slice(0, 200) : 'the app refused';
+  return typeof message === 'string' && message ? (truncateDetail(message, 200) ?? 'the app refused') : 'the app refused';
 }
 
 /**
@@ -284,20 +287,46 @@ export async function testReadyMade(connection: { id: string; source: string; se
     const openError = rpcError(opened.body, 1);
     if (openError) return failed(`Initialize error: ${openError}`, opened.status);
     await adapter.callLink({ url: connection.serverUrl, message: { jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId: opened.sessionId });
-    const listed = await adapter.callLink({ url: connection.serverUrl, message: { jsonrpc: '2.0', id: 2, method: 'tools/list' }, sessionId: opened.sessionId });
-    if (listed.status >= 400) return failed(`The app answered ${listed.status}.`, listed.status);
-    const listError = rpcError(listed.body, 2);
-    if (listError) return failed(`MCP error: ${listError}`, listed.status);
-    const answer = linkJson(listed.body, 2);
-    // A 200 that is not an answer to the question is not a working app with no tools
-    if (!answer || typeof answer.result !== 'object' || answer.result === null) return failed('The app did not answer the list of what it can do.', listed.status);
-    // The answer to the list of tools has the list: no list is not an app with no tools (an empty list is)
-    const tools = (answer.result as { tools?: unknown }).tools;
-    if (!Array.isArray(tools) || tools.some((tool) => !tool || typeof tool !== 'object' || typeof (tool as { name?: unknown }).name !== 'string')) {
-      return failed('The app did not answer the list of what it can do.', listed.status);
+    // Every page of the list of tools (ids 2, 3, ...): a long list comes in pages, each with the cursor of the next
+    const names: string[] = [];
+    const seenNames = new Set<string>();
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+    let lastStatus = opened.status;
+    let incomplete = false;
+    for (let page = 0; page < MAX_TOOL_PAGES; page += 1) {
+      const id = 2 + page;
+      const listed = await adapter.callLink({ url: connection.serverUrl, message: { jsonrpc: '2.0', id, method: 'tools/list', ...(cursor ? { params: { cursor } } : {}) }, sessionId: opened.sessionId });
+      lastStatus = listed.status;
+      if (listed.status >= 400) return failed(`The app answered ${listed.status}.`, listed.status);
+      const listError = rpcError(listed.body, id);
+      if (listError) return failed(`MCP error: ${listError}`, listed.status);
+      const answer = linkJson(listed.body, id);
+      // A 200 that is not an answer to the question is not a working app with no tools
+      if (!answer || typeof answer.result !== 'object' || answer.result === null) return failed('The app did not answer the list of what it can do.', listed.status);
+      // The answer to the list of tools has the list: no list is not an app with no tools (an empty list is)
+      const result = answer.result as { tools?: unknown; nextCursor?: unknown };
+      const tools = result.tools;
+      if (!Array.isArray(tools) || tools.some((tool) => !tool || typeof tool !== 'object' || typeof (tool as { name?: unknown }).name !== 'string' || !(tool as { name: string }).name.trim())) {
+        return failed('The app did not answer the list of what it can do.', listed.status);
+      }
+      for (const tool of tools as { name: string }[]) {
+        if (!seenNames.has(tool.name)) {
+          seenNames.add(tool.name);
+          names.push(tool.name);
+        }
+      }
+      if (typeof result.nextCursor !== 'string' || !result.nextCursor) break;
+      // A page is still offered but is not read (a cursor already followed, or past the last page that is read): the list says so
+      // rather than pass for everything
+      if (seenCursors.has(result.nextCursor) || page === MAX_TOOL_PAGES - 1) {
+        incomplete = true;
+        break;
+      }
+      seenCursors.add(result.nextCursor);
+      cursor = result.nextCursor;
     }
-    const names = (tools as { name: string }[]).map((tool) => tool.name);
-    return { success: true, toolCount: names.length, toolNames: names, status: listed.status };
+    return { success: true, toolCount: names.length, toolNames: names, ...(incomplete ? { incomplete: true } : {}), status: lastStatus };
   } catch (error) {
     console.error('[ReadyMade] Test failed:', error instanceof Error ? error.message : 'unknown');
     return failed('The app could not be reached.');
