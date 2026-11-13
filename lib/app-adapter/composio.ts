@@ -72,6 +72,8 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
       headers: { ...(body ? { 'content-type': 'application/json' } : {}), 'x-api-key': options.apiKey },
       ...(body ? { body: JSON.stringify(body) } : {}),
       signal: AbortSignal.timeout(30_000),
+      // The key goes only to the provider's own address: an answer that sends us elsewhere fails instead of being followed
+      redirect: 'error',
     }));
     const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
     if (!response.ok || !json) throw new AdapterError('provider', `Provider answered ${response.status}`);
@@ -114,8 +116,15 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
       return 'failed';
     },
 
-    async appLink({ person, toolkits }): Promise<AppLink> {
-      const json = await call('/tool_router/session', { user_id: person, toolkits: { enable: toolkits }, workbench: { enable: true } });
+    async appLink({ person, toolkits, accounts }): Promise<AppLink> {
+      // Each toolkit pinned to the account the person signed in with (the provider takes a list of ids per toolkit)
+      const pinned = accounts ? Object.fromEntries(Object.entries(accounts).map(([toolkit, id]) => [toolkit, [id]])) : null;
+      const json = await call('/tool_router/session', {
+        user_id: person,
+        toolkits: { enable: toolkits },
+        workbench: { enable: true },
+        ...(pinned && Object.keys(pinned).length > 0 ? { connected_accounts: pinned } : {}),
+      });
       const mcp = json.mcp && typeof json.mcp === 'object' ? (json.mcp as Record<string, unknown>) : {};
       const url = str(mcp.url);
       if (!url) throw new AdapterError('provider', 'Provider sent no app link');
