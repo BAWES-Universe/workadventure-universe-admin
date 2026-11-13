@@ -589,6 +589,8 @@ export interface HeldNotice {
   matrixUserId: string | null;
   kind: ItemKind;
   words: string;
+  /** The item's own time zone, so the notice can say when it comes back on the person's clock. */
+  timeZone: string;
   resumesAt: string;
   /** Names this wait (when it began): the confirm carries it, so a late confirm from an earlier wait marks nothing. */
   waitId: string;
@@ -816,7 +818,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
             await tx.brickItem.update({ where: { id }, data: { nextDueAt: room.resumesAt, heldSince: since, ...(owed ? { heldNoticeAt: now } : {}) } });
             if (owed) {
               const owner = await tx.user.findUniqueOrThrow({ where: { id: item.ownerId }, select: { uuid: true, matrixChatId: true } });
-              notice = { itemId: item.id, brickId: item.botId, userId: owner.uuid, matrixUserId: owner.matrixChatId, kind: item.kind as ItemKind, words: item.words, resumesAt: room.resumesAt.toISOString(), waitId: since.toISOString() };
+              notice = { itemId: item.id, brickId: item.botId, userId: owner.uuid, matrixUserId: owner.matrixChatId, kind: item.kind as ItemKind, words: item.words, timeZone: item.timeZone, resumesAt: room.resumesAt.toISOString(), waitId: since.toISOString() };
             }
             return null;
           }
@@ -879,7 +881,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
         const item = await tx.brickItem.findUniqueOrThrow({ where: { id }, include: { owner: { select: { uuid: true, matrixChatId: true } } } });
         if (!item.heldSince || !item.nextDueAt) return null;
         await tx.brickItem.update({ where: { id }, data: { heldNoticeAt: now } });
-        return { itemId: item.id, brickId: item.botId, userId: item.owner.uuid, matrixUserId: item.owner.matrixChatId, kind: item.kind as ItemKind, words: item.words, resumesAt: item.nextDueAt.toISOString(), waitId: item.heldSince.toISOString() } satisfies HeldNotice;
+        return { itemId: item.id, brickId: item.botId, userId: item.owner.uuid, matrixUserId: item.owner.matrixChatId, kind: item.kind as ItemKind, words: item.words, timeZone: item.timeZone, resumesAt: item.nextDueAt.toISOString(), waitId: item.heldSince.toISOString() } satisfies HeldNotice;
       });
       if (notice) held.push(notice);
     } catch (error) {

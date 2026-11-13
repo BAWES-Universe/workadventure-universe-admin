@@ -919,7 +919,7 @@ run('goals and tasks, in a real database', () => {
       // A reminder is fixed text with no AI: it still comes
       expect(mineIn(first, reminder.id)).toHaveLength(1);
       expect(first.held.filter((one) => one.userId === gsbea.uuid).map((one) => one.itemId).sort()).toEqual([watch.id, briefing.id].sort());
-      expect(first.held.find((one) => one.itemId === watch.id)).toMatchObject({ kind: 'watch', brickId: gsbea.brickId, resumesAt: WINDOW_ENDS.toISOString() });
+      expect(first.held.find((one) => one.itemId === watch.id)).toMatchObject({ kind: 'watch', brickId: gsbea.brickId, resumesAt: WINDOW_ENDS.toISOString(), timeZone: expect.any(String) });
       expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).toMatchObject({ state: 'on', nextDueAt: WINDOW_ENDS });
       expect(await runsOf(watch.id)).toHaveLength(0);
       // Asked again soon, before anything confirmed it: nothing runs and the same notice is not handed out twice in a row
@@ -931,6 +931,8 @@ run('goals and tasks, in a real database', () => {
       expect(retry.held.filter((one) => one.userId === gsbea.uuid).map((one) => one.itemId).sort()).toEqual([watch.id, briefing.id].sort());
       expect(mineIn(retry, watch.id, briefing.id)).toEqual([]);
       const offered = retry.held.find((one) => one.itemId === watch.id)!;
+      // The resent notice carries the item's time zone too (the retry path reads it again)
+      expect(offered.timeZone).toBe(first.held.find((one) => one.itemId === watch.id)!.timeZone);
       expect(offered.waitId).toBe(first.held.find((one) => one.itemId === watch.id)!.waitId);
       // A confirm for another wait marks nothing; the right one keeps it, and it is not handed out again for this wait
       expect(await markHeldTold(watch.id, new Date(0).toISOString())).toEqual({ ok: true, told: false });
