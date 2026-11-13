@@ -267,6 +267,35 @@ export function transformVisitingBrickToServerFormat(
 }
 
 /**
+ * A Brick that lives in a room (game #2005): the Brick's own fields, with the room it stands in and how it behaves
+ * there (the home's spot, radius, roaming and routes, written by the same editor as any room bot's), and `brick.home`
+ * saying whose it is. Its voice stays off, as for every Brick.
+ */
+export function transformHomedBrickToServerFormat(
+  bot: Parameters<typeof transformBrickToServerFormat>[0],
+  isDefault: boolean,
+  home: { roomUrl: string; behaviorType: string; behaviorConfig: unknown },
+  owner: { uuid: string; name: string | null }
+) {
+  const base = transformBrickToServerFormat(bot, isDefault);
+  const url = new URL(home.roomUrl);
+  const parts = url.pathname.split('/').filter(Boolean);
+  const stored: Record<string, unknown> = home.behaviorConfig && typeof home.behaviorConfig === 'object' && !Array.isArray(home.behaviorConfig) ? (home.behaviorConfig as Record<string, unknown>) : {};
+  const assignedSpace = (stored.assignedSpace as { center: { x: number; y: number }; radius: number } | undefined) ?? { center: { x: 0, y: 0 }, radius: 0 };
+  const behaviorType = home.behaviorType === 'patrol' || home.behaviorType === 'social' ? home.behaviorType : 'idle';
+  return {
+    ...base,
+    brick: { ...base.brick, home: { ownerUuid: owner.uuid, ownerName: owner.name } },
+    roomUrl: home.roomUrl,
+    worldUrl: `${url.origin}/${parts.slice(0, 3).join('/')}`,
+    universeUrl: `${url.origin}/${parts.slice(0, 2).join('/')}`,
+    behaviorType,
+    behaviorConfig: { ...base.behaviorConfig, ...stored, behaviorType, assignedSpace },
+    assignedSpace,
+  };
+}
+
+/**
  * A save that replaces a bot's whole behavior config must not silently turn "Show tool calls"
  * back off just because the caller did not know about that key. An explicit true or false
  * from the caller still wins.
