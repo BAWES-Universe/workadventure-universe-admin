@@ -206,6 +206,22 @@ run('the list of apps to connect, in a real database', () => {
     expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(2);
   });
 
+  it('never leaves a connection holding the key of an entry that was removed at the same moment', async () => {
+    for (let round = 0; round < 6; round += 1) {
+      const name = `race${round}`;
+      const created = await (await add(entry(name))).json();
+      const taps = [sara, omar].map((id) => {
+        mockUser.current = { id };
+        return connectApp(request('/api/me/apps', { method: 'POST', body: { catalogKey: key(name) } }));
+      });
+      asBoss();
+      const removing = adminRemove(request(`/api/admin/app-catalog/${created.app.id}`, { method: 'DELETE' }), params({ id: created.app.id }));
+      await Promise.all([...taps, removing]);
+      expect(await prisma.appConnection.count({ where: { catalogKey: key(name) } })).toBe(0);
+      expect(await prisma.appCatalogEntry.count({ where: { key: key(name) } })).toBe(0);
+    }
+  });
+
   it('lets a person disconnect a listed app, which then shows as not connected and can be connected again', async () => {
     await add(entry('gmail'));
     mockUser.current = { id: sara };

@@ -121,7 +121,10 @@ export async function changeCatalogEntry(id: string, patch: z.infer<typeof catal
  */
 export async function removeCatalogEntry(id: string): Promise<boolean> {
   return prisma.$transaction(async (tx) => {
-    const entry = await tx.appCatalogEntry.findUnique({ where: { id }, select: { key: true } });
+    // The entry's row is held first, so a person's Connect that is making a connection from it (which holds the same row shared)
+    // finishes before the connections are let go, and one that starts after finds the entry gone
+    const locked = await tx.$queryRaw<{ key: string }[]>`SELECT "key" FROM "app_catalog_entries" WHERE "id" = ${id} FOR UPDATE`;
+    const entry = locked[0];
     if (!entry) return false;
     await tx.appConnection.updateMany({ where: { catalogKey: entry.key }, data: { catalogKey: null } });
     return (await tx.appCatalogEntry.deleteMany({ where: { id } })).count === 1;
@@ -163,21 +166,30 @@ export async function listCatalogForPerson(ownerId: string, query?: string): Pro
  * twice (or twice at once), the second answer is the first connection. Null when the app is not on the list or is off.
  */
 export async function connectFromCatalog(ownerId: string, key: string): Promise<{ id: string; created: boolean } | null> {
-  const entry = await prisma.appCatalogEntry.findFirst({ where: { key, enabled: true } });
-  if (!entry) return null;
-  const existing = await prisma.appConnection.findFirst({ where: { ownerId, catalogKey: key }, select: { id: true } });
-  if (existing) return { id: existing.id, created: false };
   try {
-    const connection = await createConnection(ownerId, {
-      name: entry.name,
-      serverUrl: entry.serverUrl,
-      authType: entry.authType as 'oauth' | 'none',
-      authConfig: entry.authConfig ? decryptApiKey(entry.authConfig) : null,
-      headers: (entry.headers as Record<string, string> | null) ?? undefined,
-      source: 'listed',
-      catalogKey: key,
+    // The entry is read and held shared while the connection is made, so removing it at the same moment either waits for this
+    // or is waited for: a connection is never made from an entry that is already gone
+    return await prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_catalog_entries" WHERE "key" = ${key} AND "enabled" = true FOR SHARE`;
+      if (rows.length === 0) return null;
+      const entry = await tx.appCatalogEntry.findUniqueOrThrow({ where: { id: rows[0].id } });
+      const existing = await tx.appConnection.findFirst({ where: { ownerId, catalogKey: key }, select: { id: true } });
+      if (existing) return { id: existing.id, created: false };
+      const connection = await createConnection(
+        ownerId,
+        {
+          name: entry.name,
+          serverUrl: entry.serverUrl,
+          authType: entry.authType as 'oauth' | 'none',
+          authConfig: entry.authConfig ? decryptApiKey(entry.authConfig) : null,
+          headers: (entry.headers as Record<string, string> | null) ?? undefined,
+          source: 'listed',
+          catalogKey: key,
+        },
+        tx,
+      );
+      return { id: connection.id, created: true };
     });
-    return { id: connection.id, created: true };
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
       const winner = await prisma.appConnection.findFirst({ where: { ownerId, catalogKey: key }, select: { id: true } });
