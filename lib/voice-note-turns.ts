@@ -31,7 +31,7 @@ import { botHearing, universeAiHearing, type NoteHearing } from '@/lib/voice-not
  */
 
 export class VoiceNoteError extends Error {
-  constructor(message: string, readonly status: 400 | 404 | 409) {
+  constructor(message: string, readonly status: 400 | 404 | 409 | 503) {
     super(message);
   }
 }
@@ -212,6 +212,9 @@ export async function reserveVoiceNote(
   if (scope === 'bot') {
     botId = idOf(input.botId, 'botId', 64);
     const person = await resolveUsagePerson(userId, input.isGuest);
+    // A signed-in person Orbit could not look up just now is never filed as a guest: asked again once the lookup works, the same
+    // note would be a second turn under another key, and be heard twice
+    if (!person.personId && person.guest !== true) throw new VoiceNoteError('Who sent this note can\'t be looked up now', 503);
     personKey = person.personId ? `person:${person.personId}` : `guest:${userId}`;
     target = botId;
   } else {
@@ -236,14 +239,13 @@ export async function reserveVoiceNote(
   const hearing = scope === 'bot' ? await botHearing(botId!, adapters) : await universeAiHearing(adapters);
   if (hearing.route === 'none' || !hearing.payer) return { ok: false, reason: 'no-hearing' };
 
-  // A bot that answers on Universe AI: the note and its answer are one reply, checked before anything is heard
+  // The note and its answer are one reply, checked before anything is heard: the bot's own daily cap whatever it answers on, and
+  // Universe AI's windows when it answers there (lib/reply-limits.ts skips those for a person's own key)
   if (scope === 'bot') {
     const source = input.source;
     if (source !== 'universe-ai' && source !== 'provider' && source !== 'own-key') throw new VoiceNoteError('source must be universe-ai, provider or own-key', 400);
-    if (source !== 'own-key') {
-      const allowance = await checkReplyAllowance(botId!, { userId, isGuest: input.isGuest, source }, now);
-      if (!allowance.allowed) return { ok: false, reason: 'reply-limit', allowance };
-    }
+    const allowance = await checkReplyAllowance(botId!, { userId, isGuest: input.isGuest, source }, now);
+    if (!allowance.allowed) return { ok: false, reason: 'reply-limit', allowance };
   }
 
   const ownerDayLimit = scope === 'bot' ? await ownerKeyDayLimitSeconds(hearing) : null;
@@ -283,10 +285,16 @@ export async function reserveVoiceNote(
 
     if (scope === 'bot' && !universeAi) {
       // The owner's key: the same day its group listening counts on (lib/voice-listening.ts), so a note counts there too. Only a
-      // note that fits whole is taken, as on every other pool: the length is known before anything is paid
-      const used = (await tx.voiceListenUse.findUnique({ where: { botId_day: { botId: botId!, day } }, select: { seconds: true } }))?.seconds ?? 0;
-      if (ownerDayLimit !== null && used + seconds > ownerDayLimit) return { ok: false, reason: 'note-minutes', limit: 'bot', resetsAt: tomorrow };
-      await tx.voiceListenUse.upsert({ where: { botId_day: { botId: botId!, day } }, create: { botId: botId!, day, seconds }, update: { seconds: { increment: seconds } } });
+      // note that fits whole is taken, as on every other pool: the length is known before anything is paid. The limit is checked in
+      // the same statement that adds to the day, so live listening reported at that moment (which takes no lock) is counted too
+      const where = { botId_day: { botId: botId!, day } };
+      if (ownerDayLimit === null) {
+        await tx.voiceListenUse.upsert({ where, create: { botId: botId!, day, seconds }, update: { seconds: { increment: seconds } } });
+      } else {
+        await tx.voiceListenUse.upsert({ where, create: { botId: botId!, day, seconds: 0 }, update: {} });
+        const added = await tx.voiceListenUse.updateMany({ where: { botId: botId!, day, seconds: { lte: ownerDayLimit - seconds } }, data: { seconds: { increment: seconds } } });
+        if (added.count === 0) return { ok: false, reason: 'note-minutes', limit: 'bot', resetsAt: tomorrow };
+      }
     }
 
     const turn = await tx.voiceNoteTurn.create({
@@ -337,10 +345,13 @@ async function failUnused(turn: VoiceNoteTurn) {
   });
 }
 
-/** The hearing for a turn now: the same payer it was reserved with, or nothing. */
+/**
+ * The hearing for a turn now: the same payer and the same provider it was reserved with, or nothing. A key swapped since was never
+ * checked against its own day, and a hearing being looked up is only ever looked up at the provider that took the note.
+ */
 async function hearingFor(turn: VoiceNoteTurn, adapters: Set<string>): Promise<NoteHearing | null> {
   const now = turn.scope === 'bot' ? await botHearing(turn.botId!, adapters).catch(() => null) : await universeAiHearing(adapters);
-  return now && now.route !== 'none' && now.payer === turn.payer ? now : null;
+  return now && now.route !== 'none' && now.payer === turn.payer && (now.provider?.id ?? null) === turn.providerId ? now : null;
 }
 
 /** Asks to run a stage of a turn: "hearing" (send the note to the provider) or "answer" (run the model on the words). */
@@ -361,6 +372,12 @@ export async function leaseVoiceNoteStage(id: string, input: { stage?: unknown; 
       return { granted: false, reason: done.count > 0 ? 'uncertain' : 'held' };
     }
     if (turn.state !== 'reserved' && turn.state !== 'hearing') return { granted: false, reason: turn.state as TurnState };
+    if (turn.state === 'reserved' && turn.createdAt.getTime() <= now.getTime() - STARTING_MS) {
+      // Too late to start: it stopped counting as one being heard (the notes-at-once count) and is given back, so it never starts
+      // past that count. A new send is a new turn
+      await failUnused(turn);
+      return { granted: false, reason: 'expired' };
+    }
     const hearing = await hearingFor(turn, readAdapterList(input.adapters));
     if (!hearing) {
       // The key it was reserved with can't be used now. A hearing that was started stays counted

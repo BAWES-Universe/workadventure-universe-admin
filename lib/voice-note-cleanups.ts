@@ -11,10 +11,13 @@ import { sweepStaleReservations, sweepVoiceNoteBuffers } from '@/lib/voice-note-
  * - anything else, or no answer: tried again later, waiting twice as long each time, up to an hour.
  * A job still not done after a day is told to the engineers once. A job names the provider, never its key; the key is read when
  * the job is handed out, and a job whose provider or key is gone is set aside. Usage never waits on any of this.
+ *
+ * A job handed out carries `lease`, the time its hold ends, and only an answer with that same `lease` settles it: a bot server
+ * that ran past its hold and answers late can't undo the job another bot server has taken since (409).
  */
 
 export class VoiceNoteCleanupError extends Error {
-  constructor(message: string, readonly status: 400 | 404) {
+  constructor(message: string, readonly status: 400 | 404 | 409) {
     super(message);
   }
 }
@@ -49,6 +52,8 @@ export interface CleanupJob {
   id: string;
   kind: 'file' | 'transcription';
   objectId: string;
+  /** Sent back when settling: only the bot server holding the job now can settle it. */
+  lease: string;
   provider: { id: string; adapter: string; endpoint: string | null; region: string | null; apiKeyEncrypted: string };
 }
 
@@ -78,42 +83,56 @@ export async function claimVoiceNoteCleanups(input: { limit?: unknown }, now: Da
       await prisma.voiceNoteCleanup.updateMany({ where: { id: job.id, state: 'pending' }, data: { state: 'orphaned', leaseUntil: null } });
       continue;
     }
+    // Checked again as it is taken: a job another bot server settled since it was read waits for its new time
+    const leaseUntil = new Date(now.getTime() + CLEANUP_LEASE_MS);
     const taken = await prisma.voiceNoteCleanup.updateMany({
-      where: { id: job.id, state: 'pending', OR: [{ leaseUntil: null }, { leaseUntil: { lt: now } }] },
-      data: { leaseUntil: new Date(now.getTime() + CLEANUP_LEASE_MS) },
+      where: { id: job.id, state: 'pending', nextAt: { lte: now }, OR: [{ leaseUntil: null }, { leaseUntil: { lt: now } }] },
+      data: { leaseUntil },
     });
     if (taken.count === 0) continue;
     jobs.push({
       id: job.id,
       kind: job.kind as CleanupJob['kind'],
       objectId: job.objectId,
+      lease: leaseUntil.toISOString(),
       provider: { id: row.id, adapter: row.adapter, endpoint: row.endpoint, region: job.region ?? row.region, apiKeyEncrypted: row.apiKeyEncrypted },
     });
   }
   return jobs;
 }
 
-/** What the provider answered a delete with: `status`, or `failed: true` when there was no answer. */
-export async function settleVoiceNoteCleanup(id: string, input: { status?: unknown; failed?: unknown }, now: Date = new Date()): Promise<{ id: string; state: string; nextAt: string | null }> {
+/** What the provider answered a delete with: `status`, or `failed: true` when there was no answer, with the job's `lease`. */
+export async function settleVoiceNoteCleanup(id: string, input: { status?: unknown; failed?: unknown; lease?: unknown }, now: Date = new Date()): Promise<{ id: string; state: string; nextAt: string | null }> {
   const job = await prisma.voiceNoteCleanup.findUnique({ where: { id: text(id, 'id', 64) } });
   if (!job) throw new VoiceNoteCleanupError('Cleanup not found', 404);
   if (job.state !== 'pending') return { id: job.id, state: job.state, nextAt: null };
   const status = input.status;
   if (status !== undefined && (typeof status !== 'number' || !Number.isInteger(status) || status < 100 || status > 599)) throw new VoiceNoteCleanupError('status must be an HTTP status', 400);
   if (status === undefined && input.failed !== true) throw new VoiceNoteCleanupError('status or failed is required', 400);
+  const lease = new Date(text(input.lease, 'lease', 40));
+  if (Number.isNaN(lease.getTime())) throw new VoiceNoteCleanupError('lease must be the time the job was handed out with', 400);
+  // Only the bot server holding the job now: the same hold it was handed, still pending
+  const held = { id: job.id, state: 'pending', leaseUntil: lease };
+  const fenced = (count: number) => {
+    if (count === 0) throw new VoiceNoteCleanupError('Another bot server has this cleanup now', 409);
+  };
 
   if (typeof status === 'number' && ((status >= 200 && status < 300) || status === 404)) {
-    await prisma.voiceNoteCleanup.update({ where: { id: job.id }, data: { state: 'done', doneAt: now, leaseUntil: null, lastStatus: status, attempts: { increment: 1 } } });
+    fenced((await prisma.voiceNoteCleanup.updateMany({ where: held, data: { state: 'done', doneAt: now, leaseUntil: null, lastStatus: status, attempts: { increment: 1 } } })).count);
     return { id: job.id, state: 'done', nextAt: null };
   }
   const attempts = job.attempts + 1;
   const wait = status === 409 ? BUSY_RETRY_MS : Math.min(FIRST_RETRY_MS * 2 ** Math.min(job.attempts, 20), LONGEST_RETRY_MS);
   const nextAt = new Date(now.getTime() + wait);
   const overdue = !job.overdue && now.getTime() - job.createdAt.getTime() > OVERDUE_MS;
-  await prisma.voiceNoteCleanup.update({
-    where: { id: job.id },
-    data: { attempts, nextAt, leaseUntil: null, lastStatus: typeof status === 'number' ? status : null, ...(overdue ? { overdue: true } : {}) },
-  });
+  fenced(
+    (
+      await prisma.voiceNoteCleanup.updateMany({
+        where: held,
+        data: { attempts, nextAt, leaseUntil: null, lastStatus: typeof status === 'number' ? status : null, ...(overdue ? { overdue: true } : {}) },
+      })
+    ).count
+  );
   if (overdue) {
     const line = `A voice note's ${job.kind} at provider ${job.providerId} is still not deleted after a day (${attempts} tries, last answer ${typeof status === 'number' ? status : 'none'})`;
     console.error(`[VoiceNotes] ${line}`);

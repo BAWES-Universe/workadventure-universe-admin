@@ -45,8 +45,8 @@ let defaultsBefore: string[] = [];
 
 const ADAPTERS = ['soniox'];
 const turnId = () => `turn-${randomUUID()}`;
-const reserveFor = (botForTurn: string, userId: string, changes: Record<string, unknown> = {}) =>
-  reserveVoiceNote({ scope: 'bot', botId: botForTurn, userId, isGuest: true, clientTurnId: turnId(), contentHash: randomUUID(), seconds: 60, adapters: ADAPTERS, source: 'own-key', ...changes });
+const reserveFor = (botForTurn: string, userId: string, changes: Record<string, unknown> = {}, now?: Date) =>
+  reserveVoiceNote({ scope: 'bot', botId: botForTurn, userId, isGuest: true, clientTurnId: turnId(), contentHash: randomUUID(), seconds: 60, adapters: ADAPTERS, source: 'own-key', ...changes }, now);
 const reserve = (userId: string, changes: Record<string, unknown> = {}) => reserveFor(botId, userId, changes);
 const guestBrick = (guestId: string, changes: Record<string, unknown> = {}) =>
   reserveVoiceNote({ scope: 'guest-brick', roomUrl, userId: guestId, clientTurnId: turnId(), contentHash: randomUUID(), seconds: 60, adapters: ADAPTERS, ...changes });
@@ -171,31 +171,79 @@ run('voice notes for every bot, in a real database', () => {
       providers.push(key.id);
       const swept = await newBot('Swept');
       ownerKeyBots.set(swept, key.id);
-      const reserveHere = async () => turnOf(await reserveFor(swept, `s-${randomUUID()}`, { seconds: 30 }));
-      const stale = await reserveHere();
-      const started = await reserveHere();
-      const fresh = await reserveHere();
-      await leaseVoiceNoteStage(started.id, { stage: 'hearing', adapters: ADAPTERS });
-      const old = new Date(Date.now() - 3 * 60_000);
-      await prisma.voiceNoteTurn.updateMany({ where: { id: { in: [stale.id, started.id] } }, data: { createdAt: old } });
-      // Today's row is keyed by the day the turn was made: keep the stale one on today
-      expect(old.toISOString().slice(0, 10)).toBe(new Date().toISOString().slice(0, 10));
+      // One clock for the whole case, at least 5 minutes into today, so the turns made 3 minutes before it are on today's row too
+      const now = new Date(Math.max(Date.now(), today().getTime() + 5 * 60_000));
+      const old = new Date(now.getTime() - 3 * 60_000);
+      expect(old.toISOString().slice(0, 10)).toBe(today().toISOString().slice(0, 10));
+      const reserveHere = async (at: Date) => turnOf(await reserveFor(swept, `s-${randomUUID()}`, { seconds: 30 }, at));
+      const stale = await reserveHere(old);
+      const started = await reserveHere(old);
+      const fresh = await reserveHere(now);
+      await leaseVoiceNoteStage(started.id, { stage: 'hearing', adapters: ADAPTERS }, old);
       expect(await botDay(swept)).toBe(90);
 
-      await sweepStaleReservations();
+      await sweepStaleReservations(now);
       expect(await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: stale.id } })).toMatchObject({ state: 'failed', released: true });
       expect(await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: started.id } })).toMatchObject({ state: 'hearing', released: false });
       expect(await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: fresh.id } })).toMatchObject({ state: 'reserved', released: false });
       expect(await botDay(swept)).toBe(60);
       // Run again: nothing more is given back
-      await sweepStaleReservations();
+      await sweepStaleReservations(now);
       expect(await botDay(swept)).toBe(60);
+    });
+
+    it('never starts a reservation too old to count as being heard, and gives it back', async () => {
+      const key = await prisma.voiceProvider.create({ data: { adapter: 'soniox', name: `Late ${tag}`, ownerId: makerId, recognition: true, enabled: true, apiKeyEncrypted: 'iv:tag:late' } });
+      providers.push(key.id);
+      const late = await newBot('Late');
+      ownerKeyBots.set(late, key.id);
+      const now = new Date(Math.max(Date.now(), today().getTime() + 5 * 60_000));
+      const turn = turnOf(await reserveFor(late, `l-${randomUUID()}`, { seconds: 30 }, new Date(now.getTime() - 3 * 60_000)));
+      expect(await leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: ADAPTERS }, now)).toEqual({ granted: false, reason: 'expired' });
+      expect(await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: turn.id } })).toMatchObject({ state: 'failed', released: true });
+      expect(await botDay(late)).toBe(0);
+    });
+
+    it('hears only with the key a note was reserved with: a key swapped since gives the reservation back', async () => {
+      const first = await prisma.voiceProvider.create({ data: { adapter: 'soniox', name: `First ${tag}`, ownerId: makerId, recognition: true, enabled: true, apiKeyEncrypted: 'iv:tag:first' } });
+      const second = await prisma.voiceProvider.create({ data: { adapter: 'soniox', name: `Second ${tag}`, ownerId: makerId, recognition: true, enabled: true, apiKeyEncrypted: 'iv:tag:second' } });
+      providers.push(first.id, second.id);
+      const swapped = await newBot('Swapped');
+      ownerKeyBots.set(swapped, first.id);
+      const turn = turnOf(await reserveFor(swapped, `w-${randomUUID()}`, { seconds: 30 }));
+      ownerKeyBots.set(swapped, second.id);
+      expect(await leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: ADAPTERS })).toEqual({ granted: false, reason: 'no-hearing' });
+      expect(await prisma.voiceNoteTurn.findUniqueOrThrow({ where: { id: turn.id } })).toMatchObject({ state: 'failed', released: true });
+      expect(await botDay(swapped)).toBe(0);
+    });
+
+    it('refuses a signed-in person it can\'t look up just now, rather than file their note as a guest\'s', async () => {
+      const lookup = jest.spyOn(prisma.user, 'findUnique').mockRejectedValueOnce(new Error('database away'));
+      try {
+        await expect(reserve(`signed-${randomUUID()}`, { isGuest: false })).rejects.toMatchObject({ status: 503 });
+      } finally {
+        lookup.mockRestore();
+      }
+    });
+
+    it('stops a note at the bot\'s own daily reply cap, on its owner\'s key too', async () => {
+      const capped = await newBot('Capped');
+      await prisma.bot.update({ where: { id: capped }, data: { dailyReplyCap: 1 } });
+      const person = `c-${randomUUID()}`;
+      await prisma.botsAiProvider.upsert({ where: { providerId: 'universe-ai' }, create: { providerId: 'universe-ai', name: 'Universe AI', type: 'universe-ai', enabled: true }, update: {} });
+      // The first note opens the day's window; its answer is the one reply the bot gives this person today
+      expect(await reserveFor(capped, person, { source: 'own-key', seconds: 10 })).toMatchObject({ ok: true });
+      await prisma.botsAiUsage.create({ data: { botId: capped, providerId: 'universe-ai', talkedUserId: person, talkedGuest: true } });
+      expect(await reserveFor(capped, person, { source: 'own-key', seconds: 10 })).toMatchObject({ ok: false, reason: 'reply-limit', allowance: { allowed: false, limit: 'bot' } });
     });
 
     it('stops at the hour\'s minutes and the notes heard at once, for everyone, with "busy"', async () => {
       await saveVoiceLimits({ notesAtOnce: 1 }, makerId);
       try {
-        // Notes reserved a moment ago by others are still starting
+        // A note reserved a moment ago is still starting, and takes the one place
+        await prisma.voiceNoteTurn.create({
+          data: { scope: 'bot', personKey: `guest:o-${randomUUID()}`, target: botId, botId, clientTurnId: turnId(), fingerprint: randomUUID(), payer: 'universe-ai', providerId: providers[0], seconds: 10, state: 'reserved' },
+        });
         expect(await reserve(`a-${randomUUID()}`)).toMatchObject({ ok: false, reason: 'busy' });
       } finally {
         await saveVoiceLimits({ notesAtOnce: 1_000 }, makerId);
@@ -338,21 +386,46 @@ run('voice notes for every bot, in a real database', () => {
       const handed = [...first, ...second].filter((job) => job.id === file.id || job.id === transcription.id);
       expect(handed.map((job) => job.id).sort()).toEqual([file.id, transcription.id].sort());
       expect(handed[0].provider).toMatchObject({ adapter: 'soniox', apiKeyEncrypted: 'iv:tag:ua' });
-      expect(await settleVoiceNoteCleanup(transcription.id, { status: 204 })).toMatchObject({ state: 'done' });
-      expect(await settleVoiceNoteCleanup(file.id, { status: 404 })).toMatchObject({ state: 'done' });
+      const leaseOf = (id: string) => handed.find((job) => job.id === id)!.lease;
+      expect(await settleVoiceNoteCleanup(transcription.id, { status: 204, lease: leaseOf(transcription.id) })).toMatchObject({ state: 'done' });
+      expect(await settleVoiceNoteCleanup(file.id, { status: 404, lease: leaseOf(file.id) })).toMatchObject({ state: 'done' });
+    });
+
+    it('takes an answer only from the bot server holding the job now, and never hands out a job before its time', async () => {
+      const job = await addVoiceNoteCleanup({ providerId: providers[0], kind: 'file', objectId: `f-${randomUUID()}` });
+      const now = new Date();
+      const late = (await claimVoiceNoteCleanups({ limit: 50 }, now)).find((handed) => handed.id === job.id)!;
+      // Its hold ran out and another bot server took it
+      const later = new Date(now.getTime() + 3 * 60_000);
+      await prisma.voiceNoteCleanup.update({ where: { id: job.id }, data: { leaseUntil: new Date(now.getTime() - 1) } });
+      const current = (await claimVoiceNoteCleanups({ limit: 50 }, later)).find((handed) => handed.id === job.id)!;
+      expect(current.lease).not.toBe(late.lease);
+      await expect(settleVoiceNoteCleanup(job.id, { failed: true, lease: late.lease }, later)).rejects.toMatchObject({ status: 409 });
+      await expect(settleVoiceNoteCleanup(job.id, { status: 204, lease: late.lease }, later)).rejects.toMatchObject({ status: 409 });
+      await expect(settleVoiceNoteCleanup(job.id, { failed: true }, later)).rejects.toMatchObject({ status: 400 });
+      const waiting = await settleVoiceNoteCleanup(job.id, { status: 500, lease: current.lease }, later);
+      expect(waiting).toMatchObject({ state: 'pending' });
+      // Waits for its new time, however soon another bot server asks
+      expect((await claimVoiceNoteCleanups({ limit: 50 }, later)).some((handed) => handed.id === job.id)).toBe(false);
     });
 
     it('tries a 409 again in 30 seconds and anything else later each time, and tells the engineers once after a day', async () => {
       const job = await addVoiceNoteCleanup({ providerId: providers[0], kind: 'transcription', objectId: `t-${randomUUID()}` });
       const now = new Date();
-      const busy = await settleVoiceNoteCleanup(job.id, { status: 409 }, now);
+      // Held by this bot server for each answer, as a claim does
+      const hold = async () => {
+        const lease = new Date(now.getTime() + 60_000 + Math.floor(Math.random() * 60_000));
+        await prisma.voiceNoteCleanup.update({ where: { id: job.id }, data: { leaseUntil: lease } });
+        return lease.toISOString();
+      };
+      const busy = await settleVoiceNoteCleanup(job.id, { status: 409, lease: await hold() }, now);
       expect(new Date(busy.nextAt!).getTime() - now.getTime()).toBe(30_000);
-      const first = await settleVoiceNoteCleanup(job.id, { status: 500 }, now);
-      const second = await settleVoiceNoteCleanup(job.id, { failed: true }, now);
+      const first = await settleVoiceNoteCleanup(job.id, { status: 500, lease: await hold() }, now);
+      const second = await settleVoiceNoteCleanup(job.id, { failed: true, lease: await hold() }, now);
       expect(new Date(second.nextAt!).getTime() - now.getTime()).toBeGreaterThan(new Date(first.nextAt!).getTime() - now.getTime());
       const later = new Date(now.getTime() + 25 * 60 * 60_000);
-      await settleVoiceNoteCleanup(job.id, { status: 429 }, later);
-      await settleVoiceNoteCleanup(job.id, { status: 429 }, later);
+      await settleVoiceNoteCleanup(job.id, { status: 429, lease: await hold() }, later);
+      await settleVoiceNoteCleanup(job.id, { status: 429, lease: await hold() }, later);
       expect(Sentry.captureMessage).toHaveBeenCalledTimes(1);
     });
 
