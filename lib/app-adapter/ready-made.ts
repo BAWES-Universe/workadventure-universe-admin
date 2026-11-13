@@ -186,3 +186,60 @@ export async function useReadyMade(input: { botId: string; connectionId: string;
     return { status: 'unavailable' };
   }
 }
+
+export interface ReadyMadeTestResult {
+  success: boolean;
+  toolCount: number;
+  toolNames: string[];
+  error?: string;
+  status?: number | null;
+}
+
+/** The JSON of a link's answer, which may be plain JSON or an event stream holding it. */
+function linkJson(body: string): Record<string, unknown> | null {
+  const attempt = (text: string) => {
+    try {
+      const value = JSON.parse(text);
+      return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  };
+  const whole = attempt(body.trim());
+  if (whole) return whole;
+  for (const line of body.split('\n')) {
+    if (line.startsWith('data:')) {
+      const found = attempt(line.slice(5).trim());
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * "Test" on a ready-made app's grant: the link needs the provider key, which only Orbit holds, so the test goes through the adapter
+ * (open a session, list the tools) instead of a plain request that the link would turn away with 401. Counts nothing: listing is not a use.
+ */
+export async function testReadyMade(connection: { id: string; source: string; serverUrl: string; providerAccountId: string | null; providerConfirmedAt: Date | null; providerToolkit: string | null }): Promise<ReadyMadeTestResult> {
+  const adapter = getAdapter();
+  const failed = (error: string, status: number | null = null): ReadyMadeTestResult => ({ success: false, toolCount: 0, toolNames: [], error, status });
+  if (!adapter) return failed('This app is not available right now.');
+  if (!(await confirmReadyMade(connection))) return failed('Reconnect required: the sign-in for this app is not finished.');
+  try {
+    const opened = await adapter.callLink({
+      url: connection.serverUrl,
+      message: { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'orbit', version: '1' } } },
+      sessionId: null,
+    });
+    if (opened.status >= 400) return failed(`The app answered ${opened.status}.`, opened.status);
+    await adapter.callLink({ url: connection.serverUrl, message: { jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId: opened.sessionId });
+    const listed = await adapter.callLink({ url: connection.serverUrl, message: { jsonrpc: '2.0', id: 2, method: 'tools/list' }, sessionId: opened.sessionId });
+    if (listed.status >= 400) return failed(`The app answered ${listed.status}.`, listed.status);
+    const result = linkJson(listed.body)?.result as { tools?: unknown } | undefined;
+    const names = Array.isArray(result?.tools) ? (result.tools as { name?: unknown }[]).map((tool) => tool.name).filter((name): name is string => typeof name === 'string') : [];
+    return { success: true, toolCount: names.length, toolNames: names, status: listed.status };
+  } catch (error) {
+    console.error('[ReadyMade] Test failed:', error instanceof Error ? error.message : 'unknown');
+    return failed('The app could not be reached.');
+  }
+}
