@@ -10,12 +10,13 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => moc
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: (email: string | null) => email === 'boss@example.test' }));
 
 import { prisma } from '@/lib/db';
-import { setAdapterForTests, type ReadyMadeAdapter } from '@/lib/app-adapter';
+import { setAdapterForTests, type LinkAnswer, type ReadyMadeAdapter } from '@/lib/app-adapter';
 import { saveReadyMadeApps } from '@/lib/app-adapter/settings';
 import { GET as listReadyMade, POST as connectReadyMadeApp } from '@/app/api/me/apps/ready-made/route';
 import { GET as adminGet, PUT as adminPut } from '@/app/api/admin/ready-made-apps/route';
 import { POST as useApp } from '@/app/api/ready-made/use/route';
 import { POST as linkApp } from '@/app/api/ready-made/link/route';
+import { POST as testServer } from '@/app/api/bots/[id]/mcp-servers/[serverId]/test/route';
 import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
 import { POST as connectApp } from '@/app/api/me/apps/route';
 import { grantToBrick, createConnection, readConnection, listConnections } from '@/lib/app-connections';
@@ -45,7 +46,7 @@ const fake = () => {
     startConnect: jest.fn(async () => ({ redirectUrl: 'https://connect.example/sign-in', providerAccountId: `ca_${tag}`, expiresAt: null })),
     connectionStatus: jest.fn(async (): Promise<'active' | 'pending' | 'failed'> => 'active'),
     appLink: jest.fn(async () => ({ url: `https://mcp.example/${tag}/mcp`, headers: {} })),
-    callLink: jest.fn(async (_input: { url: string; message: Record<string, unknown>; sessionId: string | null }) => ({ status: 200, contentType: 'application/json', sessionId: 'mcp-1', body: '{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}' })),
+    callLink: jest.fn(async (_input: { url: string; message: Record<string, unknown>; sessionId: string | null }): Promise<LinkAnswer> => ({ status: 200, contentType: 'application/json', sessionId: 'mcp-1', body: '{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}' })),
     use: jest.fn(async () => ({ ok: true, data: { free: ['10:00'] }, error: null, providerCallId: 'log_1' })),
   } satisfies ReadyMadeAdapter;
   return adapter;
@@ -382,6 +383,40 @@ run('ready-made apps through the adapter, in a real database', () => {
       const { adapter, serverId } = await connectedAndGranted();
       adapter.callLink.mockRejectedValueOnce(new Error('down'));
       expect((await link(serverId)).status).toBe(502);
+    });
+  });
+
+  describe('"Test" on a ready-made app, which has to go through Orbit because the link needs the provider key', () => {
+    const test = (serverId: string) => {
+      asSara();
+      return testServer(request(`/api/bots/${saraBrick}/mcp-servers/${serverId}/test`, { method: 'POST' }), params({ id: saraBrick, serverId }));
+    };
+    const answerOf = (status: number, body: string, sessionId: string | null = null) => ({ status, contentType: 'text/event-stream', sessionId, body });
+
+    it('opens a session and lists the tools through the adapter, not with a plain request that would be turned away', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      adapter.callLink
+        .mockResolvedValueOnce(answerOf(200, 'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{}}\n', 's1'))
+        .mockResolvedValueOnce(answerOf(202, ''))
+        .mockResolvedValueOnce(answerOf(200, 'event: message\ndata: {"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"GMAIL_FETCH_EMAILS"},{"name":"GMAIL_SEND_EMAIL"}]}}\n', 's1'));
+      const response = await test(serverId);
+      expect(await response.json()).toMatchObject({ success: true, toolCount: 2, toolNames: ['GMAIL_FETCH_EMAILS', 'GMAIL_SEND_EMAIL'] });
+      expect(adapter.callLink.mock.calls.map(([call]) => [call.message.method, call.sessionId])).toEqual([['initialize', null], ['notifications/initialized', 's1'], ['tools/list', 's1']]);
+      expect((await prisma.botMcpServer.findUniqueOrThrow({ where: { id: serverId } })).lastTestResult).toMatchObject({ success: true, toolCount: 2 });
+      expect(await prisma.meterEvent.count({ where: { personId: sara, kind: 'app_use' } })).toBe(0);
+    });
+
+    it('reports a refusal by the link as a failed test with its status, and an unfinished sign-in as one to reconnect', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      adapter.callLink.mockResolvedValueOnce(answerOf(401, 'nope'));
+      expect(await (await test(serverId)).json()).toMatchObject({ success: false, status: 401 });
+      adapter.callLink.mockClear();
+      adapter.connectionStatus.mockResolvedValue('pending');
+      await prisma.appConnection.updateMany({ where: { ownerId: sara }, data: { providerConfirmedAt: null } });
+      const pending = await (await test(serverId)).json();
+      expect(pending).toMatchObject({ success: false });
+      expect(pending.error).toContain('Reconnect required');
+      expect(adapter.callLink).not.toHaveBeenCalled();
     });
   });
 
