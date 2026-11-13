@@ -491,19 +491,31 @@ export async function pauseItemsOfDeletedBrick(db: Tx, botId: string): Promise<n
   return count;
 }
 
+/** What the room check reads from the settings: read once by a caller that checks many people. */
+export interface RoomSettings {
+  signedIn: number;
+  windowHours: number;
+  goalsShare: number;
+}
+
 /**
  * Whether a watch, briefing or goal of this person may use their Universe AI now (game #2002). A model run on Universe AI is usage of
  * the owner in the same window as their chat, and goals and tasks may use only a share of it (a Limits row), so live chat always keeps
  * room: no while the window is used up, or goals and tasks have used their share. Read only: a check never starts a window. A Brick
  * on its owner's own key uses its key and is never held here. Returns when it carries on.
  */
-export async function goalsRoom(ownerId: string, now: Date = new Date()): Promise<{ ok: true } | { ok: false; resumesAt: Date }> {
-  const [{ signedIn, windowHours }, { goalsShare }, extra] = await Promise.all([getUniverseAiReplyLimits(), getBrickLimits(), runningExtra(ownerId, now)]);
+export async function goalsRoom(ownerId: string, now: Date = new Date(), db: Tx | typeof prisma = prisma, settings?: RoomSettings): Promise<{ ok: true } | { ok: false; resumesAt: Date }> {
+  // A caller inside a transaction passes it, and the settings it has already read, so nothing here takes another connection from the pool
+  const [{ signedIn, windowHours }, { goalsShare }, extra] = await Promise.all([
+    settings ?? getUniverseAiReplyLimits(),
+    settings ?? getBrickLimits(),
+    runningExtra(ownerId, now, db),
+  ]);
   // Extra usage a super admin gave (game #1999) raises the person's window while it runs, a multiple of the usual or no limit, so goals and
   // tasks and their share rise with it, exactly as chat does: a person with room on their usage bar is never held
   if (extra?.noLimit) return { ok: true };
   const total = signedIn * (extra?.multiplier ?? 1);
-  const window = await prisma.replyWindow.findUnique({ where: { key: `ua:person:${ownerId}` }, select: { startedAt: true } });
+  const window = await db.replyWindow.findUnique({ where: { key: `ua:person:${ownerId}` }, select: { startedAt: true } });
   const ends = window ? new Date(window.startedAt.getTime() + windowHours * 60 * MINUTE) : null;
   // No window, or one that has ended, has nothing counted in it
   if (!window || !ends || ends <= now) return { ok: true };
@@ -511,7 +523,7 @@ export async function goalsRoom(ownerId: string, now: Date = new Date()): Promis
   // either counted as usage or still holds its run's place, never neither. A run still holds its place until a call of its own that is counted
   // here (the same rows the task count takes: a task call, not an error, not a greeting, not on a personal key, inside the window) has been written, so a failed call
   // that is tried again keeps its place, and a call is never counted for one run and subtracted from another. A reminder is fixed text and takes none.
-  const rows = await prisma.$queryRaw<{ counted: bigint; counted_tasks: bigint; in_flight: bigint }[]>(Prisma.sql`
+  const rows = await db.$queryRaw<{ counted: bigint; counted_tasks: bigint; in_flight: bigint }[]>(Prisma.sql`
     SELECT
       (SELECT count(*) FROM "bots_ai_usage" a WHERE ${countedUsage(ownerId, window.startedAt)}) AS counted,
       (SELECT count(*) FROM "bots_ai_usage" a WHERE ${countedUsage(ownerId, window.startedAt)} AND a."channel" = 'task') AS counted_tasks,
@@ -629,6 +641,9 @@ export async function claimDueRuns(now: Date = new Date(), limit = CLAIM_BATCH):
  */
 export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, waitingPage = WAITING_PAGE): Promise<{ runs: ClaimedRun[]; held: HeldNotice[] }> {
   const limits = await getBrickLimits();
+  // Read once: the room check and the window start take these, so neither needs another connection while a transaction is open
+  const universe = await getUniverseAiReplyLimits();
+  const roomSettings: RoomSettings = { signedIn: universe.signedIn, windowHours: universe.windowHours, goalsShare: limits.goalsShare };
   const lease = new Date(now.getTime() + limits.longestRun * MINUTE);
   const out: ClaimedRun[] = [];
   const held: HeldNotice[] = [];
@@ -693,7 +708,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
       try {
         let ok = one.ai_provider_ref !== UNIVERSE_AI_REF;
         if (!ok) {
-          if (!roomOf.has(one.owner_id)) roomOf.set(one.owner_id, (await goalsRoom(one.owner_id, now)).ok);
+          if (!roomOf.has(one.owner_id)) roomOf.set(one.owner_id, (await goalsRoom(one.owner_id, now, prisma, roomSettings)).ok);
           ok = roomOf.get(one.owner_id)!;
         }
         if (ok) await prisma.brickItem.updateMany({ where: { id: one.id, state: 'on', heldSince: { not: null }, nextDueAt: { gt: now } }, data: { nextDueAt: now } });
@@ -747,7 +762,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-runs:${item.ownerId}`}))`;
           const bot = await tx.bot.findUniqueOrThrow({ where: { id: item.botId }, select: { aiProviderRef: true } });
           onUniverse = bot.aiProviderRef === UNIVERSE_AI_REF;
-          const room = onUniverse ? await goalsRoom(item.ownerId, now) : ({ ok: true } as const);
+          const room = onUniverse ? await goalsRoom(item.ownerId, now, tx, roomSettings) : ({ ok: true } as const);
           if (!room.ok) {
             // The notice is owed until the bot server confirms it (markHeldTold); it is handed out now, and handed out again after the
             // retry interval if no confirm came, so an answer that never arrived does not lose it and a quick second ask does not repeat it
@@ -784,7 +799,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
         if (!made.length) return null;
         // A run on Universe AI is the person's first use of the window when none is running, exactly as their first chat reply is: it
         // starts the window, so what goals and tasks use is counted in it and held against their share, never left outside any window
-        if (onUniverse) await windowStart(`ua:person:${item.ownerId}`, (await getUniverseAiReplyLimits()).windowHours, now);
+        if (onUniverse) await windowStart(`ua:person:${item.ownerId}`, roomSettings.windowHours, now, tx);
         return tx.brickItemRun.findUniqueOrThrow({ where: { id: made[0].id }, include: RUN_INCLUDE });
       });
     } catch (error) {

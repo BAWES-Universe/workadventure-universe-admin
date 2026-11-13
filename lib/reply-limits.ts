@@ -43,11 +43,12 @@ export class ReplyAllowanceError extends Error {
 
 /**
  * When the window under `key` started, starting a new one now when there is none or the last has ended. One statement,
- * so two replies asked for at the same moment agree on the same start.
+ * so two replies asked for at the same moment agree on the same start. `db` is the caller's transaction when it has one, so the start
+ * commits or rolls back with it.
  */
-export async function windowStart(key: string, hours: number, now: Date): Promise<Date> {
+export async function windowStart(key: string, hours: number, now: Date, db: Pick<typeof prisma, '$queryRaw'> = prisma): Promise<Date> {
   const endedBefore = new Date(now.getTime() - hours * HOUR);
-  const rows = await prisma.$queryRaw<{ started_at: Date }[]>(Prisma.sql`
+  const rows = await db.$queryRaw<{ started_at: Date }[]>(Prisma.sql`
     INSERT INTO "reply_windows" ("key", "started_at") VALUES (${key}, ${now})
     ON CONFLICT ("key") DO UPDATE SET "started_at" =
       CASE WHEN "reply_windows"."started_at" <= ${endedBefore} THEN EXCLUDED."started_at" ELSE "reply_windows"."started_at" END
