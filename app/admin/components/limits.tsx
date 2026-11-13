@@ -993,6 +993,18 @@ export function voiceServerLimits(values: VoiceLimits, fair: { signedIn: number;
       ],
     }),
     // Voice notes (game: every bot hears voice notes): what Universe AI hears, apart from talking live
+    own('longestNoteSeconds', {
+      id: 'longestNoteSeconds',
+      label: 'Longest voice note',
+      hint: 'The longest voice note a bot listens to. A longer one is refused before anything is paid, with “Send a shorter one.”',
+      unit: 'seconds',
+      name: secondsLabel,
+      steps: [
+        { value: 60, label: '1 minute', meaning: 'Quick notes only.' },
+        { value: 180, label: '3 minutes', meaning: 'Most notes fit.' },
+        { value: 300, label: '5 minutes', meaning: 'Room for a long thought.' },
+      ],
+    }),
     own('noteMinutesPerPerson', {
       id: 'noteMinutesPerPerson',
       label: 'Voice notes heard for a person',

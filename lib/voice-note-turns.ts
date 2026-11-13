@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { Prisma, type VoiceNoteTurn } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getVoiceLimits } from '@/lib/voice-limits';
-import { savedVoiceKeyLimits, type VoiceLimits } from '@/lib/voice-limit-values';
+import { VOICE_RANGES, savedVoiceKeyLimits, type VoiceLimits } from '@/lib/voice-limit-values';
 import { checkReplyAllowance, type ReplyAllowance } from '@/lib/reply-limits';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import { placeFor } from '@/lib/guest-brick';
@@ -35,8 +35,13 @@ export class VoiceNoteError extends Error {
   }
 }
 
-/** The longest note: 5 minutes and the second the measurement may run over. */
-export const MAX_NOTE_SECONDS = 301;
+/**
+ * The second a measured length may run over the longest note (Limits, Voice, "Longest voice note"): ffmpeg stops one second past
+ * it, so a note right at the limit is not refused for rounding.
+ */
+export const MEASURE_SLACK_SECONDS = 1;
+/** The most any length can be, whatever the setting: the setting's own top value and the slack. Only checks the number's shape. */
+const LENGTH_CEILING = VOICE_RANGES.longestNoteSeconds.max + MEASURE_SLACK_SECONDS;
 /** How long a bot server holds a stage before another may look at it. */
 export const LEASE_MS = 2 * 60_000;
 /** How long the words and answer of a turn are kept for a reply that got lost. */
@@ -138,7 +143,9 @@ export type Reservation =
   /** Nothing can hear this note: the mic should not have been there. */
   | { ok: false; reason: 'no-hearing' }
   /** The answer of this turn is no longer kept: "This answer is no longer available. Send it again." */
-  | { ok: false; reason: 'expired' };
+  | { ok: false; reason: 'expired' }
+  /** Longer than the longest voice note (Limits, Voice), in seconds: "This note is over 5 minutes. Send a shorter one." */
+  | { ok: false; reason: 'too-long'; longestSeconds: number };
 
 const view = (turn: VoiceNoteTurn): TurnView => ({ id: turn.id, state: turn.state as TurnState, payer: turn.payer as TurnView['payer'], seconds: turn.seconds });
 
@@ -187,7 +194,7 @@ export async function reserveVoiceNote(
   const userId = idOf(input.userId, 'userId');
   const clientTurnId = idOf(input.clientTurnId, 'clientTurnId');
   const contentHash = idOf(input.contentHash, 'contentHash', 128);
-  const seconds = wholeOf(input.seconds, 'seconds', 1, MAX_NOTE_SECONDS);
+  const seconds = wholeOf(input.seconds, 'seconds', 1, LENGTH_CEILING);
   const adapters = readAdapterList(input.adapters);
   const fingerprint = fingerprintOf(contentHash);
 
@@ -214,6 +221,10 @@ export async function reserveVoiceNote(
   const earlier = await prisma.voiceNoteTurn.findUnique({ where: key });
   if (earlier) return same(earlier);
 
+  // Read now, so a change on the Limits page counts from the next note
+  const { limits } = await getVoiceLimits();
+  if (seconds > limits.longestNoteSeconds + MEASURE_SLACK_SECONDS) return { ok: false, reason: 'too-long', longestSeconds: limits.longestNoteSeconds };
+
   // Who pays is fixed here, for this attempt. Throws BotSettingsError(404) for a bot that isn't there
   const hearing = scope === 'bot' ? await botHearing(botId!, adapters) : await universeAiHearing(adapters);
   if (hearing.route === 'none' || !hearing.payer) return { ok: false, reason: 'no-hearing' };
@@ -228,7 +239,6 @@ export async function reserveVoiceNote(
     }
   }
 
-  const { limits } = await getVoiceLimits();
   const botDayLimit = scope === 'bot' ? await botDayLimitSeconds(hearing, limits) : 0;
   const day = dayOf(now);
   const tomorrow = new Date(day.getTime() + DAY).toISOString();
@@ -416,7 +426,7 @@ export async function recordVoiceNote(id: string, input: Record<string, unknown>
     case 'heard': {
       holding('hearing');
       if (typeof input.transcript !== 'string') throw new VoiceNoteError('transcript is required', 400);
-      const heardSeconds = input.seconds === undefined ? turn.seconds : Math.min(turn.seconds, wholeOf(input.seconds, 'seconds', 0, MAX_NOTE_SECONDS));
+      const heardSeconds = input.seconds === undefined ? turn.seconds : Math.min(turn.seconds, wholeOf(input.seconds, 'seconds', 0, LENGTH_CEILING));
       const costMicros = input.costMicros === undefined ? null : wholeOf(input.costMicros, 'costMicros', 0, 2_000_000_000);
       const buffer = sealBuffer(turn.id, { transcript: input.transcript.slice(0, 20_000) });
       fenced((await moveOn(turn, { state: 'heard', heardSeconds, costMicros, buffer, bufferUntil: new Date(now.getTime() + BUFFER_MS), leaseUntil: null })).count);

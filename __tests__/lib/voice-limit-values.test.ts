@@ -12,6 +12,7 @@ describe('voice limits', () => {
       listenMinutesPerDay: 60,
       followUpSeconds: 30,
       voicesShownFirst: 5,
+      longestNoteSeconds: 300,
       noteMinutesPerPerson: 30,
       guestNoteMinutesPerGuest: 10,
       guestNoteMinutesPerUniverse: 120,

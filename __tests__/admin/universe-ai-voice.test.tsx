@@ -810,7 +810,7 @@ describe('the voice limits', () => {
 
   it('are the 7 from #740, the four a key can change first, each with its recommended value', () => {
     const rows = voiceServerLimits({ ...VOICE_LIMITS_RECOMMENDED }, { signedIn: 30, guest: 10 });
-    expect(rows.map((row) => row.id)).toEqual(['turnSeconds', 'replyCharacters', 'replySeconds', 'listenMinutesPerDay', 'followUpSeconds', 'voicesShownFirst', 'textReserveShare', 'guestVoiceReplies', 'noteMinutesPerPerson', 'guestNoteMinutesPerGuest', 'guestNoteMinutesPerUniverse', 'notesAtOnce', 'noteMinutesPerHour']);
+    expect(rows.map((row) => row.id)).toEqual(['turnSeconds', 'replyCharacters', 'replySeconds', 'listenMinutesPerDay', 'followUpSeconds', 'voicesShownFirst', 'textReserveShare', 'guestVoiceReplies', 'longestNoteSeconds', 'noteMinutesPerPerson', 'guestNoteMinutesPerGuest', 'guestNoteMinutesPerUniverse', 'notesAtOnce', 'noteMinutesPerHour']);
     for (const row of rows) {
       expect(row.value).toBe(row.recommended);
       expect(row.options.some((option) => option.value === row.value)).toBe(true);

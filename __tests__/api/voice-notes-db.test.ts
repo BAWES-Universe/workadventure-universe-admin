@@ -139,9 +139,23 @@ run('voice notes for every bot, in a real database', () => {
       expect(await guestBrick(`g3-${randomUUID()}`)).toMatchObject({ ok: false, reason: 'note-minutes', limit: 'universe' });
     });
 
-    it('refuses a note longer than 5 minutes and a length nobody measured', async () => {
-      await expect(reserve(`x-${randomUUID()}`, { seconds: 302 })).rejects.toMatchObject({ status: 400 });
+    it('refuses a note longer than the longest voice note, read live from the Limits page, and a length nobody measured', async () => {
+      // Room in the person's and the bot's minutes, so only the length decides
+      const quiet = await newBot('Long');
+      const ask = (seconds: unknown) => reserveFor(quiet, `x-${randomUUID()}`, { seconds });
+      await saveVoiceLimits({ noteMinutesPerPerson: 60 }, makerId);
+      try {
+        // 5 minutes by default, with the second the measurement may run over
+        expect(await ask(301)).toMatchObject({ ok: true });
+        expect(await ask(302)).toEqual({ ok: false, reason: 'too-long', longestSeconds: 300 });
+        await saveVoiceLimits({ longestNoteSeconds: 60 }, makerId);
+        expect(await ask(62)).toEqual({ ok: false, reason: 'too-long', longestSeconds: 60 });
+        expect(await ask(61)).toMatchObject({ ok: true });
+      } finally {
+        await saveVoiceLimits({ longestNoteSeconds: 300, noteMinutesPerPerson: 3 }, makerId);
+      }
       await expect(reserve(`x-${randomUUID()}`, { seconds: '60' })).rejects.toMatchObject({ status: 400 });
+      await expect(reserve(`x-${randomUUID()}`, { seconds: 0 })).rejects.toMatchObject({ status: 400 });
     });
   });
 
