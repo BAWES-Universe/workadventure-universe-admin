@@ -61,10 +61,16 @@ export async function lendApp(ownerId: string, connectionId: string, input: z.in
   if (!isAppLendable(connection)) return 'not_lendable' as const;
   if (!(await lendAccess(ownerId, input.universeId))) return 'no_access' as const;
   const data = { things: uniqueThings(input.things) ?? Prisma.JsonNull, usesPerDay: input.usesPerDay };
-  return prisma.appLend.upsert({
-    where: { connectionId_universeId: { connectionId, universeId: input.universeId } },
-    create: { connectionId, universeId: input.universeId, lentById: ownerId, ...data },
-    update: data,
+  return prisma.$transaction(async (tx) => {
+    // The app's row is held shared while the lend is written (taking the app away holds it for update): an app removed just after
+    // the check above answers "not found", never the database's plain error for a lend with nothing to belong to
+    const held = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_connections" WHERE "id" = ${connectionId} AND "owner_id" = ${ownerId} FOR SHARE`;
+    if (held.length === 0) return 'not_found' as const;
+    return tx.appLend.upsert({
+      where: { connectionId_universeId: { connectionId, universeId: input.universeId } },
+      create: { connectionId, universeId: input.universeId, lentById: ownerId, ...data },
+      update: data,
+    });
   });
 }
 

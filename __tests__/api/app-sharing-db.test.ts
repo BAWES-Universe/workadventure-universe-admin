@@ -130,6 +130,20 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
   /* ---------------------------------- lending ---------------------------------- */
 
   describe('lending one of your apps', () => {
+    it('answers "not there" when the app is removed between the check and the lend, never a plain server error', async () => {
+      const app = await keyApp(sara);
+      as(sara);
+      const stale = await prisma.appConnection.findUniqueOrThrow({ where: { id: app.id } });
+      await prisma.appConnection.delete({ where: { id: app.id } });
+      const read = jest.spyOn(prisma.appConnection, 'findFirst').mockResolvedValueOnce(stale as never);
+      try {
+        expect((await lendTo(app.id, { universeId: universeA })).status).toBe(404);
+        expect(await prisma.appLend.count({ where: { universeId: universeA } })).toBe(0);
+      } finally {
+        read.mockRestore();
+      }
+    });
+
     it('lists the universes you could lend to and moves no bot when you do', async () => {
       const app = await keyApp(sara);
       as(sara);
