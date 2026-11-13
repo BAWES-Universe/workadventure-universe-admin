@@ -509,7 +509,7 @@ export async function goalsRoom(ownerId: string, now: Date = new Date()): Promis
   if (!window || !ends || ends <= now) return { ok: true };
   // What was used and what runs still hold are read in ONE statement, so both come from the same snapshot: a call recorded while this reads is
   // either counted as usage or still holds its run's place, never neither. A run still holds its place until a call of its own that is counted
-  // here (the same rows as the count: not an error, not a greeting, not on a personal key, inside the window) has been written, so a failed call
+  // here (the same rows the task count takes: a task call, not an error, not a greeting, not on a personal key, inside the window) has been written, so a failed call
   // that is tried again keeps its place, and a call is never counted for one run and subtracted from another. A reminder is fixed text and takes none.
   const rows = await prisma.$queryRaw<{ counted: bigint; counted_tasks: bigint; in_flight: bigint }[]>(Prisma.sql`
     SELECT
@@ -520,7 +520,7 @@ export async function goalsRoom(ownerId: string, now: Date = new Date()): Promis
         JOIN "bots" b ON b."id" = i."bot_id"
         WHERE r."state" = 'claimed' AND r."lease_until" > ${now}
           AND i."owner_id" = ${ownerId} AND i."kind" <> 'reminder' AND b."ai_provider_ref" = ${UNIVERSE_AI_REF}
-          AND NOT EXISTS (SELECT 1 FROM "bots_ai_usage" a WHERE a."brick_run_id" = r."id" AND ${countedUsage(ownerId, window.startedAt)})) AS in_flight`);
+          AND NOT EXISTS (SELECT 1 FROM "bots_ai_usage" a WHERE a."brick_run_id" = r."id" AND a."channel" = 'task' AND ${countedUsage(ownerId, window.startedAt)})) AS in_flight`);
   const inFlight = Number(rows[0]?.in_flight ?? 0);
   const used = Number(rows[0]?.counted ?? 0) + inFlight;
   const byTasks = Number(rows[0]?.counted_tasks ?? 0) + inFlight;

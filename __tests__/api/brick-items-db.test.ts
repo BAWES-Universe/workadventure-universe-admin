@@ -1018,6 +1018,17 @@ run('goals and tasks, in a real database', () => {
       expect(mineIn(await claimWork(at(HOUR + 7 * MIN)), b.id)).toEqual([]);
     });
 
+    it('a call that names a run but is not a task call does not release the run’s place', async () => {
+      const gsdm = await person('gsdm');
+      const a = await set(gsdm, { kind: 'watch', words: 'A', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+      const b = await set(gsdm, { kind: 'watch', words: 'B', condition: 'It drops', cadence: { type: 'every', minutes: 60 } }, at(3 * MIN));
+      await usage(gsdm, 8, 'task');
+      const first = await claimWork(at(HOUR + 2 * MIN));
+      const runA = first.runs.find((one) => one.itemId === a.id)!;
+      await prisma.botsAiUsage.create({ data: { botId: gsdm.brickId, providerId: 'universe-ai', talkedPersonId: gsdm.id, channel: 'dm', brickRunId: runA.runId, timestamp: at(HOUR + 3 * MIN) } });
+      expect(mineIn(await claimWork(at(HOUR + 5 * MIN)), b.id)).toEqual([]);
+    });
+
     it('a call of one run never takes the place another still-open run holds', async () => {
       const gsover = await person('gsover');
       const a = await set(gsover, { kind: 'watch', words: 'A', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
