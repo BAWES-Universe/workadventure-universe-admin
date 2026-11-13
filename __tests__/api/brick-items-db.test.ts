@@ -16,9 +16,9 @@ import { ensureDefaultBrick } from '@/lib/brick-default';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { makeBrick } from '@/lib/brick-make';
 import { saveServerLimits } from '@/lib/bot-limits';
-import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, markHeldTold, markTold, claimWork, readItem, type NewItemInput } from '@/lib/brick-items';
+import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, markHeldTold, markTold, claimWork, goalsRoom, readItem, type NewItemInput } from '@/lib/brick-items';
 import { recordGrant } from '@/lib/meter-grants';
-import { checkReplyAllowance } from '@/lib/reply-limits';
+import { checkReplyAllowance, windowStart } from '@/lib/reply-limits';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -1027,6 +1027,32 @@ run('goals and tasks, in a real database', () => {
       const runA = first.runs.find((one) => one.itemId === a.id)!;
       await prisma.botsAiUsage.create({ data: { botId: gsdm.brickId, providerId: 'universe-ai', talkedPersonId: gsdm.id, channel: 'dm', brickRunId: runA.runId, timestamp: at(HOUR + 3 * MIN) } });
       expect(mineIn(await claimWork(at(HOUR + 5 * MIN)), b.id)).toEqual([]);
+    });
+
+    it('the room check and the window start use only the client they are given, never another connection', async () => {
+      const gstx = await person('gstx');
+      const settings = { signedIn: 30, windowHours: 5, goalsShare: 30 };
+      // A stand-in for the claim's transaction that records every read and write made through it
+      const seen: string[] = [];
+      const db = {
+        $queryRaw: async (query: { strings?: readonly string[] }) => {
+          const text = (query.strings ?? []).join('');
+          seen.push(text.includes('reply_windows') ? 'window start' : 'usage');
+          return text.includes('reply_windows') ? [{ started_at: at(HOUR) }] : [{ counted: BigInt(3), counted_tasks: BigInt(3), in_flight: BigInt(0) }];
+        },
+        replyWindow: { findUnique: async () => (seen.push('window') as unknown, { startedAt: at(0) }) },
+        meterGrant: { findMany: async () => (seen.push('extra usage') as unknown, []) },
+      };
+      // The global client must not be touched by either
+      const spies = [jest.spyOn(prisma, '$queryRaw'), jest.spyOn(prisma.replyWindow, 'findUnique'), jest.spyOn(prisma.meterGrant, 'findMany'), jest.spyOn(prisma.botsAiUsage, 'count')];
+      try {
+        expect(await goalsRoom(gstx.id, at(HOUR), db as never, settings)).toEqual({ ok: true });
+        expect(await windowStart(`ua:person:${gstx.id}`, 5, at(HOUR), db as never)).toEqual(at(HOUR));
+        expect(seen.sort()).toEqual(['extra usage', 'usage', 'window', 'window start']);
+        for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+      } finally {
+        for (const spy of spies) spy.mockRestore();
+      }
     });
 
     it('a call of one run never takes the place another still-open run holds', async () => {
