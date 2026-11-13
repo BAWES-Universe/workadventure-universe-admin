@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { decryptApiKey } from '@/lib/encryption';
-import { getOwnedConnection, newSignInNonce, NOT_FOUND } from '@/lib/app-connections';
+import { newSignInNonce, NOT_FOUND } from '@/lib/app-connections';
+import { getManagedConnection } from '@/lib/app-team-access';
 import { startOAuth } from '@/lib/mcp/oauth-start';
 import { appsRoute, preflight } from '@/lib/me-apps-route';
 
@@ -19,7 +20,7 @@ export async function OPTIONS(request: NextRequest) {
 export async function GET(request: NextRequest, { params }: { params: Promise<{ connectionId: string }> }) {
   return appsRoute(request, METHODS, 'starting a sign-in', async (user, respond) => {
     const { connectionId } = await params;
-    const connection = await getOwnedConnection(connectionId, user.id);
+    const connection = await getManagedConnection(connectionId, user.id);
     if (!connection) return respond({ error: NOT_FOUND }, 404);
     if (connection.authType !== 'oauth' || !connection.authConfig) return respond({ error: 'This app does not sign in on a page' }, 400);
     let oauthConfig;

@@ -59,6 +59,9 @@ model User {
   botServersConnected BotMcpServer[] @relation("BotMcpServerConnectedBy")
   appConnections    AppConnection[] @relation("AppConnectionOwner")
   appConnectionsMade AppConnection[] @relation("AppConnectionConnectedBy")
+  appLendsMade      AppLend[]       @relation("AppLendLentBy")
+  appManagerOf      AppConnectionManager[] @relation("AppManagerUser")
+  appManagersAdded  AppConnectionManager[] @relation("AppManagerAddedBy")
   botConversations BotsConversation[]
   botMemories      BotsMemory[]
   avatarGrants     UserAvatarGrant[]
@@ -325,6 +328,8 @@ model Universe {
   members    UniverseMember[]
   membershipInvitations MembershipInvitation[]
   aiKeyLends AiKeyLend[]
+  appConnections AppConnection[]
+  appLends AppLend[]
   voiceKeyLends VoiceKeyLend[]
   ownershipOffer OwnershipOffer?
 
@@ -1076,7 +1081,10 @@ model BotMcpServer {
 // Removing the connection deletes every grant with it (onDelete cascade), so every Brick stops at once.
 model AppConnection {
   id          String   @id @default(uuid())
-  ownerId     String   @map("owner_id")
+  // A person's own app has an owner and no universe. A universe's own app (a team app, #2001 step 7) has a universe and NO owner,
+  // so it stays when anyone leaves; who may manage it is the list of managers. The database holds it to exactly one of the two.
+  ownerId     String?  @map("owner_id")
+  universeId  String?  @map("universe_id")
   name        String   @db.VarChar(255)
   serverUrl   String   @map("server_url") @db.Text
   authType    String   @default("none") @map("auth_type") @db.VarChar(20)   // none | bearer | api-key | oauth
@@ -1103,14 +1111,77 @@ model AppConnection {
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  owner       User     @relation("AppConnectionOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  owner       User?    @relation("AppConnectionOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  universe    Universe? @relation(fields: [universeId], references: [id], onDelete: Cascade)
   connectedBy User?    @relation("AppConnectionConnectedBy", fields: [connectedById], references: [id], onDelete: SetNull)
   grants      BotMcpServer[]
+  lends       AppLend[]
+  managers    AppConnectionManager[]
+  uses        AppUse[]
 
   @@unique([ownerId, catalogKey])
   @@unique([ownerId, providerToolkit])
   @@index([ownerId])
+  @@index([universeId])
   @@map("app_connections")
+}
+
+// A person's own app lent to a universe (#2001 step 7), like an AI key: with limits, taken back at any time. Lending moves no bot;
+// a person who manages a bot there lets that bot use it. Taking it back deletes every bot's grant of it in that universe.
+model AppLend {
+  id           String   @id @default(uuid())
+  connectionId String   @map("connection_id")
+  universeId   String   @map("universe_id")
+  lentById     String?  @map("lent_by_id")
+  // Which of the four headings bots there may use it for (lookUp, make, change, deleteSend), or null for all four
+  things       Json?
+  // Uses a day there, for the whole universe together, or null for no limit
+  usesPerDay   Int?     @map("uses_per_day")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  connection AppConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  universe   Universe      @relation(fields: [universeId], references: [id], onDelete: Cascade)
+  lentBy     User?         @relation("AppLendLentBy", fields: [lentById], references: [id], onDelete: SetNull)
+
+  @@unique([connectionId, universeId])
+  @@index([universeId])
+  @@map("app_lends")
+}
+
+// The named managers of a universe's own app. The universe's owner always manages it without a row. A named manager manages it only
+// while they still have Manage bots in that universe, so someone who leaves stops managing it.
+model AppConnectionManager {
+  id           String   @id @default(uuid())
+  connectionId String   @map("connection_id")
+  userId       String   @map("user_id")
+  addedById    String?  @map("added_by_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  connection AppConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  user       User          @relation("AppManagerUser", fields: [userId], references: [id], onDelete: Cascade)
+  addedBy    User?         @relation("AppManagerAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+
+  @@unique([connectionId, userId])
+  @@index([userId])
+  @@map("app_connection_managers")
+}
+
+// One use of a lent or a universe's own app by a bot there, written once under the bot server's call id. It is what "today 12 of
+// 200" and "this month's uses" read, so a retry of one call counts once.
+model AppUse {
+  id           String   @id @default(uuid())
+  connectionId String   @map("connection_id")
+  universeId   String   @map("universe_id")
+  botId        String   @map("bot_id") @db.VarChar(255)
+  callId       String   @map("call_id") @db.VarChar(200)
+  usedAt       DateTime @default(now()) @map("used_at")
+
+  connection AppConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, callId])
+  @@index([connectionId, universeId, usedAt])
+  @@map("app_uses")
 }
 
 // The apps a person can connect with one tap (#2001): a list a super admin keeps, never written in code. Each entry is an app that

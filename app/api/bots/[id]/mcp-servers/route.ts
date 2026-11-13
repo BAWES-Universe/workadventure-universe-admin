@@ -1,3 +1,4 @@
+import { botUniverseId } from '@/lib/app-uses';
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { isReconnectRequired, parseOAuthConfig, refreshBlockedReason } from '@/lib/mcp/oauth-token';
@@ -89,6 +90,13 @@ export async function GET(
     // Transform: remove authConfig from response for security,
     // except for internal bot-server calls authenticated via ADMIN_API_TOKEN
     // For OAuth servers, check if connected (has accessToken) without exposing credentials
+    // Where each grant comes from: one of the bot's own maker's apps (a Brick), a person's app lent to this bot's universe (with what the
+    // lender allowed), or the universe's own app. The bot server holds the limits again at every use (POST .../use).
+    const universeId = bot.roomId ? await botUniverseId(botId) : null;
+    const lends = universeId && servers.some((row) => row.connectionId)
+      ? await prisma.appLend.findMany({ where: { universeId, connectionId: { in: servers.map((row) => row.connectionId).filter((id): id is string => !!id) } }, select: { connectionId: true, things: true, usesPerDay: true } })
+      : [];
+    const lendOf = new Map(lends.map((lend) => [lend.connectionId, lend]));
     const transformed = await Promise.all(
       servers.map(async (s) => {
         let oauthConnected = false;
@@ -152,6 +160,8 @@ export async function GET(
             enabled: s.enabled,
             // Set for a Brick's grant on a person's connection: its link and sign-in are changed on the app's own page
             connectionId: s.connectionId,
+            // Set when a person's app is lent to this bot's universe: what the lender allowed (null = all four) and the uses a day
+            ...(lendOf.has(s.connectionId ?? '') ? { lent: { things: lendOf.get(s.connectionId as string)!.things, usesPerDay: lendOf.get(s.connectionId as string)!.usesPerDay } } : {}),
             // A server that existed before its tools were checked keeps working in text, and reads Not checked yet (#738)
             notCheckedYet: s.legacyText === true,
             policyRevision: s.policyRevision ?? 1,
