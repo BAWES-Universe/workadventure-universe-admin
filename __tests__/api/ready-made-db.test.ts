@@ -480,6 +480,31 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(pending.error).toContain('Reconnect required');
       expect(adapter.callLink).not.toHaveBeenCalled();
     });
+
+    it('reports an error the link carries inside a 200 answer as a failed test, never as a working app with no tools', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      adapter.callLink.mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"no session"}}'));
+      const opening = await (await test(serverId)).json();
+      expect(opening).toMatchObject({ success: false, toolCount: 0 });
+      expect(opening.error).toContain('Initialize error: no session');
+
+      adapter.callLink
+        .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":1,"result":{}}', 's1'))
+        .mockResolvedValueOnce(answerOf(202, ''))
+        .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":2,"error":{"code":-32001,"message":"sign-in expired"}}', 's1'));
+      const listing = await (await test(serverId)).json();
+      expect(listing).toMatchObject({ success: false, toolCount: 0 });
+      expect(listing.error).toContain('MCP error: sign-in expired');
+
+      // A 200 that is not an answer at all is not an app with no tools either
+      adapter.callLink
+        .mockResolvedValueOnce(answerOf(200, '{"jsonrpc":"2.0","id":1,"result":{}}', 's1'))
+        .mockResolvedValueOnce(answerOf(202, ''))
+        .mockResolvedValueOnce(answerOf(200, '<html>maintenance</html>', 's1'));
+      expect(await (await test(serverId)).json()).toMatchObject({ success: false, toolCount: 0 });
+      // The last stored result is the failure, so the screen does not show a green one
+      expect((await prisma.botMcpServer.findUniqueOrThrow({ where: { id: serverId } })).lastTestResult).toMatchObject({ success: false });
+    });
   });
 
   it('refuses a person’s own app by link on this route: it only serves ready-made apps', async () => {

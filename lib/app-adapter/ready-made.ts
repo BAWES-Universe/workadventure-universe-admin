@@ -228,6 +228,14 @@ function linkJson(body: string): Record<string, unknown> | null {
   return null;
 }
 
+/** The text of a JSON-RPC error carried in an answer that came with a 2xx status, or null when there is none. */
+function rpcError(body: string): string | null {
+  const error = linkJson(body)?.error;
+  if (error === undefined || error === null) return null;
+  const message = typeof error === 'object' ? (error as { message?: unknown }).message : error;
+  return typeof message === 'string' && message ? message.slice(0, 200) : 'the app refused';
+}
+
 /**
  * "Test" on a ready-made app's grant: the link needs the provider key, which only Orbit holds, so the test goes through the adapter
  * (open a session, list the tools) instead of a plain request that the link would turn away with 401. Counts nothing: listing is not a use.
@@ -245,10 +253,17 @@ export async function testReadyMade(connection: { id: string; source: string; se
       sessionId: null,
     });
     if (opened.status >= 400) return failed(`The app answered ${opened.status}.`, opened.status);
+    const openError = rpcError(opened.body);
+    if (openError) return failed(`Initialize error: ${openError}`, opened.status);
     await adapter.callLink({ url: connection.serverUrl, message: { jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId: opened.sessionId });
     const listed = await adapter.callLink({ url: connection.serverUrl, message: { jsonrpc: '2.0', id: 2, method: 'tools/list' }, sessionId: opened.sessionId });
     if (listed.status >= 400) return failed(`The app answered ${listed.status}.`, listed.status);
-    const result = linkJson(listed.body)?.result as { tools?: unknown } | undefined;
+    const listError = rpcError(listed.body);
+    if (listError) return failed(`MCP error: ${listError}`, listed.status);
+    const answer = linkJson(listed.body);
+    // A 200 that is not an answer to the question is not a working app with no tools
+    if (!answer || typeof answer.result !== 'object' || answer.result === null) return failed('The app did not answer the list of what it can do.', listed.status);
+    const result = answer.result as { tools?: unknown };
     const names = Array.isArray(result?.tools) ? (result.tools as { name?: unknown }[]).map((tool) => tool.name).filter((name): name is string => typeof name === 'string') : [];
     return { success: true, toolCount: names.length, toolNames: names, status: listed.status };
   } catch (error) {
