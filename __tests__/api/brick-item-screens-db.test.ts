@@ -165,6 +165,9 @@ run('goals and tasks screens, in a real database', () => {
     signedInAs(lena.id);
     expect(await (await read(lena.brickId, item.id)).json()).toMatchObject({ item: { id: item.id, words: 'Water the plants', state: 'on' } });
     expect((await read(lena.brickId, 'no-such-item')).status).toBe(404);
+    // The item under another Brick of the same owner is not found there
+    const second = await makeBrick(lena.id, { name: 'Second Brick' });
+    expect((await read(second.id, item.id)).status).toBe(404);
     signedInAs(other.id);
     expect((await read(lena.brickId, item.id)).status).toBe(404);
     signedInAs(null);
@@ -174,10 +177,13 @@ run('goals and tasks screens, in a real database', () => {
   it('pages through everything Brick did without skipping runs claimed in the same moment', async () => {
     const nora = await person('nora');
     const watch = await set(nora, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
-    // 120 runs claimed at one instant: a page is 50, so a page boundary falls inside them
+    // 120 runs claimed at one instant (a page is 50, so a page boundary falls inside them), and 10 more at other moments before and after
     const claimedAt = at(2 * HOUR);
     await prisma.brickItemRun.createMany({
-      data: Array.from({ length: 120 }, (_, i) => ({ itemId: watch.id, dueAt: at(HOUR + i * 60_000), revision: 1, claimedAt, leaseUntil: at(3 * HOUR), state: 'done', outcome: 'quiet', finishedAt: claimedAt })),
+      data: [
+        ...Array.from({ length: 120 }, (_, i) => ({ itemId: watch.id, dueAt: at(HOUR + i * 60_000), revision: 1, claimedAt, leaseUntil: at(3 * HOUR), state: 'done', outcome: 'quiet', finishedAt: claimedAt })),
+        ...Array.from({ length: 10 }, (_, i) => ({ itemId: watch.id, dueAt: at(4 * HOUR + i * 60_000), revision: 1, claimedAt: at((i % 2 ? 1 : 3) * HOUR + i * 1000), leaseUntil: at(5 * HOUR), state: 'done', outcome: 'quiet', finishedAt: at(5 * HOUR) })),
+      ],
     });
     signedInAs(nora.id);
     const seen: string[] = [];
@@ -188,7 +194,7 @@ run('goals and tasks screens, in a real database', () => {
       if (!page.next) break;
       before = `?before=${encodeURIComponent(page.next)}`;
     }
-    expect(seen).toHaveLength(120);
-    expect(new Set(seen).size).toBe(120);
+    expect(seen).toHaveLength(130);
+    expect(new Set(seen).size).toBe(130);
   });
 });
