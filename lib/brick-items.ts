@@ -585,6 +585,8 @@ export interface HeldNotice {
   itemId: string;
   brickId: string;
   userId: string;
+  /** The owner's chat (Matrix) id, where Brick speaks to them; null when they have none, and then nothing can be said. */
+  chatId: string | null;
   kind: ItemKind;
   words: string;
   resumesAt: string;
@@ -598,6 +600,8 @@ export interface ClaimedRun {
   brickId: string;
   /** The owner as the bot server names people: their game uuid. */
   userId: string;
+  /** The owner's chat (Matrix) id, where Brick speaks to them; null when they have none, and then nothing can be said. */
+  chatId: string | null;
   kind: ItemKind;
   words: string;
   condition: string | null;
@@ -622,13 +626,14 @@ export interface ClaimedRun {
   deliveredEventId: string | null;
 }
 
-const claimedOf = (run: Prisma.BrickItemRunGetPayload<{ include: { item: { include: { owner: { select: { uuid: true } } } } } }>): ClaimedRun => {
+const claimedOf = (run: Prisma.BrickItemRunGetPayload<{ include: { item: { include: { owner: { select: { uuid: true, matrixChatId: true } } } } } }>): ClaimedRun => {
   const steps = stepsSchema.safeParse(run.item.steps);
   return {
     runId: run.id,
     itemId: run.itemId,
     brickId: run.item.botId,
     userId: run.item.owner.uuid,
+    chatId: run.item.owner.matrixChatId,
     kind: run.item.kind as ItemKind,
     words: run.item.words,
     condition: run.item.condition,
@@ -646,7 +651,7 @@ const claimedOf = (run: Prisma.BrickItemRunGetPayload<{ include: { item: { inclu
     deliveredEventId: run.deliveredEventId,
   };
 };
-const RUN_INCLUDE = { item: { include: { owner: { select: { uuid: true } } } } } as const;
+const RUN_INCLUDE = { item: { include: { owner: { select: { uuid: true, matrixChatId: true } } } } } as const;
 
 /** A one-off (a single moment, never a goal) has no next time: when its run fails for good it ends, it is never left on with nothing due. */
 function endsOnFailure(item: { kind: string; cadence: Prisma.JsonValue }): boolean {
@@ -801,8 +806,8 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
             const owed = item.heldToldAt === null && (item.heldNoticeAt === null || item.heldNoticeAt.getTime() <= now.getTime() - noticeRetry);
             await tx.brickItem.update({ where: { id }, data: { nextDueAt: room.resumesAt, heldSince: since, ...(owed ? { heldNoticeAt: now } : {}) } });
             if (owed) {
-              const owner = await tx.user.findUniqueOrThrow({ where: { id: item.ownerId }, select: { uuid: true } });
-              notice = { itemId: item.id, brickId: item.botId, userId: owner.uuid, kind: item.kind as ItemKind, words: item.words, resumesAt: room.resumesAt.toISOString(), waitId: since.toISOString() };
+              const owner = await tx.user.findUniqueOrThrow({ where: { id: item.ownerId }, select: { uuid: true, matrixChatId: true } });
+              notice = { itemId: item.id, brickId: item.botId, userId: owner.uuid, chatId: owner.matrixChatId, kind: item.kind as ItemKind, words: item.words, resumesAt: room.resumesAt.toISOString(), waitId: since.toISOString() };
             }
             return null;
           }
@@ -861,10 +866,10 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
             AND (i."held_notice_at" IS NULL OR i."held_notice_at" <= ${new Date(now.getTime() - noticeRetry)})
           FOR UPDATE OF i SKIP LOCKED`);
         if (!locked.length) return null;
-        const item = await tx.brickItem.findUniqueOrThrow({ where: { id }, include: { owner: { select: { uuid: true } } } });
+        const item = await tx.brickItem.findUniqueOrThrow({ where: { id }, include: { owner: { select: { uuid: true, matrixChatId: true } } } });
         if (!item.heldSince || !item.nextDueAt) return null;
         await tx.brickItem.update({ where: { id }, data: { heldNoticeAt: now } });
-        return { itemId: item.id, brickId: item.botId, userId: item.owner.uuid, kind: item.kind as ItemKind, words: item.words, resumesAt: item.nextDueAt.toISOString(), waitId: item.heldSince.toISOString() } satisfies HeldNotice;
+        return { itemId: item.id, brickId: item.botId, userId: item.owner.uuid, chatId: item.owner.matrixChatId, kind: item.kind as ItemKind, words: item.words, resumesAt: item.nextDueAt.toISOString(), waitId: item.heldSince.toISOString() } satisfies HeldNotice;
       });
       if (notice) held.push(notice);
     } catch (error) {

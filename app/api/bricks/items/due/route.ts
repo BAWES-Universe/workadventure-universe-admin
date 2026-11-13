@@ -17,8 +17,8 @@ export const runtime = 'nodejs';
  * with `resumesAt` and a `waitId`: Brick says so once per wait and nothing runs until then. Confirm with
  * POST /api/bricks/items/held/:itemId/told { waitId } after saying it; an unconfirmed notice is handed out again after a while, so it is never lost.
  * A reminder is never held.
- * Answers { runs: [{ runId, itemId, brickId, userId, kind, words, condition, outcome, steps, statusLine, timeZone, dueAt,
- * revision, late, fresh, attempt, leaseUntil, marker, deliveredEventId }], held: [{ itemId, brickId, userId, kind, words, resumesAt, waitId }] }
+ * Answers { runs: [{ runId, itemId, brickId, userId, chatId, kind, words, condition, outcome, steps, statusLine, timeZone, dueAt,
+ * revision, late, fresh, attempt, leaseUntil, marker, deliveredEventId }], held: [{ itemId, brickId, userId, chatId, kind, words, resumesAt, waitId }] }
  */
 export async function POST(request: NextRequest) {
   try {

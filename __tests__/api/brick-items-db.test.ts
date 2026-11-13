@@ -1213,4 +1213,16 @@ run('goals and tasks, in a real database', () => {
       expect(work.held.filter((one) => one.userId === gsdev.uuid)).toEqual([]);
     });
   });
+
+  // Last: it claims every run that is due, so tests after it would find theirs already taken
+  it('a claimed run names where Brick speaks to its owner: their chat id, or null when they have none', async () => {
+    const withChat = await person('chatid-yes');
+    const noChat = await person('chatid-none');
+    await prisma.user.update({ where: { id: withChat.id }, data: { matrixChatId: `@chatid-yes-${tag}:matrix.example.test` } });
+    const a = await set(withChat);
+    const b = await set(noChat);
+    const claimed = await claimDueRuns(at(HOUR + MIN));
+    expect(claimed.find((one) => one.itemId === a.id)).toMatchObject({ userId: withChat.uuid, chatId: `@chatid-yes-${tag}:matrix.example.test` });
+    expect(claimed.find((one) => one.itemId === b.id)).toMatchObject({ userId: noChat.uuid, chatId: null });
+  });
 });
