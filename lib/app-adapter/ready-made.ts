@@ -44,9 +44,10 @@ export async function connectReadyMade(ownerId: string, key: string, returnUrl: 
     const connection = await createConnection(ownerId, {
       name: app.name,
       serverUrl: link.url,
-      authType: Object.keys(link.headers).length > 0 ? 'api-key' : 'none',
+      // No sign-in method and no headers stored, ever: the link needs the provider key, which only Orbit holds and sends itself
+      // (callLink), so it is never written to a row, a screen or the bot server
+      authType: 'none',
       authConfig: undefined,
-      headers: Object.keys(link.headers).length > 0 ? link.headers : undefined,
       source: 'ready_made',
       providerToolkit: key,
       providerAccountId: start.providerAccountId,

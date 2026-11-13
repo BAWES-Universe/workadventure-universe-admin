@@ -45,7 +45,7 @@ const fake = () => {
   const adapter = {
     startConnect: jest.fn(async () => ({ redirectUrl: 'https://connect.example/sign-in', providerAccountId: `ca_${tag}`, expiresAt: null })),
     connectionStatus: jest.fn(async (): Promise<'active' | 'pending' | 'failed'> => 'active'),
-    appLink: jest.fn(async () => ({ url: `https://mcp.example/${tag}/mcp`, headers: {} })),
+    appLink: jest.fn(async () => ({ url: `https://mcp.example/${tag}/mcp` })),
     callLink: jest.fn(async (_input: { url: string; message: Record<string, unknown>; sessionId: string | null }): Promise<LinkAnswer> => ({ status: 200, contentType: 'application/json', sessionId: 'mcp-1', body: '{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}' })),
     use: jest.fn(async () => ({ ok: true, data: { free: ['10:00'] }, error: null, providerCallId: 'log_1' })),
   } satisfies ReadyMadeAdapter;
@@ -132,7 +132,7 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect(adapter.startConnect).toHaveBeenCalledWith({ person: sara, toolkit: KEY, returnUrl: expect.stringContaining('/admin/apps') });
     expect(adapter.appLink).toHaveBeenCalledWith({ person: sara, toolkits: [KEY] });
     const row = await prisma.appConnection.findUniqueOrThrow({ where: { id: body.id } });
-    expect(row).toMatchObject({ ownerId: sara, source: 'ready_made', providerToolkit: KEY, serverUrl: `https://mcp.example/${tag}/mcp`, authConfig: null });
+    expect(row).toMatchObject({ ownerId: sara, source: 'ready_made', providerToolkit: KEY, serverUrl: `https://mcp.example/${tag}/mcp`, authConfig: null, authType: 'none', headers: null });
 
     const again = await connect();
     expect(again.status).toBe(200);
@@ -231,6 +231,23 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect((await readConnection(first.id, sara))?.connected).toBe(false);
     adapter.connectionStatus.mockResolvedValue('active');
     expect((await readConnection(first.id, sara))?.connected).toBe(true);
+  });
+
+  it('never stores the provider key, even when the provider’s session answer carries headers, and shows it nowhere', async () => {
+    const adapter = fake();
+    // A provider that sends the key back in the link's headers (the adapter drops them; a fake that returned them would still be ignored)
+    adapter.appLink.mockResolvedValue({ url: `https://mcp.example/${tag}/mcp`, headers: { 'x-api-key': 'the-provider-key' } } as never);
+    setAdapterForTests(adapter);
+    await list();
+    asSara();
+    const made = await (await connect()).json();
+    const row = await prisma.appConnection.findUniqueOrThrow({ where: { id: made.id } });
+    expect(row.headers).toBeNull();
+    expect(row.authType).toBe('none');
+    expect(JSON.stringify(row)).not.toContain('the-provider-key');
+    const grant = (await grantToBrick(sara, made.id, saraBrick)) as { id: string };
+    expect(JSON.stringify(await prisma.botMcpServer.findUniqueOrThrow({ where: { id: grant.id } }))).not.toContain('the-provider-key');
+    expect(JSON.stringify(await listConnections(sara))).not.toContain('the-provider-key');
   });
 
   it('refuses an app that is not on the list or is turned off', async () => {

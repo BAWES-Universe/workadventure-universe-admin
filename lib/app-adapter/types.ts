@@ -18,8 +18,6 @@ export interface ConnectStart {
 export interface AppLink {
   /** The person's own app link at the provider (one per person), plugged into the same connection of step 2. */
   url: string;
-  /** Headers the provider says its link needs; empty unless it sent some. Never invented here. */
-  headers: Record<string, string>;
 }
 
 export interface LinkAnswer {

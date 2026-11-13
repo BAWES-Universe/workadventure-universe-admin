@@ -100,13 +100,13 @@ describe('the real adapter speaks the provider as its docs say, against a preten
   it('asks for the person’s own app link, with the provider’s code sandbox on', async () => {
     const adapter = make([answer({ session_id: 'trs_1', mcp: { type: 'http', url: 'https://mcp.example/trs_1/mcp' } })]);
     const link = await adapter.appLink({ person: 'person-1', toolkits: ['gmail'] });
-    expect(link).toEqual({ url: 'https://mcp.example/trs_1/mcp', headers: {} });
+    expect(link).toEqual({ url: 'https://mcp.example/trs_1/mcp' });
     expect(sent()).toEqual({ user_id: 'person-1', toolkits: { enable: ['gmail'] }, workbench: { enable: true } });
   });
 
-  it('keeps only headers the provider itself sent', async () => {
-    const adapter = make([answer({ mcp: { url: 'https://mcp.example/y', headers: { 'x-thing': 'v', bad: 1 } } })]);
-    expect((await adapter.appLink({ person: 'p', toolkits: ['gmail'] })).headers).toEqual({ 'x-thing': 'v' });
+  it('drops whatever headers the provider’s session answer holds: the key is Orbit’s alone', async () => {
+    const adapter = make([answer({ mcp: { url: 'https://mcp.example/y', headers: { 'x-api-key': 'k', 'x-thing': 'v' } } })]);
+    expect(await adapter.appLink({ person: 'p', toolkits: ['gmail'] })).toEqual({ url: 'https://mcp.example/y' });
   });
 
   describe('the app link', () => {

@@ -9,8 +9,8 @@ import { AdapterError, type AppLink, type ConnectStart, type LinkAnswer, type Re
  *    The auth config is one per app, kept in a super admin setting (never in code) and passed in as the toolkit's config id.
  *  - Status: GET /connected_accounts/{id} -> { status: ACTIVE | INITIALIZING | INITIATED | FAILED | EXPIRED | INACTIVE }. Only ACTIVE reads as connected.
  *  - Use: POST /tools/execute/{tool_slug} { user_id, connected_account_id, arguments } -> { data, successful, error, log_id }.
- *  - Link: POST /tool_router/session { user_id, toolkits: { enable: [...] }, workbench: { enable: true } } -> { session_id, mcp: { url } }. The docs show no
- *    headers for that link, so none are sent or stored here; if one is needed it is found out on the first real test, with Khalid's OK.
+ *  - Link: POST /tool_router/session { user_id, toolkits: { enable: [...] }, workbench: { enable: true } } -> { session_id, mcp: { url } }. The link answers 401 without
+ *    the provider key, which Orbit sends itself on every message (callLink); no header is ever stored or handed on.
  *
  *  - Sign-in setup: with no auth config chosen by a super admin, the provider's own managed one for the app is used: found with
  *    GET /auth_configs?toolkit_slug&is_composio_managed, or made with POST /auth_configs { toolkit: { slug } } (its default is
@@ -119,10 +119,8 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
       const mcp = json.mcp && typeof json.mcp === 'object' ? (json.mcp as Record<string, unknown>) : {};
       const url = str(mcp.url);
       if (!url) throw new AdapterError('provider', 'Provider sent no app link');
-      const sent = mcp.headers && typeof mcp.headers === 'object' && !Array.isArray(mcp.headers) ? (mcp.headers as Record<string, unknown>) : {};
-      const headers: Record<string, string> = {};
-      for (const [name, value] of Object.entries(sent)) if (typeof value === 'string') headers[name] = value;
-      return { url, headers };
+      // Whatever headers the session answer holds are dropped on purpose: the key is Orbit's alone, sent by callLink
+      return { url };
     },
 
     async callLink({ url, message, sessionId }): Promise<LinkAnswer> {
