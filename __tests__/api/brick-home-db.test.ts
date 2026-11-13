@@ -491,5 +491,36 @@ run('a Brick that lives in a room, in a real database', () => {
         await deleteHome(call('DELETE', `/api/bricks/${brickId}/home`), ids(brickId));
       }
     });
+    it('removes every stale home in one call however it is paged, mixed with healthy ones', async () => {
+      const world = await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } });
+      const ids5: string[] = [];
+      for (let i = 0; i < 5; i++) ids5.push((await createBrick({ ownerId: sara.id, name: `Stale ${i}` })).id);
+      const healthy: string[] = [];
+      for (let i = 0; i < 3; i++) healthy.push((await createBrick({ ownerId: sara.id, name: `Healthy ${i}` })).id);
+      for (const id of ids5) await put(id, hosted.roomUrl);
+      for (const id of healthy) await put(id, own.roomUrl);
+      await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: world.id } });
+      expect(await dropHomesWithoutAccess(undefined, 2)).toBe(5);
+      expect(await prisma.brickHome.count({ where: { botId: { in: ids5 } } })).toBe(0);
+      expect(await prisma.brickHome.count({ where: { botId: { in: healthy } } })).toBe(3);
+      await prisma.worldMember.create({ data: { userId: sara.id, worldId: world.id, tags: ['admin'] } });
+    });
+    it('keeps sweeping when a home on a page boundary is taken out by someone else between two pages', async () => {
+      const world = await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } });
+      const made: string[] = [];
+      for (let i = 0; i < 4; i++) made.push((await createBrick({ ownerId: sara.id, name: `Boundary ${i}` })).id);
+      for (const id of made) await put(id, hosted.roomUrl);
+      await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: world.id } });
+      const sorted = [...made, brickId, secondBrickId].filter((id) => made.includes(id)).sort();
+      const real = jest.requireActual('@/lib/bot-permissions').canManageBots as typeof canManageBots;
+      // Page one is the two lowest ids; its last row is gone before page two is read
+      (canManageBots as jest.Mock).mockImplementationOnce(async (...args: Parameters<typeof canManageBots>) => {
+        await prisma.brickHome.delete({ where: { botId: sorted[1] } });
+        return real(...args);
+      });
+      expect(await dropHomesWithoutAccess(undefined, 2)).toBe(3);
+      expect(await prisma.brickHome.count({ where: { botId: { in: made } } })).toBe(0);
+      await prisma.worldMember.create({ data: { userId: sara.id, worldId: world.id, tags: ['admin'] } });
+    });
   });
 });

@@ -201,12 +201,12 @@ export async function dropHomesWithoutAccess(roomId?: string, pageSize = 200): P
   const memo = new Map<string, boolean>();
   let after: string | undefined;
   for (;;) {
+    // Keyset paging, not a cursor row: a home deleted by someone else between two pages must not end the sweep early
     const homes = await prisma.brickHome.findMany({
-      where: roomId ? { roomId } : {},
+      where: { ...(roomId ? { roomId } : {}), ...(after ? { botId: { gt: after } } : {}) },
       select: { botId: true, roomId: true, placedById: true, updatedAt: true },
       take: pageSize,
       orderBy: { botId: 'asc' },
-      ...(after ? { cursor: { botId: after }, skip: 1 } : {}),
     });
     for (const home of homes) {
       const key = `${home.placedById}:${home.roomId}`;
