@@ -51,6 +51,12 @@ export const BUFFER_MAX_BYTES = 64 * 1024;
 /** A note reserved this long ago and never started is no longer "being heard" for the notes-at-once count. */
 const STARTING_MS = LEASE_MS;
 
+/**
+ * For a transaction that takes the reservations' lock: how long it may wait for a connection, and for the lock and its few reads
+ * (each indexed). Past that it fails, and the bot server is told to try again, rather than holding a connection.
+ */
+const LOCKED = { maxWait: 5_000, timeout: 15_000 };
+
 const HOUR = 60 * 60_000;
 const DAY = 24 * HOUR;
 const dayOf = (now: Date) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
@@ -209,9 +215,11 @@ export async function reserveVoiceNote(
   let target: string;
   let botId: string | null = null;
   let universeKey: string | null = null;
+  // An email is only ever a signed-in person's (lib/usage-person.ts), whatever the bot server said
+  const signedIn = input.isGuest !== true || userId.includes('@');
   if (scope === 'bot') {
     botId = idOf(input.botId, 'botId', 64);
-    const person = await resolveUsagePerson(userId, input.isGuest);
+    const person = await resolveUsagePerson(userId, signedIn ? false : true);
     // A signed-in person Orbit could not look up just now is never filed as a guest: asked again once the lookup works, the same
     // note would be a second turn under another key, and be heard twice
     if (!person.personId && person.guest !== true) throw new VoiceNoteError('Who sent this note can\'t be looked up now', 503);
@@ -258,10 +266,10 @@ export async function reserveVoiceNote(
   return prisma.$transaction(async (tx): Promise<Reservation> => {
     // One lock for every reservation: they are short and few, and nothing can take the last minute twice
     await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext('voice-note-reserve'))`);
-    if (scope === 'bot' && personKey.startsWith('guest:') && input.isGuest !== true) {
+    if (scope === 'bot' && personKey.startsWith('guest:') && signedIn) {
       // A signed-in person Orbit had no account for a moment ago: looked up again under the lock, so an ask that found the account
       // in the meantime and reserved this note under it is found here, and the note is never two turns
-      const again = await resolveUsagePerson(userId, input.isGuest);
+      const again = await resolveUsagePerson(userId, false);
       if (!again.personId && again.guest !== true) throw new VoiceNoteError('Who sent this note can\'t be looked up now', 503);
       if (again.personId) {
         personKey = `person:${again.personId}`;
@@ -313,7 +321,7 @@ export async function reserveVoiceNote(
       data: { scope, personKey, target, botId, universeKey, clientTurnId, fingerprint, payer: hearing.payer!, providerId: hearing.provider?.id ?? null, seconds, state: 'reserved', createdAt: now },
     });
     return { ok: true, turn: view(turn), replay: false };
-  });
+  }, LOCKED);
 }
 
 /** Gives back a reservation that was never used: its seconds stop counting, on the bot's day too. */
@@ -408,7 +416,7 @@ export async function leaseVoiceNoteStage(id: string, input: { stage?: unknown; 
           where: { id: turn.id, state: 'reserved', generation: turn.generation, createdAt: { gt: new Date(at - STARTING_MS) } },
           data: { state: 'hearing', generation, leaseUntil },
         });
-      });
+      }, LOCKED);
       if (started.count === 0) {
         const after = await findTurn(turn.id);
         if (after.state !== 'reserved') return { granted: false, reason: 'held' };

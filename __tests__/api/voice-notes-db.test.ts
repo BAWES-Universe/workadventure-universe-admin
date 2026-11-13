@@ -298,6 +298,29 @@ run('voice notes for every bot, in a real database', () => {
       expect(await prisma.voiceNoteTurn.count({ where: { clientTurnId } })).toBe(1);
     });
 
+    it('takes an email as a signed-in person even when the bot server says guest: one turn whichever ask reserves first', async () => {
+      const email = `mail-${randomUUID()}@example.test`;
+      const clientTurnId = turnId();
+      let second: Reservation | null = null;
+      afterWho = async () => {
+        const person = await prisma.user.create({ data: { uuid: `u-${randomUUID()}`, email, name: 'Mail' } });
+        people.push(person.id);
+        second = await reserve(email, { isGuest: true, clientTurnId, contentHash: 'same' });
+      };
+      const first = await reserve(email, { isGuest: true, clientTurnId, contentHash: 'same' });
+      expect(second).toMatchObject({ ok: true, replay: false });
+      expect(first).toMatchObject({ ok: true, replay: true, turn: { id: turnOf(second!).id } });
+      expect(await prisma.voiceNoteTurn.count({ where: { clientTurnId } })).toBe(1);
+
+      // Its lookup failing is a "try again", never a guest's turn
+      const lookup = jest.spyOn(prisma.user, 'findUnique').mockRejectedValueOnce(new Error('database away'));
+      try {
+        await expect(reserve(`other-${randomUUID()}@example.test`, { isGuest: true })).rejects.toMatchObject({ status: 503 });
+      } finally {
+        lookup.mockRestore();
+      }
+    });
+
     it('refuses a signed-in person it can\'t look up just now, rather than file their note as a guest\'s', async () => {
       const lookup = jest.spyOn(prisma.user, 'findUnique').mockRejectedValueOnce(new Error('database away'));
       try {

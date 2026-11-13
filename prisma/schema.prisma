@@ -2444,6 +2444,8 @@ model VoiceNoteTurn {
   @@index([target, createdAt])
   @@index([universeKey, createdAt])
   @@index([payer, createdAt])
+  // Notes being heard now (reserved or hearing), counted under the reservations' lock: few rows, found without a scan
+  @@index([payer, state])
   @@index([bufferUntil])
   @@map("voice_note_turns")
 }
