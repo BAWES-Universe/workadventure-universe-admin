@@ -35,30 +35,39 @@ export async function connectReadyMade(ownerId: string, key: string, returnUrl: 
   if (!adapter) return null;
   const app = (await readReadyMadeApps()).find((entry) => entry.key === key && entry.enabled);
   if (!app) return null;
-  const existing = await prisma.appConnection.findFirst({ where: { ownerId, providerToolkit: key } });
-  if (existing) return restartIfNotSignedIn(ownerId, existing, key, returnUrl, adapter);
+  // One person's connect of one app at a time: the lock is taken before looking for an existing connection and held until the
+  // connection is saved, so a second tap at the same moment waits, then finds the first one's connection, instead of opening a
+  // second account at the provider that nothing would ever use
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`ready-made:${ownerId}:${key}`}, 0))`;
+      const existing = await prisma.appConnection.findFirst({ where: { ownerId, providerToolkit: key } });
+      if (existing) return restartIfNotSignedIn(ownerId, existing, key, returnUrl, adapter);
 
-  const start = await adapter.startConnect({ person: ownerId, toolkit: key, returnUrl });
-  const link = await adapter.appLink({ person: ownerId, toolkits: [key] });
-  try {
-    const connection = await createConnection(ownerId, {
-      name: app.name,
-      serverUrl: link.url,
-      // No sign-in method and no headers stored, ever: the link needs the provider key, which only Orbit holds and sends itself
-      // (callLink), so it is never written to a row, a screen or the bot server
-      authType: 'none',
-      authConfig: undefined,
-      source: 'ready_made',
-      providerToolkit: key,
-      providerAccountId: start.providerAccountId,
-    });
-    return { id: connection.id, redirectUrl: start.redirectUrl, created: true };
-  } catch (error) {
-    // Two taps at once: the other one made it
-    const again = await prisma.appConnection.findFirst({ where: { ownerId, providerToolkit: key } });
-    if (again) return { id: again.id, redirectUrl: null, created: false };
-    throw error;
-  }
+      const start = await adapter.startConnect({ person: ownerId, toolkit: key, returnUrl });
+      const link = await adapter.appLink({ person: ownerId, toolkits: [key] });
+      try {
+        const connection = await createConnection(ownerId, {
+          name: app.name,
+          serverUrl: link.url,
+          // No sign-in method and no headers stored, ever: the link needs the provider key, which only Orbit holds and sends itself
+          // (callLink), so it is never written to a row, a screen or the bot server
+          authType: 'none',
+          authConfig: undefined,
+          source: 'ready_made',
+          providerToolkit: key,
+          providerAccountId: start.providerAccountId,
+        });
+        return { id: connection.id, redirectUrl: start.redirectUrl, created: true as boolean };
+      } catch (error) {
+        // Anything else that made it first
+        const again = await prisma.appConnection.findFirst({ where: { ownerId, providerToolkit: key } });
+        if (again) return { id: again.id, redirectUrl: null, created: false as boolean };
+        throw error;
+      }
+    },
+    { maxWait: 15_000, timeout: 90_000 },
+  );
 }
 
 async function restartIfNotSignedIn(
