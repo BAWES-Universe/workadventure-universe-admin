@@ -332,7 +332,9 @@ export async function startJob(input: { botId: string; personId: string; title: 
     await prisma.computerJob.deleteMany({ where: { id: created.id } });
     return { ok: false, reason: 'not_set' };
   }
-  const job = await prisma.computerJob.findUniqueOrThrow({ where: { id: created.id }, include: JOB_INCLUDE });
+  const job = await prisma.computerJob.findUnique({ where: { id: created.id }, include: JOB_INCLUDE });
+  // A second ask for the same run found this job while it waited for its first try, saw the controls not set up and took it away
+  if (!job) return { ok: false, reason: 'not_set' };
   if (job.status === 'failed') return { ok: false, reason: 'broken_start' };
   const after = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
   return { ok: true, job: jobView(job), restoredFrom: job.status === 'running' ? (after?.restoredFrom ?? null) : null };

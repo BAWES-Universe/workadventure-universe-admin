@@ -216,4 +216,19 @@ run('money and the run, in a real database', () => {
     create.mockRestore();
     expect(await prisma.computerJob.count({ where: { botId: sara.brickId, runId: mine.runId } })).toBe(0);
   });
+
+  it('answers not_set, never an error, when a second ask took the job away between its insert and its first try', async () => {
+    const sara = await person('sara');
+    expect((await giveComputer(sara.brickId, sara.id)).ok).toBe(true);
+    const mine = await goalRun(sara);
+    // The first ask has inserted its job; before it tries, the second ask (controls not set up) has already removed it
+    const real = prisma.computerJob.create.bind(prisma.computerJob);
+    const create = jest.spyOn(prisma.computerJob, 'create').mockImplementationOnce(((args: never) =>
+      (real as (a: never) => Promise<{ id: string }>)(args).then(async (row) => {
+        await prisma.computerJob.deleteMany({ where: { id: row.id } });
+        return row;
+      })) as never);
+    expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'For the run', runId: mine.runId }, NOW)).toEqual({ ok: false, reason: 'not_set' });
+    create.mockRestore();
+  });
 });
