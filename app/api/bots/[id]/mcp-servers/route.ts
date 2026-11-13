@@ -160,6 +160,9 @@ export async function GET(
             enabled: s.enabled,
             // Set for a Brick's grant on a person's connection: its link and sign-in are changed on the app's own page
             connectionId: s.connectionId,
+            // A ready-made app: the bot server never calls its link itself (it needs the provider key, which stays in Orbit), it goes through
+            // POST /api/ready-made/link. False for every other server.
+            readyMade: s.connection?.source === 'ready_made',
             // Set when a person's app is lent to this bot's universe: what the lender allowed (null = all four) and the uses a day
             ...(lendOf.has(s.connectionId ?? '') ? { lent: { things: lendOf.get(s.connectionId as string)!.things, usesPerDay: lendOf.get(s.connectionId as string)!.usesPerDay } } : {}),
             // A server that existed before its tools were checked keeps working in text, and reads Not checked yet (#738)

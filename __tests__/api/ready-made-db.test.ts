@@ -15,6 +15,7 @@ import { confirmReadyMade } from '@/lib/app-adapter/confirm';
 import { saveReadyMadeApps } from '@/lib/app-adapter/settings';
 import { GET as listReadyMade, POST as connectReadyMadeApp } from '@/app/api/me/apps/ready-made/route';
 import { GET as adminGet, PUT as adminPut } from '@/app/api/admin/ready-made-apps/route';
+import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { POST as useApp } from '@/app/api/ready-made/use/route';
 import { POST as linkApp } from '@/app/api/ready-made/link/route';
 import { POST as testServer } from '@/app/api/bots/[id]/mcp-servers/[serverId]/test/route';
@@ -463,5 +464,17 @@ run('ready-made apps through the adapter, in a real database', () => {
     const own = await createConnection(sara, { name: 'Own', serverUrl: 'https://own.example.com/mcp', authType: 'none', source: 'link' });
     const grant = await grantToBrick(sara, own.id, saraBrick);
     expect((await useIt({ serverId: (grant as { id: string }).id })).status).toBe(404);
+  });
+
+  it('tells the bot server which of a bot’s Apps are ready-made, so it goes through Orbit for them and for no other', async () => {
+    const { serverId } = await connectedAndGranted();
+    const own = await createConnection(sara, { name: 'Own', serverUrl: 'https://own.example.com/mcp', authType: 'none', source: 'link' });
+    const ownGrant = (await grantToBrick(sara, own.id, saraBrick)) as { id: string };
+    const ownServer = await prisma.botMcpServer.create({ data: { botId: saraBrick, name: 'Plain', serverUrl: 'https://plain.example.com/mcp', authType: 'none' } });
+    asSara();
+    const servers = (await (await listServers(request(`/api/bots/${saraBrick}/mcp-servers`), params({ id: saraBrick }))).json()) as { id: string; readyMade: boolean }[];
+    expect(servers.find((s) => s.id === serverId)?.readyMade).toBe(true);
+    expect(servers.find((s) => s.id === ownGrant.id)?.readyMade).toBe(false);
+    expect(servers.find((s) => s.id === ownServer.id)?.readyMade).toBe(false);
   });
 });
