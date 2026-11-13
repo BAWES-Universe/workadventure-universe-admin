@@ -1260,6 +1260,8 @@ model AppConnection {
   // A ready-made app made through the adapter (source = ready_made, OFF until Khalid says): which app, and the adapter's id for this person's sign-in
   providerToolkit    String? @map("provider_toolkit") @db.VarChar(60)
   providerAccountId  String? @map("provider_account_id") @db.VarChar(255)
+  // Set once the provider says the person finished signing in; until then the app is not connected and tapping Connect starts the sign-in again
+  providerConfirmedAt DateTime? @map("provider_confirmed_at")
   // The one ticket a sign-in page may bring back: set when a sign-in starts, cleared when it is used, so a replayed return, or
   // one from a sign-in that a newer start replaced, is refused
   signInNonce        String?   @map("sign_in_nonce") @db.VarChar(64)

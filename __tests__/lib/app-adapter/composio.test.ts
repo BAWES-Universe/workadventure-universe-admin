@@ -58,6 +58,17 @@ describe('the real adapter speaks the provider as its docs say, against a preten
     expect(calls).toHaveLength(0);
   });
 
+  it('reads a sign-in as finished only when the provider says ACTIVE', async () => {
+    const adapter = make([answer({ status: 'ACTIVE' }), answer({ status: 'INITIATED' }), answer({ status: 'EXPIRED' }), answer({}, 404)]);
+    expect(await adapter.connectionStatus({ providerAccountId: 'ca_1' })).toBe('active');
+    expect(calls[0].url).toBe('https://backend.composio.dev/api/v3.1/connected_accounts/ca_1');
+    expect(calls[0].init.method).toBe('GET');
+    expect(calls[0].init.body).toBeUndefined();
+    expect(await adapter.connectionStatus({ providerAccountId: 'ca_1' })).toBe('pending');
+    expect(await adapter.connectionStatus({ providerAccountId: 'ca_1' })).toBe('failed');
+    await expect(adapter.connectionStatus({ providerAccountId: 'ca_1' })).rejects.toThrow('Provider answered 404');
+  });
+
   it('asks for the person’s own app link with the provider’s code sandbox switched off', async () => {
     const adapter = make([answer({ session_id: 'trs_1', mcp: { type: 'http', url: 'https://mcp.example/trs_1/mcp' } })]);
     const link = await adapter.appLink({ person: 'person-1', toolkits: ['gmail'] });

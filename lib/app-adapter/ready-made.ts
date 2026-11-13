@@ -2,6 +2,7 @@ import { prisma } from '@/lib/db';
 import { getAdapter, AdapterError } from '@/lib/app-adapter';
 import { readReadyMadeApps } from '@/lib/app-adapter/settings';
 import { createConnection } from '@/lib/app-connections';
+import { confirmReadyMade } from '@/lib/app-adapter/confirm';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
 
@@ -15,15 +16,16 @@ import { personKeyOf } from '@/lib/meter-values';
 /**
  * "Connect" on a ready-made app: starts the person's sign-in on the provider's own page and makes the connection (theirs alone,
  * source `ready_made`), whose link is the person's own at the provider. Null when the adapter is off or the app is not listed or
- * is off: the same answer as an app that does not exist. Asked again, the person's existing connection is returned.
+ * is off: the same answer as an app that does not exist. Asked again, the person's existing connection is returned if they finished signing in; if they did not (they closed the page, or it expired), the
+ * sign-in starts again and a fresh `redirectUrl` comes back for the same connection.
  */
 export async function connectReadyMade(ownerId: string, key: string, returnUrl: string): Promise<{ id: string; redirectUrl: string | null; created: boolean } | null> {
   const adapter = getAdapter();
   if (!adapter) return null;
   const app = (await readReadyMadeApps()).find((entry) => entry.key === key && entry.enabled);
   if (!app) return null;
-  const existing = await prisma.appConnection.findFirst({ where: { ownerId, providerToolkit: key }, select: { id: true } });
-  if (existing) return { id: existing.id, redirectUrl: null, created: false };
+  const existing = await prisma.appConnection.findFirst({ where: { ownerId, providerToolkit: key } });
+  if (existing) return restartIfNotSignedIn(existing, key, returnUrl, adapter);
 
   const start = await adapter.startConnect({ person: ownerId, toolkit: key, returnUrl });
   const link = await adapter.appLink({ person: ownerId, toolkits: [key] });
@@ -41,10 +43,25 @@ export async function connectReadyMade(ownerId: string, key: string, returnUrl: 
     return { id: connection.id, redirectUrl: start.redirectUrl, created: true };
   } catch (error) {
     // Two taps at once: the other one made it
-    const again = await prisma.appConnection.findFirst({ where: { ownerId, providerToolkit: key }, select: { id: true } });
+    const again = await prisma.appConnection.findFirst({ where: { ownerId, providerToolkit: key } });
     if (again) return { id: again.id, redirectUrl: null, created: false };
     throw error;
   }
+}
+
+async function restartIfNotSignedIn(
+  existing: { id: string; source: string; providerAccountId: string | null; providerConfirmedAt: Date | null },
+  key: string,
+  returnUrl: string,
+  adapter: NonNullable<ReturnType<typeof getAdapter>>,
+): Promise<{ id: string; redirectUrl: string | null; created: false }> {
+  if (await confirmReadyMade(existing)) return { id: existing.id, redirectUrl: null, created: false };
+  // Not signed in yet: a new sign-in replaces the one that was left, so a repeat tap always gets a page that works
+  const owner = await prisma.appConnection.findUnique({ where: { id: existing.id }, select: { ownerId: true } });
+  if (!owner) return { id: existing.id, redirectUrl: null, created: false };
+  const start = await adapter.startConnect({ person: owner.ownerId, toolkit: key, returnUrl });
+  await prisma.appConnection.update({ where: { id: existing.id }, data: { providerAccountId: start.providerAccountId, providerConfirmedAt: null } });
+  return { id: existing.id, redirectUrl: start.redirectUrl, created: false };
 }
 
 export type ReadyMadeUseOutcome =
@@ -62,6 +79,8 @@ export async function useReadyMade(input: { botId: string; connectionId: string;
   if (!adapter) return { status: 'off' };
   const connection = await prisma.appConnection.findFirst({ where: { id: input.connectionId, ownerId: input.ownerId, source: 'ready_made' } });
   if (!connection || !connection.providerToolkit) return { status: 'gone' };
+  // Not signed in at the provider yet: nothing to use, and nothing is counted
+  if (!(await confirmReadyMade(connection))) return { status: 'unavailable' };
   const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true } });
   if (!bot || bot.roomId !== null || bot.ownerId !== input.ownerId) return { status: 'not_owner' };
 
