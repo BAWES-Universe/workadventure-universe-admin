@@ -14,13 +14,14 @@ export async function OPTIONS(request: NextRequest) {
 /**
  * GET /api/me/apps/:id/things - { things: ["Find Events", ...] }: what the app can do, by name, read from the app itself, for
  * "Connected · it can do 3 things". Only for the caller's own app (404 otherwise). An app that is not signed in or cannot be reached
- * right now answers an empty list, and the sheet says plain "Connected".
+ * right now answers an empty list, and the sheet says plain "Connected". An app with more than is read answers `incomplete: true` too,
+ * and the sheet says "and more".
  */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ connectionId: string }> }) {
   return appsRoute(request, METHODS, 'reading what an app can do', async (user, respond) => {
     const { connectionId } = await params;
-    const things = await thingsForOwnApp(connectionId, user.id);
-    if (!things) return respond({ error: NOT_FOUND }, 404);
-    return respond({ things });
+    const found = await thingsForOwnApp(connectionId, user.id);
+    if (!found) return respond({ error: NOT_FOUND }, 404);
+    return respond({ things: found.things, ...(found.incomplete ? { incomplete: true } : {}) });
   });
 }

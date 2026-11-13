@@ -98,6 +98,25 @@ describe('testMcpConnection', () => {
     expect(await testMcpConnection(base)).toMatchObject({ success: true, toolNames: ['a'] });
   });
 
+  it('says the list is incomplete when the app still offers a page after the last one that is read, and not when it ends there', async () => {
+    const pages = (total: number) =>
+      pretend(({ message }) => {
+        if (message.method === 'initialize') return json({ jsonrpc: '2.0', id: 'init', result: {} });
+        if (message.method !== 'tools/list') return new Response(null, { status: 202 });
+        const page = Number(message.id);
+        return json({ jsonrpc: '2.0', id: message.id, result: { tools: [{ name: `tool_${page}` }], ...(page < total ? { nextCursor: `c${page + 1}` } : {}) } });
+      });
+    pages(21);
+    const long = await testMcpConnection(base);
+    expect(long).toMatchObject({ success: true, incomplete: true, toolCount: 20 });
+    expect(long.toolNames[0]).toBe('tool_1');
+    expect(long.toolNames[19]).toBe('tool_20');
+    pages(20);
+    const exact = await testMcpConnection(base);
+    expect(exact).toMatchObject({ success: true, toolCount: 20 });
+    expect(exact.incomplete).toBeUndefined();
+  });
+
   it('never returns what an app echoes of the credentials it was sent in an error answer', async () => {
     pretend(({ message }) => (message.method === 'initialize' ? json({ jsonrpc: '2.0', id: 'init', error: { message: 'bad Authorization: Bearer sk-live-secret-1234567890' } }) : new Response(null, { status: 202 })));
     const opened = await testMcpConnection(base);
@@ -108,10 +127,15 @@ describe('testMcpConnection', () => {
     const listed = await testMcpConnection(base);
     expect(listed.success).toBe(false);
     expect(JSON.stringify(listed)).not.toContain('sk-live-secret-1234567890');
+
+    pretend(({ message }) => (message.method === 'initialize' ? json({ jsonrpc: '2.0', id: 'init', error: { message: 'bad Authorization: Bearer abc123' } }) : new Response(null, { status: 202 })));
+    const short = await testMcpConnection(base);
+    expect(short.success).toBe(false);
+    expect(JSON.stringify(short)).not.toContain('abc123');
   });
 
   it('fails, rather than breaks, on a list with no tools key or a tool whose name is not text', async () => {
-    const answers = [{ result: {} }, { result: { tools: [{ name: 42 }] } }, { result: { tools: ['x'] } }];
+    const answers = [{ result: {} }, { result: { tools: [{ name: 42 }] } }, { result: { tools: ['x'] } }, { result: { tools: [{}] } }, { result: { tools: [{ name: '  ' }] } }];
     for (const answer of answers) {
       pretend(({ message }) => (message.method === 'initialize' ? json({ jsonrpc: '2.0', id: 'init', result: {} }) : message.method !== 'tools/list' ? new Response(null, { status: 202 }) : json({ jsonrpc: '2.0', id: '1', ...answer })));
       const result = await testMcpConnection(base);

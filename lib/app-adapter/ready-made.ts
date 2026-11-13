@@ -6,7 +6,7 @@ import { createConnection } from '@/lib/app-connections';
 import { confirmReadyMade } from '@/lib/app-adapter/confirm';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { APP_USE_MICROS_DEFAULT, personKeyOf } from '@/lib/meter-values';
-import { truncateDetail } from '@/lib/mcp/test-result';
+import { truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
 
 /**
  * Ready-made apps through the adapter (game #2001, step 8). Everything here answers "not there" while the adapter is off, which
@@ -225,6 +225,8 @@ export interface ReadyMadeTestResult {
   success: boolean;
   toolCount: number;
   toolNames: string[];
+  /** True when the app has more pages of tools than are read: the list is the first pages, not everything. */
+  incomplete?: boolean;
   error?: string;
   status?: number | null;
   statusText?: string | null;
@@ -291,7 +293,8 @@ export async function testReadyMade(connection: { id: string; source: string; se
     const seenCursors = new Set<string>();
     let cursor: string | undefined;
     let lastStatus = opened.status;
-    for (let page = 0; page < 20; page += 1) {
+    let incomplete = false;
+    for (let page = 0; page < MAX_TOOL_PAGES; page += 1) {
       const id = 2 + page;
       const listed = await adapter.callLink({ url: connection.serverUrl, message: { jsonrpc: '2.0', id, method: 'tools/list', ...(cursor ? { params: { cursor } } : {}) }, sessionId: opened.sessionId });
       lastStatus = listed.status;
@@ -304,7 +307,7 @@ export async function testReadyMade(connection: { id: string; source: string; se
       // The answer to the list of tools has the list: no list is not an app with no tools (an empty list is)
       const result = answer.result as { tools?: unknown; nextCursor?: unknown };
       const tools = result.tools;
-      if (!Array.isArray(tools) || tools.some((tool) => !tool || typeof tool !== 'object' || typeof (tool as { name?: unknown }).name !== 'string')) {
+      if (!Array.isArray(tools) || tools.some((tool) => !tool || typeof tool !== 'object' || typeof (tool as { name?: unknown }).name !== 'string' || !(tool as { name: string }).name.trim())) {
         return failed('The app did not answer the list of what it can do.', listed.status);
       }
       for (const tool of tools as { name: string }[]) {
@@ -314,10 +317,12 @@ export async function testReadyMade(connection: { id: string; source: string; se
         }
       }
       if (typeof result.nextCursor !== 'string' || !result.nextCursor || seenCursors.has(result.nextCursor)) break;
+      // Another page is offered after the last one that is read: the list says so rather than pass for everything
+      if (page === MAX_TOOL_PAGES - 1) incomplete = true;
       seenCursors.add(result.nextCursor);
       cursor = result.nextCursor;
     }
-    return { success: true, toolCount: names.length, toolNames: names, status: lastStatus };
+    return { success: true, toolCount: names.length, toolNames: names, ...(incomplete ? { incomplete: true } : {}), status: lastStatus };
   } catch (error) {
     console.error('[ReadyMade] Test failed:', error instanceof Error ? error.message : 'unknown');
     return failed('The app could not be reached.');

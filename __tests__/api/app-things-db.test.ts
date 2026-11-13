@@ -85,6 +85,23 @@ run('what an app can do, in a real database', () => {
     expect((await ask(made.id)).status).toBe(401);
   });
 
+  it('says the list is incomplete when the app has more pages than are read', async () => {
+    const adapter = fake([]);
+    (adapter.callLink as jest.Mock).mockImplementation(async (input: { message: Record<string, unknown> }): Promise<LinkAnswer> => {
+      if (input.message.method !== 'tools/list') return { status: 200, contentType: 'application/json', sessionId: 'mcp-1', body: '{"jsonrpc":"2.0","id":1,"result":{}}' };
+      const id = input.message.id as number;
+      return { status: 200, contentType: 'application/json', sessionId: null, body: JSON.stringify({ jsonrpc: '2.0', id, result: { tools: [{ name: `GMAIL_TOOL_${id}` }], nextCursor: `c${id + 1}` } }) };
+    });
+    setAdapterForTests(adapter);
+    const made = await readyMade();
+    await prisma.appConnection.update({ where: { id: made.id }, data: { providerConfirmedAt: new Date() } });
+    mockUser.current = { id: sara };
+    const body = await (await ask(made.id)).json();
+    expect(body.incomplete).toBe(true);
+    expect(body.things).toHaveLength(20);
+    expect(body.things[0]).toBe('Tool 2');
+  });
+
   it('gives an empty list, never an error, while a ready-made app is not signed in or the adapter is off', async () => {
     const adapter = fake(['GMAIL_FETCH_EMAILS']);
     (adapter.connectionStatus as jest.Mock).mockResolvedValue('pending');
