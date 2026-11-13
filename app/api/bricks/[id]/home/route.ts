@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { brickJson, brickOwner } from '@/lib/brick-api';
 import { homeOfBrick, placeBrick, takeOutBrick } from '@/lib/brick-home';
 import { corsHeaders } from '@/lib/cors';
+import { homeBehaviorConfigSchema } from '@/lib/brick-home-schema';
 import { prisma } from '@/lib/db';
 
 export const runtime = 'nodejs';
@@ -16,7 +17,7 @@ const placeSchema = z
   .object({
     roomUrl: z.string().trim().min(1).max(2000),
     behaviorType: z.enum(['idle', 'patrol', 'social']).optional(),
-    behaviorConfig: z.record(z.string(), z.any()).optional(),
+    behaviorConfig: homeBehaviorConfigSchema.optional(),
   })
   .strict();
 

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { brickJson, brickOwner } from '@/lib/brick-api';
 import { moveBrick, takeOutBrick } from '@/lib/brick-home';
 import { corsHeaders } from '@/lib/cors';
+import { homeBehaviorConfigSchema } from '@/lib/brick-home-schema';
 
 export const runtime = 'nodejs';
 
@@ -12,7 +13,7 @@ export async function OPTIONS(request: NextRequest) {
 }
 
 const moveSchema = z
-  .object({ behaviorType: z.enum(['idle', 'patrol', 'social']).optional(), behaviorConfig: z.record(z.string(), z.any()).optional() })
+  .object({ behaviorType: z.enum(['idle', 'patrol', 'social']).optional(), behaviorConfig: homeBehaviorConfigSchema.optional() })
   .strict();
 
 /**

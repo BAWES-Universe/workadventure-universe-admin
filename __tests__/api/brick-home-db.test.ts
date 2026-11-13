@@ -289,6 +289,15 @@ run('a Brick that lives in a room, in a real database', () => {
       expect(await (await homeFeed(call('POST', '/api/brick-homes/room', { roomUrl: own.otherRoomUrl }, service))).json()).toEqual([]);
     });
 
+    it('refuses a spot or a route that is not shaped like one, on placing and on moving, and stores nothing', async () => {
+      await put(brickId, own.roomUrl, { behaviorConfig: SPOT });
+      for (const bad of ['text', [], { assignedSpace: 'here' }, { assignedSpace: { center: { x: 'a', y: 1 }, radius: 3 } }, { assignedSpace: { center: { x: 1, y: 1 }, radius: -1 } }, { speed: 'fast' }, { patrolWaypoints: [{ x: 1 }] }, { moves: 'fly' }]) {
+        expect((await put(brickId, own.roomUrl, { behaviorConfig: bad })).status).toBe(400);
+        expect((await moveHome(call('PATCH', `/api/brick-homes/${brickId}`, { behaviorConfig: bad }), ids(brickId))).status).toBe(400);
+      }
+      expect((await home(brickId))?.behaviorConfig).toEqual(SPOT);
+    });
+
     it('never lets a room manager’s edit reach what is the owner’s to set: only the spot and how it moves pass', async () => {
       await prisma.bot.update({ where: { id: brickId }, data: { behaviorConfig: { showToolCalls: true, vision: { mode: 'own' } } } });
       await put(brickId, hosted.roomUrl, { behaviorConfig: { ...SPOT, vision: { mode: 'x' }, showToolCalls: false } });
