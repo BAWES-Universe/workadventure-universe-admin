@@ -677,7 +677,8 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
   }
 
   // A wait for usage ends before its window does when there is room again: extra usage was given, the allowance went up, or the Brick moved
-  // to its owner's own key. Such an item is made due now (its work is saved), and the claim below checks the room again under the person's lock.
+  // to its owner's own key. Such an item is made due now (its work is saved) with its wait marks kept: the claim below checks the room again under
+  // the person's lock, clears the marks only for an item it hands a run to, and an item it holds again keeps its wait, so is never announced twice.
   // Every waiting item is looked at, a page at a time by id: one that stays held never keeps a later one from being looked at. Waiting items
   // are few (a person has them only while their usage is used up), and the room is read once for each person.
   const roomOf = new Map<string, boolean>();
@@ -697,7 +698,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
           if (!roomOf.has(one.owner_id)) roomOf.set(one.owner_id, (await goalsRoom(one.owner_id, now)).ok);
           ok = roomOf.get(one.owner_id)!;
         }
-        if (ok) await prisma.brickItem.updateMany({ where: { id: one.id, state: 'on', heldSince: { not: null }, nextDueAt: { gt: now } }, data: { nextDueAt: now, ...NOT_HELD } });
+        if (ok) await prisma.brickItem.updateMany({ where: { id: one.id, state: 'on', heldSince: { not: null }, nextDueAt: { gt: now } }, data: { nextDueAt: now } });
       } catch (error) {
         console.error('[BrickItems] Could not look again at a waiting item:', error instanceof Error ? error.message : 'unknown');
       }

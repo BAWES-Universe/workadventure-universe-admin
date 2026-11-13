@@ -944,18 +944,59 @@ run('goals and tasks, in a real database', () => {
     it('looks again at every waiting item, so ones that stay held never keep a later one from carrying on', async () => {
       const stay = [await person('gsstay1'), await person('gsstay2'), await person('gsstay3')];
       const later = await person('gslater');
-      const watches = [];
-      for (const one of [...stay, later]) {
+      const owners = [...stay, later];
+      const watches: Awaited<ReturnType<typeof set>>[] = [];
+      for (const one of owners) {
         await usage(one, 9, 'task');
         watches.push(await set(one, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } }));
       }
       await claimWork(at(HOUR + 2 * MIN));
       for (const watch of watches) expect((await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).heldSince).not.toBeNull();
-      // Room comes back only for the last one's owner, with a page of two: the first pages are all still held
-      await recordGrant({ personId: later.id, settlement: 'gift', startsAt: at(0), endsAt: at(4 * HOUR), givenById: later.id, grantKey: `gslater-none-${randomUUID()}`, noLimit: true });
+      // Room comes back only for the owner of the item with the highest id, with a page of two: the pages before it are all still held, so the
+      // item that can carry on is surely on a later page
+      const byId = [...watches].sort((a, b) => a.id.localeCompare(b.id));
+      const lastItem = byId[byId.length - 1];
+      const lastOwner = owners[watches.indexOf(lastItem)];
+      await recordGrant({ personId: lastOwner.id, settlement: 'gift', startsAt: at(0), endsAt: at(4 * HOUR), givenById: lastOwner.id, grantKey: `gslater-none-${randomUUID()}`, noLimit: true });
       const work = await claimWork(at(HOUR + 25 * MIN), 50, 2);
-      expect(mineIn(work, watches[3].id)).toHaveLength(1);
-      for (const watch of watches.slice(0, 3)) expect(mineIn(work, watch.id)).toEqual([]);
+      expect(mineIn(work, lastItem.id)).toHaveLength(1);
+      for (const watch of byId.slice(0, 3)) expect(mineIn(work, watch.id)).toEqual([]);
+    });
+
+    it('lets room that fits only some of a person’s waiting items carry on only those: the rest keep their wait and are not told again', async () => {
+      const gspart = await person('gspart');
+      const items = [];
+      for (const words of ['A', 'B', 'C']) items.push(await set(gspart, { kind: 'watch', words, condition: 'It drops', cadence: { type: 'every', minutes: 60 } }));
+      await usage(gspart, 9, 'task');
+      const first = await claimWork(at(HOUR + 2 * MIN));
+      expect(first.held.filter((one) => one.userId === gspart.uuid)).toHaveLength(3);
+      // The bot server told them all
+      for (const note of first.held.filter((one) => one.userId === gspart.uuid)) expect(await markHeldTold(note.itemId, note.waitId)).toEqual({ ok: true, told: true });
+      const before = await prisma.brickItem.findMany({ where: { id: { in: items.map((one) => one.id) } } });
+      // One place comes free: only one of the three can carry on
+      const row = await prisma.botsAiUsage.findFirstOrThrow({ where: { talkedPersonId: gspart.id } });
+      await prisma.botsAiUsage.delete({ where: { id: row.id } });
+      const work = await claimWork(at(HOUR + 10 * MIN));
+      expect(mineIn(work, ...items.map((one) => one.id))).toHaveLength(1);
+      expect(work.held.filter((one) => one.userId === gspart.uuid)).toEqual([]);
+      const ranId = mineIn(work, ...items.map((one) => one.id))[0].itemId;
+      for (const was of before) {
+        const now = await prisma.brickItem.findUniqueOrThrow({ where: { id: was.id } });
+        if (was.id === ranId) expect(now).toMatchObject({ heldSince: null, heldToldAt: null, heldNoticeAt: null });
+        else expect(now).toMatchObject({ heldSince: was.heldSince, heldToldAt: was.heldToldAt, heldNoticeAt: was.heldNoticeAt });
+      }
+    });
+
+    it('lets extra usage with no limit carry on all of a person’s waiting items and clear their waits', async () => {
+      const gsall = await person('gsall');
+      const items = [];
+      for (const words of ['A', 'B', 'C']) items.push(await set(gsall, { kind: 'watch', words, condition: 'It drops', cadence: { type: 'every', minutes: 60 } }));
+      await usage(gsall, 9, 'task');
+      await claimWork(at(HOUR + 2 * MIN));
+      await recordGrant({ personId: gsall.id, settlement: 'gift', startsAt: at(0), endsAt: at(4 * HOUR), givenById: gsall.id, grantKey: `gsall-none-${randomUUID()}`, noLimit: true });
+      const work = await claimWork(at(HOUR + 10 * MIN));
+      expect(mineIn(work, ...items.map((one) => one.id))).toHaveLength(3);
+      for (const one of items) expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: one.id } })).toMatchObject({ heldSince: null, heldToldAt: null, heldNoticeAt: null });
     });
 
     it('a call of one run never takes the place another still-open run holds', async () => {
