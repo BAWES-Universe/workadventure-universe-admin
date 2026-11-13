@@ -11,6 +11,7 @@ jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: (email: string | null) => 
 
 import { prisma } from '@/lib/db';
 import { setAdapterForTests, type LinkAnswer, type ReadyMadeAdapter } from '@/lib/app-adapter';
+import { confirmReadyMade } from '@/lib/app-adapter/confirm';
 import { saveReadyMadeApps } from '@/lib/app-adapter/settings';
 import { GET as listReadyMade, POST as connectReadyMadeApp } from '@/app/api/me/apps/ready-made/route';
 import { GET as adminGet, PUT as adminPut } from '@/app/api/admin/ready-made-apps/route';
@@ -169,6 +170,25 @@ run('ready-made apps through the adapter, in a real database', () => {
     const after = await connect();
     expect(await after.json()).toEqual({ id: first.id });
     expect(adapter.startConnect).toHaveBeenCalledTimes(2);
+  });
+
+  it('two overlapping confirmations of one sign-in both read connected, and one for a replaced sign-in does not', async () => {
+    const adapter = fake();
+    setAdapterForTests(adapter);
+    await list();
+    asSara();
+    const made = await (await connect()).json();
+    const row = await prisma.appConnection.findUniqueOrThrow({ where: { id: made.id } });
+    await prisma.appConnection.update({ where: { id: made.id }, data: { providerConfirmedAt: null } });
+    const stale = { id: row.id, source: row.source, providerAccountId: row.providerAccountId, providerConfirmedAt: null };
+    const [a, b] = await Promise.all([confirmReadyMade(stale), confirmReadyMade(stale)]);
+    expect(a).toBeInstanceOf(Date);
+    expect(b).toBeInstanceOf(Date);
+
+    // A newer sign-in replaced the account in the meantime: the old answer is not about it
+    await prisma.appConnection.update({ where: { id: made.id }, data: { providerConfirmedAt: null, providerAccountId: `ca_newer_${tag}` } });
+    expect(await confirmReadyMade(stale)).toBeNull();
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: made.id } })).providerConfirmedAt).toBeNull();
   });
 
   it('is not used, and nothing is counted, while the sign-in is not finished or the provider cannot be asked', async () => {
