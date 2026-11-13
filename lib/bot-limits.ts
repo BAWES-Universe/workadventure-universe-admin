@@ -94,6 +94,28 @@ export async function getBrickLimits(): Promise<ServerLimits['bricks']> {
   return (await getServerLimits()).bricks;
 }
 
+/** The most Apps one bot or Brick can use at once (5 until a super admin changes it), the same number for Apps added by hand and lent ones. */
+export async function maxAppsPerBot(): Promise<number> {
+  return (await getBrickLimits()).appsPerBot;
+}
+
+/** The line a person reads when a bot is full of Apps; every way of adding one says it the same. */
+export class AppsFull extends Error {
+  constructor(readonly max: number) {
+    super(`Maximum of ${max} apps per bot reached`);
+  }
+}
+
+/**
+ * Makes room for one more App on a bot, inside the caller's transaction, or throws AppsFull. The bot's row is held while the
+ * count is taken, so two Apps added at the same moment, by hand or lent, cannot both slip in past the limit.
+ */
+export async function claimAppSlot(tx: Prisma.TransactionClient, botId: string): Promise<void> {
+  const max = await maxAppsPerBot();
+  await tx.$queryRaw`SELECT "id" FROM "bots" WHERE "id" = ${botId} FOR UPDATE`;
+  if ((await tx.botMcpServer.count({ where: { botId } })) >= max) throw new AppsFull(max);
+}
+
 /** A key's reply limits: what its owner changed, the recommended value for the rest. */
 export const keyReplyLimits = (key: { replyLimits?: Prisma.JsonValue | null }): ReplyLimits => readReplyLimits(key.replyLimits);
 

@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { z } from 'zod';
 import { availableForBot, grantSharedToBot } from '@/lib/app-sharing';
+import { AppsFull } from '@/lib/bot-limits';
 import { NOT_FOUND } from '@/lib/app-connections';
 import { appsRoute, preflight } from '@/lib/me-apps-route';
 
@@ -39,7 +40,11 @@ export async function POST(request: NextRequest, { params }: Params) {
     const { id } = await params;
     const parsed = bodySchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return respond({ error: 'Invalid input data' }, 400);
-    const grant = await grantSharedToBot(user.id, parsed.data.connectionId, id);
+    const grant = await grantSharedToBot(user.id, parsed.data.connectionId, id).catch((error) => {
+      if (error instanceof AppsFull) return error;
+      throw error;
+    });
+    if (grant instanceof AppsFull) return respond({ error: grant.message }, 422);
     if (!grant) return respond({ error: NOT_FOUND }, 404);
     return respond({ serverId: grant.id, botId: grant.botId }, 201);
   });

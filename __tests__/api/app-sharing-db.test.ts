@@ -18,6 +18,7 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { encryptApiKey } from '@/lib/encryption';
 import { managerCandidates } from '@/lib/app-sharing';
+import { maxAppsPerBot, saveServerLimits } from '@/lib/bot-limits';
 import { createConnection, grantToBrick, markConnectionReconnected, checkAppUse } from '@/lib/app-connections';
 import { GET as getApp } from '@/app/api/me/apps/[connectionId]/route';
 import { POST as lend } from '@/app/api/me/apps/[connectionId]/lends/route';
@@ -29,7 +30,8 @@ import { POST as addManagerRoute } from '@/app/api/me/team-apps/[connectionId]/m
 import { DELETE as removeManagerRoute } from '@/app/api/me/team-apps/[connectionId]/managers/[personId]/route';
 import { GET as available, POST as letBotUse } from '@/app/api/bots/[id]/apps/available/route';
 import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
-import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
+import { GET as listServers, POST as addServer } from '@/app/api/bots/[id]/mcp-servers/route';
+import { GET as botSignInStart } from '@/app/api/bots/[id]/mcp-servers/[serverId]/oauth/start/route';
 import { GET as signInStart } from '@/app/api/me/apps/[connectionId]/sign-in/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -290,31 +292,63 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect((await check(guide, serverId, { callId: 'back', heading: 'lookUp' })).body.allowed).toBe(true);
     });
 
-    it('stops at five apps on a bot, as adding one by hand does, but still answers a repeated ask with the same grant', async () => {
-      const { app, serverId } = await lentAndLet();
-      const extra = await prisma.bot.create({ data: { roomId: (await prisma.bot.findUniqueOrThrow({ where: { id: guide }, select: { roomId: true } })).roomId, name: 'Crowded', createdById: sara, behaviorConfig: {} } });
+    it('stops a bot at the Limits setting, five unless a super admin changes it, the same for apps added by hand and lent ones', async () => {
+      const { app } = await lentAndLet();
+      const roomId = (await prisma.bot.findUniqueOrThrow({ where: { id: guide }, select: { roomId: true } })).roomId;
+      const crowded = await prisma.bot.create({ data: { roomId, name: 'Crowded', createdById: sara, behaviorConfig: {} } });
+      const byHand = async (name: string) => {
+        as(sara);
+        return addServer(request(`/api/bots/${crowded.id}/mcp-servers`, { method: 'POST', body: { name, serverUrl: `https://hand.example.com/${name}`, authType: 'none' } }), params({ id: crowded.id }));
+      };
       try {
-        // Four own apps already on the bot, then the lent one makes five
-        for (let n = 0; n < 4; n++) await prisma.botMcpServer.create({ data: { botId: extra.id, name: `Hand ${n}`, serverUrl: `${LINK}/${n}`, authType: 'none' } });
-        const fifth = await letGuide(sara, app.id, extra.id);
-        expect(fifth.status).toBe(201);
-        const fifthServer = (await json(fifth)).serverId as string;
-        // Asked again at the cap: the same grant, not a refusal
-        const again = await letGuide(sara, app.id, extra.id);
-        expect(again.status).toBe(201);
-        expect((await json(again)).serverId).toBe(fifthServer);
-        // A different lent app is the sixth: refused, and nothing is added
+        // Nothing saved: five, as before
+        expect(await maxAppsPerBot()).toBe(5);
+        // The super admin sets two: the second is the last
+        await saveServerLimits({ bricks: { appsPerBot: 2 } }, sara);
+        expect((await byHand('first')).status).toBe(201);
+        // The lent app is the second: let in, and asked again it is the same grant, never a refusal
+        const second = await letGuide(sara, app.id, crowded.id);
+        expect(second.status).toBe(201);
+        const secondServer = (await json(second)).serverId as string;
+        expect((await json(await letGuide(sara, app.id, crowded.id))).serverId).toBe(secondServer);
+        // The third is refused by hand and lent with the same line, and nothing is added
         const other = await keyApp(sara, { name: 'Other' });
         as(sara);
         expect((await lendTo(other.id, { universeId: universeA })).status).toBe(201);
-        const sixth = await letGuide(sara, other.id, extra.id);
-        expect(sixth.status).toBe(400);
-        expect((await json(sixth)).error).toMatch(/Maximum of 5 apps/);
-        expect(await prisma.botMcpServer.count({ where: { botId: extra.id } })).toBe(5);
-        expect(serverId).toBeTruthy();
+        const handRefused = await byHand('third');
+        const lentRefused = await letGuide(sara, other.id, crowded.id);
+        expect(handRefused.status).toBe(422);
+        expect(lentRefused.status).toBe(422);
+        expect((await json(handRefused)).error).toBe('Maximum of 2 apps per bot reached');
+        expect((await json(lentRefused)).error).toBe('Maximum of 2 apps per bot reached');
+        expect(await prisma.botMcpServer.count({ where: { botId: crowded.id } })).toBe(2);
+        // Raised again, the same two now fit
+        await saveServerLimits({ bricks: { appsPerBot: 3 } }, sara);
+        expect((await letGuide(sara, other.id, crowded.id)).status).toBe(201);
+        expect(await prisma.botMcpServer.count({ where: { botId: crowded.id } })).toBe(3);
       } finally {
-        await prisma.botMcpServer.deleteMany({ where: { botId: extra.id } });
-        await prisma.bot.delete({ where: { id: extra.id } });
+        await saveServerLimits({ bricks: { appsPerBot: 5 } }, sara);
+        await prisma.botMcpServer.deleteMany({ where: { botId: crowded.id } });
+        await prisma.bot.delete({ where: { id: crowded.id } });
+      }
+    });
+
+    it('lets two apps arrive at the very same moment without passing the limit', async () => {
+      const first = await keyApp(sara, { name: 'One' });
+      const second = await keyApp(sara, { name: 'Two' });
+      as(sara);
+      for (const app of [first, second]) expect((await lendTo(app.id, { universeId: universeA })).status).toBe(201);
+      const roomId = (await prisma.bot.findUniqueOrThrow({ where: { id: guide }, select: { roomId: true } })).roomId;
+      const busy = await prisma.bot.create({ data: { roomId, name: 'Busy', createdById: sara, behaviorConfig: {} } });
+      try {
+        await saveServerLimits({ bricks: { appsPerBot: 1 } }, sara);
+        const answers = await Promise.all([letGuide(sara, first.id, busy.id), letGuide(sara, second.id, busy.id)]);
+        expect(answers.map((answer) => answer.status).sort()).toEqual([201, 422]);
+        expect(await prisma.botMcpServer.count({ where: { botId: busy.id } })).toBe(1);
+      } finally {
+        await saveServerLimits({ bricks: { appsPerBot: 5 } }, sara);
+        await prisma.botMcpServer.deleteMany({ where: { botId: busy.id } });
+        await prisma.bot.delete({ where: { id: busy.id } });
       }
     });
 
@@ -619,6 +653,21 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect((await signInStart(request(`/api/me/apps/${id}/sign-in`), params({ connectionId: id }))).status).toBe(200);
       as(lena);
       expect((await signInStart(request(`/api/me/apps/${id}/sign-in`), params({ connectionId: id }))).status).toBe(404);
+    });
+
+    it('lets only a manager of the app itself start its sign-in from a bot, never a person who only manages the bot', async () => {
+      const id = (await json(await addTeam(sara, universeA, { authType: 'oauth', authConfig: JSON.stringify({ clientId: 'c', authorizeUrl: 'https://auth.example.com/authorize', tokenUrl: 'https://auth.example.com/token' }) }))).id as string;
+      const serverId = (await json(await letGuide(sara, id))).serverId as string;
+      await prisma.appConnection.update({ where: { id }, data: { signInNonce: 'in-progress' } });
+      const start = () => botSignInStart(request(`/api/bots/${guide}/mcp-servers/${serverId}/oauth/start`), params({ id: guide, serverId }));
+      // Omar manages the bot but is not one of the app's managers
+      as(omar);
+      expect((await start()).status).toBe(403);
+      expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInNonce).toBe('in-progress');
+      // Sara manages the app: it starts, and the new sign-in is its own
+      as(sara);
+      expect((await start()).status).toBe(200);
+      expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInNonce).not.toBe('in-progress');
     });
 
     it('is disconnected by a manager: every bot stops at once', async () => {

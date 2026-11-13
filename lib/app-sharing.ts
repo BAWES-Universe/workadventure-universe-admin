@@ -5,6 +5,7 @@ import { endApprovalsForServers } from '@/lib/bot-actions';
 import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { lendAccess, lendAccessMany, lendableUniverses, type LendableUniverse } from '@/lib/ai-key-lend';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
+import { claimAppSlot } from '@/lib/bot-limits';
 import { addConnectionSchema, AppConnectionError, HEADINGS, NOT_FOUND, connectedState, type Heading } from '@/lib/app-connections';
 import { encryptApiKey } from '@/lib/encryption';
 import { botUniverseId, startOfDay, startOfMonth } from '@/lib/app-uses';
@@ -344,9 +345,6 @@ export async function availableForBot(userId: string, botId: string): Promise<Av
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** The most apps one bot uses, the same cap as adding one by hand */
-export const MAX_APPS_PER_BOT = 5;
-
 /**
  * "Let Guide use it": a bot of the universe starts using an app lent there (by the asker) or the universe's own (which the asker
  * manages). The asker must manage the bot. Four headings start at today's defaults, so a change or a send still asks first.
@@ -373,10 +371,8 @@ export async function grantSharedToBot(userId: string, connectionId: string, bot
       // Asked twice is the same grant, so it is never turned away for the cap
       const already = await tx.botMcpServer.findFirst({ where: { botId, connectionId } });
       if (already) return already;
-      // The same cap as adding an app by hand: a bot uses at most five
-      if ((await tx.botMcpServer.count({ where: { botId } })) >= MAX_APPS_PER_BOT) {
-        throw new AppConnectionError(400, `Maximum of ${MAX_APPS_PER_BOT} apps per bot reached`);
-      }
+      // The same limit, held the same way, as adding an app by hand
+      await claimAppSlot(tx, botId);
       return tx.botMcpServer.create({
         data: { botId, connectionId, name: connection.name, serverUrl: '', authType: 'none', connectedById: userId },
       });

@@ -1,3 +1,4 @@
+import { AppsFull, claimAppSlot } from '@/lib/bot-limits';
 import { botUniverseId } from '@/lib/app-uses';
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
@@ -275,13 +276,7 @@ export async function POST(
 
     // Soft cap: reject if bot already has 5 servers (atomic check+create)
     const server = await prisma.$transaction(async (tx) => {
-      const existingCount = await tx.botMcpServer.count({
-        where: { botId },
-      });
-
-      if (existingCount >= 5) {
-        throw new Error('MaxServersReached');
-      }
+      await claimAppSlot(tx, botId);
 
       return tx.botMcpServer.create({
         data: {
@@ -315,9 +310,9 @@ export async function POST(
       { status: 201, headers: corsHeaders(request) }
     );
   } catch (error) {
-    if (error instanceof Error && error.message === 'MaxServersReached') {
+    if (error instanceof AppsFull) {
       return NextResponse.json(
-        { error: 'Maximum of 5 apps per bot reached' },
+        { error: error.message },
         { status: 422, headers: corsHeaders(request) }
       );
     }

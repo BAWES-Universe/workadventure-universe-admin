@@ -92,6 +92,8 @@ export interface BrickLimits {
   failuresBeforeTelling: number;
   /** The share, in percent, of one person's Universe AI usage window that goals and tasks may use, so live chat always keeps room. */
   goalsShare: number;
+  /** Apps one bot or Brick can use at once, by hand or lent. */
+  appsPerBot: number;
 }
 
 /** What a super admin sets, all in one place. */
@@ -109,7 +111,7 @@ export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, 
 export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 };
 export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0, guestDays: 1 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
-export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30 };
+export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
 export const FAIR_USAGE_WINDOW_HOURS = 5;
 
@@ -182,6 +184,7 @@ const BRICK_RANGES: Record<keyof BrickLimits, Range> = {
   snooze: { min: 1, max: 10_080, whole: true },
   failuresBeforeTelling: { min: 1, max: 100, whole: true },
   goalsShare: { min: 1, max: 100, whole: true },
+  appsPerBot: { min: 1, max: 100, whole: true },
 };
 
 /** The values each group can hold, for the pages to say ("Between 1 and 100 files") before anything is sent. */
