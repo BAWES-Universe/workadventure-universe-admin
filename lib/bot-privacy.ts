@@ -112,6 +112,7 @@ export async function deleteWithHiddenBotData<T>(botsWhere: Prisma.BotWhereInput
     prisma.botsConversation.deleteMany({ where: botIdIn }),
     prisma.botsMemory.deleteMany({ where: botIdIn }),
     prisma.botMemoryForget.deleteMany({ where: botIdIn }),
+    prisma.botMemoryItemForget.deleteMany({ where: botIdIn }),
     remove(),
   ]);
   return results[results.length - 1] as T;

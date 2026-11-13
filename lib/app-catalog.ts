@@ -42,7 +42,9 @@ export const catalogEntrySchema = createMcpServerSchema
   // The sign-in setup may hold only what sets a sign-in up. A token (access, refresh, expiry, anything a person's own sign-in writes)
   // would be copied into every connection made from the entry and shared by everyone who taps Connect
   .refine((entry) => entry.authType !== 'oauth' || onlyProviderSetup(entry.authConfig), { path: ['authConfig'], message: 'A listed app may hold only its sign-in setup, never a token' })
-  .refine((entry) => entry.authType !== 'none' || !entry.authConfig, { path: ['authConfig'], message: 'An app that needs no sign-in has no sign-in setup' });
+  .refine((entry) => entry.authType !== 'none' || !entry.authConfig, { path: ['authConfig'], message: 'An app that needs no sign-in has no sign-in setup' })
+  // Extra headers would be copied into every person's connection like a token would, and can carry a key the same way
+  .refine((entry) => !entry.headers || Object.keys(entry.headers).length === 0, { path: ['headers'], message: 'A listed app takes no extra headers' });
 
 export const catalogPatchSchema = z
   .object({

@@ -86,6 +86,11 @@ run('the list of apps to connect, in a real database', () => {
       expect((await add(entry('gmail', { authConfig: JSON.stringify({ ...setup, ...extra }) }))).status).toBe(400);
     }
     expect((await add(entry('gmail', { authType: 'none', authConfig: JSON.stringify(setup) }))).status).toBe(400);
+    // Nor a header, which would be copied into every connection as a token would
+    for (const headers of [{ Authorization: 'Bearer shared' }, { 'x-api-key': 'shared' }, { 'X-Anything': 'x' }]) {
+      expect((await add(entry('gmail', { headers }))).status).toBe(400);
+      expect((await add(entry('gmail', { authType: 'none', authConfig: undefined, headers }))).status).toBe(400);
+    }
     expect((await add(entry('gmail'))).status).toBe(201);
     expect((await add(entry('gmail'))).status).toBe(409);
     expect((await add(entry('weather', { authType: 'none', authConfig: null }))).status).toBe(201);
@@ -111,6 +116,8 @@ run('the list of apps to connect, in a real database', () => {
     const mine = (apps: { key: string }[]) => apps.filter((app) => app.key.endsWith(tag)).map((app) => app.key).sort();
     expect(mine(all.apps)).toEqual([key('gmail'), key('notion')].sort());
     expect(JSON.stringify(all)).not.toMatch(/platform|authConfig|serverUrl|example\.com/);
+    // Only the name, what it does, its icon and whether they have it: nothing else of an entry ever reaches a person
+    for (const app of all.apps) expect(Object.keys(app).sort()).toEqual(['blurb', 'connectionId', 'icon', 'key', 'name']);
     const found = await (await catalog(request('/api/me/apps/catalog?q=DOCS'))).json();
     expect(mine(found.apps)).toEqual([key('notion')]);
     const byLine = await (await catalog(request('/api/me/apps/catalog?q=send%20email'))).json();

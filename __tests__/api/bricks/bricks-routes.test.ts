@@ -18,6 +18,9 @@ import { ensureDefaultBrick, isDefaultBrick, listBricks, listDeletedBricks } fro
 import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
 import { makeBrick } from '@/lib/brick-make';
 import { BRICK_HAS_NO_ROOM } from '@/lib/brick';
+import { checkAiProviderRef, checkBotModel } from '@/lib/ai-provider-ref';
+import { checkConfigVision, dropOthersVisionKey } from '@/lib/bot-vision';
+import { clearBotRunsOnNotices } from '@/lib/notices';
 
 jest.mock('@/lib/db', () => ({
   prisma: {
@@ -37,9 +40,14 @@ jest.mock('@/lib/brick-default', () => ({
   isDefaultBrick: jest.fn(),
 }));
 jest.mock('@/lib/brick-delete', () => ({ deleteBrick: jest.fn(), undoBrickDelete: jest.fn(), removeGoneBricks: jest.fn() }));
+jest.mock('@/lib/brick-visit', () => ({ endStaleVisits: jest.fn(async () => 0) }));
+jest.mock('@/lib/brick-home', () => ({ dropHomesWithoutAccess: jest.fn(async () => 0) }));
 jest.mock('@/lib/brick-make', () => ({ ...jest.requireActual('@/lib/brick-make'), makeBrick: jest.fn() }));
 jest.mock('@/lib/bot-limits', () => ({ ...jest.requireActual('@/lib/bot-limits'), getBrickLimits: jest.fn(async () => ({ undoDays: 7, offerAfter: 3 })) }));
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
+jest.mock('@/lib/ai-provider-ref', () => ({ checkAiProviderRef: jest.fn(async () => null), checkBotModel: jest.fn(async () => null) }));
+jest.mock('@/lib/bot-vision', () => ({ ...jest.requireActual('@/lib/bot-vision'), checkConfigVision: jest.fn(async () => null), dropOthersVisionKey: jest.fn(async () => null) }));
+jest.mock('@/lib/notices', () => ({ ...jest.requireActual('@/lib/notices'), clearBotRunsOnNotices: jest.fn(async () => undefined) }));
 
 const db = prisma as unknown as { bot: Record<'findUnique' | 'update', jest.Mock>; user: Record<'findUnique', jest.Mock> };
 const session = getSessionUser as jest.Mock;
@@ -238,6 +246,101 @@ describe('POST /api/bricks: New Brick (game #1996)', () => {
     expect(make).toHaveBeenCalledWith(SARA.id, { name: 'Teal Brick' });
   });
 
+  it('saves its look, the way it is checked when a Brick is made: a Brick look or a WOKA id, never empty or too long', async () => {
+    const response = await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { characterTextureId: ' brick-red ' } }), params());
+    expect(response.status).toBe(200);
+    expect(db.bot.update).toHaveBeenLastCalledWith({ where: { id: BRICK_ID }, data: { characterTextureId: 'brick-red', updatedById: SARA.id } });
+    for (const characterTextureId of ['  ', 'x'.repeat(101), null]) {
+      expect((await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { characterTextureId } }), params())).status).toBe(400);
+    }
+  });
+
+  describe('what it runs on (Mind)', () => {
+    const home = { actorId: SARA.id, makerId: SARA.id, roomId: null, ownerId: SARA.id, botId: BRICK_ID };
+
+    it('puts it on one of its owner’s keys judged as a room bot’s is, with its owner in place of a room, and starts it on that key’s own model', async () => {
+      const response = await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { aiProviderRef: 'key-1' } }), params());
+      expect(response.status).toBe(200);
+      expect(checkAiProviderRef).toHaveBeenCalledWith('key-1', 'universe-ai', home);
+      expect(checkBotModel).toHaveBeenCalledWith(undefined, { ...home, ref: 'key-1', currentRef: 'universe-ai', currentModel: null });
+      expect(db.bot.update).toHaveBeenLastCalledWith({ where: { id: BRICK_ID }, data: { aiProviderRef: 'key-1', aiModel: null, updatedById: SARA.id } });
+      expect(dropOthersVisionKey).toHaveBeenCalledWith(brick.behaviorConfig, SARA.id);
+      expect(clearBotRunsOnNotices).toHaveBeenCalledWith(BRICK_ID);
+    });
+
+    it('saves a model picked on the key, and writes nothing when the key is not its owner’s', async () => {
+      await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { aiProviderRef: 'key-1', aiModel: 'm-2' } }), params());
+      expect(db.bot.update).toHaveBeenLastCalledWith({ where: { id: BRICK_ID }, data: { aiProviderRef: 'key-1', aiModel: 'm-2', updatedById: SARA.id } });
+      db.bot.update.mockClear();
+      (checkAiProviderRef as jest.Mock).mockResolvedValueOnce('AI provider "key-9" does not exist');
+      const refused = await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { aiProviderRef: 'key-9' } }), params());
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({ error: 'AI provider "key-9" does not exist' });
+      (checkBotModel as jest.Mock).mockResolvedValueOnce('That model isn’t on this key’s list. Pick one it has.');
+      expect((await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { aiModel: 'nope' } }), params())).status).toBe(400);
+      expect(db.bot.update).not.toHaveBeenCalled();
+    });
+
+    it('does not touch what it runs on, or its notices, when a save says nothing about it', async () => {
+      await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { name: 'Helper' } }), params());
+      expect(clearBotRunsOnNotices).not.toHaveBeenCalled();
+      expect(checkAiProviderRef).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('how it behaves, and its companion', () => {
+    it('merges the Behavior keys sent into what is saved, so what the other parts keep there stays', async () => {
+      const response = await changeBrick(
+        request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { behaviorType: 'social', behaviorConfig: { moves: 'wander', goesToPeople: true, conversationRadius: 100 }, companionTextureId: 'dog-2' } }),
+        params(),
+      );
+      expect(response.status).toBe(200);
+      expect(checkConfigVision).toHaveBeenCalledWith({ moves: 'wander', goesToPeople: true, conversationRadius: 100 }, expect.objectContaining({ roomId: null, ownerId: SARA.id }));
+      expect(db.bot.update).toHaveBeenLastCalledWith({
+        where: { id: BRICK_ID },
+        data: {
+          behaviorType: 'social',
+          behaviorConfig: { ...brick.behaviorConfig, moves: 'wander', goesToPeople: true, conversationRadius: 100 },
+          companionTextureId: 'dog-2',
+          updatedById: SARA.id,
+        },
+      });
+    });
+
+    it('takes the direction and pause of a route it was saved with', async () => {
+      const response = await changeBrick(
+        request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { behaviorConfig: { loop: false, pauseAtWaypoints: 5 } } }),
+        params(),
+      );
+      expect(response.status).toBe(200);
+      expect(db.bot.update).toHaveBeenLastCalledWith({
+        where: { id: BRICK_ID },
+        data: { behaviorConfig: { ...brick.behaviorConfig, loop: false, pauseAtWaypoints: 5 }, updatedById: SARA.id },
+      });
+    });
+
+    it('clears its companion with null, and refuses a behavior it does not know', async () => {
+      await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { companionTextureId: null } }), params());
+      expect(db.bot.update).toHaveBeenLastCalledWith({ where: { id: BRICK_ID }, data: { companionTextureId: null, updatedById: SARA.id } });
+      db.bot.update.mockClear();
+      for (const body of [{ behaviorType: 'run' }, { behaviorConfig: { moves: 'fly' } }, { behaviorConfig: { conversationRadius: -1 } }, { companionTextureId: '' }]) {
+        expect((await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body }), params())).status).toBe(400);
+      }
+      expect(db.bot.update).not.toHaveBeenCalled();
+    });
+  });
+
+  it('gives none of it to anyone but its owner: a super admin gets "not found" and nothing is checked or written', async () => {
+    const body = { characterTextureId: 'brick-red', aiProviderRef: 'key-1', behaviorType: 'social', companionTextureId: 'dog' };
+    for (const who of [OMAR, ROOT]) {
+      const response = await changeBrick(request(`/api/bricks/${BRICK_ID}`, who, { method: 'PATCH', body }), params());
+      expect(response.status).toBe(404);
+      expect(await response.json()).toEqual({ error: 'Brick not found' });
+    }
+    expect(checkAiProviderRef).not.toHaveBeenCalled();
+    expect(db.bot.update).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['a room', { roomId: 'room-1' }],
     ['another owner', { ownerId: OMAR.id }],
@@ -382,9 +485,9 @@ describe('PATCH /api/bricks/:id: what a Brick’s owner can change', () => {
   it.each([
     ['a room', { roomId: 'room-1' }],
     ['another owner', { ownerId: OMAR.id }],
-    ['another key', { aiProviderRef: 'key-1' }],
     ['a voice', { voiceEnabled: true }],
-    ['a look', { characterTextureId: 'woka-1' }],
+    ['a behavior key that is not Behavior’s', { behaviorConfig: { showToolCalls: true } }],
+    ['a tool timeout', { toolTimeoutSeconds: 5 }],
   ])('refuses a save that names %s, and writes nothing', async (_what, extra) => {
     const response = await changeBrick(request(`/api/bricks/${BRICK_ID}`, SARA, { method: 'PATCH', body: { name: 'Helper', ...extra } }), params());
     expect(response.status).toBe(400);

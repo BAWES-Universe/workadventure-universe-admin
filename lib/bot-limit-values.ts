@@ -72,6 +72,26 @@ export interface BrickLimits {
   guestReplies: number;
   /** Replies all guests together get from the Brick for guests in one universe in each window. */
   universePool: number;
+  /** Minutes a visiting Brick stays after the bot server last found its person in a room: it is how a visit ends when the person leaves Universe (game #2005). */
+  visitEndsMinutes: number;
+  /** Goals and tasks one person can have going at once, paused ones included (game #2002); done ones do not count. */
+  itemsPerPerson: number;
+  /** The shortest wait between two runs of one reminder, schedule, watch or goal, in minutes. */
+  shortestRepeat: number;
+  /** Runs one person's watches, schedules and goals get in a day, all together. A reminder is fixed text with no AI, so it never uses them. */
+  runsPerDay: number;
+  /** Minutes a run may take before it is given up and counted as failed. */
+  longestRun: number;
+  /** Minutes a computer waits for a person to take over after Brick handed over; then the job ends and its room goes back (game #2000). */
+  computerWait: number;
+  /** Minutes a card that a goal or task put up (it needs the person's yes before it goes on) waits for the person. A later check of the same thing joins that card. When the time is up the card ends. */
+  scheduledCardWait: number;
+  /** Minutes Snooze moves a reminder or briefing by. */
+  snooze: number;
+  /** Runs of a watch or goal that fail one after another before Brick tells the person. A reminder or briefing tells on the first. */
+  failuresBeforeTelling: number;
+  /** The share, in percent, of one person's Universe AI usage window that goals and tasks may use, so live chat always keeps room. */
+  goalsShare: number;
 }
 
 /** What a super admin sets, all in one place. */
@@ -89,7 +109,7 @@ export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, 
 export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 };
 export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0, guestDays: 1 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
-export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200 };
+export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
 export const FAIR_USAGE_WINDOW_HOURS = 5;
 
@@ -152,6 +172,16 @@ const BRICK_RANGES: Record<keyof BrickLimits, Range> = {
   offerAfter: { min: 2, max: 100, whole: true },
   guestReplies: { min: 1, max: 1_000_000, whole: true },
   universePool: { min: 1, max: 1_000_000, whole: true },
+  visitEndsMinutes: { min: 1, max: 1_440, whole: true },
+  itemsPerPerson: { min: 1, max: 10_000, whole: true },
+  shortestRepeat: { min: 1, max: 525_600, whole: true },
+  runsPerDay: { min: 1, max: 100_000, whole: true },
+  longestRun: { min: 1, max: 1_440, whole: true },
+  computerWait: { min: 1, max: 1_440, whole: true },
+  scheduledCardWait: { min: 1, max: 10_080, whole: true },
+  snooze: { min: 1, max: 10_080, whole: true },
+  failuresBeforeTelling: { min: 1, max: 100, whole: true },
+  goalsShare: { min: 1, max: 100, whole: true },
 };
 
 /** The values each group can hold, for the pages to say ("Between 1 and 100 files") before anything is sent. */
