@@ -36,7 +36,7 @@ export interface ReadyMadeAdapter {
   startConnect(input: { person: string; toolkit: string; returnUrl: string }): Promise<ConnectStart>;
   /** Whether the person finished signing in for a connection started by `startConnect`: `active` once they did, `pending` while the page is still open, `failed` when it expired or was refused. */
   connectionStatus(input: { providerAccountId: string }): Promise<'active' | 'pending' | 'failed'>;
-  /** The person's own app link at the provider. The provider's code-running sandbox is off in whatever it makes. */
+  /** The person's own app link at the provider. The provider's code-running sandbox is ON in whatever it makes (the owner's rule: nothing ships off); it works only on data from the person's own connected apps, and each run is counted like an app step by the bot server. */
   appLink(input: { person: string; toolkits: string[] }): Promise<AppLink>;
   /** One use of one app tool for one person. `callId` makes a retry the same call. */
   use(input: { person: string; toolkit: string; tool: string; arguments: Record<string, unknown>; providerAccountId: string | null; callId: string }): Promise<UseResult>;
