@@ -49,6 +49,7 @@ model User {
   ownershipOffersMade     OwnershipOffer[] @relation("OwnershipOfferBy")
   bricks            Bot[] @relation("BotOwner")
   defaultBrick      DefaultBrick?
+  brickVisit        BrickVisit?
   brickOffers       BrickOffer[]
   brickItems        BrickItem[] @relation("BrickItemOwner")
   guestBrickHandovers GuestBrickHandover[]
@@ -309,6 +310,9 @@ model Universe {
   hideBotConversations Boolean @default(false) @map("hide_bot_conversations")
   // Allow voice bots here (#740): a bot can only speak and listen in this universe while it is on.
   allowVoiceBots Boolean @default(true) @map("allow_voice_bots")
+  // Visiting Bricks (game #2005): whether people may bring their own Brick along here. Off for every universe that
+  // existed before it shipped, on for a universe made after.
+  allowVisitingBricks Boolean @default(true) @map("allow_visiting_bricks")
   // Set when the universe was passed to this owner (#820): when, and from whom. Null for the person who created it.
   ownerSince      DateTime? @map("owner_since")
   previousOwnerId String?   @map("previous_owner_id")
@@ -383,6 +387,7 @@ model Room {
   roomAccesses RoomAccess[]
   bots       Bot[]
   reports    Report[]
+  brickVisits BrickVisit[]
 
   @@unique([worldId, slug]) // Slug unique within world
   @@map("rooms")
@@ -914,6 +919,7 @@ model Bot {
   voiceReplyUses VoiceReplyUse[]
   voiceListenUses VoiceListenUse[]
   defaultBrickOf  DefaultBrick?
+  visit           BrickVisit?
   computer        BrickComputer?
   computerJobs    ComputerJob[]
   brickItems      BrickItem[]
@@ -936,6 +942,32 @@ model DefaultBrick {
   bot  Bot? @relation(fields: [botId], references: [id], onDelete: SetNull)
 
   @@map("default_bricks")
+}
+
+// A person's Brick walking beside them in another place (game #2005, "Bring along"). One row per person: one Brick walks
+// with a person at a time, and bringing another swaps them. It is the same Brick, never a copy, and the row holds
+// nothing of its owner's: only which Brick, whose, where it was last seen and when. `roomId` and `seenAt` come from the
+// bot server each time it finds the person in a room, so Orbit knows where the visit is without being told where
+// people are. A visit nobody has seen for a while ends by itself (Limits, "Bricks"); ending it deletes only this row.
+model BrickVisit {
+  userId    String   @id @map("user_id")
+  botId     String   @unique @map("bot_id")
+  roomId    String?  @map("room_id")
+  // When the person's game saw them come into `roomId` (the game's own time, never later than the moment Orbit heard it). A
+  // visit only moves to another room on a sighting newer than this, so a late sync from a room they left moves nothing
+  roomSince DateTime? @map("room_since")
+  // Which page load of the player's game said it. Times are only compared with each other when the same one said both: a
+  // second device has its own clock, and its first sighting is a move
+  roomClient String? @map("room_client") @db.VarChar(64)
+  startedAt DateTime @default(now()) @map("started_at")
+  seenAt    DateTime @default(now()) @map("seen_at")
+
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bot  Bot   @relation(fields: [botId], references: [id], onDelete: Cascade)
+  room Room? @relation(fields: [roomId], references: [id], onDelete: SetNull)
+
+  @@index([roomId, seenAt])
+  @@map("brick_visits")
 }
 
 // A reply the Brick for guests gave or was asked for (game #1997). The Brick for guests is Universe's own and has no bot

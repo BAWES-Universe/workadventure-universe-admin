@@ -19,6 +19,7 @@ jest.mock('@/lib/db', () => ({
   prisma: {
     bot: { findUnique: jest.fn(), updateMany: jest.fn() },
     user: { findUnique: jest.fn(async () => null) },
+    brickVisit: { findUnique: jest.fn(async () => null) },
     botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn() },
     aiKeyLend: { findUnique: jest.fn(async () => null) },
     botsAiUsage: { create: jest.fn(async () => ({})) },

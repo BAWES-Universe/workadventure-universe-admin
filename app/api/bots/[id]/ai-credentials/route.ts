@@ -14,8 +14,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   try {
     requireServiceToken(request);
     const { id } = await params;
-    const result = await credentialsForBot(id);
-    if (result.status !== 200) return NextResponse.json({ error: result.error }, { status: result.status });
+    // `asker`: who is about to be answered, by their WorkAdventure id, email or Orbit id. Only a Brick (game #2005) reads it
+    const asker = new URL(request.url).searchParams.get('asker')?.trim().slice(0, 320) || null;
+    const result = await credentialsForBot(id, { asker });
+    if (result.status !== 200) return NextResponse.json({ error: result.error, ...('code' in result ? { code: result.code } : {}) }, { status: result.status });
     return NextResponse.json(result.body);
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized: Invalid service token') {

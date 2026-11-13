@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import * as Sentry from '@sentry/nextjs';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { removeGoneBricks } from '@/lib/brick-delete';
+import { endStaleVisits } from '@/lib/brick-visit';
 
 export const runtime = 'nodejs';
 
@@ -10,14 +11,24 @@ export const runtime = 'nodejs';
  * Removes for good every deleted Brick whose days are over (game #1996), with its saved chats and what it remembers.
  * Asked by the bot server now and then; a person's own are also cleared when they open their Bricks page. Answers
  * { removed: [bot ids] }, so the bot server can close those chats. Nothing depends on when this runs: a Brick whose days
- * are over is in no list and cannot be brought back, swept or not.
+ * are over is in no list and cannot be brought back, swept or not. It also clears visiting Bricks nobody has seen for
+ * the time a super admin gave (game #2005), which are ended whether or not this has run.
  *
  * Auth: service token only.
  */
 export async function POST(request: NextRequest) {
   try {
     requireServiceToken(request);
-    return NextResponse.json({ removed: await removeGoneBricks() });
+    const removed = await removeGoneBricks();
+    // Visits nobody has seen for too long have ended (game #2005); a visit that ran out is ignored whether or not this has run.
+    // Failing here must not lose the ids just removed above: the bot server needs them to close those chats.
+    try {
+      await endStaleVisits();
+    } catch (error) {
+      Sentry.captureException(error, { tags: { area: 'bricks' } });
+      console.error('[Bricks] Ending stale visits failed:', error instanceof Error ? error.message : 'unknown');
+    }
+    return NextResponse.json({ removed });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized: Invalid service token') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });

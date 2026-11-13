@@ -10,6 +10,8 @@ export const runtime = 'nodejs';
 const bodySchema = z
   .object({
     action: z.enum(BOT_ACTIONS as [string, ...string[]]),
+    // The room the person is in, when known: a visiting Brick (game #2005) is only reached from the room it is in
+    roomUrl: z.string().trim().min(1).max(2000).nullish(),
     person: z.object({
       signedIn: z.boolean(),
       identifier: z.string().trim().min(1).max(320).nullish(),
@@ -32,7 +34,7 @@ export async function OPTIONS(request: NextRequest) {
  * Can this person do this with this bot? (#426)
  *
  * Auth: BOT_SERVICE_TOKEN
- * Body: { action: "chat" | "dm" | "call" | "summon" | "change" | "deleteOrSend", person: { signedIn: boolean, identifier?: string, chatId?: string } }
+ * Body: { action: "chat" | "dm" | "call" | "summon" | "change" | "deleteOrSend", person: { signedIn: boolean, identifier?: string, chatId?: string }, roomUrl?: string }
  * Response: { allowed: boolean, code: "allowed" | "sign_in_required" | "not_allowed" | "no_room_access" | "unknown_person"
  *   | "shared_chat_id" | "banned", reason: string | null, person?: { uuid: string, name: string | null } }
  *
@@ -60,6 +62,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       botId: id,
       action: parsed.data.action as (typeof BOT_ACTIONS)[number],
       person: parsed.data.person,
+      roomUrl: parsed.data.roomUrl ?? null,
     });
     if (!answer) {
       return NextResponse.json({ error: 'Bot not found' }, { status: 404, headers: corsHeaders(request) });
