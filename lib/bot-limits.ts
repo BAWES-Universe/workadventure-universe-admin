@@ -106,13 +106,18 @@ export class AppsFull extends Error {
   }
 }
 
+/** Holds the bot's row until the caller's transaction ends: everything that changes which Apps a bot has takes it first, so they go one at a time. */
+export async function lockBotForApps(tx: Prisma.TransactionClient, botId: string): Promise<void> {
+  await tx.$queryRaw`SELECT "id" FROM "bots" WHERE "id" = ${botId} FOR UPDATE`;
+}
+
 /**
  * Makes room for one more App on a bot, inside the caller's transaction, or throws AppsFull. The bot's row is held while the
  * count is taken, so two Apps added at the same moment, by hand or lent, cannot both slip in past the limit.
  */
 export async function claimAppSlot(tx: Prisma.TransactionClient, botId: string): Promise<void> {
   const max = await maxAppsPerBot();
-  await tx.$queryRaw`SELECT "id" FROM "bots" WHERE "id" = ${botId} FOR UPDATE`;
+  await lockBotForApps(tx, botId);
   if ((await tx.botMcpServer.count({ where: { botId } })) >= max) throw new AppsFull(max);
 }
 
