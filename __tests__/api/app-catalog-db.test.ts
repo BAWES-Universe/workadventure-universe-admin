@@ -185,6 +185,27 @@ run('the list of apps to connect, in a real database', () => {
     expect(await prisma.appConnection.count({ where: { id } })).toBe(1);
   });
 
+  it('lets go of the key when an entry is removed, so a new entry with the same key is a different app for everyone', async () => {
+    const first = await (await add(entry('gmail'))).json();
+    mockUser.current = { id: sara };
+    const { id } = await (await connectApp(request('/api/me/apps', { method: 'POST', body: { catalogKey: key('gmail') } }))).json();
+    asBoss();
+    expect((await adminRemove(request(`/api/admin/app-catalog/${first.app.id}`, { method: 'DELETE' }), params({ id: first.app.id }))).status).toBe(204);
+    // Theirs, still working, no longer tied to the entry
+    expect(await prisma.appConnection.findUniqueOrThrow({ where: { id } })).toMatchObject({ ownerId: sara, catalogKey: null, source: 'listed' });
+    // A new entry with the same key: not connected yet, and Connect makes a second, new connection
+    expect((await add(entry('gmail', { serverUrl: 'https://gmail-new.example.com/mcp' }))).status).toBe(201);
+    mockUser.current = { id: sara };
+    const rows = (await (await catalog(request(`/api/me/apps/catalog?q=${key('gmail')}`))).json()).apps as { key: string; connectionId: string | null }[];
+    expect(rows.find((row) => row.key === key('gmail'))?.connectionId).toBeNull();
+    const second = await connectApp(request('/api/me/apps', { method: 'POST', body: { catalogKey: key('gmail') } }));
+    expect(second.status).toBe(201);
+    const secondId = (await second.json()).id as string;
+    expect(secondId).not.toBe(id);
+    expect(await prisma.appConnection.findUniqueOrThrow({ where: { id: secondId } })).toMatchObject({ catalogKey: key('gmail'), serverUrl: 'https://gmail-new.example.com/mcp' });
+    expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(2);
+  });
+
   it('lets a person disconnect a listed app, which then shows as not connected and can be connected again', async () => {
     await add(entry('gmail'));
     mockUser.current = { id: sara };

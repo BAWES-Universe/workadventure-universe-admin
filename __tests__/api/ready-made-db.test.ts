@@ -12,7 +12,7 @@ jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: (email: string | null) => 
 import { prisma } from '@/lib/db';
 import { setAdapterForTests, type ReadyMadeAdapter } from '@/lib/app-adapter';
 import { saveReadyMadeApps } from '@/lib/app-adapter/settings';
-import { POST as connectReadyMadeApp } from '@/app/api/me/apps/ready-made/route';
+import { GET as listReadyMade, POST as connectReadyMadeApp } from '@/app/api/me/apps/ready-made/route';
 import { GET as adminGet, PUT as adminPut } from '@/app/api/admin/ready-made-apps/route';
 import { POST as useApp } from '@/app/api/ready-made/use/route';
 import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
@@ -65,7 +65,6 @@ run('ready-made apps through the adapter, in a real database', () => {
     await prisma.meterEvent.deleteMany({ where: { personId: { in: [sara, omar] } } });
     await prisma.appConnection.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
     await prisma.appSetting.deleteMany({ where: { key: 'ready-made-apps' } });
-    await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
   });
   afterAll(async () => {
     if (envBefore.service === undefined) delete process.env.BOT_SERVICE_TOKEN; else process.env.BOT_SERVICE_TOKEN = envBefore.service;
@@ -110,7 +109,10 @@ run('ready-made apps through the adapter, in a real database', () => {
     mockUser.current = { id: boss, email: 'boss@example.test' };
     const put = await adminPut(request('/api/admin/ready-made-apps', { method: 'PUT', body: { apps: { [KEY]: { name: 'Gmail', authConfigId: 'ac_1' } } } }));
     expect(put.status).toBe(200);
-    expect((await (await adminGet(request('/api/admin/ready-made-apps'))).json()).apps).toEqual([{ key: KEY, name: 'Gmail', authConfigId: 'ac_1', enabled: true }]);
+    const apps = (await (await adminGet(request('/api/admin/ready-made-apps'))).json()).apps as { key: string }[];
+    expect(apps.find((app) => app.key === KEY)).toEqual({ key: KEY, name: 'Gmail', authConfigId: 'ac_1', enabled: true });
+    // The built-in apps are there with nothing set, each on and with the provider's own sign-in setup
+    expect(apps.find((app) => app.key === 'gmail')).toEqual({ key: 'gmail', name: 'Gmail', authConfigId: null, enabled: true });
     const bad = await adminPut(request('/api/admin/ready-made-apps', { method: 'PUT', body: { apps: { 'Not A Key': { name: 'x', authConfigId: 'y' } } } }));
     expect(bad.status).toBe(400);
   });
@@ -182,6 +184,52 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect((await readConnection(made.id, sara))?.connected).toBe(false);
   });
 
+  it('works with nothing saved: a built-in app connects, and the person sees the list with their own connection marked', async () => {
+    const adapter = fake();
+    setAdapterForTests(adapter);
+    asSara();
+    const before = (await (await listReadyMade(request('/api/me/apps/ready-made'))).json()).apps as { key: string; name: string; connectionId: string | null }[];
+    expect(before.find((app) => app.key === 'gmail')).toEqual({ key: 'gmail', name: 'Gmail', connectionId: null });
+    expect(Object.keys(before[0]).sort()).toEqual(['connectionId', 'key', 'name']);
+    const made = await (await connectReadyMadeApp(request('/api/me/apps/ready-made', { method: 'POST', body: { key: 'gmail' } }))).json();
+    expect(made.redirectUrl).toBeDefined();
+    const after = (await (await listReadyMade(request('/api/me/apps/ready-made'))).json()).apps as { key: string; connectionId: string | null }[];
+    expect(after.find((app) => app.key === 'gmail')?.connectionId).toBe(made.id);
+    // Off with no key: the list is not there either
+    setAdapterForTests(null);
+    expect((await listReadyMade(request('/api/me/apps/ready-made'))).status).toBe(404);
+  });
+
+  it('a super admin can turn a built-in app off and back to its built-in form, never has to', async () => {
+    setAdapterForTests(fake());
+    await saveReadyMadeApps({ apps: { gmail: { enabled: false } } }, boss);
+    asSara();
+    expect((await connectReadyMadeApp(request('/api/me/apps/ready-made', { method: 'POST', body: { key: 'gmail' } }))).status).toBe(404);
+    await saveReadyMadeApps({ apps: { gmail: null } }, boss);
+    expect((await connectReadyMadeApp(request('/api/me/apps/ready-made', { method: 'POST', body: { key: 'gmail' } }))).status).toBe(201);
+  });
+
+  it('restarts a sign-in that was lost after it had been confirmed, and reads connected again only when the provider confirms the new one', async () => {
+    const adapter = fake();
+    adapter.startConnect
+      .mockResolvedValueOnce({ redirectUrl: 'https://connect.example/one', providerAccountId: `ca_one_${tag}`, expiresAt: null })
+      .mockResolvedValueOnce({ redirectUrl: 'https://connect.example/two', providerAccountId: `ca_two_${tag}`, expiresAt: null });
+    setAdapterForTests(adapter);
+    await list();
+    asSara();
+    const first = await (await connect()).json();
+    expect((await listConnections(sara))[0].connected).toBe(true);
+    await prisma.appConnection.update({ where: { id: first.id }, data: { signInLostAt: new Date(), signInLostStatus: 401 } });
+    expect((await readConnection(first.id, sara))?.connected).toBe(false);
+    adapter.connectionStatus.mockResolvedValue('pending');
+    const again = await (await connect()).json();
+    expect(again).toEqual({ id: first.id, redirectUrl: 'https://connect.example/two' });
+    expect(await prisma.appConnection.findUniqueOrThrow({ where: { id: first.id } })).toMatchObject({ providerAccountId: `ca_two_${tag}`, providerConfirmedAt: null, signInLostAt: null, signInLostStatus: null });
+    expect((await readConnection(first.id, sara))?.connected).toBe(false);
+    adapter.connectionStatus.mockResolvedValue('active');
+    expect((await readConnection(first.id, sara))?.connected).toBe(true);
+  });
+
   it('refuses an app that is not on the list or is turned off', async () => {
     setAdapterForTests(fake());
     asSara();
@@ -208,7 +256,7 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect(ownVerdict.readyMade).toBeUndefined();
   });
 
-  it('writes the meter before the provider is called, once for each call id, paid by the universe with the price unknown while no price is set', async () => {
+  it('writes the meter before the provider is called, once for each call id, paid by the universe, at the built-in estimate while no price is saved', async () => {
     const { adapter, serverId } = await connectedAndGranted();
     let writtenWhenCalled = 0;
     adapter.use.mockImplementationOnce(async () => {
@@ -222,17 +270,25 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect(writtenWhenCalled).toBe(1);
     const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ eventId: `app:${callId}`, payerKind: 'universe', route: 'app', unit: 'use', basis: 'unknown', costMicros: null, botId: saraBrick });
+    expect(events[0]).toMatchObject({ eventId: `app:${callId}`, payerKind: 'universe', route: 'app', unit: 'use', basis: 'estimated', costMicros: BigInt(5000), botId: saraBrick });
     expect(events[0].detail).toEqual({ toolkit: KEY, tool: 'GMAIL_FETCH_EMAILS' });
   });
 
   it('writes an estimate from the super admin’s own price once there is one', async () => {
     const { serverId } = await connectedAndGranted();
-    await saveMeterSettings({ appUseMicros: 2500 }, boss);
-    expect((await useIt({ serverId })).status).toBe(200);
-    const event = await prisma.meterEvent.findFirstOrThrow({ where: { personId: sara, kind: 'app_use' } });
-    expect(event).toMatchObject({ basis: 'estimated', costMicros: BigInt(2500) });
+    // The meter setting is shared with other suites: put back what was there, never delete it
+    const before = await prisma.appSetting.findUnique({ where: { key: 'meter' } });
+    try {
+      await saveMeterSettings({ appUseMicros: 2500 }, boss);
+      expect((await useIt({ serverId })).status).toBe(200);
+      const event = await prisma.meterEvent.findFirstOrThrow({ where: { personId: sara, kind: 'app_use' } });
+      expect(event).toMatchObject({ basis: 'estimated', costMicros: BigInt(2500) });
+    } finally {
+      if (before) await prisma.appSetting.update({ where: { key: 'meter' }, data: { value: before.value as never } });
+      else await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
+    }
   });
+
 
   it('never runs one call id twice: a retry is told it was already asked, and the meter has one event', async () => {
     const { adapter, serverId } = await connectedAndGranted();

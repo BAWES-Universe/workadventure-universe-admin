@@ -4,7 +4,7 @@ import { readReadyMadeApps } from '@/lib/app-adapter/settings';
 import { createConnection } from '@/lib/app-connections';
 import { confirmReadyMade } from '@/lib/app-adapter/confirm';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
-import { personKeyOf } from '@/lib/meter-values';
+import { APP_USE_MICROS_DEFAULT, personKeyOf } from '@/lib/meter-values';
 
 /**
  * Ready-made apps through the adapter (game #2001, step 8). Everything here answers "not there" while the adapter is off, which
@@ -12,6 +12,17 @@ import { personKeyOf } from '@/lib/meter-values';
  *
  * Which apps, and the adapter's sign-in setup for each, are a super admin setting (settings.ts), never in code.
  */
+
+/** What a person may know of the ready-made apps: the name, and their own connection when they have one. Empty while the adapter is off. */
+export async function listReadyMadeForPerson(ownerId: string): Promise<{ key: string; name: string; connectionId: string | null }[]> {
+  if (!getAdapter()) return [];
+  const [apps, mine] = await Promise.all([
+    readReadyMadeApps(),
+    prisma.appConnection.findMany({ where: { ownerId, providerToolkit: { not: null } }, select: { id: true, providerToolkit: true } }),
+  ]);
+  const connectionOf = new Map(mine.map((row) => [row.providerToolkit, row.id]));
+  return apps.filter((app) => app.enabled).map((app) => ({ key: app.key, name: app.name, connectionId: connectionOf.get(app.key) ?? null }));
+}
 
 /**
  * "Connect" on a ready-made app: starts the person's sign-in on the provider's own page and makes the connection (theirs alone,
@@ -51,15 +62,21 @@ export async function connectReadyMade(ownerId: string, key: string, returnUrl: 
 
 async function restartIfNotSignedIn(
   ownerId: string,
-  existing: { id: string; source: string; providerAccountId: string | null; providerConfirmedAt: Date | null },
+  existing: { id: string; source: string; providerAccountId: string | null; providerConfirmedAt: Date | null; signInLostAt: Date | null },
   key: string,
   returnUrl: string,
   adapter: NonNullable<ReturnType<typeof getAdapter>>,
 ): Promise<{ id: string; redirectUrl: string | null; created: false }> {
-  if (await confirmReadyMade(existing)) return { id: existing.id, redirectUrl: null, created: false };
-  // Not signed in yet: a new sign-in replaces the one that was left, so a repeat tap always gets a page that works
+  // Signed in and not lost: nothing to do. A sign-in the bot server saw lost (`signInLostAt`) is asked for again even though it was
+  // once confirmed, otherwise it could never be recovered.
+  if (!existing.signInLostAt && (await confirmReadyMade(existing))) return { id: existing.id, redirectUrl: null, created: false };
+  // Not signed in yet, or lost: a new sign-in replaces the old one, so a repeat tap always gets a page that works. What was seen
+  // lost is cleared with it, and the app reads connected again only when the provider confirms the new sign-in.
   const start = await adapter.startConnect({ person: ownerId, toolkit: key, returnUrl });
-  await prisma.appConnection.update({ where: { id: existing.id }, data: { providerAccountId: start.providerAccountId, providerConfirmedAt: null } });
+  await prisma.appConnection.update({
+    where: { id: existing.id },
+    data: { providerAccountId: start.providerAccountId, providerConfirmedAt: null, signInLostAt: null, signInLostStatus: null, noAnswerAt: null },
+  });
   return { id: existing.id, redirectUrl: start.redirectUrl, created: false };
 }
 
@@ -71,7 +88,7 @@ export type ReadyMadeUseOutcome =
  * One use of a ready-made app for the person who owns it. The meter is written FIRST, under an event id taken from the call's
  * own id, so a retry never counts twice and never runs twice: a call id seen before answers `already_asked` and the provider is
  * not called again (an unclear outcome is looked up by the caller, never repeated). Paid by the universe: the cost is the super
- * admin's setting while it has one (estimated), unknown while empty (never a made-up price). Nothing is refused for the price.
+ * admin's setting while it has one, else the built-in estimate (always `estimated`). Nothing is refused for the price.
  */
 export async function useReadyMade(input: { botId: string; connectionId: string; ownerId: string; tool: string; arguments: Record<string, unknown>; callId: string }): Promise<ReadyMadeUseOutcome> {
   const adapter = getAdapter();
@@ -84,7 +101,8 @@ export async function useReadyMade(input: { botId: string; connectionId: string;
   if (!bot || bot.roomId !== null || bot.ownerId !== input.ownerId) return { status: 'not_owner' };
 
   const settings = await getMeterSettings();
-  const cost = settings.appUseMicros;
+  // A saved price wins; with none, the built-in estimate: a use is never written free or with no cost
+  const cost = settings.appUseMicros ?? APP_USE_MICROS_DEFAULT;
   const written = await recordMeterEvent({
     eventId: `app:${input.callId}`,
     kind: 'app_use',
@@ -101,7 +119,7 @@ export async function useReadyMade(input: { botId: string; connectionId: string;
     quantity: 1,
     unit: 'use',
     costMicros: cost,
-    basis: cost === null ? 'unknown' : 'estimated',
+    basis: 'estimated',
     sourceRef: null,
     // What was asked is the person's: only which app and which tool, never the arguments
     detail: { toolkit: connection.providerToolkit, tool: input.tool },

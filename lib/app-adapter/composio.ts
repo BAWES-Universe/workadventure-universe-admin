@@ -9,11 +9,15 @@ import { AdapterError, type AppLink, type ConnectStart, type ReadyMadeAdapter, t
  *    The auth config is one per app, kept in a super admin setting (never in code) and passed in as the toolkit's config id.
  *  - Status: GET /connected_accounts/{id} -> { status: ACTIVE | INITIALIZING | INITIATED | FAILED | EXPIRED | INACTIVE }. Only ACTIVE reads as connected.
  *  - Use: POST /tools/execute/{tool_slug} { user_id, connected_account_id, arguments } -> { data, successful, error, log_id }.
- *  - Link: POST /tool_router/session { user_id, toolkits, workbench: { enable: false } } -> { session_id, mcp: { url } }. The docs show no
+ *  - Link: POST /tool_router/session { user_id, toolkits: { enable: [...] }, workbench: { enable: true } } -> { session_id, mcp: { url } }. The docs show no
  *    headers for that link, so none are sent or stored here; if one is needed it is found out on the first real test, with Khalid's OK.
  *
- * The provider's sandbox (its "workbench" that runs code) is switched off explicitly on every session, never left to its default,
- * which is on.
+ *  - Sign-in setup: with no auth config chosen by a super admin, the provider's own managed one for the app is used: found with
+ *    GET /auth_configs?toolkit_slug&is_composio_managed, or made with POST /auth_configs { toolkit: { slug } } (its default is
+ *    Composio-managed auth), so nobody registers anything with Google or others and nothing needs setting up.
+ *
+ * The provider's sandbox (its "workbench", which runs code on the person's own data) is ON in every session (the provider's default,
+ * stated explicitly); each run is counted like an app step by whoever sends it (the bot server).
  */
 
 const BASE = 'https://backend.composio.dev/api/v3.1';
@@ -22,10 +26,18 @@ type Fetch = typeof fetch;
 
 export interface ComposioOptions {
   apiKey: string;
-  /** The provider's auth config id for each app, from a super admin setting. */
+  /** An auth config id a super admin chose for an app; null for none, which means the provider's managed one. */
   authConfigFor: (toolkit: string) => Promise<string | null>;
   fetchImpl?: Fetch;
   baseUrl?: string;
+}
+
+/** The managed auth config found or made for each app, kept for the life of the process. */
+const managedAuthConfigs = new Map<string, string>();
+
+/** For tests. */
+export function forgetManagedAuthConfigs(): void {
+  managedAuthConfigs.clear();
 }
 
 export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapter {
@@ -46,10 +58,25 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
 
   const str = (value: unknown): string | null => (typeof value === 'string' && value ? value : null);
 
+  async function managedAuthConfig(toolkit: string): Promise<string> {
+    const known = managedAuthConfigs.get(toolkit);
+    if (known) return known;
+    const found = await call(`/auth_configs?toolkit_slug=${encodeURIComponent(toolkit)}&is_composio_managed=true&limit=1`, null);
+    const item = Array.isArray(found.items) ? (found.items[0] as Record<string, unknown> | undefined) : undefined;
+    let id = str(item?.id);
+    if (!id) {
+      const made = await call('/auth_configs', { toolkit: { slug: toolkit } });
+      const config = made.auth_config && typeof made.auth_config === 'object' ? (made.auth_config as Record<string, unknown>) : {};
+      id = str(config.id);
+    }
+    if (!id) throw new AdapterError('provider', `Provider has no sign-in setup for ${toolkit}`);
+    managedAuthConfigs.set(toolkit, id);
+    return id;
+  }
+
   return {
     async startConnect({ person, toolkit, returnUrl }): Promise<ConnectStart> {
-      const authConfigId = await options.authConfigFor(toolkit);
-      if (!authConfigId) throw new AdapterError('provider', `No sign-in set up for ${toolkit}`);
+      const authConfigId = (await options.authConfigFor(toolkit)) ?? (await managedAuthConfig(toolkit));
       const json = await call('/connected_accounts/link', { auth_config_id: authConfigId, user_id: person, callback_url: returnUrl });
       const redirectUrl = str(json.redirect_url);
       const providerAccountId = str(json.connected_account_id);
@@ -66,7 +93,7 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
     },
 
     async appLink({ person, toolkits }): Promise<AppLink> {
-      const json = await call('/tool_router/session', { user_id: person, toolkits, workbench: { enable: false } });
+      const json = await call('/tool_router/session', { user_id: person, toolkits: { enable: toolkits }, workbench: { enable: true } });
       const mcp = json.mcp && typeof json.mcp === 'object' ? (json.mcp as Record<string, unknown>) : {};
       const url = str(mcp.url);
       if (!url) throw new AdapterError('provider', 'Provider sent no app link');

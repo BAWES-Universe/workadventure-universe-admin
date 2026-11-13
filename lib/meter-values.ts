@@ -174,13 +174,19 @@ export interface MeterSettings {
   atOnceMember: number | null;
   /** Jobs going at once, everyone together. */
   atOnceAll: number | null;
-  /** What one use of a ready-made app costs us (the adapter's own price). Empty until known: a use is then written with an unknown cost, never 0. Not needed to open anything. */
+  /** What one use of a ready-made app costs us (the adapter's own price). Empty means the built-in estimate (APP_USE_MICROS_DEFAULT) is used. Not needed to open anything. */
   appUseMicros: number | null;
   /** How long room is held before a job must renew it, in minutes. */
   renewMinutes: number;
 }
 
 export const METER_RENEW_MINUTES_RECOMMENDED = 10;
+
+/**
+ * What one use of a ready-made app is counted at while no price is saved: the provider's published price for a call beyond its
+ * included ones ($0.005 a call, composio.dev/pricing, read 13 Nov 2026). It is an estimate, written as such; a saved price replaces it.
+ */
+export const APP_USE_MICROS_DEFAULT = 5_000;
 
 export const METER_SETTINGS_EMPTY: MeterSettings = {
   memberAllowanceMicros: null,
