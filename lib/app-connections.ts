@@ -137,8 +137,8 @@ export const addConnectionSchema = createMcpServerSchema
 type NewConnection = Omit<z.infer<typeof addConnectionSchema>, 'source'> & { source: 'link' | 'listed' | 'ready_made'; catalogKey?: string | null; providerToolkit?: string | null; providerAccountId?: string | null };
 
 /** The person connects an app. The way in is stored encrypted and never read back by a screen. */
-export async function createConnection(ownerId: string, input: NewConnection): Promise<AppConnection> {
-  return prisma.appConnection.create({
+export async function createConnection(ownerId: string, input: NewConnection, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<AppConnection> {
+  return db.appConnection.create({
     data: {
       ownerId,
       connectedById: ownerId,
