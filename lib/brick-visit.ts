@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getBrickLimits } from '@/lib/bot-limits';
 import { mayReadRoomBots, whoMayReadRoomBots } from '@/lib/bot-room-access';
+import { canManageBots } from '@/lib/bot-permissions';
 import { ownsBrick } from '@/lib/brick';
 import { parsePlayUri } from '@/lib/utils';
 
@@ -134,12 +135,13 @@ async function liveVisit(userId: string, now: Date) {
 
 export type StartAnswer =
   | { ok: true; state: VisitState }
-  | { ok: false; reason: 'not_found' | 'off' | 'no_place' | 'not_taken'; place?: string };
+  | { ok: false; reason: 'not_found' | 'off' | 'no_place' | 'not_taken' | 'lives_in'; place?: string };
 
 /**
  * The owner brings a Brick along, to the room they are in. Not found: it is not theirs, it waits deleted, or it is a room
- * bot. Off: its switch is off. Not taken: this place does not take visiting Bricks. It swaps whichever Brick was
- * walking with them, in one statement, so two taps never leave two.
+ * bot. Off: its switch is off. Not taken: this place does not take visiting Bricks. Lives in: it has a home in a room
+ * (`place` is that room's name), so it cannot also walk beside its owner: one place at a time; taking it out of its room
+ * frees it. It swaps whichever Brick was walking with them, in one statement, so two taps never leave two.
  */
 export async function startVisit(brickId: string, ownerId: string, roomUrl: string, now: Date = new Date()): Promise<StartAnswer> {
   const brick = await prisma.bot.findUnique({ where: { id: brickId }, select: { id: true, roomId: true, ownerId: true, deletedAt: true, enabled: true } });
@@ -148,14 +150,29 @@ export async function startVisit(brickId: string, ownerId: string, roomUrl: stri
   const place = await placeOfRoomUrl(roomUrl);
   if (!place || !(await mayReadRoomBots(place.room, ownerId))) return { ok: false, reason: 'no_place' };
   if (!place.takesVisits) return { ok: false, reason: 'not_taken', place: place.name };
+  // A home whose placer can no longer manage bots there has already ended (it goes on every read and in the sweep): it does
+  // not keep the Brick from a visit. Asked here, before the transaction, so no second connection is needed inside it.
+  const standing = await prisma.brickHome.findUnique({ where: { botId: brickId }, select: { roomId: true, placedById: true } });
+  if (standing && !(await canManageBots(standing.placedById, standing.roomId))) {
+    await prisma.brickHome.deleteMany({ where: { botId: brickId, placedById: standing.placedById, roomId: standing.roomId } });
+  }
   // Two taps together can both clear the old row before either adds the new one; the one that loses the race to add it
   // tries once more, so it ends as the one visit the person has instead of failing
   for (let attempt = 0; ; attempt++) {
     try {
-      await prisma.$transaction(async (tx) => {
+      const livesIn = await prisma.$transaction(async (tx) => {
+        // The Brick's row is held while this decides, as placing it in a room does, so a home and a visit are never both
+        // written for it by two requests at once; a Brick deleted a moment ago is not visited
+        const held = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT "id" FROM "bots" WHERE "id" = ${brickId} AND "deleted_at" IS NULL AND "room_id" IS NULL FOR UPDATE`);
+        if (held.length === 0) return { gone: true as const };
+        const home = await tx.brickHome.findUnique({ where: { botId: brickId }, select: { room: { select: { name: true } } } });
+        if (home) return { room: home.room.name };
         await tx.brickVisit.deleteMany({ where: { OR: [{ userId: ownerId }, { botId: brickId }] } });
         await tx.brickVisit.create({ data: { userId: ownerId, botId: brickId, roomId: place.roomId, startedAt: now, seenAt: now } });
+        return null;
       });
+      if (livesIn && 'gone' in livesIn) return { ok: false, reason: 'not_found' };
+      if (livesIn) return { ok: false, reason: 'lives_in', place: livesIn.room };
       break;
     } catch (error) {
       if (attempt >= 2 || !(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') throw error;
@@ -210,31 +227,48 @@ export async function keepVisitAlive(botId: string, ownerUuid: string, roomUrl: 
 export interface BrickHere {
   botId: string;
   ownerId: string;
-  kind: 'visiting';
+  /** `home`: its owner gave it a place in the room (game #2005, "Add one of your Bricks"). `visiting`: it walks beside its owner. */
+  kind: 'visiting' | 'home';
   roomId: string;
   universeId: string;
 }
 
 /**
- * Where a Brick is right now, for the people who are not its owner: the room a live visit was last seen in, when that
- * room's universe takes visits. Null: it is nowhere other people can talk to it (at home with its owner's chats only).
- * `roomUrl`, when the caller knows the room the asker is in, must be that room: a Brick is never reached from a room
- * it is not in.
+ * Where a Brick is right now, for the people who are not its owner: the room it has as a home, and the room a live visit
+ * was last seen in (when that room's universe takes visits). Null: it is nowhere other people can talk to it (it is at
+ * home with its owner's chats only). `roomUrl`, when the caller knows the room the asker is in, must be one of those: a
+ * Brick is never reached from a room it is not in. Without it, the room it has as a home comes first, then its visit.
+ *
+ * A home holds only while the person who placed it can still manage bots in that room; one that no longer does is not
+ * a place (and is removed by the next sweep). A Brick that is off or waits deleted is nowhere. A home does not depend on
+ * the Visiting Bricks switch: that switch is about visits.
  */
 export async function whereIsBrick(botId: string, roomUrl: string | null, now: Date = new Date()): Promise<(BrickHere & { place: Omit<Place, 'roomUrl'> }) | null> {
-  const visit = await prisma.brickVisit.findUnique({ where: { botId }, include: { bot: { select: { enabled: true, deletedAt: true, roomId: true } } } });
-  if (!visit || !visit.roomId || !visit.bot.enabled || visit.bot.deletedAt !== null || visit.bot.roomId !== null) return null;
-  if (now.getTime() - visit.seenAt.getTime() > (await visitEndsAfterMs())) return null;
-  const place = await placeOfRoomId(visit.roomId);
-  if (!place || !place.takesVisits) return null;
-  // Its owner's access is checked now, not only when the visit began: where they may no longer open the room, the Brick is
-  // nowhere other people can reach it
-  if (!(await mayReadRoomBots(place.room, visit.userId))) return null;
+  const [home, visit] = await Promise.all([
+    prisma.brickHome.findUnique({ where: { botId }, include: { bot: { select: { enabled: true, deletedAt: true, roomId: true, ownerId: true } } } }),
+    prisma.brickVisit.findUnique({ where: { botId }, include: { bot: { select: { enabled: true, deletedAt: true, roomId: true } } } }),
+  ]);
+  const candidates: { kind: BrickHere['kind']; roomId: string; ownerId: string }[] = [];
+  if (home && home.bot.enabled && home.bot.deletedAt === null && home.bot.roomId === null && home.bot.ownerId === home.placedById && (await canManageBots(home.placedById, home.roomId))) {
+    candidates.push({ kind: 'home', roomId: home.roomId, ownerId: home.placedById });
+  }
+  if (visit && visit.roomId && visit.bot.enabled && visit.bot.deletedAt === null && visit.bot.roomId === null && now.getTime() - visit.seenAt.getTime() <= (await visitEndsAfterMs())) {
+    const place = await placeOfRoomId(visit.roomId);
+    // Its owner's access is checked now, not only when the visit began: where they may no longer open the room, the Brick is
+    // nowhere other people can reach it
+    if (place?.takesVisits && (await mayReadRoomBots(place.room, visit.userId))) candidates.push({ kind: 'visiting', roomId: visit.roomId, ownerId: visit.userId });
+  }
+  if (candidates.length === 0) return null;
+  let chosen = candidates[0];
   if (roomUrl) {
     const asked = await placeOfRoomUrl(roomUrl);
-    if (!asked || asked.roomId !== visit.roomId) return null;
+    const match = asked ? candidates.find((one) => one.roomId === asked.roomId) : undefined;
+    if (!match) return null;
+    chosen = match;
   }
-  return { botId, ownerId: visit.userId, kind: 'visiting', roomId: visit.roomId, universeId: place.universeId, place };
+  const place = await placeOfRoomId(chosen.roomId);
+  if (!place) return null;
+  return { botId, ownerId: chosen.ownerId, kind: chosen.kind, roomId: chosen.roomId, universeId: place.universeId, place };
 }
 
 /**

@@ -42,7 +42,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
  * POST /api/bricks/:id/visit  { roomUrl }
  * "Bring along": the owner's Brick walks beside them from the room they are in, in every place that takes visiting
  * Bricks. Whichever Brick walked with them before goes home. Refused with 409 when the place does not take visiting
- * Bricks (`reason: "not_taken"`, with its name) or the Brick is switched off (`reason: "off"`).
+ * Bricks (`reason: "not_taken"`, with its name), the Brick is switched off (`reason: "off"`) or it lives in a room
+ * (`reason: "lives_in"`, with that room's name): one place at a time, so it must be taken out of its room first.
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -55,7 +56,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (answer.ok) return brickJson(request, answer.state);
     if (answer.reason === 'not_found') return brickJson(request, { error: 'Brick not found' }, 404);
     if (answer.reason === 'no_place') return brickJson(request, { error: 'Room not found' }, 404);
-    return brickJson(request, { error: answer.reason === 'off' ? 'Brick is switched off' : 'This place does not take visiting Bricks', reason: answer.reason, place: answer.place ?? null }, 409);
+    const message = answer.reason === 'off' ? 'Brick is switched off' : answer.reason === 'lives_in' ? 'This Brick lives in a room: take it out of there first' : 'This place does not take visiting Bricks';
+    return brickJson(request, { error: message, reason: answer.reason, place: answer.place ?? null }, 409);
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'bricks' } });
     console.error('Error bringing a Brick along:', error);
