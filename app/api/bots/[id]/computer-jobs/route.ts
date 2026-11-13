@@ -13,6 +13,8 @@ const bodySchema = z
     isGuest: z.boolean().optional(),
     title: z.string().trim().min(1).max(200),
     writes: z.boolean().optional(),
+    // The run of a goal or task that asks for the computer (game #2002): a run handed out again finds its job and never starts a second
+    runId: z.string().min(1).max(36).optional(),
   })
   .strict();
 
@@ -43,12 +45,13 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 }
 
 /**
- * POST /api/bots/:id/computer-jobs { userId, isGuest?, title, writes? }
+ * POST /api/bots/:id/computer-jobs { userId, isGuest?, title, writes?, runId? }
  * The bot server starts a job on a Brick's computer (game #2000), after it chose the computer as the way (an app that can do it for
  * less wakes no computer: that choice is made before this call, and this call is the only thing that can make or wake a machine).
  * Only the Brick's owner starts work on it: whoever else is talking to the Brick gets `not_owner`. Answers with the job and why
  * it waits if it does: `turn` (another job is writing), `allowance` (the person's own is used up: "Ask for more"), `busy` or
- * `pool` (wait in line, nothing to ask for), or `{ ok: false, reason }` when it cannot start at all.
+ * `pool` (wait in line, nothing to ask for), or `{ ok: false, reason }` when it cannot start at all. With a `runId` (a run of the
+ * person's goal or task on this Brick) the run starts one job, ever: asked again it answers with that job; another's run is `no_run`.
  *
  * Auth: service token only.
  */
@@ -65,7 +68,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const person = await resolveUsagePerson(parsed.data.userId, parsed.data.isGuest);
     // A guest never has a Brick computer: a Brick belongs to an account
     if (!person.personId) return NextResponse.json({ ok: false, reason: 'not_owner' });
-    const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, writes: parsed.data.writes });
+    const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, writes: parsed.data.writes, runId: parsed.data.runId });
     return NextResponse.json(started.ok ? { ok: true, job: started.job, restoredFrom: started.restoredFrom } : { ok: false, reason: started.reason });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'computer' } });

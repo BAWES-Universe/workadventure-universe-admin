@@ -120,6 +120,8 @@ export interface ModelCallFacts {
   costMicros: number | null;
   tokens?: { input?: number | null; cached?: number | null; cacheWrite?: number | null; output?: number | null; reasoning?: number | null };
   occurredAt: Date;
+  /** The run of a goal or task the call was made for, once checked to be this Brick's: it is in the event's id and detail. */
+  runId?: string | null;
 }
 
 /**
@@ -137,7 +139,12 @@ export async function recordModelCall(facts: ModelCallFacts, db: Db & Pick<typeo
     const route = facts.sentProviderId === UNIVERSE_AI_REF ? 'universe-ai' : paidByOther ? 'own-key' : 'provider';
     return await recordMeterEvent(
       {
-        eventId: facts.clientEventId ? `model:${facts.botId}:${facts.clientEventId}`.slice(0, 255) : `ai-usage:${facts.usageRowId}`,
+        // A call a run made is under the run's own id, so the books can say what one run cost and a retried report is still one event
+        eventId: facts.runId
+          ? `run:${facts.runId}:model:${facts.clientEventId ?? `row-${facts.usageRowId}`}`.slice(0, 255)
+          : facts.clientEventId
+            ? `model:${facts.botId}:${facts.clientEventId}`.slice(0, 255)
+            : `ai-usage:${facts.usageRowId}`,
         kind: 'model_call',
         pool: 'chat',
         occurredAt: facts.occurredAt,
@@ -160,6 +167,7 @@ export async function recordModelCall(facts: ModelCallFacts, db: Db & Pick<typeo
           channel: facts.channel,
           error: facts.error,
           greeting: facts.greeting,
+          ...(facts.runId ? { runId: facts.runId } : {}),
           // Attributed to a Brick's owner because nobody talked to it: today's reply counts have no person for these, so shadow checks leave them out
           byOwner: !facts.talkedPersonId && personId !== null,
           tokensUsed: facts.tokensUsed,

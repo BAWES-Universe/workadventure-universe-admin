@@ -2364,10 +2364,13 @@ model ComputerJob {
   endedAt        DateTime? @map("ended_at")
   // When the sweep last tried a job that waits in line, so Bricks that stay blocked go behind the ones not tried yet
   lastTriedAt    DateTime? @map("last_tried_at")
+  // The run of a goal or task that started it (game #2002), so a run handed out again finds its job and never starts a second
+  runId          String?   @map("run_id") @db.VarChar(36)
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]
 
+  @@unique([botId, runId])
   @@index([botId, status])
   @@index([personId, status])
   @@map("computer_jobs")

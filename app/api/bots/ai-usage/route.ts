@@ -5,6 +5,7 @@ import { UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 import { readUsagePriceFacts } from '@/lib/ai-usage-cost';
 import { readUsageChannel, resolveUsagePerson } from '@/lib/usage-person';
 import { recordModelCall } from '@/lib/meter';
+import { runOfBrick } from '@/lib/brick-items';
 
 /**
  * POST /api/bots/ai-usage
@@ -115,7 +116,7 @@ export async function POST(request: NextRequest) {
       });
     })()
       // The meter's books (game #1998) copy the call from the row that was just counted. They never hold up or fail the report
-      .then((row) =>
+      .then(async (row) =>
         recordModelCall({
           usageRowId: row.id,
           botId,
@@ -136,6 +137,8 @@ export async function POST(request: NextRequest) {
           costMicros: row.costMicros,
           tokens: { input: row.inputTokens, cached: row.cachedTokens, cacheWrite: row.cacheWriteTokens, output: row.outputTokens, reasoning: row.reasoningTokens },
           occurredAt: row.timestamp,
+          // The run the call was made for, in the books only when it is one of this Brick's own (the bot server's word is checked, never trusted)
+          runId: await runOfBrick(botId, row.brickRunId),
         }),
       )
       .catch((err) => {

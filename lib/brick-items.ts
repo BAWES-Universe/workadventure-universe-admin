@@ -1062,3 +1062,15 @@ export async function markHeldTold(itemId: string, waitId: string): Promise<{ ok
 }
 
 export const deliveredSchema = z.object({ eventId: z.string().trim().min(1).max(255) }).strict();
+
+/** The run, when it is one of this Brick's goals' or tasks' runs; null when it is not, or when it cannot be looked up (the books are never a reason a report fails). */
+export async function runOfBrick(botId: string, runId: string | null | undefined): Promise<string | null> {
+  if (!runId) return null;
+  try {
+    const run = await prisma.brickItemRun.findFirst({ where: { id: runId, item: { botId } }, select: { id: true } });
+    return run?.id ?? null;
+  } catch (error) {
+    console.error('[Meter] Could not check a run:', error instanceof Error ? error.message : 'unknown');
+    return null;
+  }
+}
