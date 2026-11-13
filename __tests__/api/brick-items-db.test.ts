@@ -919,7 +919,7 @@ run('goals and tasks, in a real database', () => {
       // A reminder is fixed text with no AI: it still comes
       expect(mineIn(first, reminder.id)).toHaveLength(1);
       expect(first.held.filter((one) => one.userId === gsbea.uuid).map((one) => one.itemId).sort()).toEqual([watch.id, briefing.id].sort());
-      expect(first.held.find((one) => one.itemId === watch.id)).toMatchObject({ kind: 'watch', brickId: gsbea.brickId, resumesAt: WINDOW_ENDS.toISOString() });
+      expect(first.held.find((one) => one.itemId === watch.id)).toMatchObject({ kind: 'watch', brickId: gsbea.brickId, resumesAt: WINDOW_ENDS.toISOString(), timeZone: expect.any(String) });
       expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).toMatchObject({ state: 'on', nextDueAt: WINDOW_ENDS });
       expect(await runsOf(watch.id)).toHaveLength(0);
       // Asked again soon, before anything confirmed it: nothing runs and the same notice is not handed out twice in a row
@@ -931,6 +931,8 @@ run('goals and tasks, in a real database', () => {
       expect(retry.held.filter((one) => one.userId === gsbea.uuid).map((one) => one.itemId).sort()).toEqual([watch.id, briefing.id].sort());
       expect(mineIn(retry, watch.id, briefing.id)).toEqual([]);
       const offered = retry.held.find((one) => one.itemId === watch.id)!;
+      // The resent notice carries the item's time zone too (the retry path reads it again)
+      expect(offered.timeZone).toBe(first.held.find((one) => one.itemId === watch.id)!.timeZone);
       expect(offered.waitId).toBe(first.held.find((one) => one.itemId === watch.id)!.waitId);
       // A confirm for another wait marks nothing; the right one keeps it, and it is not handed out again for this wait
       expect(await markHeldTold(watch.id, new Date(0).toISOString())).toEqual({ ok: true, told: false });
@@ -1212,5 +1214,44 @@ run('goals and tasks, in a real database', () => {
       expect(mineIn(work, watch.id)).toHaveLength(1);
       expect(work.held.filter((one) => one.userId === gsdev.uuid)).toEqual([]);
     });
+  });
+
+  it('hands a bot server only the kinds it can run: a watch or goal it cannot run is never claimed, handed out again, tried or counted as failed', async () => {
+    const kira = await person('kinds-kira');
+    const reminder = await set(kira);
+    const watch = await set(kira, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: { type: 'every', minutes: 60 } });
+    const schedule = await set(kira, { kind: 'schedule', cadence: { type: 'every', minutes: 60 } });
+    const mine = <T extends { itemId: string }>(runs: T[]) => runs.filter((one) => [reminder.id, watch.id, schedule.id].includes(one.itemId));
+    // Asked for reminders only: the reminder is handed out, the watch and the schedule are not even claimed
+    expect(mine(await claimDueRuns(at(HOUR + MIN), undefined, ['reminder'])).map((one) => one.itemId)).toEqual([reminder.id]);
+    expect(await runsOf(watch.id)).toEqual([]);
+    expect(await runsOf(schedule.id)).toEqual([]);
+    expect((await prisma.brickItem.findUniqueOrThrow({ where: { id: watch.id } })).nextDueAt?.toISOString()).toBe(at(HOUR).toISOString());
+    // Asked for nothing: nothing
+    expect(await claimWork(at(HOUR + MIN), undefined, undefined, [])).toEqual({ runs: [], held: [] });
+    // Without kinds, everything that fell due, as before
+    const claimedAll = mine(await claimDueRuns(at(HOUR + MIN)));
+    expect(claimedAll.map((one) => one.itemId).sort()).toEqual([watch.id, schedule.id].sort());
+    // Handed out and never reported, but of a kind this server does not run: its lease passes, and it is not handed out again, not
+    // given a try and not failed (nothing tried it). Another asker that does run it can still be handed it.
+    for (const minutes of [20, 40, 60, 80]) {
+      expect(mine(await claimDueRuns(at(HOUR + minutes * MIN), undefined, ['reminder'])).filter((one) => one.itemId !== reminder.id)).toEqual([]);
+    }
+    expect(await runsOf(schedule.id)).toMatchObject([{ state: 'claimed', attempts: 1 }]);
+    expect((await prisma.brickItem.findUniqueOrThrow({ where: { id: schedule.id } })).failuresInRow).toBe(0);
+    const again = mine(await claimDueRuns(at(HOUR + 90 * MIN), undefined, ['schedule', 'watch'])).filter((one) => claimedAll.some((first) => first.runId === one.runId));
+    expect(again.map((one) => one.runId).sort()).toEqual(claimedAll.map((one) => one.runId).sort());
+  });
+
+  // Last: it claims every run that is due, so tests after it would find theirs already taken
+  it('a claimed run names where Brick speaks to its owner: their Matrix user id, or null when they have none', async () => {
+    const withChat = await person('chatid-yes');
+    const noChat = await person('chatid-none');
+    await prisma.user.update({ where: { id: withChat.id }, data: { matrixChatId: `@chatid-yes-${tag}:matrix.example.test` } });
+    const a = await set(withChat);
+    const b = await set(noChat);
+    const claimed = await claimDueRuns(at(HOUR + MIN));
+    expect(claimed.find((one) => one.itemId === a.id)).toMatchObject({ userId: withChat.uuid, matrixUserId: `@chatid-yes-${tag}:matrix.example.test` });
+    expect(claimed.find((one) => one.itemId === b.id)).toMatchObject({ userId: noChat.uuid, matrixUserId: null });
   });
 });
