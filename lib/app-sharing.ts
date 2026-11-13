@@ -82,7 +82,10 @@ export async function takeBack(ownerId: string, connectionId: string, universeId
   const connection = await prisma.appConnection.findFirst({ where: { id: connectionId, ownerId } });
   if (!connection) return false;
   const bots = await prisma.$transaction(async (tx) => {
-    const lend = await tx.appLend.findUnique({ where: { connectionId_universeId: { connectionId, universeId } }, select: { id: true } });
+    // The lend's row is held first: a bot being let use it at this moment (which holds the same row shared) finishes before the
+    // grants are read, and one that starts after finds the lend gone, so no grant is left without a lend
+    const locked = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_lends" WHERE "connection_id" = ${connectionId} AND "universe_id" = ${universeId} FOR UPDATE`;
+    const lend = locked[0];
     if (!lend) return null;
     const rows = await tx.botMcpServer.findMany({ where: { connectionId, bot: { room: { world: { universeId } } } }, select: { id: true, botId: true } });
     await endApprovalsForServers(tx, rows.map((row) => row.id));
@@ -351,12 +354,18 @@ export async function grantSharedToBot(userId: string, connectionId: string, bot
     if (connection.universeId !== universeId || !(await managesTeamApp(userId, connection))) return null;
   } else {
     if (connection.ownerId !== userId) return null;
-    const lend = await prisma.appLend.findUnique({ where: { connectionId_universeId: { connectionId, universeId } }, select: { id: true } });
-    if (!lend) return null;
   }
   try {
-    return await prisma.botMcpServer.create({
-      data: { botId, connectionId, name: connection.name, serverUrl: '', authType: 'none', connectedById: userId },
+    return await prisma.$transaction(async (tx) => {
+      if (!connection.universeId) {
+        // The lend is held shared while the grant is made, and taking it back holds it for update: one waits for the other, so a
+        // grant is never made after the lend was taken back
+        const lend = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_lends" WHERE "connection_id" = ${connectionId} AND "universe_id" = ${universeId} FOR SHARE`;
+        if (lend.length === 0) return null;
+      }
+      return tx.botMcpServer.create({
+        data: { botId, connectionId, name: connection.name, serverUrl: '', authType: 'none', connectedById: userId },
+      });
     });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return prisma.botMcpServer.findFirst({ where: { botId, connectionId } });

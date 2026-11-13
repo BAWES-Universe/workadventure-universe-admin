@@ -17,6 +17,7 @@ jest.mock('@/lib/mcp/outbound-guard', () => ({
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { encryptApiKey } from '@/lib/encryption';
+import { managerCandidates } from '@/lib/app-sharing';
 import { createConnection, grantToBrick, markConnectionReconnected, checkAppUse } from '@/lib/app-connections';
 import { GET as getApp } from '@/app/api/me/apps/[connectionId]/route';
 import { POST as lend } from '@/app/api/me/apps/[connectionId]/lends/route';
@@ -328,6 +329,36 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
   });
 
   describe('taking it back', () => {
+    it('makes a bot wait for a lend that is being taken back, then refuses it: never a grant without a lend', async () => {
+      const app = await keyApp(sara);
+      as(sara);
+      expect((await lendTo(app.id, { universeId: universeA })).status).toBe(201);
+      let letting: ReturnType<typeof letGuide> | null = null;
+      // The lend is held by a taker that has not committed yet; the bot is let use it meanwhile
+      await prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "app_lends" WHERE "connection_id" = ${app.id} AND "universe_id" = ${universeA} FOR UPDATE`;
+        letting = letGuide(sara, app.id);
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        await tx.appLend.deleteMany({ where: { connectionId: app.id } });
+      });
+      expect((await letting!).status).toBe(404);
+      expect(await prisma.botMcpServer.count({ where: { connectionId: app.id } })).toBe(0);
+    });
+
+    it('leaves no grant behind when a bot is let use the app at the very moment the lend is taken back', async () => {
+      for (let round = 0; round < 6; round += 1) {
+        const app = await keyApp(sara);
+        as(sara);
+        expect((await lendTo(app.id, { universeId: universeA })).status).toBe(201);
+        const letting = letGuide(sara, app.id);
+        const taking = takeBackRoute(request(`/api/me/apps/${app.id}/lends/${universeA}`, { method: 'DELETE' }), params({ connectionId: app.id, universeId: universeA }));
+        await Promise.all([letting, taking]);
+        expect(await prisma.appLend.count({ where: { connectionId: app.id } })).toBe(0);
+        expect(await prisma.botMcpServer.count({ where: { connectionId: app.id } })).toBe(0);
+        await prisma.appConnection.delete({ where: { id: app.id } });
+      }
+    });
+
     it('stops the bot at once, ends its approvals, and lending again does not give it back', async () => {
       const { app, serverId } = await lentAndLet();
       const base = { botId: guide, requesterKey: `sara-${tag}`, conversationKey: 'dm', connectionRef: serverId, toolName: 'search', heading: 'changesThings', toolFingerprint: 'fp', policyRevision: 1 };
@@ -443,6 +474,37 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       await expect(prisma.botMcpServer.create({ data: { botId: farBot, connectionId: id, name: 'Notion', serverUrl: '' } })).rejects.toThrow(/can only be used/);
       // nora manages the bot but not the app
       expect((await letGuide(nora, id)).status).toBe(404);
+    });
+
+    it('offers as new managers exactly the people with Manage bots who are not managers yet, with a fixed number of queries', async () => {
+      const id = (await json(await addTeam(omar))).id as string;
+      // Omar and Sara manage it; Nora can manage bots; a guest with the same role and Lena (nothing) are not offered
+      const guest = await prisma.user.create({ data: { uuid: `guest-${tag}`, email: `guest-${tag}@example.test`, name: 'Guest', isGuest: true } });
+      await prisma.worldMember.create({ data: { worldId: worldA, userId: guest.id, tags: ['admin'] } });
+      const findUnique = jest.spyOn(prisma.user, 'findUnique');
+      const findMany = jest.spyOn(prisma.user, 'findMany');
+      try {
+        const offered = await managerCandidates(sara, id);
+        expect(offered?.map((person) => person.name)).toEqual(['Nora']);
+        // The people are read together: no read of a user for each candidate
+        expect(findUnique).not.toHaveBeenCalled();
+        expect(findMany.mock.calls.filter(([args]) => JSON.stringify(args).includes('"isGuest":false'))).toHaveLength(1);
+        // More candidates do not add queries to the people read
+        for (let index = 0; index < 5; index += 1) {
+          const extra = await prisma.user.create({ data: { uuid: `extra${index}-${tag}`, email: `extra${index}-${tag}@example.test`, name: `Extra ${index}` } });
+          await prisma.worldMember.create({ data: { worldId: worldA, userId: extra.id, tags: ['admin'] } });
+        }
+        findUnique.mockClear();
+        findMany.mockClear();
+        expect((await managerCandidates(sara, id))?.map((person) => person.name).sort()).toEqual(['Extra 0', 'Extra 1', 'Extra 2', 'Extra 3', 'Extra 4', 'Nora']);
+        expect(findUnique).not.toHaveBeenCalled();
+        expect(findMany.mock.calls.filter(([args]) => JSON.stringify(args).includes('"isGuest":false'))).toHaveLength(1);
+      } finally {
+        findUnique.mockRestore();
+        findMany.mockRestore();
+        await prisma.worldMember.deleteMany({ where: { worldId: worldA, user: { uuid: { contains: tag }, NOT: { id: { in: [sara, omar, nora, lena] } } } } });
+        await prisma.user.deleteMany({ where: { uuid: { contains: tag }, id: { notIn: [sara, omar, nora, lena] } } });
+      }
     });
 
     it('is used by the universe’s bot for any visitor, and counted for the universe', async () => {
