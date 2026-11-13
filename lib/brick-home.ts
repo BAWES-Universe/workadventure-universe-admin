@@ -171,16 +171,29 @@ export async function bricksOfRoom(roomUrl: string, viewerId: string): Promise<R
 
 /**
  * Homes whose placer can no longer manage bots in the room go: "if its owner loses access to the universe, it leaves the
- * room". For one room, or for all of them (the sweep, 200 at a time). Returns how many went. The Bricks stay.
+ * room". For one room, or for all of them (the sweep). The sweep reads every home, 200 at a time by Brick id, so a stale
+ * home is never left behind a long run of healthy older ones; each person and room pair is asked once. Returns how many
+ * went. The Bricks stay.
  */
-export async function dropHomesWithoutAccess(roomId?: string): Promise<number> {
-  const homes = await prisma.brickHome.findMany({ where: roomId ? { roomId } : {}, select: { botId: true, roomId: true, placedById: true }, take: 200, orderBy: { updatedAt: 'asc' } });
+export async function dropHomesWithoutAccess(roomId?: string, pageSize = 200): Promise<number> {
   const gone: string[] = [];
   const memo = new Map<string, boolean>();
-  for (const home of homes) {
-    const key = `${home.placedById}:${home.roomId}`;
-    if (!memo.has(key)) memo.set(key, await canManageBots(home.placedById, home.roomId));
-    if (!memo.get(key)) gone.push(home.botId);
+  let after: string | undefined;
+  for (;;) {
+    const homes = await prisma.brickHome.findMany({
+      where: roomId ? { roomId } : {},
+      select: { botId: true, roomId: true, placedById: true },
+      take: pageSize,
+      orderBy: { botId: 'asc' },
+      ...(after ? { cursor: { botId: after }, skip: 1 } : {}),
+    });
+    for (const home of homes) {
+      const key = `${home.placedById}:${home.roomId}`;
+      if (!memo.has(key)) memo.set(key, await canManageBots(home.placedById, home.roomId));
+      if (!memo.get(key)) gone.push(home.botId);
+    }
+    if (homes.length < pageSize) break;
+    after = homes[homes.length - 1].botId;
   }
   if (gone.length === 0) return 0;
   return (await prisma.brickHome.deleteMany({ where: { botId: { in: gone } } })).count;

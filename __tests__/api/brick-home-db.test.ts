@@ -20,6 +20,7 @@ import { createBrick } from '@/lib/brick-create';
 import { deleteBrick } from '@/lib/brick-delete';
 import { checkBotAccess } from '@/lib/bot-access';
 import { startVisit, whereIsBrick } from '@/lib/brick-visit';
+import { dropHomesWithoutAccess } from '@/lib/brick-home';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
 import { GET as getHome, PUT as putHome, DELETE as deleteHome } from '@/app/api/bricks/[id]/home/route';
 import { GET as listRoom } from '@/app/api/brick-homes/route';
@@ -241,6 +242,18 @@ run('a Brick that lives in a room, in a real database', () => {
       expect((await sweep(call('POST', '/api/bricks/sweep', undefined, service))).status).toBe(200);
       expect(await home(brickId)).toBeNull();
       expect(await prisma.bot.findUnique({ where: { id: brickId } })).not.toBeNull();
+    });
+
+    it('the sweep reads every home, page after page, so a stale one is never left behind healthy ones', async () => {
+      const world = await prisma.world.findFirstOrThrow({ where: { universeId: hosted.universeId } });
+      await put(brickId, own.roomUrl);
+      await put(secondBrickId, hosted.roomUrl);
+      await prisma.worldMember.deleteMany({ where: { userId: sara.id, worldId: world.id } });
+      // One home per page: the healthy one may come first, the stale one is still reached
+      expect(await dropHomesWithoutAccess(undefined, 1)).toBe(1);
+      expect(await home(secondBrickId)).toBeNull();
+      expect(await home(brickId)).not.toBeNull();
+      await prisma.worldMember.create({ data: { userId: sara.id, worldId: world.id, tags: ['admin'] } });
     });
 
     it('is withdrawn, with its visit, when its owner deletes the Brick, and Undo does not bring it back', async () => {
