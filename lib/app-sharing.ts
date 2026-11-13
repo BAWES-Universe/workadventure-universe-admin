@@ -346,6 +346,24 @@ export async function availableForBot(userId: string, botId: string): Promise<Av
 }
 
 /**
+ * "Let it use" on a universe app's page: the universe's bots this person manages that do not use the app yet. Null when they do
+ * not manage the app. A bot that is full of apps is still listed: letting it use this one answers with the line that says why.
+ */
+export async function botsToLetUse(userId: string, connectionId: string): Promise<{ id: string; name: string }[] | null> {
+  const connection = await prisma.appConnection.findUnique({ where: { id: connectionId } });
+  if (!connection?.universeId || !(await managesTeamApp(userId, connection))) return null;
+  const bots = await prisma.bot.findMany({
+    where: { deletedAt: null, room: { world: { universeId: connection.universeId } }, mcpServers: { none: { connectionId } } },
+    select: { id: true, name: true, createdById: true, roomId: true, ownerId: true, deletedAt: true },
+    orderBy: { name: 'asc' },
+  });
+  if (bots.length === 0) return [];
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+  const allowed = await Promise.all(bots.map((bot) => canManageBotMcpServers(userId, user?.email ?? null, bot)));
+  return bots.filter((_, index) => allowed[index]).map((bot) => ({ id: bot.id, name: bot.name }));
+}
+
+/**
  * "Let Guide use it": a bot of the universe starts using an app lent there (by the asker) or the universe's own (which the asker
  * manages). The asker must manage the bot. Four headings start at today's defaults, so a change or a send still asks first.
  */

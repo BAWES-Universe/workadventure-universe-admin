@@ -531,6 +531,22 @@ run('lending an app to a universe and a universe’s own apps, in a real databas
       expect((await teamGet(request(`/api/me/team-apps/${id}`), params({ connectionId: id }))).status).toBe(404);
     });
 
+    it('lists on the app’s page the bots of its universe the manager can still let use it, and never another universe’s', async () => {
+      const id = (await json(await addTeam(sara))).id as string;
+      const view = async (person: string) => {
+        as(person);
+        return (await json(await teamGet(request(`/api/me/team-apps/${id}`), params({ connectionId: id })))).canLetUse as { id: string; name: string }[];
+      };
+      expect(await view(sara)).toEqual([{ id: guide, name: 'Guide' }]);
+      // Once it is let use the app, it is no longer offered
+      expect((await letGuide(sara, id)).status).toBe(201);
+      expect(await view(sara)).toEqual([]);
+      // A bot of another universe is never offered, and a person who does not manage the app gets nothing at all
+      expect((await view(sara)).map((bot) => bot.id)).not.toContain(farBot);
+      as(lena);
+      expect((await teamGet(request(`/api/me/team-apps/${id}`), params({ connectionId: id }))).status).toBe(404);
+    });
+
     it('adds a manager who can manage bots there, and refuses anyone else', async () => {
       const id = (await json(await addTeam(omar))).id as string;
       as(omar);
