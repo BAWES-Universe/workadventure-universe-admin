@@ -80,6 +80,14 @@ run('the list of apps to connect, in a real database', () => {
     expect((await add(entry('gmail', { key: 'Bad Key!' }))).status).toBe(400);
     expect((await add(entry('gmail', { authConfig: JSON.stringify({ clientId: 'x' }) }))).status).toBe(400);
     expect((await add(entry('gmail', { authConfig: JSON.stringify({ clientId: 'x', authorizeUrl: 'https://a.example.com/a', tokenUrl: 'https://a.example.com/t', revocationUrl: 'http://10.0.0.1/revoke' }) }))).status).toBe(400);
+    // The sign-in and the client secret go to the revocation address: never over plain http, even to a public host
+    const withSetup = (extra: Record<string, unknown>) => entry('gmail', { authConfig: JSON.stringify({ clientId: 'x', authorizeUrl: 'https://a.example.com/a', tokenUrl: 'https://a.example.com/t', ...extra }) });
+    expect((await add(withSetup({ revocationUrl: 'http://a.example.com/revoke' }))).status).toBe(400);
+    // A wrong type in the setup would break the sign-in for everyone who taps Connect
+    expect((await add(withSetup({ scopes: ['mail'] }))).status).toBe(400);
+    expect((await add(withSetup({ scopes: 5 }))).status).toBe(400);
+    expect((await add(withSetup({ scopesSupported: 'mail' }))).status).toBe(400);
+    expect((await add(withSetup({ scopesSupported: ['mail', 3] }))).status).toBe(400);
     // A token in the sign-in setup would be copied into every person's connection: only setup names are taken
     const setup = { clientId: 'x', authorizeUrl: 'https://a.example.com/a', tokenUrl: 'https://a.example.com/t' };
     for (const extra of [{ accessToken: 'shared' }, { refreshToken: 'shared' }, { expiresAt: 1 }, { reconnectRequired: true }, { anything: 'else' }]) {

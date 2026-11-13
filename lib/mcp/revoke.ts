@@ -17,7 +17,8 @@ export async function revokeAtApp(connection: { authType: string; authConfig: st
     const address = (config as { revocationUrl?: unknown } | null)?.revocationUrl;
     const token = config?.refreshToken || config?.accessToken;
     if (!config || typeof address !== 'string' || !token) return false;
-    // The token and the client secret go there, so it gets the same destination check as the token endpoint, DNS included
+    // The token and the client secret go there, so never over plain http (RFC 7009), and the same destination check as the token endpoint, DNS included
+    if (new URL(address).protocol !== 'https:') return false;
     if (!(await checkOutboundUrl(address)).allowed) return false;
     const body = new URLSearchParams({ token, token_type_hint: config.refreshToken ? 'refresh_token' : 'access_token' });
     if (config.clientId) body.set('client_id', config.clientId);
