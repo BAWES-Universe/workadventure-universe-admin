@@ -9,6 +9,7 @@ import { personKeyOf } from '@/lib/meter-values';
 import { priceCall } from '@/lib/composio-rates';
 import { readComposioBilling } from '@/lib/composio-billing';
 import { truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
+import { getGitHubApp } from '@/lib/github/app';
 
 /**
  * Ready-made apps through the adapter (game #2001, step 8). Everything here answers "not there" while the adapter is off, which
@@ -25,7 +26,9 @@ export async function listReadyMadeForPerson(ownerId: string): Promise<{ key: st
     prisma.appConnection.findMany({ where: { ownerId, providerToolkit: { not: null } }, select: { id: true, providerToolkit: true } }),
   ]);
   const connectionOf = new Map(mine.map((row) => [row.providerToolkit, row.id]));
-  return apps.filter((app) => app.enabled).map((app) => ({ key: app.key, name: app.name, connectionId: connectionOf.get(app.key) ?? null }));
+  // Once Universe's own GitHub App is made, GitHub is connected through it (game #2041), not offered here any more
+  const ownGitHub = !!(await getGitHubApp());
+  return apps.filter((app) => app.enabled && !(ownGitHub && app.key === 'github')).map((app) => ({ key: app.key, name: app.name, connectionId: connectionOf.get(app.key) ?? null }));
 }
 
 /**
@@ -39,6 +42,7 @@ export async function connectReadyMade(ownerId: string, key: string, returnUrl: 
   if (!adapter) return null;
   const app = (await readReadyMadeApps()).find((entry) => entry.key === key && entry.enabled);
   if (!app) return null;
+  if (key === 'github' && (await getGitHubApp())) return null;
   // One person's connect of one app at a time: the lock is taken before looking for an existing connection and held until the
   // connection is saved, so a second tap at the same moment waits, then finds the first one's connection, instead of opening a
   // second account at the provider that nothing would ever use
