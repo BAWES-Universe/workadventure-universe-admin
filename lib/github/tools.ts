@@ -65,7 +65,17 @@ export const GITHUB_TOOLS: ToolDefinition[] = [
       type: 'array',
       minItems: 1,
       maxItems: 100,
-      items: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string', description: 'The whole new text of the file' }, delete: { type: 'boolean' } }, required: ['path'], additionalProperties: false },
+      items: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          content: { type: 'string', description: 'The whole new text of the file' },
+          delete: { type: 'boolean' },
+          executable: { type: 'boolean', description: 'A new script that runs. A file that is already executable stays so without it' },
+        },
+        required: ['path'],
+        additionalProperties: false,
+      },
     },
   }, ['repo', 'branch', 'message', 'files']),
   make('github_create_pull_request', 'Open a pull request', 'A pull request from a branch.', { repo: REPO, head: { type: 'string', description: 'The branch with the changes' }, base: { type: 'string', description: 'Where it goes; the default branch when left out' }, title: { type: 'string' }, body: { type: 'string' }, draft: { type: 'boolean' } }, ['repo', 'head', 'title']),
@@ -372,6 +382,17 @@ async function run(request: Request, name: string, args: Record<string, unknown>
   }
 }
 
+/** The mode of each file in a tree (100644, 100755 or 120000), read once for the whole tree. Empty when it cannot be read. */
+async function modesOf(request: Request, repo: string, treeSha: string): Promise<Map<string, string>> {
+  const answer = await request<{ tree?: { path?: string; mode?: string; type?: string }[] }>(`${repo}/git/trees/${treeSha}?recursive=1`);
+  const modes = new Map<string, string>();
+  if (!answer.ok || !Array.isArray(answer.data.tree)) return modes;
+  for (const entry of answer.data.tree) {
+    if (entry.type === 'blob' && typeof entry.path === 'string' && (entry.mode === '100755' || entry.mode === '120000' || entry.mode === '100644')) modes.set(entry.path, entry.mode);
+  }
+  return modes;
+}
+
 /** One commit that writes (or deletes) files on a branch, through GitHub's git data API. The branch is made when it is new. */
 async function writeFiles(request: Request, args: Record<string, unknown>): Promise<ToolResult> {
   const repo = repoPath(args.repo);
@@ -380,14 +401,14 @@ async function writeFiles(request: Request, args: Record<string, unknown>): Prom
   if (!Array.isArray(args.files) || args.files.length === 0 || args.files.length > 100) throw new ToolError('files is a list of 1 to 100 files.');
   const files = args.files.map((file, index) => {
     if (!file || typeof file !== 'object') throw new ToolError(`File ${index + 1} is not a file.`);
-    const entry = file as { path?: unknown; content?: unknown; delete?: unknown };
+    const entry = file as { path?: unknown; content?: unknown; delete?: unknown; executable?: unknown };
     const path = text(entry.path, `files[${index}].path`) as string;
     const clean = path.replace(/^\/+/, '');
     if (!clean || clean.split('/').some((part) => part === '..' || part === '.' || part === '')) throw new ToolError(`${path} is not a file path.`);
     if (clean === '.git' || clean.startsWith('.git/')) throw new ToolError(`${path} cannot be written.`);
     if (entry.delete === true) return { path: clean, delete: true as const };
     if (typeof entry.content !== 'string') throw new ToolError(`files[${index}] needs content (or delete: true).`);
-    return { path: clean, content: entry.content };
+    return { path: clean, content: entry.content, executable: entry.executable === true };
   });
 
   let parent = await headOf(request, repo, branch);
@@ -400,9 +421,13 @@ async function writeFiles(request: Request, args: Record<string, unknown>): Prom
   const commit = await request<{ tree?: { sha?: string } }>(`${repo}/git/commits/${parent}`);
   if (!commit.ok || !commit.data.tree?.sha) return refusal(commit, 'reading the branch');
 
-  const tree = files.map((file) =>
-    'delete' in file ? { path: file.path, mode: '100644', type: 'blob', sha: null } : { path: file.path, mode: '100644', type: 'blob', content: file.content },
-  );
+  // A file that is already there keeps its mode (a script stays executable, a link stays a link); a new one is a plain file
+  const modes = await modesOf(request, repo, commit.data.tree.sha);
+  const tree = files.map((file) => {
+    const mode = modes.get(file.path) ?? '100644';
+    if ('delete' in file) return { path: file.path, mode, type: 'blob', sha: null };
+    return { path: file.path, mode: file.executable ? '100755' : mode, type: 'blob', content: file.content };
+  });
   const newTree = await request<{ sha?: string }>(`${repo}/git/trees`, { method: 'POST', body: { base_tree: commit.data.tree.sha, tree } });
   if (!newTree.ok || !newTree.data.sha) return refusal(newTree, 'writing the files');
   const newCommit = await request<{ sha?: string; html_url?: string }>(`${repo}/git/commits`, { method: 'POST', body: { message, tree: newTree.data.sha, parents: [parent] } });

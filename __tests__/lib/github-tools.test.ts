@@ -102,22 +102,32 @@ describe('what a Brick can do on GitHub', () => {
     const github = fakeGitHub([
       ['GET', '/repos/o/r/git/ref/heads/feature/x', 200, { object: { sha: 'parent' } }],
       ['GET', '/repos/o/r/git/commits/parent', 200, { tree: { sha: 'tree0' } }],
+      ['GET', '/repos/o/r/git/trees/tree0?recursive=1', 200, { tree: [{ path: 'run.sh', mode: '100755', type: 'blob' }, { path: 'a.txt', mode: '100644', type: 'blob' }] }],
       ['POST', '/repos/o/r/git/trees', 201, { sha: 'tree1' }],
       ['POST', '/repos/o/r/git/commits', 201, { sha: 'c1', html_url: 'https://github.com/o/r/commit/c1' }],
       ['PATCH', '/repos/o/r/git/refs/heads/feature/x', 200, {}],
     ]);
-    const result = await runGitHubTool('t', 'github_write_files', { repo: 'o/r', branch: 'feature/x', message: 'Add', files: [{ path: 'a.txt', content: 'A' }, { path: 'old.txt', delete: true }] }, github.impl);
+    const files = [
+      { path: 'a.txt', content: 'A' },
+      { path: 'old.txt', delete: true },
+      { path: 'run.sh', content: '#!/bin/sh' },
+      { path: 'new.sh', content: '#!/bin/sh', executable: true },
+    ];
+    const result = await runGitHubTool('t', 'github_write_files', { repo: 'o/r', branch: 'feature/x', message: 'Add', files }, github.impl);
     expect(result.isError).toBe(false);
-    expect(JSON.parse(result.text)).toMatchObject({ branch: 'feature/x', commit: 'c1', newBranch: false, files: 2 });
-    expect(github.calls[2].body).toEqual({
+    expect(JSON.parse(result.text)).toMatchObject({ branch: 'feature/x', commit: 'c1', newBranch: false, files: 4 });
+    // An executable that is changed stays executable; a new script is executable when asked
+    expect(github.calls[3].body).toEqual({
       base_tree: 'tree0',
       tree: [
         { path: 'a.txt', mode: '100644', type: 'blob', content: 'A' },
         { path: 'old.txt', mode: '100644', type: 'blob', sha: null },
+        { path: 'run.sh', mode: '100755', type: 'blob', content: '#!/bin/sh' },
+        { path: 'new.sh', mode: '100755', type: 'blob', content: '#!/bin/sh' },
       ],
     });
-    expect(github.calls[3].body).toEqual({ message: 'Add', tree: 'tree1', parents: ['parent'] });
-    expect(github.calls[4].body).toEqual({ sha: 'c1', force: false });
+    expect(github.calls[4].body).toEqual({ message: 'Add', tree: 'tree1', parents: ['parent'] });
+    expect(github.calls[5].body).toEqual({ sha: 'c1', force: false });
   });
 
   it('makes the branch from the default branch when it is new', async () => {
@@ -128,11 +138,12 @@ describe('what a Brick can do on GitHub', () => {
       ['GET', '/repos/o/r/git/commits/m', 200, { tree: { sha: 't' } }],
       ['POST', '/repos/o/r/git/trees', 201, { sha: 't2' }],
       ['POST', '/repos/o/r/git/commits', 201, { sha: 'c' }],
+      ['GET', '/repos/o/r/git/trees/t?recursive=1', 200, { tree: [] }],
       ['POST', '/repos/o/r/git/refs', 201, {}],
     ]);
     const result = await runGitHubTool('t', 'github_write_files', { repo: 'o/r', branch: 'new', message: 'm', files: [{ path: 'x', content: '' }] }, github.impl);
     expect(JSON.parse(result.text)).toMatchObject({ newBranch: true });
-    expect(github.calls[6].body).toEqual({ ref: 'refs/heads/new', sha: 'c' });
+    expect(github.calls[7].body).toEqual({ ref: 'refs/heads/new', sha: 'c' });
   });
 
   it('never writes inside .git or outside the repository', async () => {
