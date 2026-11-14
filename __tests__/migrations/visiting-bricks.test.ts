@@ -1,6 +1,8 @@
 /**
  * "Bringing a Brick along" (game #2005) migration: runs the real migrations on a throwaway database. Every universe that
- * exists today starts with Visiting Bricks OFF and nothing else changes; a universe made from now on starts with it on.
+ * exists at that point starts with Visiting Bricks OFF and nothing else changes; a universe made from then on starts with it on.
+ * (The decision since is ON everywhere: migration 20261114120000 turns it on for every universe; see
+ * visiting-bricks-on-by-default.test.ts. This first migration stays as it ran on dev.)
  * A visit is one row per person for one Brick, and goes with the Brick or the person; a room that goes takes no Brick
  * with it.
  */
