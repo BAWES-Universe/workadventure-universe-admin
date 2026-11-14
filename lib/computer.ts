@@ -568,12 +568,12 @@ export async function reportProgress(jobId: string, progress: { stepDone: number
  * A job that keeps running renews its room each stretch. If the allowance or our room is used up, or the room is gone, it saves
  * and stops safely: what it did stays, nothing new starts and no step is cut in half by this call.
  */
-export async function renewJob(jobId: string, now: Date = new Date()): Promise<{ ok: true } | { ok: false; reason: 'allowance' | 'pool' | 'closed' | 'over' | 'unanswered' }> {
+export async function renewJob(jobId: string, now: Date = new Date()): Promise<{ ok: true; renewInSeconds: number } | { ok: false; reason: 'allowance' | 'pool' | 'closed' | 'over' | 'unanswered' }> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (job && isOver(job.status) && job.endedBy === 'unanswered') return { ok: false, reason: 'unanswered' };
   if (!job || isOver(job.status)) return { ok: false, reason: 'over' };
   // A job in line has no room yet: nothing to renew, and it is not over
-  if (job.status === 'queued') return { ok: true };
+  if (job.status === 'queued') return { ok: true, renewInSeconds: 60 };
   if (!job.reservationKey) return { ok: false, reason: 'over' };
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
@@ -582,7 +582,8 @@ export async function renewJob(jobId: string, now: Date = new Date()): Promise<{
   if (room.ok) {
     // The lease is renewed, so the computer's key is too (one that ended is not brought back)
     await renewJobTokens(jobId, now);
-    return { ok: true };
+    // Each renewal holds more room, so the runner is told how often to ask: well inside the time the room is held, never so often it over-holds
+    return { ok: true, renewInSeconds: Math.max(30, Math.floor(settings.renewMinutes * 60 * 0.4)) };
   }
   const reason = room.reason === 'allowance' ? 'allowance' : room.reason === 'closed' ? 'closed' : 'pool';
   await endJob(jobId, 'stopped', reason === 'allowance' ? 'allowance' : reason === 'closed' ? 'error' : 'pool', now);

@@ -292,7 +292,7 @@ run('a Brick’s computer, in a real database', () => {
       const queued = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!queued.ok) throw new Error('no');
       expect(queued.job.status).toBe('queued');
-      expect(await renewJob(queued.job.id, minutes(1))).toEqual({ ok: true });
+      expect(await renewJob(queued.job.id, minutes(1))).toEqual({ ok: true, renewInSeconds: 60 });
     });
 
     it('keeps a renewing job going while there is room, and gives every held room back when a job ends or lapses', async () => {
@@ -300,7 +300,7 @@ run('a Brick’s computer, in a real database', () => {
       await giveComputer(sara.brickId, sara.id);
       const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!job.ok) throw new Error('no');
-      expect(await renewJob(job.job.id, minutes(5))).toEqual({ ok: true });
+      expect(await renewJob(job.job.id, minutes(5))).toEqual({ ok: true, renewInSeconds: 240 });
       // It never renewed again: its room lapses, and the sweep stops it safely and settles what ran
       expect(await sweepComputers(minutes(60))).toMatchObject({ stopped: 1 });
       expect(await prisma.meterReservation.count({ where: { personKey: `person:${sara.id}`, state: 'held' } })).toBe(0);
