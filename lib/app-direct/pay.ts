@@ -227,7 +227,13 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
   const { create } = definition.payment;
   const operation = definition.operations.find((candidate) => candidate.id === create.operation);
   if (!operation) return fail('not_paid');
-  const key = readKey(connection);
+  // A key that cannot be read (damaged, or sealed with a key we no longer have) is a payment that cannot start: the order is closed, never left open
+  let key: string;
+  try {
+    key = readKey(connection);
+  } catch {
+    return fail('not_paid');
+  }
   const args: Record<string, unknown> = {
     [create.amount]: Number(minorToText(job.amountMinor, job.currency)),
     [create.currency]: job.currency,
@@ -246,6 +252,8 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
     answer = await guardedRequest({ ...built, timeoutMs: limits.keyCallSeconds * 1000, maxBytes: limits.keyAnswerKb * 1024 }, deps);
   } catch (error) {
     if (error instanceof RequestError || error instanceof GuardError) return fail('not_paid');
+    // Anything else is ours to look at, but the order is not left open on the way out
+    await fail('not_paid');
     throw error;
   }
   if (answer.redirected || answer.truncated) return fail('not_paid');
@@ -334,7 +342,15 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
   if (taken.count === 0) return view(order.status);
 
   const { lookup } = definition.payment;
-  const key = readKey(connection);
+  let key: string;
+  try {
+    key = readKey(connection);
+  } catch {
+    // A key that cannot be read can never be used to ask again: a closed order stays as it is, an open one can no longer be confirmed
+    if (wasClosed) return view(order.status);
+    await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'pending' }, data: { status: 'cant_confirm' } });
+    return view('cant_confirm');
+  }
   let answer;
   try {
     const built = buildRequest(definition, lookup.operation, { [lookup.idParam]: order.providerRef }, key);

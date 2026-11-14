@@ -302,6 +302,17 @@ run('payments for pages, in a real database', () => {
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
     });
 
+    it('closes the order, never leaves it open, when the key cannot be read', async () => {
+      const { id, serverId } = await connectTap();
+      const artifactId = await makeArtifact();
+      await job(serverId, artifactId);
+      const sent = tap();
+      await prisma.appConnection.update({ where: { id }, data: { keyCipher: 'not-a-real-cipher' } });
+      expect((await start(artifactId)).status).toBe(409);
+      expect(sent).toHaveLength(0);
+      expect(await prisma.appPageOrder.findMany({ where: { ownerId: sara }, select: { status: true } })).toEqual([{ status: 'not_paid' }]);
+    });
+
     it('clears the stopped mark when a lookup is answered well', async () => {
       const { id, serverId } = await connectTap();
       const artifactId = await makeArtifact();
