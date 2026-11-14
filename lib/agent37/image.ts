@@ -129,7 +129,18 @@ export async function ensureImage(client: Agent37Client, store: ImageStore = dbI
     if (state && state.hash === context.hash) {
       if (state.state === 'ready') return state;
       if (state.state === 'building' && state.buildId) {
-        const build = await client.templateBuild(state.buildId);
+        let build;
+        try {
+          build = await client.templateBuild(state.buildId);
+        } catch (error) {
+          // A build that cannot be read for longer than a build may take is over, so the sweep never waits on it for ever
+          if (now.getTime() - new Date(state.startedAt).getTime() > BUILD_TIMEOUT_MS) {
+            state = { ...state, state: 'failed', failures: state.failures + 1, error: 'The build could not be read and took too long' };
+            await store.set(state);
+            return state;
+          }
+          throw error;
+        }
         if (build.status === 'succeeded') {
           state = { ...state, state: 'ready', revision: build.template?.revision ?? null, error: null };
           await store.set(state);

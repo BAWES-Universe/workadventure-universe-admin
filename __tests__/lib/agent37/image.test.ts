@@ -360,6 +360,17 @@ describe('building the image on Agent37', () => {
     expect((await ensureImage(w.client, w.store, T0)).state).toBe('failed');
   });
 
+  it('ends a build that can no longer be read once it has gone on for more than an hour, and waits while it is young', async () => {
+    const w = setup();
+    const state = await ensureImage(w.client, w.store, T0);
+    (w.client as unknown as { templateBuild: () => Promise<never> }).templateBuild = async () => {
+      throw new Error('404');
+    };
+    expect((await ensureImage(w.client, w.store, minutes(10))).state).toBe('building');
+    const ended = await ensureImage(w.client, w.store, minutes(61));
+    expect(ended).toMatchObject({ state: 'failed', buildId: state.buildId, failures: 1 });
+  });
+
   it('ends a build that has gone on for more than an hour', async () => {
     const w = setup();
     await ensureImage(w.client, w.store, T0);
