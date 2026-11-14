@@ -30,7 +30,7 @@ CREATE TABLE "app_share_jobs" (
 -- CreateTable
 CREATE TABLE "app_share_uses" (
     "id" TEXT NOT NULL,
-    "share_id" TEXT NOT NULL,
+    "server_id" TEXT NOT NULL,
     "call_id" VARCHAR(200) NOT NULL,
     "asker_key" VARCHAR(320) NOT NULL,
     "tool_name" VARCHAR(255) NOT NULL,
@@ -49,13 +49,13 @@ CREATE UNIQUE INDEX "app_shares_server_id_key" ON "app_shares"("server_id");
 CREATE UNIQUE INDEX "app_share_jobs_share_id_tool_name_key" ON "app_share_jobs"("share_id", "tool_name");
 
 -- CreateIndex
-CREATE INDEX "app_share_uses_share_id_created_at_idx" ON "app_share_uses"("share_id", "created_at");
+CREATE INDEX "app_share_uses_server_id_created_at_idx" ON "app_share_uses"("server_id", "created_at");
 
 -- CreateIndex
-CREATE INDEX "app_share_uses_share_id_asker_key_created_at_idx" ON "app_share_uses"("share_id", "asker_key", "created_at");
+CREATE INDEX "app_share_uses_server_id_asker_key_created_at_idx" ON "app_share_uses"("server_id", "asker_key", "created_at");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "app_share_uses_share_id_call_id_key" ON "app_share_uses"("share_id", "call_id");
+CREATE UNIQUE INDEX "app_share_uses_server_id_call_id_key" ON "app_share_uses"("server_id", "call_id");
 
 -- AddForeignKey
 ALTER TABLE "app_shares" ADD CONSTRAINT "app_shares_server_id_fkey" FOREIGN KEY ("server_id") REFERENCES "bot_mcp_servers"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -67,7 +67,7 @@ ALTER TABLE "app_shares" ADD CONSTRAINT "app_shares_shared_by_id_fkey" FOREIGN K
 ALTER TABLE "app_share_jobs" ADD CONSTRAINT "app_share_jobs_share_id_fkey" FOREIGN KEY ("share_id") REFERENCES "app_shares"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "app_share_uses" ADD CONSTRAINT "app_share_uses_share_id_fkey" FOREIGN KEY ("share_id") REFERENCES "app_shares"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "app_share_uses" ADD CONSTRAINT "app_share_uses_server_id_fkey" FOREIGN KEY ("server_id") REFERENCES "bot_mcp_servers"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 
 -- A share is only ever on a Brick's grant of its own owner's app, and never on one signed in as the person (a sign-in page, a listed

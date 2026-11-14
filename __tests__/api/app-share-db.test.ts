@@ -296,7 +296,7 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       expect((await check(saraBrick, serverId, { requesterKey: omarKey(), callId: 'a6', argumentNames: [] })).body.reason).toBe('incomplete');
       expect((await check(saraBrick, serverId, { requesterKey: omarKey(), callId: 'a7', tool: 'make_song' })).body.reason).toBe('incomplete');
       // Only the one try was written, none for the turned-away ones
-      expect(await prisma.appShareUse.count({ where: { share: { serverId } } })).toBe(1);
+      expect(await prisma.appShareUse.count({ where: { serverId } })).toBe(1);
     });
 
     it('never reaches the app another way: not through another Brick, and not once the owner’s grant or app is gone (checks 32 and 52)', async () => {
@@ -357,7 +357,7 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       expect(event.detail).toEqual({ shared: true, tool: 'make_song' });
       // The owner's own chat is the owner's: it counts nothing for the share
       await check(saraBrick, serverId, { requesterKey: saraKey(), callId: 'e2' });
-      expect(await prisma.appShareUse.count({ where: { share: { serverId } } })).toBe(1);
+      expect(await prisma.appShareUse.count({ where: { serverId } })).toBe(1);
     });
 
     it('never runs a job twice for one call id, however often it is sent, and turns a loop of repeats away (check 31)', async () => {
@@ -369,7 +369,7 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       expect((await ask(saraBrick, serverId, omarKey(), 'f1')).body.reason).toBe('already_asked');
       // The third repeat is past the two allowed
       expect((await ask(saraBrick, serverId, omarKey(), 'f1')).body.reason).toBe('busy');
-      expect(await prisma.appShareUse.count({ where: { share: { serverId } } })).toBe(1);
+      expect(await prisma.appShareUse.count({ where: { serverId } })).toBe(1);
       expect(await prisma.meterEvent.count({ where: { eventId: `app:${saraBrick}:f1` } })).toBe(1);
     });
   });
@@ -419,7 +419,7 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       const answers = await Promise.all([ask(saraBrick, serverId, omarKey(), 'i1'), ask(saraBrick, serverId, `lena-${tag}`, 'i2'), ask(saraBrick, serverId, 'guest-x', 'i3')]);
       expect(answers.filter((answer) => answer.body.allowed)).toHaveLength(1);
       expect(answers.filter((answer) => answer.body.reason === 'limit_reached' || answer.body.reason === 'busy')).toHaveLength(2);
-      expect(await prisma.appShareUse.count({ where: { share: { serverId } } })).toBe(1);
+      expect(await prisma.appShareUse.count({ where: { serverId } })).toBe(1);
       expect(await prisma.meterEvent.count({ where: { botId: saraBrick, kind: 'app_use' } })).toBe(1);
     });
 
@@ -438,7 +438,7 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       await shareSong(app.id);
       await prisma.botMcpServer.update({ where: { id: serverId }, data: { enabled: false } });
       expect((await ask(saraBrick, serverId, omarKey(), 'l1')).body.allowed).toBe(false);
-      expect(await prisma.appShareUse.count({ where: { share: { serverId } } })).toBe(0);
+      expect(await prisma.appShareUse.count({ where: { serverId } })).toBe(0);
     });
 
     it('does not run a call again when sharing was stopped and started again in between', async () => {
@@ -478,11 +478,22 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       expect(await prisma.appShare.count({ where: { server: { botId: saraBrick } } })).toBe(0);
     });
 
+    it('does not give the day back when sharing is stopped and started again', async () => {
+      const { app, serverId } = await music();
+      await shareSong(app.id, saraBrick, { usesPerDayEveryone: 1, usesPerDayPerson: 1 });
+      expect((await ask(saraBrick, serverId, omarKey(), 'n1')).body.allowed).toBe(true);
+      as(sara);
+      expect((await shareRoute('DELETE', app.id, saraBrick)).status).toBe(204);
+      await shareSong(app.id, saraBrick, { usesPerDayEveryone: 1, usesPerDayPerson: 1 });
+      expect((await ask(saraBrick, serverId, `lena-${tag}`, 'n2')).body).toMatchObject({ allowed: false, reason: 'limit_reached' });
+      expect(await prisma.appShareUse.count({ where: { serverId } })).toBe(1);
+    });
+
     it('is not used up by days gone by: only today’s uses count', async () => {
       const { app, serverId } = await music();
       await shareSong(app.id, saraBrick, { usesPerDayEveryone: 1, usesPerDayPerson: 1 });
       expect((await ask(saraBrick, serverId, omarKey(), 'j1')).body.allowed).toBe(true);
-      await prisma.appShareUse.updateMany({ where: { share: { serverId } }, data: { createdAt: new Date(Date.now() - 36 * 60 * 60 * 1000) } });
+      await prisma.appShareUse.updateMany({ where: { serverId }, data: { createdAt: new Date(Date.now() - 36 * 60 * 60 * 1000) } });
       expect((await ask(saraBrick, serverId, omarKey(), 'j2')).body.allowed).toBe(true);
     });
   });
@@ -529,7 +540,7 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       expect((await settle(saraBrick, serverId, 'm1', 'failed', null)).status).toBe(401);
       expect((await settle(saraBrick, serverId, 'm1', 'failed', 'wrong-token')).status).toBe(401);
       expect((await settle(saraOther, serverId, 'm1', 'failed')).status).toBe(404);
-      expect(await prisma.appShareUse.count({ where: { share: { serverId }, status: 'running' } })).toBe(1);
+      expect(await prisma.appShareUse.count({ where: { serverId, status: 'running' } })).toBe(1);
     });
 
     it('counts as a try for the quiet ceiling in an hour even when it was given back, so endless failures show', async () => {
@@ -541,7 +552,7 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
         await settle(saraBrick, serverId, id, 'failed');
       }
       expect((await ask(saraBrick, serverId, omarKey(), 'n4')).body).toMatchObject({ allowed: false, reason: 'busy' });
-      await prisma.appShareUse.updateMany({ where: { share: { serverId } }, data: { createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000) } });
+      await prisma.appShareUse.updateMany({ where: { serverId }, data: { createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000) } });
       expect((await ask(saraBrick, serverId, omarKey(), 'n5')).body.allowed).toBe(true);
     });
 
@@ -555,9 +566,9 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       await settle(saraBrick, serverId, 'p1', 'done');
       expect((await ask(saraBrick, serverId, 'guest-q', 'p4')).body.allowed).toBe(true);
       // A job nobody ever settled stops holding a place after the minutes set, and still counts as a use
-      await prisma.appShareUse.updateMany({ where: { share: { serverId }, status: 'running' }, data: { createdAt: new Date(Date.now() - 30 * 60 * 1000) } });
+      await prisma.appShareUse.updateMany({ where: { serverId, status: 'running' }, data: { createdAt: new Date(Date.now() - 30 * 60 * 1000) } });
       expect((await ask(saraBrick, serverId, omarKey(), 'p5')).body.allowed).toBe(true);
-      expect(await prisma.appShareUse.count({ where: { share: { serverId }, status: { not: 'refunded' } } })).toBe(4);
+      expect(await prisma.appShareUse.count({ where: { serverId, status: { not: 'refunded' } } })).toBe(4);
     });
   });
 });

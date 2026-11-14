@@ -171,7 +171,7 @@ const startingLimits = async () => {
   return { usesPerDayEveryone: limits.sharedUsesEveryone, usesPerDayPerson: limits.sharedUsesPerPerson };
 };
 
-const usedTodayOf = (shareId: string) => prisma.appShareUse.count({ where: { shareId, createdAt: { gte: startOfDay() }, status: { not: 'refunded' } } });
+const usedTodayOf = (serverId: string) => prisma.appShareUse.count({ where: { serverId, createdAt: { gte: startOfDay() }, status: { not: 'refunded' } } });
 
 function toView(grant: Grant, candidates: JobCandidate[], reachable: boolean, shareable: boolean, limits: ShareView['limits'], usedToday: number): ShareView {
   const picked = new Map((grant.share?.jobs ?? []).map((job) => [job.toolName, job]));
@@ -208,7 +208,7 @@ export async function readShare(ownerId: string, connectionId: string, botId: st
   const limits = grant.share ? { usesPerDayEveryone: grant.share.usesPerDayEveryone, usesPerDayPerson: grant.share.usesPerDayPerson } : await startingLimits();
   if (!shareable) return toView(grant, [], true, false, limits, 0);
   const shapes = await liveShapes(connection);
-  return toView(grant, candidatesOf(grant, shapes), shapes !== null, true, limits, grant.share ? await usedTodayOf(grant.share.id) : 0);
+  return toView(grant, candidatesOf(grant, shapes), shapes !== null, true, limits, grant.share ? await usedTodayOf(grant.id) : 0);
 }
 
 export type StartResult = { status: 'started' | 'already'; view: ShareView } | { status: 'not_found' } | { status: 'not_shareable' } | { status: 'refused'; problem: ShareProblem; tool?: string };

@@ -1347,6 +1347,7 @@ model BotMcpServer {
   connectedBy User?         @relation("BotMcpServerConnectedBy", fields: [connectedById], references: [id], onDelete: SetNull)
   tools       BotMcpTool[]
   share       AppShare?
+  shareUses   AppShareUse[] @relation("AppShareUses")
 
   @@unique([botId, connectionId])
   @@index([botId])
@@ -1482,7 +1483,6 @@ model AppShare {
   server   BotMcpServer   @relation(fields: [serverId], references: [id], onDelete: Cascade)
   sharedBy User?          @relation("AppShareBy", fields: [sharedById], references: [id], onDelete: SetNull)
   jobs     AppShareJob[]
-  uses     AppShareUse[]
 
   @@map("app_shares")
 }
@@ -1510,7 +1510,8 @@ model AppShareJob {
 // run again, given back only once confirmed failed), refunded (confirmed failed: not counted as a use, still a try).
 model AppShareUse {
   id        String    @id @default(uuid())
-  shareId   String    @map("share_id")
+  // The Brick's use of the app (the grant), not the share: stopping and starting sharing again never gives back what was used today
+  serverId  String    @map("server_id")
   callId    String    @map("call_id") @db.VarChar(200)
   // "person:<id>" or "guest:<id>", as the meter keeps them
   askerKey  String    @map("asker_key") @db.VarChar(320)
@@ -1520,11 +1521,11 @@ model AppShareUse {
   createdAt DateTime  @default(now()) @map("created_at")
   settledAt DateTime? @map("settled_at")
 
-  share AppShare @relation(fields: [shareId], references: [id], onDelete: Cascade)
+  server BotMcpServer @relation("AppShareUses", fields: [serverId], references: [id], onDelete: Cascade)
 
-  @@unique([shareId, callId])
-  @@index([shareId, createdAt])
-  @@index([shareId, askerKey, createdAt])
+  @@unique([serverId, callId])
+  @@index([serverId, createdAt])
+  @@index([serverId, askerKey, createdAt])
   @@map("app_share_uses")
 }
 

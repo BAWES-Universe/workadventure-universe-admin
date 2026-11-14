@@ -117,7 +117,7 @@ type Limits = Awaited<ReturnType<typeof getBrickLimits>>;
 async function reserve(input: { shareId: string; grant: { id: string; botId: string; connectionId: string }; ownerId: string; askerKey: string; callId: string; tool: string; argumentNames: string[]; limits: Limits }): Promise<ReserveOutcome> {
   const { shareId, grant, askerKey, callId, limits } = input;
   return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-share:${shareId}`}))`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-share:${grant.id}`}))`;
     // The same first lock as taking an app back or removing a grant: the app's own row, then the grant's, then the share's
     const app = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_connections" WHERE "id" = ${grant.connectionId} FOR SHARE`;
     if (app.length === 0) return { kind: 'gone' } as const;
@@ -136,7 +136,7 @@ async function reserve(input: { shareId: string; grant: { id: string; botId: str
     if (input.argumentNames.some((name) => !inputs.includes(name))) return { kind: 'not_shared' } as const;
 
     const now = new Date();
-    const seen = await tx.appShareUse.findUnique({ where: { shareId_callId: { shareId: share.id, callId } } });
+    const seen = await tx.appShareUse.findUnique({ where: { serverId_callId: { serverId: grant.id, callId } } });
     if (seen) {
       // A repeat never runs the job. Past the number of repeats allowed it is turned away as busy, so a loop of retries stops
       if (seen.retries >= limits.sharedRetries) return { kind: 'again', status: seen.status, busy: true } as const;
@@ -152,18 +152,18 @@ async function reserve(input: { shareId: string; grant: { id: string; botId: str
     const hourAgo = new Date(now.getTime() - 60 * 60 * 1000);
     const staleBefore = new Date(now.getTime() - limits.sharedJobMinutes * 60 * 1000);
     const [tries, running] = await Promise.all([
-      tx.appShareUse.count({ where: { shareId: share.id, createdAt: { gte: hourAgo } } }),
-      tx.appShareUse.count({ where: { shareId: share.id, status: { in: ['running', 'unknown'] }, createdAt: { gte: staleBefore } } }),
+      tx.appShareUse.count({ where: { serverId: grant.id, createdAt: { gte: hourAgo } } }),
+      tx.appShareUse.count({ where: { serverId: grant.id, status: { in: ['running', 'unknown'] }, createdAt: { gte: staleBefore } } }),
     ]);
     if (tries >= limits.sharedTriesPerHour || running >= limits.sharedJobsAtOnce) return { kind: 'busy' } as const;
 
     // A use given back (refunded) is not counted; a running, done or unknown try is
-    const counted = { shareId: share.id, createdAt: { gte: startOfDay(now) }, status: { not: 'refunded' } };
+    const counted = { serverId: grant.id, createdAt: { gte: startOfDay(now) }, status: { not: 'refunded' } };
     const [everyone, person] = await Promise.all([tx.appShareUse.count({ where: counted }), tx.appShareUse.count({ where: { ...counted, askerKey } })]);
     if (everyone >= share.usesPerDayEveryone) return { kind: 'limit', which: 'everyone', limit: share.usesPerDayEveryone } as const;
     if (person >= share.usesPerDayPerson) return { kind: 'limit', which: 'person', limit: share.usesPerDayPerson } as const;
 
-    await tx.appShareUse.create({ data: { shareId: share.id, callId, askerKey, toolName: input.tool, status: 'running', createdAt: now } });
+    await tx.appShareUse.create({ data: { serverId: grant.id, callId, askerKey, toolName: input.tool, status: 'running', createdAt: now } });
     // The books, in the same step. The tool is the owner's, so what it costs is the owner's; the cost of an app added by a link is not
     // known to us, so it is said as not known and paid by someone else, never as free. A repeat of this id writes nothing.
     await recordMeterEvent(
@@ -226,8 +226,8 @@ export async function settleSharedUse(botId: string, serverId: string, callId: s
   return prisma.$transaction(async (tx) => {
     const share = await tx.appShare.findFirst({ where: { serverId, server: { botId } }, select: { id: true } });
     if (!share) return { status: 'not_found' } as const;
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-share:${share.id}`}))`;
-    const use = await tx.appShareUse.findUnique({ where: { shareId_callId: { shareId: share.id, callId } } });
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-share:${serverId}`}))`;
+    const use = await tx.appShareUse.findUnique({ where: { serverId_callId: { serverId, callId } } });
     if (!use) return { status: 'not_found' } as const;
     const now = new Date();
     const to = outcome === 'failed' ? 'refunded' : outcome;
