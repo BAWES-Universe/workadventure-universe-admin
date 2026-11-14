@@ -10,10 +10,17 @@ describe('middleware matcher', () => {
     expect(runs('/api/me/ai-keys')).toBe(true);
     // A route whose name only starts the same way is not an artifact route
     expect(runs('/api/artifactsx')).toBe(true);
+    expect(runs('/api/github/callback')).toBe(true);
+    expect(runs('/api/gitx')).toBe(true);
   });
 
   it('leaves out the artifact routes, whose bodies can be larger than a middleware lets through', () => {
     expect(runs('/api/artifacts')).toBe(false);
     expect(runs('/api/artifacts/abc/change')).toBe(false);
+  });
+
+  it('leaves out the git relay, whose pushes can be larger than a middleware lets through', () => {
+    expect(runs('/api/git')).toBe(false);
+    expect(runs('/api/git/owner/repo.git/git-receive-pack')).toBe(false);
   });
 });
