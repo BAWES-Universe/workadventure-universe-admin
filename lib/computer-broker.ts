@@ -95,7 +95,13 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
   if (!live.ok) return live;
   const { job, provider } = live;
   if (job.responseId && job.sessionId) {
-    const active = await provider.activeTurn(job.ref, job.sessionId).catch(() => null);
+    // A check that could not be made is not an answer: the turn may still be running, so its id stays and this one is tried again later
+    let unsure = false;
+    const active = await provider.activeTurn(job.ref, job.sessionId).catch(() => {
+      unsure = true;
+      return null;
+    });
+    if (unsure) return { ok: false, reason: 'failed' };
     if (active) return { ok: false, reason: 'busy', responseId: active };
     // The turn we kept is over (the stream was lost before its end reached us): it is cleared and this one goes ahead
     await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: job.responseId }, data: { agentResponseId: null } });

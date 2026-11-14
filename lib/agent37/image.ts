@@ -42,7 +42,15 @@ export interface ImageState {
 export interface ImageStore {
   get(): Promise<ImageState | null>;
   set(state: ImageState): Promise<void>;
+  /**
+   * Takes the one right to start a build, so two sweeps (or two Orbit processes) never both start one. Returns the state that was written
+   * ("building", no build id yet), or null when someone else holds the right. Without it (a plain store) every caller may start.
+   */
+  claim?(hash: string, now: Date): Promise<ImageState | null>;
 }
+
+/** How long a claimed start may take before it is taken to have died and another sweep may start the build. */
+export const CLAIM_MS = 2 * 60 * 1000;
 
 export const dbImageStore: ImageStore = {
   async get() {
@@ -58,6 +66,20 @@ export const dbImageStore: ImageStore = {
   async set(state) {
     const value = state as unknown as Prisma.InputJsonValue;
     await prisma.appSetting.upsert({ where: { key: SETTING_KEY }, create: { key: SETTING_KEY, value }, update: { value } });
+  },
+  async claim(hash, now) {
+    return prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('computer-image-build'))`;
+      const row = await tx.appSetting.findUnique({ where: { key: SETTING_KEY } });
+      const value = (row?.value && typeof row.value === 'object' ? row.value : {}) as Partial<ImageState>;
+      const same = value.hash === hash;
+      // Someone claimed it a moment ago and has not yet recorded the build: it is theirs
+      if (same && value.state === 'building' && !value.buildId && value.startedAt && now.getTime() - new Date(value.startedAt).getTime() < CLAIM_MS) return null;
+      const marker: ImageState = { hash, state: 'building', buildId: null, revision: null, startedAt: now.toISOString(), failures: same ? (value.failures ?? 0) : 0, error: null };
+      const json = marker as unknown as Prisma.InputJsonValue;
+      await tx.appSetting.upsert({ where: { key: SETTING_KEY }, create: { key: SETTING_KEY, value: json }, update: { value: json } });
+      return marker;
+    });
   },
 };
 
@@ -130,7 +152,13 @@ export async function ensureImage(client: Agent37Client, store: ImageStore = dbI
         if (now.getTime() - new Date(state.startedAt).getTime() < wait) return state;
       }
     }
-    // No build of this content yet, or the last one failed and its wait is over: start one
+    // No build of this content yet, or the last one failed and its wait is over: start one, if no other sweep is starting it right now
+    if (store.claim) {
+      const claimed = await store.claim(context.hash, now);
+      if (!claimed) return (await store.get()) ?? state ?? { hash: context.hash, state: 'building', buildId: null, revision: null, startedAt: now.toISOString(), failures: 0, error: null };
+      state = claimed;
+      justMade = true;
+    }
     const created = await client.createTemplateBuild({ name: IMAGE_NAME, sizeBytes: context.gzipped.length, defaultPort: IMAGE_PORT });
     // Kept before the upload, so a build that was started is never started twice if what follows is cut short
     state = { hash: context.hash, state: 'building', buildId: created.id, revision: null, startedAt: now.toISOString(), failures: state && state.hash === context.hash ? state.failures : 0, error: null };

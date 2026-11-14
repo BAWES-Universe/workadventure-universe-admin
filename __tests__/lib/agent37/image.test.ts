@@ -299,6 +299,15 @@ describe('building the image on Agent37', () => {
     expect(w.uploaded[0].length).toBe(imageContext().gzipped.length);
   });
 
+  it('does not start a build when another sweep holds the right to, and records the build only for the one that does', async () => {
+    const w = setup();
+    let claims = 0;
+    const store: ImageStore = { ...w.store, claim: async (hash, now) => (++claims === 1 ? { hash, state: 'building', buildId: null, revision: null, startedAt: now.toISOString(), failures: 0, error: null } : null) };
+    const [a, b] = await Promise.all([ensureImage(w.client, store, T0), ensureImage(w.client, store, T0)]);
+    expect(w.calls.filter((call) => call.startsWith('create:'))).toHaveLength(1);
+    expect([a.state, b.state]).toEqual(['building', 'building']);
+  });
+
   it('is ready when the build succeeded, with the revision it published, and then does nothing more', async () => {
     const w = setup([{ status: 'building' }, { status: 'succeeded', template: { revision: 3, imageDigest: 'sha256:x' } }]);
     await ensureImage(w.client, w.store, T0);

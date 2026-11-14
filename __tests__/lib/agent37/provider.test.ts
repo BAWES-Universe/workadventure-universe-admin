@@ -206,6 +206,22 @@ describe('the Agent37 provider', () => {
       expect(JSON.stringify(checks)).not.toContain('a37_secret_value');
     });
 
+    it('says the wallet could not be checked, not that the key failed, when what is set aside cannot be read', async () => {
+      const w = world();
+      const p = new Agent37ComputerProvider({
+        client: w.client,
+        outstandingReserveMicros: async () => {
+          throw new Error('database down');
+        },
+        sleep: async () => undefined,
+        now: () => 1_000_000,
+        image: built,
+      });
+      const checks = named(await p.checkup());
+      expect(checks['agent37 key']).toMatchObject({ ok: true });
+      expect(checks['agent37 wallet']).toMatchObject({ ok: false, detail: 'What is already set aside could not be read' });
+    });
+
     it('says where the image stands: building, failed with the reason, not started', async () => {
       const state = (over: Partial<ImageState>) => async (): Promise<ImageState | null> => ({ hash: 'h', state: 'building', buildId: 'b', revision: null, startedAt: new Date(0).toISOString(), failures: 0, error: null, ...over });
       expect(named(await provider(world(), { image: state({}) }).checkup())['computer image']).toMatchObject({ ok: false, detail: 'The computer image is being built' });
@@ -448,6 +464,32 @@ describe('getting a machine ready for a job', () => {
     await p.ready('m1');
     expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up']);
     expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
+  });
+
+  it('after asking a machine to stop, waits until it is really stopped, not just until it stops saying "stopping"', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    let runs = 0;
+    w.setExec(() => (++runs === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n'));
+    const real = w.client.stopInstance.bind(w.client);
+    let reads = 0;
+    (w.client as unknown as { stopInstance: (id: string) => Promise<unknown> }).stopInstance = async (id) => {
+      await real(id);
+      // The stop was accepted but the machine still says it is running for two reads
+      w.instances.get(id)!.status = 'running';
+      return { id, status: 'stopping' };
+    };
+    const get = w.client.getInstance.bind(w.client);
+    (w.client as unknown as { getInstance: (id: string) => Promise<Instance> }).getInstance = async (id) => {
+      const instance = await get(id);
+      if (w.calls.includes(`stop:${id}`) && !w.calls.includes(`start:${id}`) && instance.status === 'running' && ++reads >= 3) instance.status = 'stopped';
+      return instance;
+    };
+    await p.ready('m1');
+    const order = w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'));
+    expect(order).toEqual(['stop:m1', 'start:m1']);
+    expect(reads).toBeGreaterThanOrEqual(3);
   });
 
   it('says the machine is not ready, with the reason, when a part did not come up', async () => {

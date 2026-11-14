@@ -26,7 +26,8 @@ jest.mock('@/lib/meter', () => {
 import { saveMeterSettings } from '@/lib/meter';
 import { currentEnvelope } from '@/lib/meter-allowance';
 import { recordGrant } from '@/lib/meter-grants';
-import { mintJobToken, verifyJobToken } from '@/lib/computer-token';
+import { mintJobToken, TOKEN_LIFE_MS, TOKEN_RENEW_EVERY_SECONDS, verifyJobToken } from '@/lib/computer-token';
+import { CLAIM_MS, dbImageStore } from '@/lib/agent37/image';
 import { checkScreen, openScreen, screenTicket } from '@/lib/computer-screen';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import {
@@ -343,6 +344,38 @@ run('a Brick’s computer, in a real database', () => {
       if (!queued.ok) throw new Error('no');
       expect(queued.job.status).toBe('queued');
       expect(await renewJob(queued.job.id, minutes(1))).toEqual({ ok: true, renewInSeconds: 60 });
+    });
+
+    it('tells a runner to renew inside the life of its key, however large the room is, and the key is still alive at that moment', async () => {
+      await setUp({ renewMinutes: 60, memberAllowanceMicros: 5_000_000 });
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      const token = await mintJobToken(job.job.id, 'model', NOW);
+      if (!token.ok) throw new Error('no key');
+      const first = await renewJob(job.job.id, NOW);
+      expect(first).toEqual({ ok: true, renewInSeconds: TOKEN_RENEW_EVERY_SECONDS });
+      expect(TOKEN_RENEW_EVERY_SECONDS).toBe(360);
+      expect(TOKEN_RENEW_EVERY_SECONDS * 1000).toBeLessThan(TOKEN_LIFE_MS);
+      // At the moment the runner asks again the key is still good, and the renewal brings it on
+      const later = new Date(NOW.getTime() + TOKEN_RENEW_EVERY_SECONDS * 1000);
+      expect(await verifyJobToken(token.token, 'model', later)).toMatchObject({ ok: true });
+      const again = await renewJob(job.job.id, later);
+      expect(again).toEqual({ ok: true, renewInSeconds: TOKEN_RENEW_EVERY_SECONDS });
+    });
+
+    it('lets only one sweep start the image build at a time, and a start that died is taken over after a while', async () => {
+      await prisma.appSetting.deleteMany({ where: { key: 'computer-image' } });
+      const now = new Date('2026-11-15T12:00:00Z');
+      const both = await Promise.all([dbImageStore.claim!('h1', now), dbImageStore.claim!('h1', now)]);
+      expect(both.filter(Boolean)).toHaveLength(1);
+      expect(await dbImageStore.claim!('h1', new Date(now.getTime() + 1000))).toBeNull();
+      // Its build was never recorded: after the wait another sweep may start it, keeping the count of failures
+      expect(await dbImageStore.claim!('h1', new Date(now.getTime() + CLAIM_MS + 1000))).toMatchObject({ state: 'building', buildId: null });
+      // New content is never held back by an older start
+      expect(await dbImageStore.claim!('h2', new Date(now.getTime() + CLAIM_MS + 2000))).toMatchObject({ hash: 'h2' });
+      await prisma.appSetting.deleteMany({ where: { key: 'computer-image' } });
     });
 
     it('keeps a renewing job going while there is room, and gives every held room back when a job ends or lapses', async () => {

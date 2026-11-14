@@ -7,7 +7,7 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { memberAllowance, releaseRoom, renewRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
 import { monthOf } from '@/lib/meter-values';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
-import { renewJobTokens, revokeJobTokens } from '@/lib/computer-token';
+import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
 import {
@@ -593,7 +593,7 @@ export async function renewJob(jobId: string, now: Date = new Date()): Promise<{
     // The lease is renewed, so the computer's key is too (one that ended is not brought back)
     await renewJobTokens(jobId, now);
     // Each renewal holds more room, so the runner is told how often to ask: well inside the time the room is held, never so often it over-holds
-    return { ok: true, renewInSeconds: Math.max(30, Math.floor(settings.renewMinutes * 60 * 0.4)) };
+    return { ok: true, renewInSeconds: Math.max(30, Math.min(Math.floor(settings.renewMinutes * 60 * 0.4), TOKEN_RENEW_EVERY_SECONDS)) };
   }
   const reason = room.reason === 'allowance' ? 'allowance' : room.reason === 'closed' ? 'closed' : 'pool';
   await endJob(jobId, 'stopped', reason === 'allowance' ? 'allowance' : reason === 'closed' ? 'error' : 'pool', now);
@@ -1118,6 +1118,24 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
   return { ok: true, job: jobView(job) };
 }
 
+/**
+ * A take-over fence that could not be proved stops the machine (see fenceMachine). The jobs handed back need it working again, so it is
+ * woken here; if it will not come back the jobs end, their room given back, rather than wait on a machine that is not there.
+ */
+async function wakeIfStopped(botId: string): Promise<void> {
+  const row = await prisma.brickComputer.findUnique({ where: { botId } });
+  const provider = providerFor(row);
+  if (!row?.providerRef || !provider || row.machine !== 'stopped') return;
+  try {
+    await bringUp(botId, provider, new Date());
+  } catch (error) {
+    console.error('[Computer] A machine did not come back after a hand back:', error instanceof Error ? error.message : 'unknown');
+    const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true } });
+    for (const job of jobs) await endJob(job.id, 'stopped', 'error', new Date());
+    await prisma.brickComputer.updateMany({ where: { botId, machine: { in: ['waking', 'restoring'] } }, data: { machine: 'broken' } });
+  }
+}
+
 /** Hand back: Brick carries on from where the person left it. What they entered is theirs and is not read back by this call. */
 export async function handBack(botId: string, ownerId: string): Promise<Control> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
@@ -1129,7 +1147,10 @@ export async function handBack(botId: string, ownerId: string): Promise<Control>
     handedBack += back.count;
   }
   // Keys made before the hand back stay refused: the runner asks for a new one for what comes next
-  if (handedBack > 0) await fenceControl(botId);
+  if (handedBack > 0) {
+    await fenceControl(botId);
+    await wakeIfStopped(botId);
+  }
   const job = await prisma.computerJob.findFirst({ where: { botId, status: { in: ['running', 'waiting'] } }, orderBy: [{ writes: 'desc' }, { createdAt: 'asc' }], include: JOB_INCLUDE });
   if (!job) return { ok: false, reason: 'nothing_waiting' };
   return { ok: true, job: jobView(job) };

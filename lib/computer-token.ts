@@ -17,6 +17,8 @@ export type TokenScope = 'model';
 
 /** How long a key lives without the job's lease renewing it. */
 export const TOKEN_LIFE_MS = 15 * 60 * 1000;
+/** How often a runner is told to renew at most: a fraction of the shortest lease it keeps alive (the key), never of the room size, so a key never lapses between two renewals. */
+export const TOKEN_RENEW_EVERY_SECONDS = Math.floor((TOKEN_LIFE_MS / 1000) * 0.4);
 
 const PREFIX = 'cjt_';
 const digestOf = (token: string) => createHash('sha256').update(token).digest('hex');

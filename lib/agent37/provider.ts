@@ -113,16 +113,23 @@ export class Agent37ComputerProvider implements ComputerProvider {
   async checkup(): Promise<Check[]> {
     const checks: Check[] = [];
     const dollars = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
+    let balance: Awaited<ReturnType<Agent37Client['billing']>> | null = null;
     try {
-      const balance = await this.client.billing();
+      balance = await this.client.billing();
       checks.push({ name: 'agent37 key', ok: true, detail: 'The Agent37 key works' });
-      const have = Math.round(balance.balance_usd * 1_000_000);
-      const need = (await this.reserved()) + dayOfRunningMicros(BRICK_SHAPE);
-      if (balance.past_due) checks.push({ name: 'agent37 wallet', ok: false, detail: 'The wallet is overdrawn' });
-      else if (!Number.isFinite(have)) checks.push({ name: 'agent37 wallet', ok: false, detail: 'The wallet could not be read' });
-      else checks.push({ name: 'agent37 wallet', ok: have >= need, detail: have >= need ? `The wallet holds ${dollars(have)}; ${dollars(need)} is needed to start a computer` : `The wallet holds ${dollars(have)} but ${dollars(need)} is needed to start a computer` });
     } catch (error) {
       checks.push({ name: 'agent37 key', ok: false, detail: error instanceof Agent37Error && (error.status === 401 || error.status === 403) ? 'Agent37 refused the key' : 'Agent37 could not be reached' });
+    }
+    if (balance) {
+      try {
+        const have = Math.round(balance.balance_usd * 1_000_000);
+        const need = (await this.reserved()) + dayOfRunningMicros(BRICK_SHAPE);
+        if (balance.past_due) checks.push({ name: 'agent37 wallet', ok: false, detail: 'The wallet is overdrawn' });
+        else if (!Number.isFinite(have)) checks.push({ name: 'agent37 wallet', ok: false, detail: 'The wallet could not be read' });
+        else checks.push({ name: 'agent37 wallet', ok: have >= need, detail: have >= need ? `The wallet holds ${dollars(have)}; ${dollars(need)} is needed to start a computer` : `The wallet holds ${dollars(have)} but ${dollars(need)} is needed to start a computer` });
+      } catch {
+        checks.push({ name: 'agent37 wallet', ok: false, detail: 'What is already set aside could not be read' });
+      }
     }
     if (this.image) {
       const state = await this.image().catch(() => null);
@@ -202,7 +209,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     let up = await this.up(ref);
     if (up.restart) {
       await this.client.stopInstance(ref);
-      await this.untilDown(ref);
+      await this.untilDown(ref, true);
       await this.client.startInstance(ref);
       await this.untilHealthy(ref, instance.url);
       up = await this.up(ref);
@@ -247,12 +254,17 @@ export class Agent37ComputerProvider implements ComputerProvider {
     await this.untilHealthy(ref, instance.url);
   }
 
-  /** Waits for a machine that is stopping to be stopped or asleep. Throws if it goes away, or does not settle in time. */
-  private async untilDown(ref: string): Promise<Instance> {
+  /**
+   * Waits for a machine that is stopping to be stopped or asleep. Throws if it goes away, or does not settle in time. Right after a stop
+   * was asked the machine may still say it is running for a moment, so then (`afterStop`) only a stopped or sleeping machine counts.
+   */
+  private async untilDown(ref: string, afterStop = false): Promise<Instance> {
     const until = this.now() + READY_WITHIN_MS;
     for (;;) {
       const instance = await this.client.getInstance(ref);
-      if (instance.status !== 'stopping') return instance;
+      const status = String(instance.status);
+      if (gone(status)) return instance;
+      if (afterStop ? status === 'stopped' || status === 'sleeping' : status !== 'stopping') return instance;
       if (this.now() >= until) throw new Error('The computer did not become ready in time');
       await this.pause(POLL_MS);
     }

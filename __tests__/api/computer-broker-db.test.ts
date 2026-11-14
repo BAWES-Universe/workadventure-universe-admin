@@ -186,6 +186,17 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).agentResponseId).toBeNull();
     });
 
+    it('keeps the turn it kept when the check on it could not be made, and starts nothing', async () => {
+      const { jobId } = await running();
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentSessionId: 'sess-1', agentResponseId: 'resp-live' } });
+      fake.activeTurn = async () => {
+        throw new Error('gateway timeout');
+      };
+      expect(await startTurn(jobId, 'next')).toEqual({ ok: false, reason: 'failed' });
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).agentResponseId).toBe('resp-live');
+      expect(fake.openedTurns).toHaveLength(0);
+    });
+
     it('says busy when the agent itself says its session is busy', async () => {
       const { jobId } = await running();
       fake.openTurn = async () => {
@@ -277,6 +288,18 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       fake.failExec = true;
       expect(await fenceMachine(other.sara.brickId)).toBe('failed');
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: other.sara.brickId } })).machine).toBe('stopped');
+    });
+
+    it('wakes a machine that a failed fence stopped when the person hands the job back, so the job can go on', async () => {
+      const { sara, jobId } = await running();
+      fake.execAnswer = (command) => (command.endsWith('--check') ? { stdout: 'remaining=2\n' } : {});
+      await takeOver(sara.brickId, sara.id, NOW);
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('stopped');
+      fake.execAnswer = (command) => (command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {});
+      const back = await handBack(sara.brickId, sara.id);
+      expect(back.ok).toBe(true);
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).status).toBe('running');
     });
 
     it('a command that fails is not proof, whatever it printed', async () => {
