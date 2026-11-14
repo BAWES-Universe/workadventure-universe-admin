@@ -1,8 +1,10 @@
+import { randomBytes } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { Readable } from 'node:stream';
 
 const stored = new Map<string, Buffer>();
 let abortCalled = false;
+let failUpload = false;
 
 jest.mock('@/lib/artifact-storage', () => ({
   artifactBucket: () => ({
@@ -30,6 +32,11 @@ jest.mock('@aws-sdk/lib-storage', () => ({
   Upload: class {
     constructor(private readonly options: { params: { Key: string; Body: Readable } }) {}
     async done() {
+      if (failUpload) {
+        // A bucket that stops reading and then fails, while the archive is still coming
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        throw new Error('bucket refused the upload');
+      }
       const chunks: Buffer[] = [];
       for await (const chunk of this.options.params.Body) chunks.push(Buffer.from(chunk));
       stored.set(this.options.params.Key, Buffer.concat(chunks));
@@ -50,6 +57,7 @@ beforeAll(() => {
 beforeEach(() => {
   stored.clear();
   abortCalled = false;
+  failUpload = false;
 });
 
 describe('the saved copy of a Brick computer’s files', () => {
@@ -79,6 +87,20 @@ describe('the saved copy of a Brick computer’s files', () => {
     expect([...stored.keys()]).toEqual([savedCopyKey('bot-1')]);
     expect((stored.get(savedCopyKey('bot-1')) as Buffer).equals(before)).toBe(true);
   });
+
+  it('a bucket that fails while a big archive is still coming ends the save with an error instead of hanging', async () => {
+    failUpload = true;
+    // 40 MB of a valid gzip that nobody reads: without the clean-up the stream stops on backpressure and never settles
+    const big = gzipSync(randomBytes(40 * 1024 * 1024));
+    const endless = Readable.toWeb(
+      Readable.from(
+        (function* () {
+          for (let at = 0; at < big.length; at += 64 * 1024) yield big.subarray(at, at + 64 * 1024);
+        })(),
+      ),
+    ) as unknown as ReadableStream<Uint8Array>;
+    await expect(storeSavedCopy('bot-1', endless)).rejects.toThrow('bucket refused');
+  }, 10_000);
 
   it('says nothing is saved for a Brick that has no copy', async () => {
     expect(await savedCopyOf('nobody')).toBeNull();

@@ -238,6 +238,15 @@ describe('the Agent37 provider', () => {
       expect(store).not.toHaveBeenCalled();
     });
 
+    it('does not wake a stopped machine that has a copy, even when the wallet is low', async () => {
+      const w = world({ balanceUsd: 0 });
+      w.instances.set('s1', { id: 's1', status: 'stopped', url: 'https://s1.agent37.app', metadata: { creation_id: 'brick:bot-9' } });
+      const p = provider(w, { copies: { latest: async () => copy(77), store: jest.fn() } });
+      const saved = await p.saveFiles('s1');
+      expect(saved.bytes).toBe(77);
+      expect(w.calls.some((call) => call.startsWith('start') || call === 'billing')).toBe(false);
+    });
+
     it('wakes a resting machine once, for the save, when there is no copy that matches it', async () => {
       const w = world();
       const store = jest.fn(async () => copy());

@@ -77,26 +77,38 @@ export async function storeSavedCopy(botId: string, archive: ReadableStream<Uint
   const source = Readable.fromWeb(archive as never);
   const toBucket = new PassThrough();
   const toCheck = createGunzip();
-  // The same bytes go two ways: to the bucket, and through a gzip check that fails when the stream ends early
+  const sealed = encryptor(derivedKey(PURPOSE));
+  // Any part that fails takes every other part down with it, so no stream is left paused on a reader that is gone
+  const stopAll = (error: Error) => {
+    for (const part of [source, toBucket, sealed, toCheck]) part.destroy(error);
+  };
+  // The same bytes go two ways: to the bucket (encrypted), and through a gzip check that fails when the stream ends early
   source.pipe(toBucket);
   source.pipe(toCheck);
-  source.on('error', (error) => {
-    toBucket.destroy(error);
-    toCheck.destroy(error);
+  source.on('error', stopAll);
+  pipeline(toBucket, sealed, (error) => {
+    if (error) stopAll(error);
   });
   const upload = new Upload({
     client: s3,
-    params: { Bucket: bucket, Key: stagingKey(botId), Body: toBucket.pipe(encryptor(derivedKey(PURPOSE))), ContentType: 'application/octet-stream', CacheControl: 'private, no-store' },
+    params: { Bucket: bucket, Key: stagingKey(botId), Body: sealed, ContentType: 'application/octet-stream', CacheControl: 'private, no-store' },
   });
-  const checked = run(toCheck, new Writable({ write: (_chunk, _encoding, done) => done() }));
-  // Both must finish; one that fails ends the other, so nothing is left uploading
-  const results = await Promise.allSettled([checked, upload.done()]);
+  const checked = run(toCheck, new Writable({ write: (_chunk, _encoding, done) => done() })).catch((error) => {
+    stopAll(error);
+    throw error;
+  });
+  const uploaded = upload.done().catch((error) => {
+    stopAll(error);
+    throw error;
+  });
+  // Both must finish; one that fails has ended the others, so this always settles
+  const results = await Promise.allSettled([checked, uploaded]);
   const failed = results.find((result) => result.status === 'rejected') as PromiseRejectedResult | undefined;
   if (failed) {
     await upload.abort().catch(() => undefined);
     // The upload may have finished a moment before the check failed: what it wrote is not a copy, and the saved one is untouched
     await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey(botId) })).catch(() => undefined);
-    throw failed.reason instanceof Error ? failed.reason : new Error('The copy of the files could not be saved');
+    throw failed.reason && typeof failed.reason.message === 'string' ? failed.reason : new Error('The copy of the files could not be saved');
   }
   // The stream was whole and the upload finished: now, and only now, it replaces the saved copy (one copy inside the bucket)
   await s3.send(new CopyObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId), CopySource: `${bucket}/${stagingKey(botId)}` }));

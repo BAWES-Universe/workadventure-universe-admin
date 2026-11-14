@@ -215,12 +215,13 @@ export class Agent37ComputerProvider implements ComputerProvider {
     const botId = typeof instance.metadata?.creation_id === 'string' ? instance.metadata.creation_id.replace(/^brick:/, '') : this.brickOf.get(ref);
     if (!botId) throw new Error('This computer does not say which Brick it belongs to');
     if (gone(String(instance.status))) throw new Error(`The computer is ${instance.status}`);
-    // A machine that rests has not changed since it went to sleep: a copy saved before that is still the folder. Asking its address
-    // would wake it, and nothing here wakes a machine that already has a copy to show
+    // A machine that rests has not changed since it was put to rest: a copy saved before that is still the folder. Asking its address
+    // would wake it, and nothing here wakes a machine that already has a copy to show. A sleeping machine says when it slept, and the
+    // copy must be from then; a stopped one says nothing of when (and is only ever stopped by us, after a save), so its copy stands
     if (instance.status !== 'running') {
       const existing = await this.copies.latest(botId);
       const sleptAt = instance.slept_at ? instance.slept_at * 1000 : null;
-      if (existing && sleptAt !== null && existing.savedAt.getTime() >= sleptAt - FRESH_COPY_MS) return existing;
+      if (existing && (instance.status === 'stopped' || (sleptAt !== null && existing.savedAt.getTime() >= sleptAt - FRESH_COPY_MS))) return existing;
       // No copy that is as the machine was left: it is woken once, for this
       await this.wake(ref);
     }
