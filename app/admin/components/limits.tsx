@@ -765,6 +765,19 @@ export function brickLimits(values: BrickLimits): Limit[] {
         { value: 20, label: '20 apps', meaning: 'For the busiest bots.' },
       ],
     },
+    {
+      id: 'templateList',
+      label: 'Templates in each short list',
+      hint: 'Under “Start from a template” a person sees three short lists: the ones they starred, a few picked by Universe, and Bricks they have met that share one. This is how many each list shows.',
+      unit: 'templates',
+      value: values.templateList,
+      recommended: recommended.templateList,
+      options: [
+        { value: 5, label: '5 templates', meaning: 'Very short lists.' },
+        { value: 10, label: '10 templates', meaning: 'Short and easy to scan.' },
+        { value: 20, label: '20 templates', meaning: 'For a busy shelf.' },
+      ],
+    },
   ], LIMIT_RANGES.bricks);
 }
 
