@@ -2,6 +2,7 @@
  * The git relay with real git (game #2041): a real `git clone` and `git push` go through the relay, and "GitHub" is a real git
  * server on this machine (git http-backend), so what is checked is what git really sends and reads.
  */
+import crypto from 'node:crypto';
 import { execFile, execFileSync, spawn } from 'child_process';
 import { promisify } from 'util';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
@@ -151,6 +152,17 @@ const hasHttpBackend = (() => {
     expect(upstream.seen.every((call) => call.url.startsWith('https://github.com/acme/tools.git/'))).toBe(true);
     expect(upstream.seen.every((call) => call.authorization === `Basic ${Buffer.from('x-access-token:ghu_owner').toString('base64')}`)).toBe(true);
     expect(git(path.join(work, 'github', 'acme', 'tools.git'), 'branch', '--list')).toContain('feature');
+  });
+
+  it('passes on a push bigger than git sends in one go (git first sends a bare flush to probe, then the push in pieces)', async () => {
+    const clone = path.join(work, 'clone-big');
+    expect(await tryGit(work, 'clone', '-q', `http://127.0.0.1:${port}/api/git/acme/tools.git`, clone)).toMatchObject({ ok: true });
+    writeFileSync(path.join(clone, 'big.bin'), crypto.randomBytes(64 * 1024));
+    git(clone, 'add', '.');
+    git(clone, '-c', 'user.name=sara', '-c', 'user.email=1+sara@users.noreply.github.com', 'commit', '-qm', 'big');
+    const pushed = await tryGit(clone, '-c', 'http.postBuffer=4096', 'push', '-q', 'origin', 'HEAD:refs/heads/big');
+    expect(pushed).toMatchObject({ ok: true });
+    expect(git(path.join(work, 'github', 'acme', 'tools.git'), 'branch', '--list')).toContain('big');
   });
 
   it('turns down deleting a branch and pushing a tag, and git says why', async () => {

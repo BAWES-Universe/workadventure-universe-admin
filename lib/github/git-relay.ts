@@ -178,6 +178,9 @@ export interface RefUpdate {
   ref: string;
 }
 
+/** git's probe before a push it sends in pieces: one flush packet and nothing else. */
+const isProbe = (body: Buffer | null): boolean => !!body && body.length === 4 && body.toString('ascii') === '0000';
+
 /**
  * The ref updates at the start of a push (git's receive-pack request: pkt-lines up to the first flush). Null when the request is
  * not one that can be read: a push that cannot be read is refused, never passed on unchecked.
@@ -242,10 +245,14 @@ export async function relayGit(
   if (target.step === 'git-receive-pack' && input.body) {
     if (input.body.length > MAX_PUSH_BYTES) return { status: 'too_big' };
     const raw = input.contentEncoding === 'gzip' ? await unzipStart(input.body, COMMANDS_MAX_BYTES) : input.body;
-    const read = raw ? readPushCommands(raw) : null;
-    if (!read) return { status: 'bad_request' };
-    const refused = refusedPush(read.updates);
-    if (refused) return { status: 'refused', message: refused, response: rejectedPush(read.updates, refused, read.capabilities) };
+    // A push too big for git to send in one go starts with a bare flush ("0000") to check it may push at all: it changes nothing,
+    // so it is passed on, and the push itself comes next and is read like any other
+    if (!isProbe(raw)) {
+      const read = raw ? readPushCommands(raw) : null;
+      if (!read) return { status: 'bad_request' };
+      const refused = refusedPush(read.updates);
+      if (refused) return { status: 'refused', message: refused, response: rejectedPush(read.updates, refused, read.capabilities) };
+    }
   }
   const token = await gitHubToken(pass.connectionId, fetchImpl);
   if (token.status === 'reconnect') return { status: 'reconnect' };
