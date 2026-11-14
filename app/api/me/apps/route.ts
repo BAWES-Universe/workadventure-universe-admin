@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import { z } from 'zod';
+import { unsendableIssueMessage } from '@/lib/mcp/server-input';
 import { addConnectionSchema, createConnection, listConnections, ownBricks, NOT_FOUND } from '@/lib/app-connections';
 import { connectFromCatalog } from '@/lib/app-catalog';
 import { appsRoute, preflight } from '@/lib/me-apps-route';
@@ -40,7 +41,7 @@ export async function POST(request: NextRequest) {
       return respond({ id: made.id }, made.created ? 201 : 200);
     }
     const parsed = addConnectionSchema.safeParse(body);
-    if (!parsed.success) return respond({ error: 'Invalid input data', details: z.treeifyError(parsed.error) }, 400);
+    if (!parsed.success) return respond({ error: unsendableIssueMessage(parsed.error.issues) ?? 'Invalid input data', details: z.treeifyError(parsed.error) }, 400);
     const connection = await createConnection(user.id, { ...parsed.data, source: 'link' });
     return respond({ id: connection.id, name: connection.name }, 201);
   });
