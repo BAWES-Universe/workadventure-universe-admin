@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { connectedState } from '@/lib/app-connections';
 import { getBrickLimits } from '@/lib/bot-limits';
-import { TIME_ZONE_KEY, isTimeZone, type Cadence } from '@/lib/brick-item-time';
+import { TIME_ZONE_KEY, isTimeZone, repeatMinutes, type Cadence } from '@/lib/brick-item-time';
 import { makeBrick } from '@/lib/brick-make';
 import type { BrickCard } from '@/lib/brick-default';
 import { NEVER_CARRIED, type Need, type Routine, type RoutineKind } from '@/lib/brick-templates';
@@ -230,14 +230,18 @@ export async function pickTemplate(templateId: string, adminId: string, picked: 
  * other, so the ones that do not fit under the setting are left out, and how many is said. Reads the time zone the person kept;
  * until one is kept the routine holds a placeholder zone that is replaced when they turn it on.
  */
-export async function bringRoutines(tx: Prisma.TransactionClient, botId: string, ownerId: string, routines: Routine[], itemsPerPerson: number): Promise<{ added: number; leftOut: number }> {
+export async function bringRoutines(tx: Prisma.TransactionClient, botId: string, ownerId: string, routines: Routine[], limits: { itemsPerPerson: number; shortestRepeat: number }): Promise<{ added: number; leftOut: number }> {
   if (routines.length === 0) return { added: 0, leftOut: 0 };
   const kept = (await tx.userPreference.findUnique({ where: { userId_key: { userId: ownerId, key: TIME_ZONE_KEY } }, select: { value: true } }))?.value;
   const timeZone = isTimeZone(kept) ? kept : 'UTC';
   const have = await tx.brickItem.count({ where: { ownerId, parentId: null, state: { in: ['on', 'paused'] } } });
-  const room = Math.max(0, itemsPerPerson - have);
+  const room = Math.max(0, limits.itemsPerPerson - have);
   let added = 0;
-  for (const routine of routines.slice(0, room)) {
+  for (const routine of routines) {
+    if (added >= room) break;
+    // The shortest wait between two runs is the setting as it is now, not as it was when the maker set the routine
+    const gap = repeatMinutes(routine.cadence);
+    if (gap !== null && gap < limits.shortestRepeat) continue;
     await tx.brickItem.create({
       data: {
         ownerId,
@@ -328,7 +332,7 @@ export async function makeBrickFromTemplate(viewerId: string, templateId: string
     );
     const makerName = nameOf(template.maker.name);
     await tx.brickTemplateUse.create({ data: { botId: brick.id, templateId: template.id, versionNumber: version.number, makerId: template.makerId, makerName, templateName: version.name } });
-    const routines = await bringRoutines(tx, brick.id, viewerId, asRoutines(version.routines), limits.itemsPerPerson);
+    const routines = await bringRoutines(tx, brick.id, viewerId, asRoutines(version.routines), limits);
     const needs = await readyOnBrick(brick.id, asNeeds(version.needs), tx);
     return {
       ok: true as const,
@@ -466,10 +470,13 @@ export async function takeUpdate(botId: string, ownerId: string, input: z.infer<
     }
     if (Object.keys(data).length > 1) await tx.bot.update({ where: { id: botId }, data });
     const routineChange = wanted.includes('routines') ? offered.get('routines') : undefined;
-    const routines = routineChange && routineChange.field === 'routines' ? await bringRoutines(tx, botId, ownerId, routineChange.theirs, limits.itemsPerPerson) : { added: 0, leftOut: 0 };
+    const routines = routineChange && routineChange.field === 'routines' ? await bringRoutines(tx, botId, ownerId, routineChange.theirs, limits) : { added: 0, leftOut: 0 };
     await tx.brickTemplateUse.update({ where: { botId }, data: { versionNumber: read.template.currentVersion, templateName: read.latest.name } });
     return { ok: true as const, routines };
   });
   if (!done.ok) return done;
-  return { ok: true, view: (await madeFromView(botId, ownerId))!, routines: done.routines };
+  // The Brick can be deleted between the change and this read: the change stands, and what is read next is not found
+  const view = await madeFromView(botId, ownerId);
+  if (!view) return { ok: false, status: 404, error: 'Brick not found' };
+  return { ok: true, view, routines: done.routines };
 }

@@ -326,6 +326,20 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ state: 'on', pausedBy: null, timeZone: 'Asia/Kuwait', nextDueAt: expect.any(Date) });
     });
 
+    it('leave out a routine that repeats more often than the shortest-wait setting is now, even if it was fine when the maker set it', async () => {
+      const often = await routine(brickId, sara.id, { cadence: { type: 'every', minutes: 30 }, words: 'Every half hour check the oven' });
+      const id = await share({ routines: [often.id] });
+      try {
+        await saveServerLimits({ bricks: { shortestRepeat: 120 } }, sara.id);
+        as(omar);
+        const body = await remember(await makeFrom(id));
+        expect(body.routines).toEqual({ added: 0, leftOut: 1 });
+        expect(await prisma.brickItem.count({ where: { botId: body.brick.id } })).toBe(0);
+      } finally {
+        await saveServerLimits({ bricks: { shortestRepeat: 30 } }, sara.id);
+      }
+    });
+
     it('leave out what does not fit under the goals and tasks setting, and say how many', async () => {
       const first = await routine(brickId, sara.id);
       const second = await routine(brickId, sara.id, { words: 'Every evening send me a menu' });
