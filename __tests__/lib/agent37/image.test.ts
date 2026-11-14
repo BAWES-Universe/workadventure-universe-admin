@@ -5,7 +5,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
@@ -71,11 +71,30 @@ describe('what is in the image', () => {
 
   python('has scripts that are well formed', () => {
     const dir = write();
-    for (const name of ['universe-up', 'universe-supervise', 'universe-clean']) expect(spawnSync('sh', ['-n', join(dir, name)]).status).toBe(0);
+    for (const name of ['universe-up', 'universe-supervise', 'universe-clean', 'universe-files']) expect(spawnSync('sh', ['-n', join(dir, name)]).status).toBe(0);
     for (const name of ['universe-proxy', 'universe-fence']) {
       const compiled = spawnSync('python3', ['-c', `import ast,sys;ast.parse(open(sys.argv[1]).read())`, join(dir, name)]);
       expect(compiled.status).toBe(0);
     }
+  });
+
+  it('lists the files a person would look for, newest first, without hidden folders or the tools’ own', () => {
+    const dir = write();
+    const home = mkdtempSync(join(tmpdir(), 'universe-home-'));
+    mkdirSync(join(home, 'visa'), { recursive: true });
+    mkdirSync(join(home, '.hidden'));
+    mkdirSync(join(home, 'node_modules', 'x'), { recursive: true });
+    writeFileSync(join(home, 'visa', 'form.pdf'), 'abc');
+    writeFileSync(join(home, 'notes.txt'), 'hello world');
+    writeFileSync(join(home, '.hidden', 'secret'), 'x');
+    writeFileSync(join(home, 'node_modules', 'x', 'y.js'), 'x');
+    utimesSync(join(home, 'notes.txt'), new Date('2026-01-01T00:00:00Z'), new Date('2026-01-01T00:00:00Z'));
+    const run = spawnSync('sh', [join(dir, 'universe-files')], { env: { ...process.env, HOME: home }, encoding: 'utf8' });
+    expect(run.status).toBe(0);
+    const lines = run.stdout.trim().split('\n').map((line) => line.split('\t'));
+    expect(lines.map((parts) => parts[2])).toEqual(['visa/form.pdf', 'notes.txt']);
+    expect(lines.map((parts) => parts[0])).toEqual(['3', '11']);
+    rmSync(home, { recursive: true, force: true });
   });
 
   it('writes Hermes’ config once, pointing only at the local model address, and says when Hermes must be restarted', () => {

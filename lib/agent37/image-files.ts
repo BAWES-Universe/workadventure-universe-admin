@@ -35,8 +35,8 @@ USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify chromium x11-utils procps python3 fonts-liberation fonts-noto-color-emoji ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-COPY universe-up universe-supervise universe-proxy universe-fence universe-clean /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/universe-up /usr/local/bin/universe-supervise /usr/local/bin/universe-proxy /usr/local/bin/universe-fence /usr/local/bin/universe-clean
+COPY universe-up universe-supervise universe-proxy universe-fence universe-clean universe-files /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/universe-up /usr/local/bin/universe-supervise /usr/local/bin/universe-proxy /usr/local/bin/universe-fence /usr/local/bin/universe-clean /usr/local/bin/universe-files
 # Hermes' browser tool drives the visible Chromium that the screen shows
 ENV DISPLAY=:1 BROWSER_CDP_URL=http://127.0.0.1:9222 AGENT37_SCREEN_GEOMETRY=1440x900
 USER node
@@ -390,15 +390,26 @@ print("killed=%d" % killed)
 
 export const UNIVERSE_CLEAN = String.raw`#!/bin/sh
 # Clears the browser's sign-in state between jobs: a signed-in page one job was handed never carries into the next. The browser is
-# stopped, its profile removed, and it comes back clean (the supervisor in universe-up starts it again).
+# stopped, its profile removed, and it comes back clean (the supervisor in universe-up starts it again). Every screen link still open
+# is closed too (the web screen is restarted), so a tab left open on a job that is over shows nothing and a new link is needed.
 HOME_DIR="$HOME"
 [ -n "$HOME_DIR" ] || HOME_DIR=/home/node
+pkill -x websockify 2>/dev/null
 pkill -x chromium 2>/dev/null
 pkill -x chrome 2>/dev/null
 sleep 0.5
 rm -rf "$HOME_DIR/.config/universe-chromium" "$HOME_DIR/.cache/chromium" 2>/dev/null
 /usr/local/bin/universe-up --child >/dev/null 2>&1
 echo "cleaned=1"
+`;
+
+/** Lists the files a person would look for: regular files in the home folder (not hidden ones, not the tools' own folders), newest first. */
+export const UNIVERSE_FILES = String.raw`#!/bin/sh
+# One line for each file: size in bytes, TAB, modified (seconds), TAB, path from the home folder. At most 201 lines (the caller says "more" for the 201st).
+HOME_DIR="$HOME"
+[ -n "$HOME_DIR" ] || HOME_DIR=/home/node
+cd "$HOME_DIR" 2>/dev/null || exit 0
+find . -maxdepth 5 \( -path './.*' -o -name node_modules -o -name __pycache__ \) -prune -o -type f -printf '%s\t%T@\t%P\n' 2>/dev/null | sort -t "$(printf '\t')" -k2,2nr | head -n 201
 `;
 
 /** Every file of the build context: the folder Agent37 builds. The Dockerfile is at its root. */
@@ -410,5 +421,6 @@ export function imageFiles(): Array<{ name: string; mode: number; text: string }
     { name: 'universe-proxy', mode: 0o755, text: UNIVERSE_PROXY },
     { name: 'universe-fence', mode: 0o755, text: UNIVERSE_FENCE },
     { name: 'universe-clean', mode: 0o755, text: UNIVERSE_CLEAN },
+    { name: 'universe-files', mode: 0o755, text: UNIVERSE_FILES },
   ];
 }

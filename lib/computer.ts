@@ -9,6 +9,7 @@ import { monthOf } from '@/lib/meter-values';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
 import { renewJobTokens, revokeJobTokens } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
+import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
@@ -77,7 +78,7 @@ export interface ComputerView {
   queued: JobView[];
   /** The person's month for computers: the share left (0 to 1), or null when no allowance is set up yet. Never a count or a price. */
   month: { leftFraction: number; unlimited: boolean; endsAt: Date } | null;
-  files: { bytes: number; savedAt: Date | null };
+  files: { bytes: number; savedAt: Date | null; /** What was on the computer when its last job ended; null until one has. */ list: FilesList | null };
   /** The day its files came from, after a restore from a backup. */
   restoredFrom: Date | null;
   /**
@@ -189,7 +190,7 @@ export async function computerView(botId: string, ownerId: string, now: Date = n
     job: holding ? jobView(holding) : null,
     queued: jobs.filter((job) => job.status === 'queued').map(jobView),
     month: row?.enabled ? await monthOfPerson(ownerId, now) : null,
-    files: { bytes: toNumber(row?.filesBytes), savedAt: row?.filesSavedAt ?? null },
+    files: { bytes: toNumber(row?.filesBytes), savedAt: row?.filesSavedAt ?? null, list: readFilesList(row?.filesList) },
     restoredFrom: row?.restoredFrom ?? null,
     notice: await noticeOf(botId, row?.noticeDismissedJobId ?? null),
   };
@@ -623,16 +624,28 @@ export async function stopJobFor(botId: string, ownerId: string, now: Date = new
 }
 
 /**
- * Once no job holds an awake machine, the browser on it is cleared (the image's `universe-clean`), so a page one job was signed in to
- * never carries into the next. Best effort and quick: a machine that is not awake is left alone (a command would wake it), and a clean
- * that fails never holds up the end of the job (the next job's start-up clears nothing, so this is logged for the one who looks).
+ * Once no job holds an awake machine: what is on it is listed for the Files list, then the browser is cleared (the image's
+ * `universe-clean`), so a page one job was signed in to never carries into the next and a screen link left open goes dead. Best
+ * effort and quick: a machine that is not awake is left alone (a command would wake it), and a step that fails never holds up the end of
+ * the job (it is logged for the one who looks; the list from the last job stays).
  */
-async function cleanBrowserIfUnheld(botId: string): Promise<void> {
+async function closeOutIfUnheld(botId: string): Promise<void> {
   try {
     const row = await prisma.brickComputer.findUnique({ where: { botId } });
     const provider = providerFor(row);
     if (!row?.providerRef || !provider || row.machine !== 'working') return;
-    if ((await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } })) > 0) return;
+    const holders = () => prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } });
+    if ((await holders()) > 0) return;
+    try {
+      const listed = await provider.exec(row.providerRef, 'universe-files', { timeoutMs: 20_000 });
+      if (listed.exitCode === 0 && !listed.truncated) {
+        await prisma.brickComputer.updateMany({ where: { botId, providerRef: row.providerRef }, data: { filesList: parseFilesList(listed.stdout, new Date()) as unknown as Prisma.InputJsonValue } });
+      }
+    } catch (error) {
+      console.error('[Computer] Could not list the files after a job:', error instanceof Error ? error.message : 'unknown');
+    }
+    // A job that started while the list was being made holds the machine now: its browser is not cleared under it
+    if ((await holders()) > 0) return;
     await provider.exec(row.providerRef, 'universe-clean', { timeoutMs: 20_000 });
   } catch (error) {
     console.error('[Computer] Could not clear the browser after a job:', error instanceof Error ? error.message : 'unknown');
@@ -677,7 +690,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   }
 
   if (held) {
-    await cleanBrowserIfUnheld(job.botId);
+    await closeOutIfUnheld(job.botId);
     await restIfUnheld(job.botId, now);
   }
   // The turn passes to the next job in line, except while a Stop is ending everything

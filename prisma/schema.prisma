@@ -2421,6 +2421,8 @@ model BrickComputer {
   filesBytes    BigInt    @default(0) @map("files_bytes")
   filesSavedAt  DateTime? @map("files_saved_at")
   restoredFrom  DateTime? @map("restored_from")
+  // What was on the computer's home folder when the last job ended (names, sizes, days; newest first), for the Files list. Null until a job has ended.
+  filesList     Json?     @map("files_list")
   // Set while a rest is claimed and not finished, empty once it is done: a rest a stopped server left half way is told apart from a finished one
   restClaimedAt DateTime? @map("rest_claimed_at")
   // When the sweep last sent the machine a no-op command to keep it awake while a job holds it

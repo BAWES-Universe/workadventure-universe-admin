@@ -228,7 +228,7 @@ run('a Brick’s computer, in a real database', () => {
       if (!job.ok) throw new Error('no');
       await finishJob(job.job.id, 'done', minutes(1));
       expect((await computerView(sara.brickId, sara.id))?.machine).toBe('resting');
-      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake', 'exec', 'saveFiles', 'rest']);
+      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake', 'exec', 'exec', 'saveFiles', 'rest']);
       // A second job wakes the SAME machine: never a second one
       await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(2));
       expect(provider.calls.filter((call) => call.name === 'create')).toHaveLength(1);
@@ -249,6 +249,23 @@ run('a Brick’s computer, in a real database', () => {
       expect(provider.commands.filter((entry) => entry.command === 'universe-clean')).toHaveLength(1);
       const names = provider.calls.map((call) => call.name);
       expect(names.indexOf('exec')).toBeLessThan(names.indexOf('rest'));
+    });
+
+    it('lists what is on the computer when the last job ends, for the Files list, and keeps the last list when a later listing fails', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      provider.execAnswer = (command) => (command === 'universe-files' ? { stdout: '12\t1794679965.5\tvisa/form.pdf\n3\t1794679000\tnotes.txt\n' } : {});
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      expect((await computerView(sara.brickId, sara.id))?.files.list).toBeNull();
+      await finishJob(job.job.id, 'done', minutes(1));
+      const list = (await computerView(sara.brickId, sara.id))?.files.list;
+      expect(list?.items.map((entry) => entry.path)).toEqual(['visa/form.pdf', 'notes.txt']);
+      provider.execAnswer = () => ({ exitCode: 1 });
+      const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(2));
+      if (!second.ok) throw new Error('no');
+      await finishJob(second.job.id, 'done', minutes(3));
+      expect((await computerView(sara.brickId, sara.id))?.files.list?.items).toHaveLength(2);
     });
 
     it('a clean that fails never holds up the end of the job: the machine still rests', async () => {
