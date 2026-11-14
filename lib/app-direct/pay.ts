@@ -193,6 +193,8 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
   // A key marked as stopped is not a reason to refuse here: the call itself finds out, and a good call is what clears the mark
   if (job.artifact.expiresAt && job.artifact.expiresAt.getTime() <= Date.now()) return { status: 'unavailable' };
   const definition = definitionOf(connection);
+  // An app with test and live keys needs to know which one this key is: a payment is never taken with a key of a kind it could not tell
+  if (definition?.modes && !connection.keyMode) return { status: 'unavailable' };
   // A definition that changed since the owner asked for this is not the one they agreed to: payments wait for them to ask again
   if (!definition?.payment || job.definitionHash !== connection.definitionHash) return { status: 'unavailable' };
   const origin = ownOrigin();
@@ -381,7 +383,8 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
     const reference = valueAt(record, lookup.orderPath);
     const live = lookup.livePath ? valueAt(record, lookup.livePath) : undefined;
     // A payment for a key with a known mode is only counted when the service says, as a yes or no, which mode it was made in
-    const sameMode = order.mode ? typeof live === 'boolean' && (live ? 'live' : 'test') === order.mode : true;
+    // An app with test and live keys never counts a payment for a key of a kind it could not tell (no known mode on the order)
+    const sameMode = definition.modes || order.mode ? typeof live === 'boolean' && !!order.mode && (live ? 'live' : 'test') === order.mode : true;
     const same =
       amountToMinor(typeof amount === 'number' || typeof amount === 'string' ? amount : null, order.currency) === order.amountMinor &&
       typeof currency === 'string' &&

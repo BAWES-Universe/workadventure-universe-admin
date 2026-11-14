@@ -313,6 +313,21 @@ run('payments for pages, in a real database', () => {
       expect(await prisma.appPageOrder.findMany({ where: { ownerId: sara }, select: { status: true } })).toEqual([{ status: 'not_paid' }]);
     });
 
+    it('takes no payment with a key whose mode the app could not tell, and counts none for an order that has no mode', async () => {
+      const { id, serverId } = await connectTap();
+      const artifactId = await makeArtifact();
+      await job(serverId, artifactId);
+      const sent = tap({ record: (order) => paidRecord(order) });
+      const { orderId } = await checkout(artifactId);
+      await prisma.appPageOrder.update({ where: { id: orderId }, data: { mode: null } });
+      expect(await settle(orderId)).toMatchObject({ status: 'cant_confirm' });
+      expect(await notices()).toHaveLength(0);
+      await prisma.appConnection.update({ where: { id }, data: { keyMode: null } });
+      const before = sent.length;
+      expect((await start(artifactId, '203.0.113.20')).status).toBe(409);
+      expect(sent).toHaveLength(before);
+    });
+
     it('clears the stopped mark when a lookup is answered well', async () => {
       const { id, serverId } = await connectTap();
       const artifactId = await makeArtifact();
