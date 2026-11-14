@@ -16,6 +16,7 @@ describe('the secret check of the look before sharing', () => {
     // Written as an assignment, a password needs no digit
     expect(kinds('password: correct-horse-battery-staple')).toEqual(['secret:a password or key written out']);
     expect(kinds('secret = correcthorsebatterystaple')).toEqual(['secret:a password or key written out']);
+    expect(kinds('password: CorrectHorse')).toEqual(['secret:a password or key written out']);
     expect(kinds('xoxb-123456789012-abcdefghij')).toEqual(['secret:a Slack token']);
     expect(kinds('eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U')).toEqual(['secret:a sign-in token']);
   });
@@ -42,6 +43,8 @@ describe('the secret check of the look before sharing', () => {
     expect(kinds('Check https://example.com/recipes/ChickenAndVegetableSoupForFamilyDinner2026 every morning')).toEqual([]);
     expect(kinds('Check [recipe](https://example.com/recipes/ChickenAndVegetableSoupForFamilyDinner2026) every morning')).toEqual([]);
     expect(kinds('Check (https://example.com/recipes/ChickenAndVegetableSoupForFamilyDinner2026), then reply')).toEqual([]);
+    // A plain word after a keyword and a colon is prose, not a password
+    expect(kinds('Ask for the password: required. The token: confidential. Keep the secret: remember it.')).toEqual([]);
     expect(kinds('Be brief and kind. Reply in English.')).toEqual([]);
     expect(findInText('', 'x')).toEqual([]);
     expect(findInText(null, 'x')).toEqual([]);
