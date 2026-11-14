@@ -459,6 +459,70 @@ run('payments for pages, in a real database', () => {
       expect(await settle(late.orderId)).toMatchObject({ status: 'paid' });
     });
 
+    describe('a payment that completes after the order was closed as not paid', () => {
+      const closeByExpiry = async (artifactId: string, address: string) => {
+        await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
+        tap({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
+        const order = await checkout(artifactId, address);
+        await prisma.appPageOrder.update({ where: { id: order.orderId }, data: { createdAt: new Date(Date.now() - 2 * 3_600_000) } });
+        expect(await settle(order.orderId)).toMatchObject({ status: 'not_paid' });
+        return order.orderId;
+      };
+
+      it('is counted once, with one notice that says it came in late', async () => {
+        const { artifactId } = await pending();
+        const before = (await notices()).length;
+        const orderId = await closeByExpiry(artifactId, '198.51.100.30');
+        tap({ record: (order) => paidRecord(order) });
+        expect(await settle(orderId)).toMatchObject({ status: 'paid' });
+        expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ status: 'paid' });
+        await settle(orderId);
+        const made = (await notices()).slice(before);
+        expect(made).toHaveLength(1);
+        expect(made[0].body).toContain('came in after the checkout had closed');
+      });
+
+      it('is counted once, with one notice, when two callers ask at the same moment', async () => {
+        const { artifactId } = await pending();
+        const before = (await notices()).length;
+        const orderId = await closeByExpiry(artifactId, '198.51.100.31');
+        tap({ record: (order) => paidRecord(order) });
+        await prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 60_000) } });
+        await Promise.all([verifyOrder(orderId), notice(request(`/api/app-pay/notice/${orderId}`, { method: 'POST', body: { status: 'CAPTURED' } }), params({ orderId }))]);
+        expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('paid');
+        expect((await notices()).slice(before)).toHaveLength(1);
+      });
+
+      it('is never counted when the amount, currency or mode is not what was asked: it goes to cannot-confirm', async () => {
+        const { artifactId } = await pending();
+        const before = (await notices()).length;
+        const orderId = await closeByExpiry(artifactId, '198.51.100.32');
+        tap({ record: (order) => paidRecord(order, { amount: 1 }) });
+        expect(await settle(orderId)).toMatchObject({ status: 'cant_confirm' });
+        expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ status: 'cant_confirm', paidAt: null });
+        expect((await notices()).slice(before)).toHaveLength(0);
+      });
+
+      it('stays closed while the service still does not call it completed', async () => {
+        const { artifactId } = await pending();
+        const orderId = await closeByExpiry(artifactId, '198.51.100.33');
+        tap({ record: (order) => paidRecord(order, { status: 'FAILED' }) });
+        expect(await settle(orderId)).toMatchObject({ status: 'not_paid', checkoutUrl: null });
+        tap({ record: (order) => paidRecord(order, { status: 'SOMETHING_NEW' }) });
+        expect(await settle(orderId)).toMatchObject({ status: 'not_paid' });
+      });
+
+      it('is not asked about again once it is older than the late-payment hours from Limits', async () => {
+        const { artifactId } = await pending();
+        const orderId = await closeByExpiry(artifactId, '198.51.100.34');
+        await prisma.appPageOrder.update({ where: { id: orderId }, data: { createdAt: new Date(Date.now() - 60 * 3_600_000) } });
+        const sent = tap({ record: (order) => paidRecord(order) });
+        expect(await settle(orderId)).toMatchObject({ status: 'not_paid' });
+        expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(0);
+        expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('not_paid');
+      });
+    });
+
     it('asks the service at most once in the seconds from Limits, however often it is asked', async () => {
       const { artifactId } = await pending();
       const sent = tap({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });

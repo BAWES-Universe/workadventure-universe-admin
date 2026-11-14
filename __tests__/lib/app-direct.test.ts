@@ -228,6 +228,10 @@ describe('a key is taken out of anything that quotes it', () => {
 
   it('shows only the last four', () => {
     expect(lastFour(KEY)).toBe('7a60');
+    // A short secret shows no hint at all: four characters of it would be too much
+    expect(lastFour('12345678')).toBeNull();
+    expect(lastFour('123456789012345')).toBeNull();
+    expect(lastFour('1234567890123456')).toBe('3456');
   });
 
   it('knows what the form can take as a key', () => {

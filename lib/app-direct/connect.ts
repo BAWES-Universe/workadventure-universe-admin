@@ -201,8 +201,10 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
   const limits = await getBrickLimits();
   if (row.tries >= limits.keyTries) throw new KeyFormError(429, 'too_many', 'Too many tries');
   // What is wrong with the key is never said: only that it is not one this form can take
-  if (!looksLikeAKey(input.key)) throw new KeyFormError(400, 'invalid_key', 'That does not look like a key');
-  const key = input.key;
+  // A pasted key often carries a trailing space or line break; that is never part of it
+  const typed = typeof input.key === 'string' ? input.key.trim() : input.key;
+  if (!looksLikeAKey(typed)) throw new KeyFormError(400, 'invalid_key', 'That does not look like a key');
+  const key = typed;
   const definition = readDefinition(row);
 
   // Prove the key with the definition's own non-changing request. A key the service refuses costs a try.

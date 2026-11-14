@@ -36,5 +36,8 @@ export function scrubDeep<T>(value: T, secret: string): T {
   return value;
 }
 
-/** The last four characters, the only part of a key that is ever shown ("ending 9f2c"). */
-export const lastFour = (key: string): string => key.slice(-4);
+/** A key shorter than this shows no hint at all: four characters of a short secret are too much of it. */
+export const MIN_KEY_FOR_LAST4 = 16;
+
+/** The last four characters, the only part of a key that is ever shown ("ending 9f2c"); none for a short key. */
+export const lastFour = (key: string): string | null => (key.length >= MIN_KEY_FOR_LAST4 ? key.slice(-4) : null);

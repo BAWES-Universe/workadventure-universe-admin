@@ -120,6 +120,22 @@ run('key apps, in a real database', () => {
     expect(JSON.stringify(await listConnections(sara))).not.toContain(row.keyCipher!);
   });
 
+  it('trims what was pasted around the key, and shows no hint of the end of a short key', async () => {
+    const id = await open();
+    const short = 'sk_test_abcd';
+    const fake = service(404);
+    const done = await submitKey({ requestId: id, ownerId: sara, key: `  ${short}\n` }, fake.deps);
+    expect(fake.seen[0].headers.authorization).toBe(`Bearer ${short}`);
+    const row = await prisma.appConnection.findUniqueOrThrow({ where: { id: done.id } });
+    expect(readKey(row)).toBe(short);
+    expect(row.keyLast4).toBeNull();
+    mockUser.current = { id: sara };
+    const listed = await (await listApps(request('/api/me/apps'))).json();
+    expect(listed.apps.find((app: { id: string }) => app.id === done.id)).toMatchObject({ kind: 'direct', keyLast4: null });
+    expect(JSON.stringify(listed)).not.toContain(short);
+    await prisma.appConnection.delete({ where: { id: done.id } });
+  });
+
   it('does not take a key the service refuses: it costs a try, stores nothing, and the form closes after the last one', async () => {
     const id = await open();
     for (let attempt = 1; attempt <= 5; attempt += 1) {

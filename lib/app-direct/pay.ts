@@ -303,23 +303,30 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
   const order = await prisma.appPageOrder.findUnique({ where: { id: orderId }, include: { connection: true, job: { select: { artifact: { select: { title: true } } } } } });
   if (!order) return null;
   const view = (status: string, mode: string | null = order.mode): OrderView => ({ status: stateOf(status), checkoutUrl: status === 'pending' ? order.checkoutUrl : null, testPayment: mode === 'test' });
-  if (order.status !== 'pending') return view(order.status);
+  // Paid and cannot-confirm are final. A closed (not paid) order is asked about again for a while: the buyer may still pay at the service
+  // after it was closed, and that is real money.
+  if (order.status !== 'pending' && order.status !== 'not_paid') return view(order.status);
+  const limits = await getBrickLimits();
+  const now = new Date();
+  const wasClosed = order.status === 'not_paid';
+  if (wasClosed && now.getTime() - order.createdAt.getTime() > (limits.checkoutOpenHours + limits.latePaymentHours) * HOUR) return view(order.status);
+  // What the order may still become: a pending one anything, a closed one only paid (or cannot-confirm for a payment that does not match)
+  const open = { in: ['pending', 'not_paid'] };
 
   const connection = order.connection;
   const definition = connection && connection.kind === 'direct' ? definitionOf(connection) : null;
   // The app was disconnected or changed: what it said could not be checked any more, and a payment is never assumed
   if (!connection || !definition?.payment || order.definitionHash !== connection.definitionHash || !order.providerRef) {
+    if (wasClosed) return view(order.status);
     await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'pending' }, data: { status: 'cant_confirm' } });
     return view('cant_confirm');
   }
-  const limits = await getBrickLimits();
-  const now = new Date();
   // One look per order in a few seconds, whoever is asking
   const taken = await prisma.appPageOrder.updateMany({
-    where: { id: order.id, status: 'pending', OR: [{ checkedAt: null }, { checkedAt: { lt: new Date(now.getTime() - limits.paymentCheckSeconds * 1000) } }] },
+    where: { id: order.id, status: open, OR: [{ checkedAt: null }, { checkedAt: { lt: new Date(now.getTime() - limits.paymentCheckSeconds * 1000) } }] },
     data: { checkedAt: now, checks: { increment: 1 } },
   });
-  if (taken.count === 0) return view('pending');
+  if (taken.count === 0) return view(order.status);
 
   const { lookup } = definition.payment;
   const key = readKey(connection);
@@ -328,20 +335,20 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
     const built = buildRequest(definition, lookup.operation, { [lookup.idParam]: order.providerRef }, key);
     answer = await guardedRequest({ ...built, timeoutMs: limits.keyCallSeconds * 1000, maxBytes: limits.keyAnswerKb * 1024 }, deps);
   } catch (error) {
-    if (error instanceof RequestError || error instanceof GuardError) return view('pending');
+    if (error instanceof RequestError || error instanceof GuardError) return view(order.status);
     throw error;
   }
   if (answer.status === 401 || answer.status === 403) {
     await reportConnectionSignIn(connection.id, { state: 'expired', status: answer.status }, new Date()).catch(() => undefined);
-    return view('pending');
+    return view(order.status);
   }
-  if (answer.redirected || answer.truncated || answer.status < 200 || answer.status >= 300) return view('pending');
+  if (answer.redirected || answer.truncated || answer.status < 200 || answer.status >= 300) return view(order.status);
   let record: unknown;
   try {
     const asked = definition.operations.find((candidate) => candidate.id === lookup.operation);
     record = pickFields(JSON.parse(answer.body), asked?.returns ?? []);
   } catch {
-    return view('pending');
+    return view(order.status);
   }
 
   const status = valueAt(record, lookup.statusPath);
@@ -360,13 +367,15 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
       sameMode;
     // Completed at the service, but not for what we asked: never counted as paid
     if (!same) {
-      await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'pending' }, data: { status: 'cant_confirm' } });
+      await prisma.appPageOrder.updateMany({ where: { id: order.id, status: open }, data: { status: 'cant_confirm' } });
       return view('cant_confirm');
     }
-    const marked = await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'pending' }, data: { status: 'paid', paidAt: now } });
-    if (marked.count === 1) await tellOwnerPaid(order, connection.name, definition.service !== 'custom', order.job?.artifact.title ?? 'your page');
+    const marked = await prisma.appPageOrder.updateMany({ where: { id: order.id, status: open }, data: { status: 'paid', paidAt: now } });
+    if (marked.count === 1) await tellOwnerPaid(order, connection.name, definition.service !== 'custom', order.job?.artifact.title ?? 'your page', wasClosed);
     return view('paid');
   }
+  // A closed order that the service still does not call completed stays closed
+  if (wasClosed) return view('not_paid');
   // Only a state the service names as final closes an order early; anything else (started, authorised only, a state we never heard of) stays
   // open until it has been open too long. A payment that completes after that is still real money and is still counted above.
   const failed = typeof status === 'string' && lookup.failedStates.includes(status);
@@ -380,6 +389,7 @@ async function tellOwnerPaid(
   app: string,
   verified: boolean,
   title: string,
+  late = false,
 ): Promise<void> {
   try {
     const startOfDay = new Date();
@@ -394,7 +404,7 @@ async function tellOwnerPaid(
       kind: 'page_payment',
       dedupeKey: `page-paid:${order.id}`,
       title: test ? `Test payment on ${title}` : `Someone just paid on ${title}`,
-      body: `${amount}${test ? ' (a test payment, no real money)' : ''}. ${said} ${today === 1 ? 'The first one today.' : `${today} paid today.`}`,
+      body: `${amount}${test ? ' (a test payment, no real money)' : ''}. ${said}${late ? ' It came in after the checkout had closed.' : ''} ${today === 1 ? 'The first one today.' : `${today} paid today.`}`,
       badge: test ? 'Test' : 'Paid',
     });
   } catch (error) {

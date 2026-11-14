@@ -883,6 +883,19 @@ export function brickLimits(values: BrickLimits): Limit[] {
       ],
     },
     {
+      id: 'latePaymentHours',
+      label: 'How long a late payment is still counted',
+      hint: 'A buyer may pay at the service after the checkout was closed as not paid. Until this many hours later it is still asked about, and counted if it completes for the right amount.',
+      unit: 'hours',
+      value: values.latePaymentHours,
+      recommended: recommended.latePaymentHours,
+      options: [
+        { value: 24, label: '24 hours', meaning: 'A day.' },
+        { value: 72, label: '72 hours', meaning: 'Three days.' },
+        { value: 168, label: '168 hours', meaning: 'A week.' },
+      ],
+    },
+    {
       id: 'paymentCheckSeconds',
       label: 'Wait between two asks about the same payment',
       hint: 'The service is left alone this long before it is asked again about one payment.',
