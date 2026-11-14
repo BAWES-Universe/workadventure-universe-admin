@@ -25,7 +25,8 @@ import { GET as callback } from '@/app/api/github/callback/route';
 import { GET as installed } from '@/app/api/github/installed/route';
 import { POST as webhook } from '@/app/api/github/webhook/route';
 import { POST as saveKey, DELETE as dropKey } from '@/app/api/me/apps/github/key/route';
-import { GET as createPage } from '@/app/api/admin/github-app/create/route';
+import { POST as createPage } from '@/app/api/admin/github-app/create/route';
+import { GET as created } from '@/app/api/admin/github-app/created/route';
 import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { POST as link } from '@/app/api/ready-made/link/route';
 import { grantToBrick, readConnection } from '@/lib/app-connections';
@@ -129,16 +130,33 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(after.apps[0]).toEqual({ key: 'github', name: 'GitHub', blurb: 'Code, pull requests, issues and CI', icon: 'github', connectionId: null });
   });
 
-  it('the Create page sends GitHub the whole form for the organization, for a super admin only', async () => {
+  it('the setup page gets the whole form for the organization, for a super admin only, and the return keeps the app', async () => {
     mockUser.current = { id: sara, isSuperAdmin: false };
-    expect((await createPage(request('/api/admin/github-app/create'))).status).toBe(403);
+    expect((await createPage(request('/api/admin/github-app/create', { method: 'POST', body: {} }))).status).toBe(403);
     mockUser.current = { id: sara, isSuperAdmin: true };
-    const page = await (await createPage(request('/api/admin/github-app/create'))).text();
-    expect(page).toContain('action="https://github.com/organizations/BAWES-Universe/settings/apps/new?state=');
-    expect(page).toContain('name="manifest"');
-    expect(page).toContain('https://orbit.example.com/api/github/callback');
-    await makeApp();
-    expect(await (await createPage(request('/api/admin/github-app/create'))).text()).toContain('already set up');
+    const form = await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body: {} }))).json();
+    expect(form.action).toMatch(/^https:\/\/github\.com\/organizations\/BAWES-Universe\/settings\/apps\/new\?state=/);
+    expect(JSON.parse(form.manifest)).toMatchObject({ name: 'BAWES Universe', callback_urls: ['https://orbit.example.com/api/github/callback'] });
+    const state = new URL(form.action).searchParams.get('state') as string;
+
+    // GitHub sends them back with no Orbit sign-in: the state is the proof, and they must still be a super admin
+    const calls = pretendGitHub({
+      'POST https://api.github.com/app-manifests/the-code/conversions': { status: 201, body: { id: 77, slug: 'bawes-universe', client_id: 'Iv1.client', client_secret: 'app-secret', webhook_secret: 'hook-secret', pem: PEM, html_url: 'https://github.com/apps/bawes-universe' } },
+    });
+    const adminsBefore = process.env.SUPER_ADMINS;
+    try {
+      process.env.SUPER_ADMINS = 'someone-else@example.test';
+      expect((await created(request(`/api/admin/github-app/created?code=the-code&state=${encodeURIComponent(state)}`))).status).toBe(403);
+      expect((await created(request(`/api/admin/github-app/created?code=the-code&state=made-up`))).status).toBe(400);
+      expect(calls).toHaveLength(0);
+      process.env.SUPER_ADMINS = `sara-${tag}@example.test`;
+      expect((await created(request(`/api/admin/github-app/created?code=the-code&state=${encodeURIComponent(state)}`))).status).toBe(200);
+    } finally {
+      if (adminsBefore === undefined) delete process.env.SUPER_ADMINS;
+      else process.env.SUPER_ADMINS = adminsBefore;
+    }
+    forgetGitHubApp();
+    expect(await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body: {} }))).json()).toEqual({ existing: { slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe' } });
   });
 
   it('connects once, signs in on GitHub with PKCE, keeps the token in Orbit and sends a person with no install on to pick where it works', async () => {
