@@ -364,7 +364,8 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
     const currency = valueAt(record, lookup.currencyPath);
     const reference = valueAt(record, lookup.orderPath);
     const live = lookup.livePath ? valueAt(record, lookup.livePath) : undefined;
-    const sameMode = typeof live === 'boolean' && order.mode ? (live ? 'live' : 'test') === order.mode : true;
+    // A payment for a key with a known mode is only counted when the service says, as a yes or no, which mode it was made in
+    const sameMode = order.mode ? typeof live === 'boolean' && (live ? 'live' : 'test') === order.mode : true;
     const same =
       amountToMinor(typeof amount === 'number' || typeof amount === 'string' ? amount : null, order.currency) === order.amountMinor &&
       typeof currency === 'string' &&

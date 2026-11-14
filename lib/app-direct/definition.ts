@@ -193,6 +193,8 @@ export const definitionSchema = z
       need(asked, [lookup.idParam], 'lookup');
       for (const path of [create.idPath, create.checkoutUrlPath]) if (made && !made.returns.includes(path)) ctx.addIssue({ code: 'custom', path: ['payment', 'create'], message: `${path} is not among what the operation returns` });
       for (const path of [lookup.statusPath, lookup.amountPath, lookup.currencyPath, lookup.orderPath, lookup.livePath]) if (path && asked && !asked.returns.includes(path)) ctx.addIssue({ code: 'custom', path: ['payment', 'lookup'], message: `${path} is not among what the look-up returns` });
+      // An app with test and live keys must say where its look-up reports which one a payment was made in: a payment is never counted without it
+      if (def.modes && !lookup.livePath) ctx.addIssue({ code: 'custom', path: ['payment', 'lookup', 'livePath'], message: 'An app with test and live keys must say where the look-up shows which one a payment was made in' });
       for (const host of def.payment.checkoutHosts) if (!isAllowedServerUrl(`https://${host}/`) || /\.(local|localhost|localdomain|internal|lan|home|corp|test|invalid|example)$/.test(host)) ctx.addIssue({ code: 'custom', path: ['payment', 'checkoutHosts'], message: 'A checkout host must be a public name' });
     }
     if (def.check) {

@@ -450,6 +450,7 @@ run('payments for pages, in a real database', () => {
       ['a different currency', { currency: 'USD' }],
       ['another order’s payment', { reference: { order: randomUUID() } }],
       ['a real payment for a test order', { live_mode: true }],
+      ['a payment that does not say which mode it was made in', { live_mode: undefined }],
       ['no order reference', { reference: {} }],
     ])('does not count %s', async (_name, change) => {
       const { artifactId } = await pending();

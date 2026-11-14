@@ -92,6 +92,16 @@ describe('the payment contract of a definition', () => {
     expect(definitionSchema.safeParse(draft).success).toBe(false);
   });
 
+  it('needs the look-up to show the mode of a payment when the app has test and live keys', () => {
+    const draft = tap();
+    expect(draft.modes).toBeDefined();
+    delete draft.payment!.lookup.livePath;
+    expect(definitionSchema.safeParse(draft).success).toBe(false);
+    // An app with one kind of key has nothing to tell apart
+    delete (draft as { modes?: unknown }).modes;
+    expect(definitionSchema.safeParse(draft).success).toBe(true);
+  });
+
   it('refuses a path the operation does not return', () => {
     const draft = tap();
     draft.payment!.lookup.statusPath = 'something.else';
