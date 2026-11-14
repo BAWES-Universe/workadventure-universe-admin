@@ -300,6 +300,32 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ state: 'on', pausedBy: null, timeZone: 'Asia/Kuwait', nextDueAt: expect.any(Date) });
     });
 
+    it('Done is not a way around the gate: a routine marked done while still off cannot be reopened or snoozed on until it is set up', async () => {
+      const gmail = await connectGmail(sara);
+      await prisma.botMcpServer.create({ data: { botId: brickId, name: 'Gmail', serverUrl: gmail.serverUrl, connectionId: gmail.id } });
+      const item = await routine(brickId, sara.id);
+      const id = await share({ routines: [item.id] });
+      as(omar);
+      const body = await remember(await makeFrom(id));
+      const botId = body.brick.id;
+      const itemId = (await prisma.brickItem.findFirstOrThrow({ where: { botId } })).id;
+      const act = (action: 'resume' | 'done' | 'reopen' | 'snooze') => changeItem(botId, itemId, { userId: omar.email, action });
+
+      expect((await act('done')).ok).toBe(true);
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ state: 'done', pausedBy: 'template', nextDueAt: null });
+      expect(await act('reopen')).toMatchObject({ ok: false, status: 422, code: 'needs_time_zone' });
+      await keepZone(omar);
+      expect(await act('reopen')).toMatchObject({ ok: false, status: 409, code: 'needs_setup' });
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ state: 'done', nextDueAt: null });
+      const later = new Date(Date.now() + 30 * 24 * 3_600_000);
+      expect((await claimDueRuns(later, 500)).filter((run) => (run as { botId?: string }).botId === botId)).toEqual([]);
+
+      const own = await connectGmail(omar);
+      await prisma.botMcpServer.create({ data: { botId, name: 'Gmail', serverUrl: own.serverUrl, connectionId: own.id } });
+      expect((await act('reopen')).ok).toBe(true);
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ state: 'on', pausedBy: null, timeZone: 'Asia/Kuwait', nextDueAt: expect.any(Date) });
+    });
+
     it('leave out what does not fit under the goals and tasks setting, and say how many', async () => {
       const first = await routine(brickId, sara.id);
       const second = await routine(brickId, sara.id, { words: 'Every evening send me a menu' });

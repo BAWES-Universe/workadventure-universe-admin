@@ -426,16 +426,24 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (row.state === 'done') return { ok: true as const, item: viewOf(row) };
         await moveChecks(tx, row.id, ['on', 'paused'], { state: 'done', pausedBy: null, doneAt: now }, now, false);
         await endTaskCards(tx, row.botId, row.id, now);
-        return finish({ state: 'done', pausedBy: null, nextDueAt: null, doneAt: now, result: input.result ?? row.result, ...NOT_ASKING, ...bump });
+        // A routine that came with a template and was never turned on stays marked so while done: coming back (Reopen, Snooze) goes through
+        // the same gate as Resume, so Done is not a way around it
+        return finish({ state: 'done', pausedBy: row.pausedBy === 'template' ? 'template' : null, nextDueAt: null, doneAt: now, result: input.result ?? row.result, ...NOT_ASKING, ...bump });
       }
       case 'reopen': {
         if (row.state === 'on') return { ok: true as const, item: viewOf(row) };
         if (row.state !== 'done') return wrongState(row.state);
         const refused = await comingBackProblem(tx, row, ownerId, limits);
         if (refused) return refused;
+        let zone = row.timeZone;
+        if (row.pausedBy === 'template') {
+          const gate = await templateRoutineGate(tx, row.botId, ownerId);
+          if (!gate.ok) return gate;
+          zone = gate.timeZone;
+        }
         // Starts again from the new revision, counted from now: a one-off that has passed is due now, once
-        const due = cadence.type === 'once' ? (firstDue(cadence, row.timeZone, now) ?? now) : firstDue(cadence, row.timeZone, now);
-        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, nextDueAt: due, failuresInRow: 0, failureTold: false, tellRunId: null, ...NOT_ASKING, askKept: null, ...bump });
+        const due = cadence.type === 'once' ? (firstDue(cadence, zone, now) ?? now) : firstDue(cadence, zone, now);
+        return finish({ state: 'on', pausedBy: null, timeZone: zone, doneAt: null, result: null, nextDueAt: due, failuresInRow: 0, failureTold: false, tellRunId: null, ...NOT_ASKING, askKept: null, ...bump });
       }
       case 'delete': {
         await moveChecks(tx, row.id, ['on', 'paused', 'done'], { state: 'deleted', pausedBy: null }, now, false);
@@ -453,6 +461,10 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (row.state === 'done') {
           const refused = await comingBackProblem(tx, row, ownerId, limits);
           if (refused) return refused;
+          if (row.pausedBy === 'template') {
+            const gate = await templateRoutineGate(tx, row.botId, ownerId);
+            if (!gate.ok) return gate;
+          }
         }
         // A one-off that is not due yet moves from the moment it was due (an early or stale tap only ever puts it later, never earlier);
         // anything else comes back this much after the tap, a repeating one then carrying on from there
