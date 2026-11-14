@@ -71,7 +71,8 @@ export async function checkSharedUse(
   const found = await prisma.appShare.findUnique({ where: { serverId: grant.id }, select: { id: true } });
   if (!found) return null;
   // A use that cannot be counted, or held to what was picked, never runs
-  if (!ask.callId || !ask.tool || !ask.argumentNames) return { allowed: false, reason: 'incomplete' };
+  // ... nor does one that cannot say who is asking: unnamed askers would all share one "unknown" person's day
+  if (!ask.callId || !ask.tool || !ask.argumentNames || !ask.requesterKey) return { allowed: false, reason: 'incomplete' };
   const owner = await prisma.appConnection.findUnique({ where: { id: grant.connectionId }, select: { ownerId: true } });
   if (!owner?.ownerId) return { allowed: false, reason: 'gone' };
   const askerKey = await askerKeyOf(ask.requesterKey);

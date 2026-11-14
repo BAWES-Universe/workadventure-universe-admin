@@ -295,6 +295,7 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       expect((await check(saraBrick, serverId, { requesterKey: omarKey(), tool: 'make_song', argumentNames: [] })).body.reason).toBe('incomplete');
       expect((await check(saraBrick, serverId, { requesterKey: omarKey(), callId: 'a6', argumentNames: [] })).body.reason).toBe('incomplete');
       expect((await check(saraBrick, serverId, { requesterKey: omarKey(), callId: 'a7', tool: 'make_song' })).body.reason).toBe('incomplete');
+      expect((await check(saraBrick, serverId, { callId: 'a8', tool: 'make_song', argumentNames: [] })).body.reason).toBe('incomplete');
       // Only the one try was written, none for the turned-away ones
       expect(await prisma.appShareUse.count({ where: { serverId } })).toBe(1);
     });
