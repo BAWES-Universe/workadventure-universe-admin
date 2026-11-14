@@ -18,6 +18,7 @@ import {
   billFrom,
   callGapIsFlagged,
   invoiceGapIsFlagged,
+  readEvent,
   readMonth,
   type ScannedEvent,
 } from '@/lib/composio-billing';
@@ -204,6 +205,19 @@ describe('the month’s bill', () => {
   it('reads a month name, and refuses anything else', () => {
     expect(readMonth('2026-11')).toMatchObject({ key: '2026-11', start: new Date('2026-11-01T00:00:00Z'), end: new Date('2026-12-01T00:00:00Z') });
     for (const bad of ['2026-13', '2026-1', 'nov', '', null, 5]) expect(readMonth(bad)).toBeNull();
+  });
+});
+
+describe('reading a stored event', () => {
+  const row = (detail: Record<string, unknown>) => readEvent({ occurredAt: new Date('2026-11-05T10:00:00Z'), costMicros: BigInt(500), detail });
+
+  it('calls a managed price unsettled even on an event written before the table said so, and our own sign-in settled', () => {
+    const old = { toolkit: 'notion', tool: 'NOTION_A', executions: 3, sandboxRuns: 0, zdrCalls: 0, tier: 'managed_other', tierVerified: true };
+    expect(row(old)).toMatchObject({ executions: 3, tier: 'managed_other', tierVerified: false, directCalls: 0, legacy: false });
+    expect(row({ ...old, tier: 'managed_listed', tierVerified: true })).toMatchObject({ tierVerified: false });
+    expect(row({ ...old, tier: 'own', tierVerified: false })).toMatchObject({ tierVerified: true });
+    const bill = billFrom([row(old)], COMPOSIO_BILLING_DEFAULTS, '2026-11');
+    expect(bill.unsettledPriceExecutions).toBe(3);
   });
 });
 

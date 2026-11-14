@@ -177,8 +177,12 @@ export interface ScannedEvent {
 
 const num = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0);
 
-/** One meter event as a priced call. An event written before the meter priced by app is one tool run at its app's rate. */
-function readEvent(row: { occurredAt: Date; costMicros: bigint | null; detail: unknown }): ScannedEvent {
+/**
+ * One meter event as a priced call. An event written before the meter priced by app is one tool run at its app's rate. Whether its price
+ * is settled is read from its tier, never from the flag it was written with: an event written before #945 says a managed price was
+ * verified, and none is.
+ */
+export function readEvent(row: { occurredAt: Date; costMicros: bigint | null; detail: unknown }): ScannedEvent {
   const detail = isRecord(row.detail) ? row.detail : {};
   const toolkit = typeof detail.toolkit === 'string' ? detail.toolkit : '';
   const tool = typeof detail.tool === 'string' ? detail.tool : '';
@@ -186,7 +190,7 @@ function readEvent(row: { occurredAt: Date; costMicros: bigint | null; detail: u
   if (typeof detail.executions === 'number' && typeof detail.tier === 'string' && detail.tier in RATE_MICROS) {
     const inner: Record<string, number> = {};
     if (isRecord(detail.inner)) for (const [slug, count] of Object.entries(detail.inner)) inner[slug] = num(count);
-    return { ...base, executions: num(detail.executions), sandboxRuns: num(detail.sandboxRuns), zdrCalls: num(detail.zdrCalls), directCalls: num(detail.directCalls), tier: detail.tier as RateTier, tierVerified: detail.tierVerified !== false, inner, legacy: false };
+    return { ...base, executions: num(detail.executions), sandboxRuns: num(detail.sandboxRuns), zdrCalls: num(detail.zdrCalls), directCalls: num(detail.directCalls), tier: detail.tier as RateTier, tierVerified: detail.tier === 'own', inner, legacy: false };
   }
   const { tier, verified } = tierOf(toolkit, false);
   return { ...base, executions: 1, sandboxRuns: 0, zdrCalls: 0, directCalls: 0, tier, tierVerified: verified, inner: {}, legacy: true };
