@@ -143,7 +143,7 @@ export function computerProviderKind(env: NodeJS.ProcessEnv = process.env): 'fak
 
 /** Room Universe holds for computer jobs that are working: what the Agent37 wallet has to cover on top of a new machine. */
 async function outstandingJobRoom(): Promise<number> {
-  const held = await prisma.meterReservation.aggregate({ where: { state: 'held', reservationKey: { startsWith: 'computer:job:' } }, _sum: { amountMicros: true } });
+  const held = await prisma.meterReservation.aggregate({ where: { state: 'held', reservationKey: { startsWith: 'computer:' } }, _sum: { amountMicros: true } });
   return Number(held._sum.amountMicros ?? 0);
 }
 

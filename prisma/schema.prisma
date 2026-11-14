@@ -2470,9 +2470,13 @@ model ComputerJob {
   lastTriedAt    DateTime? @map("last_tried_at")
   // The run of a goal or task that started it (game #2002), so a run handed out again finds its job and never starts a second
   runId          String?   @map("run_id") @db.VarChar(36)
+  // Goes up each time the person takes the machine and each time it is handed back (the take-over fence): a token and an agent
+  // callback made under an older number are refused, so nothing the agent had in flight can act after the person took over
+  controlGeneration Int    @default(0) @map("control_generation")
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]
+  tokens  ComputerJobToken[]
 
   @@unique([botId, runId])
   @@index([botId, status])
@@ -2577,4 +2581,24 @@ model VoiceNoteCleanup {
   @@unique([providerId, kind, objectId])
   @@index([state, nextAt])
   @@map("voice_note_cleanups")
+}
+
+// A short-lived key a job's computer holds, and the ONLY one: it names no account and grants nothing by itself. Orbit keeps the
+// digest only; the job, the Brick, the person who pays and what is allowed are all read from Orbit's own records when it is used,
+// never from the token or from anything the agent says. Tokens end with the job, on a take over (the generation moves) and after
+// 15 minutes unless the job's lease renews them. `scope` keeps what a computer may ask apart: "model" is a model call and nothing more.
+model ComputerJobToken {
+  id         String    @id @default(uuid())
+  jobId      String    @map("job_id")
+  scope      String    @db.VarChar(12)
+  generation Int
+  digest     String    @unique @db.VarChar(64)
+  expiresAt  DateTime  @map("expires_at")
+  revokedAt  DateTime? @map("revoked_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, revokedAt])
+  @@map("computer_job_tokens")
 }

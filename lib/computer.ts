@@ -7,6 +7,8 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { memberAllowance, releaseRoom, renewRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
 import { monthOf } from '@/lib/meter-values';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
+import { renewJobTokens, revokeJobTokens } from '@/lib/computer-token';
+import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
@@ -577,7 +579,11 @@ export async function renewJob(jobId: string, now: Date = new Date()): Promise<{
   const provider = providerFor(row);
   const settings = await getMeterSettings();
   const room = await renewRoom({ key: job.reservationKey, moreMicros: roomFor(settings.renewMinutes, provider ? provider.microsPerMinute() : null) }, now);
-  if (room.ok) return { ok: true };
+  if (room.ok) {
+    // The lease is renewed, so the computer's key is too (one that ended is not brought back)
+    await renewJobTokens(jobId, now);
+    return { ok: true };
+  }
   const reason = room.reason === 'allowance' ? 'allowance' : room.reason === 'closed' ? 'closed' : 'pool';
   await endJob(jobId, 'stopped', reason === 'allowance' ? 'allowance' : reason === 'closed' ? 'error' : 'pool', now);
   return { ok: false, reason };
@@ -623,6 +629,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   });
   // Someone else ended it between the read and the write: that one counts and settles
   if (ended.count === 0) return;
+  // The job's computer holds no key from here on: a call it makes after this is refused
+  await revokeJobTokens(jobId, now).catch((error) => console.error('[Computer] Could not revoke a job’s keys:', error instanceof Error ? error.message : 'unknown'));
 
   try {
     if (job.reservationKey) {
@@ -749,6 +757,15 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
       released++;
     }
   }
+  // Room held for a model call that never reported back (the bot server stopped, the call was lost): what it cost is not known, so it
+  // is written as unknown and settled at the room held, never at 0
+  const lapsedCalls = await prisma.meterReservation.findMany({ where: { state: 'held', expiresAt: { lte: now }, jobId: { not: null }, reservationKey: { startsWith: 'computer:call:' } }, take: 200 });
+  for (const reservation of lapsedCalls) {
+    const callId = reservation.jobId && reservation.reservationKey.startsWith(callRoomKey(reservation.jobId, '')) ? reservation.reservationKey.slice(callRoomKey(reservation.jobId, '').length) : null;
+    if (reservation.jobId && callId) await settleModelCall(reservation.jobId, callId, { costMicros: null, basis: 'unknown', payer: { kind: 'universe' }, route: 'universe-ai', cutShort: true }, now).catch(() => undefined);
+    else await releaseRoom({ key: reservation.reservationKey }, now);
+    released++;
+  }
   // A machine that was being made when its job died, and never got a reference: nothing was made, so it can be tried again
   await prisma.brickComputer.updateMany({ where: { machine: 'waking', providerRef: null, updatedAt: { lte: new Date(now.getTime() - 5 * 60 * 1000) } }, data: { machine: 'none' } });
   // A machine that works while no job holds it (a stop that broke half way, a start that finished after a turn off) is put to rest
@@ -828,6 +845,19 @@ export async function requestHandover(jobId: string, waitingFor: WaitingFor, now
   return after ? jobView(after) : null;
 }
 
+/**
+ * The take-over fence's first half, kept here so every way control changes uses it: the control generation of the Brick's live
+ * jobs moves up and their keys end. A key made before is refused, so the agent cannot act on what it was told before the person
+ * took the machine (or before they gave it back).
+ */
+async function fenceControl(botId: string, now: Date = new Date()): Promise<void> {
+  const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] } }, select: { id: true } });
+  for (const job of jobs) {
+    await prisma.computerJob.updateMany({ where: { id: job.id }, data: { controlGeneration: { increment: 1 } } });
+    await revokeJobTokens(job.id, now);
+  }
+}
+
 export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'nothing_waiting' };
 
 /**
@@ -854,6 +884,8 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
       });
     }
   }
+  // The fence: every key the computer held ends and the number moves, so a call the agent had in flight is refused from here on
+  if (changed.count > 0 || moved > 0) await fenceControl(botId);
   const job = await prisma.computerJob.findFirst({ where: { botId, status: 'waiting' }, orderBy: [{ writes: 'desc' }, { createdAt: 'asc' }], include: JOB_INCLUDE });
   // Asked twice it is the same: already theirs is still theirs
   if (!job || (changed.count === 0 && job.control !== 'person' && moved === 0)) return { ok: false, reason: 'nothing_waiting' };
@@ -864,10 +896,14 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
 export async function handBack(botId: string, ownerId: string): Promise<Control> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
   // Asked until a pass finds none: a job that joined the person while the others were being handed back is found by the next pass
+  let handedBack = 0;
   for (let round = 0; round < 5; round++) {
     const back = await prisma.computerJob.updateMany({ where: { botId, status: 'waiting', control: 'person' }, data: { status: 'running', control: 'brick', waitingFor: null, readyWhat: null, readyWhere: null } });
     if (back.count === 0) break;
+    handedBack += back.count;
   }
+  // Keys made before the hand back stay refused: the runner asks for a new one for what comes next
+  if (handedBack > 0) await fenceControl(botId);
   const job = await prisma.computerJob.findFirst({ where: { botId, status: { in: ['running', 'waiting'] } }, orderBy: [{ writes: 'desc' }, { createdAt: 'asc' }], include: JOB_INCLUDE });
   if (!job) return { ok: false, reason: 'nothing_waiting' };
   return { ok: true, job: jobView(job) };
