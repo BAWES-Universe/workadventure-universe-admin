@@ -49,12 +49,12 @@ const PATTERNS: Pattern[] = [
   {
     kind: 'secret',
     what: 'a password or key written out',
-    pattern: /\b(?:password|passwd|passcode|secret|token|api[ _-]?key|access[ _-]?key)\b["']?\s*(?:is|=|:)\s*["']?[A-Za-z0-9_\-/+=.!@#$%^&*]{8,}/gi,
+    pattern: /\b(?:password|passwd|passcode|secret|token|api[ _-]?key|access[ _-]?key)\b["']?\s*(?:is\s*[=:]?|=|:)\s*["']?[A-Za-z0-9_\-/+=.!@#$%^&*]{8,}/gi,
     // "the password is something you give it" is a sentence, so after "is" a password has a digit in it. Written as "password: x" or
     // "password = x" it is an assignment and looks like a password without needing a digit: a symbol, mixed case or a long run counts
     // too. A plain word ("password: required", "token: confidential") is prose and is left alone
     accept: (match) => {
-      const value = match.replace(/^[^=:]*?(?:\bis\b|=|:)\s*["']?/i, '');
+      const value = match.replace(/^[^=:]*?(?:\bis\b\s*[=:]?|=|:)\s*["']?/i, '');
       if (!/^[^=:]*?[=:]/.test(match)) return hasDigit(value);
       const bare = value.replace(/[.!,;]+$/, '');
       return hasDigit(bare) || /[^A-Za-z0-9]/.test(bare) || (/[a-z]/.test(bare) && /[A-Z]/.test(bare)) || bare.length >= 20;
