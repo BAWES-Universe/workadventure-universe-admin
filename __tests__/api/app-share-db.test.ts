@@ -490,6 +490,17 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       expect(await prisma.appShareUse.count({ where: { serverId } })).toBe(1);
     });
 
+    it('lets a job that was on its way when sharing was stopped still give its use back when it failed', async () => {
+      const { app, serverId } = await music();
+      await shareSong(app.id, saraBrick, { usesPerDayEveryone: 1, usesPerDayPerson: 1 });
+      expect((await ask(saraBrick, serverId, omarKey(), 'q1')).body.allowed).toBe(true);
+      as(sara);
+      expect((await shareRoute('DELETE', app.id, saraBrick)).status).toBe(204);
+      expect((await settle(saraBrick, serverId, 'q1', 'failed')).body).toEqual({ status: 'refunded' });
+      await shareSong(app.id, saraBrick, { usesPerDayEveryone: 1, usesPerDayPerson: 1 });
+      expect((await ask(saraBrick, serverId, `lena-${tag}`, 'q2')).body.allowed).toBe(true);
+    });
+
     it('is not used up by days gone by: only today’s uses count', async () => {
       const { app, serverId } = await music();
       await shareSong(app.id, saraBrick, { usesPerDayEveryone: 1, usesPerDayPerson: 1 });

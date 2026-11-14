@@ -225,8 +225,9 @@ export type SettleResult = { status: 'settled'; now: string } | { status: 'not_f
  */
 export async function settleSharedUse(botId: string, serverId: string, callId: string, outcome: SettleOutcome): Promise<SettleResult> {
   return prisma.$transaction(async (tx) => {
-    const share = await tx.appShare.findFirst({ where: { serverId, server: { botId } }, select: { id: true } });
-    if (!share) return { status: 'not_found' } as const;
+    // By the Brick's use of the app, not by the share: a job that was on its way when sharing was stopped still settles
+    const grant = await tx.botMcpServer.findFirst({ where: { id: serverId, botId }, select: { id: true } });
+    if (!grant) return { status: 'not_found' } as const;
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-share:${serverId}`}))`;
     const use = await tx.appShareUse.findUnique({ where: { serverId_callId: { serverId, callId } } });
     if (!use) return { status: 'not_found' } as const;
