@@ -20,7 +20,7 @@ export interface McpToolShape {
   outputs: string[] | null;
 }
 
-const MAX_SHAPE_FIELDS = 100;
+export const MAX_SHAPE_FIELDS = 100;
 
 const allPropertyNames = (schema: unknown): string[] => {
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return [];

@@ -7,7 +7,7 @@ import { thingName } from '@/lib/app-things';
 import { startOfDay } from '@/lib/app-uses';
 import { SHAREABLE_HEADINGS, isAppShareable } from '@/lib/app-share';
 import { ownsBrick } from '@/lib/brick';
-import { testMcpConnection, type McpToolShape } from '@/lib/mcp/test-connection';
+import { testMcpConnection, MAX_SHAPE_FIELDS, type McpToolShape } from '@/lib/mcp/test-connection';
 
 /**
  * The owner's side of "Other people: only you" (game #2006, mock Part 17 pictures 1 to 9): see what can be shared, start sharing
@@ -108,6 +108,8 @@ function candidatesOf(grant: Grant, shapes: Map<string, McpToolShape> | null): J
     .filter((tool) => tool.confirmedAt && tool.heading && (SHAREABLE_HEADINGS as readonly string[]).includes(tool.heading))
     // A tool the app did not list just now (gone, or past the pages that are read) cannot be held to inputs or to what comes back, so it is not offered
     .filter((tool) => !shapes || shapes.has(tool.name))
+    // A tool that must be given more inputs than one ask can carry could never be asked for, so it is not offered
+    .filter((tool) => (shapes?.get(tool.name)?.inputs.filter((input) => input.required).length ?? 0) <= MAX_SHAPE_FIELDS)
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((tool) => {
       const shape = shapes?.get(tool.name);

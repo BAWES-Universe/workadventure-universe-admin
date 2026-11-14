@@ -464,6 +464,14 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       expect((await shareRoute('POST', app.id, saraBrick)).status).toBe(201);
     });
 
+    it('does not offer a job that needs more inputs than one ask can carry', async () => {
+      const { app } = await music();
+      mockTools.current = [{ ...SONG, inputs: Array.from({ length: 101 }, (_, i) => ({ name: `p${i + 1}`, required: true })) }, FIND];
+      as(sara);
+      const page = await json(await shareRoute('GET', app.id, saraBrick));
+      expect(page.jobs.map((job: { tool: string }) => job.tool)).toEqual(['find_songs']);
+    });
+
     it('is not used up by days gone by: only today’s uses count', async () => {
       const { app, serverId } = await music();
       await shareSong(app.id, saraBrick, { usesPerDayEveryone: 1, usesPerDayPerson: 1 });
