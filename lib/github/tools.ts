@@ -99,8 +99,9 @@ export interface ToolResult {
   /** GitHub refused the token itself: the person must sign in again. */
   unauthorized?: boolean;
   /**
-   * Certain that nothing changed on GitHub: no change was sent, or GitHub turned down every change it was sent. Only then may the
-   * same call be asked again; after a change GitHub did not answer (a timeout, a 5xx) it may have happened.
+   * Certain that nothing changed on GitHub: no change was sent (a read, answered or not), or GitHub turned down every change it was
+   * sent. Only then may the same call be asked again; after a change GitHub made or did not answer (a timeout, a 5xx) it may have
+   * happened.
    */
   changedNothing?: boolean;
 }
@@ -215,7 +216,8 @@ export async function runGitHubTool(token: string, name: string, args: Record<st
   if (result.isError && mayHaveChanged && !result.text.includes('Check on GitHub')) {
     result = { ...result, text: `${result.text} It may still have happened: check on GitHub before asking for it again.` };
   }
-  return result.isError && !mayHaveChanged ? { ...result, changedNothing: true } : result;
+  // A read, or a change GitHub turned down: whatever the answer, running it again changes nothing either
+  return mayHaveChanged ? result : { ...result, changedNothing: true };
 }
 
 /**

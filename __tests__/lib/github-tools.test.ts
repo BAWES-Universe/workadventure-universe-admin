@@ -95,7 +95,7 @@ describe('what a Brick can do on GitHub', () => {
   it('reads a file as text', async () => {
     const github = fakeGitHub([['GET', '/repos/o/r/contents/src/a%20b.ts?ref=dev', 200, { type: 'file', encoding: 'base64', content: Buffer.from('hello').toString('base64') }]]);
     const result = await runGitHubTool('t', 'github_read_file', { repo: 'o/r', path: '/src/a b.ts', ref: 'dev' }, github.impl);
-    expect(result).toEqual({ text: 'hello', isError: false });
+    expect(result).toEqual({ text: 'hello', isError: false, changedNothing: true });
   });
 
   it('commits files in one commit on an existing branch, never forcing it', async () => {
@@ -269,7 +269,7 @@ describe('what a Brick can do on GitHub', () => {
       ['GET', 'https://logs.example.net/job9?sig=1', 200, 'line 1\nline 2'],
     ]);
     const result = await runGitHubTool('t', 'github_ci_job_log', { repo: 'o/r', job_id: 9 }, github.impl);
-    expect(result).toEqual({ text: 'line 1\nline 2', isError: false });
+    expect(result).toEqual({ text: 'line 1\nline 2', isError: false, changedNothing: true });
     expect(github.calls[1].headers.Authorization).toBeUndefined();
   });
 

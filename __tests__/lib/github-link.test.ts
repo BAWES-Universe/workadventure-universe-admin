@@ -50,12 +50,12 @@ describe('a GitHub tool call', () => {
   beforeEach(() => written.clear());
 
   it('may be sent again when GitHub could not be reached for a token, and runs once after that', async () => {
-    const github = jest.fn(async () => new Response(JSON.stringify({ content: Buffer.from('hi').toString('base64'), encoding: 'base64', size: 2 }), { status: 200 })) as unknown as typeof fetch;
+    const github = answers(201);
     jest.mocked(gitHubToken).mockResolvedValueOnce({ status: 'unavailable' });
-    expect(await call('call-1', github)).toEqual({ status: 'unavailable' });
+    expect(await call('call-1', github, OPEN_ISSUE)).toEqual({ status: 'unavailable' });
     jest.mocked(gitHubToken).mockResolvedValue({ status: 'ok', token: 'ghu_x', login: 'sara' });
-    expect((await call('call-1', github)).status).toBe('done');
-    expect(await call('call-1', github)).toEqual({ status: 'already_asked' });
+    expect((await call('call-1', github, OPEN_ISSUE)).status).toBe('done');
+    expect(await call('call-1', github, OPEN_ISSUE)).toEqual({ status: 'already_asked' });
     expect(github).toHaveBeenCalledTimes(1);
     // Written as no use and no money, paid by the person, and not on the route Composio's calls are counted by
     expect(recordMeterEvent).toHaveBeenCalledWith(
@@ -106,13 +106,13 @@ describe('a GitHub tool call', () => {
       }
     });
 
-    it('may always be asked again when it only looked', async () => {
+    it('may always be asked again when it only looked, answered or not', async () => {
       const github = answers(new Error('socket hang up'), 500, 200);
       for (let attempt = 0; attempt < 2; attempt++) expect(JSON.stringify(await call('call-7', github))).toContain('isError\\":true');
       expect(written.has('github:b:call-7')).toBe(false);
-      await call('call-7', github);
-      expect(written.has('github:b:call-7')).toBe(true);
-      expect(github).toHaveBeenCalledTimes(3);
+      for (let attempt = 0; attempt < 2; attempt++) expect(JSON.stringify(await call('call-7', github))).toContain('isError\\":false');
+      expect(written.has('github:b:call-7')).toBe(false);
+      expect(github).toHaveBeenCalledTimes(4);
     });
   });
 });

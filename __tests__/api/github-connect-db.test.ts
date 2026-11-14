@@ -299,11 +299,20 @@ run('Connect GitHub for Bricks, in a real database', () => {
     const tools = JSON.parse((await (await send({ jsonrpc: '2.0', id: '1', method: 'tools/list' })).json()).body).result.tools;
     expect(tools.map((tool: { name: string }) => tool.name)).toEqual(GITHUB_TOOLS.map((tool) => tool.name));
 
-    const calls = pretendGitHub({ 'GET https://api.github.com/user': { body: { login: 'sara-gh', name: 'Sara' } } });
+    const calls = pretendGitHub({
+      'GET https://api.github.com/user': { body: { login: 'sara-gh', name: 'Sara' } },
+      'POST https://api.github.com/repos/acme/tools/issues': { status: 201, body: { number: 7, html_url: 'https://github.com/acme/tools/issues/7' } },
+    });
     const ran = await (await send({ jsonrpc: '2.0', id: '2', method: 'tools/call', params: { name: 'github_whoami', arguments: {} } }, 'call-1')).json();
     expect(JSON.parse(JSON.parse(ran.body).result.content[0].text)).toMatchObject({ login: 'sara-gh' });
     expect((calls[0].init.headers as Record<string, string>).Authorization).toBe('Bearer ghu_first');
-    expect((await send({ jsonrpc: '2.0', id: '2', method: 'tools/call', params: { name: 'github_whoami', arguments: {} } }, 'call-1')).status).toBe(409);
+    // A look changes nothing, so the same call may run again; a change runs once
+    expect((await send({ jsonrpc: '2.0', id: '2', method: 'tools/call', params: { name: 'github_whoami', arguments: {} } }, 'call-1')).status).toBe(200);
+    const openIssue = { jsonrpc: '2.0', id: '4', method: 'tools/call', params: { name: 'github_create_issue', arguments: { repo: 'acme/tools', title: 'Broken' } } };
+    expect((await send(openIssue, 'call-3')).status).toBe(200);
+    expect((await send(openIssue, 'call-3')).status).toBe(409);
+    expect(calls.filter((call) => call.key.startsWith('POST')).length).toBe(1);
+    expect(await prisma.meterEvent.count({ where: { eventId: { startsWith: `github:${saraBrick}:` } } })).toBe(1);
     // Only its owner's Brick, and only tools it has
     expect((await send({ jsonrpc: '2.0', id: '3', method: 'tools/call', params: { name: 'something_else', arguments: {} } }, 'call-2')).status).toBe(400);
   });
