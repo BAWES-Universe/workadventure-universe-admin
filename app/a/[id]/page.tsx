@@ -54,5 +54,5 @@ export default async function PublicArtifactPage({ params }: { params: Promise<{
   const found = await load(id);
   if (found === 'gone') return <LinkNotAvailable universeUrl={universeUrl} />;
   if (found === 'broken') return <LinkNotAvailable universeUrl={universeUrl} tryAgain />;
-  return <PublicArtifact view={found} universeUrl={universeUrl} />;
+  return <PublicArtifact view={found} universeUrl={universeUrl} artifactId={id} />;
 }

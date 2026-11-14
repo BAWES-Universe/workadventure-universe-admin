@@ -78,6 +78,54 @@ const placementSchema = z.discriminatedUnion('in', [
   z.object({ in: z.literal('query'), name: z.string().regex(NAME) }).strict(),
 ]);
 
+const PATH = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,6}$/);
+const PARAM = z.string().regex(NAME);
+
+/**
+ * How a service takes a customer-initiated hosted checkout and reports it done (game #2044). Declarative: which operation makes a checkout and
+ * where its parts go, where the buyer pays, and how to ask the service whether it was paid. Customer-initiated hosted checkout only: no saved
+ * cards, recurring charges, refunds or payouts from a page. "Paid" is only ever written when the service's own record of the payment, asked
+ * for with the key and a payment id we hold, says completed for THIS order, amount, currency and mode.
+ */
+export const paymentSchema = z
+  .object({
+    create: z
+      .object({
+        operation: z.string().regex(NAME),
+        amount: PARAM,
+        currency: PARAM,
+        orderRef: PARAM,
+        idempotentKey: PARAM,
+        returnUrl: PARAM,
+        notifyUrl: PARAM,
+        /** A placeholder the service insists on, never kept or shown as the buyer's. */
+        customerName: PARAM.optional(),
+        idPath: PATH,
+        checkoutUrlPath: PATH,
+      })
+      .strict(),
+    /** Hosts the buyer may be sent to: these names and anything under them. Separate from where the key goes. */
+    checkoutHosts: z.array(z.string().regex(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/)).min(1).max(10),
+    lookup: z
+      .object({
+        operation: z.string().regex(NAME),
+        idParam: PARAM,
+        statusPath: PATH,
+        /** The explicit states that mean completed. Authorization only, pending, cancelled, failed and refunded are never in it. */
+        successStates: z.array(z.string().max(40)).min(1).max(5),
+        pendingStates: z.array(z.string().max(40)).max(10).default([]),
+        /** States that mean it will never complete (declined, cancelled): the order is closed at once. Any other state stays open until it times out. */
+        failedStates: z.array(z.string().max(40)).max(15).default([]),
+        amountPath: PATH,
+        currencyPath: PATH,
+        orderPath: PATH,
+        /** Where the service says whether the payment was real or a test, when it does (a boolean). */
+        livePath: PATH.optional(),
+      })
+      .strict(),
+  })
+  .strict();
+
 export const definitionSchema = z
   .object({
     version: z.literal(1),
@@ -105,6 +153,7 @@ export const definitionSchema = z
       })
       .strict()
       .optional(),
+    payment: paymentSchema.optional(),
   })
   .strict()
   .superRefine((def, ctx) => {
@@ -131,6 +180,21 @@ export const definitionSchema = z
       if (operation.body !== undefined && operation.method === 'GET') ctx.addIssue({ code: 'custom', path: [...path, 'body'], message: 'A GET has no body' });
       if (operation.verified && def.service === 'custom') ctx.addIssue({ code: 'custom', path: [...path, 'verified'], message: 'A custom operation is never verified' });
     });
+    if (def.payment) {
+      const { create, lookup } = def.payment;
+      const made = def.operations.find((candidate) => candidate.id === create.operation);
+      const asked = def.operations.find((candidate) => candidate.id === lookup.operation);
+      const need = (operation: Operation | undefined, names: (string | undefined)[], where: string) => {
+        for (const name of names) if (name && !operation?.params.some((param) => param.name === name)) ctx.addIssue({ code: 'custom', path: ['payment', where], message: `${name} is not a parameter of ${operation?.id ?? 'the operation'}` });
+      };
+      if (!made || made.method !== 'POST' || made.category !== 'make') ctx.addIssue({ code: 'custom', path: ['payment', 'create'], message: 'A checkout is made by a POST operation that makes something' });
+      if (!asked || asked.method !== 'GET' || asked.category !== 'lookUp') ctx.addIssue({ code: 'custom', path: ['payment', 'lookup'], message: 'A payment is read by a GET look-up' });
+      need(made, [create.amount, create.currency, create.orderRef, create.idempotentKey, create.returnUrl, create.notifyUrl, create.customerName], 'create');
+      need(asked, [lookup.idParam], 'lookup');
+      for (const path of [create.idPath, create.checkoutUrlPath]) if (made && !made.returns.includes(path)) ctx.addIssue({ code: 'custom', path: ['payment', 'create'], message: `${path} is not among what the operation returns` });
+      for (const path of [lookup.statusPath, lookup.amountPath, lookup.currencyPath, lookup.orderPath, lookup.livePath]) if (path && asked && !asked.returns.includes(path)) ctx.addIssue({ code: 'custom', path: ['payment', 'lookup'], message: `${path} is not among what the look-up returns` });
+      for (const host of def.payment.checkoutHosts) if (!isAllowedServerUrl(`https://${host}/`) || /\.(local|localhost|localdomain|internal|lan|home|corp|test|invalid|example)$/.test(host)) ctx.addIssue({ code: 'custom', path: ['payment', 'checkoutHosts'], message: 'A checkout host must be a public name' });
+    }
     if (def.check) {
       const operation = def.operations.find((candidate) => candidate.id === def.check?.operation);
       if (!operation) ctx.addIssue({ code: 'custom', path: ['check', 'operation'], message: 'The check is not one of the operations' });

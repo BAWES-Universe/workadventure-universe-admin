@@ -702,6 +702,12 @@ export async function openArtifact(id: string, viewer: Viewer, version?: number 
   return { artifact: viewOf(artifact), version: versionView(row, addressOf(artifact, row, files, pass), pass), you: rightsOf(artifact, who, now) };
 }
 
+/** Throws the same not-found as everything else unless this viewer may open the artifact. Opens nothing: no version is read and no address is made. */
+export async function requireMayOpen(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<void> {
+  const artifact = await loadArtifact(id, ctx.now);
+  requireOpen(artifact, await whoIsLooking(artifact, viewer), ctx.now);
+}
+
 export async function listVersions(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ versions: VersionView[] }> {
   const { files, now } = ctx;
   const artifact = await loadArtifact(id, now);

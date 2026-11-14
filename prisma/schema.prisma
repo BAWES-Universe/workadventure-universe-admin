@@ -62,6 +62,7 @@ model User {
   botServersConnected BotMcpServer[] @relation("BotMcpServerConnectedBy")
   appConnections    AppConnection[] @relation("AppConnectionOwner")
   appKeyRequests    AppKeyRequest[] @relation("AppKeyRequestOwner")
+  appPageJobs       AppPageJob[]    @relation("AppPageJobOwner")
   appConnectionsMade AppConnection[] @relation("AppConnectionConnectedBy")
   appLendsMade      AppLend[]       @relation("AppLendLentBy")
   appManagerOf      AppConnectionManager[] @relation("AppManagerUser")
@@ -234,6 +235,7 @@ model Artifact {
   owner    User?             @relation("ArtifactOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   versions ArtifactVersion[]
   passes   ArtifactPass[]
+  pageJobs AppPageJob[]
 
   @@index([ownerId, updatedAt])
   @@index([makerBotId])
@@ -1306,6 +1308,8 @@ model AppConnection {
   uses        AppUse[]
   keyRequests AppKeyRequest[]
   keyCalls    AppKeyCall[]
+  pageJobs    AppPageJob[]
+  pageOrders  AppPageOrder[]
 
   @@unique([ownerId, catalogKey])
   @@unique([ownerId, providerToolkit])
@@ -1386,6 +1390,74 @@ model AppKeyCall {
   @@index([ownerId, createdAt])
   @@index([createdAt])
   @@map("app_key_calls")
+}
+
+// The one job a page may do with an owner's key app (game #2044): open a hosted checkout for a FIXED amount. Written only from the owner's own
+// request (a Brick asked by the owner), bound to the owner, the page, the app and the definition version, and frozen: a visitor, the page's
+// code and a later version of the page can change none of it. Stop makes the page say "Payments unavailable"; disconnecting deletes it.
+model AppPageJob {
+  id             String   @id @default(uuid())
+  ownerId        String   @map("owner_id")
+  artifactId     String   @map("artifact_id")
+  connectionId   String   @map("connection_id")
+  definitionHash String   @map("definition_hash") @db.VarChar(64)
+  // The version of the page the owner asked for it on (kept for the record: the frozen terms below are what is charged)
+  artifactVersion Int     @map("artifact_version")
+  // Exact: whole minor units of the currency (4.500 KWD is 4500), never a float
+  amountMinor    Int      @map("amount_minor")
+  currency       String   @db.VarChar(3)
+  description    String?  @db.VarChar(200)
+  // The Brick that was asked (kept as a name only: the job belongs to the owner, not to the Brick)
+  madeByBot      String?  @map("made_by_bot") @db.VarChar(255)
+  status         String   @default("active") @db.VarChar(10)   // active | stopped
+  stoppedAt      DateTime? @map("stopped_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  owner      User          @relation("AppPageJobOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  artifact   Artifact      @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  connection AppConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  orders     AppPageOrder[]
+
+  @@unique([artifactId])
+  @@index([ownerId])
+  @@index([connectionId])
+  @@map("app_page_jobs")
+}
+
+// One checkout a visitor started: made on our side BEFORE the service is asked, so a retry and a lost answer reconcile instead of repeating.
+// "paid" is only ever written after the service's own record of the payment says completed with this order, amount, currency and mode.
+model AppPageOrder {
+  id             String   @id @default(uuid())
+  jobId          String?  @map("job_id")
+  ownerId        String   @map("owner_id")
+  connectionId   String?  @map("connection_id")
+  artifactId     String   @map("artifact_id") @db.VarChar(255)
+  definitionHash String   @map("definition_hash") @db.VarChar(64)
+  amountMinor    Int      @map("amount_minor")
+  currency       String   @db.VarChar(3)
+  // test | live, as the owner's key said when the order was made
+  mode           String?  @db.VarChar(10)
+  // creating | pending | paid | not_paid | cant_confirm
+  status         String   @default("creating") @db.VarChar(14)
+  // The service's id for the payment, and where the buyer pays (kept so a blocked pop-up can go on with the SAME order)
+  providerRef    String?  @map("provider_ref") @db.VarChar(255)
+  checkoutUrl    String?  @map("checkout_url") @db.Text
+  // SHA-256 of who started it, with a secret: only to count tries, never to know who
+  visitorHash    String   @map("visitor_hash") @db.VarChar(64)
+  checks         Int      @default(0)
+  checkedAt      DateTime? @map("checked_at")
+  paidAt         DateTime? @map("paid_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  job        AppPageJob?    @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  connection AppConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+
+  @@index([jobId, createdAt])
+  @@index([ownerId, createdAt])
+  @@index([visitorHash, createdAt])
+  @@index([status, createdAt])
+  @@map("app_page_orders")
 }
 
 model AppConnectionManager {

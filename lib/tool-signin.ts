@@ -231,7 +231,7 @@ export async function dropOrphanedToolSignInNotices(userId: string): Promise<voi
 }
 
 /** The same report, for the connection a grant belongs to: its fields move, and the cards of every Brick that uses it follow. */
-async function reportConnectionSignIn(connectionId: string, report: ToolSignInReport, at: Date): Promise<{ changed: boolean }> {
+export async function reportConnectionSignIn(connectionId: string, report: ToolSignInReport, at: Date): Promise<{ changed: boolean }> {
   const afterLastReconnect = { OR: [{ reconnectedAt: null }, { reconnectedAt: { lt: at } }] };
   const botsOf = async () => (await prisma.botMcpServer.findMany({ where: { connectionId }, select: { id: true, botId: true } }));
 

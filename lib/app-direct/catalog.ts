@@ -24,7 +24,7 @@ const TAP: Definition = {
       method: 'GET',
       path: '/v2/charges/{chargeId}',
       params: [{ name: 'chargeId', type: 'string', in: 'path', required: true, maxLength: 80, description: 'The payment id, like chg_TS01...' }],
-      returns: ['id', 'status', 'amount', 'currency', 'description', 'reference.order', 'reference.transaction', 'transaction.created', 'response.code', 'response.message'],
+      returns: ['id', 'status', 'amount', 'currency', 'description', 'live_mode', 'reference.order', 'reference.transaction', 'transaction.created', 'response.code', 'response.message'],
       category: 'lookUp',
       verified: true,
     },
@@ -40,6 +40,8 @@ const TAP: Definition = {
         { name: 'customerName', type: 'string', in: 'body', required: true, maxLength: 100 },
         { name: 'returnUrl', type: 'string', in: 'body', required: true, maxLength: 500, description: 'Where the buyer lands after paying' },
         { name: 'orderRef', type: 'string', in: 'body', required: false, maxLength: 80 },
+        { name: 'idempotentKey', type: 'string', in: 'body', required: false, maxLength: 80, description: 'The same value again within 24 hours returns the first answer instead of making a second payment' },
+        { name: 'notifyUrl', type: 'string', in: 'body', required: false, maxLength: 500 },
       ],
       body: {
         amount: { $param: 'amount' },
@@ -49,7 +51,8 @@ const TAP: Definition = {
         customer: { first_name: { $param: 'customerName' } },
         source: { id: 'src_all' },
         redirect: { url: { $param: 'returnUrl' } },
-        reference: { order: { $param: 'orderRef' } },
+        reference: { order: { $param: 'orderRef' }, idempotent: { $param: 'idempotentKey' } },
+        post: { url: { $param: 'notifyUrl' } },
       },
       // Where the buyer pays comes back as transaction.url
       returns: ['id', 'status', 'amount', 'currency', 'transaction.url', 'reference.order'],
@@ -57,6 +60,24 @@ const TAP: Definition = {
       verified: true,
     },
   ],
+  // What a page may do with it: open Tap's own hosted checkout for a fixed amount, and learn whether it was paid. Paid only when Tap's own
+  // record of the payment says CAPTURED for this order, amount, currency and mode (a notice from Tap only makes us ask).
+  payment: {
+    create: { operation: 'makePaymentLink', amount: 'amount', currency: 'currency', orderRef: 'orderRef', idempotentKey: 'idempotentKey', returnUrl: 'returnUrl', notifyUrl: 'notifyUrl', customerName: 'customerName', idPath: 'id', checkoutUrlPath: 'transaction.url' },
+    checkoutHosts: ['tap.company'],
+    lookup: {
+      operation: 'lookUpPayment',
+      idParam: 'chargeId',
+      statusPath: 'status',
+      successStates: ['CAPTURED'],
+      pendingStates: ['INITIATED', 'IN_PROGRESS', 'PENDING'],
+      failedStates: ['ABANDONED', 'CANCELLED', 'FAILED', 'DECLINED', 'RESTRICTED', 'VOID', 'TIMEDOUT'],
+      amountPath: 'amount',
+      currencyPath: 'currency',
+      orderPath: 'reference.order',
+      livePath: 'live_mode',
+    },
+  },
   // A look-up of a payment that does not exist: a key Tap accepts answers "not found" (or "bad request"), one it does not answers 401
   check: { operation: 'lookUpPayment', arguments: { chargeId: 'chg_universe_key_check' }, rejected: [401, 403] },
 };
