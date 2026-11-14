@@ -416,6 +416,25 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       }
     });
 
+    it('hold after the template is gone: its source Brick removed for good changes nothing about what the routines need', async () => {
+      const gmail = await connectGmail(sara);
+      await prisma.botMcpServer.create({ data: { botId: brickId, name: 'Gmail', serverUrl: gmail.serverUrl, connectionId: gmail.id } });
+      const item = await routine(brickId, sara.id);
+      const id = await share({ routines: [item.id] });
+      as(omar);
+      const body = await remember(await makeFrom(id));
+      const botId = body.brick.id;
+      const itemId = (await prisma.brickItem.findFirstOrThrow({ where: { botId } })).id;
+      await keepZone(omar);
+      // The template goes for good with its source Brick (the cascade the delete job ends in)
+      await prisma.brickTemplate.delete({ where: { id } });
+      expect(await prisma.brickTemplateUse.findUniqueOrThrow({ where: { botId } })).toMatchObject({ templateId: null });
+      expect(await changeItem(botId, itemId, { userId: omar.email, action: 'resume' })).toMatchObject({ ok: false, status: 409, code: 'needs_setup' });
+      const page = await json(await madeFrom(botId));
+      expect(page.setup.setupRequired).toBe(true);
+      expect(page.setup.needs.map((need: { label: string }) => need.label)).toEqual(['Gmail']);
+    });
+
     it('leave out what does not fit under the goals and tasks setting, and say how many', async () => {
       const first = await routine(brickId, sara.id);
       const second = await routine(brickId, sara.id, { words: 'Every evening send me a menu' });
@@ -595,7 +614,8 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       await prisma.bot.delete({ where: { id: brickId } });
       const gone = await json(await madeFrom(botId));
       expect(gone.madeFrom).toMatchObject({ templateName: 'Recipe Brick', maker: { name: 'Sara A.' }, shared: false });
-      expect(gone.setup.needs).toEqual([]);
+      // What it needs stays with the Brick: the template going does not make "Setup required" disappear
+      expect(gone.setup.needs.map((need: { label: string }) => need.label)).toEqual(['Gmail']);
       brickId = (await createBrick({ ownerId: sara.id, name: 'Recipe Brick', description: 'Keeps the family recipes', characterTextureId: 'brick-red', chatInstructions: 'You keep my family recipes. Send me one when I ask.', hello: 'Send me the first recipe' })).id;
     });
   });

@@ -278,10 +278,10 @@ export type Gate = { ok: true; timeZone: string } | { ok: false; status: 409 | 4
 export async function templateRoutineGate(tx: Prisma.TransactionClient, botId: string, ownerId: string, routineZone: string = PLACEHOLDER_ZONE): Promise<Gate> {
   const kept = (await tx.userPreference.findUnique({ where: { userId_key: { userId: ownerId, key: TIME_ZONE_KEY } }, select: { value: true } }))?.value;
   if (!isTimeZone(kept)) return { ok: false, status: 422, code: 'needs_time_zone', error: 'No time zone is kept for this person yet' };
-  const use = await tx.brickTemplateUse.findUnique({ where: { botId }, select: { templateId: true, versionNumber: true } });
-  if (use?.templateId) {
-    const version = await tx.brickTemplateVersion.findUnique({ where: { templateId_number: { templateId: use.templateId, number: use.versionNumber } }, select: { needs: true } });
-    const missing = (await readyOnBrick(botId, asNeeds(version?.needs), tx)).filter((need) => need.required && !need.ready);
+  // What the template said it needs is kept on the Brick itself, so it holds after the template is gone
+  const use = await tx.brickTemplateUse.findUnique({ where: { botId }, select: { needs: true } });
+  if (use) {
+    const missing = (await readyOnBrick(botId, asNeeds(use.needs), tx)).filter((need) => need.required && !need.ready);
     if (missing.length > 0) return { ok: false, status: 409, code: 'needs_setup', error: `Set up ${missing.map((need) => need.label).join(', ')} first` };
   }
   // The placeholder is replaced by the owner's zone; a zone they set on the routine themselves stays
@@ -338,7 +338,7 @@ export async function makeBrickFromTemplate(viewerId: string, templateId: string
       tx,
     );
     const makerName = nameOf(template.maker.name);
-    await tx.brickTemplateUse.create({ data: { botId: brick.id, templateId: template.id, versionNumber: version.number, makerId: template.makerId, makerName, templateName: version.name } });
+    await tx.brickTemplateUse.create({ data: { botId: brick.id, templateId: template.id, versionNumber: version.number, makerId: template.makerId, makerName, templateName: version.name, needs: version.needs ?? [] } });
     const routines = await bringRoutines(tx, brick.id, viewerId, asRoutines(version.routines), limits);
     const needs = await readyOnBrick(brick.id, asNeeds(version.needs), tx);
     return {
@@ -422,8 +422,7 @@ export async function madeFromView(botId: string, ownerId: string): Promise<Made
   if (!bot || !ownsBrick(bot, ownerId)) return null;
   const use = await prisma.brickTemplateUse.findUnique({ where: { botId }, include: { template: { select: { id: true, stoppedAt: true, bot: { select: { deletedAt: true } } } } } });
   if (!use) return null;
-  const taken = use.templateId ? await prisma.brickTemplateVersion.findUnique({ where: { templateId_number: { templateId: use.templateId, number: use.versionNumber } } }) : null;
-  const needs = await readyOnBrick(botId, asNeeds(taken?.needs));
+  const needs = await readyOnBrick(botId, asNeeds(use.needs));
   const off = await prisma.brickItem.count({ where: { botId, state: 'paused', pausedBy: 'template' } });
   const read = await readUpdate(botId, use, prisma);
   const offered = read && read.changes.length > 0 ? read : null;
@@ -478,7 +477,7 @@ export async function takeUpdate(botId: string, ownerId: string, input: z.infer<
     if (Object.keys(data).length > 1) await tx.bot.update({ where: { id: botId }, data });
     const routineChange = wanted.includes('routines') ? offered.get('routines') : undefined;
     const routines = routineChange && routineChange.field === 'routines' ? await bringRoutines(tx, botId, ownerId, routineChange.theirs, limits) : { added: 0, leftOut: 0 };
-    await tx.brickTemplateUse.update({ where: { botId }, data: { versionNumber: read.template.currentVersion, templateName: read.latest.name } });
+    await tx.brickTemplateUse.update({ where: { botId }, data: { versionNumber: read.template.currentVersion, templateName: read.latest.name, needs: read.latest.needs ?? [] } });
     return { ok: true as const, routines };
   });
   if (!done.ok) return done;

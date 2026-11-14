@@ -1246,6 +1246,8 @@ model BrickTemplateUse {
   makerId       String?  @map("maker_id")
   makerName     String   @map("maker_name") @db.VarChar(100)
   templateName  String   @map("template_name") @db.VarChar(100)
+  /// What the version it took said the Brick needs, kept here so "Setup required" and the routine gate hold after the template is gone.
+  needs         Json     @default("[]")
   createdAt     DateTime @default(now()) @map("created_at")
 
   bot      Bot            @relation(fields: [botId], references: [id], onDelete: Cascade)
