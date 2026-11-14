@@ -626,6 +626,8 @@ export interface ClaimedRun {
   marker: string;
   /** Set when the message was sent and the run was handed out again before it finished: do not send it again. */
   deliveredEventId: string | null;
+  /** With `deliveredEventId`, when the bot server kept how the run was to be reported (outcome, result, progress, reached): report that, not a plain "said". */
+  deliveredReport: DeliveredReport | null;
 }
 
 const claimedOf = (run: Prisma.BrickItemRunGetPayload<{ include: { item: { include: { owner: { select: { uuid: true, matrixChatId: true } } } } } }>): ClaimedRun => {
@@ -651,6 +653,7 @@ const claimedOf = (run: Prisma.BrickItemRunGetPayload<{ include: { item: { inclu
     leaseUntil: run.leaseUntil.toISOString(),
     marker: `brick-run:${run.id}`,
     deliveredEventId: run.deliveredEventId,
+    deliveredReport: readDeliveredReport(run.deliveredReport),
   };
 };
 const RUN_INCLUDE = { item: { include: { owner: { select: { uuid: true, matrixChatId: true } } } } } as const;
@@ -1027,10 +1030,10 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
  * handed out again (its server stopped between the send and the report) is given this event id and does not send again. The
  * first one stands; the same id twice is fine; a different one is refused so a second send shows up instead of hiding.
  */
-export async function markDelivered(runId: string, eventId: string, now: Date = new Date()): Promise<{ ok: true; eventId: string; first: boolean } | { ok: false; status: 404 | 409; error: string }> {
+export async function markDelivered(runId: string, eventId: string, now: Date = new Date(), report?: DeliveredReport): Promise<{ ok: true; eventId: string; first: boolean } | { ok: false; status: 404 | 409; error: string }> {
   const run = await prisma.brickItemRun.findUnique({ where: { id: runId }, select: { id: true } });
   if (!run) return { ok: false, status: 404, error: 'Run not found' };
-  const { count } = await prisma.brickItemRun.updateMany({ where: { id: runId, deliveredEventId: null }, data: { deliveredEventId: eventId, deliveredAt: now } });
+  const { count } = await prisma.brickItemRun.updateMany({ where: { id: runId, deliveredEventId: null }, data: { deliveredEventId: eventId, deliveredAt: now, ...(report ? { deliveredReport: report } : {}) } });
   if (count > 0) return { ok: true, eventId, first: true };
   const kept = await prisma.brickItemRun.findUniqueOrThrow({ where: { id: runId }, select: { deliveredEventId: true } });
   return kept.deliveredEventId === eventId ? { ok: true, eventId, first: false } : { ok: false, status: 409, error: 'This run already sent a message' };
@@ -1078,7 +1081,24 @@ export async function markHeldTold(itemId: string, waitId: string): Promise<{ ok
   return { ok: true, told: count > 0 };
 }
 
-export const deliveredSchema = z.object({ eventId: z.string().trim().min(1).max(255) }).strict();
+/** How a run that said something was to be reported, kept with the delivery: the report's own parts, without the try (the run may be handed out again as another one). */
+export const deliveredReportSchema = z
+  .object({
+    outcome: z.enum(['spoke', 'waiting']),
+    result: line(1000),
+    progress: z.object({ statusLine: line(300).nullish(), steps: stepsSchema.optional(), waitingFor: line(300).nullish() }).strict().optional(),
+    reached: z.boolean().optional(),
+  })
+  .strict();
+export type DeliveredReport = z.infer<typeof deliveredReportSchema>;
+
+/** What was kept, or null when nothing was or it no longer reads (a report never fails because of it). */
+function readDeliveredReport(value: Prisma.JsonValue | null | undefined): DeliveredReport | null {
+  const read = deliveredReportSchema.safeParse(value);
+  return read.success ? read.data : null;
+}
+
+export const deliveredSchema = z.object({ eventId: z.string().trim().min(1).max(255), report: deliveredReportSchema.optional() }).strict();
 
 /** The run, when it is one of this Brick's goals' or tasks' runs; null when it is not, or when it cannot be looked up (the books are never a reason a report fails). */
 export async function runOfBrick(botId: string, runId: string | null | undefined): Promise<string | null> {
