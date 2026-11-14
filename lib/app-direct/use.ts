@@ -10,6 +10,7 @@ import { guardedRequest, GuardError, type GuardDeps } from '@/lib/app-direct/gua
 import { buildRequest, pickFields, RequestError } from '@/lib/app-direct/request';
 import { readKey } from '@/lib/app-direct/connect';
 import { scrubDeep } from '@/lib/app-direct/scrub';
+import { ensureKeyAppTools, fingerprintOf, toolNameOf } from '@/lib/app-direct/policy';
 
 /**
  * Using a key app (game #2044). The bot server asks Orbit to run ONE operation of an app's definition with arguments the model
@@ -163,6 +164,12 @@ async function finish(input: RunKeyApp, outcome: 'ok' | 'rejected' | 'failed' | 
   await prisma.appKeyCall.updateMany({ where: { botId: input.botId, callId: input.callId }, data: { state: 'done', outcome, httpStatus } }).catch(() => undefined);
 }
 
+export interface KeyAppToolView extends KeyAppOperationView {
+  /** The tool's name as the model calls it, and its fingerprint: the same ones the tool policy of this grant holds. */
+  tool: string;
+  fingerprint: string;
+}
+
 export interface KeyAppView {
   /** The Brick's grant id: the id the bot server uses to ask whether a use is allowed and to run one. */
   serverId: string;
@@ -177,7 +184,7 @@ export interface KeyAppView {
   working: boolean;
   /** What the Brick does under each heading for this app (rightAway | asksFirst | off). */
   settings: { looksUp: string; makesNew: string; changesThings: string; deletesOrSends: string };
-  operations: KeyAppOperationView[];
+  operations: KeyAppToolView[];
 }
 
 /** The key apps one Brick has, for the bot server. Never a key, a key's end, an address or anything of the definition beyond its operations. */
@@ -193,6 +200,8 @@ export async function keyAppsOf(botId: string): Promise<KeyAppView[]> {
     if (!connection?.definition) continue;
     const parsed = definitionSchema.safeParse(connection.definition);
     if (!parsed.success || hashDefinition(parsed.data) !== connection.definitionHash) continue;
+    await ensureKeyAppTools(row.id);
+    const hash = connection.definitionHash as string;
     views.push({
       serverId: row.id,
       connectionId: connection.id,
@@ -202,7 +211,7 @@ export async function keyAppsOf(botId: string): Promise<KeyAppView[]> {
       enabled: row.enabled,
       working: !connection.signInLostAt,
       settings: { looksUp: row.lookUpSetting, makesNew: row.makeSetting, changesThings: row.changeSetting, deletesOrSends: row.deleteSendSetting },
-      operations: operationViews(parsed.data),
+      operations: operationViews(parsed.data).map((operation) => ({ ...operation, tool: toolNameOf(parsed.data, operation.id, connection.id), fingerprint: fingerprintOf(hash, operation.id) })),
     });
   }
   return views;

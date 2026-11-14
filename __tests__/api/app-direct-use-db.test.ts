@@ -39,6 +39,8 @@ import { GET as listKeyApps } from '@/app/api/bots/[id]/key-apps/route';
 import { POST as callKeyApp } from '@/app/api/bots/[id]/key-apps/[serverId]/call/route';
 import { POST as askForKey } from '@/app/api/bots/[id]/app-key-forms/route';
 import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
+import { GET as readTools } from '@/app/api/bots/[id]/mcp-servers/[serverId]/tools/route';
+import { confirmTools } from '@/lib/mcp-tool-policy';
 import { saveServerLimits } from '@/lib/bot-limits';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -187,6 +189,59 @@ run('using a key app, in a real database', () => {
     expect(text).not.toContain('keyCipher');
     expect(await keyAppsOf(omarBrick)).toEqual([]);
     expect((await listKeyApps(request(`/api/bots/${saraBrick}/key-apps`), params({ id: saraBrick }))).status).toBe(401);
+  });
+
+  /* ------------------------- its operations are the grant's tools ------------------------- */
+
+  const toolsOf = async (botId: string, serverId: string) => (await (await readTools(request(`/api/bots/${botId}/mcp-servers/${serverId}/tools`, { token: ADMIN_TOKEN }), params({ id: botId, serverId }))).json()) as { state: string; policyRevision: number; settings: Record<string, string>; tools: { name: string; fingerprint: string; heading: string | null; state: string }[] };
+
+  it('gives a tested app’s operations as confirmed tools under their headings, with the names and fingerprints the list carries', async () => {
+    const id = await connectTap();
+    const grant = (await grantOf(saraBrick, id))!;
+    const policy = await toolsOf(saraBrick, grant.id);
+    expect(policy.state).toBe('confirmed');
+    expect(policy.settings).toMatchObject({ looksUp: 'rightAway', makesNew: 'rightAway', changesThings: 'asksFirst', deletesOrSends: 'asksFirst' });
+    expect(policy.tools.map((tool) => [tool.name, tool.heading, tool.state])).toEqual([
+      ['tap_lookuppayment', 'looksUp', 'confirmed'],
+      ['tap_makepaymentlink', 'makesNew', 'confirmed'],
+    ]);
+    const [app] = await keyAppsOf(saraBrick);
+    expect(app.operations.map((operation) => [operation.tool, operation.fingerprint])).toEqual(policy.tools.map((tool) => [tool.name, tool.fingerprint]));
+    // Reading again, and replacing the key, change nothing
+    const again = await toolsOf(saraBrick, grant.id);
+    expect(again.policyRevision).toBe(policy.policyRevision);
+    const replace = await openKeyForm({ ownerId: sara, service: 'tap' });
+    await submitKey({ requestId: replace.id, ownerId: sara, key: `sk_test_${randomUUID().replace(/-/g, '')}` }, okCheck);
+    expect((await toolsOf(saraBrick, grant.id)).policyRevision).toBe(policy.policyRevision);
+  });
+
+  it('keeps a custom app’s operations waiting to be confirmed, and forgets a confirmation when the definition changes', async () => {
+    const draft = (extra = {}) => ({
+      version: 1, service: 'custom', name: 'ShipLink', short: 'ShipLink', origin: 'https://api.shiplink.com', placement: { in: 'header', name: 'X-Api-Key', scheme: 'none' },
+      operations: [
+        { id: 'track', label: 'Track a parcel', method: 'GET', path: '/v1/parcels/{id}', params: [{ name: 'id', type: 'string', in: 'path' }], returns: ['status'], category: 'lookUp', ...extra },
+        { id: 'remove', label: 'Remove a parcel', method: 'DELETE', path: '/v1/parcels/{id}', params: [{ name: 'id', type: 'string', in: 'path' }], returns: ['ok'], category: 'deleteSend' },
+      ],
+      check: { operation: 'track', arguments: { id: 'check' } },
+    });
+    const connect = async (definition: object) => {
+      const form = await openKeyForm({ ownerId: sara, draft: definition, source: 'https://docs.shiplink.com/api' });
+      return (await submitKey({ requestId: form.id, ownerId: sara, key: 'shiplink-secret-123456' }, okCheck)).id;
+    };
+    const id = await connect(draft());
+    const grant = (await grantOf(saraBrick, id))!;
+    const before = await toolsOf(saraBrick, grant.id);
+    expect(before.state).toBe('notConfirmedYet');
+    expect(before.tools.every((tool) => tool.state === 'notConfirmedYet' && tool.heading === null)).toBe(true);
+    // Its owner confirms them, and they hold through a replaced key
+    await confirmTools(saraBrick, grant.id, sara);
+    expect((await toolsOf(saraBrick, grant.id)).state).toBe('confirmed');
+    await connect(draft());
+    expect((await toolsOf(saraBrick, grant.id)).state).toBe('confirmed');
+    // A different definition (an operation reworded) is a different version: nothing it was confirmed for carries over
+    await connect(draft({ label: 'Track a parcel now' }));
+    const changed = await toolsOf(saraBrick, grant.id);
+    expect(changed.tools.map((tool) => tool.state)).toEqual(['notConfirmedYet', 'notConfirmedYet']);
   });
 
   it('does not list a key app among the servers the bot server connects to', async () => {
