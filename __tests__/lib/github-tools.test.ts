@@ -288,8 +288,10 @@ describe('what a Brick can do on GitHub', () => {
 
   it('never makes a public repository from a private value that is not true or false', async () => {
     const github = fakeGitHub([]);
-    const result = await runGitHubTool('t', 'github_create_repo', { name: 'new', private: 'true' }, github.impl);
-    expect(result).toEqual({ text: 'private must be true or false.', isError: true });
+    for (const value of ['true', null, 1]) {
+      const result = await runGitHubTool('t', 'github_create_repo', { name: 'new', private: value }, github.impl);
+      expect(result).toEqual({ text: 'private must be true or false.', isError: true });
+    }
     expect(github.calls).toHaveLength(0);
   });
 });

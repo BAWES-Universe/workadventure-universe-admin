@@ -450,15 +450,22 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(cancelled).toBe(true);
     expect(calls.length).toBe(before);
     // GitHub taken away from the Brick while a push is still uploading: checked again once it is read, and nothing goes to GitHub
+    // highWaterMark 0: nothing is pulled until the route starts reading the body, which is after its first pass check; that check
+    // must have let the push in (the grant is still there when reading starts)
     let taken = false;
-    const slow = new ReadableStream<Uint8Array>({
-      async pull(controller) {
-        if (taken) return controller.close();
-        taken = true;
-        await removeGrant(sara, id, saraBrick);
-        controller.enqueue(new Uint8Array([48, 48, 48, 48]));
+    let grantWhenReadStarted: boolean | null = null;
+    const slow = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          if (taken) return controller.close();
+          taken = true;
+          grantWhenReadStarted = (await prisma.botMcpServer.count({ where: { botId: saraBrick, connectionId: id, enabled: true } })) === 1;
+          await removeGrant(sara, id, saraBrick);
+          controller.enqueue(new Uint8Array([48, 48, 48, 48]));
+        },
       },
-    });
+      { highWaterMark: 0 },
+    );
     const paused = new NextRequest('https://orbit.example.com/api/git/acme/tools.git/git-receive-pack', {
       method: 'POST',
       headers: { authorization: basic(issued.pass), 'content-type': 'application/x-git-receive-pack-request', 'transfer-encoding': 'chunked' },
@@ -467,6 +474,7 @@ run('Connect GitHub for Bricks, in a real database', () => {
     } as ConstructorParameters<typeof NextRequest>[1] & { duplex: 'half' });
     expect((await gitPost(paused, params({ path: ['acme', 'tools.git', 'git-receive-pack'] }))).status).toBe(401);
     expect(taken).toBe(true);
+    expect(grantWhenReadStarted).toBe(true);
     expect(calls.length).toBe(before);
     // ...and the pass stops for everything else at once
     expect((await refs(basic(issued.pass))).status).toBe(401);

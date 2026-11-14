@@ -342,7 +342,7 @@ async function run(request: Request, name: string, args: Record<string, unknown>
     }
     case 'github_create_repo': {
       const owner = text(args.owner, 'owner', false);
-      if (args.private !== undefined && args.private !== null && typeof args.private !== 'boolean') throw new ToolError('private must be true or false.');
+      if (args.private !== undefined && typeof args.private !== 'boolean') throw new ToolError('private must be true or false.');
       // Private unless the Brick says otherwise in so many words
       const body = { name: text(args.name, 'name'), private: args.private !== false, description: text(args.description, 'description', false), auto_init: true };
       const me = owner ? await request<{ login?: string }>('/user') : null;
