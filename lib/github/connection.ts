@@ -225,7 +225,11 @@ async function tokenRequest(app: GitHubApp, fields: Record<string, string>, fetc
       redirect: 'error',
       signal: AbortSignal.timeout(10_000),
     });
-    if (!response.ok) return { error: `http_${response.status}` };
+    if (!response.ok) {
+      // A refusal may still carry GitHub's reason (a dead refresh token is one only a new sign-in fixes): kept when it is there
+      const said = (await response.json().catch(() => null)) as { error?: unknown } | null;
+      return { error: typeof said?.error === 'string' ? said.error : `http_${response.status}` };
+    }
     return (await response.json()) as TokenAnswer;
   } catch (error) {
     console.error('[GitHub] Token request failed:', error instanceof Error ? error.message : 'unknown');
@@ -345,7 +349,7 @@ async function renewUnderLease(connectionId: string, fetchImpl: FetchLike): Prom
     // Checked against the time now, after the request: a token that ran out while GitHub was asked is not handed out
     if (!answer) return stillGood(auth);
     if (!answer.access_token) {
-      // GitHub answers a dead refresh token with 200 and an error: only a new sign-in fixes it
+      // GitHub answers a dead refresh token with an error (usually with 200, sometimes with a 4xx): only a new sign-in fixes it
       if (answer.error === 'bad_refresh_token' || answer.error === 'invalid_grant') {
         await markReconnect(connectionId, auth.accessToken, 'GitHub asked for a new sign-in');
         return { status: 'reconnect', reason: 'GitHub asked for a new sign-in' };

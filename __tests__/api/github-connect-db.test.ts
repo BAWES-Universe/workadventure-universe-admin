@@ -339,6 +339,20 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(await readConnection(id, sara)).toMatchObject({ connected: false, reconnectRequired: true });
   });
 
+  it('asks for a new sign-in when GitHub refuses the renewal with a 4xx and its reason, and keeps the sign-in when it only fails', async () => {
+    await makeApp();
+    const id = await signedIn();
+    const auth = readGitHubAuth(await prisma.appConnection.findUniqueOrThrow({ where: { id } }))!;
+    await prisma.appConnection.update({ where: { id }, data: { authConfig: encryptApiKey(JSON.stringify({ ...auth, expiresAt: Math.floor(Date.now() / 1000) + 60 })) } });
+    // GitHub down: the token that still works is used, and nothing asks for a new sign-in
+    pretendGitHub({ 'POST https://github.com/login/oauth/access_token': { status: 502, body: { message: 'Bad Gateway' } } });
+    expect(await gitHubToken(id)).toMatchObject({ status: 'ok', token: 'ghu_first' });
+    expect(await readConnection(id, sara)).toMatchObject({ connected: true, reconnectRequired: false });
+    pretendGitHub({ 'POST https://github.com/login/oauth/access_token': { status: 400, body: { error: 'invalid_grant' } } });
+    expect(await gitHubToken(id)).toMatchObject({ status: 'reconnect' });
+    expect(await readConnection(id, sara)).toMatchObject({ connected: false, reconnectRequired: true });
+  });
+
   it('a 401 for an old token never clears a newer sign-in saved meanwhile', async () => {
     await makeApp();
     const id = await signedIn();
