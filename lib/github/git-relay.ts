@@ -1,4 +1,4 @@
-import { gunzipSync } from 'zlib';
+import { createGunzip } from 'zlib';
 import { prisma } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { orbitBase } from '@/lib/github/app';
@@ -16,6 +16,8 @@ import type { FetchLike } from '@/lib/github/api';
 export const GIT_PASS_SECONDS = 15 * 60;
 /** The most a push may carry through the relay. */
 export const MAX_PUSH_BYTES = 200 * 1024 * 1024;
+/** The most of a gzipped push that is unpacked to read its ref updates: they come first, and the rest is passed on as it was. */
+const COMMANDS_MAX_BYTES = 1024 * 1024;
 const ZERO_ID = /^0{40}$|^0{64}$/;
 
 interface GitPass {
@@ -99,6 +101,55 @@ export function readRelayPath(parts: string[]): RelayTarget | null {
   return null;
 }
 
+/**
+ * A request body read as it streams, stopping as soon as it passes `max` bytes: null then, and the rest is never read. A chunked
+ * request says nothing of its size up front, so its Content-Length cannot be trusted to say it.
+ */
+export async function readCapped(stream: ReadableStream<Uint8Array> | null, max: number): Promise<Buffer | null> {
+  if (!stream) return Buffer.alloc(0);
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks, size);
+}
+
+/**
+ * The start of a gzipped body, unpacked up to `max` bytes and no further, so a small body that unpacks to gigabytes costs nothing.
+ * Null when it is not gzip.
+ */
+export function unzipStart(body: Buffer, max: number): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    const unzip = createGunzip();
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+    const finish = (value: Buffer | null) => {
+      if (settled) return;
+      settled = true;
+      unzip.destroy();
+      resolve(value);
+    };
+    unzip.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
+      size += chunk.length;
+      if (size >= max) finish(Buffer.concat(chunks, size).subarray(0, max));
+    });
+    unzip.on('end', () => finish(Buffer.concat(chunks, size)));
+    unzip.on('error', () => finish(null));
+    unzip.end(body);
+  });
+}
+
 export interface RefUpdate {
   oldId: string;
   newId: string;
@@ -168,15 +219,8 @@ export async function relayGit(
   }
   if (target.step === 'git-receive-pack' && input.body) {
     if (input.body.length > MAX_PUSH_BYTES) return { status: 'too_big' };
-    let raw = input.body;
-    if (input.contentEncoding === 'gzip') {
-      try {
-        raw = gunzipSync(input.body);
-      } catch {
-        return { status: 'bad_request' };
-      }
-    }
-    const read = readPushCommands(raw);
+    const raw = input.contentEncoding === 'gzip' ? await unzipStart(input.body, COMMANDS_MAX_BYTES) : input.body;
+    const read = raw ? readPushCommands(raw) : null;
     if (!read) return { status: 'bad_request' };
     const refused = refusedPush(read.updates);
     if (refused) return { status: 'refused', message: refused, response: rejectedPush(read.updates, refused, read.capabilities) };

@@ -15,7 +15,8 @@ jest.mock('@/lib/github/connection', () => ({
   gitHubToken: jest.fn(async () => ({ status: 'ok', token: 'ghu_owner', login: 'sara' })),
 }));
 
-import { readPushCommands, readRelayPath, refusedPush, relayGit } from '@/lib/github/git-relay';
+import { gzipSync } from 'zlib';
+import { MAX_PUSH_BYTES, readCapped, readPushCommands, readRelayPath, refusedPush, relayGit } from '@/lib/github/git-relay';
 
 const PASS = { kind: 'git-pass' as const, botId: 'b', connectionId: 'c', ownerId: 'o', exp: Math.floor(Date.now() / 1000) + 900 };
 
@@ -187,5 +188,55 @@ describe('reading a git address and a push', () => {
     expect(refusedPush([{ oldId: 'a', newId: '0'.repeat(64), ref: 'refs/heads/main' }])).toContain('Deleting');
     expect(refusedPush([{ oldId: 'a', newId: 'b', ref: 'refs/notes/x' }])).toContain('Only branches');
     expect(refusedPush([{ oldId: 'a', newId: 'b', ref: 'refs/heads/main' }])).toBeNull();
+  });
+
+  const line = (text: string) => `${(text.length + 4).toString(16).padStart(4, '0')}${text}`;
+  const push = (body: Buffer, contentEncoding: string | null) =>
+    relayGit(PASS, { repo: 'acme/tools', step: 'git-receive-pack' }, { method: 'POST', search: '', contentType: 'application/x-git-receive-pack-request', contentEncoding, gitProtocol: null, body }, (async () => {
+      throw new Error('nothing reaches GitHub here');
+    }) as unknown as typeof fetch);
+
+  it('unpacks only the start of a gzipped push: a small body that unpacks past the limit is turned down, never unpacked whole', async () => {
+    // gzip packs at most about 1000 to 1, so a body that unpacks past the 200 MB limit is about 200 KB; a 4 KB one unpacks to 4 MB.
+    // Both are turned down having unpacked no more than 1 MB.
+    const bomb = gzipSync(Buffer.alloc(MAX_PUSH_BYTES + 1024 * 1024), { level: 9 });
+    expect(bomb.length).toBeLessThan(250 * 1024);
+    const small = gzipSync(Buffer.alloc(4 * 1024 * 1024), { level: 9 });
+    expect(small.length).toBeLessThan(5 * 1024);
+    const before = process.memoryUsage().rss;
+    expect(await push(small, 'gzip')).toEqual({ status: 'bad_request' });
+    expect(await push(bomb, 'gzip')).toEqual({ status: 'bad_request' });
+    expect(process.memoryUsage().rss - before).toBeLessThan(100 * 1024 * 1024);
+    expect(await push(Buffer.from('not gzip at all'), 'gzip')).toEqual({ status: 'bad_request' });
+    // A real gzipped push is still read, and a tag in it still turned down
+    const tag = Buffer.from(`${line(`${'0'.repeat(40)} ${'b'.repeat(40)} refs/tags/v1\0report-status\n`)}0000PACK`);
+    expect(await push(gzipSync(tag), 'gzip')).toMatchObject({ status: 'refused', message: expect.stringContaining('Pushing tags') });
+  });
+
+  it('reads a streamed body only up to the limit, and stops there without reading the rest', async () => {
+    let pulled = 0;
+    let cancelled = false;
+    const piece = new Uint8Array(1024);
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        controller.enqueue(piece);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    expect(await readCapped(endless, 10 * 1024)).toBeNull();
+    expect(pulled).toBeLessThan(20);
+    expect(cancelled).toBe(true);
+    const short = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1, 2]));
+        controller.enqueue(new Uint8Array([3]));
+        controller.close();
+      },
+    });
+    expect([...((await readCapped(short, 10)) ?? [])]).toEqual([1, 2, 3]);
+    expect((await readCapped(null, 10))?.length).toBe(0);
   });
 });

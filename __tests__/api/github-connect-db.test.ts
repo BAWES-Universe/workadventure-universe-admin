@@ -31,7 +31,8 @@ import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { POST as link } from '@/app/api/ready-made/link/route';
 import { grantToBrick, readConnection, removeGrant } from '@/lib/app-connections';
 import { POST as gitPass } from '@/app/api/bots/[id]/git-pass/route';
-import { GET as gitGet } from '@/app/api/git/[...path]/route';
+import { GET as gitGet, POST as gitPost } from '@/app/api/git/[...path]/route';
+import { MAX_PUSH_BYTES } from '@/lib/github/git-relay';
 import { createBrick } from '@/lib/brick-create';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -46,7 +47,7 @@ const request = (path: string, init: { method?: string; body?: unknown; token?: 
     headers: { 'content-type': 'application/json', ...(init.token ? { authorization: `Bearer ${init.token}` } : {}), ...(init.headers ?? {}) },
     ...(init.raw !== undefined ? { body: init.raw } : init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
   });
-const params = <T extends Record<string, string>>(value: T) => ({ params: Promise.resolve(value) });
+const params = <T extends Record<string, string | string[]>>(value: T) => ({ params: Promise.resolve(value) });
 
 type Reply = { status?: number; body?: unknown; headers?: Record<string, string> };
 /** A pretend GitHub: replies by method and address, and every request kept. */
@@ -353,6 +354,30 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect((calls[0].init.headers as Record<string, string>).Authorization).toBe(`Basic ${Buffer.from('x-access-token:ghu_first').toString('base64')}`);
     // Not a git address
     expect((await gitGet(request('/api/git/acme/tools.git/HEAD', { headers: { authorization: basic(issued.pass) } }), params({ path: ['acme', 'tools.git', 'HEAD'] }))).status).toBe(404);
+    // A chunked push says no length: it is read as it comes and stopped past the limit, never read to the end, never sent on
+    let sent = 0;
+    let cancelled = false;
+    const piece = new Uint8Array(1024 * 1024);
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        sent += piece.length;
+        controller.enqueue(piece);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const before = calls.length;
+    const chunked = new NextRequest('https://orbit.example.com/api/git/acme/tools.git/git-receive-pack', {
+      method: 'POST',
+      headers: { authorization: basic(issued.pass), 'content-type': 'application/x-git-receive-pack-request', 'transfer-encoding': 'chunked' },
+      body: endless,
+      duplex: 'half',
+    } as ConstructorParameters<typeof NextRequest>[1] & { duplex: 'half' });
+    expect((await gitPost(chunked, params({ path: ['acme', 'tools.git', 'git-receive-pack'] }))).status).toBe(413);
+    expect(sent).toBeLessThan(MAX_PUSH_BYTES + 20 * piece.length);
+    expect(cancelled).toBe(true);
+    expect(calls.length).toBe(before);
     // GitHub taken away from the Brick: the pass stops at once
     await removeGrant(sara, id, saraBrick);
     expect((await refs(basic(issued.pass))).status).toBe(401);
