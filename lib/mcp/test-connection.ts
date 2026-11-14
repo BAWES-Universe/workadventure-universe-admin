@@ -1,6 +1,7 @@
 import { decryptApiKey } from '@/lib/encryption';
 import { extractErrorCode, readBodyWithLimit, truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
 import { isAllowedServerIp, isAllowedServerUrl } from '@/lib/mcp/outbound-guard';
+import { headerProblem } from '@/lib/mcp/header-text';
 
 interface McpToolDescriptor {
   name?: string;
@@ -241,6 +242,12 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
         headers[key] = value;
       }
     }
+  }
+
+  // Something saved earlier (or pasted before this check) with text that cannot be sent names the field, instead of the raw fetch error
+  const unsendable = headerProblem({ authType: server.authType === 'oauth' ? 'bearer' : server.authType, authValue, headers: server.headers });
+  if (unsendable) {
+    return { success: false, toolCount: 0, toolNames: [], error: unsendable };
   }
 
   try {

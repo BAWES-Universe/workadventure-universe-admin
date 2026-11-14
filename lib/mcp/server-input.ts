@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { isAllowedServerUrl } from '@/lib/mcp/outbound-guard';
+import { headerProblem } from '@/lib/mcp/header-text';
 
 /**
  * What a person gives to add an app by its link: a bot's own (POST /api/bots/:id/mcp-servers) and a person's connection
@@ -24,6 +25,12 @@ export const createMcpServerSchema = z.object({
   ).optional(),
   enabled: z.boolean().optional().default(true),
 }).superRefine((data, ctx) => {
+  // A key, token or extra header with text that cannot be sent says which one (a pasted em dash is the usual cause)
+  const problem = headerProblem({ authType: data.authType, authValue: data.authConfig, headers: data.headers });
+  if (problem) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: [data.headers && /extra header/.test(problem) ? 'headers' : 'authConfig'], message: problem });
+    return;
+  }
   if ((data.authType === 'bearer' || data.authType === 'api-key' || data.authType === 'oauth') && !data.authConfig) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,

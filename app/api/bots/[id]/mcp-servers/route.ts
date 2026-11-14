@@ -10,6 +10,7 @@ import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
 import { z } from 'zod';
 import { corsHeaders } from '@/lib/cors';
 import { createMcpServerSchema } from '@/lib/mcp/server-input';
+import { headerProblem } from '@/lib/mcp/header-text';
 import { WITH_CONNECTION, effectiveServer } from '@/lib/app-connections';
 
 export const runtime = 'nodejs';
@@ -258,6 +259,11 @@ export async function POST(
 
     // Parse and validate request body
     const body = await request.json();
+    // A key, token or extra header with text that cannot be sent is named here, in words: the schema would only say the input is invalid
+    const unsendable = headerProblem({ authType: body?.authType, authValue: body?.authConfig, headers: body?.headers });
+    if (unsendable) {
+      return NextResponse.json({ error: unsendable }, { status: 400, headers: corsHeaders(request) });
+    }
     const validatedData = createMcpServerSchema.parse(body);
 
     // Encrypt authConfig if provided (store even when authType is 'none',
