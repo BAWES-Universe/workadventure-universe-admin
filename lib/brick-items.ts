@@ -8,6 +8,7 @@ import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
 import { runningExtra } from '@/lib/meter-grants';
 import { windowStart } from '@/lib/reply-limits';
 import { ownerAskingThrough } from '@/lib/brick-make';
+import { templateRoutineGate } from '@/lib/brick-template-use';
 import { TIME_ZONE_KEY, WORKWEEK_KEY, firstDue, isTimeZone, nextDue, readCadence, readWorkweek, repeatMinutes, type Cadence } from '@/lib/brick-item-time';
 
 /**
@@ -120,7 +121,7 @@ export interface ItemView {
   setBy: 'you' | 'brick';
   revision: number;
   parentId: string | null;
-  pausedBy: 'owner' | 'brick_deleted' | 'goal' | null;
+  pausedBy: 'owner' | 'brick_deleted' | 'goal' | 'template' | null;
   result: string | null;
   doneAt: string | null;
   lastRunAt: string | null;
@@ -153,7 +154,7 @@ export function viewOf(row: ItemRow): ItemView {
     setBy: row.setBy === 'brick' ? 'brick' : 'you',
     revision: row.revision,
     parentId: row.parentId,
-    pausedBy: row.pausedBy === 'owner' || row.pausedBy === 'brick_deleted' || row.pausedBy === 'goal' ? row.pausedBy : null,
+    pausedBy: row.pausedBy === 'owner' || row.pausedBy === 'brick_deleted' || row.pausedBy === 'goal' || row.pausedBy === 'template' ? row.pausedBy : null,
     result: row.result,
     doneAt: row.doneAt?.toISOString() ?? null,
     lastRunAt: row.lastRunAt?.toISOString() ?? null,
@@ -168,7 +169,7 @@ export type Refused = {
   status: 400 | 404 | 409 | 422;
   error: string;
   /** What the bot server can say to the person, as a code: needs_time_zone, too_often, too_many, past, off. */
-  code?: 'needs_time_zone' | 'too_often' | 'too_many' | 'past' | 'off' | 'needs_wait' | 'needs_goal' | 'wrong_state';
+  code?: 'needs_time_zone' | 'too_often' | 'too_many' | 'past' | 'off' | 'needs_wait' | 'needs_goal' | 'wrong_state' | 'needs_setup';
   /** The setting that decided it, when there is one. */
   limit?: number;
 };
@@ -407,11 +408,19 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (!bot?.enabled || bot.deletedAt) return { ok: false as const, status: 409 as const, code: 'off' as const, error: 'This Brick is switched off' };
         // A check runs only while its goal is on: it is brought back by its goal's Resume, not on its own under a paused goal
         if (row.parentId && !(await goalIsOn(tx, row.parentId))) return { ok: false as const, status: 409 as const, code: 'needs_goal' as const, error: 'A check comes back only while its goal is on' };
+        // A routine that came with a template (game #2008) was switched off on purpose: it runs only once its owner's time zone is kept
+        // and what the template said the Brick needs is there. It is read on their clock, never the maker's.
+        let zone = row.timeZone;
+        if (row.pausedBy === 'template') {
+          const gate = await templateRoutineGate(tx, row.botId, ownerId);
+          if (!gate.ok) return gate;
+          zone = gate.timeZone;
+        }
         // One that was meant for a moment that has passed while it was paused is due now, once; the rest carry on from now
-        const due = cadence.type === 'once' ? (firstDue(cadence, row.timeZone, now) ?? now) : firstDue(cadence, row.timeZone, now);
+        const due = cadence.type === 'once' ? (firstDue(cadence, zone, now) ?? now) : firstDue(cadence, zone, now);
         // Only the checks its own pause (or the deleted Brick) stopped: one the person paused by itself stays paused
         await moveChecks(tx, row.id, ['paused'], { state: 'on', pausedBy: null }, now, true, ['goal', 'brick_deleted']);
-        return finish({ state: 'on', pausedBy: null, nextDueAt: due, ...bump });
+        return finish({ state: 'on', pausedBy: null, nextDueAt: due, timeZone: zone, ...bump });
       }
       case 'done': {
         if (row.state === 'done') return { ok: true as const, item: viewOf(row) };

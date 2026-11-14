@@ -72,6 +72,7 @@ run('sharing a Brick as a template, in a real database', () => {
     await prisma.botMcpServer.deleteMany({ where: { botId: brickId } });
     await prisma.appConnection.deleteMany({ where: { ownerId: sara.id } });
     await prisma.brickComputer.deleteMany({ where: { botId: brickId } });
+    await prisma.botsMemory.deleteMany({ where: { botId: brickId } });
     await prisma.bot.update({ where: { id: brickId }, data: { name: 'Recipe Brick', description: 'Keeps the family recipes', characterTextureId: 'brick-red', chatInstructions: 'You keep my family recipes. Send me one when I ask.', hello: 'Send me the first recipe', deletedAt: null, goneAt: null, enabledBeforeDelete: null, enabled: true } });
     as(sara);
   });
@@ -195,7 +196,7 @@ run('sharing a Brick as a template, in a real database', () => {
       const connection = await prisma.appConnection.create({ data: { ownerId: sara.id, name: 'Gmail', serverUrl: 'https://mcp.example.test/gmail', authType: 'oauth', source: 'listed', catalogKey: 'gmail' } });
       await prisma.botMcpServer.create({ data: { botId: brickId, name: 'Gmail', serverUrl: connection.serverUrl, connectionId: connection.id } });
       const item = await itemFor(brickId, sara.id, { kind: 'schedule', words: 'Every morning send me one recipe' });
-      await prisma.botsMemory.create({ data: { botId: brickId, userId: sara.id, content: 'Her mum’s lentil soup is the best', memoryType: 'user' } as never }).catch(() => undefined);
+      await prisma.botsMemory.create({ data: { botId: brickId, userUuid: `sara-${tag}`, userId: sara.id, isGuest: false, memories: [{ text: 'Her mum’s lentil soup is the best' }] } });
 
       const response = await share(brickId, { routines: [item.id], optionalNeeds: [], audience: 'link' });
       expect(response.status).toBe(200);
