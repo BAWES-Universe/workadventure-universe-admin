@@ -61,6 +61,7 @@ model User {
   botToolsMoved     BotMcpTool[] @relation("BotToolMovedBy")
   botServersConnected BotMcpServer[] @relation("BotMcpServerConnectedBy")
   appConnections    AppConnection[] @relation("AppConnectionOwner")
+  appKeyRequests    AppKeyRequest[] @relation("AppKeyRequestOwner")
   appConnectionsMade AppConnection[] @relation("AppConnectionConnectedBy")
   appLendsMade      AppLend[]       @relation("AppLendLentBy")
   appManagerOf      AppConnectionManager[] @relation("AppManagerUser")
@@ -1281,6 +1282,18 @@ model AppConnection {
   noAnswerAt         DateTime? @map("no_answer_at")
   reconnectedAt      DateTime? @map("reconnected_at")
   connectedById      String?   @map("connected_by_id")
+  // A key app (game #2044): kind = direct. The definition is the data it runs from (one HTTPS origin, its operations, where the key goes),
+  // the key is kept encrypted in its own column and is never copied to a grant, a screen or the bot server; only its last characters are shown.
+  // source is always 'direct' for one, so it can never be lent (the database holds that line) and is never an app link: `serverUrl` holds its origin for lists only.
+  kind        String   @default("mcp") @db.VarChar(10)   // mcp | direct
+  definition  Json?
+  definitionHash String? @map("definition_hash") @db.VarChar(64)
+  keyCipher   String?  @map("key_cipher") @db.Text
+  keyLast4    String?  @map("key_last4") @db.VarChar(8)
+  // test | live, when the service's keys say which (a switch between them is asked about)
+  keyMode     String?  @map("key_mode") @db.VarChar(10)
+  // Counts every replaced key, so a request built for an older one is never sent with a newer one
+  keyVersion  Int      @default(1) @map("key_version")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -1291,6 +1304,7 @@ model AppConnection {
   lends       AppLend[]
   managers    AppConnectionManager[]
   uses        AppUse[]
+  keyRequests AppKeyRequest[]
 
   @@unique([ownerId, catalogKey])
   @@unique([ownerId, providerToolkit])
@@ -1324,6 +1338,31 @@ model AppLend {
 
 // The named managers of a universe's own app. The universe's owner always manages it without a row. A named manager manages it only
 // while they still have Manage bots in that universe, so someone who leaves stops managing it.
+// One open safe form for a key (game #2044): who asked for it, the definition the owner is shown, and how many times a key was tried. The
+// form is for exactly this person, this service and this request. The key itself is never stored here.
+model AppKeyRequest {
+  id             String   @id @default(uuid())
+  ownerId        String   @map("owner_id")
+  // The Brick that asked, when one did
+  botId          String?  @map("bot_id") @db.VarChar(255)
+  // Set when the form replaces the key of an existing app
+  connectionId   String?  @map("connection_id")
+  definition     Json
+  definitionHash String   @map("definition_hash") @db.VarChar(64)
+  // Where a Brick read the service's docs, for the line "Setup prepared from ..."
+  source         String?  @db.VarChar(255)
+  tries          Int      @default(0)
+  expiresAt      DateTime @map("expires_at")
+  usedAt         DateTime? @map("used_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  owner      User           @relation("AppKeyRequestOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  connection AppConnection? @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId])
+  @@map("app_key_requests")
+}
+
 model AppConnectionManager {
   id           String   @id @default(uuid())
   connectionId String   @map("connection_id")

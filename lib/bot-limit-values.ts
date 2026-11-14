@@ -94,6 +94,14 @@ export interface BrickLimits {
   goalsShare: number;
   /** Apps one bot or Brick can use at once, by hand or lent. */
   appsPerBot: number;
+  /** Minutes the safe form for a key stays open after a Brick or a person asks for it (game #2044); then it is asked for again. */
+  keyFormMinutes: number;
+  /** Times a key may be tried in one safe form before it is asked for again. */
+  keyTries: number;
+  /** Seconds a request to an app that uses a key may take before it is given up. */
+  keyCallSeconds: number;
+  /** Kilobytes of an app's answer that are read; a longer answer is cut. */
+  keyAnswerKb: number;
 }
 
 /** What a super admin sets, all in one place. */
@@ -111,7 +119,7 @@ export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, 
 export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 };
 export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0, guestDays: 1 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
-export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5 };
+export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
 export const FAIR_USAGE_WINDOW_HOURS = 5;
 
@@ -185,6 +193,10 @@ const BRICK_RANGES: Record<keyof BrickLimits, Range> = {
   failuresBeforeTelling: { min: 1, max: 100, whole: true },
   goalsShare: { min: 1, max: 100, whole: true },
   appsPerBot: { min: 1, max: 100, whole: true },
+  keyFormMinutes: { min: 1, max: 1_440, whole: true },
+  keyTries: { min: 1, max: 100, whole: true },
+  keyCallSeconds: { min: 1, max: 300, whole: true },
+  keyAnswerKb: { min: 1, max: 10_240, whole: true },
 };
 
 /** The values each group can hold, for the pages to say ("Between 1 and 100 files") before anything is sent. */
