@@ -175,5 +175,18 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
       });
       return { ok: json.successful === true, data: json.data ?? null, error: str(json.error), providerCallId: str(json.log_id) };
     },
+
+    /** POST /project/usage/tool_calls { from, to, limit } -> { event_count, groups: [{ key, event_count }] } (read live 14 Nov 2026 with the project key). Counts only: no price comes back. */
+    async usage({ fromMs, toMs }) {
+      const json = await call('/project/usage/tool_calls', { from: fromMs, to: toMs, limit: 1000 });
+      const count = (value: unknown): number => {
+        const n = Number(value);
+        return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : 0;
+      };
+      const groups = Array.isArray(json.groups)
+        ? (json.groups as Record<string, unknown>[]).filter((group) => typeof group?.key === 'string').map((group) => ({ key: String(group.key), count: count(group.event_count) }))
+        : [];
+      return { toolCalls: count(json.event_count), groups };
+    },
   };
 }

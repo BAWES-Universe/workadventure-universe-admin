@@ -207,4 +207,17 @@ describe('the real adapter speaks the provider as its docs say, against a preten
     const down = make([answer({ error: { message: 'x' } }, 503)]);
     await expect(down.use({ person: 'p', toolkit: 'gmail', tool: 'T', arguments: {}, providerAccountId: null, callId: 'c' })).rejects.toThrow('503');
   });
+
+  it('reads the provider’s own count of tool calls for a period: counts only, nothing else kept', async () => {
+    const adapter = make([answer({ event_count: 12, groups: [{ key: 'GMAIL_FETCH_EMAILS', event_count: 9 }, { key: 'SLACK_SEND_MESSAGE', event_count: '3' }, { event_count: 4 }], secret: 'x' })]);
+    const usage = await adapter.usage!({ fromMs: 1000, toMs: 2000 });
+    expect(usage).toEqual({ toolCalls: 12, groups: [{ key: 'GMAIL_FETCH_EMAILS', count: 9 }, { key: 'SLACK_SEND_MESSAGE', count: 3 }] });
+    expect(calls[0].url).toBe('https://backend.composio.dev/api/v3.1/project/usage/tool_calls');
+    expect(sent()).toEqual({ from: 1000, to: 2000, limit: 1000 });
+  });
+
+  it('a usage answer with nothing readable is zero, never a made-up number', async () => {
+    const adapter = make([answer({ event_count: 'many', groups: 'none' })]);
+    expect(await adapter.usage!({ fromMs: 1, toMs: 2 })).toEqual({ toolCalls: 0, groups: [] });
+  });
 });

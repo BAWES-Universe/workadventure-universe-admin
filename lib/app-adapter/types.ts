@@ -53,6 +53,8 @@ export interface ReadyMadeAdapter {
   callLink(input: { url: string; message: Record<string, unknown>; sessionId: string | null }): Promise<LinkAnswer>;
   /** One use of one app tool for one person. `callId` makes a retry the same call. */
   use(input: { person: string; toolkit: string; tool: string; arguments: Record<string, unknown>; providerAccountId: string | null; callId: string }): Promise<UseResult>;
+  /** The provider's own count of tool calls for our project over a range (epoch milliseconds, end excluded), by tool name. Optional: the monthly check says it could not run when an adapter has none. */
+  usage?(input: { fromMs: number; toMs: number }): Promise<{ toolCalls: number; groups: { key: string; count: number }[] }>;
 }
 
 /** Thrown for anything the adapter will not do (it is off, or the provider refused). The text is for logs; a person sees nothing of it. */

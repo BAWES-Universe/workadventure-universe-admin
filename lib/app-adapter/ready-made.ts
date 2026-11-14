@@ -5,7 +5,9 @@ import { readReadyMadeApps } from '@/lib/app-adapter/settings';
 import { createConnection } from '@/lib/app-connections';
 import { confirmReadyMade } from '@/lib/app-adapter/confirm';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
-import { APP_USE_MICROS_DEFAULT, personKeyOf } from '@/lib/meter-values';
+import { personKeyOf } from '@/lib/meter-values';
+import { priceCall } from '@/lib/composio-rates';
+import { readComposioBilling } from '@/lib/composio-billing';
 import { truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
 
 /**
@@ -107,13 +109,18 @@ async function restartIfNotSignedIn(
 }
 
 /**
- * The use is written to the meter. Paid by the universe: the cost is the super admin's setting while it has one, else the built-in
- * estimate (always `estimated`; the provider sends no cost back). The event id comes from the call's own id, so a retry never counts twice.
+ * The use is written to the meter, first, under an event id taken from the call's own id (a retry never counts twice). Paid by the
+ * universe, at the provider's own list price for what the call is (lib/composio-rates.ts): a search or lookup is free (written
+ * with 0 and no tool run), a sandbox run and a tool run are priced by app, a batch is the sum of the tools inside it, and the
+ * zero data retention add-on is counted where it covers. The figure is always `estimated` (the provider sends no cost back); the
+ * month's free calls and the plan's credit are taken off at the account level (lib/composio-billing.ts), not here. A price a super
+ * admin saved (`appUseMicros`) replaces the list price of each paid step.
  */
-async function meterUse(input: { botId: string; ownerId: string; toolkit: string; tool: string; callId: string }) {
-  const settings = await getMeterSettings();
-  // A saved price wins; with none, the built-in estimate: a use is never written free or with no cost
-  const cost = settings.appUseMicros ?? APP_USE_MICROS_DEFAULT;
+async function meterUse(input: { botId: string; ownerId: string; toolkit: string; tool: string; arguments?: unknown; callId: string }) {
+  const [settings, app, billing] = await Promise.all([getMeterSettings(), readyMadeApp(input.toolkit), readComposioBilling()]);
+  const priced = priceCall({ toolkit: input.toolkit, tool: input.tool, arguments: input.arguments, ownAuth: !!app?.authConfigId, zdrOn: billing.zdrOn });
+  const steps = priced.executions + priced.sandboxRuns;
+  const cost = settings.appUseMicros === null ? priced.listMicros : steps * settings.appUseMicros;
   return recordMeterEvent({
     // Per Brick: a call id is only known to be unique for the one that made it, so two Bricks never count as one call
     eventId: `app:${input.botId}:${input.callId}`,
@@ -128,19 +135,36 @@ async function meterUse(input: { botId: string; ownerId: string; toolkit: string
     payerPersonId: null,
     route: 'app',
     jobId: null,
-    quantity: 1,
+    // A free lookup is not an app step: it is written (so a repeated call id is still refused) with quantity 0 and cost 0
+    quantity: steps,
     unit: 'use',
     costMicros: cost,
     basis: 'estimated',
     sourceRef: null,
-    // What was asked is the person's: only which app and which tool, never the arguments
-    detail: { toolkit: input.toolkit, tool: input.tool },
+    // What was asked is the person's: which app and which tool, and how it was priced; never the arguments. The monthly bill reads these.
+    detail: {
+      toolkit: input.toolkit,
+      tool: input.tool,
+      kind: priced.kind,
+      tier: priced.tier,
+      tierVerified: priced.tierVerified,
+      ownAuth: !!app?.authConfigId,
+      executions: priced.executions,
+      sandboxRuns: priced.sandboxRuns,
+      zdrCalls: priced.zdrCalls,
+      ...(Object.keys(priced.inner).length > 0 ? { inner: priced.inner } : {}),
+    },
   });
+}
+
+/** The app as listed, or null when it is not on the list. */
+async function readyMadeApp(toolkit: string) {
+  return (await readReadyMadeApps()).find((app) => app.key === toolkit) ?? null;
 }
 
 /** Whether the app is on the list and not turned off: a super admin turning one off stops every use of it at once, connections included. */
 async function appIsOn(toolkit: string): Promise<boolean> {
-  return (await readReadyMadeApps()).some((app) => app.key === toolkit && app.enabled);
+  return (await readyMadeApp(toolkit))?.enabled === true;
 }
 
 export type ReadyMadeLinkOutcome =
@@ -169,7 +193,7 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
   if (method === 'tools/call') {
     const params = input.message.params && typeof input.message.params === 'object' ? (input.message.params as Record<string, unknown>) : {};
     if (typeof params.name !== 'string' || !params.name || !input.callId) return { status: 'refused' };
-    const written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit: connection.providerToolkit, tool: params.name, callId: input.callId });
+    const written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit: connection.providerToolkit, tool: params.name, arguments: params.arguments, callId: input.callId });
     if (!written.recorded) return { status: 'already_asked' };
   }
   try {
@@ -201,7 +225,7 @@ export async function useReadyMade(input: { botId: string; connectionId: string;
   const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true } });
   if (!bot || bot.roomId !== null || bot.ownerId !== input.ownerId) return { status: 'not_owner' };
 
-  const written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit: connection.providerToolkit, tool: input.tool, callId: input.callId });
+  const written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit: connection.providerToolkit, tool: input.tool, arguments: input.arguments, callId: input.callId });
   if (!written.recorded) return { status: 'already_asked' };
 
   try {
