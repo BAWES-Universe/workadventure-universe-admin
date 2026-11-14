@@ -2412,7 +2412,7 @@ model BrickComputer {
   enabled       Boolean   @default(true)
   // none (not made yet), waking, resting, working, cold (resting a long while), broken, restoring, stopped (stopped by us)
   machine       String    @default("none") @db.VarChar(10)
-  // Which provider holds the machine: "fake" (the pretend one, for tests and the dev server) or "real" (off until Khalid says)
+  // Which provider holds the machine: "fake" (the pretend one, for tests and the dev server) or "real" (Agent37, on wherever the Agent37 key is set)
   provider      String    @default("fake") @db.VarChar(10)
   providerRef   String?   @map("provider_ref") @db.VarChar(255)
   madeAt        DateTime? @map("made_at")

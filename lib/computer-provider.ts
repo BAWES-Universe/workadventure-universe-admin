@@ -1,6 +1,6 @@
 /**
- * Where a Brick's computer really lives (game #2000). Everything in Universe talks to a computer through this one interface,
- * so the team can run the whole of it with the pretend provider on the dev server first, and the real one is wired and OFF.
+ * Where a Brick's computer really lives (game #2000). Everything in Universe talks to a computer through this one interface:
+ * the pretend provider runs the whole of it on the dev server and in tests, and the real one (Agent37, lib/agent37) runs on prod.
  *
  * Four rules the interface keeps by its shape:
  *  - Nothing here creates or wakes a machine unless a job needs it: only `create` and `wake` do, and Universe calls them from
@@ -9,6 +9,10 @@
  *  - `rest` and `stop` keep the disk. Only `remove` takes a machine away, and only after the person's files were saved.
  *  - What a minute costs is the provider's answer, never a number of ours.
  */
+
+import { prisma } from '@/lib/db';
+import { Agent37Client } from '@/lib/agent37/client';
+import { Agent37ComputerProvider } from '@/lib/agent37/provider';
 
 export interface MachineInfo {
   ref: string;
@@ -44,14 +48,6 @@ export interface ComputerProvider {
   watch(ref: string): Promise<WatchSession | null>;
   /** Saves a copy of its home folder and says how big it is. */
   saveFiles(ref: string): Promise<SavedCopy>;
-}
-
-/** The real provider is wired and off until the owner of Universe says so, after a measured, bounded trial. */
-export class ComputerProviderOff extends Error {
-  constructor() {
-    super('The real computer provider is not switched on');
-    this.name = 'ComputerProviderOff';
-  }
 }
 
 /** The pretend provider's pretend price: test data on the dev server only, never read as what a minute really costs. */
@@ -134,42 +130,21 @@ export class FakeComputerProvider implements ComputerProvider {
   }
 }
 
-/** The real provider: wired so the team can see where it goes, and off. Every call says so. */
-export class RealComputerProvider implements ComputerProvider {
-  readonly kind = 'real' as const;
-  microsPerMinute(): number | null {
-    return null;
-  }
-  async create(): Promise<MachineInfo> {
-    throw new ComputerProviderOff();
-  }
-  async wake(): Promise<void> {
-    throw new ComputerProviderOff();
-  }
-  async rest(): Promise<void> {
-    throw new ComputerProviderOff();
-  }
-  async stop(): Promise<void> {
-    throw new ComputerProviderOff();
-  }
-  async remove(): Promise<void> {
-    throw new ComputerProviderOff();
-  }
-  async watch(): Promise<WatchSession | null> {
-    throw new ComputerProviderOff();
-  }
-  async saveFiles(): Promise<SavedCopy> {
-    throw new ComputerProviderOff();
-  }
-}
-
 /**
- * Which provider this server runs, from `COMPUTER_PROVIDER`: "fake" on the dev server and in tests, "real" only when Khalid has
- * said so. Anything else, and every server that was not told, has no computers at all: a Brick's page says so and nothing is made.
+ * Which provider this server runs. A server that holds an Agent37 key (`AGENT37_API_KEY`) runs real computers: the key being there is
+ * the whole of turning them on, and there is no switch (Khalid, 13 Nov). `COMPUTER_PROVIDER=fake` is for the dev server and tests, and
+ * wins over the key so a test server never spends. Without either, this server has no computers at all: a Brick's page says so and
+ * nothing is made. Never set "fake" on production.
  */
 export function computerProviderKind(env: NodeJS.ProcessEnv = process.env): 'fake' | 'real' | null {
-  const value = (env.COMPUTER_PROVIDER ?? '').trim().toLowerCase();
-  return value === 'fake' || value === 'real' ? value : null;
+  if ((env.COMPUTER_PROVIDER ?? '').trim().toLowerCase() === 'fake') return 'fake';
+  return (env.AGENT37_API_KEY ?? '').trim() ? 'real' : null;
+}
+
+/** Room Universe holds for computer jobs that are working: what the Agent37 wallet has to cover on top of a new machine. */
+async function outstandingJobRoom(): Promise<number> {
+  const held = await prisma.meterReservation.aggregate({ where: { state: 'held', reservationKey: { startsWith: 'computer:job:' } }, _sum: { amountMicros: true } });
+  return Number(held._sum.amountMicros ?? 0);
 }
 
 let shared: ComputerProvider | null = null;
@@ -179,7 +154,7 @@ export function getComputerProvider(env: NodeJS.ProcessEnv = process.env): Compu
   const kind = computerProviderKind(env);
   if (kind === null) return null;
   if (!shared || sharedKind !== kind) {
-    shared = kind === 'fake' ? new FakeComputerProvider() : new RealComputerProvider();
+    shared = kind === 'fake' ? new FakeComputerProvider() : new Agent37ComputerProvider({ client: new Agent37Client({ key: env.AGENT37_API_KEY as string }), outstandingReserveMicros: outstandingJobRoom });
     sharedKind = kind;
   }
   return shared;
