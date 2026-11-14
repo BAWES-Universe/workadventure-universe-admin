@@ -235,6 +235,9 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       const broken = new NextRequest(`http://localhost/api/brick-templates/${id}/use`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"name": ' });
       expect((await postUse(broken, ids(id))).status).toBe(400);
       expect(await prisma.bot.count({ where: { ownerId: omar.id } })).toBe(before);
+      const blank = new NextRequest(`http://localhost/api/brick-templates/${id}/use`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '   ' });
+      expect((await postUse(blank, ids(id))).status).toBe(400);
+      expect(await prisma.bot.count({ where: { ownerId: omar.id } })).toBe(before);
       const bare = new NextRequest(`http://localhost/api/brick-templates/${id}/use`, { method: 'POST' });
       const made = await postUse(bare, ids(id));
       expect(made.status).toBe(201);

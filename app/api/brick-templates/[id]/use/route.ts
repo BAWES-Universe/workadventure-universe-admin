@@ -22,10 +22,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const { id } = await params;
     const owner = await brickOwner(request);
     if (owner.response) return owner.response;
-    // No body at all means "its own name, nothing else"; a body that is not JSON is refused before anything is made
+    // No body at all (nothing sent) means "its own name, nothing else"; a body that is not JSON is refused before anything is made
     const text = await request.text();
     let body: unknown = {};
-    if (text.trim() !== '') {
+    if (text !== '') {
       try {
         body = JSON.parse(text);
       } catch {
