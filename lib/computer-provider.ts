@@ -13,6 +13,25 @@
 import { prisma } from '@/lib/db';
 import { Agent37Client } from '@/lib/agent37/client';
 import { Agent37ComputerProvider } from '@/lib/agent37/provider';
+import type { ExecResult } from '@/lib/agent37/client';
+import type { TurnEvent } from '@/lib/agent37/turn-events';
+
+export type { ExecResult, TurnEvent };
+
+export interface ExecOptions {
+  /** Only "root" is allowed, for what the image's own user cannot do. */
+  user?: 'root';
+  /** The same name asked again returns the first result and does not run the command again. */
+  name?: string;
+  background?: boolean;
+  timeoutMs?: number;
+}
+
+export interface TurnInput {
+  text: string;
+  /** The conversation the turn belongs to; empty for the first turn of a job, which makes one. */
+  sessionId?: string | null;
+}
 
 export interface MachineInfo {
   ref: string;
@@ -48,6 +67,19 @@ export interface ComputerProvider {
   watch(ref: string): Promise<WatchSession | null>;
   /** Saves a copy of its home folder and says how big it is. */
   saveFiles(ref: string): Promise<SavedCopy>;
+  /**
+   * Runs a shell command on the machine. Only for a machine a job holds: a sleeping machine is woken by it. A non-zero exit is an
+   * answer, not an error; a command that could not be asked at all throws.
+   */
+  exec(ref: string, command: string, options?: ExecOptions): Promise<ExecResult>;
+  /** Starts a turn of the agent on the machine and gives its events as they come. Ends with a `completed` or a `failed`. */
+  openTurn(ref: string, input: TurnInput, signal?: AbortSignal): Promise<AsyncGenerator<TurnEvent>>;
+  /** The events of a turn already running (or just finished), from its start. */
+  reattachTurn(ref: string, responseId: string, signal?: AbortSignal): Promise<AsyncGenerator<TurnEvent>>;
+  /** Cancels a turn. One that is already over is not an error. */
+  cancelTurn(ref: string, responseId: string): Promise<void>;
+  /** The id of the turn running in a session, or null when none is. */
+  activeTurn(ref: string, sessionId: string): Promise<string | null>;
 }
 
 /** The pretend provider's pretend price: test data on the dev server only, never read as what a minute really costs. */
@@ -64,6 +96,17 @@ export class FakeComputerProvider implements ComputerProvider {
   failNext: Partial<Record<'create' | 'wake' | 'rest' | 'saveFiles', boolean>> = {};
   /** Every save fails until this is turned off. */
   failSaves = false;
+  /** What a command run on the pretend machine answers with, by what it says; a test sets this. Without it every command succeeds with no output. */
+  execAnswer: (command: string) => Partial<ExecResult> | Promise<Partial<ExecResult>> = (command) => (command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {});
+  /** Every command is refused (the machine does not answer) while this is on. */
+  failExec = false;
+  /** The turns the pretend agent will run, one list of events per turn, used in order. */
+  turns: TurnEvent[][] = [];
+  /** What was asked of the pretend agent, and what was cancelled. */
+  openedTurns: { ref: string; input: TurnInput }[] = [];
+  cancelledTurns: string[] = [];
+  /** A turn the pretend agent is running in a session: set by a test, read back by `activeTurn`. */
+  running = new Map<string, string>();
   filesBytes = 1_288_490_188;
   private rate: number | null;
   private awake = new Set<string>();
@@ -127,6 +170,43 @@ export class FakeComputerProvider implements ComputerProvider {
     if (this.failSaves) throw new Error('The pretend provider failed on saveFiles');
     this.fail('saveFiles');
     return { bytes: this.filesBytes, savedAt: new Date() };
+  }
+
+  async exec(ref: string, command: string): Promise<ExecResult> {
+    this.note('exec', ref);
+    this.commands.push({ ref, command });
+    if (this.failExec) throw new Error('The pretend provider failed on exec');
+    const answer = await this.execAnswer(command);
+    return { exitCode: 0, stdout: '', stderr: '', truncated: false, ...answer };
+  }
+  /** The commands that were run, in order. */
+  readonly commands: { ref: string; command: string }[] = [];
+
+  async openTurn(ref: string, input: TurnInput): Promise<AsyncGenerator<TurnEvent>> {
+    this.note('openTurn', ref);
+    this.openedTurns.push({ ref, input });
+    const events = this.turns.shift() ?? [{ type: 'created', id: `resp-${this.openedTurns.length}`, sessionId: input.sessionId ?? 'session-1' }, { type: 'completed', outputText: 'done', usage: null }];
+    return (async function* () {
+      for (const event of events) yield event;
+    })();
+  }
+
+  async reattachTurn(ref: string, responseId: string): Promise<AsyncGenerator<TurnEvent>> {
+    this.note('reattachTurn', ref);
+    return (async function* () {
+      yield { type: 'created', id: responseId, sessionId: null } as TurnEvent;
+      yield { type: 'completed', outputText: '', usage: null } as TurnEvent;
+    })();
+  }
+
+  async cancelTurn(ref: string, responseId: string): Promise<void> {
+    this.note('cancelTurn', ref);
+    this.cancelledTurns.push(responseId);
+  }
+
+  async activeTurn(ref: string, sessionId: string): Promise<string | null> {
+    this.note('activeTurn', ref);
+    return this.running.get(sessionId) ?? null;
   }
 }
 

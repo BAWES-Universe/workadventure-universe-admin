@@ -155,7 +155,7 @@ async function brickOf(botId: string, ownerId: string) {
 }
 
 /** The provider for this computer: the server's, when it is the one that holds the machine. A machine of another provider is not reached. */
-function providerFor(row: { provider: string } | null): Provider | null {
+export function providerFor(row: { provider: string } | null): Provider | null {
   const provider = getComputerProvider();
   if (!provider) return null;
   return row && row.provider !== provider.kind ? null : provider;
@@ -625,12 +625,14 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   const seconds = job.secondsRun + stretch;
   const ended = await prisma.computerJob.updateMany({
     where: { id: jobId, status: job.status },
-    data: { status, endedBy, endedAt: now, queuedFor: null, waitingFor: null, readyWhat: null, readyWhere: null, control: 'brick', stretchStarted: null, secondsRun: seconds },
+    data: { status, endedBy, endedAt: now, queuedFor: null, waitingFor: null, readyWhat: null, readyWhere: null, control: 'brick', stretchStarted: null, secondsRun: seconds, agentResponseId: null },
   });
   // Someone else ended it between the read and the write: that one counts and settles
   if (ended.count === 0) return;
   // The job's computer holds no key from here on: a call it makes after this is refused
   await revokeJobTokens(jobId, now).catch((error) => console.error('[Computer] Could not revoke a job’s keys:', error instanceof Error ? error.message : 'unknown'));
+  // A turn the agent was still running is cancelled, so it does not go on working (and spending) for a job that is over
+  if (held && job.agentResponseId) await cancelAgentTurn(job.botId, job.agentResponseId);
 
   try {
     if (job.reservationKey) {
@@ -785,6 +787,8 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   }
   const idle = await prisma.brickComputer.findMany({ where: { machine: 'working', NOT: { providerRef: null }, updatedAt: { lte: new Date(now.getTime() - 2 * 60 * 1000) } }, select: { botId: true }, take: 200 });
   for (const machine of idle) await restIfUnheld(machine.botId, now);
+  // A machine a job holds is kept awake while it works
+  await keepWorkingMachinesAwake(now, batch).catch((error) => console.error('[Computer] Keep-awake failed:', error instanceof Error ? error.message : 'unknown'));
   // What a job ran whose write to the books failed is written again (same event id, so never twice)
   await recordMissingComputerTime(now, batch);
   // One try per Brick: the oldest job in line has the turn. Bricks tried and blocked are skipped by the next page, so a long run of
@@ -851,6 +855,89 @@ export async function requestHandover(jobId: string, waitingFor: WaitingFor, now
   return after ? jobView(after) : null;
 }
 
+/** Cancels a turn of the agent on a Brick's machine. Best effort: a turn that is already over, or a machine that does not answer, is not an error here. */
+async function cancelAgentTurn(botId: string, responseId: string): Promise<void> {
+  const row = await prisma.brickComputer.findUnique({ where: { botId } });
+  const provider = providerFor(row);
+  if (!row?.providerRef || !provider) return;
+  await provider.cancelTurn(row.providerRef, responseId).catch((error) => console.error('[Computer] Could not cancel a turn:', error instanceof Error ? error.message : 'unknown'));
+}
+
+/** What `universe-fence --check` prints when nothing the agent started is left running. The command is in the image (it knows which processes the desktop needs). */
+const FENCE_CLEAR = /(^|\n)remaining=0\s*$/;
+const FENCE_TRIES = 3;
+
+/**
+ * The take-over fence's second half (build handoff v2, section 4), done on the machine before the person has the keyboard: the turn
+ * the agent is running is cancelled, every process it started is stopped (the image's `universe-fence` keeps the desktop, the screen
+ * and the agent's gateway), and a second look proves none is left. A fence that cannot be proved stops the machine: the person
+ * then has no screen, rather than a screen with an agent still acting behind it. The disk is kept either way. Never throws.
+ */
+export async function fenceMachine(botId: string): Promise<'done' | 'failed' | 'skipped'> {
+  try {
+    const row = await prisma.brickComputer.findUnique({ where: { botId } });
+    const provider = providerFor(row);
+    if (!row?.providerRef || !provider || row.machine !== 'working') return 'skipped';
+    const ref = row.providerRef;
+    const turns = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] }, NOT: { agentResponseId: null } }, select: { id: true, agentResponseId: true } });
+    for (const turn of turns) {
+      if (turn.agentResponseId) await provider.cancelTurn(ref, turn.agentResponseId).catch((error) => console.error('[Computer] Could not cancel a turn:', error instanceof Error ? error.message : 'unknown'));
+      await prisma.computerJob.updateMany({ where: { id: turn.id, agentResponseId: turn.agentResponseId }, data: { agentResponseId: null } });
+    }
+    for (let attempt = 0; attempt < FENCE_TRIES; attempt++) {
+      try {
+        await provider.exec(ref, 'universe-fence', { timeoutMs: 30_000 });
+        const check = await provider.exec(ref, 'universe-fence --check', { timeoutMs: 30_000 });
+        if (check.exitCode === 0 && FENCE_CLEAR.test(check.stdout)) return 'done';
+      } catch (error) {
+        console.error('[Computer] The fence did not run:', error instanceof Error ? error.message : 'unknown');
+      }
+    }
+    // Not proved: the machine is stopped so nothing can act behind the person's back. Its files stay, and the next job wakes it
+    console.error('[Computer] The take-over fence could not be proved: the machine is stopped');
+    await provider.stop(ref).catch((error) => console.error('[Computer] Could not stop a machine:', error instanceof Error ? error.message : 'unknown'));
+    await prisma.brickComputer.updateMany({ where: { botId, providerRef: ref }, data: { machine: 'stopped' } });
+    return 'failed';
+  } catch (error) {
+    console.error('[Computer] The fence failed:', error instanceof Error ? error.message : 'unknown');
+    return 'failed';
+  }
+}
+
+/** How often a working machine is sent a no-op command: Agent37 counts a command as activity, and a machine with none for its idle time sleeps (900 s). */
+const KEEP_AWAKE_EVERY_MS = 5 * 60 * 1000;
+
+/**
+ * While a job holds a machine, a command that does nothing is sent every 5 minutes, so a long quiet stretch of work (the agent
+ * thinking, a build running) is not slept under it. Management reads do not count as activity; a command does. Once no job holds the
+ * machine it is no longer sent one, and the machine rests. Returns how many were sent.
+ */
+async function keepWorkingMachinesAwake(now: Date, batch: number): Promise<number> {
+  const due = await prisma.brickComputer.findMany({
+    where: { machine: 'working', NOT: { providerRef: null }, OR: [{ keptAwakeAt: null }, { keptAwakeAt: { lte: new Date(now.getTime() - KEEP_AWAKE_EVERY_MS) } }] },
+    select: { botId: true, providerRef: true, provider: true, keptAwakeAt: true },
+    take: batch,
+  });
+  let sent = 0;
+  for (const machine of due) {
+    if ((await prisma.computerJob.count({ where: { botId: machine.botId, status: { in: ['running', 'waiting'] } } })) === 0) continue;
+    const provider = providerFor(machine);
+    if (!provider || !machine.providerRef) continue;
+    // One sweep at a time sends it: the claim is on the time that was seen
+    const claim = await prisma.brickComputer.updateMany({ where: { botId: machine.botId, machine: 'working', keptAwakeAt: machine.keptAwakeAt }, data: { keptAwakeAt: now } });
+    if (claim.count !== 1) continue;
+    try {
+      await provider.exec(machine.providerRef, 'true', { name: `awake:${Math.floor(now.getTime() / KEEP_AWAKE_EVERY_MS)}`, timeoutMs: 20_000 });
+      sent++;
+    } catch (error) {
+      console.error('[Computer] Could not keep a machine awake:', error instanceof Error ? error.message : 'unknown');
+      // Tried again by the next sweep rather than five minutes from now
+      await prisma.brickComputer.updateMany({ where: { botId: machine.botId, keptAwakeAt: now }, data: { keptAwakeAt: machine.keptAwakeAt } });
+    }
+  }
+  return sent;
+}
+
 /**
  * The take-over fence's first half, kept here so every way control changes uses it: the control generation of the Brick's live
  * jobs moves up and their keys end. A key made before is refused, so the agent cannot act on what it was told before the person
@@ -891,7 +978,11 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
     }
   }
   // The fence: every key the computer held ends and the number moves, so a call the agent had in flight is refused from here on
-  if (changed.count > 0 || moved > 0) await fenceControl(botId);
+  if (changed.count > 0 || moved > 0) {
+    await fenceControl(botId);
+    // Then the machine itself: the turn is cancelled and what the agent started is stopped and proved gone, before the person has the screen
+    await fenceMachine(botId);
+  }
   const job = await prisma.computerJob.findFirst({ where: { botId, status: 'waiting' }, orderBy: [{ writes: 'desc' }, { createdAt: 'asc' }], include: JOB_INCLUDE });
   // Asked twice it is the same: already theirs is still theirs
   if (!job || (changed.count === 0 && job.control !== 'person' && moved === 0)) return { ok: false, reason: 'nothing_waiting' };

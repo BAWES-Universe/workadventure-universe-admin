@@ -2423,6 +2423,8 @@ model BrickComputer {
   restoredFrom  DateTime? @map("restored_from")
   // Set while a rest is claimed and not finished, empty once it is done: a rest a stopped server left half way is told apart from a finished one
   restClaimedAt DateTime? @map("rest_claimed_at")
+  // When the sweep last sent the machine a no-op command to keep it awake while a job holds it
+  keptAwakeAt   DateTime? @map("kept_awake_at")
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again
   noticeDismissedJobId String? @map("notice_dismissed_job_id") @db.VarChar(40)
   createdAt     DateTime  @default(now()) @map("created_at")
@@ -2473,6 +2475,10 @@ model ComputerJob {
   // Goes up each time the person takes the machine and each time it is handed back (the take-over fence): a token and an agent
   // callback made under an older number are refused, so nothing the agent had in flight can act after the person took over
   controlGeneration Int    @default(0) @map("control_generation")
+  // The agent's conversation for this job and the turn it is running now (Agent37 ids), so the runner reconnects to a turn that is
+  // still going before it starts another, and the take-over fence knows which turn to cancel. Empty when no turn is running.
+  agentSessionId    String? @map("agent_session_id") @db.VarChar(80)
+  agentResponseId   String? @map("agent_response_id") @db.VarChar(120)
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]

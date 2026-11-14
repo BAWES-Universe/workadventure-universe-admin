@@ -1,4 +1,5 @@
-import type { ComputerProvider, MachineInfo, SavedCopy, WatchSession } from '@/lib/computer-provider';
+import type { ComputerProvider, ExecOptions, ExecResult, MachineInfo, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
+import { readTurn } from '@/lib/agent37/turn-events';
 import { Agent37Client, Agent37Error, Agent37Unreached, type Instance } from '@/lib/agent37/client';
 import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros } from '@/lib/agent37/rates';
 import { savedCopyOf, storeSavedCopy, type SavedCopyInfo } from '@/lib/agent37/saved-copies';
@@ -241,5 +242,34 @@ export class Agent37ComputerProvider implements ComputerProvider {
     const archive = await this.client.archive(url);
     const saved = await this.copies.store(botId, archive.body as ReadableStream<Uint8Array>);
     return { bytes: saved.bytes, savedAt: saved.savedAt };
+  }
+
+  /** The address of a machine's own agent. Asked of Agent37 each time (a few ms), so a machine that moved host is still found. */
+  private async urlOf(ref: string): Promise<string> {
+    const instance = await this.client.getInstance(ref);
+    if (gone(String(instance.status)) || !instance.url) throw new Error(`The computer is ${instance.status}`);
+    return instance.url;
+  }
+
+  exec(ref: string, command: string, options?: ExecOptions): Promise<ExecResult> {
+    return this.client.exec(ref, command, options);
+  }
+
+  async openTurn(ref: string, input: TurnInput, signal?: AbortSignal): Promise<AsyncGenerator<TurnEvent>> {
+    const response = await this.client.openTurn(await this.urlOf(ref), input, signal);
+    return readTurn(response.body as ReadableStream<Uint8Array>);
+  }
+
+  async reattachTurn(ref: string, responseId: string, signal?: AbortSignal): Promise<AsyncGenerator<TurnEvent>> {
+    const response = await this.client.reattachTurn(await this.urlOf(ref), responseId, signal);
+    return readTurn(response.body as ReadableStream<Uint8Array>);
+  }
+
+  async cancelTurn(ref: string, responseId: string): Promise<void> {
+    await this.client.cancelTurn(await this.urlOf(ref), responseId);
+  }
+
+  async activeTurn(ref: string, sessionId: string): Promise<string | null> {
+    return this.client.activeTurn(await this.urlOf(ref), sessionId);
   }
 }

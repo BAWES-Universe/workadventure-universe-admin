@@ -10,6 +10,8 @@
  */
 
 export const AGENT37_API = 'https://api.agent37.com';
+/** Where commands run: the instance address is for the agent, this one is for the machine. Signed links cannot authorize it. */
+export const AGENT37_SANDBOX = 'https://sandbox.agent37.app';
 
 /** The states of an instance, as Agent37 names them. */
 export type InstanceStatus = 'provisioning' | 'running' | 'stopping' | 'stopped' | 'starting' | 'restarting' | 'updating' | 'sleeping' | 'waking' | 'failed' | 'deleting' | 'deleted';
@@ -54,6 +56,8 @@ export class Agent37Error extends Error {
     readonly status: number,
     readonly code: string | null,
     message: string,
+    /** Only for `session_busy`: the turn that is running, so a caller can reattach to it instead of starting another. */
+    readonly runningResponseId: string | null = null,
   ) {
     super(message);
     this.name = 'Agent37Error';
@@ -80,7 +84,20 @@ export interface ClientOptions {
   /** For tests: how a wait is made. */
   sleep?: (ms: number) => Promise<void>;
   api?: string;
+  sandbox?: string;
 }
+
+export interface ExecResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  /** Either stream went over Agent37's 512 KB cap and its middle was cut out. */
+  truncated: boolean;
+  /** Only for a command run in the background. */
+  pid?: number;
+}
+
+export type NetworkPolicy = 'allow-all' | 'deny-all' | { allow: string[] };
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const RETRY_WAITS_MS = [1_000, 3_000, 8_000];
@@ -101,6 +118,7 @@ export class Agent37Client {
   private readonly fetchImpl: FetchLike;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly api: string;
+  private readonly sandbox: string;
 
   constructor(options: ClientOptions) {
     if (!options.key.trim()) throw new Error('The Agent37 key is empty');
@@ -108,6 +126,7 @@ export class Agent37Client {
     this.fetchImpl = options.fetchImpl ?? ((input, init) => fetch(input, init));
     this.sleep = options.sleep ?? wait;
     this.api = options.api ?? AGENT37_API;
+    this.sandbox = options.sandbox ?? AGENT37_SANDBOX;
   }
 
   /** One call, one answer. Throws Agent37Error for an answer that is not a success and Agent37Unreached when there was none. */
@@ -229,6 +248,92 @@ export class Agent37Client {
       }
       const { code, message } = describe(json);
       throw new Agent37Error(response.status, code, message || `Agent37 answered ${response.status}`);
+    }
+    return response;
+  }
+
+  /**
+   * Runs a shell command on the machine (`sh -c`). A sleeping machine is woken first, so this is only for a machine a job holds. A
+   * non-zero exit is an answer, not an error. `name` makes a repeat of the same request return the first result without running the
+   * command again (remembered while it runs and for 5 minutes after), which is what makes it safe to ask again after a lost answer.
+   * Foreground commands wait up to 15 minutes at Agent37; this waits a little longer and then says it was not reached.
+   */
+  exec(id: string, command: string, options: { user?: 'root'; background?: boolean; name?: string; timeoutMs?: number } = {}): Promise<ExecResult> {
+    const { timeoutMs = 60_000, ...rest } = options;
+    const body: Record<string, unknown> = { command, ...(rest.user ? { user: rest.user } : {}), ...(rest.background ? { background: true } : {}), ...(rest.name ? { name: rest.name } : {}) };
+    const run = async (): Promise<ExecResult> => {
+      const answer = await this.call<{ exit_code?: number; stdout?: string; stderr?: string; truncated?: boolean; pid?: number }>('POST', `${this.sandbox}/v1/instances/${encodeURIComponent(id)}/exec`, this.own(), body, timeoutMs);
+      return {
+        exitCode: typeof answer?.exit_code === 'number' ? answer.exit_code : -1,
+        stdout: typeof answer?.stdout === 'string' ? answer.stdout : '',
+        stderr: typeof answer?.stderr === 'string' ? answer.stderr : '',
+        truncated: answer?.truncated === true,
+        ...(typeof answer?.pid === 'number' ? { pid: answer.pid } : {}),
+      };
+    };
+    // Asked again only when the request carries a name: without one a repeat would run the command twice
+    return rest.name ? this.again(run) : run();
+  }
+
+  /**
+   * Starts a turn and returns its stream as it comes (`stream: true`). The first byte can wait for the machine to wake, so there is no
+   * short timeout: the caller's signal ends it. A non-200 throws (a turn already running in the session is 409 `session_busy`).
+   */
+  async openTurn(instanceUrl: string, input: { text: string; sessionId?: string | null }, signal?: AbortSignal): Promise<Response> {
+    return this.stream('POST', `${instanceUrl.replace(/\/+$/, '')}/v1/responses`, { input: input.text, stream: true, ...(input.sessionId ? { session_id: input.sessionId } : {}) }, signal);
+  }
+
+  /** The stream of a turn already running (or just finished): the events so far, then the rest. 404 `response_not_found` once it is old. */
+  async reattachTurn(instanceUrl: string, responseId: string, signal?: AbortSignal): Promise<Response> {
+    return this.stream('GET', `${instanceUrl.replace(/\/+$/, '')}/v1/responses/${encodeURIComponent(responseId)}/stream`, undefined, signal);
+  }
+
+  /** Cancels a turn. It still ends with a completed event holding what it wrote before. A turn that is not there is not an error. */
+  async cancelTurn(instanceUrl: string, responseId: string): Promise<void> {
+    try {
+      await this.again(() => this.call('POST', `${instanceUrl.replace(/\/+$/, '')}/v1/responses/${encodeURIComponent(responseId)}/cancel`, this.own(), {}, 15_000));
+    } catch (error) {
+      if (error instanceof Agent37Error && (error.status === 404 || error.status === 409)) return;
+      throw error;
+    }
+  }
+
+  /** The id of the turn running in a session, or null when it is idle (or the session is new). */
+  async activeTurn(instanceUrl: string, sessionId: string): Promise<string | null> {
+    const answer = await this.again(() => this.call<{ active_response_id?: string | null }>('GET', `${instanceUrl.replace(/\/+$/, '')}/v1/sessions/${encodeURIComponent(sessionId)}`, this.own(), undefined, 20_000));
+    return typeof answer?.active_response_id === 'string' && answer.active_response_id ? answer.active_response_id : null;
+  }
+
+  /** What the machine may reach on the internet. A 503 `try_again` means it is saved and reaches the machine within two minutes: asked again, it confirms. */
+  setNetwork(id: string, network: NetworkPolicy): Promise<Instance> {
+    return this.again(() => this.call('PATCH', `${this.api}/v1/instances/${encodeURIComponent(id)}`, this.account(), { network }));
+  }
+
+  /** A streamed call: returns the response when it is a 200, so the caller reads the body as it comes. */
+  private async stream(method: string, url: string, body: unknown, signal?: AbortSignal): Promise<Response> {
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method,
+        headers: { ...this.own(), Accept: 'text/event-stream', ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal,
+      });
+    } catch (error) {
+      throw new Agent37Unreached(error instanceof Error ? error.name : 'unknown');
+    }
+    if (!response.ok || !response.body) {
+      const text = await response.text().catch(() => '');
+      let json: unknown = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = null;
+      }
+      const { code, message } = describe(json);
+      // `session_busy` names the turn that is running, so a caller can reattach to it
+      const running = json && typeof json === 'object' && typeof (json as { error?: { response_id?: unknown } }).error?.response_id === 'string' ? (json as { error: { response_id: string } }).error.response_id : null;
+      throw new Agent37Error(response.status, code, message || `Agent37 answered ${response.status}`, running);
     }
     return response;
   }

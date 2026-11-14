@@ -8,6 +8,7 @@ jest.mock('@/lib/agent37/saved-copies', () => ({ savedCopyOf: jest.fn(), storeSa
 function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const instances = new Map<string, Instance>();
   const calls: string[] = [];
+  const execs: Array<{ id: string; command: string; options: unknown }> = [];
   let healthy = true;
   const refuse: Record<string, Error | undefined> = {};
   const client = {
@@ -69,13 +70,33 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       calls.push('health');
       return healthy;
     },
+    async exec(id: string, command: string, options?: unknown) {
+      calls.push(`exec:${id}:${command}`);
+      execs.push({ id, command, options });
+      return { exitCode: 0, stdout: 'ok', stderr: '', truncated: false };
+    },
+    async openTurn(url: string, input: { text: string; sessionId?: string | null }) {
+      calls.push(`turn:${url}:${input.text}`);
+      return new Response(`event: response.created\ndata: ${JSON.stringify({ id: 'resp-1', session_id: 'sess-1' })}\n\nevent: response.completed\ndata: ${JSON.stringify({ output_text: 'done', usage: null })}\n\n`);
+    },
+    async reattachTurn(url: string, responseId: string) {
+      calls.push(`reattach:${url}:${responseId}`);
+      return new Response(`event: response.completed\ndata: ${JSON.stringify({ output_text: '', usage: null })}\n\n`);
+    },
+    async cancelTurn(url: string, responseId: string) {
+      calls.push(`cancel:${url}:${responseId}`);
+    },
+    async activeTurn(url: string, sessionId: string) {
+      calls.push(`active:${url}:${sessionId}`);
+      return 'resp-2';
+    },
     async archive(url: string) {
       calls.push(`archive:${url}`);
       return { body: new ReadableStream() } as unknown as Response;
     },
   };
   const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean }> = [];
-  return { client: client as unknown as Agent37Client, instances, calls, created, refuse, setHealthy: (value: boolean) => (healthy = value) };
+  return { client: client as unknown as Agent37Client, instances, calls, execs, created, refuse, setHealthy: (value: boolean) => (healthy = value) };
 }
 
 function provider(w: ReturnType<typeof world>, extra: { reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
@@ -297,6 +318,45 @@ describe('the Agent37 provider', () => {
       });
       await p.create('bot-1');
       await expect(p.saveFiles('m1')).rejects.toThrow('ended early');
+    });
+  });
+
+  describe('the agent and commands on a machine', () => {
+    it('runs a command on the machine as it is asked, with its options', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      expect(await p.exec('m1', 'universe-fence', { name: 'x', timeoutMs: 5000 })).toMatchObject({ exitCode: 0, stdout: 'ok' });
+      expect(w.execs).toEqual([{ id: 'm1', command: 'universe-fence', options: { name: 'x', timeoutMs: 5000 } }]);
+    });
+
+    it('starts a turn at the machine’s own address and gives its events', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const seen = [];
+      for await (const event of await p.openTurn('m1', { text: 'Fill the form' })) seen.push(event.type);
+      expect(seen).toEqual(['created', 'completed']);
+      expect(w.calls).toContain('turn:https://m1.agent37.app:Fill the form');
+    });
+
+    it('reconnects, cancels and asks which turn is running at the same address', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      for await (const event of await p.reattachTurn('m1', 'resp-1')) void event;
+      await p.cancelTurn('m1', 'resp-1');
+      expect(await p.activeTurn('m1', 'sess-1')).toBe('resp-2');
+      expect(w.calls).toEqual(expect.arrayContaining(['reattach:https://m1.agent37.app:resp-1', 'cancel:https://m1.agent37.app:resp-1', 'active:https://m1.agent37.app:sess-1']));
+    });
+
+    it('does not reach a machine that is gone', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.instances.get('m1')!.status = 'deleted';
+      await expect(p.openTurn('m1', { text: 'x' })).rejects.toThrow('deleted');
+      await expect(p.cancelTurn('m1', 'r')).rejects.toThrow('deleted');
     });
   });
 });
