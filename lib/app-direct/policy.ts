@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { definitionSchema, hashDefinition, type Definition } from '@/lib/app-direct/definition';
+import { definitionSchema, hashDefinition, toolNameStart, type Definition } from '@/lib/app-direct/definition';
 import { headingOf } from '@/lib/app-direct/describe';
 
 /**
@@ -18,8 +18,7 @@ import { headingOf } from '@/lib/app-direct/describe';
 
 /** The name the model calls an operation by: unique among a Brick's tools (a custom service says which of them with a few letters of its id). */
 export function toolNameOf(definition: Pick<Definition, 'service' | 'short'>, operationId: string, connectionId: string): string {
-  const slug = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-  const parts = [slug(definition.short) || 'app', slug(operationId) || 'do'];
+  const parts = [toolNameStart(definition.short, operationId)];
   if (definition.service === 'custom') parts.push(connectionId.replace(/[^a-z0-9]/gi, '').slice(0, 4).toLowerCase());
   return parts.join('_').slice(0, 64);
 }

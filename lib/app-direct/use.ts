@@ -202,7 +202,13 @@ export async function keyAppsOf(botId: string): Promise<KeyAppView[]> {
     if (!connection?.definition) continue;
     const parsed = definitionSchema.safeParse(connection.definition);
     if (!parsed.success || hashDefinition(parsed.data) !== connection.definitionHash) continue;
-    await ensureKeyAppTools(row.id);
+    // One app whose tools cannot be made must not take the others down with it
+    try {
+      await ensureKeyAppTools(row.id);
+    } catch (error) {
+      console.error('[KeyApps] Could not make the tools of one app:', error instanceof Error ? error.message : 'unknown');
+      continue;
+    }
     const hash = connection.definitionHash as string;
     views.push({
       serverId: row.id,

@@ -16,6 +16,11 @@ export const CATEGORIES = ['lookUp', 'make', 'change', 'deleteSend'] as const;
 export type Category = (typeof CATEGORIES)[number];
 
 const NAME = /^[A-Za-z][A-Za-z0-9_]{0,39}$/;
+
+/** A word as it appears in a tool's name: lower case letters and digits, joined by underscores. */
+export const toolWord = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+/** What a tool's name starts with, cut short enough that a custom app's own four letters still fit within 64 characters. */
+export const toolNameStart = (short: string, operationId: string): string => [toolWord(short) || 'app', toolWord(operationId) || 'do'].join('_').slice(0, 59);
 const SEGMENT = /^[A-Za-z0-9._~-]+$/;
 const PLAIN = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f<>]*$/, 'Plain text only');
 
@@ -161,10 +166,14 @@ export const definitionSchema = z
     if (!origin.ok) ctx.addIssue({ code: 'custom', path: ['origin'], message: origin.reason });
     else if (origin.origin !== def.origin) ctx.addIssue({ code: 'custom', path: ['origin'], message: 'The address must be written as https://host' });
     const ids = new Set<string>();
+    const tools = new Set<string>();
     def.operations.forEach((operation, index) => {
       const path = ['operations', index];
-      if (ids.has(operation.id)) ctx.addIssue({ code: 'custom', path: [...path, 'id'], message: 'Two operations share an id' });
+      // Two ids that become the same tool name ("getItem" and "getitem") would be one tool: they count as the same id
+      const named = toolNameStart(def.short, operation.id);
+      if (ids.has(operation.id) || tools.has(named)) ctx.addIssue({ code: 'custom', path: [...path, 'id'], message: 'Two operations share an id' });
       ids.add(operation.id);
+      tools.add(named);
       const problem = pathProblem(operation.path, operation.params);
       if (problem) ctx.addIssue({ code: 'custom', path: [...path, 'path'], message: problem });
       const names = new Set<string>();

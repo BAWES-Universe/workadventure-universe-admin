@@ -102,6 +102,15 @@ describe('the payment contract of a definition', () => {
     expect(definitionSchema.safeParse(draft).success).toBe(true);
   });
 
+  it('refuses two operations that would become the same tool name', () => {
+    const draft = tap();
+    expect(definitionSchema.safeParse(draft).success).toBe(true);
+    draft.operations.push({ ...draft.operations[0], id: draft.operations[0].id.toUpperCase() } as never);
+    const refused = definitionSchema.safeParse(draft);
+    expect(refused.success).toBe(false);
+    expect(JSON.stringify(refused.error?.issues)).toContain('Two operations share an id');
+  });
+
   it('refuses a path the operation does not return', () => {
     const draft = tap();
     draft.payment!.lookup.statusPath = 'something.else';
