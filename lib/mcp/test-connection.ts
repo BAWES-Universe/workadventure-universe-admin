@@ -4,8 +4,41 @@ import { isAllowedServerIp, isAllowedServerUrl } from '@/lib/mcp/outbound-guard'
 
 interface McpToolDescriptor {
   name?: string;
-  function?: { name?: string };
+  function?: { name?: string; description?: string };
   [key: string]: unknown;
+}
+
+/**
+ * What one tool takes and gives back, by field name only (game #2006): the names of its inputs and which are required, and the
+ * names of the fields of its structured answer when it declares them (`outputSchema`), else null. Never a default, an example or
+ * a description of a field: the owner picks what other people may ask for from these names.
+ */
+export interface McpToolShape {
+  name: string;
+  description: string | null;
+  inputs: { name: string; required: boolean }[];
+  outputs: string[] | null;
+}
+
+const MAX_SHAPE_FIELDS = 100;
+
+const propertyNames = (schema: unknown): string[] | null => {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return null;
+  const properties = (schema as { properties?: unknown }).properties;
+  if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return null;
+  return Object.keys(properties).slice(0, MAX_SHAPE_FIELDS);
+};
+
+export function shapeOfTool(tool: McpToolDescriptor, name: string): McpToolShape {
+  const input = (tool.inputSchema ?? (tool.function as { parameters?: unknown } | undefined)?.parameters) as { required?: unknown } | undefined;
+  const required = Array.isArray(input?.required) ? input.required.filter((entry): entry is string => typeof entry === 'string') : [];
+  const description = typeof tool.description === 'string' ? tool.description : typeof tool.function?.description === 'string' ? tool.function.description : null;
+  return {
+    name,
+    description: description ? description.slice(0, 300) : null,
+    inputs: (propertyNames(input) ?? []).map((field) => ({ name: field, required: required.includes(field) })),
+    outputs: propertyNames(tool.outputSchema),
+  };
 }
 
 /** The most of an event stream read while waiting for the answer: a server that never stops sending is cut off here. */
@@ -174,6 +207,8 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
   success: boolean;
   toolCount: number;
   toolNames: string[];
+  /** What each tool takes and gives back, by field name (see McpToolShape). */
+  tools?: McpToolShape[];
   /** True when the app has more pages of tools than are read: the list is the first pages, not everything. */
   incomplete?: boolean;
   error?: string;
@@ -424,6 +459,7 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
 
     // Step 2: Call tools/list, every page of it
     const toolNames: string[] = [];
+    const shapes: McpToolShape[] = [];
     const seenNames = new Set<string>();
     let cursor: string | undefined;
     const seenCursors = new Set<string>();
@@ -475,6 +511,7 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
         if (!seenNames.has(named)) {
           seenNames.add(named);
           toolNames.push(named);
+          shapes.push(shapeOfTool(tool, named));
         }
       }
       const next = (result as { nextCursor?: unknown }).nextCursor;
@@ -492,6 +529,7 @@ export async function testMcpConnection(server: { serverUrl: string; authType: s
       success: true,
       toolCount: toolNames.length,
       toolNames,
+      tools: shapes,
       ...(incomplete ? { incomplete: true } : {}),
     };
   } catch (error: unknown) {

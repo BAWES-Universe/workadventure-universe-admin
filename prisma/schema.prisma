@@ -63,6 +63,7 @@ model User {
   appConnections    AppConnection[] @relation("AppConnectionOwner")
   appConnectionsMade AppConnection[] @relation("AppConnectionConnectedBy")
   appLendsMade      AppLend[]       @relation("AppLendLentBy")
+  appSharesMade     AppShare[]      @relation("AppShareBy")
   appManagerOf      AppConnectionManager[] @relation("AppManagerUser")
   appManagersAdded  AppConnectionManager[] @relation("AppManagerAddedBy")
   botConversations BotsConversation[]
@@ -1239,6 +1240,7 @@ model BotMcpServer {
   connection  AppConnection? @relation(fields: [connectionId], references: [id], onDelete: Cascade)
   connectedBy User?         @relation("BotMcpServerConnectedBy", fields: [connectedById], references: [id], onDelete: SetNull)
   tools       BotMcpTool[]
+  share       AppShare?
 
   @@unique([botId, connectionId])
   @@index([botId])
@@ -1355,6 +1357,69 @@ model AppUse {
   @@unique([connectionId, botId, callId])
   @@index([connectionId, universeId, usedAt])
   @@map("app_uses")
+}
+
+// A person letting other people ask one of their Bricks for a job from an app of theirs (#2006, mock Part 17). It sits on the
+// grant (a Brick's use of the app), never on the app: the same app used by another Brick stays "only you". Deleting the grant, the
+// app, or this row stops everyone at once. What can be asked for is the jobs below, nothing else of the app.
+model AppShare {
+  id                 String   @id @default(uuid())
+  serverId           String   @unique @map("server_id")
+  sharedById         String?  @map("shared_by_id")
+  // Uses a day, for everyone who asks together and for each person. They start at what a super admin set (Limits) and the owner
+  // changes them for their own app.
+  usesPerDayEveryone Int      @map("uses_per_day_everyone")
+  usesPerDayPerson   Int      @map("uses_per_day_person")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  server   BotMcpServer   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  sharedBy User?          @relation("AppShareBy", fields: [sharedById], references: [id], onDelete: SetNull)
+  jobs     AppShareJob[]
+  uses     AppShareUse[]
+
+  @@map("app_shares")
+}
+
+// One job the owner picked: a tool of the app, the input names people may fill in, and the names of what may come back. The tool's
+// fingerprint is kept so a tool that changed afterwards stops being shared until its owner picks it again.
+model AppShareJob {
+  id          String   @id @default(uuid())
+  shareId     String   @map("share_id")
+  toolName    String   @map("tool_name") @db.VarChar(255)
+  fingerprint String   @db.VarChar(128)
+  inputs      Json
+  // Names of the fields that may come back, or null for the whole answer (a tool that does not say what it gives back)
+  returns     Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  share AppShare @relation(fields: [shareId], references: [id], onDelete: Cascade)
+
+  @@unique([shareId, toolName])
+  @@map("app_share_jobs")
+}
+
+// One try by someone else at a shared job, written once under the bot server's call id (a retry is the same try and never runs the
+// job again). `status`: running (asked, not settled), done, unknown (it timed out or the answer was lost: still counted, never
+// run again, given back only once confirmed failed), refunded (confirmed failed: not counted as a use, still a try).
+model AppShareUse {
+  id        String    @id @default(uuid())
+  shareId   String    @map("share_id")
+  callId    String    @map("call_id") @db.VarChar(200)
+  // "person:<id>" or "guest:<id>", as the meter keeps them
+  askerKey  String    @map("asker_key") @db.VarChar(320)
+  toolName  String    @map("tool_name") @db.VarChar(255)
+  status    String    @default("running") @db.VarChar(10)
+  retries   Int       @default(0)
+  createdAt DateTime  @default(now()) @map("created_at")
+  settledAt DateTime? @map("settled_at")
+
+  share AppShare @relation(fields: [shareId], references: [id], onDelete: Cascade)
+
+  @@unique([shareId, callId])
+  @@index([shareId, createdAt])
+  @@index([shareId, askerKey, createdAt])
+  @@map("app_share_uses")
 }
 
 // The apps a person can connect with one tap (#2001): a list a super admin keeps, never written in code. Each entry is an app that

@@ -94,6 +94,18 @@ export interface BrickLimits {
   goalsShare: number;
   /** Apps one bot or Brick can use at once, by hand or lent. */
   appsPerBot: number;
+  /** What a Brick's owner starts with when they let other people ask for a job from an app (game #2006): uses a day for everyone together. The owner can change it for their own app. */
+  sharedUsesEveryone: number;
+  /** The same, uses a day for each person. */
+  sharedUsesPerPerson: number;
+  /** The quiet ceiling on tries at one shared app in an hour, a failed try included (a failed try gives its use back, never its place here). */
+  sharedTriesPerHour: number;
+  /** Times one ask may come again with the same id before it is turned away; a repeat never runs the job a second time. */
+  sharedRetries: number;
+  /** Shared jobs of one app running or not yet settled at the same moment. */
+  sharedJobsAtOnce: number;
+  /** Minutes after which a shared job that was never settled stops counting as running (its use still counts, it is not given back). */
+  sharedJobMinutes: number;
 }
 
 /** What a super admin sets, all in one place. */
@@ -111,7 +123,7 @@ export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, 
 export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 };
 export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0, guestDays: 1 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
-export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5 };
+export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
 export const FAIR_USAGE_WINDOW_HOURS = 5;
 
@@ -185,6 +197,12 @@ const BRICK_RANGES: Record<keyof BrickLimits, Range> = {
   failuresBeforeTelling: { min: 1, max: 100, whole: true },
   goalsShare: { min: 1, max: 100, whole: true },
   appsPerBot: { min: 1, max: 100, whole: true },
+  sharedUsesEveryone: { min: 1, max: 1_000_000, whole: true },
+  sharedUsesPerPerson: { min: 1, max: 1_000_000, whole: true },
+  sharedTriesPerHour: { min: 1, max: 1_000_000, whole: true },
+  sharedRetries: { min: 0, max: 20, whole: true },
+  sharedJobsAtOnce: { min: 1, max: 1_000, whole: true },
+  sharedJobMinutes: { min: 1, max: 1_440, whole: true },
 };
 
 /** The values each group can hold, for the pages to say ("Between 1 and 100 files") before anything is sent. */
