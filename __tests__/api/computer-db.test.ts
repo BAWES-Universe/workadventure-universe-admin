@@ -27,6 +27,7 @@ import { saveMeterSettings } from '@/lib/meter';
 import { currentEnvelope } from '@/lib/meter-allowance';
 import { recordGrant } from '@/lib/meter-grants';
 import { mintJobToken, verifyJobToken } from '@/lib/computer-token';
+import { checkScreen, openScreen, screenTicket } from '@/lib/computer-screen';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import {
   computerView,
@@ -1502,6 +1503,80 @@ run('a Brick’s computer, in a real database', () => {
       const again = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(3));
       expect(again.ok && again.job.status).toBe('running');
       expect(await provider.awake(`fake-${sara.brickId}`)).toBe(true);
+    });
+  });
+  describe('the screen, through the bot server', () => {
+    const secret = process.env.BOT_SERVICE_TOKEN;
+    beforeAll(() => {
+      process.env.BOT_SERVICE_TOKEN = 'a-test-service-token';
+    });
+    afterAll(() => {
+      if (secret === undefined) delete process.env.BOT_SERVICE_TOKEN;
+      else process.env.BOT_SERVICE_TOKEN = secret;
+    });
+
+    it('gives the owner a ticket for a computer that works, opens it once with a link made for that socket, and wakes nothing', async () => {
+      const sara = await person('sara');
+      const omar = await person('omar');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      expect(await screenTicket(sara.brickId, omar.id, 'watch', NOW)).toEqual({ ok: false, reason: 'not_found' });
+      const ticket = await screenTicket(sara.brickId, sara.id, 'watch', NOW);
+      if (!ticket.ok) throw new Error('no ticket');
+      const woke = provider.calls.filter((call) => call.name === 'wake' || call.name === 'create').length;
+      const opened = await openScreen(ticket.ticket, minutes(0.5));
+      expect(opened).toMatchObject({ ok: true, mode: 'watch' });
+      expect(opened.ok && opened.upstream).toContain('computer.pretend.invalid');
+      expect(provider.calls.filter((call) => call.name === 'wake' || call.name === 'create')).toHaveLength(woke);
+      // After the job ends the machine rests: no ticket, no open, and an open socket is told to close
+      expect(await checkScreen(ticket.ticket, minutes(0.6))).toEqual({ ok: true, mode: 'watch' });
+      await finishJob(job.job.id, 'done', minutes(1));
+      expect(await screenTicket(sara.brickId, sara.id, 'watch', minutes(2))).toEqual({ ok: false, reason: 'resting' });
+      expect(await openScreen(ticket.ticket, minutes(0.9))).toEqual({ ok: false, reason: 'resting' });
+      expect(await checkScreen(ticket.ticket, minutes(1.2))).toEqual({ ok: false, reason: 'resting' });
+      expect(provider.calls.filter((call) => call.name === 'wake' || call.name === 'create')).toHaveLength(woke);
+    });
+
+    it('a ticket opens a socket for 60 seconds only, and a forged, changed or someone else’s ticket opens nothing', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      const ticket = await screenTicket(sara.brickId, sara.id, 'watch', NOW);
+      if (!ticket.ok) throw new Error('no ticket');
+      expect(await openScreen(ticket.ticket, new Date(NOW.getTime() + 61_000))).toEqual({ ok: false, reason: 'expired' });
+      // An open socket is not cut by its ticket's 60 seconds
+      expect(await checkScreen(ticket.ticket, minutes(5))).toEqual({ ok: true, mode: 'watch' });
+      const [prefix, body, signature] = ticket.ticket.split('.');
+      const other = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(body, 'base64url').toString()), m: 'input', j: 'x', g: 0 })).toString('base64url');
+      for (const bad of [`${prefix}.${other}.${signature}`, `${prefix}.${body}.${signature.slice(0, -2)}AA`, 'nonsense', '', null, 42, `x.${body}.${signature}`]) {
+        expect(await openScreen(bad, NOW)).toEqual({ ok: false, reason: 'invalid' });
+        expect(await checkScreen(bad, NOW)).toEqual({ ok: false, reason: 'invalid' });
+      }
+      // A socket is never kept longer than two hours
+      expect(await checkScreen(ticket.ticket, new Date(NOW.getTime() + 2 * 60 * 60 * 1000 + 61_000))).toEqual({ ok: false, reason: 'too_long' });
+    });
+
+    it('input is only for the person who has taken over, and only for that take over: a hand back or a new take over kills the old ticket', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      expect(await screenTicket(sara.brickId, sara.id, 'input', NOW)).toEqual({ ok: false, reason: 'not_taken_over' });
+      await requestHandover(job.job.id, 'signin', minutes(1));
+      await takeOver(sara.brickId, sara.id, minutes(1));
+      const input = await screenTicket(sara.brickId, sara.id, 'input', minutes(1));
+      if (!input.ok) throw new Error('no input ticket');
+      expect(await openScreen(input.ticket, minutes(1.2))).toMatchObject({ ok: true, mode: 'input' });
+      await handBack(sara.brickId, sara.id);
+      expect(await checkScreen(input.ticket, minutes(2))).toEqual({ ok: false, reason: 'not_taken_over' });
+      expect(await openScreen(input.ticket, minutes(1.3))).toEqual({ ok: false, reason: 'not_taken_over' });
+      // The same job taken over again is a new take over: the old ticket stays dead
+      await takeOver(sara.brickId, sara.id, minutes(3));
+      expect(await checkScreen(input.ticket, minutes(3))).toEqual({ ok: false, reason: 'not_taken_over' });
+      const again = await screenTicket(sara.brickId, sara.id, 'input', minutes(3));
+      expect(again.ok).toBe(true);
     });
   });
 });

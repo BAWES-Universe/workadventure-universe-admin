@@ -150,7 +150,7 @@ function jobView(row: JobRow): JobView {
 
 const JOB_INCLUDE = { effects: { select: { effectKey: true, kind: true, state: true, evidence: true } } } as const;
 
-async function brickOf(botId: string, ownerId: string) {
+export async function brickOf(botId: string, ownerId: string) {
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { id: true, roomId: true, ownerId: true, deletedAt: true } });
   return bot && ownsBrick(bot, ownerId) ? bot : null;
 }
