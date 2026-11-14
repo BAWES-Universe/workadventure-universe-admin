@@ -32,6 +32,7 @@ jest.mock('@/lib/app-direct/guard', () => {
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { disconnect } from '@/lib/app-connections';
+import { definitionSchema, hashDefinition } from '@/lib/app-direct/definition';
 import { openKeyForm, submitKey } from '@/lib/app-direct/connect';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { orderForArtifact, startCheckout, verifyOrder } from '@/lib/app-direct/pay';
@@ -618,6 +619,19 @@ run('payments for pages, in a real database', () => {
       expect(await settle(orderId)).toMatchObject({ status: 'cant_confirm' });
       expect(await notices()).toHaveLength(0);
       expect((await start(artifactId)).status).toBe(409);
+    });
+
+    it('still counts a payment for an order begun before the app definition changed (a new key after a deploy)', async () => {
+      const { artifactId, connectionId } = await pending();
+      tap({ record: (order) => paidRecord(order) });
+      const { orderId } = await checkout(artifactId);
+      // A new catalog entry after a deploy: a valid definition with a new hash
+      const before = await prisma.appConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      const changed = { ...(before.definition as Record<string, unknown>), keyHint: 'Your test key starts with sk_test' } as never;
+      await prisma.appConnection.update({ where: { id: connectionId }, data: { definition: changed, definitionHash: hashDefinition(definitionSchema.parse(changed)) } });
+      expect((await prisma.appConnection.findUniqueOrThrow({ where: { id: connectionId } })).definitionHash).not.toBe(before.definitionHash);
+      expect(await settle(orderId)).toMatchObject({ status: 'paid' });
+      expect(await notices()).toHaveLength(1);
     });
 
     it('still checks an order that was open when the owner stopped payments', async () => {

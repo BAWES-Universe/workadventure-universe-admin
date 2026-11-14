@@ -318,8 +318,10 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
 
   const connection = order.connection;
   const definition = connection && connection.kind === 'direct' ? definitionOf(connection) : null;
-  // The app was disconnected or changed: what it said could not be checked any more, and a payment is never assumed
-  if (!connection || !definition?.payment || order.definitionHash !== connection.definitionHash || !order.providerRef) {
+  // The app was disconnected: what it said could not be checked any more, and a payment is never assumed. A definition that changed since
+  // the checkout began (a new key, a new catalog) is not a reason to give up on a payment that may be real: the look below uses the
+  // definition now in force, and "paid" still needs the exact amount, currency, reference and mode.
+  if (!connection || !definition?.payment || !order.providerRef) {
     if (wasClosed) return view(order.status);
     await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'pending' }, data: { status: 'cant_confirm' } });
     return view('cant_confirm');
