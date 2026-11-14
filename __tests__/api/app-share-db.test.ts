@@ -234,6 +234,17 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       expect(await prisma.appShare.count({ where: { server: { botId: saraBrick } } })).toBe(0);
     });
 
+    it('offers only tools the app listed just now, so one it did not list is never shared with an unnamed answer', async () => {
+      const { app } = await music();
+      mockTools.current = [SONG];
+      as(sara);
+      const page = await json(await shareRoute('GET', app.id, saraBrick));
+      expect(page.jobs.map((job: { tool: string }) => job.tool)).toEqual(['make_song']);
+      const refused = await shareRoute('POST', app.id, saraBrick, { jobs: [{ tool: 'find_songs', inputs: ['query'], returns: null }] });
+      expect(refused.status).toBe(400);
+      expect((await json(refused)).reason).toBe('unknown_job');
+    });
+
     it('cannot pick while the app cannot be reached, and says so', async () => {
       const { app } = await music();
       mockTools.current = null;

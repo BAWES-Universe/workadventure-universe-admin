@@ -106,6 +106,8 @@ async function liveShapes(connection: AppConnection): Promise<Map<string, McpToo
 function candidatesOf(grant: Grant, shapes: Map<string, McpToolShape> | null): JobCandidate[] {
   return grant.tools
     .filter((tool) => tool.confirmedAt && tool.heading && (SHAREABLE_HEADINGS as readonly string[]).includes(tool.heading))
+    // A tool the app did not list just now (gone, or past the pages that are read) cannot be held to inputs or to what comes back, so it is not offered
+    .filter((tool) => !shapes || shapes.has(tool.name))
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((tool) => {
       const shape = shapes?.get(tool.name);

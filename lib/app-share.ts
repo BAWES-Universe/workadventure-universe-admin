@@ -58,11 +58,6 @@ export async function askerKeyOf(requesterKey: string | undefined): Promise<stri
   return personKeyOf({ guestId: requesterKey });
 }
 
-/** Whether a person's own app, used by their own Brick, may be asked for by someone else: it has a share. */
-export async function shareOf(serverId: string) {
-  return prisma.appShare.findUnique({ where: { serverId }, include: { jobs: true } });
-}
-
 /**
  * The check for someone else asking a Brick for a shared job, or null when this grant has no share (the caller refuses it as it
  * always has). `grant` is the Brick's use of the app. Never says what is in the app or whose it is.
@@ -73,40 +68,40 @@ export async function checkSharedUse(
   botName: string,
   ask: SharedAsk,
 ): Promise<SharedVerdict | null> {
-  const share = await shareOf(grant.id);
-  if (!share) return null;
+  const found = await prisma.appShare.findUnique({ where: { serverId: grant.id }, select: { id: true } });
+  if (!found) return null;
   // A use that cannot be counted, or held to what was picked, never runs
   if (!ask.callId || !ask.tool || !ask.argumentNames) return { allowed: false, reason: 'incomplete' };
-  const job = share.jobs.find((entry) => entry.toolName === ask.tool);
-  if (!job) return { allowed: false, reason: 'not_shared' };
-  const tool = await prisma.botMcpTool.findUnique({ where: { serverId_name: { serverId: grant.id, name: ask.tool } } });
-  // A tool that changed since it was picked, was moved to a heading that is not shareable, or is not confirmed any more, is not shared
-  if (!tool || !tool.confirmedAt || tool.fingerprint !== job.fingerprint || !(SHAREABLE_HEADINGS as readonly string[]).includes(tool.heading ?? '')) {
-    return { allowed: false, reason: 'not_shared' };
-  }
-  const inputs = stringList(job.inputs) ?? [];
-  if (ask.argumentNames.some((name) => !inputs.includes(name))) return { allowed: false, reason: 'not_shared' };
-
   const owner = await prisma.appConnection.findUnique({ where: { id: grant.connectionId }, select: { ownerId: true } });
   if (!owner?.ownerId) return { allowed: false, reason: 'gone' };
   const askerKey = await askerKeyOf(ask.requesterKey);
   const limits = await getBrickLimits();
-  const outcome = await reserve({ share, grant, ownerId: owner.ownerId, askerKey, callId: ask.callId, tool: ask.tool, limits });
-  if (outcome.kind === 'gone') return { allowed: false, reason: 'gone' };
-  if (outcome.kind === 'again') return { allowed: false, reason: outcome.busy ? 'busy' : 'already_asked', earlier: outcome.status };
-  if (outcome.kind === 'busy') return { allowed: false, reason: 'busy' };
-  if (outcome.kind === 'limit') {
-    if (outcome.which === 'everyone') await tellOwnerOfLimit({ shareId: share.id, ownerId: owner.ownerId, connectionId: grant.connectionId, botId: grant.botId, serverId: grant.id, appName: connectionName, botName, limit: share.usesPerDayEveryone });
-    return { allowed: false, reason: 'limit_reached', resetsAt: nextDay(new Date()) };
+  // What was picked and the limits are read again inside, under the share's lock: an owner who changes them while an ask is on its
+  // way is never answered with the old ones
+  const outcome = await reserve({ shareId: found.id, grant, ownerId: owner.ownerId, askerKey, callId: ask.callId, tool: ask.tool, argumentNames: ask.argumentNames, limits });
+  switch (outcome.kind) {
+    case 'gone':
+      return { allowed: false, reason: 'gone' };
+    case 'not_shared':
+      return { allowed: false, reason: 'not_shared' };
+    case 'again':
+      return { allowed: false, reason: outcome.busy ? 'busy' : 'already_asked', earlier: outcome.status };
+    case 'busy':
+      return { allowed: false, reason: 'busy' };
+    case 'limit':
+      if (outcome.which === 'everyone') await tellOwnerOfLimit({ shareId: found.id, ownerId: owner.ownerId, connectionId: grant.connectionId, botId: grant.botId, serverId: grant.id, appName: connectionName, botName, limit: outcome.limit });
+      return { allowed: false, reason: 'limit_reached', resetsAt: nextDay(new Date()) };
+    default:
+      return { allowed: true, ownerId: owner.ownerId, returns: outcome.returns };
   }
-  return { allowed: true, ownerId: owner.ownerId, returns: stringList(job.returns) };
 }
 
 type ReserveOutcome =
-  | { kind: 'recorded' }
+  | { kind: 'recorded'; returns: string[] | null }
+  | { kind: 'not_shared' }
   | { kind: 'again'; status: string; busy: boolean }
   | { kind: 'busy' }
-  | { kind: 'limit'; which: 'everyone' | 'person' }
+  | { kind: 'limit'; which: 'everyone' | 'person'; limit: number }
   | { kind: 'gone' };
 
 type Limits = Awaited<ReturnType<typeof getBrickLimits>>;
@@ -117,15 +112,25 @@ type Limits = Awaited<ReturnType<typeof getBrickLimits>>;
  * the try is written together with its meter event, so a failed meter write leaves no try behind and nothing runs without being
  * written to the books. The share's own rows are held shared, so a stop that comes in waits for this one or finds the share gone.
  */
-async function reserve(input: { share: { id: string; usesPerDayEveryone: number; usesPerDayPerson: number }; grant: { id: string; botId: string; connectionId: string }; ownerId: string; askerKey: string; callId: string; tool: string; limits: Limits }): Promise<ReserveOutcome> {
-  const { share, grant, askerKey, callId, limits } = input;
+async function reserve(input: { shareId: string; grant: { id: string; botId: string; connectionId: string }; ownerId: string; askerKey: string; callId: string; tool: string; argumentNames: string[]; limits: Limits }): Promise<ReserveOutcome> {
+  const { shareId, grant, askerKey, callId, limits } = input;
   return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-share:${share.id}`}))`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`app-share:${shareId}`}))`;
     // The same first lock as taking an app back or removing a grant: the app's own row, then the grant's, then the share's
     const app = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_connections" WHERE "id" = ${grant.connectionId} FOR SHARE`;
     if (app.length === 0) return { kind: 'gone' } as const;
-    const held = await tx.$queryRaw<{ id: string }[]>`SELECT s."id" FROM "app_shares" s JOIN "bot_mcp_servers" g ON g."id" = s."server_id" WHERE s."id" = ${share.id} AND g."id" = ${grant.id} AND g."bot_id" = ${grant.botId} FOR SHARE OF s, g`;
+    const held = await tx.$queryRaw<{ id: string }[]>`SELECT s."id" FROM "app_shares" s JOIN "bot_mcp_servers" g ON g."id" = s."server_id" WHERE s."id" = ${shareId} AND g."id" = ${grant.id} AND g."bot_id" = ${grant.botId} FOR SHARE OF s, g`;
     if (held.length === 0) return { kind: 'gone' } as const;
+
+    // The share as it is now (a change holds it for update, so it is never half done here): the picked job, its inputs and the limits
+    const share = await tx.appShare.findUniqueOrThrow({ where: { id: shareId }, include: { jobs: true } });
+    const job = share.jobs.find((entry) => entry.toolName === input.tool);
+    if (!job) return { kind: 'not_shared' } as const;
+    const tool = await tx.botMcpTool.findUnique({ where: { serverId_name: { serverId: grant.id, name: input.tool } } });
+    // A tool that changed since it was picked, was moved to a heading that is not shareable, or is not confirmed any more, is not shared
+    if (!tool || !tool.confirmedAt || tool.fingerprint !== job.fingerprint || !(SHAREABLE_HEADINGS as readonly string[]).includes(tool.heading ?? '')) return { kind: 'not_shared' } as const;
+    const inputs = stringList(job.inputs) ?? [];
+    if (input.argumentNames.some((name) => !inputs.includes(name))) return { kind: 'not_shared' } as const;
 
     const now = new Date();
     const seen = await tx.appShareUse.findUnique({ where: { shareId_callId: { shareId: share.id, callId } } });
@@ -147,8 +152,8 @@ async function reserve(input: { share: { id: string; usesPerDayEveryone: number;
     // A use given back (refunded) is not counted; a running, done or unknown try is
     const counted = { shareId: share.id, createdAt: { gte: startOfDay(now) }, status: { not: 'refunded' } };
     const [everyone, person] = await Promise.all([tx.appShareUse.count({ where: counted }), tx.appShareUse.count({ where: { ...counted, askerKey } })]);
-    if (everyone >= share.usesPerDayEveryone) return { kind: 'limit', which: 'everyone' } as const;
-    if (person >= share.usesPerDayPerson) return { kind: 'limit', which: 'person' } as const;
+    if (everyone >= share.usesPerDayEveryone) return { kind: 'limit', which: 'everyone', limit: share.usesPerDayEveryone } as const;
+    if (person >= share.usesPerDayPerson) return { kind: 'limit', which: 'person', limit: share.usesPerDayPerson } as const;
 
     await tx.appShareUse.create({ data: { shareId: share.id, callId, askerKey, toolName: input.tool, status: 'running', createdAt: now } });
     // The books, in the same step. The tool is the owner's, so what it costs is the owner's; the cost of an app added by a link is not
@@ -177,7 +182,7 @@ async function reserve(input: { share: { id: string; usesPerDayEveryone: number;
       },
       tx,
     );
-    return { kind: 'recorded' } as const;
+    return { kind: 'recorded', returns: stringList(job.returns) } as const;
   });
 }
 
