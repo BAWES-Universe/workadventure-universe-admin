@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { isOpenByLink, orderForArtifact, pageTakesPayments, startCheckout } from '@/lib/app-direct/pay';
 import { meOriginAllowed } from '@/lib/me-route';
@@ -7,10 +6,14 @@ export const runtime = 'nodejs';
 
 const respond = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 
-/** Who is asking, as far as counting tries goes: an address and a browser, hashed again before they are kept. */
+/**
+ * Who is asking, as far as counting tries goes: the address only (hashed again before it is kept). A browser name is something a visitor
+ * can change on every try, so it is never part of the count. This count is a soft limit; the hard bound on a page and on an owner is the
+ * per-page and per-owner limits in startCheckout, which no header can get around.
+ */
 function visitorOf(request: NextRequest): string {
   const address = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || request.headers.get('x-real-ip') || 'unknown';
-  return `web:${address}:${createHash('sha256').update(request.headers.get('user-agent') ?? '').digest('hex').slice(0, 16)}`;
+  return `web:${address}`;
 }
 
 /**
