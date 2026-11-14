@@ -161,7 +161,8 @@ export async function POST(
       // Don't fail the request — the test already completed
     }
 
-    return NextResponse.json(result, { headers: corsHeaders(request) });
+    // The field shapes are for the owner's "what others may ask for" page only (lib/app-share-owner.ts), not for this answer
+    return NextResponse.json({ ...result, tools: undefined }, { headers: corsHeaders(request) });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(request) });

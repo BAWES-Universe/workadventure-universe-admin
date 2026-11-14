@@ -17,6 +17,7 @@ import { isReconnectRequired, parseOAuthConfig, refreshBlockedReason } from '@/l
 import { syncToolSignInNotices } from '@/lib/tool-signin';
 import { revokeAtApp } from '@/lib/mcp/revoke';
 import { holdRefreshLease } from '@/lib/mcp/oauth-refresh';
+import { checkSharedUse, isAppShareable } from '@/lib/app-share';
 
 /**
  * Apps a person connects once (game #2001, "Apps").
@@ -66,7 +67,7 @@ export function effectiveServer<T extends ServerRow>(row: T): T {
 }
 
 /** Why an app cannot be used for a request. The bot server only ever learns `allowed`, never what the app holds. */
-export type AppUseRefusal = 'gone' | 'off' | 'not_owner' | 'not_lent' | 'limit_reached' | 'incomplete';
+export type AppUseRefusal = 'gone' | 'off' | 'not_owner' | 'not_lent' | 'limit_reached' | 'incomplete' | 'not_shared' | 'busy' | 'already_asked';
 
 /** The four headings a bot's settings are kept under, and what a lend may narrow bots to. */
 export const HEADINGS = ['lookUp', 'make', 'change', 'deleteSend'] as const;
@@ -82,6 +83,12 @@ export interface AppUseVerdict {
   readyMade?: boolean;
   /** Who pays for this use: a person's own app lent to a universe is the lender's; a universe's own app is counted for that universe. */
   paidBy?: { kind: 'person'; personId: string } | { kind: 'universe'; universeId: string };
+  /** Set when this is someone else asking a Brick for a job its owner shared (game #2006): the names of the fields that may come back, null for the whole answer. */
+  shared?: { returns: string[] | null };
+  /** For `limit_reached` on a shared job: when today's uses are back. */
+  resetsAt?: Date;
+  /** For `already_asked` on a shared job: what the first try came to (running, done, unknown or refunded). The job is never run again. */
+  earlier?: string;
 }
 
 export const useCheckSchema = z
@@ -94,6 +101,9 @@ export const useCheckSchema = z
     callId: z.string().trim().min(1).max(200).optional(),
     /** Required for a lent app (a use without it is refused as `incomplete`): which heading the tool falls under, so what the lender allowed is held at every use. */
     heading: z.enum(HEADINGS).optional(),
+    /** Someone else asking a Brick for a job its owner shared (game #2006): the tool by its name in the app, and the names (never the values) of the inputs the ask carries. Both are required, else the ask is refused as `incomplete`. */
+    tool: z.string().trim().min(1).max(255).optional(),
+    argumentNames: z.array(z.string().max(200)).max(100).optional(),
   })
   .strict();
 
@@ -158,10 +168,16 @@ export async function checkAppUse(botId: string, serverId: string, input: z.infe
   if (!row.enabled) return refuse('off');
   const allowed: AppUseVerdict = { allowed: true, viaConnection: true, ...(connection.source === 'ready_made' ? { readyMade: true } : {}) };
   if (input.forOwner === true) return allowed;
-  if (!input.requesterKey) return refuse('not_owner');
-  const asker = await findUserByIdentifier(input.requesterKey);
-  if (!asker || asker.isGuest || asker.id !== connection.ownerId) return refuse('not_owner');
-  return allowed;
+  const asker = input.requesterKey ? await findUserByIdentifier(input.requesterKey) : null;
+  if (asker && !asker.isGuest && asker.id === connection.ownerId) return allowed;
+  // Someone else (or nobody we can name): only a job the owner chose to share, and only inside what they picked (game #2006). A
+  // grant with no share, and an app signed in as the person, stay "not the owner's use", exactly as before.
+  if (!isAppShareable(connection)) return refuse('not_owner');
+  const botName = await prisma.bot.findUnique({ where: { id: botId }, select: { name: true } });
+  const shared = await checkSharedUse({ id: row.id, botId, connectionId: connection.id }, connection.name, botName?.name ?? 'Your Brick', input);
+  if (!shared) return refuse('not_owner');
+  if (!shared.allowed) return { allowed: false, reason: shared.reason, viaConnection: true, ...(shared.resetsAt ? { resetsAt: shared.resetsAt } : {}), ...(shared.earlier ? { earlier: shared.earlier } : {}) };
+  return { allowed: true, viaConnection: true, shared: { returns: shared.returns }, paidBy: { kind: 'person', personId: shared.ownerId } };
 }
 
 /** The lender is told once a day that today's uses ran out, with what they need to change the limit. Never throws. */
@@ -243,8 +259,10 @@ export interface ConnectionView {
   connectedAt: Date;
   /** Whether it can be lent to a universe: an app added with a link and a key, a token or nothing. One signed in as the person never is. */
   lendable: boolean;
-  /** The Bricks of this person that use it, each with what it may do (the four headings). */
-  bricks: { botId: string; botName: string; serverId: string; enabled: boolean; headings: Headings }[];
+  /** Whether other people can be let ask a Brick for one of its jobs (game #2006): the same apps. One signed in as the person says "Only for you". */
+  shareable: boolean;
+  /** The Bricks of this person that use it, each with what it may do (the four headings) and whether other people can ask it for a job of this app. */
+  bricks: { botId: string; botName: string; serverId: string; enabled: boolean; headings: Headings; shared: boolean }[];
 }
 
 export interface Headings {
@@ -269,7 +287,7 @@ export function connectedState(connection: AppConnection): { connected: boolean;
   }
 }
 
-type ConnectionWithGrants = AppConnection & { grants: (BotMcpServer & { bot: { id: string; name: string; deletedAt: Date | null; roomId: string | null } })[] };
+type ConnectionWithGrants = AppConnection & { grants: (BotMcpServer & { bot: { id: string; name: string; deletedAt: Date | null; roomId: string | null }; share: { id: string } | null })[] };
 
 function toView(connection: ConnectionWithGrants): ConnectionView {
   const state = connectedState(connection);
@@ -284,6 +302,7 @@ function toView(connection: ConnectionWithGrants): ConnectionView {
     reconnectRequired: state.reconnectRequired || !!connection.signInLostAt,
     connectedAt: connection.createdAt,
     lendable: isAppLendable(connection),
+    shareable: isAppShareable(connection),
     bricks: connection.grants
       // A Brick that waits deleted for Undo uses nothing and is not listed; a room bot that uses it through a lend is listed under "Lent to"
       .filter((grant) => grant.bot.deletedAt === null && grant.bot.roomId === null)
@@ -293,6 +312,7 @@ function toView(connection: ConnectionWithGrants): ConnectionView {
         serverId: grant.id,
         enabled: grant.enabled,
         headings: { lookUp: grant.lookUpSetting, make: grant.makeSetting, change: grant.changeSetting, deleteSend: grant.deleteSendSetting },
+        shared: !!grant.share,
       })),
   };
 }
@@ -304,7 +324,7 @@ export async function confirmIfPending<T extends AppConnection>(row: T): Promise
   return confirmedAt ? { ...row, providerConfirmedAt: confirmedAt } : row;
 }
 
-const GRANTS = { grants: { include: { bot: { select: { id: true, name: true, deletedAt: true, roomId: true } } }, orderBy: { createdAt: 'asc' as const } } };
+const GRANTS = { grants: { include: { bot: { select: { id: true, name: true, deletedAt: true, roomId: true } }, share: { select: { id: true } } }, orderBy: { createdAt: 'asc' as const } } };
 
 /** Every app the person connected, oldest first, with the Bricks of theirs that use each. Only theirs. */
 export async function listConnections(ownerId: string): Promise<ConnectionView[]> {
