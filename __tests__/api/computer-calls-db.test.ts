@@ -287,5 +287,16 @@ run('what a computer may ask of Orbit, in a real database', () => {
       const event = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:lost` } });
       expect(event).toMatchObject({ basis: 'unknown', costMicros: null });
     });
+
+    it('the sweep gives back room held for a call whose job is gone, instead of finding it again on every sweep', async () => {
+      const { jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await call(token, 'orphan', 7_000);
+      await prisma.computerJob.delete({ where: { id: jobId } });
+      await sweepComputers(minutes(30));
+      const room = await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: callRoomKey(jobId, 'orphan') } });
+      expect(room.state).toBe('released');
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${jobId}:call:orphan` } })).toBe(0);
+    });
   });
 });

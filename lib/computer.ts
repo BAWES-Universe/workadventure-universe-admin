@@ -762,8 +762,14 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   const lapsedCalls = await prisma.meterReservation.findMany({ where: { state: 'held', expiresAt: { lte: now }, jobId: { not: null }, reservationKey: { startsWith: 'computer:call:' } }, take: 200 });
   for (const reservation of lapsedCalls) {
     const callId = reservation.jobId && reservation.reservationKey.startsWith(callRoomKey(reservation.jobId, '')) ? reservation.reservationKey.slice(callRoomKey(reservation.jobId, '').length) : null;
-    if (reservation.jobId && callId) await settleModelCall(reservation.jobId, callId, { costMicros: null, basis: 'unknown', payer: { kind: 'universe' }, route: 'universe-ai', cutShort: true }, now).catch(() => undefined);
-    else await releaseRoom({ key: reservation.reservationKey }, now);
+    const settled =
+      reservation.jobId && callId
+        ? await settleModelCall(reservation.jobId, callId, { costMicros: null, basis: 'unknown', payer: { kind: 'universe' }, route: 'universe-ai', cutShort: true }, now).catch(() => 'failed' as const)
+        : null;
+    // A write that failed is left for the next sweep. The job gone (or a key that is not one of ours) means there is no one to write the cost to,
+    // so the room is given back instead of staying held and being found by every sweep
+    if (settled === 'failed') continue;
+    if (!settled?.ok) await releaseRoom({ key: reservation.reservationKey }, now);
     released++;
   }
   // A machine that was being made when its job died, and never got a reference: nothing was made, so it can be tried again
