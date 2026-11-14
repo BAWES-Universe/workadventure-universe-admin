@@ -314,8 +314,8 @@ model Universe {
   hideBotConversations Boolean @default(false) @map("hide_bot_conversations")
   // Allow voice bots here (#740): a bot can only speak and listen in this universe while it is on.
   allowVoiceBots Boolean @default(true) @map("allow_voice_bots")
-  // Visiting Bricks (game #2005): whether people may bring their own Brick along here. Off for every universe that
-  // existed before it shipped, on for a universe made after.
+  // Visiting Bricks (game #2005): whether people may bring their own Brick along here. On for every universe,
+  // those that existed before it shipped included (migration 20261114120000); a host can turn it off.
   allowVisitingBricks Boolean @default(true) @map("allow_visiting_bricks")
   // Set when the universe was passed to this owner (#820): when, and from whom. Null for the person who created it.
   ownerSince      DateTime? @map("owner_since")
