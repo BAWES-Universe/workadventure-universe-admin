@@ -29,7 +29,9 @@ import { POST as createPage } from '@/app/api/admin/github-app/create/route';
 import { GET as created } from '@/app/api/admin/github-app/created/route';
 import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { POST as link } from '@/app/api/ready-made/link/route';
-import { grantToBrick, readConnection } from '@/lib/app-connections';
+import { grantToBrick, readConnection, removeGrant } from '@/lib/app-connections';
+import { POST as gitPass } from '@/app/api/bots/[id]/git-pass/route';
+import { GET as gitGet } from '@/app/api/git/[...path]/route';
 import { createBrick } from '@/lib/brick-create';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -326,6 +328,34 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect((calls[0].init.headers as Record<string, string>).Authorization).toBe(`Basic ${Buffer.from('Iv1.client:app-secret').toString('base64')}`);
     expect(JSON.parse(String(calls[0].init.body))).toEqual({ access_token: 'ghu_first' });
     expect(await prisma.appConnection.count({ where: { id } })).toBe(0);
+  });
+
+  it('gives a Brick’s computer a 15-minute git pass only while it may use its owner’s GitHub, and the relay takes nothing else', async () => {
+    await makeApp();
+    const id = await signedIn();
+    const pass = (token = SERVICE) => gitPass(request(`/api/bots/${saraBrick}/git-pass`, { method: 'POST', token }), params({ id: saraBrick }));
+    expect((await pass('wrong')).status).toBe(401);
+    expect((await pass()).status).toBe(404);
+    await grantToBrick(sara, id, saraBrick);
+    const issued = await (await pass()).json();
+    expect(issued).toMatchObject({ remoteBase: 'https://orbit.example.com/api/git', name: 'sara-gh', email: '501+sara-gh@users.noreply.github.com' });
+    expect(new Date(issued.expiresAt).getTime() - Date.now()).toBeGreaterThan(14 * 60_000);
+    expect(JSON.stringify(issued)).not.toContain('ghu_first');
+
+    const basic = (secret: string) => `Basic ${Buffer.from(`brick:${secret}`).toString('base64')}`;
+    const refs = (authorization?: string) =>
+      gitGet(request('/api/git/acme/tools.git/info/refs?service=git-upload-pack', { headers: authorization ? { authorization } : {} }), params({ path: ['acme', 'tools.git', 'info', 'refs'] }));
+    expect((await refs()).status).toBe(401);
+    expect((await refs(basic('made-up'))).status).toBe(401);
+    // A good pass, through to "GitHub" with the owner's token
+    const calls = pretendGitHub({ 'GET https://github.com/acme/tools.git/info/refs': { body: 'refs' } });
+    expect((await refs(basic(issued.pass))).status).toBe(200);
+    expect((calls[0].init.headers as Record<string, string>).Authorization).toBe(`Basic ${Buffer.from('x-access-token:ghu_first').toString('base64')}`);
+    // Not a git address
+    expect((await gitGet(request('/api/git/acme/tools.git/HEAD', { headers: { authorization: basic(issued.pass) } }), params({ path: ['acme', 'tools.git', 'HEAD'] }))).status).toBe(404);
+    // GitHub taken away from the Brick: the pass stops at once
+    await removeGrant(sara, id, saraBrick);
+    expect((await refs(basic(issued.pass))).status).toBe(401);
   });
 
   it('takes webhooks only with GitHub’s signature', async () => {
