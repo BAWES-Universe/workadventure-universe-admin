@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { connectedState } from '@/lib/app-connections';
 import { getBrickLimits } from '@/lib/bot-limits';
-import { TIME_ZONE_KEY, isTimeZone, repeatMinutes, type Cadence } from '@/lib/brick-item-time';
+import { TIME_ZONE_KEY, isTimeZone, ownZone, repeatMinutes, type Cadence } from '@/lib/brick-item-time';
 import { makeBrick } from '@/lib/brick-make';
 import type { BrickCard } from '@/lib/brick-default';
 import { NEVER_CARRIED, type Need, type Routine, type RoutineKind } from '@/lib/brick-templates';
@@ -239,7 +239,7 @@ export const PLACEHOLDER_ZONE = 'Etc/UTC';
 export async function bringRoutines(tx: Prisma.TransactionClient, botId: string, ownerId: string, routines: Routine[], limits: { itemsPerPerson: number; shortestRepeat: number }): Promise<{ added: number; leftOut: number }> {
   if (routines.length === 0) return { added: 0, leftOut: 0 };
   const kept = (await tx.userPreference.findUnique({ where: { userId_key: { userId: ownerId, key: TIME_ZONE_KEY } }, select: { value: true } }))?.value;
-  const timeZone = isTimeZone(kept) ? kept : PLACEHOLDER_ZONE;
+  const timeZone = isTimeZone(kept) ? ownZone(kept) : PLACEHOLDER_ZONE;
   const have = await tx.brickItem.count({ where: { ownerId, parentId: null, state: { in: ['on', 'paused'] } } });
   const room = Math.max(0, limits.itemsPerPerson - have);
   let added = 0;

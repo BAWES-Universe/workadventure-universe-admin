@@ -40,6 +40,8 @@ describe('the secret check of the look before sharing', () => {
     expect(kinds('You keep my family recipes. Ask me which one I want, then send it. The password is something I give you each time.')).toEqual([]);
     expect(kinds('Check https://example.com/recipes/pasta-with-tomato-sauce-and-basil every morning')).toEqual([]);
     expect(kinds('Check https://example.com/recipes/ChickenAndVegetableSoupForFamilyDinner2026 every morning')).toEqual([]);
+    expect(kinds('Check [recipe](https://example.com/recipes/ChickenAndVegetableSoupForFamilyDinner2026) every morning')).toEqual([]);
+    expect(kinds('Check (https://example.com/recipes/ChickenAndVegetableSoupForFamilyDinner2026), then reply')).toEqual([]);
     expect(kinds('Be brief and kind. Reply in English.')).toEqual([]);
     expect(findInText('', 'x')).toEqual([]);
     expect(findInText(null, 'x')).toEqual([]);

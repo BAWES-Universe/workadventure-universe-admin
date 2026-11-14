@@ -32,7 +32,7 @@ interface Pattern {
 
 const hasDigit = (value: string) => /\d/.test(value);
 /** The text before a match ends inside a link (https://...): what follows is an address, not a key. */
-const insideLink = (head: string) => /(?:^|\s)[a-z][a-z0-9+.-]*:\/\/\S*$/i.test(head);
+const insideLink = (head: string) => /(?:^|[^a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/\S*$/i.test(head);
 const mixesCases = (value: string) => /[a-z]/.test(value) && /[A-Z]/.test(value) && /\d/.test(value);
 
 const PATTERNS: Pattern[] = [

@@ -9,7 +9,7 @@ import { runningExtra } from '@/lib/meter-grants';
 import { windowStart } from '@/lib/reply-limits';
 import { ownerAskingThrough } from '@/lib/brick-make';
 import { templateRoutineGate } from '@/lib/brick-template-use';
-import { TIME_ZONE_KEY, WORKWEEK_KEY, firstDue, isTimeZone, nextDue, readCadence, readWorkweek, repeatMinutes, type Cadence } from '@/lib/brick-item-time';
+import { TIME_ZONE_KEY, WORKWEEK_KEY, firstDue, isTimeZone, ownZone, nextDue, readCadence, readWorkweek, repeatMinutes, type Cadence } from '@/lib/brick-item-time';
 
 /**
  * Goals and tasks (game #2002, Brick 11): Universe's own scheduler.
@@ -258,12 +258,12 @@ export async function createItem(viaBrickId: string, input: NewItemInput, now: D
   if (!brick?.enabled) return { ok: false, status: 409, code: 'off', error: 'This Brick is switched off' };
   const cadence = readCadence(input.cadence);
   const limits = await getBrickLimits();
-  let timeZone = input.timeZone ?? null;
+  let timeZone = input.timeZone === undefined || input.timeZone === null ? null : ownZone(input.timeZone);
   if (timeZone !== null && !isTimeZone(timeZone)) return { ok: false, status: 400, error: 'timeZone must be a time zone like Asia/Kuwait' };
   if (timeZone === null) {
     const kept = (await prisma.userPreference.findUnique({ where: { userId_key: { userId: ownerId, key: TIME_ZONE_KEY } }, select: { value: true } }))?.value;
     if (!isTimeZone(kept)) return { ok: false, status: 422, code: 'needs_time_zone', error: 'No time zone is kept for this person yet' };
-    timeZone = kept;
+    timeZone = ownZone(kept);
   }
   if (input.kind === 'watch' && !input.condition) return { ok: false, status: 400, error: 'a watch needs the condition it speaks for' };
   if (input.kind === 'goal' && !input.outcome) return { ok: false, status: 400, error: 'a goal needs the outcome the person named' };
@@ -481,7 +481,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         let timeZone = row.timeZone;
         if (change.timeZone !== undefined) {
           if (!isTimeZone(change.timeZone)) return { ok: false as const, status: 400 as const, error: 'timeZone must be a time zone like Asia/Kuwait' };
-          timeZone = change.timeZone;
+          timeZone = ownZone(change.timeZone);
         }
         const nextCadence = change.cadence === undefined ? cadence : readCadence(change.cadence);
         const waitingFor = change.waitingFor === undefined ? row.waitingFor : change.waitingFor;

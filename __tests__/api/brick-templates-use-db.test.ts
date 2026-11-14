@@ -338,9 +338,13 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       const botId = body.brick.id;
       const itemId = (await prisma.brickItem.findFirstOrThrow({ where: { botId } })).id;
       await keepZone(omar);
-      expect((await changeItem(botId, itemId, { userId: omar.email, action: 'change', change: { timeZone: 'UTC' } })).ok).toBe(true);
-      expect((await changeItem(botId, itemId, { userId: omar.email, action: 'resume' })).ok).toBe(true);
-      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ state: 'on', timeZone: 'UTC' });
+      // Either spelling of the same clock is the owner's choice: it is kept as "UTC", never read as the placeholder
+      for (const chosen of ['UTC', 'Etc/UTC']) {
+        await prisma.brickItem.update({ where: { id: itemId }, data: { state: 'paused', pausedBy: 'template', nextDueAt: null, timeZone: 'Etc/UTC' } });
+        expect((await changeItem(botId, itemId, { userId: omar.email, action: 'change', change: { timeZone: chosen } })).ok).toBe(true);
+        expect((await changeItem(botId, itemId, { userId: omar.email, action: 'resume' })).ok).toBe(true);
+        expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ state: 'on', timeZone: 'UTC' });
+      }
     });
 
     it('Done is not a way around the gate: a routine marked done while still off cannot be reopened or snoozed on until it is set up', async () => {
