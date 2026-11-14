@@ -71,6 +71,8 @@ export interface ComputerProvider {
   stop(ref: string): Promise<void>;
   /** Takes the machine away for good. Only after the person's files were saved. */
   remove(ref: string): Promise<void>;
+  /** Whether the machine is running or on its way up (billed). A machine that is gone, stopped or asleep is not. Used to prove a stop. */
+  awake(ref: string): Promise<boolean>;
   /** The screen of a machine that is awake and working; null when it is not. Never wakes a machine. */
   watch(ref: string): Promise<WatchSession | null>;
   /** Saves a copy of its home folder and says how big it is. */
@@ -119,7 +121,7 @@ export class FakeComputerProvider implements ComputerProvider {
   /** The machines that were made ready for a job. */
   readied: string[] = [];
   private rate: number | null;
-  private awake = new Set<string>();
+  private awake_ = new Set<string>();
 
   constructor(microsPerMinute: number | null = PRETEND_MICROS_PER_MINUTE) {
     this.rate = microsPerMinute;
@@ -155,29 +157,36 @@ export class FakeComputerProvider implements ComputerProvider {
   async wake(ref: string): Promise<void> {
     this.note('wake', ref);
     this.fail('wake');
-    this.awake.add(ref);
+    this.awake_.add(ref);
   }
 
   async rest(ref: string): Promise<void> {
     this.note('rest', ref);
     this.fail('rest');
-    this.awake.delete(ref);
+    this.awake_.delete(ref);
   }
 
   async stop(ref: string): Promise<void> {
     this.note('stop', ref);
-    this.awake.delete(ref);
+    this.awake_.delete(ref);
   }
 
   async remove(ref: string): Promise<void> {
     this.note('remove', ref);
-    this.awake.delete(ref);
+    this.awake_.delete(ref);
+  }
+
+  /** A test sets the machines that stay awake whatever is asked of them (a stop that did not take). */
+  readonly stuckAwake = new Set<string>();
+
+  async awake(ref: string): Promise<boolean> {
+    return this.awake_.has(ref) || this.stuckAwake.has(ref);
   }
 
   async watch(ref: string): Promise<WatchSession | null> {
     this.note('watch', ref);
     // Only a machine that is awake has a screen: looking never wakes it
-    if (!this.awake.has(ref)) return null;
+    if (!this.awake_.has(ref)) return null;
     return { url: `https://computer.pretend.invalid/screen/${encodeURIComponent(ref)}`, expiresAt: new Date(Date.now() + 5 * 60_000) };
   }
 

@@ -267,6 +267,17 @@ export class Agent37ComputerProvider implements ComputerProvider {
     this.brickOf.delete(ref);
   }
 
+  async awake(ref: string): Promise<boolean> {
+    try {
+      const status = String((await this.client.getInstance(ref)).status);
+      return ['running', 'starting', 'restarting', 'updating', 'waking', 'provisioning'].includes(status);
+    } catch (error) {
+      // A machine that is not there is not running; any other answer is not known, and "not known" is never taken for "stopped"
+      if (error instanceof Agent37Error && error.status === 404) return false;
+      throw error;
+    }
+  }
+
   async watch(ref: string): Promise<WatchSession | null> {
     // Looking never wakes: only a machine that is running has a screen
     const instance = await this.client.getInstance(ref);

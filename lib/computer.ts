@@ -225,7 +225,7 @@ export type Given = { ok: true; view: ComputerView } | { ok: false; reason: 'not
 export async function giveComputer(botId: string, ownerId: string, now: Date = new Date()): Promise<Given> {
   if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
   const provider = getComputerProvider();
-  if (!provider) return { ok: false, reason: 'not_open' };
+  if (!provider || (await isWindingDown())) return { ok: false, reason: 'not_open' };
   const existing = await prisma.brickComputer.findUnique({ where: { botId } });
   if (existing && existing.provider !== provider.kind) return { ok: false, reason: 'not_open' };
   await prisma.brickComputer.upsert({ where: { botId }, create: { botId, enabled: true, provider: provider.kind }, update: { enabled: true } });
@@ -305,6 +305,8 @@ export async function startJob(input: { botId: string; personId: string; title: 
   const row = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
   if (!row || !row.enabled) return { ok: false, reason: 'off' };
   if (!providerFor(row)) return { ok: false, reason: 'not_open' };
+  // A wind-down is on (the team's command): computers take no new work
+  if (await isWindingDown()) return { ok: false, reason: 'not_open' };
   // A run of a goal or task (game #2002) starts one job, ever: the same run again (it was handed out again) finds that job, whatever it
   // came to, and takes no second room. The run must be this person's, on this Brick.
   if (input.runId) {
@@ -380,6 +382,11 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
   const provider = providerFor(row);
   if (!row || !row.enabled || !provider) {
     await endJob(job.id, 'stopped', 'off', now);
+    return 'gone';
+  }
+  // A wind-down is on: a job in line never starts, it ends (the wind-down would end it next anyway)
+  if (await isWindingDown()) {
+    await endJob(job.id, 'stopped', 'off', now, false);
     return 'gone';
   }
   const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued' }, data: { queuedFor } });
@@ -616,6 +623,23 @@ export async function stopJobFor(botId: string, ownerId: string, now: Date = new
 }
 
 /**
+ * Once no job holds an awake machine, the browser on it is cleared (the image's `universe-clean`), so a page one job was signed in to
+ * never carries into the next. Best effort and quick: a machine that is not awake is left alone (a command would wake it), and a clean
+ * that fails never holds up the end of the job (the next job's start-up clears nothing, so this is logged for the one who looks).
+ */
+async function cleanBrowserIfUnheld(botId: string): Promise<void> {
+  try {
+    const row = await prisma.brickComputer.findUnique({ where: { botId } });
+    const provider = providerFor(row);
+    if (!row?.providerRef || !provider || row.machine !== 'working') return;
+    if ((await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } })) > 0) return;
+    await provider.exec(row.providerRef, 'universe-clean', { timeoutMs: 20_000 });
+  } catch (error) {
+    console.error('[Computer] Could not clear the browser after a job:', error instanceof Error ? error.message : 'unknown');
+  }
+}
+
+/**
  * Ends a job once. Whatever it ran is worked out from the seconds the machine was held for it, recorded in the meter's books as
  * one event under the job's id, and its reserved room is settled to that. Then the machine rests if no other job holds it, and
  * the next job in line is tried. A job that is already over is left exactly as it ended.
@@ -652,7 +676,10 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     console.error('[Computer] Could not settle a job’s room:', error instanceof Error ? error.message : 'unknown');
   }
 
-  if (held) await restIfUnheld(job.botId, now);
+  if (held) {
+    await cleanBrowserIfUnheld(job.botId);
+    await restIfUnheld(job.botId, now);
+  }
   // The turn passes to the next job in line, except while a Stop is ending everything
   if (advance && endedBy !== 'off' && endedBy !== 'deleted') await startNext(job.botId, now);
 }
@@ -734,6 +761,8 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   let started = 0;
   // What the provider keeps up between jobs (the real one builds its image, a step at a time); a failure here never stops the sweep
   await getComputerProvider()?.maintain().catch((error) => console.error('[Computer] The provider could not be kept up:', error instanceof Error ? error.message : 'unknown'));
+  // A wind-down that is on goes on until every job is over and every machine is stopped and proven so
+  await continueWindDown(now, batch).catch((error) => console.error('[Computer] The wind-down could not go on:', error instanceof Error ? error.message : 'unknown'));
   // A job that asked its person to take over and got no answer within the wait a super admin set ends, so it does not hold the
   // machine and the allowance for nobody. Read each sweep, so a changed setting counts at once, jobs already waiting included. Once the
   // person has taken over the job is theirs and is not ended here.
@@ -820,6 +849,105 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
     if (lines.length < batch) break;
   }
   return { stopped, released, started };
+}
+
+// ---------- Wind-down (the team's command, never a setting) ----------
+
+const WIND_DOWN_KEY = 'computer-wind-down';
+/** The machines that are billed or on their way up: a wind-down is not done while one is left. A resting one sleeps and costs nothing. */
+const BILLED_MACHINES = ['waking', 'working', 'restoring'];
+
+export interface WindDownStatus {
+  on: boolean;
+  since: string | null;
+  by: string | null;
+  /** Work left to wind down: jobs not over, and machines still awake. Zero means it is finished. */
+  jobsLeft: number;
+  machinesLeft: number;
+}
+
+async function windDownFlag(): Promise<{ on: boolean; since: string | null; by: string | null }> {
+  const row = await prisma.appSetting.findUnique({ where: { key: WIND_DOWN_KEY } });
+  const value = (row?.value && typeof row.value === 'object' ? row.value : {}) as { on?: unknown; since?: unknown; by?: unknown };
+  return { on: value.on === true, since: typeof value.since === 'string' ? value.since : null, by: typeof value.by === 'string' ? value.by : null };
+}
+
+/** True while the team's wind-down is on: no computer takes new work, and none is given. */
+export async function isWindingDown(): Promise<boolean> {
+  return (await windDownFlag()).on;
+}
+
+/**
+ * Starts the wind-down (super admins only, asked by the route): the door closes first, so nothing new starts, then the work is ended
+ * a few Bricks at a time by this call and by every sweep after it until none is left. Files and the page's state stay; only the
+ * work and the machines stop. Asked twice it is the same.
+ */
+export async function startWindDown(by: string, now: Date = new Date()): Promise<WindDownStatus> {
+  const flag = await windDownFlag();
+  if (!flag.on) {
+    const value = { on: true, since: now.toISOString(), by } as unknown as Prisma.InputJsonValue;
+    await prisma.appSetting.upsert({ where: { key: WIND_DOWN_KEY }, create: { key: WIND_DOWN_KEY, value }, update: { value } });
+    console.warn('[Computer] A wind-down was started by', by);
+  }
+  await continueWindDown(now, SWEEP_BATCH).catch((error) => console.error('[Computer] The wind-down could not go on:', error instanceof Error ? error.message : 'unknown'));
+  return windDownStatus();
+}
+
+/** Lifts the wind-down: computers take work again. Machines stay as they are (stopped ones wake at the next job). */
+export async function liftWindDown(by: string): Promise<WindDownStatus> {
+  const value = { on: false, since: null, by } as unknown as Prisma.InputJsonValue;
+  await prisma.appSetting.upsert({ where: { key: WIND_DOWN_KEY }, create: { key: WIND_DOWN_KEY, value }, update: { value } });
+  console.warn('[Computer] The wind-down was lifted by', by);
+  return windDownStatus();
+}
+
+export async function windDownStatus(): Promise<WindDownStatus> {
+  const flag = await windDownFlag();
+  const [jobsLeft, machinesLeft] = await Promise.all([
+    prisma.computerJob.count({ where: { status: { in: ['queued', 'running', 'waiting'] } } }),
+    prisma.brickComputer.count({ where: { machine: { in: BILLED_MACHINES }, NOT: { providerRef: null } } }),
+  ]);
+  return { ...flag, jobsLeft, machinesLeft };
+}
+
+/**
+ * One step of the wind-down, safe to run twice at once and to repeat: every Brick with a job not over or a machine awake has its
+ * jobs ended (keys revoked, turns cancelled, time counted), its files saved, and its machine stopped. A machine counts as stopped
+ * only once the provider says it is not running; one that is not proven stays "working" and is tried again by the next sweep.
+ * Does nothing when no wind-down is on.
+ */
+export async function continueWindDown(now: Date = new Date(), batch: number = SWEEP_BATCH): Promise<{ bricks: number; left: number }> {
+  if (!(await isWindingDown())) return { bricks: 0, left: 0 };
+  const withJobs = await prisma.computerJob.findMany({ where: { status: { in: ['queued', 'running', 'waiting'] } }, distinct: ['botId'], select: { botId: true }, orderBy: { createdAt: 'asc' }, take: batch });
+  const withMachines = await prisma.brickComputer.findMany({ where: { machine: { in: BILLED_MACHINES }, NOT: { providerRef: null } }, select: { botId: true }, orderBy: { updatedAt: 'asc' }, take: batch });
+  const bricks = Array.from(new Set([...withJobs, ...withMachines].map((entry) => entry.botId))).slice(0, batch);
+  for (const botId of bricks) await windDownBrick(botId, now);
+  const status = await windDownStatus();
+  return { bricks: bricks.length, left: status.jobsLeft + status.machinesLeft };
+}
+
+async function windDownBrick(botId: string, now: Date): Promise<void> {
+  try {
+    const before = await prisma.brickComputer.findUnique({ where: { botId } });
+    const wasBilled = !!before && BILLED_MACHINES.includes(before.machine);
+    const jobs = await prisma.computerJob.findMany({ where: { botId, status: { in: ['queued', 'running', 'waiting'] } }, select: { id: true } });
+    // No job of this Brick starts in its place while it is ended (the line does not advance)
+    for (const job of jobs) await endJob(job.id, 'stopped', 'off', now, false);
+    const row = await prisma.brickComputer.findUnique({ where: { botId } });
+    const provider = providerFor(row);
+    // Only a machine that was awake when this began: ending the jobs may have put it to rest, and a rest is checked too
+    if (!row?.providerRef || !provider || !(wasBilled || BILLED_MACHINES.includes(row.machine))) return;
+    const ref = row.providerRef;
+    if (await provider.awake(ref)) {
+      await saveCopy(botId, ref, provider);
+      await provider.stop(ref);
+    }
+    // Proven: the provider no longer says it runs. A stop that did not take leaves the machine "working", so the next sweep finds it again
+    const proven = !(await provider.awake(ref));
+    await prisma.brickComputer.updateMany({ where: { botId, providerRef: ref, machine: { in: [...BILLED_MACHINES, 'resting'] } }, data: { machine: proven ? 'stopped' : 'working', restClaimedAt: null } });
+  } catch (error) {
+    console.error('[Computer] A Brick could not be wound down yet:', error instanceof Error ? error.message : 'unknown');
+  }
 }
 
 // ---------- Watching, taking over and handing back ----------

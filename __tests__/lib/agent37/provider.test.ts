@@ -253,6 +253,17 @@ describe('the Agent37 provider', () => {
     await expect(p.remove('m1')).resolves.toBeUndefined();
   });
 
+  it('says whether a machine is running, to prove a stop: running is awake, stopped, sleeping and gone are not', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    expect(await p.awake('m1')).toBe(true);
+    await p.rest('m1');
+    expect(await p.awake('m1')).toBe(false);
+    await p.remove('m1');
+    expect(await p.awake('m1')).toBe(false);
+  });
+
   it('looking never wakes: a machine that is not running has no screen and no signed link is asked for', async () => {
     const w = world();
     const p = provider(w);

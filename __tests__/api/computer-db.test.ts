@@ -26,6 +26,7 @@ jest.mock('@/lib/meter', () => {
 import { saveMeterSettings } from '@/lib/meter';
 import { currentEnvelope } from '@/lib/meter-allowance';
 import { recordGrant } from '@/lib/meter-grants';
+import { mintJobToken, verifyJobToken } from '@/lib/computer-token';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import {
   computerView,
@@ -35,6 +36,8 @@ import {
   finishJob,
   giveComputer,
   handBack,
+  isWindingDown,
+  liftWindDown,
   planEffect,
   removeMachineBeforeDelete,
   renewJob,
@@ -42,8 +45,10 @@ import {
   requestHandover,
   settleEffect,
   startJob,
+  startWindDown,
   stopJobFor,
   sweepComputers,
+  windDownStatus,
   takeOver,
   turnOffComputer,
   watchComputer,
@@ -76,7 +81,7 @@ const wipe = async () => {
   await prisma.meterEvent.deleteMany({});
   await prisma.meterReservation.deleteMany({});
   await prisma.meterGrant.deleteMany({});
-  await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits'] } } });
+  await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits', 'computer-wind-down'] } } });
 };
 
 const woke = () => provider.calls.filter((call) => call.name === 'create' || call.name === 'wake').length;
@@ -223,11 +228,37 @@ run('a Brick’s computer, in a real database', () => {
       if (!job.ok) throw new Error('no');
       await finishJob(job.job.id, 'done', minutes(1));
       expect((await computerView(sara.brickId, sara.id))?.machine).toBe('resting');
-      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake', 'saveFiles', 'rest']);
+      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake', 'exec', 'saveFiles', 'rest']);
       // A second job wakes the SAME machine: never a second one
       await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(2));
       expect(provider.calls.filter((call) => call.name === 'create')).toHaveLength(1);
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).providerRef).toBe(`fake-${sara.brickId}`);
+    });
+
+    it('clears the browser once the last job is over, before the machine rests, and not while another job still holds it', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const first = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: true }, NOW);
+      const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW);
+      if (!first.ok || !second.ok) throw new Error('did not start');
+      expect(second.job.status).toBe('running');
+      await finishJob(first.job.id, 'done', minutes(1));
+      // The reader still holds the machine: its browser is not cleared under it
+      expect(provider.commands.filter((entry) => entry.command === 'universe-clean')).toHaveLength(0);
+      await finishJob(second.job.id, 'done', minutes(2));
+      expect(provider.commands.filter((entry) => entry.command === 'universe-clean')).toHaveLength(1);
+      const names = provider.calls.map((call) => call.name);
+      expect(names.indexOf('exec')).toBeLessThan(names.indexOf('rest'));
+    });
+
+    it('a clean that fails never holds up the end of the job: the machine still rests', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      provider.failExec = true;
+      await finishJob(job.job.id, 'done', minutes(1));
+      expect((await computerView(sara.brickId, sara.id))?.machine).toBe('resting');
     });
 
     it('reports its steps and nothing else about a finished job changes them', async () => {
@@ -1379,6 +1410,81 @@ run('a Brick’s computer, in a real database', () => {
       expect(provider.calls.some((call) => call.name === 'remove')).toBe(false);
       expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
       expect(provider.calls.filter((call) => call.name === 'remove')).toHaveLength(1);
+    });
+  });
+  describe('the team’s wind-down', () => {
+    it('closes the door first: no new job starts and no computer is given, and every job and machine is ended and proven stopped', async () => {
+      const sara = await person('sara');
+      const omar = await person('omar');
+      await giveComputer(sara.brickId, sara.id);
+      await giveComputer(omar.brickId, omar.id);
+      const running = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      const waiting = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, NOW);
+      const other = await startJob({ botId: omar.brickId, personId: omar.id, title: 'C' }, NOW);
+      if (!running.ok || !waiting.ok || !other.ok) throw new Error('did not start');
+      const status = await startWindDown('team@example.test', minutes(3));
+      expect(status).toMatchObject({ on: true, by: 'team@example.test', jobsLeft: 0, machinesLeft: 0 });
+      for (const id of [running.job.id, waiting.job.id, other.job.id]) expect(await prisma.computerJob.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'stopped', endedBy: 'off', agentResponseId: null });
+      // The time that ran is counted, and the room is settled
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${running.job.id}:time` } })).toBe(1);
+      expect(await prisma.meterReservation.count({ where: { state: 'held', reservationKey: { startsWith: 'computer:' } } })).toBe(0);
+      // Both machines are not running any more, and the files stay
+      expect(await provider.awake(`fake-${sara.brickId}`)).toBe(false);
+      expect(await provider.awake(`fake-${omar.brickId}`)).toBe(false);
+      expect((await computerView(sara.brickId, sara.id))?.files.savedAt).not.toBeNull();
+      // Nothing new starts, nothing is given, and a machine that was never made is never made
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'D' }, minutes(4))).toEqual({ ok: false, reason: 'not_open' });
+      const lena = await person('lena');
+      expect(await giveComputer(lena.brickId, lena.id)).toEqual({ ok: false, reason: 'not_open' });
+      expect(provider.calls.filter((call) => call.name === 'create')).toHaveLength(2);
+    });
+
+    it('is proven machine by machine: a stop that did not take leaves the machine for the next sweep, which finishes it', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      const ref = `fake-${sara.brickId}`;
+      provider.stuckAwake.add(ref);
+      // The rest after the job also leaves it up, so the machine is still billed
+      const status = await startWindDown('team@example.test', minutes(1));
+      expect(status.machinesLeft).toBe(1);
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+      provider.stuckAwake.delete(ref);
+      await sweepComputers(minutes(2));
+      expect(await windDownStatus()).toMatchObject({ on: true, jobsLeft: 0, machinesLeft: 0 });
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('stopped');
+    });
+
+    it('a job that was in line when it started does not start in a sweep, and the keys of a job it ended are refused', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const first = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, NOW);
+      if (!first.ok || !second.ok) throw new Error('no');
+      const minted = await mintJobToken(first.job.id, 'model', minutes(0));
+      if (!minted.ok) throw new Error('no key');
+      await startWindDown('team@example.test', minutes(1));
+      expect(await verifyJobToken(minted.token, 'model', minutes(2))).toMatchObject({ ok: false });
+      await sweepComputers(minutes(2));
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId, status: { in: ['queued', 'running', 'waiting'] } } })).toBe(0);
+      expect(await prisma.computerJobToken.count({ where: { jobId: { in: [first.job.id, second.job.id] }, revokedAt: null } })).toBe(0);
+    });
+
+    it('asked twice is the same, and lifting it opens the door again: a stopped machine wakes for the next job', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      const first = await startWindDown('team@example.test', minutes(1));
+      const second = await startWindDown('someone-else@example.test', minutes(2));
+      expect(second.since).toBe(first.since);
+      expect(second.by).toBe('team@example.test');
+      expect(await isWindingDown()).toBe(true);
+      expect((await liftWindDown('team@example.test')).on).toBe(false);
+      const again = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(3));
+      expect(again.ok && again.job.status).toBe('running');
+      expect(await provider.awake(`fake-${sara.brickId}`)).toBe(true);
     });
   });
 });
