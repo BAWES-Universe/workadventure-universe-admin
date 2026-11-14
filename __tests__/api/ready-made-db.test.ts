@@ -339,9 +339,9 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect(writtenWhenCalled).toBe(1);
     const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, payerKind: 'universe', route: 'app', unit: 'use', basis: 'estimated', costMicros: BigInt(300), quantity: BigInt(1), botId: saraBrick });
-    // The app here has a sign-in setup a super admin chose, so it is priced as our own sign-in: $0.0003. How it was priced is written, never what was asked.
-    expect(events[0].detail).toEqual({ toolkit: KEY, tool: 'GMAIL_FETCH_EMAILS', kind: 'execution', tier: 'own', tierVerified: true, ownAuth: true, executions: 1, sandboxRuns: 0, zdrCalls: 0 });
+    expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, payerKind: 'universe', route: 'app', unit: 'use', basis: 'estimated', costMicros: BigInt(400), quantity: BigInt(1), botId: saraBrick });
+    // The app here has a sign-in setup a super admin chose, so it is priced as our own sign-in: $0.0003, plus $0.0001 for a run outside a session. How it was priced is written, never what was asked.
+    expect(events[0].detail).toEqual({ toolkit: KEY, tool: 'GMAIL_FETCH_EMAILS', kind: 'execution', tier: 'own', tierVerified: true, ownAuth: true, executions: 1, sandboxRuns: 0, zdrCalls: 0, directCalls: 1 });
   });
 
   it('writes an estimate from the super admin’s own price once there is one', async () => {
@@ -491,7 +491,7 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(JSON.stringify(event.detail)).not.toContain('private words');
     });
 
-    it('prices a call on Composio’s own sign-in at the managed rate, and adds the zero data retention add-on only where it covers (our own sign-in, once it is switched on)', async () => {
+    it('prices a call on Composio’s own sign-in at the managed rate (an app the page does not name: $0.01), plus the direct execution add-on, and adds the zero data retention add-on only where it covers (our own sign-in, once it is switched on)', async () => {
       const { serverId } = await connectedAndGranted();
       await saveComposioBilling({ zdrOn: true }, boss);
       try {
@@ -509,7 +509,7 @@ run('ready-made apps through the adapter, in a real database', () => {
         await prisma.appSetting.deleteMany({ where: { key: 'composio-billing' } });
       }
       const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' }, orderBy: { recordedAt: 'asc' } });
-      expect(events.map((event) => Number(event.costMicros))).toEqual([500, 400, 300]);
+      expect(events.map((event) => Number(event.costMicros))).toEqual([10_100, 500, 400]);
       expect(events.map((event) => (event.detail as { zdrCalls: number }).zdrCalls)).toEqual([0, 1, 0]);
     });
 

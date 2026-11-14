@@ -94,7 +94,7 @@ run('the Composio bill report', () => {
     await step(4, 'c', { toolkit: 'gmail', tool: 'COMPOSIO_SEARCH_TOOLS', kind: 'free', tier: 'own', tierVerified: true, ownAuth: true, executions: 0, sandboxRuns: 0, zdrCalls: 0 }, 0, 0);
     const body = await (await get()).json();
     expect(body.billed).toMatchObject({ month: MONTH, plan: 'pro', events: 3, executions: 2, freeExecutions: 2, paidExecutions: 0, freeLookups: 1, recordedMicros: 600, planFeeMicros: 29_000_000, billedMicros: 29_000_000 });
-    expect(body.rates).toMatchObject({ perCallMicros: { own: 300, managed_other: 500 }, zdrAddOnMicros: 100, freeManagedCallsPerMonth: 20_000 });
+    expect(body.rates).toMatchObject({ perCallMicros: { own: 300, managed_other: 10_000 }, zdrAddOnMicros: 100, directExecutionMicros: 100, freeManagedCallsPerMonth: 20_000 });
     expect(body.reconciliation).toMatchObject({ composio: null, oursTopLevel: 3, invoice: null });
   });
 
