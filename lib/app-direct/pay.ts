@@ -189,7 +189,8 @@ const HOUR = 3_600_000;
 export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}): Promise<CheckoutOutcome> {
   const job = await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId }, include: { connection: true, artifact: { select: { expiresAt: true } } } });
   const connection = job?.connection;
-  if (!job || job.status !== 'active' || !connection || connection.kind !== 'direct' || connection.signInLostAt) return { status: 'unavailable' };
+  if (!job || job.status !== 'active' || !connection || connection.kind !== 'direct') return { status: 'unavailable' };
+  // A key marked as stopped is not a reason to refuse here: the call itself finds out, and a good call is what clears the mark
   if (job.artifact.expiresAt && job.artifact.expiresAt.getTime() <= Date.now()) return { status: 'unavailable' };
   const definition = definitionOf(connection);
   // A definition that changed since the owner asked for this is not the one they agreed to: payments wait for them to ask again
@@ -253,6 +254,8 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
     return fail('not_paid');
   }
   if (answer.status < 200 || answer.status >= 300) return fail('not_paid');
+  // The service accepted the key: a "stopped working" mark from an earlier refusal (even one for another operation) no longer holds
+  if (connection.signInLostAt) await reportConnectionSignIn(connection.id, { state: 'ok' }, new Date()).catch(() => undefined);
   let picked: unknown;
   try {
     picked = pickFields(JSON.parse(answer.body), operation.returns);
@@ -343,6 +346,7 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
     return view(order.status);
   }
   if (answer.redirected || answer.truncated || answer.status < 200 || answer.status >= 300) return view(order.status);
+  if (connection.signInLostAt) await reportConnectionSignIn(connection.id, { state: 'ok' }, new Date()).catch(() => undefined);
   let record: unknown;
   try {
     const asked = definition.operations.find((candidate) => candidate.id === lookup.operation);

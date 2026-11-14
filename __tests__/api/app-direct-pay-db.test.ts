@@ -294,11 +294,41 @@ run('payments for pages, in a real database', () => {
       expect((await start(artifactId)).status).toBe(409);
       expect(await prisma.appPageOrder.findFirst({ where: { ownerId: sara } })).toMatchObject({ status: 'not_paid' });
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).not.toBeNull();
-      // And while the key is marked stopped nothing new is asked of the service
-      mockSend.current = () => {
-        throw new Error('the service must not be asked');
-      };
-      expect((await start(artifactId)).status).toBe(409);
+      // A mark never blocks the next visitor: the service is asked again, and a good answer clears the mark
+      const sent = tap();
+      expect((await start(artifactId, '203.0.113.8')).status).toBe(200);
+      expect(sent.length).toBeGreaterThan(0);
+      expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
+    });
+
+    it('clears the stopped mark when a lookup is answered well', async () => {
+      const { id, serverId } = await connectTap();
+      const artifactId = await makeArtifact();
+      await job(serverId, artifactId);
+      tap();
+      const { orderId } = await checkout(artifactId);
+      await prisma.appConnection.update({ where: { id }, data: { signInLostAt: new Date() } });
+      tap({ record: (order) => paidRecord(order) });
+      expect((await settle(orderId))?.status).toBe('paid');
+      expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
+    });
+
+    it('a refused lookup for one order does not stop other pages from taking payments', async () => {
+      const { id, serverId } = await connectTap();
+      const first = await makeArtifact();
+      const second = await makeArtifact();
+      await job(serverId, first);
+      await job(serverId, second);
+      tap();
+      const { orderId } = await checkout(first);
+      // The service refuses this one lookup (for example a charge it no longer shows this key)
+      mockSend.current = () => ({ status: 403 });
+      await settle(orderId);
+      expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).not.toBeNull();
+      // Another page still gets its checkout, which clears the mark
+      tap();
+      expect((await start(second, '203.0.113.9')).status).toBe(200);
+      expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
     });
 
     it('stops when the owner stops it, at once', async () => {
