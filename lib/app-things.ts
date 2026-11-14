@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { connectedState, confirmIfPending } from '@/lib/app-connections';
 import { testReadyMade } from '@/lib/app-adapter/ready-made';
+import { testGitHub } from '@/lib/github/check';
 import { ensureFreshOAuthConfig } from '@/lib/mcp/oauth-refresh';
 import { testMcpConnection } from '@/lib/mcp/test-connection';
 
@@ -31,7 +32,10 @@ export async function thingsForOwnApp(connectionId: string, ownerId: string): Pr
   let toolNames: string[] = [];
   let incomplete = false;
   try {
-    if (connection.source === 'ready_made') {
+    if (connection.source === 'github') {
+      const listed = await testGitHub(connection.id);
+      toolNames = listed.toolNames;
+    } else if (connection.source === 'ready_made') {
       // The link of a ready-made app needs the provider key, which only Orbit holds: asked through the adapter
       const listed = await testReadyMade(connection);
       toolNames = listed.toolNames;

@@ -18,6 +18,7 @@ import { syncToolSignInNotices } from '@/lib/tool-signin';
 import { revokeAtApp } from '@/lib/mcp/revoke';
 import { holdRefreshLease } from '@/lib/mcp/oauth-refresh';
 import { checkSharedUse, isAppShareable } from '@/lib/app-share';
+import { revokeGitHub } from '@/lib/github/connection';
 
 /**
  * Apps a person connects once (game #2001, "Apps").
@@ -166,7 +167,7 @@ export async function checkAppUse(botId: string, serverId: string, input: z.infe
 
   if (!connection.ownerId || !ownsBrick(row.bot, connection.ownerId)) return refuse('gone');
   if (!row.enabled) return refuse('off');
-  const allowed: AppUseVerdict = { allowed: true, viaConnection: true, ...(connection.source === 'ready_made' ? { readyMade: true } : {}) };
+  const allowed: AppUseVerdict = { allowed: true, viaConnection: true, ...(connection.source === 'ready_made' || connection.source === 'github' ? { readyMade: true } : {}) };
   if (input.forOwner === true) return allowed;
   const asker = input.requesterKey ? await findUserByIdentifier(input.requesterKey) : null;
   if (asker && !asker.isGuest && asker.id === connection.ownerId) return allowed;
@@ -222,7 +223,7 @@ export const addConnectionSchema = createMcpServerSchema
   .omit({ enabled: true });
 
 /** A connection made from a person's own input is "link"; the list (lib/app-catalog.ts) adds `catalogKey` for its own. */
-type NewConnection = Omit<z.infer<typeof addConnectionSchema>, 'source'> & { source: 'link' | 'listed' | 'ready_made'; catalogKey?: string | null; providerToolkit?: string | null; providerAccountId?: string | null };
+type NewConnection = Omit<z.infer<typeof addConnectionSchema>, 'source'> & { source: 'link' | 'listed' | 'ready_made' | 'github'; catalogKey?: string | null; providerToolkit?: string | null; providerAccountId?: string | null };
 
 /** The person connects an app. The way in is stored encrypted and never read back by a screen. */
 export async function createConnection(ownerId: string, input: NewConnection, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<AppConnection> {
@@ -357,7 +358,16 @@ export async function grantToBrick(ownerId: string, connectionId: string, botId:
   try {
     return await prisma.botMcpServer.create({
       // The link is the connection's and is never copied: the column is not null, so it stays empty here and is read through effectiveServer
-      data: { botId, connectionId, name: connection.name, serverUrl: '', authType: 'none', connectedById: ownerId },
+      data: {
+        botId,
+        connectionId,
+        name: connection.name,
+        serverUrl: '',
+        authType: 'none',
+        connectedById: ownerId,
+        // GitHub works as its owner says in chat (merging included), with no question cards of its own (game #2041)
+        ...(connection.source === 'github' ? { changeSetting: 'rightAway', deleteSendSetting: 'rightAway' } : {}),
+      },
     });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
@@ -412,7 +422,8 @@ export async function disconnect(ownerId: string, connectionId: string): Promise
   // The sign-in cards that were about it go too; a failed report never undoes the disconnect
   for (const botId of bots) await syncToolSignInNotices(botId);
   // Best effort, after everything above: the app takes the sign-in back when it said where (never throws)
-  await revokeAtApp(connection);
+  if (connection.source === 'github') await revokeGitHub(connection);
+  else await revokeAtApp(connection);
   return true;
 }
 

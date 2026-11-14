@@ -5,6 +5,7 @@ import { prisma } from '@/lib/db';
 import { json, preflight, readBody, serviceRoute } from '@/lib/bot-action-api';
 import { adapterIsOn } from '@/lib/app-adapter';
 import { linkReadyMade } from '@/lib/app-adapter/ready-made';
+import { linkGitHub } from '@/lib/github/link';
 
 export const runtime = 'nodejs';
 
@@ -32,11 +33,11 @@ const bodySchema = z
  * without the provider key, and that key never leaves Orbit: the bot server and the Brick never hold it, so every message goes
  * through here. Same checks as /api/ready-made/use (the use check first, their own signed-in app and Brick only); a tools/call is
  * counted like a use. Answers { status, contentType, sessionId, body } with what the link sent. 404 while the adapter is off.
+ * A person's GitHub (game #2041) comes here too: Orbit answers it itself with the person's own token, adapter or not.
  * Auth: BOT_SERVICE_TOKEN.
  */
 export async function POST(request: NextRequest) {
   return serviceRoute(request, 'sending to an app link', async () => {
-    if (!adapterIsOn()) return json(request, { error: 'Not found' }, 404);
     const body = await readBody(request, bodySchema);
     if (body.response) return body.response;
     const { botId, serverId, requesterKey, forOwner, message, sessionId, callId } = body.data;
@@ -44,9 +45,12 @@ export async function POST(request: NextRequest) {
     if (!verdict) return json(request, { allowed: false, reason: 'gone' }, 404);
     if (!verdict.allowed) return json(request, { allowed: false, reason: verdict.reason }, 403);
     if (!verdict.readyMade) return json(request, { error: 'Not found' }, 404);
-    const row = await prisma.botMcpServer.findUnique({ where: { id: serverId }, select: { connectionId: true, connection: { select: { ownerId: true } } } });
+    const row = await prisma.botMcpServer.findUnique({ where: { id: serverId }, select: { connectionId: true, connection: { select: { ownerId: true, source: true } } } });
     if (!row?.connectionId || !row.connection?.ownerId) return json(request, { allowed: false, reason: 'gone' }, 404);
-    const outcome = await linkReadyMade({ botId, connectionId: row.connectionId, ownerId: row.connection.ownerId, message, sessionId: sessionId ?? null, callId: callId ?? null });
+    const github = row.connection.source === 'github';
+    if (!github && !adapterIsOn()) return json(request, { error: 'Not found' }, 404);
+    const linkInput = { botId, connectionId: row.connectionId, ownerId: row.connection.ownerId, message, callId: callId ?? null };
+    const outcome = github ? await linkGitHub(linkInput) : await linkReadyMade({ ...linkInput, sessionId: sessionId ?? null });
     switch (outcome.status) {
       case 'done':
         return json(request, outcome.answer);

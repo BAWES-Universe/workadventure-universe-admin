@@ -9,6 +9,9 @@ export interface FetchMemberDataByUuidSuccessResponse {
   email: string | null;
   username?: string | null;
   userUuid: string;
+  // Orbit's own id for this person (User.id), never an email or a name. The game uses it, and only it, to tell
+  // PostHog who this is, so support can find the person here by it. Missing when Orbit could not verify the person.
+  userId?: string;
   tags: string[];
   visitCardUrl: string | null;
   isCharacterTexturesValid: boolean;
