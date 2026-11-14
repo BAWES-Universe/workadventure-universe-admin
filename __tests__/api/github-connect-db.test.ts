@@ -32,7 +32,7 @@ import { POST as link } from '@/app/api/ready-made/link/route';
 import { grantToBrick, readConnection, removeGrant } from '@/lib/app-connections';
 import { POST as gitPass } from '@/app/api/bots/[id]/git-pass/route';
 import { GET as gitGet, POST as gitPost } from '@/app/api/git/[...path]/route';
-import { MAX_PUSH_BYTES } from '@/lib/github/git-relay';
+import { checkGitPass, MAX_PUSH_BYTES, UPLOAD_GRACE_SECONDS } from '@/lib/github/git-relay';
 import { createBrick } from '@/lib/brick-create';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -478,6 +478,13 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(calls.length).toBe(before);
     // ...and the pass stops for everything else at once
     expect((await refs(basic(issued.pass))).status).toBe(401);
+    // A pass that ran out a minute ago during an upload still counts when the upload ends; one that ran out long ago does not
+    await grantToBrick(sara, id, saraBrick);
+    const passFrom = (secondsAgo: number) =>
+      basic(encryptApiKey(JSON.stringify({ kind: 'git-pass', botId: saraBrick, connectionId: id, ownerId: sara, exp: Math.floor(Date.now() / 1000) - secondsAgo })));
+    expect(await checkGitPass(passFrom(60))).toBeNull();
+    expect(await checkGitPass(passFrom(60), UPLOAD_GRACE_SECONDS)).toMatchObject({ botId: saraBrick });
+    expect(await checkGitPass(passFrom(UPLOAD_GRACE_SECONDS + 60), UPLOAD_GRACE_SECONDS)).toBeNull();
   });
 
   it('takes webhooks only with GitHub’s signature', async () => {

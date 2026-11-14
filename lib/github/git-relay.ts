@@ -16,6 +16,12 @@ import type { FetchLike } from '@/lib/github/api';
 export const GIT_PASS_SECONDS = 15 * 60;
 /** The most a push may carry through the relay. */
 export const MAX_PUSH_BYTES = 200 * 1024 * 1024;
+/**
+ * A push must finish uploading within this long. The pass is checked again once it has (the owner may have turned GitHub off
+ * meanwhile); a pass that ran out during the upload still counts for this long after, so a big push on a slow line is not lost.
+ */
+export const UPLOAD_MS = 10 * 60_000;
+export const UPLOAD_GRACE_SECONDS = UPLOAD_MS / 1000;
 /** The most of a gzipped push that is unpacked to read its ref updates: they come first, and the rest is passed on as it was. */
 const COMMANDS_MAX_BYTES = 1024 * 1024;
 /** How long GitHub has to start answering a git request: a push gets longer, GitHub answers it after taking the whole pack in. */
@@ -65,7 +71,7 @@ export async function issueGitPass(botId: string): Promise<PassIssue> {
 }
 
 /** The pass in a git request (HTTP Basic: any user name, the pass as the password), still good and still allowed, or null. */
-export async function checkGitPass(authorization: string | null): Promise<GitPass | null> {
+export async function checkGitPass(authorization: string | null, graceSeconds = 0): Promise<GitPass | null> {
   if (!authorization?.startsWith('Basic ')) return null;
   let pass: GitPass;
   try {
@@ -75,7 +81,7 @@ export async function checkGitPass(authorization: string | null): Promise<GitPas
   } catch {
     return null;
   }
-  if (!pass || pass.kind !== 'git-pass' || typeof pass.exp !== 'number' || pass.exp < Date.now() / 1000) return null;
+  if (!pass || pass.kind !== 'git-pass' || typeof pass.exp !== 'number' || pass.exp + graceSeconds < Date.now() / 1000) return null;
   // Still the owner's Brick, still allowed to use this GitHub: a pass outlives none of these
   const bot = await prisma.bot.findUnique({ where: { id: pass.botId }, select: { ownerId: true, roomId: true, deletedAt: true } });
   if (!bot || bot.ownerId !== pass.ownerId || bot.roomId !== null || bot.deletedAt !== null) return null;
@@ -108,20 +114,33 @@ export function readRelayPath(parts: string[]): RelayTarget | null {
  * A request body read as it streams, stopping as soon as it passes `max` bytes: null then, and the rest is never read. A chunked
  * request says nothing of its size up front, so its Content-Length cannot be trusted to say it.
  */
-export async function readCapped(stream: ReadableStream<Uint8Array> | null, max: number): Promise<Buffer | null> {
+export async function readCapped(stream: ReadableStream<Uint8Array> | null, max: number, timeoutMs = UPLOAD_MS): Promise<Buffer | null | 'late'> {
   if (!stream) return Buffer.alloc(0);
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > max) {
-      reader.cancel().catch(() => undefined);
-      return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<'late'>((resolve) => {
+    timer = setTimeout(() => resolve('late'), timeoutMs);
+  });
+  try {
+    for (;;) {
+      const next = await Promise.race([reader.read(), late]);
+      if (next === 'late') {
+        reader.cancel().catch(() => undefined);
+        return 'late';
+      }
+      const { done, value } = next;
+      if (done) break;
+      size += value.byteLength;
+      if (size > max) {
+        reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } finally {
+    clearTimeout(timer);
   }
   return Buffer.concat(chunks, size);
 }

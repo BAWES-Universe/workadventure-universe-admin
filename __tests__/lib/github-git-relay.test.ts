@@ -240,7 +240,17 @@ describe('reading a git address and a push', () => {
         controller.close();
       },
     });
-    expect([...((await readCapped(short, 10)) ?? [])]).toEqual([1, 2, 3]);
+    expect([...((await readCapped(short, 10)) as Buffer)]).toEqual([1, 2, 3]);
+    // An upload that stalls is given up after its time, never waited on for ever
+    let stopped = false;
+    const stalled = new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => undefined),
+      cancel() {
+        stopped = true;
+      },
+    });
+    expect(await readCapped(stalled, 10, 50)).toBe('late');
+    expect(stopped).toBe(true);
     expect((await readCapped(null, 10))?.length).toBe(0);
   });
 

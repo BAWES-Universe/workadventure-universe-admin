@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { checkGitPass, MAX_PUSH_BYTES, readCapped, readRelayPath, relayGit } from '@/lib/github/git-relay';
+import { checkGitPass, MAX_PUSH_BYTES, readCapped, readRelayPath, relayGit, UPLOAD_GRACE_SECONDS } from '@/lib/github/git-relay';
 
 export const runtime = 'nodejs';
 
@@ -25,11 +25,13 @@ async function handle(request: NextRequest, { params }: Params): Promise<NextRes
     const declared = Number(request.headers.get('content-length') ?? '0');
     if (declared > MAX_PUSH_BYTES) return plain('This push is too big for Universe to pass on.', 413);
     // Read as it streams and stopped past the limit: a chunked push declares no length
-    body = await readCapped(request.body, MAX_PUSH_BYTES);
-    if (!body) return plain('This push is too big for Universe to pass on.', 413);
-    // A slow upload may outlast the pass, or the owner may have turned GitHub off for this Brick meanwhile: checked again before
-    // anything goes to GitHub
-    pass = await checkGitPass(request.headers.get('authorization'));
+    const read = await readCapped(request.body, MAX_PUSH_BYTES);
+    if (read === 'late') return plain('This push took too long to upload. Try again.', 408);
+    if (!read) return plain('This push is too big for Universe to pass on.', 413);
+    body = read;
+    // The owner may have turned GitHub off for this Brick while it uploaded: checked again before anything goes to GitHub. A pass
+    // that was good when the upload started and ran out during it still counts (the upload itself is limited to UPLOAD_MS).
+    pass = await checkGitPass(request.headers.get('authorization'), UPLOAD_GRACE_SECONDS);
     if (!pass) return needPass();
   }
   const url = new URL(request.url);
