@@ -52,8 +52,11 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
         }
         if (Date.now() < until) timer.current = setTimeout(poll, POLL_MS);
         else {
+          // Twenty minutes without an answer: said plainly, never a silent end. The order may still be counted later.
           busy.current = false;
-          tell('checking');
+          setResume(null);
+          setLine(WORDS.cant_confirm);
+          tell('cant_confirm');
         }
       };
       timer.current = setTimeout(poll, POLL_MS);
