@@ -8,7 +8,8 @@ import { readModels, type VoiceModel } from '@/lib/voice-providers';
  * "Load models" for a voice key (#749): one free, authenticated call to the company with the pasted key (the `check` of its
  * catalog entry, lib/voice-key-companies.ts), to see that the company accepts it. Nothing is transcribed or spoken, so nothing is
  * billed. The key goes only in that one header to the company's own fixed address, and is never logged or returned. The models
- * shown are the ones the server's own providers for that company list, so a model id is exactly what the bot server calls.
+ * shown are the ones the company itself lists for the key where it has a list (the catalog's `modelList`), otherwise the ones the
+ * server's own providers for that company list.
  */
 
 /** How long the company has to answer. */
@@ -137,9 +138,39 @@ export async function loadVoiceKeyModels(adapter: unknown, apiKey: unknown, enab
   if (verdict === 'unreachable') return { ok: false, reason: 'unreachable', message: `Couldn’t reach ${company.label}. Try again in a moment.` };
   // Its model is typed as the person named it, once the company accepted the key
   if (company.account?.typedModel) return { ok: true, models: [], typed: true };
-  const models = await serverVoiceModels(company.adapter);
+  const models = await keyVoiceModels(company, key);
   if (models.length === 0) return { ok: false, reason: 'no-models', message: `${company.label} has no models set up here yet.` };
   return { ok: true, models };
+}
+
+/**
+ * The models a person's own key lists: for each job the company lists models for (its catalog `modelList`), the ones the company
+ * itself lists for this key, read with the same key (one free GET per job, nothing heard or spoken). A job with no list, or a list
+ * that can't be read right now, gives what the server's own providers list for that job, or the catalog's starting models.
+ */
+async function keyVoiceModels(company: VoiceKeyCompanyInfo, key: string): Promise<VoiceModel[]> {
+  const listedJobs = companyJobs(company).filter((job) => company.jobs[job]?.modelList);
+  const [server, listed] = await Promise.all([serverVoiceModels(company.adapter), Promise.all(listedJobs.map((job) => listCompanyModels(company, key, job)))]);
+  const fromCompany = new Map<VoiceModel['kind'], VoiceModel[]>();
+  listedJobs.forEach((job, index) => {
+    const models = listed[index];
+    // The short line about each model is for an operator choosing; a key's list keeps the id, label and job
+    if (models) fromCompany.set(job, models.map(({ id, label, kind }) => ({ id, ...(label ? { label } : {}), kind })));
+  });
+  if (fromCompany.size === 0) return server;
+  // The server's list keeps its order, with each listed job's models swapped for the company's own where that job first comes up
+  const models: VoiceModel[] = [];
+  const placed = new Set<VoiceModel['kind']>();
+  for (const model of server) {
+    const own = fromCompany.get(model.kind);
+    if (!own) models.push(model);
+    else if (!placed.has(model.kind)) {
+      placed.add(model.kind);
+      models.push(...own);
+    }
+  }
+  for (const [kind, own] of fromCompany) if (!placed.has(kind)) models.push(...own);
+  return models;
 }
 
 /** The most models one company's list may give: more is not a list a person can tick through. */

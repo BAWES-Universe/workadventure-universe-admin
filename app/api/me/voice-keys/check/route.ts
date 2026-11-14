@@ -19,8 +19,8 @@ const STATUS = { refused: 422, unreachable: 502, 'bad-request': 400, 'no-models'
 /**
  * POST /api/me/voice-keys/check { adapter, apiKey, address?, region? } - "Load models" for a voice key (#749): one free, authenticated call to the
  * company with the pasted key, to see that it accepts it. Nothing is saved, transcribed or spoken, so nothing is billed, and the
- * key is never logged or returned. Answers 200 `{ ok: true, models }`, the models the server's own providers for that company list
- * (`[{ id, label?, kind: "recognition" | "speech" | "talk" }]`, each kind and id once; none and `typed: true` for a company whose
+ * key is never logged or returned. Answers 200 `{ ok: true, models }`: for each job the company lists models for, the ones it lists
+ * for this key; otherwise the ones the server's own providers for that company list (`[{ id, label?, kind: "recognition" | "speech" | "talk" }]`, each kind and id once; none and `typed: true` for a company whose
  * model is typed, like an Azure deployment, checked on the person's own `address`), or `{ error }` with a plain sentence: 422 the company
  * didn't accept the key, 502 it couldn't be reached (timeout or any other answer), 400 the company or key isn't usable, 409 the
  * company has no models set up, 429 too many tries (the same limit as the text keys' checks).
