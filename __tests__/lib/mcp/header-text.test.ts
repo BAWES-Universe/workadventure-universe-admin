@@ -9,7 +9,7 @@ jest.mock('@/lib/mcp/outbound-guard', () => ({
 jest.mock('@/lib/encryption', () => ({ decryptApiKey: (value: string) => value.replace('encrypted:', '') }));
 
 import { headerProblem, unsendableCharacter } from '@/lib/mcp/header-text';
-import { createMcpServerSchema } from '@/lib/mcp/server-input';
+import { createMcpServerSchema, unsendableIssueMessage } from '@/lib/mcp/server-input';
 import { testMcpConnection } from '@/lib/mcp/test-connection';
 
 const fetchBefore = global.fetch;
@@ -54,6 +54,13 @@ describe('adding an app', () => {
   it('refuses an extra header value with an em dash and says which header', () => {
     const result = createMcpServerSchema.safeParse({ ...input, headers: { 'X-Note': 'a — b' } });
     expect(!result.success && result.error.issues[0]).toMatchObject({ path: ['headers'], message: expect.stringContaining('“X-Note”') });
+  });
+
+  it('gives routes the sentence to put in `error`, and nothing for other refusals', () => {
+    const bad = createMcpServerSchema.safeParse({ ...input, authType: 'api-key', authConfig: 'abc \u2014 def' });
+    expect(!bad.success && unsendableIssueMessage(bad.error.issues)).toContain('The key has an em dash');
+    const other = createMcpServerSchema.safeParse({ ...input, authType: 'api-key' });
+    expect(!other.success && unsendableIssueMessage(other.error.issues)).toBeNull();
   });
 
   it('takes a plain key', () => {

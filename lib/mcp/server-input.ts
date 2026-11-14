@@ -119,3 +119,9 @@ export const createMcpServerSchema = z.object({
   }
 });
 
+
+/** The sentence of a key, token or extra header with text that cannot be sent, when the schema refused the input for that: routes put it in `error`, not only in `details`. */
+export function unsendableIssueMessage(issues: readonly { code: string; message: string; params?: unknown }[]): string | null {
+  const found = issues.find((issue) => issue.code === 'custom' && (issue.params as { unsendable?: boolean } | undefined)?.unsendable);
+  return found ? found.message : null;
+}

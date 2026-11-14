@@ -9,7 +9,7 @@ import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
 import { z } from 'zod';
 import { corsHeaders } from '@/lib/cors';
-import { createMcpServerSchema } from '@/lib/mcp/server-input';
+import { createMcpServerSchema, unsendableIssueMessage } from '@/lib/mcp/server-input';
 import { WITH_CONNECTION, effectiveServer } from '@/lib/app-connections';
 
 export const runtime = 'nodejs';
@@ -325,9 +325,9 @@ export async function POST(
     }
     if (error instanceof z.ZodError) {
       // A key, token or extra header with text that cannot be sent is named in words: the schema found it on the trimmed, typed input
-      const unsendable = error.issues.find((issue) => issue.code === 'custom' && (issue as { params?: { unsendable?: boolean } }).params?.unsendable);
+      const unsendable = unsendableIssueMessage(error.issues);
       if (unsendable) {
-        return NextResponse.json({ error: unsendable.message }, { status: 400, headers: corsHeaders(request) });
+        return NextResponse.json({ error: unsendable }, { status: 400, headers: corsHeaders(request) });
       }
       return NextResponse.json(
         { error: 'Invalid input data', details: error.issues },
