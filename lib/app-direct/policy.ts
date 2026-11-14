@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { definitionSchema, hashDefinition, type Definition } from '@/lib/app-direct/definition';
 import { headingOf } from '@/lib/app-direct/describe';
@@ -26,7 +27,7 @@ export function toolNameOf(definition: Pick<Definition, 'service' | 'short'>, op
 export const fingerprintOf = (definitionHash: string, operationId: string): string => createHash('sha256').update(`${definitionHash}:${operationId}`).digest('hex');
 
 /** Makes the grant's tools match the definition it uses. Cheap when nothing changed. Returns true when something did. */
-export async function ensureKeyAppTools(serverId: string): Promise<boolean> {
+export async function ensureKeyAppTools(serverId: string, retried = false): Promise<boolean> {
   const server = await prisma.botMcpServer.findUnique({ where: { id: serverId }, include: { connection: true, tools: { select: { id: true, name: true, fingerprint: true, confirmedAt: true } } } });
   const connection = server?.connection;
   if (!server || !connection || connection.kind !== 'direct' || !connection.definition) return false;
@@ -39,6 +40,7 @@ export async function ensureKeyAppTools(serverId: string): Promise<boolean> {
   const upToDate = wanted.length === server.tools.length && wanted.every((entry) => byName.get(entry.name)?.fingerprint === entry.fingerprint && (!entry.operation.verified || byName.get(entry.name)?.confirmedAt));
   if (upToDate) return false;
 
+  try {
   await prisma.$transaction(async (tx) => {
     const now = new Date();
     for (const entry of wanted) {
@@ -56,5 +58,10 @@ export async function ensureKeyAppTools(serverId: string): Promise<boolean> {
     if (gone.length > 0) await tx.botMcpTool.deleteMany({ where: { id: { in: gone.map((tool) => tool.id) } } });
     await tx.botMcpServer.update({ where: { id: serverId }, data: { legacyText: false, policyRevision: { increment: 1 } } });
   });
+  } catch (error) {
+    // Two calls made the same tools at once and the other one won: look again at what is there now and make only what is still missing
+    if (!retried && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return ensureKeyAppTools(serverId, true);
+    throw error;
+  }
   return true;
 }

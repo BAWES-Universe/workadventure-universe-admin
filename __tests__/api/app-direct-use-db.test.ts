@@ -35,6 +35,7 @@ import { createBrick } from '@/lib/brick-create';
 import { disconnect, removeGrant, grantToBrick } from '@/lib/app-connections';
 import { openKeyForm, submitKey, readKeyForm } from '@/lib/app-direct/connect';
 import { runKeyApp, keyAppsOf } from '@/lib/app-direct/use';
+import { ensureKeyAppTools } from '@/lib/app-direct/policy';
 import { GET as listKeyApps } from '@/app/api/bots/[id]/key-apps/route';
 import { POST as callKeyApp } from '@/app/api/bots/[id]/key-apps/[serverId]/call/route';
 import { POST as askForKey } from '@/app/api/bots/[id]/app-key-forms/route';
@@ -214,6 +215,15 @@ run('using a key app, in a real database', () => {
     const replace = await openKeyForm({ ownerId: sara, service: 'tap' });
     await submitKey({ requestId: replace.id, ownerId: sara, key: `sk_test_${randomUUID().replace(/-/g, '')}` }, okCheck);
     expect((await toolsOf(saraBrick, grant.id)).policyRevision).toBe(policy.policyRevision);
+  });
+
+  it('makes the tools once when two calls ask at the same moment, and neither fails', async () => {
+    const id = await connectTap();
+    const grant = (await grantOf(saraBrick, id))!;
+    await prisma.botMcpTool.deleteMany({ where: { serverId: grant.id } });
+    const [first, second, third] = await Promise.all([ensureKeyAppTools(grant.id), ensureKeyAppTools(grant.id), ensureKeyAppTools(grant.id)]);
+    expect([first, second, third].some(Boolean)).toBe(true);
+    expect((await prisma.botMcpTool.findMany({ where: { serverId: grant.id } })).map((tool) => tool.name).sort()).toEqual(['tap_lookuppayment', 'tap_makepaymentlink']);
   });
 
   it('keeps a custom app’s operations waiting to be confirmed, and forgets a confirmation when the definition changes', async () => {
