@@ -224,6 +224,9 @@ export async function pickTemplate(templateId: string, adminId: string, picked: 
 
 /* ------------------------------ routines that arrive switched off ------------------------------ */
 
+/** What a routine holds until its owner has a time zone kept. */
+export const PLACEHOLDER_ZONE = 'UTC';
+
 /**
  * Gives a Brick the routines a template came with, SWITCHED OFF: paused by the template, nothing due, so none can run until
  * the owner sets them up and turns them on (see templateRoutineGate). They count toward the person's goals and tasks like any
@@ -233,7 +236,7 @@ export async function pickTemplate(templateId: string, adminId: string, picked: 
 export async function bringRoutines(tx: Prisma.TransactionClient, botId: string, ownerId: string, routines: Routine[], limits: { itemsPerPerson: number; shortestRepeat: number }): Promise<{ added: number; leftOut: number }> {
   if (routines.length === 0) return { added: 0, leftOut: 0 };
   const kept = (await tx.userPreference.findUnique({ where: { userId_key: { userId: ownerId, key: TIME_ZONE_KEY } }, select: { value: true } }))?.value;
-  const timeZone = isTimeZone(kept) ? kept : 'UTC';
+  const timeZone = isTimeZone(kept) ? kept : PLACEHOLDER_ZONE;
   const have = await tx.brickItem.count({ where: { ownerId, parentId: null, state: { in: ['on', 'paused'] } } });
   const room = Math.max(0, limits.itemsPerPerson - have);
   let added = 0;
@@ -269,7 +272,7 @@ export type Gate = { ok: true; timeZone: string } | { ok: false; status: 409 | 4
  * their clock, never the maker's), and what the template said the Brick needs is there. Asked inside the transaction of the
  * item's own change. This is the only door a template's routine goes through to run.
  */
-export async function templateRoutineGate(tx: Prisma.TransactionClient, botId: string, ownerId: string): Promise<Gate> {
+export async function templateRoutineGate(tx: Prisma.TransactionClient, botId: string, ownerId: string, routineZone: string = PLACEHOLDER_ZONE): Promise<Gate> {
   const kept = (await tx.userPreference.findUnique({ where: { userId_key: { userId: ownerId, key: TIME_ZONE_KEY } }, select: { value: true } }))?.value;
   if (!isTimeZone(kept)) return { ok: false, status: 422, code: 'needs_time_zone', error: 'No time zone is kept for this person yet' };
   const use = await tx.brickTemplateUse.findUnique({ where: { botId }, select: { templateId: true, versionNumber: true } });
@@ -278,7 +281,8 @@ export async function templateRoutineGate(tx: Prisma.TransactionClient, botId: s
     const missing = (await readyOnBrick(botId, asNeeds(version?.needs), tx)).filter((need) => need.required && !need.ready);
     if (missing.length > 0) return { ok: false, status: 409, code: 'needs_setup', error: `Set up ${missing.map((need) => need.label).join(', ')} first` };
   }
-  return { ok: true, timeZone: kept };
+  // The placeholder is replaced by the owner's zone; a zone they set on the routine themselves stays
+  return { ok: true, timeZone: routineZone === PLACEHOLDER_ZONE ? kept : routineZone };
 }
 
 /* ------------------------------ using one ------------------------------ */

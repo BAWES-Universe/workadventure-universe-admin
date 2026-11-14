@@ -300,6 +300,20 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ state: 'on', pausedBy: null, timeZone: 'Asia/Kuwait', nextDueAt: expect.any(Date) });
     });
 
+    it('keep a time zone the owner set on the routine itself; only the placeholder is replaced by their kept zone', async () => {
+      const item = await routine(brickId, sara.id);
+      const id = await share({ routines: [item.id] });
+      as(omar);
+      const body = await remember(await makeFrom(id));
+      const botId = body.brick.id;
+      const itemId = (await prisma.brickItem.findFirstOrThrow({ where: { botId } })).id;
+      await keepZone(omar);
+      const changed = await changeItem(botId, itemId, { userId: omar.email, action: 'change', change: { timeZone: 'Asia/Dubai' } });
+      expect(changed.ok).toBe(true);
+      expect((await changeItem(botId, itemId, { userId: omar.email, action: 'resume' })).ok).toBe(true);
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ state: 'on', timeZone: 'Asia/Dubai' });
+    });
+
     it('Done is not a way around the gate: a routine marked done while still off cannot be reopened or snoozed on until it is set up', async () => {
       const gmail = await connectGmail(sara);
       await prisma.botMcpServer.create({ data: { botId: brickId, name: 'Gmail', serverUrl: gmail.serverUrl, connectionId: gmail.id } });

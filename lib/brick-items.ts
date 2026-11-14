@@ -412,7 +412,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         // and what the template said the Brick needs is there. It is read on their clock, never the maker's.
         let zone = row.timeZone;
         if (row.pausedBy === 'template') {
-          const gate = await templateRoutineGate(tx, row.botId, ownerId);
+          const gate = await templateRoutineGate(tx, row.botId, ownerId, row.timeZone);
           if (!gate.ok) return gate;
           zone = gate.timeZone;
         }
@@ -437,7 +437,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (refused) return refused;
         let zone = row.timeZone;
         if (row.pausedBy === 'template') {
-          const gate = await templateRoutineGate(tx, row.botId, ownerId);
+          const gate = await templateRoutineGate(tx, row.botId, ownerId, row.timeZone);
           if (!gate.ok) return gate;
           zone = gate.timeZone;
         }
@@ -462,7 +462,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
           const refused = await comingBackProblem(tx, row, ownerId, limits);
           if (refused) return refused;
           if (row.pausedBy === 'template') {
-            const gate = await templateRoutineGate(tx, row.botId, ownerId);
+            const gate = await templateRoutineGate(tx, row.botId, ownerId, row.timeZone);
             if (!gate.ok) return gate;
           }
         }
