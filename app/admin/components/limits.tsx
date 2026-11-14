@@ -1005,6 +1005,79 @@ export function voiceServerLimits(values: VoiceLimits, fair: { signedIn: number;
         { value: 5, label: '5 replies', meaning: fiveGuestReplies(guestVoiceLeft) },
       ],
     }),
+    // Voice notes (game: every bot hears voice notes): what Universe AI hears, apart from talking live
+    own('longestNoteSeconds', {
+      id: 'longestNoteSeconds',
+      label: 'Longest voice note',
+      hint: 'The longest voice note a bot listens to. A longer one is refused before anything is paid, with “Send a shorter one.”',
+      unit: 'seconds',
+      name: secondsLabel,
+      steps: [
+        { value: 60, label: '1 minute', meaning: 'Quick notes only.' },
+        { value: 180, label: '3 minutes', meaning: 'Most notes fit.' },
+        { value: 300, label: '5 minutes', meaning: 'Room for a long thought.' },
+      ],
+    }),
+    own('noteMinutesPerPerson', {
+      id: 'noteMinutesPerPerson',
+      label: 'Voice notes heard for a person',
+      hint: 'Minutes of voice notes Universe AI hears for one person in a day, from every bot together. A bot on its maker’s own listening key doesn’t count.',
+      unit: 'minutes',
+      name: (value) => (value === 0 ? 'None' : minutesLabel(value)),
+      steps: [
+        { value: 10, label: '10 minutes', meaning: 'A few short notes a day.' },
+        { value: 30, label: '30 minutes', meaning: 'Plenty for everyday notes.' },
+        { value: 60, label: '1 hour', meaning: 'For people who talk more than they type.' },
+      ],
+    }),
+    own('guestNoteMinutesPerGuest', {
+      id: 'guestNoteMinutesPerGuest',
+      label: 'Voice notes heard for a guest',
+      hint: 'Minutes of voice notes the Brick for guests hears for someone who isn’t signed in, in a day.',
+      unit: 'minutes',
+      name: (value) => (value === 0 ? 'None' : minutesLabel(value)),
+      steps: [
+        { value: 0, label: 'None', meaning: 'Guests type to the Brick.' },
+        { value: 5, label: '5 minutes', meaning: 'A taste of voice notes.' },
+        { value: 10, label: '10 minutes', meaning: 'A short conversation.' },
+      ],
+    }),
+    own('guestNoteMinutesPerUniverse', {
+      id: 'guestNoteMinutesPerUniverse',
+      label: 'Voice notes heard for a universe’s guests',
+      hint: 'Minutes of voice notes the Brick for guests hears for all the guests of one universe together, in a day.',
+      unit: 'minutes',
+      name: (value) => (value === 0 ? 'None' : minutesLabel(value)),
+      steps: [
+        { value: 60, label: '1 hour', meaning: 'A quiet universe.' },
+        { value: 120, label: '2 hours', meaning: 'A busy day of visitors.' },
+        { value: 480, label: '8 hours', meaning: 'A very busy universe.' },
+      ],
+    }),
+    own('notesAtOnce', {
+      id: 'notesAtOnce',
+      label: 'Voice notes heard at once',
+      hint: 'How many voice notes Universe AI hears at the same moment, for everyone. One more waits and is told to try again.',
+      unit: 'notes',
+      name: (value) => `${value} ${value === 1 ? 'note' : 'notes'}`,
+      steps: [
+        { value: 4, label: '4 notes', meaning: 'A small server.' },
+        { value: 8, label: '8 notes', meaning: 'Room for a busy hour.' },
+        { value: 20, label: '20 notes', meaning: 'A large server.' },
+      ],
+    }),
+    own('noteMinutesPerHour', {
+      id: 'noteMinutesPerHour',
+      label: 'Voice notes heard in an hour',
+      hint: 'Minutes of voice notes Universe AI hears in an hour, for everyone together. It keeps new guest ids from getting around the limits above.',
+      unit: 'minutes',
+      name: minutesLabel,
+      steps: [
+        { value: 120, label: '2 hours', meaning: 'A small server.' },
+        { value: 300, label: '5 hours', meaning: 'Room for a busy hour.' },
+        { value: 1200, label: '20 hours', meaning: 'A large server.' },
+      ],
+    }),
   ];
 }
 

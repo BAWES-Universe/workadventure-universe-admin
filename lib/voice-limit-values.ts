@@ -23,6 +23,18 @@ export interface VoiceLimits {
   followUpSeconds: number;
   /** Voices listed first when a maker gives a bot a voice; the rest are behind "All voices". */
   voicesShownFirst: number;
+  /** The longest voice note a bot hears, in seconds. A longer one is refused before anything is paid, never trimmed. */
+  longestNoteSeconds: number;
+  /** Minutes of voice notes Universe AI hears for one person in a day, from every bot together (game: every bot hears voice notes). */
+  noteMinutesPerPerson: number;
+  /** Minutes of voice notes the Brick for guests hears for one guest in a day. */
+  guestNoteMinutesPerGuest: number;
+  /** Minutes of voice notes the Brick for guests hears for all the guests of one universe in a day. */
+  guestNoteMinutesPerUniverse: number;
+  /** Voice notes Universe AI hears at the same moment, for everyone on this server. */
+  notesAtOnce: number;
+  /** Minutes of voice notes Universe AI hears in an hour, for everyone on this server. */
+  noteMinutesPerHour: number;
 }
 
 export const VOICE_LIMITS_RECOMMENDED: VoiceLimits = {
@@ -34,6 +46,12 @@ export const VOICE_LIMITS_RECOMMENDED: VoiceLimits = {
   listenMinutesPerDay: 60,
   followUpSeconds: 30,
   voicesShownFirst: 5,
+  longestNoteSeconds: 300,
+  noteMinutesPerPerson: 30,
+  guestNoteMinutesPerGuest: 10,
+  guestNoteMinutesPerUniverse: 120,
+  notesAtOnce: 8,
+  noteMinutesPerHour: 300,
 };
 
 /** The values that can be saved: anything a person might mean, nothing that would break a turn. */
@@ -51,6 +69,12 @@ export const VOICE_RANGES: Record<keyof VoiceLimits, Range> = {
   listenMinutesPerDay: { min: 0, max: 1_440 },
   followUpSeconds: { min: 5, max: 600 },
   voicesShownFirst: { min: 1, max: 20 },
+  longestNoteSeconds: { min: 10, max: 1_800 },
+  noteMinutesPerPerson: { min: 0, max: 1_440 },
+  guestNoteMinutesPerGuest: { min: 0, max: 1_440 },
+  guestNoteMinutesPerUniverse: { min: 0, max: 100_000 },
+  notesAtOnce: { min: 1, max: 1_000 },
+  noteMinutesPerHour: { min: 1, max: 100_000 },
 };
 
 const fits = (value: unknown, range: Range): value is number =>

@@ -8,9 +8,10 @@ import { GET as getBrick } from '@/app/api/guest-brick/route';
 import { POST as claimReply } from '@/app/api/guest-brick/replies/route';
 import { PATCH as finishReply } from '@/app/api/guest-brick/replies/[turnId]/route';
 import { POST as takeChat } from '@/app/api/bricks/default/guest-chat/route';
+import { POST as checkHandover } from '@/app/api/guest-brick/handover/route';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
-import { GuestBrickError, claimGuestBrickReply, finishGuestBrickReply, guestBrickFor, takeCarriedGuestChat } from '@/lib/guest-brick';
+import { GuestBrickError, claimGuestBrickReply, finishGuestBrickReply, guestBrickFor, guestChatHandedTo, takeCarriedGuestChat } from '@/lib/guest-brick';
 
 jest.mock('@/lib/db', () => ({ prisma: { user: { findUnique: jest.fn() } } }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -21,6 +22,7 @@ jest.mock('@/lib/guest-brick', () => ({
   claimGuestBrickReply: jest.fn(),
   finishGuestBrickReply: jest.fn(),
   takeCarriedGuestChat: jest.fn(),
+  guestChatHandedTo: jest.fn(),
 }));
 
 const user = prisma.user as unknown as { findUnique: jest.Mock };
@@ -29,6 +31,7 @@ const served = guestBrickFor as jest.Mock;
 const claim = claimGuestBrickReply as jest.Mock;
 const finish = finishGuestBrickReply as jest.Mock;
 const take = takeCarriedGuestChat as jest.Mock;
+const handed = guestChatHandedTo as jest.Mock;
 
 const TOKEN = 'bot-server-secret';
 const asBotServer = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
@@ -48,6 +51,7 @@ describe('what the bot server calls', () => {
     ['reading the Brick for guests', () => getBrick(call('/api/guest-brick?roomUrl=x', 'GET', {}))],
     ['asking for a reply', () => claimReply(call('/api/guest-brick/replies', 'POST', {}, { guestId: 'g', turnId: 't' }))],
     ['closing a turn', () => finishReply(call('/api/guest-brick/replies/t', 'PATCH', {}, { failed: true }), { params: Promise.resolve({ turnId: 't' }) })],
+    ['checking a hand-over', () => checkHandover(call('/api/guest-brick/handover', 'POST', {}, { guestId: 'g', userUuid: 'u' }))],
   ];
 
   it.each(doors)('turns down anyone without the service token: %s', async (_name, door) => {
@@ -104,6 +108,14 @@ describe('what the bot server calls', () => {
     expect(finish).toHaveBeenCalledWith('t1', { failed: true });
     finish.mockRejectedValueOnce(new GuestBrickError('Reply not found', 404));
     expect((await finishReply(call('/api/guest-brick/replies/zz', 'PATCH', asBotServer, {}), { params: Promise.resolve({ turnId: 'zz' }) })).status).toBe(404);
+  });
+
+  it("says whether a guest's chat was handed to this person, for copying their uploads (plan v3)", async () => {
+    handed.mockResolvedValueOnce({ handed: true });
+    const response = await checkHandover(call('/api/guest-brick/handover', 'POST', asBotServer, { guestId: 'g1', userUuid: 'uuid-1' }));
+    expect(await response.json()).toEqual({ handed: true });
+    expect(handed).toHaveBeenCalledWith('g1', 'uuid-1');
+    expect(handed).toHaveBeenCalledTimes(1);
   });
 
   it('says 500 without the details when something breaks', async () => {

@@ -2501,3 +2501,80 @@ model ComputerEffect {
   @@unique([jobId, effectKey])
   @@map("computer_effects")
 }
+
+// A voice note a bot hears (game: every bot hears voice notes): one row per turn, so a note is reserved, heard and answered once
+// however often it is retried, and two bot servers never run the same stage. `seconds` is the note's length the bot server
+// measured before anything was paid, and is what the minutes count; hearing that was done stays counted when a later step
+// fails, and only a reservation that was never used is released. Never words or audio, except the answer and its words for a
+// lost reply: encrypted, for 15 minutes at most, and gone once the device has them.
+model VoiceNoteTurn {
+  id           String    @id @default(uuid())
+  // "bot" for a bot's chat (direct messages, nearby chat), "guest-brick" for the Brick for guests
+  scope        String    @db.VarChar(16)
+  // "person:<account id>" for a signed-in person, "guest:<guest id>" for a guest
+  personKey    String    @map("person_key") @db.VarChar(300)
+  // The bot's id, or "gb:<universe key>" for the Brick for guests
+  target       String    @db.VarChar(300)
+  botId        String?   @map("bot_id") @db.VarChar(64)
+  // The universe the Brick for guests was in ("outside" for none); null for a bot
+  universeKey  String?   @map("universe_key") @db.VarChar(64)
+  // The device's id for the turn: a new message sent on purpose has a new one
+  clientTurnId String    @map("client_turn_id") @db.VarChar(255)
+  // A keyed hash of what the turn holds: the same id with other contents is refused
+  fingerprint  String    @db.VarChar(64)
+  // "owner" or "universe-ai", fixed when the note is reserved
+  payer        String    @db.VarChar(16)
+  providerId   String?   @map("provider_id") @db.VarChar(64)
+  seconds      Int
+  heardSeconds Int?      @map("heard_seconds")
+  // reserved, hearing, heard, answering, answered, delivered, failed, uncertain
+  state        String    @db.VarChar(16)
+  // The stage a bot server holds, its generation (a late one is fenced out) and until when
+  generation   Int       @default(0)
+  leaseUntil   DateTime? @map("lease_until")
+  // The provider's own ids for the hearing (file, transcription), to look it up instead of sending it again
+  providerRefs Json?     @map("provider_refs")
+  // A reservation that was never used, given back
+  released     Boolean   @default(false)
+  costMicros   Int?      @map("cost_micros")
+  // The words heard and the answer, encrypted per turn, until the device has them or `bufferUntil`
+  buffer       String?   @db.Text
+  bufferUntil  DateTime? @map("buffer_until")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@unique([scope, personKey, target, clientTurnId])
+  @@index([personKey, createdAt])
+  @@index([target, createdAt])
+  @@index([universeKey, createdAt])
+  @@index([payer, createdAt])
+  // Notes being heard now (reserved or hearing), counted under the reservations' lock: few rows, found without a scan
+  @@index([payer, state])
+  @@index([bufferUntil])
+  @@map("voice_note_turns")
+}
+
+// A file or transcription left at a listening provider after a voice note was heard (game: every bot hears voice notes): deleted
+// by the bot server until the provider confirms it is gone, across restarts. Names the provider, never its key.
+model VoiceNoteCleanup {
+  id         String    @id @default(uuid())
+  providerId String    @map("provider_id") @db.VarChar(64)
+  region     String?   @db.VarChar(50)
+  // "file" or "transcription": the provider deletes each on its own
+  kind       String    @db.VarChar(16)
+  objectId   String    @map("object_id") @db.VarChar(255)
+  // pending, done, orphaned (the provider or its key is gone)
+  state      String    @default("pending") @db.VarChar(16)
+  attempts   Int       @default(0)
+  nextAt     DateTime  @default(now()) @map("next_at")
+  leaseUntil DateTime? @map("lease_until")
+  lastStatus Int?      @map("last_status")
+  // Told to the engineers once, when a job is still not done after a day
+  overdue    Boolean   @default(false)
+  createdAt  DateTime  @default(now()) @map("created_at")
+  doneAt     DateTime? @map("done_at")
+
+  @@unique([providerId, kind, objectId])
+  @@index([state, nextAt])
+  @@map("voice_note_cleanups")
+}

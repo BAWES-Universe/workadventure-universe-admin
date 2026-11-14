@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
 import { prisma } from '@/lib/db';
-import { adoptGuestChat, claimGuestBrickReply, finishGuestBrickReply, guestBrickFor, takeCarriedGuestChat } from '@/lib/guest-brick';
+import { adoptGuestChat, claimGuestBrickReply, finishGuestBrickReply, guestBrickFor, guestChatHandedTo, takeCarriedGuestChat } from '@/lib/guest-brick';
 import { ensureDefaultBrick } from '@/lib/brick-default';
 import { checkReplyAllowance } from '@/lib/reply-limits';
 import { saveServerLimits } from '@/lib/bot-limits';
@@ -245,6 +245,24 @@ run('the Brick for guests, in a real database', () => {
       const asks = await Promise.all(Array.from({ length: 6 }, () => takeCarriedGuestChat(noor.id, guestId)));
       expect(asks.filter((answer) => answer.carried)).toHaveLength(1);
       expect(await takeCarriedGuestChat(noor.id, guestId)).toEqual({ carried: false });
+    });
+
+    it("says a guest's chat was handed to the account that signed in as them, and to nobody else (their uploads go with it)", async () => {
+      const a = await universe('handed');
+      const rana = await person('rana-in');
+      const other = await person('rana-other');
+      const guestId = guest();
+      await claim(guestId, a.roomUrl);
+      expect(await guestChatHandedTo(guestId, rana.uuid)).toEqual({ handed: false });
+      await adoptGuestChat(guestId, rana.id);
+      expect(await guestChatHandedTo(guestId, rana.uuid)).toEqual({ handed: true });
+      // Still true after the device picked it up, so a carry that was cut off can finish
+      await takeCarriedGuestChat(rana.id, guestId);
+      expect(await guestChatHandedTo(guestId, rana.uuid)).toEqual({ handed: true });
+      expect(await guestChatHandedTo(guestId, other.uuid)).toEqual({ handed: false });
+      expect(await guestChatHandedTo(randomUUID(), rana.uuid)).toEqual({ handed: false });
+      expect(await guestChatHandedTo(guestId, 'nobody')).toEqual({ handed: false });
+      expect(await guestChatHandedTo(undefined, rana.uuid)).toEqual({ handed: false });
     });
 
     it('does nothing when the guest never talked to the Brick, or only had a reply that failed', async () => {

@@ -256,3 +256,16 @@ export async function takeCarriedGuestChat(userId: string, guestIdInput: unknown
     RETURNING "guest_key"`);
   return { carried: rows.length > 0 };
 }
+
+/**
+ * Whether a guest's chat was handed to the person with this uuid (plan v3 section 7): the bot server asks before it copies the
+ * guest's uploads into that person's own chat, so the uploads of a guest go only to the account that signed in as them.
+ */
+export async function guestChatHandedTo(guestIdInput: unknown, userUuidInput: unknown, now: Date = new Date()): Promise<{ handed: boolean }> {
+  if (typeof guestIdInput !== 'string' || !guestIdInput.trim() || typeof userUuidInput !== 'string' || !userUuidInput.trim()) return { handed: false };
+  const user = await prisma.user.findUnique({ where: { uuid: userUuidInput.trim().slice(0, 255) }, select: { id: true } });
+  if (!user) return { handed: false };
+  const since = await handoverWindow(now);
+  const handover = await prisma.guestBrickHandover.findUnique({ where: { guestKey: guestIdInput.trim().slice(0, 255) }, select: { userId: true, claimedAt: true } });
+  return { handed: !!handover && handover.userId === user.id && handover.claimedAt >= since };
+}
