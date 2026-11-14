@@ -2,7 +2,7 @@ import { createGunzip } from 'zlib';
 import { prisma } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { orbitBase } from '@/lib/github/app';
-import { gitHubToken, GITHUB_SOURCE, readGitHubAuth } from '@/lib/github/connection';
+import { gitHubToken, gitHubTokenRefused, GITHUB_SOURCE, readGitHubAuth } from '@/lib/github/connection';
 import type { FetchLike } from '@/lib/github/api';
 
 /**
@@ -18,6 +18,9 @@ export const GIT_PASS_SECONDS = 15 * 60;
 export const MAX_PUSH_BYTES = 200 * 1024 * 1024;
 /** The most of a gzipped push that is unpacked to read its ref updates: they come first, and the rest is passed on as it was. */
 const COMMANDS_MAX_BYTES = 1024 * 1024;
+/** How long GitHub has to start answering a git request: a push gets longer, GitHub answers it after taking the whole pack in. */
+const GITHUB_ANSWER_MS = 60_000;
+const GITHUB_PUSH_ANSWER_MS = 10 * 60_000;
 const ZERO_ID = /^0{40}$|^0{64}$/;
 
 interface GitPass {
@@ -238,14 +241,30 @@ export async function relayGit(
   if (input.contentEncoding) headers['Content-Encoding'] = input.contentEncoding;
   if (input.gitProtocol) headers['Git-Protocol'] = input.gitProtocol;
   headers.Accept = target.step === 'info/refs' ? '*/*' : `application/x-${target.step}-result`;
-  const upstream = await fetchImpl(`https://github.com/${target.repo}.git/${target.step}${query}`, {
-    method: input.method,
-    headers,
-    body: input.body ? new Uint8Array(input.body) : undefined,
-    // Never followed: a redirect would carry the token to another address
-    redirect: 'manual',
-  });
-  if (upstream.status === 401) return { status: 'reconnect' };
+  // GitHub must start answering in time; once it does, a long clone may take as long as it needs
+  const stop = new AbortController();
+  const timer = setTimeout(() => stop.abort(), target.step === 'git-receive-pack' ? GITHUB_PUSH_ANSWER_MS : GITHUB_ANSWER_MS);
+  let upstream: Response;
+  try {
+    upstream = await fetchImpl(`https://github.com/${target.repo}.git/${target.step}${query}`, {
+      method: input.method,
+      headers,
+      body: input.body ? new Uint8Array(input.body) : undefined,
+      // Never followed: a redirect would carry the token to another address
+      redirect: 'manual',
+      signal: stop.signal,
+    });
+  } catch (error) {
+    console.warn('[git relay] GitHub could not be reached', error);
+    return { status: 'unavailable' };
+  } finally {
+    clearTimeout(timer);
+  }
+  if (upstream.status === 401) {
+    // GitHub refused the token itself: the owner sees Reconnect in Apps
+    await gitHubTokenRefused(pass.connectionId);
+    return { status: 'reconnect' };
+  }
   const out = new Headers();
   for (const name of ['content-type', 'cache-control', 'expires', 'pragma']) {
     const value = upstream.headers.get(name);

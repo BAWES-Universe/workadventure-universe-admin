@@ -323,7 +323,20 @@ async function renewUnderLease(connectionId: string, fetchImpl: FetchLike): Prom
       return auth.expiresAt > now ? { status: 'ok', token: auth.accessToken, login: auth.login ?? null } : { status: 'unavailable' };
     }
     const renewed = withTokens(auth, answer, Date.now());
-    await prisma.appConnection.update({ where: { id: connectionId }, data: { authConfig: sealAuth(renewed) } });
+    // GitHub has already turned the old refresh token off: the new one must be kept, so the write is tried more than once.
+    // If it still fails, the new token works for this call and the next renewal asks for a new sign-in.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await prisma.appConnection.update({ where: { id: connectionId }, data: { authConfig: sealAuth(renewed) } });
+        break;
+      } catch (error) {
+        if (attempt >= 3) {
+          console.error('[github] Could not keep the renewed GitHub sign-in', error);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+      }
+    }
     return { status: 'ok', token: renewed.accessToken as string, login: renewed.login ?? null };
   } finally {
     await letGo();

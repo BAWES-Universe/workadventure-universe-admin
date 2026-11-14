@@ -68,9 +68,14 @@ export async function linkGitHub(
     default: {
       const params = (input.message.params ?? {}) as { name?: unknown; arguments?: unknown };
       if (typeof params.name !== 'string' || !isGitHubTool(params.name) || !input.callId) return { status: 'refused' };
-      if (!firstTime(`${input.connectionId}:${input.callId}`)) return { status: 'already_asked' };
+      const callKey = `${input.connectionId}:${input.callId}`;
+      if (!firstTime(callKey)) return { status: 'already_asked' };
       const token = await gitHubToken(input.connectionId, fetchImpl);
-      if (token.status === 'unavailable') return { status: 'unavailable' };
+      if (token.status === 'unavailable') {
+        // Nothing ran: the same call may be asked again
+        ran.delete(callKey);
+        return { status: 'unavailable' };
+      }
       if (token.status === 'reconnect') {
         return { status: 'done', answer: rpc(id, { content: [{ type: 'text', text: 'GitHub needs the owner to sign in again (Apps, GitHub, Reconnect).' }], isError: true }) };
       }

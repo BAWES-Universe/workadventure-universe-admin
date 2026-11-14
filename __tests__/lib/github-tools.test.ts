@@ -149,6 +149,28 @@ describe('what a Brick can do on GitHub', () => {
     expect(github.calls[0].body).toEqual({ merge_method: 'squash' });
   });
 
+  it('reads the latest 30 comments even when the last page holds only one', async () => {
+    const comment = (n: number) => ({ user: { login: 's' }, body: `c${n}`, created_at: '2026-11-14T00:00:00Z' });
+    const { impl, calls } = fakeGitHub([
+      ['GET', '/repos/acme/tools/issues/7', 200, { number: 7, title: 't', state: 'open', body: 'b', labels: [], user: { login: 's' }, html_url: 'https://github.com/acme/tools/issues/7', comments: 31 }],
+      ['GET', '/repos/acme/tools/issues/7/comments?per_page=30&page=1', 200, Array.from({ length: 30 }, (_, i) => comment(i + 1))],
+      ['GET', '/repos/acme/tools/issues/7/comments?per_page=30&page=2', 200, [comment(31)]],
+    ]);
+    const result = await runGitHubTool('ghu_x', 'github_get_issue', { repo: 'acme/tools', number: 7 }, impl);
+    const read = JSON.parse(result.text) as { comments: { body: string }[] };
+    expect(read.comments).toHaveLength(30);
+    expect(read.comments[0].body).toBe('c2');
+    expect(read.comments[29].body).toBe('c31');
+    expect(calls).toHaveLength(3);
+  });
+
+  it('clears an issue body when asked with an empty one', async () => {
+    const { impl, calls } = fakeGitHub([['PATCH', '/repos/acme/tools/issues/7', 200, { number: 7, state: 'open', html_url: 'u' }]]);
+    const result = await runGitHubTool('ghu_x', 'github_update_issue', { repo: 'acme/tools', number: 7, body: '' }, impl);
+    expect(result.isError).toBeFalsy();
+    expect(calls[0].body).toEqual({ body: '' });
+  });
+
   it('says plainly when GitHub no longer takes the sign-in', async () => {
     const github = fakeGitHub([['GET', '/user', 401, { message: 'Bad credentials' }]]);
     const result = await runGitHubTool('t', 'github_whoami', {}, github.impl);

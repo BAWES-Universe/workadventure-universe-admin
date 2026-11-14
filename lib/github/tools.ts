@@ -256,9 +256,15 @@ async function run(request: Request, name: string, args: Record<string, unknown>
       const answer = await request<{ number: number; title: string; state: string; body: string | null; labels: { name: string }[]; user: { login: string } | null; html_url: string; comments: number }>(`${repo}/issues/${number}`);
       if (!answer.ok) return refusal(answer, 'reading the issue');
       const issue = answer.data;
-      // The latest comments (the last page)
-      const page = Math.max(1, Math.ceil(issue.comments / 30));
-      const comments = issue.comments ? await request<{ user: { login: string } | null; body: string; created_at: string }[]>(`${repo}/issues/${number}/comments?per_page=30&page=${page}`) : null;
+      // The latest 30 comments: the last page of 30, and the one before it when the last is short
+      type Comment = { user: { login: string } | null; body: string; created_at: string };
+      const last = Math.max(1, Math.ceil(issue.comments / 30));
+      const pageOf = (page: number) => request<Comment[]>(`${repo}/issues/${number}/comments?per_page=30&page=${page}`);
+      let comments: { ok: true; data: Comment[] } | { ok: false } | null = null;
+      if (issue.comments) {
+        const [before, end] = await Promise.all([last > 1 && issue.comments % 30 !== 0 ? pageOf(last - 1) : null, pageOf(last)]);
+        comments = end.ok ? { ok: true, data: [...(before?.ok ? before.data : []), ...end.data].slice(-30) } : { ok: false };
+      }
       return out({
         number: issue.number,
         title: issue.title,
@@ -348,7 +354,10 @@ async function run(request: Request, name: string, args: Record<string, unknown>
     }
     case 'github_update_issue': {
       const body: Record<string, unknown> = {};
-      for (const field of ['title', 'body', 'state'] as const) if (args[field] !== undefined) body[field] = text(args[field], field);
+      for (const field of ['title', 'state'] as const) if (args[field] !== undefined) body[field] = text(args[field], field);
+      // An empty body clears it
+      if (args.body === '' || args.body === null) body.body = '';
+      else if (args.body !== undefined) body.body = text(args.body, 'body');
       if (Array.isArray(args.labels)) body.labels = args.labels.filter((label): label is string => typeof label === 'string');
       if (Object.keys(body).length === 0) throw new ToolError('Say what to change: title, body, state or labels.');
       const answer = await request<{ number: number; html_url: string; state: string }>(`${repoPath(args.repo)}/issues/${whole(args.number, 'number')}`, { method: 'PATCH', body });

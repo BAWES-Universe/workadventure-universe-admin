@@ -12,10 +12,12 @@ import path from 'path';
 jest.mock('@/lib/github/connection', () => ({
   GITHUB_SOURCE: 'github',
   readGitHubAuth: jest.fn(),
+  gitHubTokenRefused: jest.fn(async () => undefined),
   gitHubToken: jest.fn(async () => ({ status: 'ok', token: 'ghu_owner', login: 'sara' })),
 }));
 
 import { gzipSync } from 'zlib';
+import { gitHubTokenRefused } from '@/lib/github/connection';
 import { MAX_PUSH_BYTES, readCapped, readPushCommands, readRelayPath, refusedPush, relayGit } from '@/lib/github/git-relay';
 
 const PASS = { kind: 'git-pass' as const, botId: 'b', connectionId: 'c', ownerId: 'o', exp: Math.floor(Date.now() / 1000) + 900 };
@@ -238,5 +240,18 @@ describe('reading a git address and a push', () => {
     });
     expect([...((await readCapped(short, 10)) ?? [])]).toEqual([1, 2, 3]);
     expect((await readCapped(null, 10))?.length).toBe(0);
+  });
+
+  it('says GitHub could not be reached when the request fails, and asks for a new sign-in when GitHub refuses the token', async () => {
+    const refs = (impl: typeof fetch) =>
+      relayGit(PASS, { repo: 'acme/tools', step: 'info/refs' }, { method: 'GET', search: '?service=git-upload-pack', contentType: null, contentEncoding: null, gitProtocol: null, body: null }, impl);
+    const down = (async () => {
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch;
+    expect(await refs(down)).toEqual({ status: 'unavailable' });
+    expect(gitHubTokenRefused).not.toHaveBeenCalled();
+    const refused = (async () => new Response('Bad credentials', { status: 401 })) as unknown as typeof fetch;
+    expect(await refs(refused)).toEqual({ status: 'reconnect' });
+    expect(gitHubTokenRefused).toHaveBeenCalledWith('c');
   });
 });
