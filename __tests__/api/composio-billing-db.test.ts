@@ -127,6 +127,16 @@ run('the Composio bill report', () => {
     expect(body.reconciliation.flags.join(' ')).toContain('Composio counts 400');
   });
 
+  it('with a cut-short by-tool list, compares only the tools Composio named, and says so', async () => {
+    asBoss();
+    await step(2, 'a', ownRun('GMAIL_FETCH_EMAILS'), 300, 1);
+    await step(3, 'b', ownRun('GMAIL_SEND_EMAIL'), 300, 1);
+    setAdapterForTests(fakeAdapter(async () => ({ toolCalls: 2, groups: [{ key: 'GMAIL_FETCH_EMAILS', count: 1 }], partial: true })));
+    const body = await (await get()).json();
+    expect(body.reconciliation.biggestDifferences).toEqual([{ tool: 'GMAIL_FETCH_EMAILS', ours: 1, composio: 1 }]);
+    expect(body.reconciliation.flags.join(' ')).toContain('cut short');
+  });
+
   it('does not flag a small gap, and reports a usage check that cannot run instead of failing', async () => {
     asBoss();
     await step(2, 'a', ownRun('GMAIL_FETCH_EMAILS'), 300, 1);

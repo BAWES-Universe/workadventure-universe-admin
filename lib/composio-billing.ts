@@ -278,6 +278,8 @@ export async function composioMonth(month: { start: Date; end: Date; key: string
 export interface UsageNumbers {
   toolCalls: number;
   groups: { key: string; count: number }[];
+  /** The by-tool list is cut short (Composio caps it): a tool missing from it is not known to have no calls. */
+  partial?: boolean;
 }
 
 export interface Reconciliation {
@@ -341,7 +343,9 @@ export async function reconcileMonth(month: { start: Date; end: Date; key: strin
     callsFlagged = callGapIsFlagged(gapTop, composio.toolCalls) && callGapIsFlagged(gapInner, composio.toolCalls);
     if (callsFlagged) flags.push(`Composio counts ${composio.toolCalls} tool calls for ${month.key}; our books have ${top} (${top + inner} with the tools run inside batches).`);
     const theirs = new Map(composio.groups.map((group) => [group.key, group.count]));
-    const keys = new Set([...withInner.keys(), ...theirs.keys()]);
+    // Composio's by-tool list can be cut short: then only the tools it did name can be compared, and an absent one is not a measured zero
+    const keys = new Set(composio.partial ? theirs.keys() : [...withInner.keys(), ...theirs.keys()]);
+    if (composio.partial) flags.push(`Composio's by-tool list for ${month.key} is cut short, so the tool-by-tool comparison covers only the tools it named.`);
     biggest = [...keys]
       .map((tool) => ({ tool, ours: withInner.get(tool) ?? 0, composio: theirs.get(tool) ?? 0 }))
       .sort((a, b) => Math.abs(b.ours - b.composio) - Math.abs(a.ours - a.composio) || a.tool.localeCompare(b.tool))
