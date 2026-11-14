@@ -156,16 +156,28 @@ export class Agent37ComputerProvider implements ComputerProvider {
   }
 
   async wake(ref: string): Promise<void> {
-    const instance = await this.client.getInstance(ref);
+    let instance = await this.client.getInstance(ref);
+    // A machine that is still going down cannot be started yet: wait for it to be down (or asleep), then wake it as any other
+    if (instance.status === 'stopping') instance = await this.untilDown(ref);
     const status = String(instance.status);
     if (gone(status)) throw new Error(`The computer is ${status}`);
     if (status === 'sleeping' || status === 'stopped') {
       await this.checkFunds();
       await this.client.startInstance(ref);
-    } else if (status !== 'running') {
-      // Starting, waking or provisioning: it is on its way, and asking again would only queue a second wake
     }
+    // Running, starting, waking or provisioning: it is on its way, and asking again would only queue a second wake
     await this.untilHealthy(ref, instance.url);
+  }
+
+  /** Waits for a machine that is stopping to be stopped or asleep. Throws if it goes away, or does not settle in time. */
+  private async untilDown(ref: string): Promise<Instance> {
+    const until = this.now() + READY_WITHIN_MS;
+    for (;;) {
+      const instance = await this.client.getInstance(ref);
+      if (instance.status !== 'stopping') return instance;
+      if (this.now() >= until) throw new Error('The computer did not become ready in time');
+      await this.pause(POLL_MS);
+    }
   }
 
   async rest(ref: string): Promise<void> {

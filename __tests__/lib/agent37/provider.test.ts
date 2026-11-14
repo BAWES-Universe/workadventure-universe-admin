@@ -174,6 +174,33 @@ describe('the Agent37 provider', () => {
     await expect(p.wake('m1')).rejects.toThrow('did not become ready');
   });
 
+  it('waits for a machine that is stopping to be down, then starts it exactly once', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.instances.get('m1')!.status = 'stopping';
+    let reads = 0;
+    const get = w.client.getInstance.bind(w.client);
+    (w.client as unknown as { getInstance: (id: string) => Promise<Instance> }).getInstance = async (id) => {
+      const instance = await get(id);
+      // Two reads say stopping, the third says stopped; the start brings it up
+      if (instance.status === 'stopping' && ++reads >= 3) instance.status = 'stopped';
+      return instance;
+    };
+    await p.wake('m1');
+    expect(w.calls.filter((call) => call === 'start:m1')).toHaveLength(1);
+    expect(w.instances.get('m1')!.status).toBe('running');
+  });
+
+  it('says the plain timeout when a machine never leaves stopping, and starts nothing', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.instances.get('m1')!.status = 'stopping';
+    await expect(p.wake('m1')).rejects.toThrow('did not become ready in time');
+    expect(w.calls.some((call) => call.startsWith('start'))).toBe(false);
+  });
+
   it('rests a running machine with Agent37’s sleep, and a machine that already rests is left alone', async () => {
     const w = world();
     const p = provider(w);
