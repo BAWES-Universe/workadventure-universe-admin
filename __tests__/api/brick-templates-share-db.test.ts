@@ -154,6 +154,12 @@ run('sharing a Brick as a template, in a real database', () => {
         { kind: 'detail', where: 'instructions', what: 'a phone number', sample: '+965 5…' },
         { kind: 'secret', where: 'routine 1', what: 'a password or key written out', sample: 'passwo…' },
       ]);
+      // The Brick's name and the name of an app it uses leave with the template too, so they are read the same way
+      await prisma.bot.update({ where: { id: brickId }, data: { name: 'Recipes ghp_abcdefghijklmnopqrstuvwxyz0123456789' } });
+      const connection = await prisma.appConnection.create({ data: { ownerId: sara.id, name: 'Gmail token: Summer2026!x', serverUrl: 'https://mcp.example.test/g', authType: 'none', source: 'listed', catalogKey: 'gmail' } });
+      await prisma.botMcpServer.create({ data: { botId: brickId, name: 'Gmail', serverUrl: connection.serverUrl, connectionId: connection.id } });
+      const named = (await (await look(brickId, { routines: [item.id] })).json()).look;
+      expect(named.findings.map((finding: { where: string; kind: string }) => `${finding.kind}:${finding.where}`)).toEqual(['secret:name', 'secret:instructions', 'detail:instructions', 'secret:need gmail', 'secret:routine 1']);
       const refused = await share(brickId, { routines: [item.id] });
       expect(refused.status).toBe(422);
       expect((await refused.json()).code).toBe('secret');

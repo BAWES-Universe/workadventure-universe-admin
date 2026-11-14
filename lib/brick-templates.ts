@@ -212,9 +212,12 @@ export async function lookAtTemplate(botId: string, ownerId: string, choices: Sh
     routines,
   };
   const findings = [
+    ...findInText(content.name, 'name'),
     ...findInText(content.description, 'description'),
     ...findInText(content.instructions, 'instructions'),
     ...findInText(content.firstThing, 'firstThing'),
+    // An app's name is a label its owner can rename, so it is read like any other words that leave with the template
+    ...needs.flatMap((need) => findInText(need.label, `need ${need.key}`)),
     ...routines.flatMap((routine, index) => [...findInText(routine.words, `routine ${index + 1}`), ...findInText(routine.condition, `routine ${index + 1}`)]),
   ];
   const contentHash = hashOf(content);
