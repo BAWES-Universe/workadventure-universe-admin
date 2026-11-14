@@ -149,6 +149,17 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       expect(fake.openedTurns[0].input).toEqual({ text: 'Fill the form', sessionId: null });
     });
 
+    it('keeps the turn’s id when the reader goes away before it ends, so it can be reconnected or cancelled', async () => {
+      const { jobId } = await running();
+      fake.turns = [[{ type: 'created', id: 'resp-1', sessionId: 'sess-1' }, { type: 'text', text: 'Hel' }, { type: 'text', text: 'lo' }, { type: 'completed', outputText: 'Hello', usage: null }]];
+      const started = await startTurn(jobId, 'Fill the form');
+      if (!started.ok) throw new Error('no turn');
+      for await (const event of started.events) {
+        if (event.type === 'text') break; // the runner drops
+      }
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ agentSessionId: 'sess-1', agentResponseId: 'resp-1' });
+    });
+
     it('continues the job’s own conversation on the next turn', async () => {
       const { jobId } = await running();
       fake.turns = [[{ type: 'created', id: 'r1', sessionId: 'sess-1' }, { type: 'completed', outputText: '', usage: null }]];

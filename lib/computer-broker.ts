@@ -111,9 +111,14 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
   return { ok: true, events: keeping(job, provider, events) };
 }
 
-/** Keeps a turn's ids on its job while the turn runs, and clears them when it ends; a turn begun under an older control number is cancelled. */
+/**
+ * Keeps a turn's ids on its job while the turn runs, and clears them only when the turn itself ends (completed or failed). If the reader goes
+ * away first (the runner dropped, Orbit restarted) the turn is still running on the machine, so its id stays: the runner can reconnect to it,
+ * and ending the job or the take-over fence can still cancel it. A turn begun under an older control number is cancelled.
+ */
 async function* keeping(job: Live, provider: NonNullable<ReturnType<typeof providerFor>>, events: AsyncGenerator<TurnEvent>): AsyncGenerator<TurnEvent> {
   let responseId: string | null = null;
+  let over = false;
   try {
     for await (const event of events) {
       if (event.type === 'created') {
@@ -125,15 +130,17 @@ async function* keeping(job: Live, provider: NonNullable<ReturnType<typeof provi
         if (kept.count === 0) {
           // The person took over (or the job ended) between asking and the agent starting: this turn must not run
           await provider.cancelTurn(job.ref, event.id).catch(() => undefined);
+          over = true;
           yield { type: 'failed', code: 'fenced', message: 'The turn was stopped because the person took over' };
           return;
         }
       }
+      if (event.type === 'completed' || event.type === 'failed') over = true;
       yield event;
-      if (event.type === 'completed' || event.type === 'failed') return;
+      if (over) return;
     }
   } finally {
-    if (responseId) await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: responseId }, data: { agentResponseId: null } }).catch(() => undefined);
+    if (responseId && over) await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: responseId }, data: { agentResponseId: null } }).catch(() => undefined);
   }
 }
 
