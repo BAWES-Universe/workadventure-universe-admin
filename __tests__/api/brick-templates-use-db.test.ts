@@ -740,6 +740,30 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       expect((await needsOf()).sort()).toEqual([['computer', true], ['gmail', true]]);
     });
 
+    it('keeps what its routines need when the routines taken do not fit under the goals and tasks setting and none is added', async () => {
+      const gmail = await connectGmail(sara);
+      const server = await prisma.botMcpServer.create({ data: { botId: brickId, name: 'Gmail', serverUrl: gmail.serverUrl, connectionId: gmail.id } });
+      const item = await routine(brickId, sara.id);
+      const id = await share({ routines: [item.id] });
+      as(omar);
+      const botId = (await remember(await makeFrom(id))).brick.id;
+      as(sara);
+      await prisma.botMcpServer.delete({ where: { id: server.id } });
+      await prisma.brickComputer.create({ data: { botId: brickId, enabled: true } as never });
+      const menu = await routine(brickId, sara.id, { words: 'Every evening send me a menu' });
+      await share({ routines: [menu.id] });
+      try {
+        await saveServerLimits({ bricks: { itemsPerPerson: 1 } }, sara.id);
+        as(omar);
+        const taken = await json(await postUpdate(call('POST', `/api/bricks/${botId}/made-from/update`, { version: 2, take: ['routines'] }), ids(botId)));
+        expect(taken.routines).toEqual({ added: 0, leftOut: 1 });
+        const needs = ((await prisma.brickTemplateUse.findUniqueOrThrow({ where: { botId } })).needs as { key: string }[]).map((need) => need.key);
+        expect(needs).toEqual(['gmail']);
+      } finally {
+        await saveServerLimits({ bricks: { itemsPerPerson: 20 } }, sara.id);
+      }
+    });
+
     it('refuses a version that is not the latest, a part that is not in the update, and anyone but the owner', async () => {
       const id = await share();
       as(omar);

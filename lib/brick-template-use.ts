@@ -488,9 +488,9 @@ export async function takeUpdate(botId: string, ownerId: string, input: z.infer<
     if (Object.keys(data).length > 1) await tx.bot.update({ where: { id: botId }, data });
     const routineChange = wanted.includes('routines') ? offered.get('routines') : undefined;
     const routines = routineChange && routineChange.field === 'routines' ? await bringRoutines(tx, botId, ownerId, routineChange.theirs, limits) : { added: 0, leftOut: 0 };
-    // What the routines the owner keeps need stays on the Brick. Taking the routines adds the new version's needs to it; closing the
+    // What the routines the owner keeps need stays on the Brick. Taking routines that were really added adds the new version's needs to it (none added, say under the goals and tasks setting, changes nothing); closing the
     // offer or taking other parts never swaps the list for the new version's, which could drop what a kept routine still needs
-    const needs = routineChange ? mergeNeeds(asNeeds(use.needs), asNeeds(read.latest.needs)) : asNeeds(use.needs);
+    const needs = routines.added > 0 ? mergeNeeds(asNeeds(use.needs), asNeeds(read.latest.needs)) : asNeeds(use.needs);
     await tx.brickTemplateUse.update({ where: { botId }, data: { versionNumber: read.template.currentVersion, templateName: read.latest.name, needs: needs as unknown as Prisma.InputJsonValue } });
     return { ok: true as const, routines };
   });
