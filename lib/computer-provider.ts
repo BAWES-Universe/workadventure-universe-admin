@@ -13,6 +13,7 @@
 import { prisma } from '@/lib/db';
 import { Agent37Client } from '@/lib/agent37/client';
 import { Agent37ComputerProvider } from '@/lib/agent37/provider';
+import { dbImageStore } from '@/lib/agent37/image';
 import type { ExecResult } from '@/lib/agent37/client';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
 
@@ -57,6 +58,13 @@ export interface ComputerProvider {
   create(botId: string): Promise<MachineInfo>;
   /** Wakes a resting or cold machine. */
   wake(ref: string): Promise<void>;
+  /**
+   * Brings a machine that was just made or woken to what a job needs: the current image, the screen and the browser, the local model
+   * address. Safe to ask any number of times. Throws when it cannot be made ready (the job then does not start).
+   */
+  ready(ref: string): Promise<void>;
+  /** Whatever the provider keeps up between jobs (the real one builds its image). Asked by the sweep; never throws. */
+  maintain(): Promise<void>;
   /** Lets it rest after a job: the disk is kept, nothing else is billed. */
   rest(ref: string): Promise<void>;
   /** A stop of ours (usage used up, a safety stop, the Brick deleted). The disk is kept. */
@@ -108,6 +116,8 @@ export class FakeComputerProvider implements ComputerProvider {
   /** A turn the pretend agent is running in a session: set by a test, read back by `activeTurn`. */
   running = new Map<string, string>();
   filesBytes = 1_288_490_188;
+  /** The machines that were made ready for a job. */
+  readied: string[] = [];
   private rate: number | null;
   private awake = new Set<string>();
 
@@ -135,6 +145,12 @@ export class FakeComputerProvider implements ComputerProvider {
     this.fail('create');
     return { ref: `fake-${botId}`, region: 'pretend' };
   }
+
+  async ready(ref: string): Promise<void> {
+    this.readied.push(ref);
+  }
+
+  async maintain(): Promise<void> {}
 
   async wake(ref: string): Promise<void> {
     this.note('wake', ref);
@@ -234,7 +250,7 @@ export function getComputerProvider(env: NodeJS.ProcessEnv = process.env): Compu
   const kind = computerProviderKind(env);
   if (kind === null) return null;
   if (!shared || sharedKind !== kind) {
-    shared = kind === 'fake' ? new FakeComputerProvider() : new Agent37ComputerProvider({ client: new Agent37Client({ key: env.AGENT37_API_KEY as string }), outstandingReserveMicros: outstandingJobRoom });
+    shared = kind === 'fake' ? new FakeComputerProvider() : new Agent37ComputerProvider({ client: new Agent37Client({ key: env.AGENT37_API_KEY as string }), outstandingReserveMicros: outstandingJobRoom, image: () => dbImageStore.get() });
     sharedKind = kind;
   }
   return shared;

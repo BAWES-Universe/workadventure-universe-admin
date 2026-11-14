@@ -1,5 +1,6 @@
 import { Agent37Error, Agent37Unreached, type Agent37Client, type Instance } from '@/lib/agent37/client';
-import { Agent37ComputerProvider, Agent37FundsLow, DESKTOP_PORT } from '@/lib/agent37/provider';
+import { Agent37ComputerProvider, Agent37FundsLow, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
+import type { ImageState } from '@/lib/agent37/image';
 import { awakeMicrosPerMinute, dayOfRunningMicros, BRICK_SHAPE } from '@/lib/agent37/rates';
 
 jest.mock('@/lib/agent37/saved-copies', () => ({ savedCopyOf: jest.fn(), storeSavedCopy: jest.fn() }));
@@ -10,6 +11,8 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const calls: string[] = [];
   const execs: Array<{ id: string; command: string; options: unknown }> = [];
   let healthy = true;
+  let execOut: (command: string) => string = () => 'ok';
+  let revisionAfterUpdate = 2;
   const refuse: Record<string, Error | undefined> = {};
   const client = {
     async listInstances() {
@@ -73,7 +76,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
     async exec(id: string, command: string, options?: unknown) {
       calls.push(`exec:${id}:${command}`);
       execs.push({ id, command, options });
-      return { exitCode: 0, stdout: 'ok', stderr: '', truncated: false };
+      return { exitCode: 0, stdout: execOut(command), stderr: '', truncated: false };
     },
     async openTurn(url: string, input: { text: string; sessionId?: string | null }) {
       calls.push(`turn:${url}:${input.text}`);
@@ -90,16 +93,23 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       calls.push(`active:${url}:${sessionId}`);
       return 'resp-2';
     },
+    async updateInstance(id: string) {
+      calls.push(`update:${id}`);
+      const found = instances.get(id)!;
+      found.status = 'running';
+      found.template_revision = revisionAfterUpdate;
+      return { id, status: 'running', template_revision: revisionAfterUpdate };
+    },
     async archive(url: string) {
       calls.push(`archive:${url}`);
       return { body: new ReadableStream() } as unknown as Response;
     },
   };
   const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean }> = [];
-  return { client: client as unknown as Agent37Client, instances, calls, execs, created, refuse, setHealthy: (value: boolean) => (healthy = value) };
+  return { client: client as unknown as Agent37Client, instances, calls, execs, created, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn) };
 }
 
-function provider(w: ReturnType<typeof world>, extra: { reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
+function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
   const clock = extra.clock ?? { t: 1_000_000 };
   return new Agent37ComputerProvider({
     client: w.client,
@@ -109,6 +119,7 @@ function provider(w: ReturnType<typeof world>, extra: { reserved?: number; copie
     },
     now: () => clock.t,
     copies: extra.copies,
+    image: extra.image,
   });
 }
 
@@ -358,5 +369,68 @@ describe('the Agent37 provider', () => {
       await expect(p.openTurn('m1', { text: 'x' })).rejects.toThrow('deleted');
       await expect(p.cancelTurn('m1', 'r')).rejects.toThrow('deleted');
     });
+  });
+});
+
+describe('getting a machine ready for a job', () => {
+  const state = (over: Partial<ImageState> = {}): ImageState => ({ hash: 'h', state: 'ready', buildId: 'b', revision: 2, startedAt: new Date(0).toISOString(), failures: 0, error: null, ...over });
+
+  it('makes no machine until the image is built, and says so', async () => {
+    const w = world();
+    for (const image of [null, state({ state: 'building' }), state({ state: 'failed', failures: 1, error: 'x' })]) {
+      await expect(provider(w, { image: async () => image }).create('bot-1')).rejects.toBeInstanceOf(ImageNotReady);
+    }
+    expect(w.calls).not.toContain('create');
+    expect((await provider(w, { image: async () => state() }).create('bot-1')).ref).toBe('m1');
+  });
+
+  it('runs universe-up, and is ready when it says so', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.setExec(() => 'ready=1 restart=0\n');
+    await expect(p.ready('m1')).resolves.toBeUndefined();
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up']);
+    expect(w.calls.filter((call) => call.startsWith('stop:'))).toEqual([]);
+  });
+
+  it('stops and starts a machine once when its config was just written, then runs universe-up again', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    let runs = 0;
+    w.setExec(() => (++runs === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n'));
+    await p.ready('m1');
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up']);
+    expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
+  });
+
+  it('says the machine is not ready, with the reason, when a part did not come up', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.setExec(() => 'ready=0 reason=browser\n');
+    await expect(p.ready('m1')).rejects.toThrow('not ready (browser)');
+    w.setExec(() => 'nothing useful');
+    await expect(p.ready('m1')).rejects.toThrow('not ready');
+  });
+
+  it('moves a machine made from an older image to the current one before it is brought up', async () => {
+    const w = world();
+    const p = provider(w, { image: async () => state({ revision: 2 }) });
+    await p.create('bot-1');
+    w.instances.get('m1')!.template_revision = 1;
+    w.setExec(() => 'ready=1 restart=0\n');
+    await p.ready('m1');
+    expect(w.calls).toContain('update:m1');
+    expect(w.calls.indexOf('update:m1')).toBeLessThan(w.calls.indexOf('exec:m1:universe-up'));
+    // a machine already on the current image is left alone
+    const again = world();
+    const q = provider(again, { image: async () => state({ revision: 2 }) });
+    await q.create('bot-1');
+    again.instances.get('m1')!.template_revision = 2;
+    again.setExec(() => 'ready=1 restart=0\n');
+    await q.ready('m1');
+    expect(again.calls.some((call) => call.startsWith('update:'))).toBe(false);
   });
 });

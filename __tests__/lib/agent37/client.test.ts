@@ -130,4 +130,36 @@ describe('the Agent37 client', () => {
       expect(JSON.parse(String(calls[0].init.body))).toEqual({ network: { allow: ['github.com'] } });
     });
   });
+
+  describe('templates', () => {
+    it('makes a build with its size and port, uploads the context with no account key, starts it, and reads where it stands', async () => {
+      const { api, calls } = client([
+        json(200, { id: 'build-1', upload_url: 'https://upload.example.test/put' }),
+        new Response(null, { status: 200 }),
+        json(200, { id: 'build-1', status: 'building' }),
+        json(200, { status: 'succeeded', data: 'x'.repeat(5000), offset: 5000, template: { revision: 3, image_digest: 'sha256:abc' } }),
+      ]);
+      expect(await api.createTemplateBuild({ name: 'universe-brick', sizeBytes: 1234, defaultPort: 3737 })).toEqual({ id: 'build-1', uploadUrl: 'https://upload.example.test/put' });
+      expect(calls[0].url).toBe('https://api.agent37.com/v1/template-builds');
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({ name: 'universe-brick', size_bytes: 1234, default_port: 3737 });
+      await api.uploadTemplateContext('https://upload.example.test/put', new Uint8Array([1, 2, 3]));
+      expect(calls[1].init.method).toBe('PUT');
+      expect(JSON.stringify(calls[1].init.headers)).not.toContain('sk_live_secret');
+      await api.startTemplateBuild('build-1');
+      expect(calls[2].url).toBe('https://api.agent37.com/v1/template-builds/build-1/start');
+      const build = await api.templateBuild('build-1');
+      expect(calls[3].url).toBe('https://api.agent37.com/v1/template-builds/build-1/logs?offset=0');
+      expect(build).toMatchObject({ status: 'succeeded', error: null, template: { revision: 3, imageDigest: 'sha256:abc' } });
+      expect(build.log.length).toBe(2000);
+    });
+
+    it('reads a failed build’s reason, says a refused upload, and moves a machine to the current image', async () => {
+      const { api, calls } = client([json(200, { status: 'failed', data: '', error: { code: 'build_failed', message: 'no chromium' } }), new Response('no', { status: 403 }), json(200, { id: 'abc', status: 'running', template_revision: 3 })]);
+      expect(await api.templateBuild('b')).toMatchObject({ status: 'failed', error: { code: 'build_failed', message: 'no chromium' } });
+      await expect(api.uploadTemplateContext('https://upload.example.test/put', new Uint8Array(1))).rejects.toMatchObject({ status: 403 });
+      expect(await api.updateInstance('abc')).toMatchObject({ template_revision: 3 });
+      expect(calls[2].url).toBe('https://api.agent37.com/v1/instances/abc/update');
+      expect(calls[2].init.method).toBe('POST');
+    });
+  });
 });

@@ -26,6 +26,17 @@ export interface Instance {
   /** Epoch seconds; present only while sleeping or waking. */
   slept_at?: number | null;
   past_due?: boolean;
+  /** The revision of the template this machine's image came from; behind the template's own revision means it can be updated. */
+  template_revision?: number | null;
+}
+
+/** A cloud build of a template: `succeeded` carries the revision it published. */
+export interface TemplateBuild {
+  status: 'created' | 'building' | 'ingesting' | 'succeeded' | 'failed' | string;
+  /** The last of the build's log, for the one who looks when it failed. */
+  log: string;
+  error: { code: string | null; message: string } | null;
+  template: { revision: number | null; imageDigest: string | null } | null;
 }
 
 export interface CreateInstance {
@@ -302,6 +313,57 @@ export class Agent37Client {
   async activeTurn(instanceUrl: string, sessionId: string): Promise<string | null> {
     const answer = await this.again(() => this.call<{ active_response_id?: string | null }>('GET', `${instanceUrl.replace(/\/+$/, '')}/v1/sessions/${encodeURIComponent(sessionId)}`, this.own(), undefined, 20_000));
     return typeof answer?.active_response_id === 'string' && answer.active_response_id ? answer.active_response_id : null;
+  }
+
+  /**
+   * Starts a cloud build of a template (free; the build runs on Agent37). The context is a gzipped folder with a Dockerfile at its root:
+   * it is told its size here, uploaded to the address given, and then started.
+   */
+  async createTemplateBuild(input: { name: string; sizeBytes: number; defaultPort?: number }): Promise<{ id: string; uploadUrl: string }> {
+    const answer = await this.call<{ id?: string; upload_url?: string }>('POST', `${this.api}/v1/template-builds`, this.account(), {
+      name: input.name,
+      size_bytes: input.sizeBytes,
+      ...(input.defaultPort !== undefined ? { default_port: input.defaultPort } : {}),
+    });
+    if (typeof answer?.id !== 'string' || typeof answer?.upload_url !== 'string') throw new Agent37Error(502, null, 'Agent37 answered a build with no id');
+    return { id: answer.id, uploadUrl: answer.upload_url };
+  }
+
+  /** Puts the gzipped context where Agent37 said. The address carries its own permission: no account key goes with it. */
+  async uploadTemplateContext(uploadUrl: string, bytes: Uint8Array): Promise<void> {
+    let response: Response;
+    try {
+      response = await this.fetchImpl(uploadUrl, { method: 'PUT', headers: { 'Content-Length': String(bytes.length) }, body: bytes as unknown as BodyInit, signal: AbortSignal.timeout(120_000) });
+    } catch (error) {
+      throw new Agent37Unreached(error instanceof Error ? error.name : 'unknown');
+    }
+    if (!response.ok) throw new Agent37Error(response.status, null, `The build context was refused with ${response.status}`);
+  }
+
+  startTemplateBuild(buildId: string): Promise<unknown> {
+    return this.again(() => this.call('POST', `${this.api}/v1/template-builds/${encodeURIComponent(buildId)}/start`, this.account()));
+  }
+
+  /** Where a build stands (its log from the start is read each time and only its end kept). */
+  async templateBuild(buildId: string): Promise<TemplateBuild> {
+    const answer = await this.again(() =>
+      this.call<{ status?: string; data?: string; error?: { code?: string; message?: string } | null; template?: { revision?: number; image_digest?: string } | null }>(
+        'GET',
+        `${this.api}/v1/template-builds/${encodeURIComponent(buildId)}/logs?offset=0`,
+        this.account(),
+      ),
+    );
+    return {
+      status: typeof answer?.status === 'string' ? answer.status : 'created',
+      log: typeof answer?.data === 'string' ? answer.data.slice(-2000) : '',
+      error: answer?.error ? { code: typeof answer.error.code === 'string' ? answer.error.code.slice(0, 60) : null, message: typeof answer.error.message === 'string' ? answer.error.message.slice(0, 300) : '' } : null,
+      template: answer?.template ? { revision: typeof answer.template.revision === 'number' ? answer.template.revision : null, imageDigest: typeof answer.template.image_digest === 'string' ? answer.template.image_digest : null } : null,
+    };
+  }
+
+  /** Moves a machine to the template's current image. Its home folder (where the files are) is kept; the rest of the disk is replaced. */
+  updateInstance(id: string): Promise<{ id: string; status: string; template_revision?: number }> {
+    return this.again(() => this.call('POST', `${this.api}/v1/instances/${encodeURIComponent(id)}/update`, this.account()));
   }
 
   /** What the machine may reach on the internet. A 503 `try_again` means it is saved and reaches the machine within two minutes: asked again, it confirms. */

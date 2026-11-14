@@ -327,6 +327,21 @@ run('the broker, the fence and keep-awake, in a real database', () => {
     });
   });
 
+  describe('a machine made ready', () => {
+    it('is brought up for a job before the job runs, and a machine that cannot be made ready starts no job', async () => {
+      const { sara } = await running('ready');
+      expect(fake.readied).toHaveLength(1);
+      expect(fake.readied[0]).toBe(`fake-${sara.brickId}`);
+      const second = await person('notready');
+      await giveComputer(second.brickId, second.id);
+      fake.ready = async () => {
+        throw new Error('The computer is not ready (browser)');
+      };
+      const started = await startJob({ botId: second.brickId, personId: second.id, title: 'Job' }, NOW);
+      expect(started.ok).toBe(false);
+    });
+  });
+
   describe('the words for the agent', () => {
     it('are kept with the job, handed only to the runner, and cleared when the job ends', async () => {
       const sara = await person('words');

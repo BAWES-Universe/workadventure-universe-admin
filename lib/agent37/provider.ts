@@ -3,6 +3,7 @@ import { readTurn } from '@/lib/agent37/turn-events';
 import { Agent37Client, Agent37Error, Agent37Unreached, type Instance } from '@/lib/agent37/client';
 import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros } from '@/lib/agent37/rates';
 import { savedCopyOf, storeSavedCopy, type SavedCopyInfo } from '@/lib/agent37/saved-copies';
+import { ensureImage, imageReady, type ImageState } from '@/lib/agent37/image';
 
 /**
  * A Brick's computer on Agent37 (game #2000): the real provider behind the interface Universe already uses.
@@ -33,6 +34,14 @@ const POLL_MS = 3_000;
 /** A copy saved this long before the machine went to sleep, or later, is the machine as it was left. */
 const FRESH_COPY_MS = 5 * 60_000;
 
+/** The image the machines are made from is still being built (or its build failed): no machine is made until it is ready. */
+export class ImageNotReady extends Error {
+  constructor(message = 'The computer image is not ready yet') {
+    super(message);
+    this.name = 'ImageNotReady';
+  }
+}
+
 /** The wallet cannot carry another machine: said plainly, and nothing is made or woken. */
 export class Agent37FundsLow extends Error {
   constructor(message = 'The computer wallet is too low to start another computer') {
@@ -48,6 +57,8 @@ export interface ProviderOptions {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   template?: string;
+  /** Where the image stands (its build). Without it the image is taken to be there (tests). */
+  image?: () => Promise<ImageState | null>;
   /** For tests: where the saved copy goes and what is saved. */
   copies?: { latest: (botId: string) => Promise<SavedCopyInfo | null>; store: (botId: string, archive: ReadableStream<Uint8Array>) => Promise<SavedCopyInfo> };
 }
@@ -62,6 +73,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
   private readonly pause: (ms: number) => Promise<void>;
   private readonly now: () => number;
   private readonly template: string;
+  private readonly image: ProviderOptions['image'];
   private readonly copies: NonNullable<ProviderOptions['copies']>;
   /** Which machine belongs to which Brick, learned from the metadata we wrote: `save` needs the Brick of a machine. */
   private readonly brickOf = new Map<string, string>();
@@ -72,6 +84,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     this.pause = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.now = options.now ?? Date.now;
     this.template = options.template ?? BRICK_TEMPLATE;
+    this.image = options.image;
     this.copies = options.copies ?? { latest: savedCopyOf, store: storeSavedCopy };
   }
 
@@ -113,6 +126,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
       this.remember(adopted, botId);
       return { ref: adopted.id, region: adopted.region ?? 'us' };
     }
+    // A machine is only made from an image that was built: a job that comes first waits for it, the sweep builds it
+    if (this.image && !imageReady(await this.image())) throw new ImageNotReady();
     await this.checkFunds();
     let made: Instance;
     try {
@@ -140,6 +155,43 @@ export class Agent37ComputerProvider implements ComputerProvider {
     this.remember(made, botId);
     await this.untilHealthy(made.id, made.url);
     return { ref: made.id, region: made.region ?? 'us' };
+  }
+
+  async maintain(): Promise<void> {
+    await ensureImage(this.client);
+  }
+
+  /**
+   * A machine made ready for a job: moved to the image's current revision if it was made from an older one (its files are kept), then
+   * `universe-up` brings the screen, the browser and the local model address up. The first time on a machine it also writes Hermes' config,
+   * and Hermes only reads that when it starts: so the machine is stopped and started once, and `universe-up` is run again.
+   */
+  async ready(ref: string): Promise<void> {
+    const state = this.image ? await this.image() : null;
+    let instance = await this.client.getInstance(ref);
+    const behind = state && imageReady(state) && state.revision !== null && typeof instance.template_revision === 'number' && instance.template_revision < state.revision;
+    if (behind) {
+      await this.client.updateInstance(ref);
+      instance = await this.untilHealthy(ref, instance.url);
+    }
+    let up = await this.up(ref);
+    if (up.restart) {
+      await this.client.stopInstance(ref);
+      await this.untilDown(ref);
+      await this.client.startInstance(ref);
+      await this.untilHealthy(ref, instance.url);
+      up = await this.up(ref);
+    }
+    if (!up.ready) throw new Error(`The computer is not ready${up.reason ? ` (${up.reason})` : ''}`);
+  }
+
+  /** Runs `universe-up` and reads what it says. */
+  private async up(ref: string): Promise<{ ready: boolean; restart: boolean; reason: string | null }> {
+    const done = await this.client.exec(ref, 'universe-up', { timeoutMs: 90_000 });
+    const ready = /(^|\n)ready=1\b/.test(done.stdout);
+    const reason = /(^|\n)ready=0 reason=([a-z_]+)/.exec(done.stdout)?.[2] ?? null;
+    if (!ready) console.error('[Computer] A machine was not ready:', reason ?? `exit ${done.exitCode}`, done.stderr.slice(-300));
+    return { ready, restart: /\brestart=1\b/.test(done.stdout), reason };
   }
 
   /** Waits until Agent37 says the instance runs and its agent answers. Throws if it does not within a few minutes. */

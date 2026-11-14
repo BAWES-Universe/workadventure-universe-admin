@@ -549,6 +549,8 @@ async function bringUp(botId: string, provider: Provider, now: Date): Promise<vo
   const restoring = row.machine === 'broken';
   await prisma.brickComputer.update({ where: { botId }, data: { machine: restoring ? 'restoring' : 'waking' } });
   await provider.wake(ref);
+  // The image current, the screen and the browser up, the model address listening: a job never starts on a machine that is not ready
+  await provider.ready(ref);
   await prisma.brickComputer.update({ where: { botId }, data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: restoring ? (row.filesSavedAt ?? now) : null } });
 }
 
@@ -730,6 +732,8 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   let stopped = 0;
   let released = 0;
   let started = 0;
+  // What the provider keeps up between jobs (the real one builds its image, a step at a time); a failure here never stops the sweep
+  await getComputerProvider()?.maintain().catch((error) => console.error('[Computer] The provider could not be kept up:', error instanceof Error ? error.message : 'unknown'));
   // A job that asked its person to take over and got no answer within the wait a super admin set ends, so it does not hold the
   // machine and the allowance for nobody. Read each sweep, so a changed setting counts at once, jobs already waiting included. Once the
   // person has taken over the job is theirs and is not ended here.
