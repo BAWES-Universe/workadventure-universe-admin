@@ -23,6 +23,7 @@ import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use
 import { POST as connectApp } from '@/app/api/me/apps/route';
 import { grantToBrick, createConnection, readConnection, listConnections } from '@/lib/app-connections';
 import { saveMeterSettings } from '@/lib/meter';
+import { saveComposioBilling } from '@/lib/composio-billing';
 import { createBrick } from '@/lib/brick-create';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -69,7 +70,7 @@ run('ready-made apps through the adapter, in a real database', () => {
     mockUser.current = null;
     await prisma.meterEvent.deleteMany({ where: { personId: { in: [sara, omar] } } });
     await prisma.appConnection.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
-    await prisma.appSetting.deleteMany({ where: { key: 'ready-made-apps' } });
+    await prisma.appSetting.deleteMany({ where: { key: { in: ['ready-made-apps', 'composio-billing', 'composio-invoices'] } } });
   });
   afterAll(async () => {
     if (envBefore.service === undefined) delete process.env.BOT_SERVICE_TOKEN; else process.env.BOT_SERVICE_TOKEN = envBefore.service;
@@ -324,7 +325,7 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect(ownVerdict.readyMade).toBeUndefined();
   });
 
-  it('writes the meter before the provider is called, once for each call id, paid by the universe, at the built-in estimate while no price is saved', async () => {
+  it('writes the meter before the provider is called, once for each call id, paid by the universe, at the provider’s list price while no price is saved', async () => {
     const { adapter, serverId } = await connectedAndGranted();
     let writtenWhenCalled = 0;
     adapter.use.mockImplementationOnce(async () => {
@@ -338,8 +339,9 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect(writtenWhenCalled).toBe(1);
     const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, payerKind: 'universe', route: 'app', unit: 'use', basis: 'estimated', costMicros: BigInt(5000), botId: saraBrick });
-    expect(events[0].detail).toEqual({ toolkit: KEY, tool: 'GMAIL_FETCH_EMAILS' });
+    expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, payerKind: 'universe', route: 'app', unit: 'use', basis: 'estimated', costMicros: BigInt(300), quantity: BigInt(1), botId: saraBrick });
+    // The app here has a sign-in setup a super admin chose, so it is priced as our own sign-in: $0.0003. How it was priced is written, never what was asked.
+    expect(events[0].detail).toEqual({ toolkit: KEY, tool: 'GMAIL_FETCH_EMAILS', kind: 'execution', tier: 'own', tierVerified: true, ownAuth: true, executions: 1, sandboxRuns: 0, zdrCalls: 0 });
   });
 
   it('writes an estimate from the super admin’s own price once there is one', async () => {
@@ -458,9 +460,57 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(adapter.callLink).toHaveBeenCalledTimes(1);
       const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
       expect(events).toHaveLength(1);
-      expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, basis: 'estimated', payerKind: 'universe' });
+      expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, basis: 'estimated', payerKind: 'universe', quantity: BigInt(1), costMicros: BigInt(100) });
+      expect(events[0].detail).toMatchObject({ kind: 'sandbox', sandboxRuns: 1, executions: 0 });
       // What was asked is not written down: only which app and which tool
       expect(JSON.stringify(events[0].detail)).not.toContain('secret code');
+    });
+
+    it('writes a search through the link as free: no tool run, cost 0, and a repeated call id is still refused', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      const message = { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'COMPOSIO_SEARCH_TOOLS', arguments: { queries: ['find my notes'] } } };
+      const callId = `call-${randomUUID()}`;
+      expect((await link(serverId, { message, callId })).status).toBe(200);
+      expect((await link(serverId, { message, callId })).status).toBe(409);
+      expect(adapter.callLink).toHaveBeenCalledTimes(1);
+      const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ quantity: BigInt(0), costMicros: BigInt(0), basis: 'estimated' });
+      expect(events[0].detail).toMatchObject({ kind: 'free', executions: 0, sandboxRuns: 0 });
+      expect(JSON.stringify(events[0].detail)).not.toContain('find my notes');
+    });
+
+    it('prices a batch by the tools inside it and writes only their names', async () => {
+      const { serverId } = await connectedAndGranted();
+      const tools = [{ tool_slug: 'GMAIL_FETCH_EMAILS', arguments: { query: 'private words' } }, { tool_slug: 'GMAIL_FETCH_EMAILS', arguments: {} }, { tool_slug: 'COMPOSIO_SEARCH_TOOLS', arguments: {} }];
+      const message = { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'COMPOSIO_MULTI_EXECUTE_TOOL', arguments: { tools } } };
+      expect((await link(serverId, { message, callId: `call-${randomUUID()}` })).status).toBe(200);
+      const event = await prisma.meterEvent.findFirstOrThrow({ where: { personId: sara, kind: 'app_use' } });
+      expect(event).toMatchObject({ quantity: BigInt(2), costMicros: BigInt(600) });
+      expect(event.detail).toMatchObject({ kind: 'batch', executions: 2, inner: { GMAIL_FETCH_EMAILS: 2, COMPOSIO_SEARCH_TOOLS: 1 } });
+      expect(JSON.stringify(event.detail)).not.toContain('private words');
+    });
+
+    it('prices a call on Composio’s own sign-in at the managed rate, and adds the zero data retention add-on only where it covers (our own sign-in, once it is switched on)', async () => {
+      const { serverId } = await connectedAndGranted();
+      await saveComposioBilling({ zdrOn: true }, boss);
+      try {
+        // No sign-in setup of the super admin's own: Composio's own sign-in, which the add-on does not cover on Pro
+        await prisma.appSetting.deleteMany({ where: { key: 'ready-made-apps' } });
+        await saveReadyMadeApps({ apps: { [KEY]: { name: 'Gmail' } } }, boss);
+        expect((await useIt({ serverId })).status).toBe(200);
+        // Our own sign-in with the switch on: the lower rate, and the add-on
+        await saveReadyMadeApps({ apps: { [KEY]: { name: 'Gmail', authConfigId: 'ac_own' } } }, boss);
+        expect((await useIt({ serverId })).status).toBe(200);
+        // The same with the switch off: no add-on
+        await saveComposioBilling({ zdrOn: false }, boss);
+        expect((await useIt({ serverId })).status).toBe(200);
+      } finally {
+        await prisma.appSetting.deleteMany({ where: { key: 'composio-billing' } });
+      }
+      const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' }, orderBy: { recordedAt: 'asc' } });
+      expect(events.map((event) => Number(event.costMicros))).toEqual([500, 400, 300]);
+      expect(events.map((event) => (event.detail as { zdrCalls: number }).zdrCalls)).toEqual([0, 1, 0]);
     });
 
     it('passes on nothing but the messages of a session, listing and running', async () => {

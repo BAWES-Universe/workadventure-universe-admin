@@ -49,6 +49,15 @@ export function forgetManagedAuthConfigs(): void {
   managedAuthConfigs.clear();
 }
 
+/** The most groups the usage API returns for one question. */
+const USAGE_GROUP_LIMIT = 1000;
+
+/** A count the provider sent: a whole number of zero or more, as a number or a numeric string; anything else is null (never zero). */
+function readCount(value: unknown): number | null {
+  const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
+  return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : null;
+}
+
 export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapter {
   const doFetch = options.fetchImpl ?? fetch;
   const base = options.baseUrl ?? BASE;
@@ -174,6 +183,23 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
         arguments: args,
       });
       return { ok: json.successful === true, data: json.data ?? null, error: str(json.error), providerCallId: str(json.log_id) };
+    },
+
+    /** POST /project/usage/tool_calls { from, to, limit } -> { event_count, groups: [{ key, event_count }] } (read live 14 Nov 2026 with the project key). Counts only: no price comes back. `limit` is the most groups returned (1000 at most): a full list may be cut short, and is said to be partial. An unreadable total is an error, never a measured zero. */
+    async usage({ fromMs, toMs }) {
+      const json = await call('/project/usage/tool_calls', { from: fromMs, to: toMs, limit: USAGE_GROUP_LIMIT });
+      const total = readCount(json.event_count);
+      if (total === null) throw new AdapterError('provider', 'Composio usage answered without a readable total');
+      const rows = Array.isArray(json.groups) ? (json.groups as Record<string, unknown>[]) : [];
+      const groups: { key: string; count: number }[] = [];
+      let unreadable = json.groups !== undefined && !Array.isArray(json.groups);
+      for (const row of rows) {
+        const count = readCount(row?.event_count);
+        if (typeof row?.key === 'string' && count !== null) groups.push({ key: row.key, count });
+        else unreadable = true;
+      }
+      // A full list may have more behind it, and a row that could not be read is missing too: neither is a tool known to have no calls
+      return { toolCalls: total, groups, ...(rows.length >= USAGE_GROUP_LIMIT || unreadable ? { partial: true } : {}) };
     },
   };
 }
