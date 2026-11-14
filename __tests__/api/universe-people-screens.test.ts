@@ -357,26 +357,35 @@ describe('invitations list and cancel', () => {
     expect(none).toEqual({ invitations: [], canCancel: false });
   });
 
-  it('lists only the invitations the viewer could send or take back: every-world ones need the permission everywhere', async () => {
+  it('lists every pending invitation to whoever may invite in some world, and marks the ones they may take back', async () => {
     const campusOnly = { ...pending, id: 'inv-campus' };
     const hqOnly = { ...pending, id: 'inv-hq', worldIds: ['hq'], worldId: 'hq' };
     const everyWorld = { ...pending, id: 'inv-all', allWorlds: true, worldIds: [] };
     const older = { ...pending, id: 'inv-old', universeId: null, allWorlds: false, worldIds: [], worldId: 'campus' };
     db.membershipInvitation.findMany.mockResolvedValue([campusOnly, hqOnly, everyWorld, older]);
 
+    // Invites in the HQ world only: sees all four, as every admin of the universe does, but may take back just HQ's
     asViewer('hq-inviter');
     const scoped = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
-    expect(scoped.invitations.map((invitation: { id: string }) => invitation.id)).toEqual(['inv-hq']);
+    expect(scoped.invitations.map((invitation: { id: string }) => invitation.id)).toEqual(['inv-campus', 'inv-hq', 'inv-all', 'inv-old']);
+    expect(scoped.invitations.filter((invitation: { canCancel: boolean }) => invitation.canCancel).map((invitation: { id: string }) => invitation.id)).toEqual(['inv-hq']);
     expect(scoped.canCancel).toBe(true);
+    // A second query asks for the ones that start in their worlds, so 200 newer elsewhere can't push them out
+    expect(db.membershipInvitation.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ allWorlds: false, worldId: { in: ['hq'] } }), take: 200 }),
+    );
 
     asViewer('inviter');
     const everywhere = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
     expect(everywhere.invitations).toHaveLength(4);
+    expect(everywhere.invitations.every((invitation: { canCancel: boolean }) => invitation.canCancel)).toBe(true);
 
-    // Nothing they may touch is waiting: no list, and nothing to cancel
+    // Nothing they may take back is waiting: the list is there, with nothing to cancel
     asViewer('hq-inviter');
     db.membershipInvitation.findMany.mockResolvedValue([campusOnly, everyWorld]);
-    expect(await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json()).toEqual({ invitations: [], canCancel: false });
+    const unreachable = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
+    expect(unreachable.invitations).toHaveLength(2);
+    expect(unreachable.canCancel).toBe(false);
   });
 
   it('takes back an invitation, as someone who may invite in the worlds it names', async () => {

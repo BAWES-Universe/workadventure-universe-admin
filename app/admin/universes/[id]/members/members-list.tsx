@@ -44,6 +44,8 @@ interface Invitation {
   invitedAt: string;
   roleIds: string[];
   worlds: Worlds;
+  /** Whether this person may take it back: they may invite and remove people in every world it names. */
+  canCancel: boolean;
 }
 
 interface Page {
@@ -90,7 +92,7 @@ export function UniverseMembersPage() {
   const [visible, setVisible] = useState(FIRST);
   const [attempt, setAttempt] = useState(0);
   const [inviting, setInviting] = useState(false);
-  const [invitations, setInvitations] = useState<{ list: Invitation[]; canCancel: boolean } | null>(null);
+  const [invitations, setInvitations] = useState<{ list: Invitation[] } | null>(null);
   const [cancelling, setCancelling] = useState<string | null>(null);
 
   const listPath = useCallback(
@@ -137,7 +139,7 @@ export function UniverseMembersPage() {
       .then(async (response) => {
         if (!response.ok) return;
         const body = await response.json();
-        setInvitations({ list: body.invitations ?? [], canCancel: !!body.canCancel });
+        setInvitations({ list: body.invitations ?? [] });
       })
       .catch(() => {});
   }, [id]);
@@ -332,7 +334,7 @@ export function UniverseMembersPage() {
                   context={<StatLine items={[`Invited by ${invitation.invitedBy.name || 'someone'}`, dayWord(new Date(invitation.invitedAt))]} />}
                   meta={<RoleSummaryPills summary={summary} />}
                   trailing={
-                    invitations.canCancel ? (
+                    invitation.canCancel ? (
                       <Button variant="outline" className="h-11 px-4" disabled={cancelling === invitation.id} onClick={() => void cancelInvite(invitation)}>
                         Cancel invite
                       </Button>
