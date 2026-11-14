@@ -224,8 +224,11 @@ export async function pickTemplate(templateId: string, adminId: string, picked: 
 
 /* ------------------------------ routines that arrive switched off ------------------------------ */
 
-/** What a routine holds until its owner has a time zone kept. */
-export const PLACEHOLDER_ZONE = 'UTC';
+/**
+ * What a routine holds until its owner has a time zone kept. Not "UTC" itself, so a person who picks UTC for a routine is
+ * still told apart from a routine nobody has given a zone yet ("Etc/UTC" is the same clock under another name).
+ */
+export const PLACEHOLDER_ZONE = 'Etc/UTC';
 
 /**
  * Gives a Brick the routines a template came with, SWITCHED OFF: paused by the template, nothing due, so none can run until

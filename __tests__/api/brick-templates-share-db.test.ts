@@ -144,6 +144,19 @@ run('sharing a Brick as a template, in a real database', () => {
       expect((await wrong.json()).code).toBe('routine_gone');
     });
 
+    it('after a shared routine is removed, "latest" and the choices shown describe one request that can be sent back', async () => {
+      const keep = await itemFor(brickId, sara.id, { kind: 'schedule', words: 'Every morning send me one recipe' });
+      const gone = await itemFor(brickId, sara.id, { kind: 'watch', words: 'Tell me when a new recipe is added', condition: 'a new recipe appears', cadence: { type: 'every', minutes: 60 } });
+      expect((await share(brickId, { routines: [keep.id, gone.id] })).status).toBe(200);
+      await prisma.brickItem.update({ where: { id: gone.id }, data: { state: 'deleted' } });
+      const state = await group(brickId);
+      expect(state.choices.routines).toEqual([keep.id]);
+      expect(state.latest.routines).toHaveLength(1);
+      const again = await look(brickId, { routines: state.choices.routines });
+      expect(again.status).toBe(200);
+      expect((await again.json()).look.contentHash).toBe(state.latest.contentHash);
+    });
+
     it('finds a secret in the instructions, the first thing and a routine, and blocks sharing; a phone number only warns', async () => {
       await prisma.bot.update({ where: { id: brickId }, data: { chatInstructions: 'Use the key sk-proj-abcdefghijklmnopqrstuvwxyz123456 for the recipes API. Call +965 5555 1234.' } });
       const item = await itemFor(brickId, sara.id, { kind: 'schedule', words: 'Log in with password: Summer2026!x and fetch a recipe' });

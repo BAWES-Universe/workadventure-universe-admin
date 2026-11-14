@@ -277,7 +277,15 @@ export async function readMakerTemplate(botId: string, ownerId: string): Promise
     ? await lookAtTemplate(botId, ownerId, { leaveOutLook: choices.leaveOutLook, firstThing: choices.firstThing, optionalNeeds: choices.optionalNeeds, routines: choices.routines.filter(Boolean), audience: template.audience as TemplateAudience })
     : null;
   // A routine the maker removed since is not part of "latest": the look is read again without it
-  const latest = looked && looked.ok ? looked.look : looked && looked.code === 'routine_gone' ? await withoutGoneRoutines(botId, ownerId, template!, choices) : null;
+  let latest: TemplateLook | null = null;
+  let shownChoices = choices;
+  if (looked && looked.ok) latest = looked.look;
+  else if (looked && looked.code === 'routine_gone') {
+    // The choices shown are the surviving ones too, so `choices` and `latest` describe one request that can be sent back
+    const without = await withoutGoneRoutines(botId, ownerId, template!, choices);
+    latest = without.look;
+    shownChoices = { ...choices, routines: without.routines };
+  }
   return {
     shared: !!template && !template.stoppedAt,
     stopped: !!template?.stoppedAt,
@@ -286,16 +294,17 @@ export async function readMakerTemplate(botId: string, ownerId: string): Promise
     sharedAt: version ? version.createdAt.toISOString() : null,
     madeFrom: template ? await countMadeFrom(template.id) : 0,
     hasChanges: !!latest && !!version && latest.contentHash !== version.contentHash,
-    choices,
+    choices: shownChoices,
     routineChoices: await routineChoices(botId, ownerId),
     latest,
   };
 }
 
-async function withoutGoneRoutines(botId: string, ownerId: string, template: BrickTemplate, choices: ReturnType<typeof savedChoices>): Promise<TemplateLook | null> {
+async function withoutGoneRoutines(botId: string, ownerId: string, template: BrickTemplate, choices: ReturnType<typeof savedChoices>): Promise<{ look: TemplateLook | null; routines: string[] }> {
   const still = new Set((await routineChoices(botId, ownerId)).map((choice) => choice.id));
-  const answer = await lookAtTemplate(botId, ownerId, { leaveOutLook: choices.leaveOutLook, firstThing: choices.firstThing, optionalNeeds: choices.optionalNeeds, routines: choices.routines.filter((id) => still.has(id)), audience: template.audience as TemplateAudience });
-  return answer.ok ? answer.look : null;
+  const routines = choices.routines.filter((id) => still.has(id));
+  const answer = await lookAtTemplate(botId, ownerId, { leaveOutLook: choices.leaveOutLook, firstThing: choices.firstThing, optionalNeeds: choices.optionalNeeds, routines, audience: template.audience as TemplateAudience });
+  return { look: answer.ok ? answer.look : null, routines };
 }
 
 /** Bricks made from a template that still exist (one waiting deleted is not counted). */

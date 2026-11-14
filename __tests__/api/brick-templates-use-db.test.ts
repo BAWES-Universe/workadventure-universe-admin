@@ -228,6 +228,19 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       expect(await prisma.botMcpServer.count({ where: { botId: brickId } })).toBe(1);
     });
 
+    it('refuses a body that is not JSON before anything is made, and still takes no body at all', async () => {
+      const id = await share();
+      as(omar);
+      const before = await prisma.bot.count({ where: { ownerId: omar.id } });
+      const broken = new NextRequest(`http://localhost/api/brick-templates/${id}/use`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"name": ' });
+      expect((await postUse(broken, ids(id))).status).toBe(400);
+      expect(await prisma.bot.count({ where: { ownerId: omar.id } })).toBe(before);
+      const bare = new NextRequest(`http://localhost/api/brick-templates/${id}/use`, { method: 'POST' });
+      const made = await postUse(bare, ids(id));
+      expect(made.status).toBe(201);
+      await remember(made);
+    });
+
     it('takes its own name when asked, and the next colour its owner has not used when the maker left the look out; each time is a new Brick', async () => {
       const id = await share({ leaveOutLook: true });
       as(omar);
@@ -271,7 +284,7 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       // Zero runs, even long after its time
       const later = new Date(Date.now() + 30 * 24 * 3_600_000);
       const claimed = await claimDueRuns(later, 500);
-      expect(claimed.filter((run) => (run as { botId?: string }).botId === body.brick.id)).toEqual([]);
+      expect(claimed.filter((run) => run.brickId === body.brick.id)).toEqual([]);
       expect(await prisma.brickItemRun.count({ where: { itemId: own[0].id } })).toBe(0);
     });
 
@@ -314,6 +327,19 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ state: 'on', timeZone: 'Asia/Dubai' });
     });
 
+    it('keep UTC when the owner chose UTC for the routine, even with another zone kept; only a routine nobody gave a zone is set to theirs', async () => {
+      const item = await routine(brickId, sara.id);
+      const id = await share({ routines: [item.id] });
+      as(omar);
+      const body = await remember(await makeFrom(id));
+      const botId = body.brick.id;
+      const itemId = (await prisma.brickItem.findFirstOrThrow({ where: { botId } })).id;
+      await keepZone(omar);
+      expect((await changeItem(botId, itemId, { userId: omar.email, action: 'change', change: { timeZone: 'UTC' } })).ok).toBe(true);
+      expect((await changeItem(botId, itemId, { userId: omar.email, action: 'resume' })).ok).toBe(true);
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ state: 'on', timeZone: 'UTC' });
+    });
+
     it('Done is not a way around the gate: a routine marked done while still off cannot be reopened or snoozed on until it is set up', async () => {
       const gmail = await connectGmail(sara);
       await prisma.botMcpServer.create({ data: { botId: brickId, name: 'Gmail', serverUrl: gmail.serverUrl, connectionId: gmail.id } });
@@ -332,7 +358,8 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       expect(await act('reopen')).toMatchObject({ ok: false, status: 409, code: 'needs_setup' });
       expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ state: 'done', nextDueAt: null });
       const later = new Date(Date.now() + 30 * 24 * 3_600_000);
-      expect((await claimDueRuns(later, 500)).filter((run) => (run as { botId?: string }).botId === botId)).toEqual([]);
+      expect((await claimDueRuns(later, 500)).filter((run) => run.brickId === botId)).toEqual([]);
+      expect(await prisma.brickItemRun.count({ where: { itemId } })).toBe(0);
 
       const own = await connectGmail(omar);
       await prisma.botMcpServer.create({ data: { botId, name: 'Gmail', serverUrl: own.serverUrl, connectionId: own.id } });

@@ -22,7 +22,17 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const { id } = await params;
     const owner = await brickOwner(request);
     if (owner.response) return owner.response;
-    const parsed = fromTemplateSchema.safeParse((await request.json().catch(() => null)) ?? {});
+    // No body at all means "its own name, nothing else"; a body that is not JSON is refused before anything is made
+    const text = await request.text();
+    let body: unknown = {};
+    if (text.trim() !== '') {
+      try {
+        body = JSON.parse(text);
+      } catch {
+        return brickJson(request, { error: 'Invalid input data' }, 400);
+      }
+    }
+    const parsed = fromTemplateSchema.safeParse(body ?? {});
     if (!parsed.success) return brickJson(request, { error: 'Invalid input data', details: z.treeifyError(parsed.error) }, 400);
     const used = await makeBrickFromTemplate(owner.userId, id, parsed.data);
     if (!used.ok) return brickJson(request, { error: used.error }, used.status);

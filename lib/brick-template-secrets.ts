@@ -26,11 +26,13 @@ interface Pattern {
   kind: FindingKind;
   what: string;
   pattern: RegExp;
-  /** A further test on the match, to keep ordinary words out. */
-  accept?: (match: string) => boolean;
+  /** A further test on the match (and the text before it), to keep ordinary words out. */
+  accept?: (match: string, head: string) => boolean;
 }
 
 const hasDigit = (value: string) => /\d/.test(value);
+/** The text before a match ends inside a link (https://...): what follows is an address, not a key. */
+const insideLink = (head: string) => /(?:^|\s)[a-z][a-z0-9+.-]*:\/\/\S*$/i.test(head);
 const mixesCases = (value: string) => /[a-z]/.test(value) && /[A-Z]/.test(value) && /\d/.test(value);
 
 const PATTERNS: Pattern[] = [
@@ -48,10 +50,12 @@ const PATTERNS: Pattern[] = [
     kind: 'secret',
     what: 'a password or key written out',
     pattern: /\b(?:password|passwd|passcode|secret|token|api[ _-]?key|access[ _-]?key)\b["']?\s*(?:is|=|:)\s*["']?[A-Za-z0-9_\-/+=.!@#$%^&*]{8,}/gi,
-    // "the password is something you give it" is a sentence: a password has a digit in it
-    accept: (match) => hasDigit(match.replace(/^[^=:]*?(?:\bis\b|=|:)\s*["']?/i, '')),
+    // "the password is something you give it" is a sentence, so after "is" a password has a digit in it. Written as "password: x" or
+    // "password = x" it is an assignment, and any value counts: passwords and keys need no digit
+    accept: (match) => /^[^=:]*?[=:]/.test(match) || hasDigit(match.replace(/^[^=:]*?\bis\b\s*["']?/i, '')),
   },
-  { kind: 'secret', what: 'a long key-like string', pattern: /\b[A-Za-z0-9+/_-]{40,}={0,2}/g, accept: mixesCases },
+  // A long run inside a link's path ("/recipes/ChickenAndVegetableSoup2026") is an address, not a key
+  { kind: 'secret', what: 'a long key-like string', pattern: /\b[A-Za-z0-9+/_-]{40,}={0,2}/g, accept: (match, head) => mixesCases(match) && !insideLink(head) },
   { kind: 'detail', what: 'an email address', pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g },
   { kind: 'detail', what: 'a phone number', pattern: /(?<![\w.])\+?\d[\d\s().-]{8,}\d(?!\w)/g, accept: (match) => match.replace(/\D/g, '').length >= 9 },
 ];
@@ -70,8 +74,8 @@ export function findInText(text: string | null | undefined, where: string): Find
   for (const { kind, what, pattern, accept } of PATTERNS) {
     pattern.lastIndex = 0;
     for (const match of text.matchAll(pattern)) {
-      if (accept && !accept(match[0])) continue;
       const start = match.index ?? 0;
+      if (accept && !accept(match[0], text.slice(0, start))) continue;
       const end = start + match[0].length;
       // The same text is reported once, under the first and most serious name it matches
       if (taken.some(([from, to]) => start < to && from < end)) continue;
