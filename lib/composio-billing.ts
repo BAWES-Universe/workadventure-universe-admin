@@ -5,6 +5,7 @@ import { getAdapter, type ReadyMadeAdapter } from '@/lib/app-adapter';
 import {
   COMPOSIO_RATES_READ_ON,
   COMPOSIO_RATES_SOURCE,
+  DIRECT_EXECUTION_MICROS,
   FREE_MANAGED_CALLS_PER_MONTH,
   FREE_TOOL_CALLS_PER_MONTH,
   PRO_PLAN_CREDIT_MICROS,
@@ -12,6 +13,7 @@ import {
   RATE_MICROS,
   SANDBOX_RUN_MICROS,
   ZDR_ADD_ON_MICROS,
+  tierIsSettled,
   tierOf,
   type RateTier,
 } from '@/lib/composio-rates';
@@ -133,9 +135,11 @@ export interface ComposioMonth {
   ownExecutions: number;
   sandboxRuns: number;
   zdrCalls: number;
+  /** Tool runs sent outside a session, which carry the direct execution add-on. */
+  directCalls: number;
   /** Searches and lookups Composio does not charge for. */
   freeLookups: number;
-  /** Tool runs priced at a figure the pricing page does not settle (the listed group of apps). */
+  /** Tool runs priced at a figure the pricing page does not settle (Google Maps, "from $0.01"). */
   unsettledPriceExecutions: number;
   /** Events written before this meter learned to price a call by app: counted as one tool run each at their app's rate. */
   legacyEvents: number;
@@ -165,6 +169,7 @@ export interface ScannedEvent {
   executions: number;
   sandboxRuns: number;
   zdrCalls: number;
+  directCalls: number;
   tier: RateTier;
   tierVerified: boolean;
   inner: Record<string, number>;
@@ -173,8 +178,12 @@ export interface ScannedEvent {
 
 const num = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0);
 
-/** One meter event as a priced call. An event written before the meter priced by app is one tool run at its app's rate. */
-function readEvent(row: { occurredAt: Date; costMicros: bigint | null; detail: unknown }): ScannedEvent {
+/**
+ * One meter event as a priced call. An event written before the meter priced by app is one tool run at its app's rate. Whether its price
+ * is settled is read from its tier, never from the flag it was written with, so a month spanning a change of the table counts
+ * every event by today's rule.
+ */
+export function readEvent(row: { occurredAt: Date; costMicros: bigint | null; detail: unknown }): ScannedEvent {
   const detail = isRecord(row.detail) ? row.detail : {};
   const toolkit = typeof detail.toolkit === 'string' ? detail.toolkit : '';
   const tool = typeof detail.tool === 'string' ? detail.tool : '';
@@ -182,10 +191,10 @@ function readEvent(row: { occurredAt: Date; costMicros: bigint | null; detail: u
   if (typeof detail.executions === 'number' && typeof detail.tier === 'string' && detail.tier in RATE_MICROS) {
     const inner: Record<string, number> = {};
     if (isRecord(detail.inner)) for (const [slug, count] of Object.entries(detail.inner)) inner[slug] = num(count);
-    return { ...base, executions: num(detail.executions), sandboxRuns: num(detail.sandboxRuns), zdrCalls: num(detail.zdrCalls), tier: detail.tier as RateTier, tierVerified: detail.tierVerified !== false, inner, legacy: false };
+    return { ...base, executions: num(detail.executions), sandboxRuns: num(detail.sandboxRuns), zdrCalls: num(detail.zdrCalls), directCalls: num(detail.directCalls), tier: detail.tier as RateTier, tierVerified: tierIsSettled(detail.tier as RateTier), inner, legacy: false };
   }
   const { tier, verified } = tierOf(toolkit, false);
-  return { ...base, executions: 1, sandboxRuns: 0, zdrCalls: 0, tier, tierVerified: verified, inner: {}, legacy: true };
+  return { ...base, executions: 1, sandboxRuns: 0, zdrCalls: 0, directCalls: 0, tier, tierVerified: verified, inner: {}, legacy: true };
 }
 
 const BATCH = 5_000;
@@ -218,7 +227,7 @@ export function billFrom(events: Iterable<ScannedEvent>, settings: ComposioBilli
   let managedFree = FREE_MANAGED_CALLS_PER_MONTH;
   const tiers = new Map<RateTier, { executions: number; paidExecutions: number; micros: number }>();
   const out = {
-    events: 0, executions: 0, freeExecutions: 0, paidExecutions: 0, managedExecutions: 0, ownExecutions: 0, sandboxRuns: 0, zdrCalls: 0, freeLookups: 0,
+    events: 0, executions: 0, freeExecutions: 0, paidExecutions: 0, managedExecutions: 0, ownExecutions: 0, sandboxRuns: 0, zdrCalls: 0, directCalls: 0, freeLookups: 0,
     unsettledPriceExecutions: 0, legacyEvents: 0, recordedMicros: 0, usageMicros: 0, stoppedExecutions: 0,
   };
   for (const event of events) {
@@ -244,8 +253,9 @@ export function billFrom(events: Iterable<ScannedEvent>, settings: ComposioBilli
     if (!event.tierVerified) out.unsettledPriceExecutions += event.executions;
     out.sandboxRuns += event.sandboxRuns;
     out.zdrCalls += event.zdrCalls;
+    out.directCalls += event.directCalls;
     // The add-ons are paid on every run they cover, free calls or not; paid runs at their app's rate
-    out.usageMicros += paid * RATE_MICROS[event.tier] + event.sandboxRuns * SANDBOX_RUN_MICROS + event.zdrCalls * ZDR_ADD_ON_MICROS;
+    out.usageMicros += paid * RATE_MICROS[event.tier] + event.sandboxRuns * SANDBOX_RUN_MICROS + event.zdrCalls * ZDR_ADD_ON_MICROS + event.directCalls * DIRECT_EXECUTION_MICROS;
     // Hobby: the free calls run out and Composio refuses the rest
     if (!pro) out.stoppedExecutions += paid;
   }

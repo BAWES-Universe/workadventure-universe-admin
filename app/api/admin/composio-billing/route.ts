@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { composioMonth, readComposioBilling, readMonth, reconcileMonth, saveComposioBilling, saveInvoice } from '@/lib/composio-billing';
-import { COMPOSIO_RATES_READ_ON, COMPOSIO_RATES_SOURCE, FREE_MANAGED_CALLS_PER_MONTH, FREE_TOOL_CALLS_PER_MONTH, PRO_PLAN_CREDIT_MICROS, PRO_PLAN_FEE_MICROS, RATE_MICROS, SANDBOX_RUN_MICROS, ZDR_ADD_ON_MICROS } from '@/lib/composio-rates';
+import { COMPOSIO_RATES_READ_ON, DIRECT_EXECUTION_MICROS, COMPOSIO_RATES_SOURCE, FREE_MANAGED_CALLS_PER_MONTH, FREE_TOOL_CALLS_PER_MONTH, PRO_PLAN_CREDIT_MICROS, PRO_PLAN_FEE_MICROS, RATE_MICROS, SANDBOX_RUN_MICROS, ZDR_ADD_ON_MICROS } from '@/lib/composio-rates';
 
 export const runtime = 'nodejs';
 
@@ -36,6 +36,7 @@ export async function GET(request: NextRequest) {
         source: COMPOSIO_RATES_SOURCE,
         perCallMicros: RATE_MICROS,
         zdrAddOnMicros: ZDR_ADD_ON_MICROS,
+        directExecutionMicros: DIRECT_EXECUTION_MICROS,
         sandboxRunMicros: SANDBOX_RUN_MICROS,
         freeToolCallsPerMonth: FREE_TOOL_CALLS_PER_MONTH,
         freeManagedCallsPerMonth: FREE_MANAGED_CALLS_PER_MONTH,

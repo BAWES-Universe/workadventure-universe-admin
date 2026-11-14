@@ -25,6 +25,7 @@ import { grantToBrick, createConnection, readConnection, listConnections } from 
 import { saveMeterSettings } from '@/lib/meter';
 import { saveComposioBilling } from '@/lib/composio-billing';
 import { createBrick } from '@/lib/brick-create';
+import { forgetGitHubApp, saveGitHubApp } from '@/lib/github/app';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const tag = randomUUID().slice(0, 8);
@@ -282,6 +283,28 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect((await readConnection(first.id, sara))?.connected).toBe(true);
   });
 
+  it('once Universe’s own GitHub App is made, starts no new ready-made GitHub, but an older one whose sign-in was lost can still sign in again', async () => {
+    const adapter = fake();
+    setAdapterForTests(adapter);
+    await saveReadyMadeApps({ apps: { github: { name: 'GitHub', authConfigId: 'ac_gh', enabled: true } } }, boss);
+    asSara();
+    const connectGitHub = () => connectReadyMadeApp(request('/api/me/apps/ready-made', { method: 'POST', body: { key: 'github' } }));
+    const older = await (await connectGitHub()).json();
+    await saveGitHubApp({ id: 77, slug: 'bawes-universe', client_id: 'Iv1.client', client_secret: 's', webhook_secret: null, pem: 'pem', html_url: 'https://github.com/apps/bawes-universe' }, null, null);
+    try {
+      await prisma.appConnection.update({ where: { id: older.id }, data: { signInLostAt: new Date(), signInLostStatus: 401 } });
+      const again = await connectGitHub();
+      expect(again.status).toBe(200);
+      expect(await again.json()).toMatchObject({ id: older.id, redirectUrl: 'https://connect.example/sign-in' });
+      // Someone with none gets none
+      mockUser.current = { id: omar, email: `omar-${tag}@example.test` };
+      expect((await connectGitHub()).status).toBe(404);
+    } finally {
+      await prisma.appSetting.deleteMany({ where: { key: 'github-app' } });
+      forgetGitHubApp();
+    }
+  });
+
   it('never stores the provider key, even when the provider’s session answer carries headers, and shows it nowhere', async () => {
     const adapter = fake();
     // A provider that sends the key back in the link's headers (the adapter drops them; a fake that returned them would still be ignored)
@@ -339,9 +362,9 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect(writtenWhenCalled).toBe(1);
     const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, payerKind: 'universe', route: 'app', unit: 'use', basis: 'estimated', costMicros: BigInt(300), quantity: BigInt(1), botId: saraBrick });
-    // The app here has a sign-in setup a super admin chose, so it is priced as our own sign-in: $0.0003. How it was priced is written, never what was asked.
-    expect(events[0].detail).toEqual({ toolkit: KEY, tool: 'GMAIL_FETCH_EMAILS', kind: 'execution', tier: 'own', tierVerified: true, ownAuth: true, executions: 1, sandboxRuns: 0, zdrCalls: 0 });
+    expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, payerKind: 'universe', route: 'app', unit: 'use', basis: 'estimated', costMicros: BigInt(400), quantity: BigInt(1), botId: saraBrick });
+    // The app here has a sign-in setup a super admin chose, so it is priced as our own sign-in: $0.0003, plus $0.0001 for a run outside a session. How it was priced is written, never what was asked.
+    expect(events[0].detail).toEqual({ toolkit: KEY, tool: 'GMAIL_FETCH_EMAILS', kind: 'execution', tier: 'own', tierVerified: true, ownAuth: true, executions: 1, sandboxRuns: 0, zdrCalls: 0, directCalls: 1 });
   });
 
   it('writes an estimate from the super admin’s own price once there is one', async () => {
@@ -491,7 +514,7 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(JSON.stringify(event.detail)).not.toContain('private words');
     });
 
-    it('prices a call on Composio’s own sign-in at the managed rate, and adds the zero data retention add-on only where it covers (our own sign-in, once it is switched on)', async () => {
+    it('prices a call on Composio’s own sign-in at the managed rate (an app the rate card does not name: $0.0005), plus the direct execution add-on, and adds the zero data retention add-on only where it covers (our own sign-in, once it is switched on)', async () => {
       const { serverId } = await connectedAndGranted();
       await saveComposioBilling({ zdrOn: true }, boss);
       try {
@@ -509,7 +532,7 @@ run('ready-made apps through the adapter, in a real database', () => {
         await prisma.appSetting.deleteMany({ where: { key: 'composio-billing' } });
       }
       const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' }, orderBy: { recordedAt: 'asc' } });
-      expect(events.map((event) => Number(event.costMicros))).toEqual([500, 400, 300]);
+      expect(events.map((event) => Number(event.costMicros))).toEqual([600, 500, 400]);
       expect(events.map((event) => (event.detail as { zdrCalls: number }).zdrCalls)).toEqual([0, 1, 0]);
     });
 

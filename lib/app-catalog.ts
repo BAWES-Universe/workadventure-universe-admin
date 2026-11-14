@@ -4,6 +4,8 @@ import { prisma } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { createMcpServerSchema } from '@/lib/mcp/server-input';
 import { createConnection } from '@/lib/app-connections';
+import { getGitHubApp } from '@/lib/github/app';
+import { connectGitHub, GITHUB_CATALOG_KEY, GITHUB_ROW_KEY } from '@/lib/github/connection';
 
 /**
  * The apps a person can connect with one tap (game #2001, "Connect another"): a list a super admin keeps in Orbit, never
@@ -164,7 +166,12 @@ export async function listCatalogForPerson(ownerId: string, query?: string): Pro
     prisma.appConnection.findMany({ where: { ownerId, catalogKey: { not: null } }, select: { id: true, catalogKey: true } }),
   ]);
   const connected = new Map(mine.map((row) => [row.catalogKey as string, row.id]));
-  return entries.map((entry) => ({ key: entry.key, name: entry.name, blurb: entry.blurb, icon: entry.icon, connectionId: connected.get(entry.key) ?? null }));
+  const rows = entries.map((entry) => ({ key: entry.key, name: entry.name, blurb: entry.blurb, icon: entry.icon, connectionId: connected.get(entry.key) ?? null }));
+  // GitHub, through Universe's own GitHub App (game #2041), once a super admin has made it: always first, for everyone
+  if (!(await getGitHubApp())) return rows;
+  const github: CatalogRow = { key: GITHUB_ROW_KEY, name: 'GitHub', blurb: 'Code, pull requests, issues and CI', icon: 'github', connectionId: connected.get(GITHUB_CATALOG_KEY) ?? null };
+  const wanted = !q || [github.name, github.blurb, github.key].some((field) => field.toLowerCase().includes(q.toLowerCase()));
+  return [...(wanted ? [github] : []), ...rows.filter((row) => row.key !== GITHUB_ROW_KEY)];
 }
 
 /**
@@ -172,6 +179,8 @@ export async function listCatalogForPerson(ownerId: string, query?: string): Pro
  * twice (or twice at once), the second answer is the first connection. Null when the app is not on the list or is off.
  */
 export async function connectFromCatalog(ownerId: string, key: string): Promise<{ id: string; created: boolean } | null> {
+  // The GitHub row is Universe's own GitHub App once it is made (game #2041); the person signs in next
+  if (key === GITHUB_ROW_KEY && (await getGitHubApp())) return connectGitHub(ownerId);
   try {
     // The entry is read and held shared while the connection is made, so removing it at the same moment either waits for this
     // or is waited for: a connection is never made from an entry that is already gone

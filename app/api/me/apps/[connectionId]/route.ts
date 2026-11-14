@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { z } from 'zod';
-import { disconnect, ownBricks, readConnection, renameConnection, NOT_FOUND } from '@/lib/app-connections';
+import { disconnect, getOwnedConnection, ownBricks, readConnection, renameConnection, NOT_FOUND } from '@/lib/app-connections';
+import { whereItWorks } from '@/lib/github/connection';
 import { appsRoute, preflight } from '@/lib/me-apps-route';
 import { lendTargets, lentTo } from '@/lib/app-sharing';
 
@@ -13,7 +14,7 @@ export async function OPTIONS(request: NextRequest) {
   return preflight(request, METHODS);
 }
 
-/** GET /api/me/apps/:id - one of the caller's apps with its Bricks, and the Bricks of theirs that do not use it yet. */
+/** GET /api/me/apps/:id - one of the caller's apps with its Bricks, and the Bricks of theirs that do not use it yet (and, for GitHub, `github`: where it works). */
 export async function GET(request: NextRequest, { params }: Params) {
   return appsRoute(request, METHODS, 'reading an app', async (user, respond) => {
     const { connectionId } = await params;
@@ -22,7 +23,11 @@ export async function GET(request: NextRequest, { params }: Params) {
     const bricks = await ownBricks(user.id);
     // "Lent to": where it is lent and what bots there do with it, and the universes it could still be lent to (empty when it cannot be lent)
     const [lent, targets] = app.lendable ? await Promise.all([lentTo(connectionId), lendTargets(user.id, connectionId)]) : [[], []];
+    // A person's GitHub (game #2041): who it signs in as, where it works and where it waits for an owner's OK
+    const row = app.source === 'github' ? await getOwnedConnection(connectionId, user.id) : null;
+    const github = row ? await whereItWorks(row) : null;
     return respond({
+      ...(github ? { github } : {}),
       app,
       canLetUse: bricks.filter((brick) => !app.bricks.some((used) => used.botId === brick.id)),
       lentTo: lent,

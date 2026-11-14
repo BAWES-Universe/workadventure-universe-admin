@@ -2,44 +2,59 @@
  * What Composio charges us for a ready-made app step: ONE table to update when its published prices change, and the rule that
  * turns a call into a price. No database in here, so the meter, the account's monthly bill and the tests read the same numbers.
  *
- * Source: composio.dev/pricing/platform and docs.composio.dev (billing and zero data retention), read 14 Nov 2026. Money is in
- * millionths of a dollar ("micros"): $0.0005 is 500.
+ * Source: Composio's own rate card, composio.dev/pricing.md (the machine-readable twin of composio.dev/pricing/platform; the two
+ * agree), read 14 Nov 2026. Money is in millionths of a dollar ("micros"): $0.0005 is 500. After the 20K free managed calls a
+ * month, per tool call on Composio's own sign-in:
+ *  - $0.01: Salesforce, YouTube, Reddit, Google Ads, QuickBooks, LinkedIn, Zoho Books, Gong, Zoho Inventory, Google Photos, Zoho
+ *    Invoice, Moneybird, Blackbaud.
+ *  - $0.002: Gmail, Google Calendar, Google Super, Microsoft Teams, Google Drive, HubSpot, Slack, Google Sheets, Jira, Trello,
+ *    Discord Bot, TikTok Ads, Confluence, Stack Exchange.
+ *  - $0.0005: all other Composio-managed apps (Notion, GitHub, Linear, Asana, Airtable, Dropbox, Todoist, Outlook, Google Docs...).
+ *  - Google Maps: from $0.01, charged from the first call and outside the free 20K; the page says it varies by API and resources
+ *    used, so $0.01 is a floor.
+ * Our own sign-in or an API key is $0.0003 on Pro. Add-ons on Pro, per call: direct execution (a tool run outside a Session)
+ * +$0.0001, sandbox execution +$0.0001, zero data retention +$0.0001. "Meta tools such as tool search are free."
  *
- * WHAT THE PAGE DOES NOT SETTLE (kept honest here, not guessed away):
- *  - The page lists app names near the price labels $0.002 and $0.0005, and its layout reads two ways. Gmail, Google Calendar,
- *    Drive, Sheets, Slack, HubSpot, Trello and the others on that list are $0.0005 on one reading and $0.002 on the other. They
- *    are priced at the HIGHER figure until the first monthly check against Composio's own invoice says which is right
- *    (`LISTED_GROUP_MICROS`), so reported margin is never better than it is.
+ * HISTORY: the text of /pricing/platform lists the apps and the price labels without saying which label belongs to which list, and
+ * this file was once held at the "higher reading" of it. That moved the other managed apps to $0.01 wrongly; pricing.md states each
+ * price against its group in a table, which settles it. Do not read the platform page's layout again: read pricing.md.
+ *
+ * WHAT IS STILL NOT SETTLED (said here, not guessed away):
  *  - The page says per-app prices for managed apps apply to signups on or after 3 Nov 2026. Whether our account is under that
- *    rule is not stated.
- *  - Whether the sandbox's own 10,000 free runs apply on Pro, and whether a sandbox run is also a tool call, are not stated:
- *    a run is priced as the add-on only ($0.0001), with no free runs taken off.
+ *    rule is not stated (the first invoice or the dashboard's per-app rates will show).
+ *  - Orbit runs a single app step through POST /tools/execute (`useReadyMade`), which is the REST side of Composio's
+ *    `tools.execute()`: its docs call that "direct execution", so the add-on is counted. The docs do not name the REST endpoint
+ *    in so many words; the first invoice settles it.
+ *  - Whether the sandbox's own 10,000 free runs apply on Pro, and whether a sandbox run is also a tool call, are not stated: a run
+ *    is priced as the add-on only ($0.0001), with no free runs taken off.
  *  - Whether a batch call (COMPOSIO_MULTI_EXECUTE_TOOL) is itself an execution besides the tools inside it is not stated: only
  *    the tools inside are priced.
  */
 
 export const COMPOSIO_RATES_READ_ON = '2026-11-14';
-export const COMPOSIO_RATES_SOURCE = 'composio.dev/pricing/platform';
+export const COMPOSIO_RATES_SOURCE = 'composio.dev/pricing.md';
 
 export type RateTier = 'own' | 'managed_other' | 'managed_listed' | 'managed_premium' | 'managed_maps';
 
-/** A tool call on Composio's own sign-in, by tier, in micros. `managed_listed` is the ambiguous one above: held at the higher figure. */
-export const LISTED_GROUP_MICROS = 2_000;
+/** A tool call by tier, in micros (see the rate card above). */
 export const RATE_MICROS: Record<RateTier, number> = {
   /** Our own sign-in app or an API-key app, on Pro. */
   own: 300,
   /** "All other Composio-managed apps". */
   managed_other: 500,
-  managed_listed: LISTED_GROUP_MICROS,
-  /** Salesforce, YouTube, Reddit and the like. */
-  managed_premium: 2_000,
-  /** "From $0.01": the starting price, charged from the first call. */
+  /** Gmail, Google Calendar, Drive, Sheets, Slack, HubSpot, Trello and the like. */
+  managed_listed: 2_000,
+  /** Salesforce, YouTube, Reddit, LinkedIn and the like. */
+  managed_premium: 10_000,
+  /** Google Maps, "from $0.01": the starting price, charged from the first call. */
   managed_maps: 10_000,
 };
 
 /** Add-ons on Pro, per call. ZDR covers only apps that do NOT use Composio's own sign-in; the sandbox is never covered. */
 export const ZDR_ADD_ON_MICROS = 100;
 export const SANDBOX_RUN_MICROS = 100;
+/** Running a tool outside a Session (Orbit's single app step), per run on Pro. */
+export const DIRECT_EXECUTION_MICROS = 100;
 
 /** Free each month: 100,000 tool calls in all, of which at most 20,000 on Composio's own sign-in apps. Pro adds a monthly credit that does not roll over. */
 export const FREE_TOOL_CALLS_PER_MONTH = 100_000;
@@ -47,7 +62,7 @@ export const FREE_MANAGED_CALLS_PER_MONTH = 20_000;
 export const PRO_PLAN_FEE_MICROS = 29_000_000;
 export const PRO_PLAN_CREDIT_MICROS = 29_000_000;
 
-/** Toolkit slugs the page names, by tier. An app not named anywhere is "all other managed apps". */
+/** Toolkit slugs the rate card names, by tier. An app not named anywhere is "all other managed apps". */
 const LISTED_GROUP = [
   'gmail', 'googlecalendar', 'googlesuper', 'microsoft_teams', 'microsoftteams', 'googledrive', 'hubspot', 'slack', 'googlesheets',
   'jira', 'trello', 'discordbot', 'tiktok_ads', 'tiktokads', 'confluence', 'stack_exchange', 'stackexchange',
@@ -58,14 +73,23 @@ const PREMIUM_GROUP = [
 ];
 const MAPS_GROUP = ['googlemaps', 'google_maps'];
 
+/** Whether a tier's price is a settled figure of the rate card. Google Maps is "from $0.01" and varies by API, so its figure is a floor. */
+export function tierIsSettled(tier: RateTier): boolean {
+  return tier !== 'managed_maps';
+}
+
 export function tierOf(toolkit: string, ownAuth: boolean): { tier: RateTier; verified: boolean } {
   const key = toolkit.toLowerCase();
-  if (ownAuth) return { tier: 'own', verified: true };
-  if (PREMIUM_GROUP.includes(key)) return { tier: 'managed_premium', verified: true };
-  if (MAPS_GROUP.includes(key)) return { tier: 'managed_maps', verified: true };
-  // The listed group's price is the page's ambiguous one: priced high, and said to be unverified
-  if (LISTED_GROUP.includes(key)) return { tier: 'managed_listed', verified: false };
-  return { tier: 'managed_other', verified: true };
+  const tier: RateTier = ownAuth
+    ? 'own'
+    : PREMIUM_GROUP.includes(key)
+      ? 'managed_premium'
+      : MAPS_GROUP.includes(key)
+        ? 'managed_maps'
+        : LISTED_GROUP.includes(key)
+          ? 'managed_listed'
+          : 'managed_other';
+  return { tier, verified: tierIsSettled(tier) };
 }
 
 /** Composio's own search and schema lookups: "Meta tools such as tool search are free". Anything else that starts with COMPOSIO_ and is not named below is NOT assumed free. */
@@ -88,6 +112,8 @@ export interface PricedCall {
   tierVerified: boolean;
   /** Tool runs that also carry the zero data retention add-on. */
   zdrCalls: number;
+  /** Tool runs that also carry the direct execution add-on (run outside a Session). */
+  directCalls: number;
   /** The slugs run inside a batch, counted (never their arguments). */
   inner: Record<string, number>;
   /** What the call costs at list price, before the free allowance and the plan's credit. */
@@ -111,6 +137,8 @@ export interface PriceInput {
   tool: string;
   /** The call's arguments: read only to count the tools inside a batch. */
   arguments?: unknown;
+  /** The call is one tool run outside a Session (`/tools/execute`), not a message of an app link's session. */
+  direct?: boolean;
   /** The app signs in through our own (or an API-key) setup, not Composio's. */
   ownAuth: boolean;
   /** Zero data retention is switched on for the project. */
@@ -125,8 +153,8 @@ export function priceCall(input: PriceInput): PricedCall {
   const base = { tier, tierVerified: verified, inner: {} as Record<string, number> };
 
   const tool = input.tool.toUpperCase();
-  if (FREE_META_TOOLS.has(tool)) return { ...base, kind: 'free', executions: 0, sandboxRuns: 0, zdrCalls: 0, listMicros: 0 };
-  if (SANDBOX_TOOLS.has(tool)) return { ...base, kind: 'sandbox', executions: 0, sandboxRuns: 1, zdrCalls: 0, listMicros: SANDBOX_RUN_MICROS };
+  if (FREE_META_TOOLS.has(tool)) return { ...base, kind: 'free', executions: 0, sandboxRuns: 0, zdrCalls: 0, directCalls: 0, listMicros: 0 };
+  if (SANDBOX_TOOLS.has(tool)) return { ...base, kind: 'sandbox', executions: 0, sandboxRuns: 1, zdrCalls: 0, directCalls: 0, listMicros: SANDBOX_RUN_MICROS };
 
   if (tool === BATCH_TOOL) {
     const slugs = innerSlugs(input.arguments);
@@ -141,9 +169,11 @@ export function priceCall(input: PriceInput): PricedCall {
       if (SANDBOX_TOOLS.has(upper)) sandboxRuns += 1;
       else executions += 1;
     }
-    return { ...base, kind: 'batch', inner, executions, sandboxRuns, zdrCalls: zdrEach ? executions : 0, listMicros: executions * (rate + zdrEach) + sandboxRuns * SANDBOX_RUN_MICROS };
+    return { ...base, kind: 'batch', inner, executions, sandboxRuns, zdrCalls: zdrEach ? executions : 0, directCalls: 0, listMicros: executions * (rate + zdrEach) + sandboxRuns * SANDBOX_RUN_MICROS };
   }
 
   // Any other tool name is one run of that tool. An unknown COMPOSIO_ tool is not assumed free: unknown prices are never zero.
-  return { ...base, kind: 'execution', executions: 1, sandboxRuns: 0, zdrCalls: zdrEach ? 1 : 0, listMicros: rate + zdrEach };
+  // A single tool run sent outside a session also carries the direct execution add-on.
+  const directEach = input.direct ? DIRECT_EXECUTION_MICROS : 0;
+  return { ...base, kind: 'execution', executions: 1, sandboxRuns: 0, zdrCalls: zdrEach ? 1 : 0, directCalls: directEach ? 1 : 0, listMicros: rate + zdrEach + directEach };
 }
