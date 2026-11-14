@@ -13,6 +13,7 @@ import {
   RATE_MICROS,
   SANDBOX_RUN_MICROS,
   ZDR_ADD_ON_MICROS,
+  tierIsSettled,
   tierOf,
   type RateTier,
 } from '@/lib/composio-rates';
@@ -138,7 +139,7 @@ export interface ComposioMonth {
   directCalls: number;
   /** Searches and lookups Composio does not charge for. */
   freeLookups: number;
-  /** Tool runs priced at a figure the pricing page does not settle (every app on Composio's own sign-in). */
+  /** Tool runs priced at a figure the pricing page does not settle (Google Maps, "from $0.01"). */
   unsettledPriceExecutions: number;
   /** Events written before this meter learned to price a call by app: counted as one tool run each at their app's rate. */
   legacyEvents: number;
@@ -179,8 +180,8 @@ const num = (value: unknown): number => (typeof value === 'number' && Number.isF
 
 /**
  * One meter event as a priced call. An event written before the meter priced by app is one tool run at its app's rate. Whether its price
- * is settled is read from its tier, never from the flag it was written with: an event written before #945 says a managed price was
- * verified, and none is.
+ * is settled is read from its tier, never from the flag it was written with, so a month spanning a change of the table counts
+ * every event by today's rule.
  */
 export function readEvent(row: { occurredAt: Date; costMicros: bigint | null; detail: unknown }): ScannedEvent {
   const detail = isRecord(row.detail) ? row.detail : {};
@@ -190,7 +191,7 @@ export function readEvent(row: { occurredAt: Date; costMicros: bigint | null; de
   if (typeof detail.executions === 'number' && typeof detail.tier === 'string' && detail.tier in RATE_MICROS) {
     const inner: Record<string, number> = {};
     if (isRecord(detail.inner)) for (const [slug, count] of Object.entries(detail.inner)) inner[slug] = num(count);
-    return { ...base, executions: num(detail.executions), sandboxRuns: num(detail.sandboxRuns), zdrCalls: num(detail.zdrCalls), directCalls: num(detail.directCalls), tier: detail.tier as RateTier, tierVerified: detail.tier === 'own', inner, legacy: false };
+    return { ...base, executions: num(detail.executions), sandboxRuns: num(detail.sandboxRuns), zdrCalls: num(detail.zdrCalls), directCalls: num(detail.directCalls), tier: detail.tier as RateTier, tierVerified: tierIsSettled(detail.tier as RateTier), inner, legacy: false };
   }
   const { tier, verified } = tierOf(toolkit, false);
   return { ...base, executions: 1, sandboxRuns: 0, zdrCalls: 0, directCalls: 0, tier, tierVerified: verified, inner: {}, legacy: true };

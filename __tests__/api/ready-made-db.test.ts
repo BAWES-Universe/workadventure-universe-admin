@@ -491,7 +491,7 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(JSON.stringify(event.detail)).not.toContain('private words');
     });
 
-    it('prices a call on Composio’s own sign-in at the managed rate (an app the page does not name: $0.01), plus the direct execution add-on, and adds the zero data retention add-on only where it covers (our own sign-in, once it is switched on)', async () => {
+    it('prices a call on Composio’s own sign-in at the managed rate (an app the rate card does not name: $0.0005), plus the direct execution add-on, and adds the zero data retention add-on only where it covers (our own sign-in, once it is switched on)', async () => {
       const { serverId } = await connectedAndGranted();
       await saveComposioBilling({ zdrOn: true }, boss);
       try {
@@ -509,7 +509,7 @@ run('ready-made apps through the adapter, in a real database', () => {
         await prisma.appSetting.deleteMany({ where: { key: 'composio-billing' } });
       }
       const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' }, orderBy: { recordedAt: 'asc' } });
-      expect(events.map((event) => Number(event.costMicros))).toEqual([10_100, 500, 400]);
+      expect(events.map((event) => Number(event.costMicros))).toEqual([600, 500, 400]);
       expect(events.map((event) => (event.detail as { zdrCalls: number }).zdrCalls)).toEqual([0, 1, 0]);
     });
 
