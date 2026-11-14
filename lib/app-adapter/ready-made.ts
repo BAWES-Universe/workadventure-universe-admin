@@ -119,13 +119,13 @@ async function restartIfNotSignedIn(
  * The use is written to the meter, first, under an event id taken from the call's own id (a retry never counts twice). Paid by the
  * universe, at the provider's own list price for what the call is (lib/composio-rates.ts): a search or lookup is free (written
  * with 0 and no tool run), a sandbox run and a tool run are priced by app, a batch is the sum of the tools inside it, and the
- * zero data retention add-on is counted where it covers. The figure is always `estimated` (the provider sends no cost back); the
+ * zero data retention add-on is counted where it covers, and a single run sent outside a session (`useReadyMade`) carries the direct execution add-on. The figure is always `estimated` (the provider sends no cost back); the
  * month's free calls and the plan's credit are taken off at the account level (lib/composio-billing.ts), not here. A price a super
  * admin saved (`appUseMicros`) replaces the list price of each paid step.
  */
-async function meterUse(input: { botId: string; ownerId: string; toolkit: string; tool: string; arguments?: unknown; callId: string }) {
+async function meterUse(input: { botId: string; ownerId: string; toolkit: string; tool: string; arguments?: unknown; callId: string; direct?: boolean }) {
   const [settings, app, billing] = await Promise.all([getMeterSettings(), readyMadeApp(input.toolkit), readComposioBilling()]);
-  const priced = priceCall({ toolkit: input.toolkit, tool: input.tool, arguments: input.arguments, ownAuth: !!app?.authConfigId, zdrOn: billing.zdrOn });
+  const priced = priceCall({ toolkit: input.toolkit, tool: input.tool, arguments: input.arguments, ownAuth: !!app?.authConfigId, zdrOn: billing.zdrOn, direct: input.direct === true });
   const steps = priced.executions + priced.sandboxRuns;
   const cost = settings.appUseMicros === null ? priced.listMicros : steps * settings.appUseMicros;
   return recordMeterEvent({
@@ -159,6 +159,7 @@ async function meterUse(input: { botId: string; ownerId: string; toolkit: string
       executions: priced.executions,
       sandboxRuns: priced.sandboxRuns,
       zdrCalls: priced.zdrCalls,
+      directCalls: priced.directCalls,
       ...(Object.keys(priced.inner).length > 0 ? { inner: priced.inner } : {}),
     },
   });
@@ -232,7 +233,7 @@ export async function useReadyMade(input: { botId: string; connectionId: string;
   const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true } });
   if (!bot || bot.roomId !== null || bot.ownerId !== input.ownerId) return { status: 'not_owner' };
 
-  const written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit: connection.providerToolkit, tool: input.tool, arguments: input.arguments, callId: input.callId });
+  const written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit: connection.providerToolkit, tool: input.tool, arguments: input.arguments, callId: input.callId, direct: true });
   if (!written.recorded) return { status: 'already_asked' };
 
   try {
