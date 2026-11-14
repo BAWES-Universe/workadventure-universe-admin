@@ -34,6 +34,8 @@ export interface ImageState {
   buildId: string | null;
   revision: number | null;
   startedAt: string;
+  /** When the build was last found to have failed: the wait before the next try counts from here, never from when it started. */
+  failedAt?: string;
   failures: number;
   /** The reason a build failed, in Agent37's words (short), for the one who looks. */
   error: string | null;
@@ -59,7 +61,7 @@ export const dbImageStore: ImageStore = {
     {
       const value = (row.value && typeof row.value === 'object' ? row.value : {}) as Partial<ImageState>;
       return typeof value.hash === 'string' && (value.state === 'building' || value.state === 'ready' || value.state === 'failed')
-        ? { hash: value.hash, state: value.state, buildId: value.buildId ?? null, revision: typeof value.revision === 'number' ? value.revision : null, startedAt: value.startedAt ?? new Date(0).toISOString(), failures: value.failures ?? 0, error: value.error ?? null }
+        ? { hash: value.hash, state: value.state, buildId: value.buildId ?? null, revision: typeof value.revision === 'number' ? value.revision : null, startedAt: value.startedAt ?? new Date(0).toISOString(), failures: value.failures ?? 0, error: value.error ?? null, ...(typeof value.failedAt === 'string' ? { failedAt: value.failedAt } : {}) }
         : null;
     }
   },
@@ -135,7 +137,7 @@ export async function ensureImage(client: Agent37Client, store: ImageStore = dbI
         } catch (error) {
           // A build that cannot be read for longer than a build may take is over, so the sweep never waits on it for ever
           if (now.getTime() - new Date(state.startedAt).getTime() > BUILD_TIMEOUT_MS) {
-            state = { ...state, state: 'failed', failures: state.failures + 1, error: 'The build could not be read and took too long' };
+            state = { ...state, state: 'failed', failedAt: now.toISOString(), failures: state.failures + 1, error: 'The build could not be read and took too long' };
             await store.set(state);
             return state;
           }
@@ -148,19 +150,19 @@ export async function ensureImage(client: Agent37Client, store: ImageStore = dbI
         }
         if (build.status === 'failed') {
           console.error('[Computer] The computer image did not build:', build.error?.code ?? 'failed', build.error?.message ?? '', build.log.slice(-400));
-          state = { ...state, state: 'failed', failures: state.failures + 1, error: (build.error?.message || build.error?.code || 'failed').slice(0, 300) };
+          state = { ...state, state: 'failed', failedAt: now.toISOString(), failures: state.failures + 1, error: (build.error?.message || build.error?.code || 'failed').slice(0, 300) };
           await store.set(state);
           return state;
         }
         if (now.getTime() - new Date(state.startedAt).getTime() > BUILD_TIMEOUT_MS) {
-          state = { ...state, state: 'failed', failures: state.failures + 1, error: 'The build took too long' };
+          state = { ...state, state: 'failed', failedAt: now.toISOString(), failures: state.failures + 1, error: 'The build took too long' };
           await store.set(state);
         }
         return state;
       }
       if (state.state === 'failed') {
         const wait = Math.min(RETRY_CAP_MS, RETRY_BASE_MS * 2 ** Math.max(0, state.failures - 1));
-        if (now.getTime() - new Date(state.startedAt).getTime() < wait) return state;
+        if (now.getTime() - new Date(state.failedAt ?? state.startedAt).getTime() < wait) return state;
       }
     }
     // No build of this content yet, or the last one failed and its wait is over: start one, if no other sweep is starting it right now
@@ -182,10 +184,10 @@ export async function ensureImage(client: Agent37Client, store: ImageStore = dbI
     console.error('[Computer] Could not move the computer image on:', error instanceof Error ? error.message : 'unknown');
     // A build that was made but could not be uploaded or started is a failure (the next try is after the wait); a poll that failed is not
     if (justMade && state) {
-      state = { ...state, state: 'failed', failures: state.failures + 1, error: 'The build could not be started' };
+      state = { ...state, state: 'failed', failedAt: now.toISOString(), failures: state.failures + 1, error: 'The build could not be started' };
       await store.set(state).catch(() => undefined);
     }
-    return state ?? { hash: context.hash, state: 'failed', buildId: null, revision: null, startedAt: now.toISOString(), failures: 1, error: 'The image could not be started' };
+    return state ?? { hash: context.hash, state: 'failed', buildId: null, revision: null, startedAt: now.toISOString(), failedAt: now.toISOString(), failures: 1, error: 'The image could not be started' };
   }
 }
 

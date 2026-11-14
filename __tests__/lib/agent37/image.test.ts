@@ -371,6 +371,19 @@ describe('building the image on Agent37', () => {
     expect(ended).toMatchObject({ state: 'failed', buildId: state.buildId, failures: 1 });
   });
 
+  it('counts the wait before a new try from when the build failed, not from when it started', async () => {
+    const w = setup([{ status: 'failed', error: { code: 'build_failed', message: 'x' } as never }]);
+    await ensureImage(w.client, w.store, T0);
+    // The build ran for 50 minutes and then failed
+    const failed = await ensureImage(w.client, w.store, minutes(50));
+    expect(failed).toMatchObject({ state: 'failed', failures: 1, failedAt: minutes(50).toISOString() });
+    const creates = () => w.calls.filter((call) => call.startsWith('create:')).length;
+    expect(creates()).toBe(1);
+    // A moment later nothing is started again, even though it began long ago
+    await ensureImage(w.client, w.store, minutes(51));
+    expect(creates()).toBe(1);
+  });
+
   it('ends a build that has gone on for more than an hour', async () => {
     const w = setup();
     await ensureImage(w.client, w.store, T0);
