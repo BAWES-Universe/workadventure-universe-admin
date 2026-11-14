@@ -180,6 +180,40 @@ describe('the Agent37 provider', () => {
     await expect(provider(w).create('bot-1')).rejects.toBeInstanceOf(Agent37FundsLow);
   });
 
+  describe('the checkup for the team', () => {
+    const built = async (): Promise<ImageState> => ({ hash: 'h', state: 'ready', buildId: 'b', revision: 3, startedAt: new Date(0).toISOString(), failures: 0, error: null });
+    const named = (checks: Array<{ name: string; ok: boolean; detail: string }>) => Object.fromEntries(checks.map((check) => [check.name, check]));
+
+    it('says the key works, the wallet carries a job and the image is built, and creates and wakes nothing', async () => {
+      const w = world();
+      const checks = named(await provider(w, { image: built }).checkup());
+      expect(checks['agent37 key'].ok).toBe(true);
+      expect(checks['agent37 wallet'].ok).toBe(true);
+      expect(checks['computer image']).toMatchObject({ ok: true });
+      expect(w.calls.filter((call) => call !== 'billing')).toEqual([]);
+    });
+
+    it('says a wallet that cannot carry a job, an overdrawn one, and a key that was refused, and never shows the key', async () => {
+      const day = dayOfRunningMicros(BRICK_SHAPE) / 1_000_000;
+      expect(named(await provider(world({ balanceUsd: day + 0.5 }), { reserved: 1_000_000, image: built }).checkup())['agent37 wallet']).toMatchObject({ ok: false });
+      expect(named(await provider(world({ pastDue: true }), { image: built }).checkup())['agent37 wallet']).toMatchObject({ ok: false, detail: 'The wallet is overdrawn' });
+      const refused = world();
+      (refused.client as unknown as { billing: () => Promise<never> }).billing = async () => {
+        throw new Agent37Error(401, 'unauthorized', 'bad key a37_secret_value');
+      };
+      const checks = await provider(refused, { image: built }).checkup();
+      expect(named(checks)['agent37 key']).toMatchObject({ ok: false, detail: 'Agent37 refused the key' });
+      expect(JSON.stringify(checks)).not.toContain('a37_secret_value');
+    });
+
+    it('says where the image stands: building, failed with the reason, not started', async () => {
+      const state = (over: Partial<ImageState>) => async (): Promise<ImageState | null> => ({ hash: 'h', state: 'building', buildId: 'b', revision: null, startedAt: new Date(0).toISOString(), failures: 0, error: null, ...over });
+      expect(named(await provider(world(), { image: state({}) }).checkup())['computer image']).toMatchObject({ ok: false, detail: 'The computer image is being built' });
+      expect(named(await provider(world(), { image: state({ state: 'failed', failures: 2, error: 'no such package' }) }).checkup())['computer image'].detail).toContain('no such package');
+      expect(named(await provider(world(), { image: async () => null }).checkup())['computer image'].ok).toBe(false);
+    });
+  });
+
   it('wakes a resting machine with one start, and waits until its agent answers', async () => {
     const w = world();
     const p = provider(w);

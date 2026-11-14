@@ -50,6 +50,13 @@ export interface SavedCopy {
   savedAt: Date;
 }
 
+/** One thing a computer needs before work can run on it, as a person on the team reads it. `detail` never carries a key. */
+export interface Check {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
 export interface ComputerProvider {
   readonly kind: 'fake' | 'real';
   /** What an awake minute costs, in millionths of a dollar, as the provider says; null when it has not said. */
@@ -63,6 +70,8 @@ export interface ComputerProvider {
    * address. Safe to ask any number of times. Throws when it cannot be made ready (the job then does not start).
    */
   ready(ref: string): Promise<void>;
+  /** What a job needs from the provider right now (the key works, the wallet carries a job, the image is built). Reads only; never throws. */
+  checkup(): Promise<Check[]>;
   /** Whatever the provider keeps up between jobs (the real one builds its image). Asked by the sweep; never throws. */
   maintain(): Promise<void>;
   /** Lets it rest after a job: the disk is kept, nothing else is billed. */
@@ -153,6 +162,10 @@ export class FakeComputerProvider implements ComputerProvider {
   }
 
   async maintain(): Promise<void> {}
+
+  async checkup(): Promise<Check[]> {
+    return [{ name: 'provider', ok: true, detail: 'The pretend provider (development only)' }];
+  }
 
   async wake(ref: string): Promise<void> {
     this.note('wake', ref);

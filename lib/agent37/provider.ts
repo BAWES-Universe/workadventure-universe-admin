@@ -1,4 +1,4 @@
-import type { ComputerProvider, ExecOptions, ExecResult, MachineInfo, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
+import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
 import { readTurn } from '@/lib/agent37/turn-events';
 import { Agent37Client, Agent37Error, Agent37Unreached, type Instance } from '@/lib/agent37/client';
 import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros } from '@/lib/agent37/rates';
@@ -107,6 +107,31 @@ export class Agent37ComputerProvider implements ComputerProvider {
     const have = Math.round(balance.balance_usd * 1_000_000);
     if (!Number.isFinite(have)) throw new Agent37FundsLow('The computer wallet could not be read');
     if (have < (await this.reserved()) + dayOfRunningMicros(BRICK_SHAPE)) throw new Agent37FundsLow();
+  }
+
+  /** For the team's readiness page: whether a job could run now, in plain words. Reads only (nothing is made or woken). */
+  async checkup(): Promise<Check[]> {
+    const checks: Check[] = [];
+    const dollars = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
+    try {
+      const balance = await this.client.billing();
+      checks.push({ name: 'agent37 key', ok: true, detail: 'The Agent37 key works' });
+      const have = Math.round(balance.balance_usd * 1_000_000);
+      const need = (await this.reserved()) + dayOfRunningMicros(BRICK_SHAPE);
+      if (balance.past_due) checks.push({ name: 'agent37 wallet', ok: false, detail: 'The wallet is overdrawn' });
+      else if (!Number.isFinite(have)) checks.push({ name: 'agent37 wallet', ok: false, detail: 'The wallet could not be read' });
+      else checks.push({ name: 'agent37 wallet', ok: have >= need, detail: have >= need ? `The wallet holds ${dollars(have)}; ${dollars(need)} is needed to start a computer` : `The wallet holds ${dollars(have)} but ${dollars(need)} is needed to start a computer` });
+    } catch (error) {
+      checks.push({ name: 'agent37 key', ok: false, detail: error instanceof Agent37Error && (error.status === 401 || error.status === 403) ? 'Agent37 refused the key' : 'Agent37 could not be reached' });
+    }
+    if (this.image) {
+      const state = await this.image().catch(() => null);
+      if (imageReady(state)) checks.push({ name: 'computer image', ok: true, detail: `The computer image is built (revision ${state?.revision ?? 'unknown'})` });
+      else if (state?.state === 'building') checks.push({ name: 'computer image', ok: false, detail: 'The computer image is being built' });
+      else if (state?.state === 'failed') checks.push({ name: 'computer image', ok: false, detail: `The computer image did not build: ${state.error ?? 'no reason given'} (tried ${state.failures} time${state.failures === 1 ? '' : 's'})` });
+      else checks.push({ name: 'computer image', ok: false, detail: 'The computer image has not been started yet (the next sweep starts it)' });
+    }
+    return checks;
   }
 
   private remember(instance: Instance, botId?: string) {
