@@ -180,6 +180,8 @@ export interface KeyAppView {
   definitionHash: string;
   /** The grant's switch (an explicit Off stays Off). */
   enabled: boolean;
+  /** The app can take a payment for a page (its definition has a payment contract): the Brick may set one up through it. */
+  payments: boolean;
   /** False while the service refuses the key ("Key stopped working"): the Brick says so and carries on without it. */
   working: boolean;
   /** What the Brick does under each heading for this app (rightAway | asksFirst | off). */
@@ -209,6 +211,7 @@ export async function keyAppsOf(botId: string): Promise<KeyAppView[]> {
       short: parsed.data.short,
       definitionHash: connection.definitionHash as string,
       enabled: row.enabled,
+      payments: !!parsed.data.payment,
       working: !connection.signInLostAt,
       settings: { looksUp: row.lookUpSetting, makesNew: row.makeSetting, changesThings: row.changeSetting, deletesOrSends: row.deleteSendSetting },
       operations: operationViews(parsed.data).map((operation) => ({ ...operation, tool: toolNameOf(parsed.data, operation.id, connection.id), fingerprint: fingerprintOf(hash, operation.id) })),

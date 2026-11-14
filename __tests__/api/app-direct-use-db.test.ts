@@ -175,7 +175,8 @@ run('using a key app, in a real database', () => {
     const body = await response.json();
     expect(body.apps).toHaveLength(1);
     const [app] = body.apps;
-    expect(app).toMatchObject({ connectionId: id, name: 'Tap Payments', short: 'Tap', enabled: true, working: true, settings: { looksUp: 'rightAway', makesNew: 'rightAway', changesThings: 'asksFirst', deletesOrSends: 'asksFirst' } });
+    expect(body.services).toEqual([{ service: 'tap', name: 'Tap Payments', short: 'Tap' }]);
+    expect(app).toMatchObject({ connectionId: id, name: 'Tap Payments', short: 'Tap', enabled: true, payments: true, working: true, settings: { looksUp: 'rightAway', makesNew: 'rightAway', changesThings: 'asksFirst', deletesOrSends: 'asksFirst' } });
     expect(app.definitionHash).toHaveLength(64);
     expect(app.operations.map((operation: { id: string; heading: string; verified: boolean }) => [operation.id, operation.heading, operation.verified])).toEqual([
       ['lookUpPayment', 'looksUp', true],
