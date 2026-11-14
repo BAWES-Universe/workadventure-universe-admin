@@ -48,6 +48,11 @@ function s3(): { s3: S3Client; bucket: string } {
   return { s3: client, bucket };
 }
 
+/** The bucket's client, for what is not an artifact's file (a Brick computer's saved copy, which lives under a key of its own). */
+export function artifactBucket(): { s3: S3Client; bucket: string } {
+  return s3();
+}
+
 export const artifactFiles: ArtifactFiles = {
   async put(key, body, contentType) {
     const { s3: s3Client, bucket } = s3();

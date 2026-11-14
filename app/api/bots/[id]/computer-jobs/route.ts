@@ -12,6 +12,8 @@ const bodySchema = z
     userId: z.string().min(1).max(255),
     isGuest: z.boolean().optional(),
     title: z.string().trim().min(1).max(200),
+    // The task in the person's words, for the agent on the computer only (never shown)
+    brief: z.string().max(4000).optional(),
     writes: z.boolean().optional(),
     // The run of a goal or task that asks for the computer (game #2002): a run handed out again finds its job and never starts a second
     runId: z.string().min(1).max(36).optional(),
@@ -68,7 +70,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const person = await resolveUsagePerson(parsed.data.userId, parsed.data.isGuest);
     // A guest never has a Brick computer: a Brick belongs to an account
     if (!person.personId) return NextResponse.json({ ok: false, reason: 'not_owner' });
-    const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, writes: parsed.data.writes, runId: parsed.data.runId });
+    const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, brief: parsed.data.brief, writes: parsed.data.writes, runId: parsed.data.runId });
     return NextResponse.json(started.ok ? { ok: true, job: started.job, restoredFrom: started.restoredFrom } : { ok: false, reason: started.reason });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'computer' } });

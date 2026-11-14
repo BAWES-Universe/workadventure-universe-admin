@@ -1,0 +1,523 @@
+import { Agent37Error, Agent37Unreached, type Agent37Client, type Instance } from '@/lib/agent37/client';
+import { Agent37ComputerProvider, Agent37FundsLow, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
+import type { ImageState } from '@/lib/agent37/image';
+import { awakeMicrosPerMinute, dayOfRunningMicros, BRICK_SHAPE } from '@/lib/agent37/rates';
+
+jest.mock('@/lib/agent37/saved-copies', () => ({ savedCopyOf: jest.fn(), storeSavedCopy: jest.fn() }));
+
+/** A pretend Agent37: instances that keep a status, and a record of every call. */
+function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
+  const instances = new Map<string, Instance>();
+  const calls: string[] = [];
+  const execs: Array<{ id: string; command: string; options: unknown }> = [];
+  let healthy = true;
+  let execOut: (command: string) => string = () => 'ok';
+  let revisionAfterUpdate = 2;
+  const refuse: Record<string, Error | undefined> = {};
+  const client = {
+    async listInstances() {
+      calls.push('list');
+      return [...instances.values()];
+    },
+    async createInstance(input: { metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean }) {
+      calls.push('create');
+      if (refuse.create) {
+        const error = refuse.create;
+        refuse.create = undefined;
+        // A lost answer after the machine WAS made
+        if (error instanceof Agent37Unreached) instances.set('made1', { id: 'made1', status: 'running', url: 'https://made1.agent37.app', metadata: input.metadata, region: 'us' });
+        throw error;
+      }
+      const instance = { id: `m${instances.size + 1}`, status: 'running', url: `https://m${instances.size + 1}.agent37.app`, metadata: input.metadata, region: 'us' } as Instance;
+      instances.set(instance.id, instance);
+      created.push(input);
+      return instance;
+    },
+    async getInstance(id: string) {
+      calls.push(`get:${id}`);
+      const found = instances.get(id);
+      if (!found) throw new Agent37Error(404, 'not_found', 'gone');
+      return found;
+    },
+    async startInstance(id: string) {
+      calls.push(`start:${id}`);
+      instances.get(id)!.status = 'running';
+      return { id, status: 'running' };
+    },
+    async sleepInstance(id: string) {
+      calls.push(`sleep:${id}`);
+      instances.get(id)!.status = 'sleeping';
+      instances.get(id)!.slept_at = Math.floor(Date.now() / 1000);
+      return { id, status: 'sleeping' };
+    },
+    async stopInstance(id: string) {
+      calls.push(`stop:${id}`);
+      instances.get(id)!.status = 'stopped';
+      return { id, status: 'stopped' };
+    },
+    async deleteInstance(id: string) {
+      calls.push(`delete:${id}`);
+      if (!instances.has(id)) throw new Agent37Error(404, 'not_found', 'gone');
+      instances.delete(id);
+      return { id, deleted: true };
+    },
+    async signedUrl(id: string, port: number, ttl: number) {
+      calls.push(`signed:${id}:${port}:${ttl}`);
+      return { url: `https://${id}.agent37.app/?a37_token=t` };
+    },
+    async billing() {
+      calls.push('billing');
+      return { balance_usd: options.balanceUsd ?? 5, past_due: options.pastDue ?? false };
+    },
+    async healthy() {
+      calls.push('health');
+      return healthy;
+    },
+    async exec(id: string, command: string, options?: unknown) {
+      calls.push(`exec:${id}:${command}`);
+      execs.push({ id, command, options });
+      return { exitCode: 0, stdout: execOut(command), stderr: '', truncated: false };
+    },
+    async openTurn(url: string, input: { text: string; sessionId?: string | null }) {
+      calls.push(`turn:${url}:${input.text}`);
+      return new Response(`event: response.created\ndata: ${JSON.stringify({ id: 'resp-1', session_id: 'sess-1' })}\n\nevent: response.completed\ndata: ${JSON.stringify({ output_text: 'done', usage: null })}\n\n`);
+    },
+    async reattachTurn(url: string, responseId: string) {
+      calls.push(`reattach:${url}:${responseId}`);
+      return new Response(`event: response.completed\ndata: ${JSON.stringify({ output_text: '', usage: null })}\n\n`);
+    },
+    async cancelTurn(url: string, responseId: string) {
+      calls.push(`cancel:${url}:${responseId}`);
+    },
+    async activeTurn(url: string, sessionId: string) {
+      calls.push(`active:${url}:${sessionId}`);
+      return 'resp-2';
+    },
+    async updateInstance(id: string) {
+      calls.push(`update:${id}`);
+      const found = instances.get(id)!;
+      found.status = 'running';
+      found.template_revision = revisionAfterUpdate;
+      return { id, status: 'running', template_revision: revisionAfterUpdate };
+    },
+    async archive(url: string) {
+      calls.push(`archive:${url}`);
+      return { body: new ReadableStream() } as unknown as Response;
+    },
+  };
+  const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean }> = [];
+  return { client: client as unknown as Agent37Client, instances, calls, execs, created, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn) };
+}
+
+function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
+  const clock = extra.clock ?? { t: 1_000_000 };
+  return new Agent37ComputerProvider({
+    client: w.client,
+    outstandingReserveMicros: async () => extra.reserved ?? 0,
+    sleep: async () => {
+      clock.t += 3_000;
+    },
+    now: () => clock.t,
+    copies: extra.copies,
+    image: extra.image,
+  });
+}
+
+describe('the Agent37 provider', () => {
+  it('makes one machine for a Brick with its id in the metadata, a $0 managed budget, no env and auto sleep on', async () => {
+    const w = world();
+    const info = await provider(w).create('bot-1');
+    expect(info).toEqual({ ref: 'm1', region: 'us' });
+    expect(w.created[0].metadata).toEqual({ creation_id: 'brick:bot-1' });
+    expect(w.created[0].budget).toEqual({ monthly_cap_micros: 0, credit_micros: 0 });
+    expect(w.created[0].env).toBeUndefined();
+    expect(w.created[0].auto_sleep).toBe(true);
+  });
+
+  it('adopts the machine a Brick already has instead of making a second one', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    const again = await p.create('bot-1');
+    expect(again.ref).toBe('m1');
+    expect(w.created).toHaveLength(1);
+    // The Brick of a deleted machine is not adopted
+    w.instances.get('m1')!.status = 'deleted';
+    expect((await p.create('bot-1')).ref).toBe('m2');
+  });
+
+  it('after a create whose answer was lost, finds the machine that was made and adopts it', async () => {
+    const w = world();
+    w.refuse.create = new Agent37Unreached('TimeoutError');
+    const info = await provider(w).create('bot-1');
+    expect(info.ref).toBe('made1');
+    expect(w.calls.filter((call) => call === 'create')).toHaveLength(1);
+  });
+
+  it('after a lost create that made nothing, says so and makes none', async () => {
+    const w = world();
+    w.refuse.create = new Agent37Error(503, 'no_capacity', 'No host');
+    await expect(provider(w).create('bot-1')).rejects.toBeInstanceOf(Agent37Error);
+    expect(w.instances.size).toBe(0);
+  });
+
+  it('does not make or wake a machine when the wallet cannot cover the room held for jobs and a day of running', async () => {
+    const day = dayOfRunningMicros(BRICK_SHAPE) / 1_000_000;
+    const poor = world({ balanceUsd: day + 0.5 });
+    await expect(provider(poor, { reserved: 1_000_000 }).create('bot-1')).rejects.toBeInstanceOf(Agent37FundsLow);
+    expect(poor.calls).not.toContain('create');
+    const enough = world({ balanceUsd: day + 1.5 });
+    await expect(provider(enough, { reserved: 1_000_000 }).create('bot-1')).resolves.toBeDefined();
+    const overdrawn = world({ pastDue: true });
+    await expect(provider(overdrawn).create('bot-1')).rejects.toBeInstanceOf(Agent37FundsLow);
+  });
+
+  it('an unreadable wallet is a no', async () => {
+    const w = world();
+    (w.client as unknown as { billing: () => Promise<never> }).billing = async () => {
+      throw new Agent37Unreached('TimeoutError');
+    };
+    await expect(provider(w).create('bot-1')).rejects.toBeInstanceOf(Agent37FundsLow);
+  });
+
+  describe('the checkup for the team', () => {
+    const built = async (): Promise<ImageState> => ({ hash: 'h', state: 'ready', buildId: 'b', revision: 3, startedAt: new Date(0).toISOString(), failures: 0, error: null });
+    const named = (checks: Array<{ name: string; ok: boolean; detail: string }>) => Object.fromEntries(checks.map((check) => [check.name, check]));
+
+    it('says the key works, the wallet carries a job and the image is built, and creates and wakes nothing', async () => {
+      const w = world();
+      const checks = named(await provider(w, { image: built }).checkup());
+      expect(checks['agent37 key'].ok).toBe(true);
+      expect(checks['agent37 wallet'].ok).toBe(true);
+      expect(checks['computer image']).toMatchObject({ ok: true });
+      expect(w.calls.filter((call) => call !== 'billing')).toEqual([]);
+    });
+
+    it('says a wallet that cannot carry a job, an overdrawn one, and a key that was refused, and never shows the key', async () => {
+      const day = dayOfRunningMicros(BRICK_SHAPE) / 1_000_000;
+      expect(named(await provider(world({ balanceUsd: day + 0.5 }), { reserved: 1_000_000, image: built }).checkup())['agent37 wallet']).toMatchObject({ ok: false });
+      expect(named(await provider(world({ pastDue: true }), { image: built }).checkup())['agent37 wallet']).toMatchObject({ ok: false, detail: 'The wallet is overdrawn' });
+      const refused = world();
+      (refused.client as unknown as { billing: () => Promise<never> }).billing = async () => {
+        throw new Agent37Error(401, 'unauthorized', 'bad key a37_secret_value');
+      };
+      const checks = await provider(refused, { image: built }).checkup();
+      expect(named(checks)['agent37 key']).toMatchObject({ ok: false, detail: 'Agent37 refused the key' });
+      expect(JSON.stringify(checks)).not.toContain('a37_secret_value');
+    });
+
+    it('says the wallet could not be checked, not that the key failed, when what is set aside cannot be read', async () => {
+      const w = world();
+      const p = new Agent37ComputerProvider({
+        client: w.client,
+        outstandingReserveMicros: async () => {
+          throw new Error('database down');
+        },
+        sleep: async () => undefined,
+        now: () => 1_000_000,
+        image: built,
+      });
+      const checks = named(await p.checkup());
+      expect(checks['agent37 key']).toMatchObject({ ok: true });
+      expect(checks['agent37 wallet']).toMatchObject({ ok: false, detail: 'What is already set aside could not be read' });
+    });
+
+    it('says where the image stands: building, failed with the reason, not started', async () => {
+      const state = (over: Partial<ImageState>) => async (): Promise<ImageState | null> => ({ hash: 'h', state: 'building', buildId: 'b', revision: null, startedAt: new Date(0).toISOString(), failures: 0, error: null, ...over });
+      expect(named(await provider(world(), { image: state({}) }).checkup())['computer image']).toMatchObject({ ok: false, detail: 'The computer image is being built' });
+      expect(named(await provider(world(), { image: state({ state: 'failed', failures: 2, error: 'no such package' }) }).checkup())['computer image'].detail).toContain('no such package');
+      expect(named(await provider(world(), { image: async () => null }).checkup())['computer image'].ok).toBe(false);
+    });
+  });
+
+  it('wakes a resting machine with one start, and waits until its agent answers', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    await p.rest('m1');
+    w.setHealthy(false);
+    const clock = { t: 1_000_000 };
+    const slow = provider(w, { clock });
+    let tries = 0;
+    (w.client as unknown as { healthy: () => Promise<boolean> }).healthy = async () => ++tries >= 3;
+    await slow.wake('m1');
+    expect(w.calls.filter((call) => call === 'start:m1')).toHaveLength(1);
+    expect(tries).toBe(3);
+  });
+
+  it('gives up when a machine is not ready in time, and never starts one that is running', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.calls.length = 0;
+    await p.wake('m1');
+    expect(w.calls).not.toContain('start:m1');
+    w.setHealthy(false);
+    await expect(p.wake('m1')).rejects.toThrow('did not become ready');
+  });
+
+  it('waits for a machine that is stopping to be down, then starts it exactly once', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.instances.get('m1')!.status = 'stopping';
+    let reads = 0;
+    const get = w.client.getInstance.bind(w.client);
+    (w.client as unknown as { getInstance: (id: string) => Promise<Instance> }).getInstance = async (id) => {
+      const instance = await get(id);
+      // Two reads say stopping, the third says stopped; the start brings it up
+      if (instance.status === 'stopping' && ++reads >= 3) instance.status = 'stopped';
+      return instance;
+    };
+    await p.wake('m1');
+    expect(w.calls.filter((call) => call === 'start:m1')).toHaveLength(1);
+    expect(w.instances.get('m1')!.status).toBe('running');
+  });
+
+  it('says the plain timeout when a machine never leaves stopping, and starts nothing', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.instances.get('m1')!.status = 'stopping';
+    await expect(p.wake('m1')).rejects.toThrow('did not become ready in time');
+    expect(w.calls.some((call) => call.startsWith('start'))).toBe(false);
+  });
+
+  it('rests a running machine with Agent37’s sleep, and a machine that already rests is left alone', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    await p.rest('m1');
+    await p.rest('m1');
+    expect(w.calls.filter((call) => call === 'sleep:m1')).toHaveLength(1);
+  });
+
+  it('stops and removes; a machine that is already gone is not an error', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    await p.stop('m1');
+    await p.stop('m1');
+    expect(w.calls.filter((call) => call === 'stop:m1')).toHaveLength(1);
+    await p.remove('m1');
+    await expect(p.remove('m1')).resolves.toBeUndefined();
+  });
+
+  it('says whether a machine is running, to prove a stop: running is awake, stopped, sleeping and gone are not', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    expect(await p.awake('m1')).toBe(true);
+    await p.rest('m1');
+    expect(await p.awake('m1')).toBe(false);
+    await p.remove('m1');
+    expect(await p.awake('m1')).toBe(false);
+  });
+
+  it('looking never wakes: a machine that is not running has no screen and no signed link is asked for', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    const live = await p.watch('m1');
+    expect(live).not.toBeNull();
+    expect(w.calls).toContain(`signed:m1:${DESKTOP_PORT}:60`);
+    await p.rest('m1');
+    w.calls.length = 0;
+    expect(await p.watch('m1')).toBeNull();
+    expect(w.calls.some((call) => call.startsWith('signed') || call.startsWith('start') || call === 'health')).toBe(false);
+  });
+
+  it('prices a minute at Agent37’s published rate for the shape', () => {
+    expect(provider(world()).microsPerMinute()).toBe(awakeMicrosPerMinute(BRICK_SHAPE));
+  });
+
+  describe('saving files', () => {
+    const copy = (bytes = 1234) => ({ bytes, savedAt: new Date() });
+
+    it('streams the folder of a running machine into the saved copy', async () => {
+      const w = world();
+      const store = jest.fn(async () => copy());
+      const p = provider(w, { copies: { latest: async () => null, store } });
+      await p.create('bot-1');
+      const saved = await p.saveFiles('m1');
+      expect(saved.bytes).toBe(1234);
+      expect(store).toHaveBeenCalledWith('bot-1', expect.anything());
+      expect(w.calls).toContain('archive:https://m1.agent37.app');
+    });
+
+    it('does not wake a resting machine whose copy is as it was left', async () => {
+      const w = world();
+      const store = jest.fn();
+      const p = provider(w, { copies: { latest: async () => copy(99), store } });
+      await p.create('bot-1');
+      await p.rest('m1');
+      w.calls.length = 0;
+      const saved = await p.saveFiles('m1');
+      expect(saved.bytes).toBe(99);
+      expect(w.calls.some((call) => call.startsWith('start') || call.startsWith('archive'))).toBe(false);
+      expect(store).not.toHaveBeenCalled();
+    });
+
+    it('does not wake a stopped machine that has a copy, even when the wallet is low', async () => {
+      const w = world({ balanceUsd: 0 });
+      w.instances.set('s1', { id: 's1', status: 'stopped', url: 'https://s1.agent37.app', metadata: { creation_id: 'brick:bot-9' } });
+      const p = provider(w, { copies: { latest: async () => copy(77), store: jest.fn() } });
+      const saved = await p.saveFiles('s1');
+      expect(saved.bytes).toBe(77);
+      expect(w.calls.some((call) => call.startsWith('start') || call === 'billing')).toBe(false);
+    });
+
+    it('wakes a resting machine once, for the save, when there is no copy that matches it', async () => {
+      const w = world();
+      const store = jest.fn(async () => copy());
+      const p = provider(w, { copies: { latest: async () => null, store } });
+      await p.create('bot-1');
+      await p.rest('m1');
+      await p.saveFiles('m1');
+      expect(w.calls.filter((call) => call === 'start:m1')).toHaveLength(1);
+      expect(store).toHaveBeenCalledTimes(1);
+    });
+
+    it('a save that fails says so, so a machine is never removed on the word of a copy that was not made', async () => {
+      const w = world();
+      const p = provider(w, {
+        copies: {
+          latest: async () => null,
+          store: async () => {
+            throw new Error('gzip stream ended early');
+          },
+        },
+      });
+      await p.create('bot-1');
+      await expect(p.saveFiles('m1')).rejects.toThrow('ended early');
+    });
+  });
+
+  describe('the agent and commands on a machine', () => {
+    it('runs a command on the machine as it is asked, with its options', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      expect(await p.exec('m1', 'universe-fence', { name: 'x', timeoutMs: 5000 })).toMatchObject({ exitCode: 0, stdout: 'ok' });
+      expect(w.execs).toEqual([{ id: 'm1', command: 'universe-fence', options: { name: 'x', timeoutMs: 5000 } }]);
+    });
+
+    it('starts a turn at the machine’s own address and gives its events', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      const seen = [];
+      for await (const event of await p.openTurn('m1', { text: 'Fill the form' })) seen.push(event.type);
+      expect(seen).toEqual(['created', 'completed']);
+      expect(w.calls).toContain('turn:https://m1.agent37.app:Fill the form');
+    });
+
+    it('reconnects, cancels and asks which turn is running at the same address', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      for await (const event of await p.reattachTurn('m1', 'resp-1')) void event;
+      await p.cancelTurn('m1', 'resp-1');
+      expect(await p.activeTurn('m1', 'sess-1')).toBe('resp-2');
+      expect(w.calls).toEqual(expect.arrayContaining(['reattach:https://m1.agent37.app:resp-1', 'cancel:https://m1.agent37.app:resp-1', 'active:https://m1.agent37.app:sess-1']));
+    });
+
+    it('does not reach a machine that is gone', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.instances.get('m1')!.status = 'deleted';
+      await expect(p.openTurn('m1', { text: 'x' })).rejects.toThrow('deleted');
+      await expect(p.cancelTurn('m1', 'r')).rejects.toThrow('deleted');
+    });
+  });
+});
+
+describe('getting a machine ready for a job', () => {
+  const state = (over: Partial<ImageState> = {}): ImageState => ({ hash: 'h', state: 'ready', buildId: 'b', revision: 2, startedAt: new Date(0).toISOString(), failures: 0, error: null, ...over });
+
+  it('makes no machine until the image is built, and says so', async () => {
+    const w = world();
+    for (const image of [null, state({ state: 'building' }), state({ state: 'failed', failures: 1, error: 'x' })]) {
+      await expect(provider(w, { image: async () => image }).create('bot-1')).rejects.toBeInstanceOf(ImageNotReady);
+    }
+    expect(w.calls).not.toContain('create');
+    expect((await provider(w, { image: async () => state() }).create('bot-1')).ref).toBe('m1');
+  });
+
+  it('runs universe-up, and is ready when it says so', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.setExec(() => 'ready=1 restart=0\n');
+    await expect(p.ready('m1')).resolves.toBeUndefined();
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up']);
+    expect(w.calls.filter((call) => call.startsWith('stop:'))).toEqual([]);
+  });
+
+  it('stops and starts a machine once when its config was just written, then runs universe-up again', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    let runs = 0;
+    w.setExec(() => (++runs === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n'));
+    await p.ready('m1');
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up']);
+    expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
+  });
+
+  it('after asking a machine to stop, waits until it is really stopped, not just until it stops saying "stopping"', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    let runs = 0;
+    w.setExec(() => (++runs === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n'));
+    const real = w.client.stopInstance.bind(w.client);
+    let reads = 0;
+    (w.client as unknown as { stopInstance: (id: string) => Promise<unknown> }).stopInstance = async (id) => {
+      await real(id);
+      // The stop was accepted but the machine still says it is running for two reads
+      w.instances.get(id)!.status = 'running';
+      return { id, status: 'stopping' };
+    };
+    const get = w.client.getInstance.bind(w.client);
+    (w.client as unknown as { getInstance: (id: string) => Promise<Instance> }).getInstance = async (id) => {
+      const instance = await get(id);
+      if (w.calls.includes(`stop:${id}`) && !w.calls.includes(`start:${id}`) && instance.status === 'running' && ++reads >= 3) instance.status = 'stopped';
+      return instance;
+    };
+    await p.ready('m1');
+    const order = w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'));
+    expect(order).toEqual(['stop:m1', 'start:m1']);
+    expect(reads).toBeGreaterThanOrEqual(3);
+  });
+
+  it('says the machine is not ready, with the reason, when a part did not come up', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.setExec(() => 'ready=0 reason=browser\n');
+    await expect(p.ready('m1')).rejects.toThrow('not ready (browser)');
+    w.setExec(() => 'nothing useful');
+    await expect(p.ready('m1')).rejects.toThrow('not ready');
+  });
+
+  it('moves a machine made from an older image to the current one before it is brought up', async () => {
+    const w = world();
+    const p = provider(w, { image: async () => state({ revision: 2 }) });
+    await p.create('bot-1');
+    w.instances.get('m1')!.template_revision = 1;
+    w.setExec(() => 'ready=1 restart=0\n');
+    await p.ready('m1');
+    expect(w.calls).toContain('update:m1');
+    expect(w.calls.indexOf('update:m1')).toBeLessThan(w.calls.indexOf('exec:m1:universe-up'));
+    // a machine already on the current image is left alone
+    const again = world();
+    const q = provider(again, { image: async () => state({ revision: 2 }) });
+    await q.create('bot-1');
+    again.instances.get('m1')!.template_revision = 2;
+    again.setExec(() => 'ready=1 restart=0\n');
+    await q.ready('m1');
+    expect(again.calls.some((call) => call.startsWith('update:'))).toBe(false);
+  });
+});

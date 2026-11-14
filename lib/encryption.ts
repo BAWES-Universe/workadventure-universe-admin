@@ -26,6 +26,11 @@ function getEncryptionKey(): Buffer {
   return Buffer.from(key, 'utf8');
 }
 
+/** A key of its own for one purpose, made from the server's key, so a copy encrypted for one use is never readable with another's. */
+export function derivedKey(purpose: string): Buffer {
+  return Buffer.from(crypto.hkdfSync('sha256', getEncryptionKey(), Buffer.alloc(0), purpose, 32));
+}
+
 /**
  * Encrypt an API key using AES-256-GCM
  * Returns format: "iv:authTag:encryptedData" (all hex strings)

@@ -1,5 +1,5 @@
 /** A Brick's computer (game #2000): the rules that need no database, and which provider a server runs. */
-import { computerProviderKind, FakeComputerProvider, RealComputerProvider, ComputerProviderOff } from '@/lib/computer-provider';
+import { computerProviderKind, FakeComputerProvider } from '@/lib/computer-provider';
 import { costOfSeconds, roomFor, isOver, PERSON_ONLY, AFTER_TAKE_OVER } from '@/lib/computer-values';
 
 describe('what an awake machine costs', () => {
@@ -32,21 +32,25 @@ describe('who does what', () => {
 });
 
 describe('which provider a server runs', () => {
-  it('has none unless it was told: a server that was not told has no computers at all', () => {
-    expect(computerProviderKind({} as unknown as NodeJS.ProcessEnv)).toBeNull();
-    expect(computerProviderKind({ COMPUTER_PROVIDER: '' } as unknown as NodeJS.ProcessEnv)).toBeNull();
-    expect(computerProviderKind({ COMPUTER_PROVIDER: 'aws' } as unknown as NodeJS.ProcessEnv)).toBeNull();
-    expect(computerProviderKind({ COMPUTER_PROVIDER: ' Fake ' } as unknown as NodeJS.ProcessEnv)).toBe('fake');
-    expect(computerProviderKind({ COMPUTER_PROVIDER: 'real' } as unknown as NodeJS.ProcessEnv)).toBe('real');
+  const env = (values: Record<string, string>) => values as unknown as NodeJS.ProcessEnv;
+
+  it('has none unless it was told: a server with no key and no pretend setting has no computers at all', () => {
+    expect(computerProviderKind(env({}))).toBeNull();
+    expect(computerProviderKind(env({ COMPUTER_PROVIDER: '' }))).toBeNull();
+    expect(computerProviderKind(env({ COMPUTER_PROVIDER: 'aws' }))).toBeNull();
+    // "real" with no key is not a computer provider: there is nothing to call Agent37 with
+    expect(computerProviderKind(env({ COMPUTER_PROVIDER: 'real' }))).toBeNull();
   });
 
-  it('the real provider is wired and off: every call says so and no price is claimed', async () => {
-    const real = new RealComputerProvider();
-    expect(real.microsPerMinute()).toBeNull();
-    await expect(real.create()).rejects.toBeInstanceOf(ComputerProviderOff);
-    await expect(real.wake()).rejects.toBeInstanceOf(ComputerProviderOff);
-    await expect(real.watch()).rejects.toBeInstanceOf(ComputerProviderOff);
-    await expect(real.saveFiles()).rejects.toBeInstanceOf(ComputerProviderOff);
+  it('the Agent37 key being there turns real computers on, with no other switch', () => {
+    expect(computerProviderKind(env({ AGENT37_API_KEY: 'sk_live_x' }))).toBe('real');
+    expect(computerProviderKind(env({ AGENT37_API_KEY: ' sk_live_x ', COMPUTER_PROVIDER: '' }))).toBe('real');
+    expect(computerProviderKind(env({ AGENT37_API_KEY: '   ' }))).toBeNull();
+  });
+
+  it('the pretend setting wins over a key, so a test server never spends', () => {
+    expect(computerProviderKind(env({ COMPUTER_PROVIDER: ' Fake ', AGENT37_API_KEY: 'sk_live_x' }))).toBe('fake');
+    expect(computerProviderKind(env({ COMPUTER_PROVIDER: 'fake' }))).toBe('fake');
   });
 
   it('the pretend provider’s screen only exists for a machine that is awake: looking never wakes it', async () => {

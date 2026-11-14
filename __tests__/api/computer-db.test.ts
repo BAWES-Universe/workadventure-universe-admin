@@ -26,6 +26,9 @@ jest.mock('@/lib/meter', () => {
 import { saveMeterSettings } from '@/lib/meter';
 import { currentEnvelope } from '@/lib/meter-allowance';
 import { recordGrant } from '@/lib/meter-grants';
+import { mintJobToken, TOKEN_LIFE_MS, TOKEN_RENEW_EVERY_SECONDS, verifyJobToken } from '@/lib/computer-token';
+import { CLAIM_MS, dbImageStore } from '@/lib/agent37/image';
+import { checkScreen, openScreen, screenTicket } from '@/lib/computer-screen';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import {
   computerView,
@@ -35,6 +38,8 @@ import {
   finishJob,
   giveComputer,
   handBack,
+  isWindingDown,
+  liftWindDown,
   planEffect,
   removeMachineBeforeDelete,
   renewJob,
@@ -42,11 +47,12 @@ import {
   requestHandover,
   settleEffect,
   startJob,
+  startWindDown,
   stopJobFor,
   sweepComputers,
+  windDownStatus,
   takeOver,
   turnOffComputer,
-  watchComputer,
 } from '@/lib/computer';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -76,7 +82,7 @@ const wipe = async () => {
   await prisma.meterEvent.deleteMany({});
   await prisma.meterReservation.deleteMany({});
   await prisma.meterGrant.deleteMany({});
-  await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits'] } } });
+  await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits', 'computer-wind-down'] } } });
 };
 
 const woke = () => provider.calls.filter((call) => call.name === 'create' || call.name === 'wake').length;
@@ -84,6 +90,8 @@ const woke = () => provider.calls.filter((call) => call.name === 'create' || cal
 run('a Brick’s computer, in a real database', () => {
   beforeAll(() => {
     process.env.COMPUTER_PROVIDER = 'fake';
+    // Screen tickets are signed with it
+    process.env.BOT_SERVICE_TOKEN ||= 'a-test-service-token';
   });
   beforeEach(async () => {
     await wipe();
@@ -129,7 +137,7 @@ run('a Brick’s computer, in a real database', () => {
       expect(await turnOffComputer(sara.brickId, omar.id)).toBeNull();
       expect(await giveComputer(randomUUID(), sara.id)).toEqual({ ok: false, reason: 'not_found' });
       expect(await startJob({ botId: sara.brickId, personId: omar.id, title: 'x' })).toEqual({ ok: false, reason: 'not_owner' });
-      expect((await watchComputer(sara.brickId, omar.id)).ok).toBe(false);
+      expect((await screenTicket(sara.brickId, omar.id)).ok).toBe(false);
     });
 
     it('is not open on a server with no provider: nothing is made and the page can say so', async () => {
@@ -223,11 +231,54 @@ run('a Brick’s computer, in a real database', () => {
       if (!job.ok) throw new Error('no');
       await finishJob(job.job.id, 'done', minutes(1));
       expect((await computerView(sara.brickId, sara.id))?.machine).toBe('resting');
-      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake', 'saveFiles', 'rest']);
+      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake', 'exec', 'exec', 'saveFiles', 'rest']);
       // A second job wakes the SAME machine: never a second one
       await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(2));
       expect(provider.calls.filter((call) => call.name === 'create')).toHaveLength(1);
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).providerRef).toBe(`fake-${sara.brickId}`);
+    });
+
+    it('clears the browser once the last job is over, before the machine rests, and not while another job still holds it', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const first = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A', writes: true }, NOW);
+      const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B', writes: false }, NOW);
+      if (!first.ok || !second.ok) throw new Error('did not start');
+      expect(second.job.status).toBe('running');
+      await finishJob(first.job.id, 'done', minutes(1));
+      // The reader still holds the machine: its browser is not cleared under it
+      expect(provider.commands.filter((entry) => entry.command === 'universe-clean')).toHaveLength(0);
+      await finishJob(second.job.id, 'done', minutes(2));
+      expect(provider.commands.filter((entry) => entry.command === 'universe-clean')).toHaveLength(1);
+      const names = provider.calls.map((call) => call.name);
+      expect(names.indexOf('exec')).toBeLessThan(names.indexOf('rest'));
+    });
+
+    it('lists what is on the computer when the last job ends, for the Files list, and keeps the last list when a later listing fails', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      provider.execAnswer = (command) => (command === 'universe-files' ? { stdout: '12\t1794679965.5\tvisa/form.pdf\n3\t1794679000\tnotes.txt\n' } : {});
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      expect((await computerView(sara.brickId, sara.id))?.files.list).toBeNull();
+      await finishJob(job.job.id, 'done', minutes(1));
+      const list = (await computerView(sara.brickId, sara.id))?.files.list;
+      expect(list?.items.map((entry) => entry.path)).toEqual(['visa/form.pdf', 'notes.txt']);
+      provider.execAnswer = () => ({ exitCode: 1 });
+      const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(2));
+      if (!second.ok) throw new Error('no');
+      await finishJob(second.job.id, 'done', minutes(3));
+      expect((await computerView(sara.brickId, sara.id))?.files.list?.items).toHaveLength(2);
+    });
+
+    it('a clean that fails never holds up the end of the job: the machine still rests', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      provider.failExec = true;
+      await finishJob(job.job.id, 'done', minutes(1));
+      expect((await computerView(sara.brickId, sara.id))?.machine).toBe('resting');
     });
 
     it('reports its steps and nothing else about a finished job changes them', async () => {
@@ -292,7 +343,39 @@ run('a Brick’s computer, in a real database', () => {
       const queued = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!queued.ok) throw new Error('no');
       expect(queued.job.status).toBe('queued');
-      expect(await renewJob(queued.job.id, minutes(1))).toEqual({ ok: true });
+      expect(await renewJob(queued.job.id, minutes(1))).toEqual({ ok: true, renewInSeconds: 60 });
+    });
+
+    it('tells a runner to renew inside the life of its key, however large the room is, and the key is still alive at that moment', async () => {
+      await setUp({ renewMinutes: 60, memberAllowanceMicros: 5_000_000 });
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      const token = await mintJobToken(job.job.id, 'model', NOW);
+      if (!token.ok) throw new Error('no key');
+      const first = await renewJob(job.job.id, NOW);
+      expect(first).toEqual({ ok: true, renewInSeconds: TOKEN_RENEW_EVERY_SECONDS });
+      expect(TOKEN_RENEW_EVERY_SECONDS).toBe(360);
+      expect(TOKEN_RENEW_EVERY_SECONDS * 1000).toBeLessThan(TOKEN_LIFE_MS);
+      // At the moment the runner asks again the key is still good, and the renewal brings it on
+      const later = new Date(NOW.getTime() + TOKEN_RENEW_EVERY_SECONDS * 1000);
+      expect(await verifyJobToken(token.token, 'model', later)).toMatchObject({ ok: true });
+      const again = await renewJob(job.job.id, later);
+      expect(again).toEqual({ ok: true, renewInSeconds: TOKEN_RENEW_EVERY_SECONDS });
+    });
+
+    it('lets only one sweep start the image build at a time, and a start that died is taken over after a while', async () => {
+      await prisma.appSetting.deleteMany({ where: { key: 'computer-image' } });
+      const now = new Date('2026-11-15T12:00:00Z');
+      const both = await Promise.all([dbImageStore.claim!('h1', now), dbImageStore.claim!('h1', now)]);
+      expect(both.filter(Boolean)).toHaveLength(1);
+      expect(await dbImageStore.claim!('h1', new Date(now.getTime() + 1000))).toBeNull();
+      // Its build was never recorded: after the wait another sweep may start it, keeping the count of failures
+      expect(await dbImageStore.claim!('h1', new Date(now.getTime() + CLAIM_MS + 1000))).toMatchObject({ state: 'building', buildId: null });
+      // New content is never held back by an older start
+      expect(await dbImageStore.claim!('h2', new Date(now.getTime() + CLAIM_MS + 2000))).toMatchObject({ hash: 'h2' });
+      await prisma.appSetting.deleteMany({ where: { key: 'computer-image' } });
     });
 
     it('keeps a renewing job going while there is room, and gives every held room back when a job ends or lapses', async () => {
@@ -300,7 +383,7 @@ run('a Brick’s computer, in a real database', () => {
       await giveComputer(sara.brickId, sara.id);
       const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!job.ok) throw new Error('no');
-      expect(await renewJob(job.job.id, minutes(5))).toEqual({ ok: true });
+      expect(await renewJob(job.job.id, minutes(5))).toEqual({ ok: true, renewInSeconds: 240 });
       // It never renewed again: its room lapses, and the sweep stops it safely and settles what ran
       expect(await sweepComputers(minutes(60))).toMatchObject({ stopped: 1 });
       expect(await prisma.meterReservation.count({ where: { personKey: `person:${sara.id}`, state: 'held' } })).toBe(0);
@@ -308,22 +391,7 @@ run('a Brick’s computer, in a real database', () => {
     });
   });
 
-  describe('Stop, Watch and turning it off', () => {
-    it('shows the screen only of a computer that works, and watching never wakes a machine', async () => {
-      const sara = await person('sara');
-      await giveComputer(sara.brickId, sara.id);
-      expect(await watchComputer(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'resting' });
-      expect(provider.calls).toEqual([]);
-      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
-      if (!job.ok) throw new Error('no');
-      expect((await watchComputer(sara.brickId, sara.id)).ok).toBe(true);
-      await stopJobFor(sara.brickId, sara.id, minutes(1));
-      const before = woke();
-      // An old link, a refresh and a reconnect: nothing wakes
-      for (let i = 0; i < 3; i++) expect(await watchComputer(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'resting' });
-      expect(woke()).toBe(before);
-    });
-
+  describe('Stop and turning it off', () => {
     it('Stop ends the job, keeps the work so far and counts what ran', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
@@ -1379,6 +1447,155 @@ run('a Brick’s computer, in a real database', () => {
       expect(provider.calls.some((call) => call.name === 'remove')).toBe(false);
       expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
       expect(provider.calls.filter((call) => call.name === 'remove')).toHaveLength(1);
+    });
+  });
+  describe('the team’s wind-down', () => {
+    it('closes the door first: no new job starts and no computer is given, and every job and machine is ended and proven stopped', async () => {
+      const sara = await person('sara');
+      const omar = await person('omar');
+      await giveComputer(sara.brickId, sara.id);
+      await giveComputer(omar.brickId, omar.id);
+      const running = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      const waiting = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, NOW);
+      const other = await startJob({ botId: omar.brickId, personId: omar.id, title: 'C' }, NOW);
+      if (!running.ok || !waiting.ok || !other.ok) throw new Error('did not start');
+      const status = await startWindDown('team@example.test', minutes(3));
+      expect(status).toMatchObject({ on: true, by: 'team@example.test', jobsLeft: 0, machinesLeft: 0 });
+      for (const id of [running.job.id, waiting.job.id, other.job.id]) expect(await prisma.computerJob.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'stopped', endedBy: 'off', agentResponseId: null });
+      // The time that ran is counted, and the room is settled
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${running.job.id}:time` } })).toBe(1);
+      expect(await prisma.meterReservation.count({ where: { state: 'held', reservationKey: { startsWith: 'computer:' } } })).toBe(0);
+      // Both machines are not running any more, and the files stay
+      expect(await provider.awake(`fake-${sara.brickId}`)).toBe(false);
+      expect(await provider.awake(`fake-${omar.brickId}`)).toBe(false);
+      expect((await computerView(sara.brickId, sara.id))?.files.savedAt).not.toBeNull();
+      // Nothing new starts, nothing is given, and a machine that was never made is never made
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'D' }, minutes(4))).toEqual({ ok: false, reason: 'not_open' });
+      const lena = await person('lena');
+      expect(await giveComputer(lena.brickId, lena.id)).toEqual({ ok: false, reason: 'not_open' });
+      expect(provider.calls.filter((call) => call.name === 'create')).toHaveLength(2);
+    });
+
+    it('is proven machine by machine: a stop that did not take leaves the machine for the next sweep, which finishes it', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      const ref = `fake-${sara.brickId}`;
+      provider.stuckAwake.add(ref);
+      // The rest after the job also leaves it up, so the machine is still billed
+      const status = await startWindDown('team@example.test', minutes(1));
+      expect(status.machinesLeft).toBe(1);
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+      provider.stuckAwake.delete(ref);
+      await sweepComputers(minutes(2));
+      expect(await windDownStatus()).toMatchObject({ on: true, jobsLeft: 0, machinesLeft: 0 });
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('stopped');
+    });
+
+    it('a job that was in line when it started does not start in a sweep, and the keys of a job it ended are refused', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const first = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, NOW);
+      if (!first.ok || !second.ok) throw new Error('no');
+      const minted = await mintJobToken(first.job.id, 'model', minutes(0));
+      if (!minted.ok) throw new Error('no key');
+      await startWindDown('team@example.test', minutes(1));
+      expect(await verifyJobToken(minted.token, 'model', minutes(2))).toMatchObject({ ok: false });
+      await sweepComputers(minutes(2));
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId, status: { in: ['queued', 'running', 'waiting'] } } })).toBe(0);
+      expect(await prisma.computerJobToken.count({ where: { jobId: { in: [first.job.id, second.job.id] }, revokedAt: null } })).toBe(0);
+    });
+
+    it('asked twice is the same, and lifting it opens the door again: a stopped machine wakes for the next job', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      const first = await startWindDown('team@example.test', minutes(1));
+      const second = await startWindDown('someone-else@example.test', minutes(2));
+      expect(second.since).toBe(first.since);
+      expect(second.by).toBe('team@example.test');
+      expect(await isWindingDown()).toBe(true);
+      expect((await liftWindDown('team@example.test')).on).toBe(false);
+      const again = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(3));
+      expect(again.ok && again.job.status).toBe('running');
+      expect(await provider.awake(`fake-${sara.brickId}`)).toBe(true);
+    });
+  });
+  describe('the screen, through the bot server', () => {
+    const secret = process.env.BOT_SERVICE_TOKEN;
+    beforeAll(() => {
+      process.env.BOT_SERVICE_TOKEN = 'a-test-service-token';
+    });
+    afterAll(() => {
+      if (secret === undefined) delete process.env.BOT_SERVICE_TOKEN;
+      else process.env.BOT_SERVICE_TOKEN = secret;
+    });
+
+    it('gives the owner a ticket for a computer that works, opens it once with a link made for that socket, and wakes nothing', async () => {
+      const sara = await person('sara');
+      const omar = await person('omar');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      expect(await screenTicket(sara.brickId, omar.id, 'watch', NOW)).toEqual({ ok: false, reason: 'not_found' });
+      const ticket = await screenTicket(sara.brickId, sara.id, 'watch', NOW);
+      if (!ticket.ok) throw new Error('no ticket');
+      const woke = provider.calls.filter((call) => call.name === 'wake' || call.name === 'create').length;
+      const opened = await openScreen(ticket.ticket, minutes(0.5));
+      expect(opened).toMatchObject({ ok: true, mode: 'watch' });
+      expect(opened.ok && opened.upstream).toContain('computer.pretend.invalid');
+      expect(provider.calls.filter((call) => call.name === 'wake' || call.name === 'create')).toHaveLength(woke);
+      // After the job ends the machine rests: no ticket, no open, and an open socket is told to close
+      expect(await checkScreen(ticket.ticket, minutes(0.6))).toEqual({ ok: true, mode: 'watch' });
+      await finishJob(job.job.id, 'done', minutes(1));
+      expect(await screenTicket(sara.brickId, sara.id, 'watch', minutes(2))).toEqual({ ok: false, reason: 'resting' });
+      expect(await openScreen(ticket.ticket, minutes(0.9))).toEqual({ ok: false, reason: 'resting' });
+      expect(await checkScreen(ticket.ticket, minutes(1.2))).toEqual({ ok: false, reason: 'resting' });
+      expect(provider.calls.filter((call) => call.name === 'wake' || call.name === 'create')).toHaveLength(woke);
+    });
+
+    it('a ticket opens a socket for 60 seconds only, and a forged, changed or someone else’s ticket opens nothing', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      const ticket = await screenTicket(sara.brickId, sara.id, 'watch', NOW);
+      if (!ticket.ok) throw new Error('no ticket');
+      expect(await openScreen(ticket.ticket, new Date(NOW.getTime() + 61_000))).toEqual({ ok: false, reason: 'expired' });
+      // An open socket is not cut by its ticket's 60 seconds
+      expect(await checkScreen(ticket.ticket, minutes(5))).toEqual({ ok: true, mode: 'watch' });
+      const [prefix, body, signature] = ticket.ticket.split('.');
+      const other = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(body, 'base64url').toString()), m: 'input', j: 'x', g: 0 })).toString('base64url');
+      for (const bad of [`${prefix}.${other}.${signature}`, `${prefix}.${body}.${signature.slice(0, -2)}AA`, 'nonsense', '', null, 42, `x.${body}.${signature}`]) {
+        expect(await openScreen(bad, NOW)).toEqual({ ok: false, reason: 'invalid' });
+        expect(await checkScreen(bad, NOW)).toEqual({ ok: false, reason: 'invalid' });
+      }
+      // A socket is never kept longer than two hours
+      expect(await checkScreen(ticket.ticket, new Date(NOW.getTime() + 2 * 60 * 60 * 1000 + 61_000))).toEqual({ ok: false, reason: 'too_long' });
+    });
+
+    it('input is only for the person who has taken over, and only for that take over: a hand back or a new take over kills the old ticket', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      expect(await screenTicket(sara.brickId, sara.id, 'input', NOW)).toEqual({ ok: false, reason: 'not_taken_over' });
+      await requestHandover(job.job.id, 'signin', minutes(1));
+      await takeOver(sara.brickId, sara.id, minutes(1));
+      const input = await screenTicket(sara.brickId, sara.id, 'input', minutes(1));
+      if (!input.ok) throw new Error('no input ticket');
+      expect(await openScreen(input.ticket, minutes(1.2))).toMatchObject({ ok: true, mode: 'input' });
+      await handBack(sara.brickId, sara.id);
+      expect(await checkScreen(input.ticket, minutes(2))).toEqual({ ok: false, reason: 'not_taken_over' });
+      expect(await openScreen(input.ticket, minutes(1.3))).toEqual({ ok: false, reason: 'not_taken_over' });
+      // The same job taken over again is a new take over: the old ticket stays dead
+      await takeOver(sara.brickId, sara.id, minutes(3));
+      expect(await checkScreen(input.ticket, minutes(3))).toEqual({ ok: false, reason: 'not_taken_over' });
+      const again = await screenTicket(sara.brickId, sara.id, 'input', minutes(3));
+      expect(again.ok).toBe(true);
     });
   });
 });
