@@ -458,12 +458,14 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         // A repeating one the person marked Done stays done (Reopen is how it comes back); only a delivered one-off comes back by Snooze
         if (row.state === 'done' && cadence.type !== 'once') return wrongState(row.state);
         // A done one coming back takes its place again, so it keeps to the same limits as a reopen: the Brick on, the goal on, the most
+        let zone = row.timeZone;
         if (row.state === 'done') {
           const refused = await comingBackProblem(tx, row, ownerId, limits);
           if (refused) return refused;
           if (row.pausedBy === 'template') {
             const gate = await templateRoutineGate(tx, row.botId, ownerId, row.timeZone);
             if (!gate.ok) return gate;
+            zone = gate.timeZone;
           }
         }
         // A one-off that is not due yet moves from the moment it was due (an early or stale tap only ever puts it later, never earlier);
@@ -472,7 +474,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         const later = new Date(from.getTime() + limits.snooze * MINUTE);
         // A one-off comes back at the new time (done ones too: they have just been delivered); a repeating one is moved once and carries on from there
         const moved: Cadence = cadence.type === 'once' ? { type: 'once', at: later.toISOString() } : cadence;
-        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, cadence: moved as unknown as Prisma.InputJsonValue, nextDueAt: later, ...(row.state === 'done' ? { failuresInRow: 0, failureTold: false, tellRunId: null } : {}), ...bump });
+        return finish({ state: 'on', pausedBy: null, timeZone: zone, doneAt: null, result: null, cadence: moved as unknown as Prisma.InputJsonValue, nextDueAt: later, ...(row.state === 'done' ? { failuresInRow: 0, failureTold: false, tellRunId: null } : {}), ...bump });
       }
       case 'change': {
         const change = input.change;

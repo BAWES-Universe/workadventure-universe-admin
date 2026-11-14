@@ -285,7 +285,7 @@ export async function templateRoutineGate(tx: Prisma.TransactionClient, botId: s
     if (missing.length > 0) return { ok: false, status: 409, code: 'needs_setup', error: `Set up ${missing.map((need) => need.label).join(', ')} first` };
   }
   // The placeholder is replaced by the owner's zone; a zone they set on the routine themselves stays
-  return { ok: true, timeZone: routineZone === PLACEHOLDER_ZONE ? kept : routineZone };
+  return { ok: true, timeZone: routineZone === PLACEHOLDER_ZONE ? ownZone(kept) : routineZone };
 }
 
 /* ------------------------------ using one ------------------------------ */

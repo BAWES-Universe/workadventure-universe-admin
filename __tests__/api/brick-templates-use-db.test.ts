@@ -347,6 +347,34 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       }
     });
 
+    it('turns a kept zone of Etc/UTC into UTC when it replaces the placeholder', async () => {
+      const item = await routine(brickId, sara.id);
+      const id = await share({ routines: [item.id] });
+      as(omar);
+      const body = await remember(await makeFrom(id));
+      const itemId = (await prisma.brickItem.findFirstOrThrow({ where: { botId: body.brick.id } })).id;
+      await prisma.userPreference.upsert({ where: { userId_key: { userId: omar.id, key: 'timeZone' } }, create: { userId: omar.id, key: 'timeZone', value: 'Etc/UTC' }, update: { value: 'Etc/UTC' } });
+      expect((await changeItem(body.brick.id, itemId, { userId: omar.email, action: 'resume' })).ok).toBe(true);
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ state: 'on', timeZone: 'UTC' });
+    });
+
+    it('Snooze after Done takes the owner’s kept zone too, so a later change back to a repeat does not run on the placeholder', async () => {
+      const item = await routine(brickId, sara.id, { kind: 'reminder', words: 'Every morning water the plants' });
+      const id = await share({ routines: [item.id] });
+      as(omar);
+      const body = await remember(await makeFrom(id));
+      const botId = body.brick.id;
+      const itemId = (await prisma.brickItem.findFirstOrThrow({ where: { botId } })).id;
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ timeZone: 'Etc/UTC' });
+      const at = new Date(Date.now() + 3 * 24 * 3_600_000).toISOString();
+      expect((await changeItem(botId, itemId, { userId: omar.email, action: 'change', change: { cadence: { type: 'once', at } } })).ok).toBe(true);
+      expect((await changeItem(botId, itemId, { userId: omar.email, action: 'done' })).ok).toBe(true);
+      expect(await changeItem(botId, itemId, { userId: omar.email, action: 'snooze' })).toMatchObject({ ok: false, code: 'needs_time_zone' });
+      await keepZone(omar);
+      expect((await changeItem(botId, itemId, { userId: omar.email, action: 'snooze' })).ok).toBe(true);
+      expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ state: 'on', pausedBy: null, timeZone: 'Asia/Kuwait' });
+    });
+
     it('Done is not a way around the gate: a routine marked done while still off cannot be reopened or snoozed on until it is set up', async () => {
       const gmail = await connectGmail(sara);
       await prisma.botMcpServer.create({ data: { botId: brickId, name: 'Gmail', serverUrl: gmail.serverUrl, connectionId: gmail.id } });
