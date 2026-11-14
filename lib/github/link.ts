@@ -15,15 +15,17 @@ export type GitHubLinkOutcome = { status: 'done'; answer: LinkAnswer } | { statu
 
 const METHODS = new Set(['initialize', 'notifications/initialized', 'tools/list', 'tools/call']);
 
+const eventIdOf = (botId: string, callId: string) => `github:${botId}:${callId}`;
+
 /**
  * A call sent twice never runs twice (a second "merge" or a second issue), on any Orbit server and after a restart: the call is
  * written to the meter first, under an id taken from the call's own id, and a second write of the same id is refused. GitHub costs
  * nothing, so the row counts no use and no money (quantity 0, cost 0) and is paid by the person (their own GitHub); it is only the
- * record that this call was asked.
+ * record that this call was asked. A call that certainly changed nothing on GitHub is let go again (see linkGitHub).
  */
 async function firstTime(input: { botId: string; ownerId: string; connectionId: string; callId: string; tool: string }): Promise<boolean> {
   const written = await recordMeterEvent({
-    eventId: `github:${input.botId}:${input.callId}`,
+    eventId: eventIdOf(input.botId, input.callId),
     kind: 'app_use',
     pool: 'chat',
     occurredAt: new Date(),
@@ -100,6 +102,9 @@ export async function linkGitHub(
       }
       const args = params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments) ? (params.arguments as Record<string, unknown>) : {};
       const result = await runGitHubTool(token.token, params.name, args, fetchImpl);
+      // Certain that nothing changed on GitHub (only looked, or GitHub turned the change down): the call is let go, so the same
+      // call may be asked again. A change GitHub may have made stays asked, so it is never made twice.
+      if (result.changedNothing) await prisma.meterEvent.deleteMany({ where: { eventId: eventIdOf(input.botId, input.callId) } });
       if (result.unauthorized) await gitHubTokenRefused(input.connectionId, token.token);
       return { status: 'done', answer: rpc(id, { content: [{ type: 'text', text: result.text }], isError: result.isError }) };
     }

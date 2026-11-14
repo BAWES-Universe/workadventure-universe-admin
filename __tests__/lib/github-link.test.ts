@@ -14,6 +14,9 @@ jest.mock('@/lib/db', () => ({
   prisma: {
     appConnection: { findFirst: jest.fn(async () => ({ id: 'c' })) },
     bot: { findUnique: jest.fn(async () => ({ roomId: null, ownerId: 'o' })) },
+    meterEvent: {
+      deleteMany: jest.fn(async ({ where }: { where: { eventId: string } }) => ({ count: written.delete(where.eventId) ? 1 : 0 })),
+    },
   },
 }));
 jest.mock('@/lib/github/connection', () => ({
@@ -26,11 +29,22 @@ import { gitHubToken, gitHubTokenRefused } from '@/lib/github/connection';
 import { recordMeterEvent } from '@/lib/meter';
 import { linkGitHub } from '@/lib/github/link';
 
-const call = (callId: string, fetchImpl: typeof fetch) =>
-  linkGitHub(
-    { botId: 'b', connectionId: 'c', ownerId: 'o', callId, message: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'github_read_file', arguments: { repo: 'acme/tools', path: 'README.md' } } } },
-    fetchImpl,
-  );
+const READ = { name: 'github_read_file', arguments: { repo: 'acme/tools', path: 'README.md' } };
+const OPEN_ISSUE = { name: 'github_create_issue', arguments: { repo: 'acme/tools', title: 'Broken' } };
+
+const call = (callId: string, fetchImpl: typeof fetch, params: { name: string; arguments: Record<string, unknown> } = READ) =>
+  linkGitHub({ botId: 'b', connectionId: 'c', ownerId: 'o', callId, message: { jsonrpc: '2.0', id: 1, method: 'tools/call', params } }, fetchImpl);
+
+/** GitHub answering each request in turn (the last answer repeats); a thrown error is a request that got no answer. */
+const answers = (...replies: (number | Error)[]) => {
+  let index = 0;
+  return jest.fn(async () => {
+    const reply = replies[Math.min(index++, replies.length - 1)];
+    if (reply instanceof Error) throw reply;
+    const body = reply < 300 ? { number: 7, html_url: 'https://github.com/acme/tools/issues/7' } : { message: 'Validation Failed' };
+    return new Response(JSON.stringify(body), { status: reply });
+  }) as unknown as typeof fetch & jest.Mock;
+};
 
 describe('a GitHub tool call', () => {
   beforeEach(() => written.clear());
@@ -66,5 +80,39 @@ describe('a GitHub tool call', () => {
     jest.mocked(gitHubToken).mockResolvedValue({ status: 'ok', token: 'ghu_old', login: 'sara' });
     await call('call-3', github);
     expect(gitHubTokenRefused).toHaveBeenCalledWith('c', 'ghu_old');
+  });
+
+  describe('that failed', () => {
+    beforeEach(() => jest.mocked(gitHubToken).mockResolvedValue({ status: 'ok', token: 'ghu_x', login: 'sara' }));
+
+    it('may be asked again when GitHub turned the change down, so nothing was made', async () => {
+      const github = answers(422, 201);
+      const first = await call('call-4', github, OPEN_ISSUE);
+      expect(JSON.stringify(first)).toContain('isError\\":true');
+      expect(written.has('github:b:call-4')).toBe(false);
+      const again = await call('call-4', github, OPEN_ISSUE);
+      expect(JSON.stringify(again)).toContain('issues/7');
+      expect(await call('call-4', github, OPEN_ISSUE)).toEqual({ status: 'already_asked' });
+      expect(github).toHaveBeenCalledTimes(2);
+    });
+
+    it('is never made twice when GitHub did not answer a change, and says to check first', async () => {
+      for (const [callId, reply] of [['call-5', new Error('The operation was aborted due to timeout')], ['call-6', 502]] as const) {
+        const github = answers(reply, 201);
+        const first = await call(callId, github, OPEN_ISSUE);
+        expect(JSON.stringify(first)).toMatch(/check on GitHub before asking for it again/i);
+        expect(await call(callId, github, OPEN_ISSUE)).toEqual({ status: 'already_asked' });
+        expect(github).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it('may always be asked again when it only looked', async () => {
+      const github = answers(new Error('socket hang up'), 500, 200);
+      for (let attempt = 0; attempt < 2; attempt++) expect(JSON.stringify(await call('call-7', github))).toContain('isError\\":true');
+      expect(written.has('github:b:call-7')).toBe(false);
+      await call('call-7', github);
+      expect(written.has('github:b:call-7')).toBe(true);
+      expect(github).toHaveBeenCalledTimes(3);
+    });
   });
 });

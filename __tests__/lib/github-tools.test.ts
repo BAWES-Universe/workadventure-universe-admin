@@ -88,7 +88,7 @@ describe('what a Brick can do on GitHub', () => {
   it('refuses a repository that is not owner/name before asking GitHub', async () => {
     const github = fakeGitHub([]);
     const result = await runGitHubTool('t', 'github_get_repo', { repo: '../../user' }, github.impl);
-    expect(result).toEqual({ text: 'Give the repository as owner/name.', isError: true });
+    expect(result).toEqual({ text: 'Give the repository as owner/name.', isError: true, changedNothing: true });
     expect(github.calls).toHaveLength(0);
   });
 
@@ -154,7 +154,7 @@ describe('what a Brick can do on GitHub', () => {
     ]) {
       const github = fakeGitHub([]);
       const result = await runGitHubTool('t', 'github_write_files', { repo: 'o/r', branch: 'b', message: 'm', files: [{ path, content: 'x' }] }, github.impl);
-      expect(result).toEqual({ text: said, isError: true });
+      expect(result).toEqual({ text: said, isError: true, changedNothing: true });
       // Turned down before GitHub is asked anything
       expect(github.calls).toHaveLength(0);
     }
@@ -212,7 +212,7 @@ describe('what a Brick can do on GitHub', () => {
     for (const tool of ['github_update_issue', 'github_create_issue']) {
       const github = fakeGitHub([]);
       const result = await runGitHubTool('t', tool, { repo: 'o/r', number: 7, title: 'T', labels: [123] }, github.impl);
-      expect(result).toEqual({ text: 'labels must be a list of label names.', isError: true });
+      expect(result).toEqual({ text: 'labels must be a list of label names.', isError: true, changedNothing: true });
       expect(github.calls).toHaveLength(0);
     }
     // An empty list is asked for in so many words: it clears them
@@ -290,7 +290,7 @@ describe('what a Brick can do on GitHub', () => {
     const github = fakeGitHub([]);
     for (const value of ['true', null, 1]) {
       const result = await runGitHubTool('t', 'github_create_repo', { name: 'new', private: value }, github.impl);
-      expect(result).toEqual({ text: 'private must be true or false.', isError: true });
+      expect(result).toEqual({ text: 'private must be true or false.', isError: true, changedNothing: true });
     }
     expect(github.calls).toHaveLength(0);
   });

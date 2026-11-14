@@ -98,6 +98,11 @@ export interface ToolResult {
   isError: boolean;
   /** GitHub refused the token itself: the person must sign in again. */
   unauthorized?: boolean;
+  /**
+   * Certain that nothing changed on GitHub: no change was sent, or GitHub turned down every change it was sent. Only then may the
+   * same call be asked again; after a change GitHub did not answer (a timeout, a 5xx) it may have happened.
+   */
+  changedNothing?: boolean;
 }
 
 class ToolError extends Error {
@@ -178,14 +183,48 @@ type Request = <T = unknown>(path: string, init?: { method?: string; body?: unkn
 
 /** Runs one tool as the person whose token this is. Never throws: a failure is a result the Brick reads. */
 export async function runGitHubTool(token: string, name: string, args: Record<string, unknown>, fetchImpl: FetchLike = fetch): Promise<ToolResult> {
-  const request: Request = (path, init) => gitHubRequest(token, path, init ?? {}, fetchImpl);
+  // Whether a change may have happened: set once a change is sent and GitHub does not plainly turn it down
+  let mayHaveChanged = false;
+  const request: Request = async <T = unknown>(path: string, init?: { method?: string; body?: unknown; accept?: string }) => {
+    const changes = isChange(path, init?.method);
+    try {
+      const answer = await gitHubRequest<T>(token, path, init ?? {}, fetchImpl);
+      // A 3xx or 4xx is GitHub saying no: nothing was done. Anything else may have done it.
+      if (changes && (answer.ok || answer.status >= 500)) mayHaveChanged = true;
+      return answer;
+    } catch (error) {
+      if (changes) mayHaveChanged = true;
+      throw error;
+    }
+  };
+  let result: ToolResult;
   try {
-    return await run(request, name, args ?? {}, fetchImpl);
+    result = await run(request, name, args ?? {}, fetchImpl);
   } catch (error) {
-    if (error instanceof ToolError) return error.unauthorized ? { text: error.message, isError: true, unauthorized: true } : { text: error.message, isError: true };
-    console.error('[GitHub] Tool failed:', name, error instanceof Error ? error.message : 'unknown');
-    return { text: 'GitHub could not be reached just now. Try again in a moment.', isError: true };
+    if (error instanceof ToolError) result = error.unauthorized ? { text: error.message, isError: true, unauthorized: true } : { text: error.message, isError: true };
+    else {
+      console.error('[GitHub] Tool failed:', name, error instanceof Error ? error.message : 'unknown');
+      result = {
+        text: mayHaveChanged
+          ? 'GitHub did not answer in time, so this may or may not have happened. Check on GitHub before asking for it again.'
+          : 'GitHub could not be reached just now. Try again in a moment.',
+        isError: true,
+      };
+    }
   }
+  if (result.isError && mayHaveChanged && !result.text.includes('Check on GitHub')) {
+    result = { ...result, text: `${result.text} It may still have happened: check on GitHub before asking for it again.` };
+  }
+  return result.isError && !mayHaveChanged ? { ...result, changedNothing: true } : result;
+}
+
+/**
+ * A request that changes something people can see. Writing git trees and commits is not one: those objects belong to no branch until
+ * a branch is moved to them, and that move is its own request.
+ */
+function isChange(path: string, method = 'GET'): boolean {
+  if (method === 'GET' || method === 'HEAD') return false;
+  return !/\/git\/(?:trees|commits|blobs)$/.test(path);
 }
 
 async function defaultBranch(request: Request, repo: string): Promise<string> {
