@@ -470,6 +470,12 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       as(sara);
       const page = await json(await shareRoute('GET', app.id, saraBrick));
       expect(page.jobs.map((job: { tool: string }) => job.tool)).toEqual(['find_songs']);
+      // And with it as the only job there is, the one button picks nothing: refused, no share made
+      mockTools.current = [{ ...SONG, inputs: Array.from({ length: 101 }, (_, i) => ({ name: `p${i + 1}`, required: true })) }];
+      const started = await shareRoute('POST', app.id, saraBrick);
+      expect(started.status).toBeGreaterThanOrEqual(400);
+      expect((await json(started)).reason).toBe('no_job');
+      expect(await prisma.appShare.count({ where: { server: { botId: saraBrick } } })).toBe(0);
     });
 
     it('is not used up by days gone by: only today’s uses count', async () => {
