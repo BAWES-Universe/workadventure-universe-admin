@@ -4,7 +4,7 @@
  *
  * The image keeps the base image's own ENTRYPOINT (it starts Hermes and its gateway; a Dockerfile that replaces it loses the chat API) and
  * adds, in /usr/local/bin:
- *   universe-up       brings the parts up and is safe to run any number of times: a screen (Xvfb, x11vnc, noVNC on 6901), a visible Chromium
+ *   universe-up       brings the parts up and is safe to run any number of times: a screen (the base's Xvfb on :99 and openbox; x11vnc and websockify on 6901), a visible Chromium
  *                     for Hermes' browser tool (DevTools on 9222, loopback), and the local model address; writes Hermes' config once.
  *   universe-proxy    the model address on 127.0.0.1:8650. It reads the relay's address and the job's key from a file on EVERY call, so a new
  *                     key never needs Hermes restarted. Hermes holds no real key at all.
@@ -38,7 +38,7 @@ RUN apt-get update \
 COPY universe-up universe-supervise universe-proxy universe-fence universe-clean universe-files /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/universe-up /usr/local/bin/universe-supervise /usr/local/bin/universe-proxy /usr/local/bin/universe-fence /usr/local/bin/universe-clean /usr/local/bin/universe-files
 # Hermes' browser tool drives the visible Chromium that the screen shows
-ENV DISPLAY=:1 BROWSER_CDP_URL=http://127.0.0.1:9222 AGENT37_SCREEN_GEOMETRY=1440x900
+ENV DISPLAY=:99 BROWSER_CDP_URL=http://127.0.0.1:9222 AGENT37_SCREEN_GEOMETRY=1440x900
 USER node
 `;
 
@@ -53,7 +53,7 @@ GEOMETRY="$AGENT37_SCREEN_GEOMETRY"
 [ -n "$GEOMETRY" ] || GEOMETRY=1440x900
 WIDTH="$(echo "$GEOMETRY" | cut -dx -f1)"
 HEIGHT="$(echo "$GEOMETRY" | cut -dx -f2)"
-export DISPLAY=:1
+export DISPLAY=:99
 CHILD=0
 [ "$1" = "--child" ] && CHILD=1
 
@@ -103,14 +103,20 @@ run() {
   nohup setsid "$@" >>"$LOGS/$name.log" 2>&1 </dev/null &
 }
 
-run Xvfb Xvfb :1 -screen 0 "$GEOMETRY"x24 -nolisten tcp
+# The base image's own start-up brings up the screen (Xvfb on :99 and the openbox window manager); give it time, and only if it never
+# appears start a screen of our own on the same address.
 i=0
-while [ ! -S /tmp/.X11-unix/X1 ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
-run x11vnc x11vnc -display :1 -rfbport 5900 -localhost -nopw -forever -shared -noxdamage -quiet
+while [ ! -S /tmp/.X11-unix/X99 ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i+1)); done
+if [ ! -S /tmp/.X11-unix/X99 ]; then
+  run Xvfb Xvfb :99 -screen 0 "$GEOMETRY"x24 -nolisten tcp
+  i=0
+  while [ ! -S /tmp/.X11-unix/X99 ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+fi
+run x11vnc x11vnc -display :99 -rfbport 5900 -localhost -forever -shared -nopw -quiet
 run websockify websockify --web /usr/share/novnc 6901 127.0.0.1:5900
 if ! pgrep -x chromium >/dev/null 2>&1; then
   nohup setsid chromium --user-data-dir="$HOME_DIR/.config/universe-chromium" --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 \
-    --no-first-run --no-default-browser-check --no-sandbox --disable-gpu --disable-dev-shm-usage --window-position=0,0 --window-size="$WIDTH","$HEIGHT" \
+    --no-sandbox --test-type --disable-dev-shm-usage --no-first-run --no-default-browser-check --hide-crash-restore-bubble --start-maximized \
     about:blank >>"$LOGS/chromium.log" 2>&1 </dev/null &
 fi
 if ! pgrep -f universe-proxy >/dev/null 2>&1; then
@@ -269,7 +275,7 @@ import signal
 import sys
 import time
 
-KEEP = re.compile(r"(^|/)(Xvfb|x11vnc|websockify|chromium|chrome|chrome_crashpad_handler|universe-proxy|universe-supervise|universe-up|universe-fence)(\s|$)")
+KEEP = re.compile(r"(^|/)(Xvfb|openbox|x11vnc|websockify|chromium|chrome|chrome_crashpad_handler|universe-proxy|universe-supervise|universe-up|universe-fence)(\s|$)")
 # The agent's gateway answers on these ports; whoever listens there stays, and so does everything above it
 GATEWAY_PORTS = {3737, 8642}
 
