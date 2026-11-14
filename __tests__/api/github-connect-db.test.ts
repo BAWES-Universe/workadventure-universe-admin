@@ -15,7 +15,6 @@ import { prisma } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { forgetGitHubApp, saveGitHubApp } from '@/lib/github/app';
 import { gitHubToken, readGitHubAuth } from '@/lib/github/connection';
-import { forgetGitHubCalls } from '@/lib/github/link';
 import { GITHUB_TOOLS } from '@/lib/github/tools';
 import { GET as catalog } from '@/app/api/me/apps/catalog/route';
 import { POST as connectApp } from '@/app/api/me/apps/route';
@@ -105,7 +104,6 @@ run('Connect GitHub for Bricks, in a real database', () => {
   beforeEach(async () => {
     await prisma.appSetting.deleteMany({ where: { key: 'github-app' } });
     forgetGitHubApp();
-    forgetGitHubCalls();
   });
   afterEach(async () => {
     global.fetch = fetchBefore;
@@ -114,6 +112,7 @@ run('Connect GitHub for Bricks, in a real database', () => {
   });
   afterAll(async () => {
     await prisma.appSetting.deleteMany({ where: { key: 'github-app' } });
+    await prisma.meterEvent.deleteMany({ where: { personId: sara } });
     forgetGitHubApp();
     await prisma.user.deleteMany({ where: { id: sara } });
     for (const [name, value] of [['BOT_SERVICE_TOKEN', envBefore.service], ['ADMIN_API_TOKEN', envBefore.admin], ['ADMIN_API_URL', envBefore.url], ['CORS_ALLOWED_ORIGINS', envBefore.cors], ['ENCRYPTION_KEY', envBefore.key]] as const) {

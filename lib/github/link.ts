@@ -1,4 +1,6 @@
 import { prisma } from '@/lib/db';
+import { recordMeterEvent } from '@/lib/meter';
+import { personKeyOf } from '@/lib/meter-values';
 import type { LinkAnswer } from '@/lib/app-adapter/types';
 import type { FetchLike } from '@/lib/github/api';
 import { gitHubToken, gitHubTokenRefused, GITHUB_SOURCE } from '@/lib/github/connection';
@@ -13,17 +15,35 @@ export type GitHubLinkOutcome = { status: 'done'; answer: LinkAnswer } | { statu
 
 const METHODS = new Set(['initialize', 'notifications/initialized', 'tools/list', 'tools/call']);
 
-/** Call ids already run, so a call sent twice never runs twice (a second "merge" or a second issue). Kept a day. */
-const ran = new Map<string, number>();
-const RAN_MS = 24 * 60 * 60 * 1000;
-
-function firstTime(key: string): boolean {
-  const now = Date.now();
-  if (ran.size > 10_000) for (const [seen, at] of ran) if (now - at > RAN_MS) ran.delete(seen);
-  const at = ran.get(key);
-  if (at !== undefined && now - at < RAN_MS) return false;
-  ran.set(key, now);
-  return true;
+/**
+ * A call sent twice never runs twice (a second "merge" or a second issue), on any Orbit server and after a restart: the call is
+ * written to the meter first, under an id taken from the call's own id, and a second write of the same id is refused. GitHub costs
+ * nothing, so the row counts no use and no money (quantity 0, cost 0) and is paid by the person (their own GitHub); it is only the
+ * record that this call was asked.
+ */
+async function firstTime(input: { botId: string; ownerId: string; connectionId: string; callId: string; tool: string }): Promise<boolean> {
+  const written = await recordMeterEvent({
+    eventId: `github:${input.botId}:${input.callId}`,
+    kind: 'app_use',
+    pool: 'chat',
+    occurredAt: new Date(),
+    personKey: personKeyOf({ personId: input.ownerId }),
+    personId: input.ownerId,
+    botId: input.botId,
+    brick: true,
+    payerKind: 'person',
+    payerPersonId: input.ownerId,
+    // Not 'app': that route is what Composio's calls are counted by
+    route: 'github',
+    jobId: null,
+    quantity: 0,
+    unit: 'use',
+    costMicros: 0,
+    basis: 'measured',
+    sourceRef: null,
+    detail: { toolkit: 'github', tool: input.tool, connectionId: input.connectionId },
+  });
+  return written.recorded;
 }
 
 const rpc = (id: unknown, result: unknown, status = 200): LinkAnswer => ({
@@ -68,13 +88,11 @@ export async function linkGitHub(
     default: {
       const params = (input.message.params ?? {}) as { name?: unknown; arguments?: unknown };
       if (typeof params.name !== 'string' || !isGitHubTool(params.name) || !input.callId) return { status: 'refused' };
-      const callKey = `${input.connectionId}:${input.callId}`;
-      if (!firstTime(callKey)) return { status: 'already_asked' };
+      // The token first: when none can be had nothing runs, and the same call may be asked again
       const token = await gitHubToken(input.connectionId, fetchImpl);
-      if (token.status === 'unavailable') {
-        // Nothing ran: the same call may be asked again
-        ran.delete(callKey);
-        return { status: 'unavailable' };
+      if (token.status === 'unavailable') return { status: 'unavailable' };
+      if (!(await firstTime({ botId: input.botId, ownerId: input.ownerId, connectionId: input.connectionId, callId: input.callId, tool: params.name }))) {
+        return { status: 'already_asked' };
       }
       if (token.status === 'reconnect') {
         return { status: 'done', answer: rpc(id, { content: [{ type: 'text', text: 'GitHub needs the owner to sign in again (Apps, GitHub, Reconnect).' }], isError: true }) };
@@ -85,9 +103,4 @@ export async function linkGitHub(
       return { status: 'done', answer: rpc(id, { content: [{ type: 'text', text: result.text }], isError: result.isError }) };
     }
   }
-}
-
-/** Forget the calls already run (tests). */
-export function forgetGitHubCalls(): void {
-  ran.clear();
 }
