@@ -102,6 +102,10 @@ export interface BrickLimits {
   keyCallSeconds: number;
   /** Kilobytes of an app's answer that are read; a longer answer is cut. */
   keyAnswerKb: number;
+  /** Requests to apps with a key that one person's Bricks may send in an hour, all together. */
+  keyCallsPerPerson: number;
+  /** Requests to apps with a key that every Brick may send in an hour, all together. */
+  keyCallsPlatform: number;
 }
 
 /** What a super admin sets, all in one place. */
@@ -119,7 +123,7 @@ export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, 
 export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 };
 export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0, guestDays: 1 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
-export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256 };
+export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPerPerson: 300, keyCallsPlatform: 20_000 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
 export const FAIR_USAGE_WINDOW_HOURS = 5;
 
@@ -197,6 +201,8 @@ const BRICK_RANGES: Record<keyof BrickLimits, Range> = {
   keyTries: { min: 1, max: 100, whole: true },
   keyCallSeconds: { min: 1, max: 300, whole: true },
   keyAnswerKb: { min: 1, max: 10_240, whole: true },
+  keyCallsPerPerson: { min: 1, max: 10_000_000, whole: true },
+  keyCallsPlatform: { min: 1, max: 100_000_000, whole: true },
 };
 
 /** The values each group can hold, for the pages to say ("Between 1 and 100 files") before anything is sent. */

@@ -93,6 +93,10 @@ export async function POST(
     if (!row || row.botId !== botId) {
       return NextResponse.json({ error: 'App not found' }, { status: 404, headers: corsHeaders(request) });
     }
+    // An app with a key (game #2044) is not an app link: there is nothing here to connect to, and its key is checked only when it is typed or replaced
+    if (row.connection?.kind === 'direct') {
+      return NextResponse.json({ error: 'App not found' }, { status: 404, headers: corsHeaders(request) });
+    }
     // A grant on a person's connection is tested with the connection's link and sign-in (game #2001); the result is the Brick's
     const server = effectiveServer(row);
 

@@ -805,6 +805,32 @@ export function brickLimits(values: BrickLimits): Limit[] {
       ],
     },
     {
+      id: 'keyCallsPerPerson',
+      label: 'Requests to apps with a key, for each person, an hour',
+      hint: 'All of one person’s Bricks together. When it is used up the Brick says the app is busy and tries again later. Reading and making things count the same.',
+      unit: 'requests',
+      value: values.keyCallsPerPerson,
+      recommended: recommended.keyCallsPerPerson,
+      options: [
+        { value: 120, label: '120 an hour', meaning: 'Steady use.' },
+        { value: 300, label: '300 an hour', meaning: 'Room for busy jobs.' },
+        { value: 1000, label: '1,000 an hour', meaning: 'For heavy automation.' },
+      ],
+    },
+    {
+      id: 'keyCallsPlatform',
+      label: 'Requests to apps with a key, for everyone, an hour',
+      hint: 'Every Brick together, a ceiling so one busy hour cannot flood the services people connected.',
+      unit: 'requests',
+      value: values.keyCallsPlatform,
+      recommended: recommended.keyCallsPlatform,
+      options: [
+        { value: 5000, label: '5,000 an hour', meaning: 'A small ceiling.' },
+        { value: 20000, label: '20,000 an hour', meaning: 'Plenty for now.' },
+        { value: 100000, label: '100,000 an hour', meaning: 'When many people use it.' },
+      ],
+    },
+    {
       id: 'appsPerBot',
       label: 'Apps one bot or Brick can use',
       hint: 'Apps added by hand and Apps lent to a universe count together. A bot that is full says so and asks for one to be taken off first.',

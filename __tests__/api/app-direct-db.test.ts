@@ -13,7 +13,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => moc
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { decryptApiKey } from '@/lib/encryption';
-import { disconnect, effectiveServer, grantToBrick, listConnections, WITH_CONNECTION } from '@/lib/app-connections';
+import { disconnect, effectiveServer, listConnections, WITH_CONNECTION } from '@/lib/app-connections';
 import { openKeyForm, readKey, readKeyForm, submitKey, KeyFormError } from '@/lib/app-direct/connect';
 import type { GuardDeps } from '@/lib/app-direct/guard';
 import { GET as listServices } from '@/app/api/me/apps/key-services/route';
@@ -223,17 +223,21 @@ run('key apps, in a real database', () => {
     }
   });
 
-  it('is never handed to a Brick as a way in: no grant by hand, and a grant carries no key even if one is written', async () => {
+  it('is never handed to a Brick as a way in: a grant of it carries no key, whatever is written to the row', async () => {
     const made = await submitKey({ requestId: await open(), ownerId: sara, key: TEST_KEY }, service(404).deps);
-    expect(await grantToBrick(sara, made.id, saraBrick)).toBeNull();
-    // Written straight to the table, as nothing in the code does: reading it back still gives no way in
-    const grant = await prisma.botMcpServer.create({ data: { botId: saraBrick, connectionId: made.id, name: 'Tap Payments', serverUrl: '', authType: 'none', connectedById: sara } });
+    // Connecting gives the owner's Brick its grant; it holds a name and nothing to connect with
+    const grant = await prisma.botMcpServer.findFirstOrThrow({ where: { botId: saraBrick, connectionId: made.id } });
+    expect(grant).toMatchObject({ authType: 'none', authConfig: null, headers: null, serverUrl: '' });
     const row = await prisma.botMcpServer.findUniqueOrThrow({ where: { id: grant.id }, include: WITH_CONNECTION });
     const served = effectiveServer(row);
     expect(served).toMatchObject({ authType: 'none', authConfig: null, headers: null });
     expect(JSON.stringify(served)).not.toContain(TEST_KEY);
     expect(JSON.stringify(served)).not.toContain(row.connection!.keyCipher!);
     expect(served.connection?.keyCipher).toBeNull();
+    // Even a row written with a way in by hand reads back without it
+    await prisma.botMcpServer.update({ where: { id: grant.id }, data: { authType: 'bearer', authConfig: 'x:y:z', headers: { a: 'b' } } });
+    const forged = effectiveServer(await prisma.botMcpServer.findUniqueOrThrow({ where: { id: grant.id }, include: WITH_CONNECTION }));
+    expect(forged).toMatchObject({ authType: 'none', authConfig: null, headers: null });
   });
 
   it('disconnect takes it away', async () => {

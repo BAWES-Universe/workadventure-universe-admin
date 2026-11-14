@@ -8,8 +8,8 @@ export interface ToolSignInNoticeData {
   botId: string;
   bot: string;
   universe: string | null;
-  /** oauth: reconnect from the card; key: a key or token that was rejected; open: a connection with no sign-in that the tool server now wants one for. */
-  servers: { id: string; name: string; kind: 'oauth' | 'key' | 'open'; at: string }[];
+  /** direct: a key app (game #2044) whose key the service stopped accepting, replaced in Apps. oauth: reconnect from the card; key: a key or token that was rejected; open: a connection with no sign-in that the tool server now wants one for. */
+  servers: { id: string; name: string; kind: 'oauth' | 'key' | 'open' | 'direct'; at: string }[];
 }
 
 const listOf = (names: string[]) => (names.length < 2 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`);
@@ -22,6 +22,15 @@ export function describeToolSignIn(data: ToolSignInNoticeData, formatTime?: (iso
   const anyKey = servers.some((server) => server.kind !== 'oauth');
   const allKeys = servers.every((server) => server.kind === 'key');
   const names = servers.map((server) => server.name);
+  // Key apps (game #2044) are fixed in Apps with one Replace key, for every Brick at once: the words are about the person's key, not "this bot's"
+  if (servers.every((server) => server.kind === 'direct')) {
+    const when = formatTime ? ` at ${formatTime(servers[0].at)}` : '';
+    return {
+      title: `${listOf(names)} stopped working`,
+      badge: 'Key stopped working',
+      body: `${data.universe ? `In ${data.universe}. ` : ''}${servers.length === 1 ? `${names[0]} stopped accepting your key${when}.` : `${listOf(names)} stopped accepting your keys.`} Your Bricks carry on without ${servers.length === 1 ? 'it' : 'them'}. Open Apps and tap Replace key.`,
+    };
+  }
   const what = allKeys ? 'API key' : 'sign-in';
   const times = formatTime ? servers.map((server) => formatTime(server.at)) : [];
   const where = data.universe ? `In ${data.universe}. ` : '';

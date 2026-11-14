@@ -1305,6 +1305,7 @@ model AppConnection {
   managers    AppConnectionManager[]
   uses        AppUse[]
   keyRequests AppKeyRequest[]
+  keyCalls    AppKeyCall[]
 
   @@unique([ownerId, catalogKey])
   @@unique([ownerId, providerToolkit])
@@ -1361,6 +1362,30 @@ model AppKeyRequest {
 
   @@index([ownerId])
   @@map("app_key_requests")
+}
+
+// One use of a key app by a Brick, written before the request is sent under the bot server's call id, so a retry of the same call never
+// sends twice (it would make a second payment link), and read for "calls an hour" per person and for everyone. Holds no arguments and no answer.
+model AppKeyCall {
+  id           String   @id @default(uuid())
+  connectionId String   @map("connection_id")
+  ownerId      String   @map("owner_id")
+  botId        String   @map("bot_id") @db.VarChar(255)
+  callId       String   @map("call_id") @db.VarChar(200)
+  operation    String   @db.VarChar(60)
+  // sending until the service answered (or could not be reached), then done
+  state        String   @default("sending") @db.VarChar(10)
+  httpStatus   Int?     @map("http_status")
+  // ok | rejected (the key was refused) | failed (an error answer) | unreachable
+  outcome      String?  @db.VarChar(12)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  connection AppConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([botId, callId])
+  @@index([ownerId, createdAt])
+  @@index([createdAt])
+  @@map("app_key_calls")
 }
 
 model AppConnectionManager {

@@ -2,6 +2,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { startWithToolCallsOn } from '@/lib/bot-tool-call-default';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
+import { grantKeyAppsToNewBrick } from '@/lib/app-direct/grants';
 
 /** What a new Brick starts with. Everything else is a bot's usual start. */
 export interface NewBrick {
@@ -23,7 +24,7 @@ export interface NewBrick {
  * (game #1995) is made through it, inside the transaction that claims the account's one row (see brick-default.ts).
  */
 export async function createBrick(input: NewBrick, db: Prisma.TransactionClient = prisma) {
-  return db.bot.create({
+  const brick = await db.bot.create({
     data: {
       ownerId: input.ownerId,
       createdById: input.ownerId,
@@ -38,4 +39,7 @@ export async function createBrick(input: NewBrick, db: Prisma.TransactionClient 
       aiProviderRef: UNIVERSE_AI_REF,
     },
   });
+  // Every key app its owner has is available to it from the start (game #2044, default access)
+  await grantKeyAppsToNewBrick(db, input.ownerId, brick.id);
+  return brick;
 }

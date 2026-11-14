@@ -24,8 +24,7 @@ export async function GET(request: NextRequest, { params }: Params) {
     const [lent, targets] = app.lendable ? await Promise.all([lentTo(connectionId), lendTargets(user.id, connectionId)]) : [[], []];
     return respond({
       app,
-      // A key app is available to all of the person's Bricks by default, so there is nothing to let in
-      canLetUse: app.kind === 'direct' ? [] : bricks.filter((brick) => !app.bricks.some((used) => used.botId === brick.id)),
+      canLetUse: bricks.filter((brick) => !app.bricks.some((used) => used.botId === brick.id)),
       lentTo: lent,
       canLendTo: targets.filter((universe) => !lent.some((row) => row.universeId === universe.id)),
     });

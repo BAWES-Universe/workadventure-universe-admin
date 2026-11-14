@@ -74,11 +74,11 @@ export async function syncToolSignInNotices(botId: string, fresh?: { serverId: s
       const downRows = bot
         ? await tx.botMcpServer.findMany({
             where: { botId, OR: [{ signInLostAt: { not: null }, connectionId: null }, { connection: { signInLostAt: { not: null } } }] },
-            select: { id: true, name: true, authType: true, signInLostAt: true, connectedById: true, connectionId: true, connection: { select: { name: true, authType: true, signInLostAt: true, connectedById: true } } },
+            select: { id: true, name: true, authType: true, signInLostAt: true, connectedById: true, connectionId: true, connection: { select: { name: true, authType: true, kind: true, signInLostAt: true, connectedById: true } } },
           })
         : [];
       const lost = downRows
-        .map((row) => (row.connection ? { id: row.id, name: row.connection.name, authType: row.connection.authType, signInLostAt: row.connection.signInLostAt, connectedById: row.connection.connectedById } : row))
+        .map((row) => (row.connection ? { id: row.id, name: row.connection.name, authType: row.connection.authType, direct: row.connection.kind === 'direct', signInLostAt: row.connection.signInLostAt, connectedById: row.connection.connectedById } : row))
         .filter((row) => row.signInLostAt !== null)
         .sort((a, b) => (a.signInLostAt as Date).getTime() - (b.signInLostAt as Date).getTime());
       const byPerson = new Map<string, typeof lost>();
@@ -104,12 +104,12 @@ export async function syncToolSignInNotices(botId: string, fresh?: { serverId: s
           servers: servers.map((server) => ({
             id: server.id,
             name: server.name,
-            kind: server.authType === 'oauth' ? 'oauth' : server.authType === 'none' ? 'open' : 'key',
+            kind: 'direct' in server && server.direct ? 'direct' : server.authType === 'oauth' ? 'oauth' : server.authType === 'none' ? 'open' : 'key',
             at: (server.signInLostAt as Date).toISOString(),
           })),
         };
         const words = describeToolSignIn(data);
-        const href = data.servers.some((server) => server.kind !== 'oauth') ? `/admin/bots/${botId}/mcp-servers` : null;
+        const href = data.servers.some((server) => server.kind !== 'oauth' && server.kind !== 'direct') ? `/admin/bots/${botId}/mcp-servers` : null;
         const existing = open.find((notice) => notice.userId === userId);
         const fields = { title: words.title.slice(0, 200), body: words.body.slice(0, 1000), badge: words.badge, href, data: data as unknown as Prisma.InputJsonValue };
         if (existing) {

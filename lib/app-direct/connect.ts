@@ -8,6 +8,7 @@ import { definitionSchema, hashDefinition, keyMode, normalizeOrigin, siteOf, typ
 import { GuardError, guardedRequest, type GuardDeps } from '@/lib/app-direct/guard';
 import { buildRequest, RequestError } from '@/lib/app-direct/request';
 import { lastFour, scrubSecret } from '@/lib/app-direct/scrub';
+import { grantKeyAppToBricks } from '@/lib/app-direct/grants';
 
 /**
  * Connecting a key app (game #2044): the safe form's two halves. A request is opened for ONE person, ONE service definition and
@@ -229,7 +230,7 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
   const encrypted = encryptApiKey(key);
   const tail = lastFour(key);
 
-  return prisma.$transaction(async (tx) => {
+  const connected = await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`direct-key:${input.ownerId}:${definition.service}:${definition.origin}`}, 0))`;
     // One use of the form, whatever happens next: a second submit at the same moment finds it used
     const taken = await tx.appKeyRequest.updateMany({ where: { id: row.id, usedAt: null, expiresAt: { gt: new Date() } }, data: { usedAt: new Date() } });
@@ -281,6 +282,9 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
     });
     return { id: created.id, name: created.name, created: true };
   }, { maxWait: 10_000, timeout: 30_000 });
+  // Available to all the owner's Bricks as soon as it is connected (default access); a replaced key changes nobody's grants
+  if (connected.created) await grantKeyAppToBricks(input.ownerId, { id: connected.id, name: connected.name });
+  return connected;
 }
 
 /** The key of a key app, for the call route only. Throws for anything that is not a key app; never logged, never returned to a person. */

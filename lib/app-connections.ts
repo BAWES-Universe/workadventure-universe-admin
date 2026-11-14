@@ -346,8 +346,7 @@ export async function ownBricks(ownerId: string): Promise<{ id: string; name: st
 export async function grantToBrick(ownerId: string, connectionId: string, botId: string): Promise<BotMcpServer | null> {
   const connection = await getOwnedConnection(connectionId, ownerId);
   if (!connection) return null;
-  // A key app is let into a Brick by connecting it (lib/app-direct), never by this: its grants carry no way in
-  if (connection.kind === 'direct') return null;
+  // A key app's grant carries no way in at all (effectiveServer): this is also how a Brick taken off it gets it back
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { roomId: true, ownerId: true, deletedAt: true } });
   if (!bot || !ownsBrick(bot, ownerId)) return null;
   try {
