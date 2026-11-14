@@ -965,23 +965,6 @@ async function windDownBrick(botId: string, now: Date): Promise<void> {
 
 // ---------- Watching, taking over and handing back ----------
 
-export type Watched = { ok: true; url: string; expiresAt: Date } | { ok: false; reason: 'not_found' | 'resting' };
-
-/**
- * Watch: the screen of a computer that is working. It only looks. A computer that rests, a job that is over, an old link, a
- * refresh or a reconnect cause no wake: with nothing to look at, the answer is "resting" and nothing was called to start it.
- */
-export async function watchComputer(botId: string, ownerId: string): Promise<Watched> {
-  if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
-  const row = await prisma.brickComputer.findUnique({ where: { botId } });
-  const provider = providerFor(row);
-  if (!row || !row.enabled || !provider || !row.providerRef || row.machine !== 'working') return { ok: false, reason: 'resting' };
-  const holding = await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } });
-  if (holding === 0) return { ok: false, reason: 'resting' };
-  const session = await provider.watch(row.providerRef).catch(() => null);
-  return session ? { ok: true, url: session.url, expiresAt: session.expiresAt } : { ok: false, reason: 'resting' };
-}
-
 /**
  * The job needs its person: before it sends their details, signs in, uploads, pays or submits. It waits, holding the machine for
  * them, and the person's Take over appears. Asked by the bot server.

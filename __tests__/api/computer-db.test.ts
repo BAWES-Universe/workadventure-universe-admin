@@ -52,7 +52,6 @@ import {
   windDownStatus,
   takeOver,
   turnOffComputer,
-  watchComputer,
 } from '@/lib/computer';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -90,6 +89,8 @@ const woke = () => provider.calls.filter((call) => call.name === 'create' || cal
 run('a Brick’s computer, in a real database', () => {
   beforeAll(() => {
     process.env.COMPUTER_PROVIDER = 'fake';
+    // Screen tickets are signed with it
+    process.env.BOT_SERVICE_TOKEN ||= 'a-test-service-token';
   });
   beforeEach(async () => {
     await wipe();
@@ -135,7 +136,7 @@ run('a Brick’s computer, in a real database', () => {
       expect(await turnOffComputer(sara.brickId, omar.id)).toBeNull();
       expect(await giveComputer(randomUUID(), sara.id)).toEqual({ ok: false, reason: 'not_found' });
       expect(await startJob({ botId: sara.brickId, personId: omar.id, title: 'x' })).toEqual({ ok: false, reason: 'not_owner' });
-      expect((await watchComputer(sara.brickId, omar.id)).ok).toBe(false);
+      expect((await screenTicket(sara.brickId, omar.id)).ok).toBe(false);
     });
 
     it('is not open on a server with no provider: nothing is made and the page can say so', async () => {
@@ -357,22 +358,7 @@ run('a Brick’s computer, in a real database', () => {
     });
   });
 
-  describe('Stop, Watch and turning it off', () => {
-    it('shows the screen only of a computer that works, and watching never wakes a machine', async () => {
-      const sara = await person('sara');
-      await giveComputer(sara.brickId, sara.id);
-      expect(await watchComputer(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'resting' });
-      expect(provider.calls).toEqual([]);
-      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
-      if (!job.ok) throw new Error('no');
-      expect((await watchComputer(sara.brickId, sara.id)).ok).toBe(true);
-      await stopJobFor(sara.brickId, sara.id, minutes(1));
-      const before = woke();
-      // An old link, a refresh and a reconnect: nothing wakes
-      for (let i = 0; i < 3; i++) expect(await watchComputer(sara.brickId, sara.id)).toEqual({ ok: false, reason: 'resting' });
-      expect(woke()).toBe(before);
-    });
-
+  describe('Stop and turning it off', () => {
     it('Stop ends the job, keeps the work so far and counts what ran', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);

@@ -5,7 +5,6 @@
  */
 import { NextRequest } from 'next/server';
 import { GET as view, POST as give, DELETE as turnOff } from '@/app/api/bricks/[id]/computer/route';
-import { POST as watch } from '@/app/api/bricks/[id]/computer/watch/route';
 import { POST as stop } from '@/app/api/bricks/[id]/computer/stop/route';
 import { POST as takeOverRoute } from '@/app/api/bricks/[id]/computer/take-over/route';
 import { POST as handBackRoute } from '@/app/api/bricks/[id]/computer/hand-back/route';
@@ -60,7 +59,6 @@ describe('the owner’s calls', () => {
     ['view', (r) => view(r, params), 'GET'],
     ['give', (r) => give(r, params), 'POST'],
     ['turn off', (r) => turnOff(r, params), 'DELETE'],
-    ['watch', (r) => watch(r, params), 'POST'],
     ['stop', (r) => stop(r, params), 'POST'],
     ['take over', (r) => takeOverRoute(r, params), 'POST'],
     ['hand back', (r) => handBackRoute(r, params), 'POST'],
@@ -90,7 +88,6 @@ describe('the owner’s calls', () => {
     lib.computerView.mockResolvedValue(null);
     lib.giveComputer.mockResolvedValue({ ok: false, reason: 'not_found' });
     lib.turnOffComputer.mockResolvedValue(null);
-    lib.watchComputer.mockResolvedValue({ ok: false, reason: 'not_found' });
     lib.stopJobFor.mockResolvedValue(null);
     lib.takeOver.mockResolvedValue({ ok: false, reason: 'not_found' });
     lib.handBack.mockResolvedValue({ ok: false, reason: 'not_found' });
@@ -100,14 +97,13 @@ describe('the owner’s calls', () => {
       view(call('/x', { method: 'GET' }), params),
       give(call('/x'), params),
       turnOff(call('/x', { method: 'DELETE' }), params),
-      watch(call('/x'), params),
       stop(call('/x'), params),
       takeOverRoute(call('/x'), params),
       handBackRoute(call('/x'), params),
       fillRoute(call('/x'), params),
       dismissRoute(call('/x', { body: { jobId: JOB } }), params),
     ]);
-    expect(answers.map((a) => a.status)).toEqual(Array(9).fill(404));
+    expect(answers.map((a) => a.status)).toEqual(Array(8).fill(404));
   });
 
   it('dismisses the notice of one named ending, for the person asking and nobody else', async () => {
@@ -125,15 +121,6 @@ describe('the owner’s calls', () => {
   it('says computers are not open yet where there is no provider', async () => {
     lib.giveComputer.mockResolvedValue({ ok: false, reason: 'not_open' });
     expect((await give(call('/x'), params)).status).toBe(503);
-  });
-
-  it('answers Watch with the screen, or "resting" (409) and nothing woken', async () => {
-    lib.watchComputer.mockResolvedValue({ ok: true, url: 'https://screen.example/1', expiresAt: new Date('2026-11-15T12:05:00Z') });
-    expect(await (await watch(call('/x'), params)).json()).toMatchObject({ url: 'https://screen.example/1' });
-    lib.watchComputer.mockResolvedValue({ ok: false, reason: 'resting' });
-    const resting = await watch(call('/x'), params);
-    expect(resting.status).toBe(409);
-    expect(await resting.json()).toMatchObject({ resting: true });
   });
 
   it('answers take over and hand back with the job, or 409 when nothing waits for the person', async () => {
