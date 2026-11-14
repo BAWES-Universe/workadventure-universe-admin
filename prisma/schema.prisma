@@ -53,6 +53,10 @@ model User {
   brickHomesPlaced  BrickHome[]
   brickOffers       BrickOffer[]
   brickItems        BrickItem[] @relation("BrickItemOwner")
+  brickTemplates    BrickTemplate[] @relation("BrickTemplateMaker")
+  brickTemplatesPicked BrickTemplate[] @relation("BrickTemplatePickedBy")
+  brickTemplateStars BrickTemplateStar[]
+  brickTemplateMadeBy BrickTemplateUse[] @relation("BrickTemplateUseMaker")
   guestBrickHandovers GuestBrickHandover[]
   botsCreated       Bot[] @relation("BotCreatedBy")
   botsUpdated       Bot[] @relation("BotUpdatedBy")
@@ -931,6 +935,8 @@ model Bot {
   computerJobs    ComputerJob[]
   home            BrickHome?
   brickItems      BrickItem[]
+  template        BrickTemplate?
+  madeFrom        BrickTemplateUse?
 
   @@index([roomId])
   @@index([ownerId])
@@ -1164,6 +1170,104 @@ model BrickItemRun {
   @@index([itemId, claimedAt])
   @@index([state, leaseUntil])
   @@map("brick_item_runs")
+}
+
+// A Brick shared as a template (game #2008, Brick 17). One row per Brick that was ever shared: sharing again after "Stop
+// sharing" brings the same row back. What is shared lives in the immutable versions below, never in this row, and never in
+// the Brick itself: the template is a copy taken at the moment its maker read it in the look, so changing or deleting the
+// Brick changes nothing that was shared. `stoppedAt` set means nobody new can use it (Bricks already made from it are not
+// touched). A Brick that waits deleted hides its template; the Brick going for good removes it, and the Bricks made from it
+// keep their "made from" line (BrickTemplateUse).
+model BrickTemplate {
+  id             String    @id @default(uuid())
+  botId          String    @unique @map("bot_id")
+  makerId        String    @map("maker_id")
+  // everyone: on the Brick's card, in lists and picks | link: only people who were given the link
+  audience       String    @default("everyone") @db.VarChar(10)
+  // The version new Bricks start from
+  currentVersion Int       @default(1) @map("current_version")
+  // What the maker chose in the look last time (leaveOutLook, which of their routines went along), so "Share your latest
+  // changes" starts from the same choices. Never read to decide what is shared: that is always what the maker read.
+  choices        Json      @default("{}")
+  stoppedAt      DateTime? @map("stopped_at")
+  // Picked by Universe for the "a few picks" list. A new version is not picked until it is picked again.
+  pickedAt       DateTime? @map("picked_at")
+  pickedById     String?   @map("picked_by_id")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  bot      Bot                    @relation(fields: [botId], references: [id], onDelete: Cascade)
+  maker    User                   @relation("BrickTemplateMaker", fields: [makerId], references: [id], onDelete: Cascade)
+  pickedBy User?                  @relation("BrickTemplatePickedBy", fields: [pickedById], references: [id], onDelete: SetNull)
+  versions BrickTemplateVersion[]
+  uses     BrickTemplateUse[]
+  stars    BrickTemplateStar[]
+
+  @@index([audience, stoppedAt])
+  @@index([pickedAt])
+  @@map("brick_templates")
+}
+
+// One shared version of a template. Never changed after it is written: a new share is a new row, so a Brick made from
+// version 2 can always be compared with version 3. Only what is shared is here: the look, the one line, the instructions,
+// the first thing to try, what people will need (names, never a link or a sign-in) and the routines the maker added on
+// purpose. Never memory, chats, history, apps, keys, sign-ins, grants, recipients, running goals or tasks, files or a computer.
+model BrickTemplateVersion {
+  templateId       String   @map("template_id")
+  number           Int
+  name             String   @db.VarChar(100)
+  description      String?
+  // Null when the maker left the look out: the new Brick takes the next colour its owner has not used
+  characterTextureId String? @map("character_texture_id") @db.VarChar(100)
+  chatInstructions String?  @map("chat_instructions")
+  // The first thing to try: the new Brick's first line in its chat
+  firstThing       String?  @map("first_thing") @db.VarChar(300)
+  // [{ kind: app | computer, key, label, required }]
+  needs            Json     @default("[]")
+  // [{ kind: reminder | schedule | watch, words, condition, cadence }], taken only when the maker added them on purpose
+  routines         Json     @default("[]")
+  // What was shared, as a hash, so "Share your latest changes" can tell whether anything changed
+  contentHash      String   @map("content_hash") @db.VarChar(64)
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  template BrickTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  @@id([templateId, number])
+  @@map("brick_template_versions")
+}
+
+// "Made from": which template a Brick was started from, and which version it last took. Its own Brick row is a new
+// identity (own name, memory, grants): this row only remembers the maker's name and the version, so the maker's name stays
+// on the Brick even after the template stops being shared or goes. `templateId` goes null when the template goes for good.
+model BrickTemplateUse {
+  botId         String   @id @map("bot_id")
+  templateId    String?  @map("template_id")
+  versionNumber Int      @map("version_number")
+  makerId       String?  @map("maker_id")
+  makerName     String   @map("maker_name") @db.VarChar(100)
+  templateName  String   @map("template_name") @db.VarChar(100)
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  bot      Bot            @relation(fields: [botId], references: [id], onDelete: Cascade)
+  template BrickTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  maker    User?          @relation("BrickTemplateUseMaker", fields: [makerId], references: [id], onDelete: SetNull)
+
+  @@index([templateId])
+  @@map("brick_template_uses")
+}
+
+// Star keeps a template for later: a person's own list, private to them.
+model BrickTemplateStar {
+  userId     String   @map("user_id")
+  templateId String   @map("template_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  template BrickTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+
+  @@id([userId, templateId])
+  @@index([templateId])
+  @@map("brick_template_stars")
 }
 
 // One role's or one person's No / Default / Yes for a bot (#427), the same shape room overrides will reuse: two

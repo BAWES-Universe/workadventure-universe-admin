@@ -8,7 +8,8 @@ import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
 import { runningExtra } from '@/lib/meter-grants';
 import { windowStart } from '@/lib/reply-limits';
 import { ownerAskingThrough } from '@/lib/brick-make';
-import { TIME_ZONE_KEY, WORKWEEK_KEY, firstDue, isTimeZone, nextDue, readCadence, readWorkweek, repeatMinutes, type Cadence } from '@/lib/brick-item-time';
+import { templateRoutineGate } from '@/lib/brick-template-use';
+import { TIME_ZONE_KEY, WORKWEEK_KEY, firstDue, isTimeZone, ownZone, nextDue, readCadence, readWorkweek, repeatMinutes, type Cadence } from '@/lib/brick-item-time';
 
 /**
  * Goals and tasks (game #2002, Brick 11): Universe's own scheduler.
@@ -120,7 +121,7 @@ export interface ItemView {
   setBy: 'you' | 'brick';
   revision: number;
   parentId: string | null;
-  pausedBy: 'owner' | 'brick_deleted' | 'goal' | null;
+  pausedBy: 'owner' | 'brick_deleted' | 'goal' | 'template' | null;
   result: string | null;
   doneAt: string | null;
   lastRunAt: string | null;
@@ -153,7 +154,7 @@ export function viewOf(row: ItemRow): ItemView {
     setBy: row.setBy === 'brick' ? 'brick' : 'you',
     revision: row.revision,
     parentId: row.parentId,
-    pausedBy: row.pausedBy === 'owner' || row.pausedBy === 'brick_deleted' || row.pausedBy === 'goal' ? row.pausedBy : null,
+    pausedBy: row.pausedBy === 'owner' || row.pausedBy === 'brick_deleted' || row.pausedBy === 'goal' || row.pausedBy === 'template' ? row.pausedBy : null,
     result: row.result,
     doneAt: row.doneAt?.toISOString() ?? null,
     lastRunAt: row.lastRunAt?.toISOString() ?? null,
@@ -168,7 +169,7 @@ export type Refused = {
   status: 400 | 404 | 409 | 422;
   error: string;
   /** What the bot server can say to the person, as a code: needs_time_zone, too_often, too_many, past, off. */
-  code?: 'needs_time_zone' | 'too_often' | 'too_many' | 'past' | 'off' | 'needs_wait' | 'needs_goal' | 'wrong_state';
+  code?: 'needs_time_zone' | 'too_often' | 'too_many' | 'past' | 'off' | 'needs_wait' | 'needs_goal' | 'wrong_state' | 'needs_setup';
   /** The setting that decided it, when there is one. */
   limit?: number;
 };
@@ -257,12 +258,12 @@ export async function createItem(viaBrickId: string, input: NewItemInput, now: D
   if (!brick?.enabled) return { ok: false, status: 409, code: 'off', error: 'This Brick is switched off' };
   const cadence = readCadence(input.cadence);
   const limits = await getBrickLimits();
-  let timeZone = input.timeZone ?? null;
+  let timeZone = input.timeZone === undefined || input.timeZone === null ? null : ownZone(input.timeZone);
   if (timeZone !== null && !isTimeZone(timeZone)) return { ok: false, status: 400, error: 'timeZone must be a time zone like Asia/Kuwait' };
   if (timeZone === null) {
     const kept = (await prisma.userPreference.findUnique({ where: { userId_key: { userId: ownerId, key: TIME_ZONE_KEY } }, select: { value: true } }))?.value;
     if (!isTimeZone(kept)) return { ok: false, status: 422, code: 'needs_time_zone', error: 'No time zone is kept for this person yet' };
-    timeZone = kept;
+    timeZone = ownZone(kept);
   }
   if (input.kind === 'watch' && !input.condition) return { ok: false, status: 400, error: 'a watch needs the condition it speaks for' };
   if (input.kind === 'goal' && !input.outcome) return { ok: false, status: 400, error: 'a goal needs the outcome the person named' };
@@ -407,26 +408,42 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (!bot?.enabled || bot.deletedAt) return { ok: false as const, status: 409 as const, code: 'off' as const, error: 'This Brick is switched off' };
         // A check runs only while its goal is on: it is brought back by its goal's Resume, not on its own under a paused goal
         if (row.parentId && !(await goalIsOn(tx, row.parentId))) return { ok: false as const, status: 409 as const, code: 'needs_goal' as const, error: 'A check comes back only while its goal is on' };
+        // A routine that came with a template (game #2008) was switched off on purpose: it runs only once its owner's time zone is kept
+        // and what the template said the Brick needs is there. It is read on their clock, never the maker's.
+        let zone = row.timeZone;
+        if (row.pausedBy === 'template') {
+          const gate = await templateRoutineGate(tx, row.botId, ownerId, row.timeZone);
+          if (!gate.ok) return gate;
+          zone = gate.timeZone;
+        }
         // One that was meant for a moment that has passed while it was paused is due now, once; the rest carry on from now
-        const due = cadence.type === 'once' ? (firstDue(cadence, row.timeZone, now) ?? now) : firstDue(cadence, row.timeZone, now);
+        const due = cadence.type === 'once' ? (firstDue(cadence, zone, now) ?? now) : firstDue(cadence, zone, now);
         // Only the checks its own pause (or the deleted Brick) stopped: one the person paused by itself stays paused
         await moveChecks(tx, row.id, ['paused'], { state: 'on', pausedBy: null }, now, true, ['goal', 'brick_deleted']);
-        return finish({ state: 'on', pausedBy: null, nextDueAt: due, ...bump });
+        return finish({ state: 'on', pausedBy: null, nextDueAt: due, timeZone: zone, ...bump });
       }
       case 'done': {
         if (row.state === 'done') return { ok: true as const, item: viewOf(row) };
         await moveChecks(tx, row.id, ['on', 'paused'], { state: 'done', pausedBy: null, doneAt: now }, now, false);
         await endTaskCards(tx, row.botId, row.id, now);
-        return finish({ state: 'done', pausedBy: null, nextDueAt: null, doneAt: now, result: input.result ?? row.result, ...NOT_ASKING, ...bump });
+        // A routine that came with a template and was never turned on stays marked so while done: coming back (Reopen, Snooze) goes through
+        // the same gate as Resume, so Done is not a way around it
+        return finish({ state: 'done', pausedBy: row.pausedBy === 'template' ? 'template' : null, nextDueAt: null, doneAt: now, result: input.result ?? row.result, ...NOT_ASKING, ...bump });
       }
       case 'reopen': {
         if (row.state === 'on') return { ok: true as const, item: viewOf(row) };
         if (row.state !== 'done') return wrongState(row.state);
         const refused = await comingBackProblem(tx, row, ownerId, limits);
         if (refused) return refused;
+        let zone = row.timeZone;
+        if (row.pausedBy === 'template') {
+          const gate = await templateRoutineGate(tx, row.botId, ownerId, row.timeZone);
+          if (!gate.ok) return gate;
+          zone = gate.timeZone;
+        }
         // Starts again from the new revision, counted from now: a one-off that has passed is due now, once
-        const due = cadence.type === 'once' ? (firstDue(cadence, row.timeZone, now) ?? now) : firstDue(cadence, row.timeZone, now);
-        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, nextDueAt: due, failuresInRow: 0, failureTold: false, tellRunId: null, ...NOT_ASKING, askKept: null, ...bump });
+        const due = cadence.type === 'once' ? (firstDue(cadence, zone, now) ?? now) : firstDue(cadence, zone, now);
+        return finish({ state: 'on', pausedBy: null, timeZone: zone, doneAt: null, result: null, nextDueAt: due, failuresInRow: 0, failureTold: false, tellRunId: null, ...NOT_ASKING, askKept: null, ...bump });
       }
       case 'delete': {
         await moveChecks(tx, row.id, ['on', 'paused', 'done'], { state: 'deleted', pausedBy: null }, now, false);
@@ -441,9 +458,15 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         // A repeating one the person marked Done stays done (Reopen is how it comes back); only a delivered one-off comes back by Snooze
         if (row.state === 'done' && cadence.type !== 'once') return wrongState(row.state);
         // A done one coming back takes its place again, so it keeps to the same limits as a reopen: the Brick on, the goal on, the most
+        let zone = row.timeZone;
         if (row.state === 'done') {
           const refused = await comingBackProblem(tx, row, ownerId, limits);
           if (refused) return refused;
+          if (row.pausedBy === 'template') {
+            const gate = await templateRoutineGate(tx, row.botId, ownerId, row.timeZone);
+            if (!gate.ok) return gate;
+            zone = gate.timeZone;
+          }
         }
         // A one-off that is not due yet moves from the moment it was due (an early or stale tap only ever puts it later, never earlier);
         // anything else comes back this much after the tap, a repeating one then carrying on from there
@@ -451,7 +474,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         const later = new Date(from.getTime() + limits.snooze * MINUTE);
         // A one-off comes back at the new time (done ones too: they have just been delivered); a repeating one is moved once and carries on from there
         const moved: Cadence = cadence.type === 'once' ? { type: 'once', at: later.toISOString() } : cadence;
-        return finish({ state: 'on', pausedBy: null, doneAt: null, result: null, cadence: moved as unknown as Prisma.InputJsonValue, nextDueAt: later, ...(row.state === 'done' ? { failuresInRow: 0, failureTold: false, tellRunId: null } : {}), ...bump });
+        return finish({ state: 'on', pausedBy: null, timeZone: zone, doneAt: null, result: null, cadence: moved as unknown as Prisma.InputJsonValue, nextDueAt: later, ...(row.state === 'done' ? { failuresInRow: 0, failureTold: false, tellRunId: null } : {}), ...bump });
       }
       case 'change': {
         const change = input.change;
@@ -460,7 +483,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         let timeZone = row.timeZone;
         if (change.timeZone !== undefined) {
           if (!isTimeZone(change.timeZone)) return { ok: false as const, status: 400 as const, error: 'timeZone must be a time zone like Asia/Kuwait' };
-          timeZone = change.timeZone;
+          timeZone = ownZone(change.timeZone);
         }
         const nextCadence = change.cadence === undefined ? cadence : readCadence(change.cadence);
         const waitingFor = change.waitingFor === undefined ? row.waitingFor : change.waitingFor;

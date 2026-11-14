@@ -21,6 +21,12 @@ export type Cadence =
 const MINUTE = 60 * 1000;
 const DAY = 24 * 60 * MINUTE;
 
+/**
+ * One name for the clock that has two: a routine that came with a template holds "Etc/UTC" until its owner has a zone (see
+ * brick-template-use), so nobody's own choice is ever stored under that name. "UTC" is the same clock.
+ */
+export const ownZone = (zone: string): string => (zone === 'Etc/UTC' ? 'UTC' : zone);
+
 /** Whether this is a time zone the runtime knows ("Asia/Kuwait", "Europe/London", "UTC"). */
 export function isTimeZone(value: unknown): value is string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 64) return false;
