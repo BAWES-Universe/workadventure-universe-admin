@@ -17,13 +17,10 @@ const listOf = (names: string[]) => (names.length < 2 ? names.join('') : `${name
 /** The words of the notice. Without `formatTime` it leaves the times out (the stored text); the page passes the viewer's clock. */
 export function describeToolSignIn(data: ToolSignInNoticeData, formatTime?: (iso: string) => string) {
   const { servers } = data;
-  // The tools page can only change a connection by adding it again, so everything that is not an OAuth sign-in leads there
-  const keysOnly = servers.every((server) => server.kind !== 'oauth');
-  const anyKey = servers.some((server) => server.kind !== 'oauth');
-  const allKeys = servers.every((server) => server.kind === 'key');
   const names = servers.map((server) => server.name);
   // Key apps (game #2044) are fixed in Apps with one Replace key, for every Brick at once: the words are about the person's key, not "this bot's"
-  if (servers.every((server) => server.kind === 'direct')) {
+  const direct = servers.filter((server) => server.kind === 'direct');
+  if (direct.length === servers.length) {
     const when = formatTime ? ` at ${formatTime(servers[0].at)}` : '';
     return {
       title: `${listOf(names)} stopped working`,
@@ -31,13 +28,21 @@ export function describeToolSignIn(data: ToolSignInNoticeData, formatTime?: (iso
       body: `${data.universe ? `In ${data.universe}. ` : ''}${servers.length === 1 ? `${names[0]} stopped accepting your key${when}.` : `${listOf(names)} stopped accepting your keys.`} Your Bricks carry on without ${servers.length === 1 ? 'it' : 'them'}. Open Apps and tap Replace key.`,
     };
   }
+  // A mix: the connections of the bot are told as before, and the key apps get their own sentence (they are never removed and added again)
+  const rest = servers.filter((server) => server.kind !== 'direct');
+  const directNote = direct.length ? ` ${listOf(direct.map((server) => server.name))} ${direct.length === 1 ? 'stopped accepting your key' : 'stopped accepting your keys'}: open Apps and tap Replace key.` : '';
+  // The tools page can only change a connection by adding it again, so everything that is not an OAuth sign-in leads there
+  const keysOnly = rest.every((server) => server.kind !== 'oauth');
+  const anyKey = rest.some((server) => server.kind !== 'oauth');
+  const allKeys = rest.every((server) => server.kind === 'key');
+  const restNames = rest.map((server) => server.name);
   const what = allKeys ? 'API key' : 'sign-in';
-  const times = formatTime ? servers.map((server) => formatTime(server.at)) : [];
+  const times = formatTime ? rest.map((server) => formatTime(server.at)) : [];
   const where = data.universe ? `In ${data.universe}. ` : '';
-  const one = servers.length === 1;
+  const one = rest.length === 1;
   const stopped = one
-    ? `${names[0]} stopped accepting this bot’s ${what}${formatTime ? ` at ${times[0]}` : ''}.`
-    : `${servers.length === 2 ? 'Both' : `All ${servers.length}`} stopped accepting this bot’s ${what}${formatTime ? ` (${listOf(times)})` : ''}.`;
+    ? `${restNames[0]} stopped accepting this bot’s ${what}${formatTime ? ` at ${times[0]}` : ''}.`
+    : `${rest.length === 2 ? 'Both' : `All ${rest.length}`} stopped accepting this bot’s ${what}${formatTime ? ` (${listOf(times)})` : ''}.`;
   const meanwhile = keysOnly
     ? 'Tap to open this bot’s apps page, remove it there and add it again with a new key.'
     : one
@@ -47,6 +52,6 @@ export function describeToolSignIn(data: ToolSignInNoticeData, formatTime?: (iso
   return {
     title: `${data.bot} can’t use ${listOf(names)}`,
     badge: allKeys ? 'Key rejected' : 'Sign-in expired',
-    body: `${where}${stopped} ${meanwhile}${keyHint}`,
+    body: `${where}${stopped} ${meanwhile}${keyHint}${directNote}`,
   };
 }

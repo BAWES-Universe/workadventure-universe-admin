@@ -84,6 +84,21 @@ describe('the words of the card', () => {
   });
 });
 
+describe('the words when a key app is mixed with the bot’s own connections', () => {
+  it('tells a key app to be replaced in Apps, and the key connection as before, without calling the key app this bot’s', () => {
+    const words = describeToolSignIn(data([{ ...at(T1.toISOString()), name: 'Tavily', kind: 'key' }, { ...at(T2.toISOString()), id: 'y', name: 'Stripe', kind: 'direct' }]), () => '12:54 PM');
+    expect(words.body).toBe('In autonode-labs. Tavily stopped accepting this bot’s API key at 12:54 PM. Tap to open this bot’s apps page, remove it there and add it again with a new key. Stripe stopped accepting your key: open Apps and tap Replace key.');
+    expect(words.body).not.toMatch(/Stripe stopped accepting this bot/);
+  });
+
+  it('keeps the sign-in words for the ones to reconnect and sends the key app to Apps', () => {
+    const words = describeToolSignIn(data([{ ...at(T1.toISOString()), name: 'Attio' }, { ...at(T2.toISOString()), id: 'y', name: 'Stripe', kind: 'direct' }, { ...at(T2.toISOString()), id: 'z', name: 'Exa', kind: 'direct' }]));
+    expect(words.badge).toBe('Sign-in expired');
+    expect(words.body).toContain('Attio stopped accepting this bot’s sign-in. Until it’s reconnected');
+    expect(words.body).toContain('Stripe and Exa stopped accepting your keys: open Apps and tap Replace key.');
+  });
+});
+
 describe('the words for a server with no sign-in at all', () => {
   it('is not called a key, and the hint is for the apps page', () => {
     const words = describeToolSignIn(data([{ ...at(T1.toISOString()), name: 'Open', kind: 'open' }]), () => '12:54 PM');
