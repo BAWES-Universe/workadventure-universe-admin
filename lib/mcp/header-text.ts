@@ -44,7 +44,7 @@ export function headerProblem(input: {
 }): string | null {
   const { authType, authValue, headers } = input;
   // An OAuth value is JSON the app was signed in with, not text a person typed; only its key and token fields are sent
-  if (authValue && (authType === 'bearer' || authType === 'api-key')) {
+  if (typeof authValue === 'string' && authValue && (authType === 'bearer' || authType === 'api-key')) {
     const bad = unsendableCharacter(authValue);
     if (bad) return unsendableMessage(authType === 'bearer' ? 'the access token' : 'the key', bad);
   }

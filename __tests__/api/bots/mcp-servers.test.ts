@@ -464,6 +464,34 @@ describe('/api/bots/[id]/mcp-servers', () => {
       expect(prisma.botMcpServer.create).not.toHaveBeenCalled();
     });
 
+    it('still saves a key pasted with a trailing line break (it is trimmed first)', async () => {
+      (prisma.botMcpServer.count as jest.Mock).mockResolvedValue(0);
+      (prisma.botMcpServer.create as jest.Mock).mockResolvedValue({ id: MOCK_SERVER_ID, botId: MOCK_BOT_ID, name: 'Exa', serverUrl: 'https://mcp.exa.ai/mcp', authType: 'api-key', enabled: true, createdAt: new Date(), updatedAt: new Date() });
+      const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Exa', serverUrl: 'https://mcp.exa.ai/mcp', authType: 'api-key', authConfig: 'abc123\n' }),
+      });
+
+      const response = await POST(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
+
+      expect(response.status).toBe(201);
+      expect(encryption.encryptApiKey).toHaveBeenCalledWith('abc123');
+    });
+
+    it('answers 400, not a crash, when the key is not text', async () => {
+      (prisma.botMcpServer.count as jest.Mock).mockResolvedValue(0);
+      const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Exa', serverUrl: 'https://mcp.exa.ai/mcp', authType: 'api-key', authConfig: 12345 }),
+      });
+
+      const response = await POST(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
+
+      expect(response.status).toBe(400);
+    });
+
     it('should return 400 for invalid body (missing name)', async () => {
       (prisma.botMcpServer.count as jest.Mock).mockResolvedValue(0);
 

@@ -28,7 +28,7 @@ export const createMcpServerSchema = z.object({
   // A key, token or extra header with text that cannot be sent says which one (a pasted em dash is the usual cause)
   const problem = headerProblem({ authType: data.authType, authValue: data.authConfig, headers: data.headers });
   if (problem) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: [data.headers && /extra header/.test(problem) ? 'headers' : 'authConfig'], message: problem });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: [/extra header/.test(problem) ? 'headers' : 'authConfig'], message: problem, params: { unsendable: true } });
     return;
   }
   if ((data.authType === 'bearer' || data.authType === 'api-key' || data.authType === 'oauth') && !data.authConfig) {

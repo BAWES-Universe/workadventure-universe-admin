@@ -10,7 +10,6 @@ import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
 import { z } from 'zod';
 import { corsHeaders } from '@/lib/cors';
 import { createMcpServerSchema } from '@/lib/mcp/server-input';
-import { headerProblem } from '@/lib/mcp/header-text';
 import { WITH_CONNECTION, effectiveServer } from '@/lib/app-connections';
 
 export const runtime = 'nodejs';
@@ -259,11 +258,6 @@ export async function POST(
 
     // Parse and validate request body
     const body = await request.json();
-    // A key, token or extra header with text that cannot be sent is named here, in words: the schema would only say the input is invalid
-    const unsendable = headerProblem({ authType: body?.authType, authValue: body?.authConfig, headers: body?.headers });
-    if (unsendable) {
-      return NextResponse.json({ error: unsendable }, { status: 400, headers: corsHeaders(request) });
-    }
     const validatedData = createMcpServerSchema.parse(body);
 
     // Encrypt authConfig if provided (store even when authType is 'none',
@@ -330,6 +324,11 @@ export async function POST(
       return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
     }
     if (error instanceof z.ZodError) {
+      // A key, token or extra header with text that cannot be sent is named in words: the schema found it on the trimmed, typed input
+      const unsendable = error.issues.find((issue) => issue.code === 'custom' && (issue as { params?: { unsendable?: boolean } }).params?.unsendable);
+      if (unsendable) {
+        return NextResponse.json({ error: unsendable.message }, { status: 400, headers: corsHeaders(request) });
+      }
       return NextResponse.json(
         { error: 'Invalid input data', details: error.issues },
         { status: 400, headers: corsHeaders(request) }
