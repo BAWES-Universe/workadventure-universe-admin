@@ -416,6 +416,28 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       }
     });
 
+    it('turn on only if they repeat no more often than the shortest-wait setting is when it is turned on', async () => {
+      const often = await routine(brickId, sara.id, { cadence: { type: 'every', minutes: 30 }, words: 'Every half hour check the oven' });
+      const id = await share({ routines: [often.id] });
+      try {
+        as(omar);
+        const body = await remember(await makeFrom(id));
+        expect(body.routines).toEqual({ added: 1, leftOut: 0 });
+        const botId = body.brick.id;
+        const itemId = (await prisma.brickItem.findFirstOrThrow({ where: { botId } })).id;
+        await keepZone(omar);
+        await saveServerLimits({ bricks: { shortestRepeat: 120 } }, sara.id);
+        expect(await changeItem(botId, itemId, { userId: omar.email, action: 'resume' })).toMatchObject({ ok: false, status: 422, code: 'too_often', limit: 120 });
+        expect(await prisma.brickItem.findUniqueOrThrow({ where: { id: itemId } })).toMatchObject({ state: 'paused', pausedBy: 'template', nextDueAt: null });
+        await prisma.brickItem.update({ where: { id: itemId }, data: { state: 'done', doneAt: new Date() } });
+        expect(await changeItem(botId, itemId, { userId: omar.email, action: 'reopen' })).toMatchObject({ ok: false, status: 422, code: 'too_often' });
+        await saveServerLimits({ bricks: { shortestRepeat: 30 } }, sara.id);
+        expect((await changeItem(botId, itemId, { userId: omar.email, action: 'reopen' })).ok).toBe(true);
+      } finally {
+        await saveServerLimits({ bricks: { shortestRepeat: 30 } }, sara.id);
+      }
+    });
+
     it('hold after the template is gone: its source Brick removed for good changes nothing about what the routines need', async () => {
       const gmail = await connectGmail(sara);
       await prisma.botMcpServer.create({ data: { botId: brickId, name: 'Gmail', serverUrl: gmail.serverUrl, connectionId: gmail.id } });
@@ -681,6 +703,41 @@ run('Brick templates: using one, finding one, taking an update, in a real databa
       const after = await brickRow(botId);
       expect([after.chatInstructions, after.description, after.hello]).toEqual([before.chatInstructions, before.description, before.hello]);
       expect((await prisma.brickTemplateUse.findUniqueOrThrow({ where: { botId } })).versionNumber).toBe(2);
+    });
+
+    it('keeps what its routines need when the offer is closed or other parts are taken, and adds to it when routines are taken', async () => {
+      const gmail = await connectGmail(sara);
+      const server = await prisma.botMcpServer.create({ data: { botId: brickId, name: 'Gmail', serverUrl: gmail.serverUrl, connectionId: gmail.id } });
+      const item = await routine(brickId, sara.id);
+      const id = await share({ routines: [item.id] });
+      as(omar);
+      const botId = (await remember(await makeFrom(id))).brick.id;
+      const itemId = (await prisma.brickItem.findFirstOrThrow({ where: { botId } })).id;
+      await keepZone(omar);
+      const needsOf = async () => ((await prisma.brickTemplateUse.findUniqueOrThrow({ where: { botId } })).needs as { key: string; required: boolean }[]).map((need) => [need.key, need.required]);
+      expect(await needsOf()).toEqual([['gmail', true]]);
+
+      // The maker's next version no longer needs Gmail
+      as(sara);
+      await prisma.botMcpServer.delete({ where: { id: server.id } });
+      await prisma.bot.update({ where: { id: brickId }, data: { chatInstructions: 'Always ask which one first.' } });
+      await share({ routines: [] });
+      as(omar);
+      const kept = await postUpdate(call('POST', `/api/bricks/${botId}/made-from/update`, { version: 2, take: [] }), ids(botId));
+      expect(kept.status).toBe(200);
+      expect(await needsOf()).toEqual([['gmail', true]]);
+      expect(await changeItem(botId, itemId, { userId: omar.email, action: 'resume' })).toMatchObject({ ok: false, status: 409, code: 'needs_setup', error: 'Set up Gmail first' });
+
+      // A later version that takes the routines adds its needs to what the kept routines need
+      as(sara);
+      await prisma.brickComputer.create({ data: { botId: brickId, enabled: true } as never });
+      const menu = await routine(brickId, sara.id, { words: 'Every evening send me a menu' });
+      await prisma.bot.update({ where: { id: brickId }, data: { chatInstructions: 'Always ask which one first, then wait.' } });
+      await share({ routines: [menu.id] });
+      as(omar);
+      const taken = await postUpdate(call('POST', `/api/bricks/${botId}/made-from/update`, { version: 3, take: ['routines'] }), ids(botId));
+      expect(taken.status).toBe(200);
+      expect((await needsOf()).sort()).toEqual([['computer', true], ['gmail', true]]);
     });
 
     it('refuses a version that is not the latest, a part that is not in the update, and anyone but the owner', async () => {

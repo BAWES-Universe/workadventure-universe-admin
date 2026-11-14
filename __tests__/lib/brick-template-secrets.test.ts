@@ -27,6 +27,13 @@ describe('the secret check of the look before sharing', () => {
     expect(kinds('the key is Ab3dEf6hIj9lMn2pQr5tUv8xYz1BcDe4FgHi7Jk0')).toEqual(['secret:a long key-like string']);
   });
 
+  it('finds a long value in a link query parameter named like a credential, and leaves other parameters alone', () => {
+    const key = 'Ab3dEf6hIj9lMn2pQr5tUv8xYz1BcDe4FgHi7Jk0';
+    expect(kinds(`Call https://api.example.com/data?key=${key} each hour`)).toEqual(['secret:a long key-like string']);
+    expect(kinds(`Call https://api.example.com/data?city=Kuwait&access_token=${key}`)).toEqual(['secret:a long key-like string']);
+    expect(kinds(`Call https://api.example.com/data?sig=${key}`)).toEqual(['secret:a long key-like string']);
+  });
+
   it('says a secret once, under its most specific name', () => {
     const found = findInText('sk-proj-abcdefghijklmnopqrstuvwxyz123456abcdefghij', 'instructions');
     expect(found).toHaveLength(1);
@@ -45,6 +52,7 @@ describe('the secret check of the look before sharing', () => {
     expect(kinds('Check https://example.com/recipes/ChickenAndVegetableSoupForFamilyDinner2026 every morning')).toEqual([]);
     expect(kinds('Check [recipe](https://example.com/recipes/ChickenAndVegetableSoupForFamilyDinner2026) every morning')).toEqual([]);
     expect(kinds('Check (https://example.com/recipes/ChickenAndVegetableSoupForFamilyDinner2026), then reply')).toEqual([]);
+    expect(kinds('Check https://example.com/recipes?page=ChickenAndVegetableSoupForFamilyDinner2026Today every morning')).toEqual([]);
     // A plain word after a keyword and a colon is prose, not a password
     expect(kinds('Ask for the password: required. The token: confidential. Keep the secret: remember it.')).toEqual([]);
     expect(kinds('The password is: required, and the token is confidential.')).toEqual([]);

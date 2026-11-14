@@ -232,6 +232,16 @@ function cadenceFits(kind: ItemKind, cadence: Cadence): boolean {
 }
 
 /**
+ * A routine that came with a template was checked against the shortest wait when it arrived. The setting can be raised while it is off,
+ * so it is checked again against the setting as it is when the owner turns it on.
+ */
+function templateRoutineTooOften(cadence: Cadence | null, shortestRepeat: number): Refused | null {
+  const gap = cadence ? repeatMinutes(cadence) : null;
+  if (gap !== null && gap < shortestRepeat) return { ok: false, status: 422, code: 'too_often', limit: shortestRepeat, error: `the shortest wait between two runs is ${shortestRepeat} minutes` };
+  return null;
+}
+
+/**
  * What a cadence needs to be set, as a refusal when it can't be: a shorter wait than the setting allows, a moment that has
  * already passed, or (goal) nothing timed and nothing to say it waits for.
  */
@@ -414,6 +424,8 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (row.pausedBy === 'template') {
           const gate = await templateRoutineGate(tx, row.botId, ownerId, row.timeZone);
           if (!gate.ok) return gate;
+          const tooOften = templateRoutineTooOften(cadence, limits.shortestRepeat);
+          if (tooOften) return tooOften;
           zone = gate.timeZone;
         }
         // One that was meant for a moment that has passed while it was paused is due now, once; the rest carry on from now
@@ -439,6 +451,8 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (row.pausedBy === 'template') {
           const gate = await templateRoutineGate(tx, row.botId, ownerId, row.timeZone);
           if (!gate.ok) return gate;
+          const tooOften = templateRoutineTooOften(cadence, limits.shortestRepeat);
+          if (tooOften) return tooOften;
           zone = gate.timeZone;
         }
         // Starts again from the new revision, counted from now: a one-off that has passed is due now, once

@@ -33,6 +33,8 @@ interface Pattern {
 const hasDigit = (value: string) => /\d/.test(value);
 /** The text before a match ends inside a link (https://...): what follows is an address, not a key. */
 const insideLink = (head: string) => /(?:^|[^a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/\S*$/i.test(head);
+/** The value of a link's query parameter that is named like a credential ("?key=", "&access_token=", "&sig="): that one is a key, not an address. */
+const afterCredentialParam = (head: string) => /[?&;][a-z0-9_.-]*(?:key|token|secret|password|passwd|pwd|auth|sig|signature|credential)[a-z0-9_.-]*=$/i.test(head);
 const mixesCases = (value: string) => /[a-z]/.test(value) && /[A-Z]/.test(value) && /\d/.test(value);
 
 const PATTERNS: Pattern[] = [
@@ -60,8 +62,8 @@ const PATTERNS: Pattern[] = [
       return hasDigit(bare) || /[^A-Za-z0-9]/.test(bare) || (/[a-z]/.test(bare) && /[A-Z]/.test(bare)) || bare.length >= 20;
     },
   },
-  // A long run inside a link's path ("/recipes/ChickenAndVegetableSoup2026") is an address, not a key
-  { kind: 'secret', what: 'a long key-like string', pattern: /\b[A-Za-z0-9+/_-]{40,}={0,2}/g, accept: (match, head) => mixesCases(match) && !insideLink(head) },
+  // A long run inside a link's path ("/recipes/ChickenAndVegetableSoup2026") is an address, not a key; the value of a credential-named query parameter still is one
+  { kind: 'secret', what: 'a long key-like string', pattern: /\b[A-Za-z0-9+/_-]{40,}={0,2}/g, accept: (match, head) => mixesCases(match) && (!insideLink(head) || afterCredentialParam(head)) },
   { kind: 'detail', what: 'an email address', pattern: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g },
   { kind: 'detail', what: 'a phone number', pattern: /(?<![\w.])\+?\d[\d\s().-]{8,}\d(?!\w)/g, accept: (match) => match.replace(/\D/g, '').length >= 9 },
 ];

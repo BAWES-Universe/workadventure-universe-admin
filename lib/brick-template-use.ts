@@ -28,6 +28,17 @@ type Db = Prisma.TransactionClient | typeof prisma;
 const OPEN = { stoppedAt: null, bot: { deletedAt: null } } as const;
 
 const asNeeds = (value: unknown): Need[] => (Array.isArray(value) ? (value as Need[]) : []);
+
+/** Both lists together, one entry for each thing; a need that is required in either stays required. */
+function mergeNeeds(kept: Need[], added: Need[]): Need[] {
+  const merged = new Map<string, Need>();
+  for (const need of [...kept, ...added]) {
+    const id = `${need.kind}:${need.key}`;
+    const have = merged.get(id);
+    merged.set(id, have ? { ...have, required: have.required || need.required } : need);
+  }
+  return [...merged.values()];
+}
 const asRoutines = (value: unknown): Routine[] => (Array.isArray(value) ? (value as Routine[]) : []);
 const slug = (name: string) => name.trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 100);
 const nameOf = (name: string | null | undefined) => (name?.trim() || 'Someone').slice(0, 100);
@@ -477,7 +488,10 @@ export async function takeUpdate(botId: string, ownerId: string, input: z.infer<
     if (Object.keys(data).length > 1) await tx.bot.update({ where: { id: botId }, data });
     const routineChange = wanted.includes('routines') ? offered.get('routines') : undefined;
     const routines = routineChange && routineChange.field === 'routines' ? await bringRoutines(tx, botId, ownerId, routineChange.theirs, limits) : { added: 0, leftOut: 0 };
-    await tx.brickTemplateUse.update({ where: { botId }, data: { versionNumber: read.template.currentVersion, templateName: read.latest.name, needs: read.latest.needs ?? [] } });
+    // What the routines the owner keeps need stays on the Brick. Taking the routines adds the new version's needs to it; closing the
+    // offer or taking other parts never swaps the list for the new version's, which could drop what a kept routine still needs
+    const needs = routineChange ? mergeNeeds(asNeeds(use.needs), asNeeds(read.latest.needs)) : asNeeds(use.needs);
+    await tx.brickTemplateUse.update({ where: { botId }, data: { versionNumber: read.template.currentVersion, templateName: read.latest.name, needs: needs as unknown as Prisma.InputJsonValue } });
     return { ok: true as const, routines };
   });
   if (!done.ok) return done;
