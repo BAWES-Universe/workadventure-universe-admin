@@ -61,6 +61,8 @@ model User {
   botToolsMoved     BotMcpTool[] @relation("BotToolMovedBy")
   botServersConnected BotMcpServer[] @relation("BotMcpServerConnectedBy")
   appConnections    AppConnection[] @relation("AppConnectionOwner")
+  appKeyRequests    AppKeyRequest[] @relation("AppKeyRequestOwner")
+  appPageJobs       AppPageJob[]    @relation("AppPageJobOwner")
   appConnectionsMade AppConnection[] @relation("AppConnectionConnectedBy")
   appLendsMade      AppLend[]       @relation("AppLendLentBy")
   appManagerOf      AppConnectionManager[] @relation("AppManagerUser")
@@ -233,6 +235,7 @@ model Artifact {
   owner    User?             @relation("ArtifactOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   versions ArtifactVersion[]
   passes   ArtifactPass[]
+  pageJobs AppPageJob[]
 
   @@index([ownerId, updatedAt])
   @@index([makerBotId])
@@ -1281,6 +1284,18 @@ model AppConnection {
   noAnswerAt         DateTime? @map("no_answer_at")
   reconnectedAt      DateTime? @map("reconnected_at")
   connectedById      String?   @map("connected_by_id")
+  // A key app (game #2044): kind = direct. The definition is the data it runs from (one HTTPS origin, its operations, where the key goes),
+  // the key is kept encrypted in its own column and is never copied to a grant, a screen or the bot server; only its last characters are shown.
+  // source is always 'direct' for one, so it can never be lent (the database holds that line) and is never an app link: `serverUrl` holds its origin for lists only.
+  kind        String   @default("mcp") @db.VarChar(10)   // mcp | direct
+  definition  Json?
+  definitionHash String? @map("definition_hash") @db.VarChar(64)
+  keyCipher   String?  @map("key_cipher") @db.Text
+  keyLast4    String?  @map("key_last4") @db.VarChar(8)
+  // test | live, when the service's keys say which (a switch between them is asked about)
+  keyMode     String?  @map("key_mode") @db.VarChar(10)
+  // Counts every replaced key, so a request built for an older one is never sent with a newer one
+  keyVersion  Int      @default(1) @map("key_version")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -1291,6 +1306,10 @@ model AppConnection {
   lends       AppLend[]
   managers    AppConnectionManager[]
   uses        AppUse[]
+  keyRequests AppKeyRequest[]
+  keyCalls    AppKeyCall[]
+  pageJobs    AppPageJob[]
+  pageOrders  AppPageOrder[]
 
   @@unique([ownerId, catalogKey])
   @@unique([ownerId, providerToolkit])
@@ -1324,6 +1343,123 @@ model AppLend {
 
 // The named managers of a universe's own app. The universe's owner always manages it without a row. A named manager manages it only
 // while they still have Manage bots in that universe, so someone who leaves stops managing it.
+// One open safe form for a key (game #2044): who asked for it, the definition the owner is shown, and how many times a key was tried. The
+// form is for exactly this person, this service and this request. The key itself is never stored here.
+model AppKeyRequest {
+  id             String   @id @default(uuid())
+  ownerId        String   @map("owner_id")
+  // The Brick that asked, when one did
+  botId          String?  @map("bot_id") @db.VarChar(255)
+  // Set when the form replaces the key of an existing app
+  connectionId   String?  @map("connection_id")
+  definition     Json
+  definitionHash String   @map("definition_hash") @db.VarChar(64)
+  // Where a Brick read the service's docs, for the line "Setup prepared from ..."
+  source         String?  @db.VarChar(255)
+  tries          Int      @default(0)
+  expiresAt      DateTime @map("expires_at")
+  usedAt         DateTime? @map("used_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  owner      User           @relation("AppKeyRequestOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  connection AppConnection? @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId])
+  @@map("app_key_requests")
+}
+
+// One use of a key app by a Brick, written before the request is sent under the bot server's call id, so a retry of the same call never
+// sends twice (it would make a second payment link), and read for "calls an hour" per person and for everyone. Holds no arguments and no answer.
+model AppKeyCall {
+  id           String   @id @default(uuid())
+  connectionId String   @map("connection_id")
+  ownerId      String   @map("owner_id")
+  botId        String   @map("bot_id") @db.VarChar(255)
+  callId       String   @map("call_id") @db.VarChar(200)
+  operation    String   @db.VarChar(60)
+  // sending until the service answered (or could not be reached), then done
+  state        String   @default("sending") @db.VarChar(10)
+  httpStatus   Int?     @map("http_status")
+  // ok | rejected (the key was refused) | failed (an error answer) | unreachable
+  outcome      String?  @db.VarChar(12)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  connection AppConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([botId, callId])
+  @@index([ownerId, createdAt])
+  @@index([createdAt])
+  @@map("app_key_calls")
+}
+
+// The one job a page may do with an owner's key app (game #2044): open a hosted checkout for a FIXED amount. Written only from the owner's own
+// request (a Brick asked by the owner), bound to the owner, the page, the app and the definition version, and frozen: a visitor, the page's
+// code and a later version of the page can change none of it. Stop makes the page say "Payments unavailable"; disconnecting deletes it.
+model AppPageJob {
+  id             String   @id @default(uuid())
+  ownerId        String   @map("owner_id")
+  artifactId     String   @map("artifact_id")
+  connectionId   String   @map("connection_id")
+  definitionHash String   @map("definition_hash") @db.VarChar(64)
+  // The version of the page the owner asked for it on (kept for the record: the frozen terms below are what is charged)
+  artifactVersion Int     @map("artifact_version")
+  // Exact: whole minor units of the currency (4.500 KWD is 4500), never a float
+  amountMinor    Int      @map("amount_minor")
+  currency       String   @db.VarChar(3)
+  description    String?  @db.VarChar(200)
+  // The Brick that was asked (kept as a name only: the job belongs to the owner, not to the Brick)
+  madeByBot      String?  @map("made_by_bot") @db.VarChar(255)
+  status         String   @default("active") @db.VarChar(10)   // active | stopped
+  stoppedAt      DateTime? @map("stopped_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  owner      User          @relation("AppPageJobOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  artifact   Artifact      @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  connection AppConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  orders     AppPageOrder[]
+
+  @@unique([artifactId])
+  @@index([ownerId])
+  @@index([connectionId])
+  @@map("app_page_jobs")
+}
+
+// One checkout a visitor started: made on our side BEFORE the service is asked, so a retry and a lost answer reconcile instead of repeating.
+// "paid" is only ever written after the service's own record of the payment says completed with this order, amount, currency and mode.
+model AppPageOrder {
+  id             String   @id @default(uuid())
+  jobId          String?  @map("job_id")
+  ownerId        String   @map("owner_id")
+  connectionId   String?  @map("connection_id")
+  artifactId     String   @map("artifact_id") @db.VarChar(255)
+  definitionHash String   @map("definition_hash") @db.VarChar(64)
+  amountMinor    Int      @map("amount_minor")
+  currency       String   @db.VarChar(3)
+  // test | live, as the owner's key said when the order was made
+  mode           String?  @db.VarChar(10)
+  // creating | pending | paid | not_paid | cant_confirm
+  status         String   @default("creating") @db.VarChar(14)
+  // The service's id for the payment, and where the buyer pays (kept so a blocked pop-up can go on with the SAME order)
+  providerRef    String?  @map("provider_ref") @db.VarChar(255)
+  checkoutUrl    String?  @map("checkout_url") @db.Text
+  // SHA-256 of who started it, with a secret: only to count tries, never to know who
+  visitorHash    String   @map("visitor_hash") @db.VarChar(64)
+  checks         Int      @default(0)
+  checkedAt      DateTime? @map("checked_at")
+  paidAt         DateTime? @map("paid_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  job        AppPageJob?    @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  connection AppConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+
+  @@index([jobId, createdAt])
+  @@index([ownerId, createdAt])
+  @@index([visitorHash, createdAt])
+  @@index([status, createdAt])
+  @@map("app_page_orders")
+}
+
 model AppConnectionManager {
   id           String   @id @default(uuid())
   connectionId String   @map("connection_id")

@@ -18,6 +18,8 @@ jest.mock('@/lib/db', () => {
     });
   return {
     prisma: {
+      // A Brick starts with every key app its owner has (game #2044): none here
+      appConnection: { findMany: jest.fn(async () => []) },
       bot: {
         findUnique: jest.fn(async ({ where }: { where: { id: string } }) => (state.bot && state.bot.id === where.id ? { ...state.bot, room: null, privateBot: false, refusalReply: null, accessRules: [] } : null)),
         create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {

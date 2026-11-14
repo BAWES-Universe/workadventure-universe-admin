@@ -53,11 +53,14 @@ export function effectiveServer<T extends ServerRow>(row: T): T {
   if (!connection) throw new Error('A grant has to be read together with its connection');
   return {
     ...row,
+    // The whole connection rides along on the row for callers that read other fields of it: for a key app it carries no key
+    connection: connection.kind === 'direct' ? { ...connection, keyCipher: null } : connection,
     name: connection.name,
     serverUrl: connection.serverUrl,
-    authType: connection.authType,
-    authConfig: connection.authConfig,
-    headers: connection.headers,
+    // A key app (game #2044) is never an app link and its key is never handed on: a grant of one carries no way in at all
+    authType: connection.kind === 'direct' ? 'none' : connection.authType,
+    authConfig: connection.kind === 'direct' ? null : connection.authConfig,
+    headers: connection.kind === 'direct' ? null : connection.headers,
     signInLostAt: connection.signInLostAt,
     signInLostStatus: connection.signInLostStatus,
     noAnswerAt: connection.noAnswerAt,
@@ -242,6 +245,12 @@ export interface ConnectionView {
   signInLostAt: Date | null;
   reconnectRequired: boolean;
   connectedAt: Date;
+  /** `mcp`: an app link. `direct`: an app that runs from a service definition and the person's key (game #2044). */
+  kind: string;
+  /** A key app only: the last characters of its key, the only part of it that is ever shown. */
+  keyLast4: string | null;
+  /** A key app only: test or live, when the service's keys say. */
+  keyMode: string | null;
   /** Whether it can be lent to a universe: an app added with a link and a key, a token or nothing. One signed in as the person never is. */
   lendable: boolean;
   /** The Bricks of this person that use it, each with what it may do (the four headings). */
@@ -258,6 +267,8 @@ export interface Headings {
 export function connectedState(connection: AppConnection): { connected: boolean; reconnectRequired: boolean } {
   // A ready-made app is connected only once the provider confirmed the sign-in (lib/app-adapter/confirm.ts), never from the tap
   if (connection.source === 'ready_made') return { connected: !!connection.providerConfirmedAt && !connection.signInLostAt, reconnectRequired: false };
+  // A key app is connected while its key works: the call route marks it lost when the service stops accepting it, and a new key clears that
+  if (connection.kind === 'direct') return { connected: !connection.signInLostAt, reconnectRequired: !!connection.signInLostAt };
   if (connection.authType !== 'oauth') return { connected: true, reconnectRequired: false };
   if (!connection.authConfig) return { connected: false, reconnectRequired: false };
   try {
@@ -280,6 +291,9 @@ function toView(connection: ConnectionWithGrants): ConnectionView {
     serverUrl: connection.serverUrl,
     authType: connection.authType,
     source: connection.source,
+    kind: connection.kind,
+    keyLast4: connection.kind === 'direct' ? connection.keyLast4 : null,
+    keyMode: connection.kind === 'direct' ? connection.keyMode : null,
     connected: state.connected,
     signInLostAt: connection.signInLostAt,
     reconnectRequired: state.reconnectRequired || !!connection.signInLostAt,
@@ -333,6 +347,7 @@ export async function ownBricks(ownerId: string): Promise<{ id: string; name: st
 export async function grantToBrick(ownerId: string, connectionId: string, botId: string): Promise<BotMcpServer | null> {
   const connection = await getOwnedConnection(connectionId, ownerId);
   if (!connection) return null;
+  // A key app's grant carries no way in at all (effectiveServer): this is also how a Brick taken off it gets it back
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { roomId: true, ownerId: true, deletedAt: true } });
   if (!bot || !ownsBrick(bot, ownerId)) return null;
   try {

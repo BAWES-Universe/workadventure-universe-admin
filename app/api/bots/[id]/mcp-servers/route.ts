@@ -82,7 +82,8 @@ export async function GET(
     // fields are the connection's, never copies on the row. A bot's own server is read as before.
     const servers = (
       await prisma.botMcpServer.findMany({
-        where: { botId },
+        // An app with a key (game #2044) is not an app link: the bot server gets it from GET .../key-apps, never as a server to connect to
+        where: { botId, OR: [{ connectionId: null }, { connection: { kind: { not: 'direct' } } }] },
         include: WITH_CONNECTION,
         orderBy: { createdAt: 'asc' },
       })
