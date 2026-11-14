@@ -157,7 +157,8 @@ export async function GET(
             name: s.name,
             serverUrl: seesWay(s) ? s.serverUrl : '',
             authType: s.authType,
-            ...(isAdminToken ? { authConfig: authConfigToServe } : {}),
+            // A person's GitHub (game #2041) is answered by Orbit itself: its token is never handed out, not even to the bot server
+            ...(isAdminToken && s.connection?.source !== 'github' ? { authConfig: authConfigToServe } : {}),
             oauthConnected,
             oauthExpiresAt,
             // Set when refreshing is impossible and only a human can fix it (#187).
@@ -168,7 +169,7 @@ export async function GET(
             connectionId: s.connectionId,
             // A ready-made app: the bot server never calls its link itself (it needs the provider key, which stays in Orbit), it goes through
             // POST /api/ready-made/link. False for every other server.
-            readyMade: s.connection?.source === 'ready_made',
+            readyMade: s.connection?.source === 'ready_made' || s.connection?.source === 'github',
             // Set when a person's app is lent to this bot's universe: what the lender allowed (null = all four) and the uses a day
             ...(lendOf.has(s.connectionId ?? '') ? { lent: { things: lendOf.get(s.connectionId as string)!.things, usesPerDay: lendOf.get(s.connectionId as string)!.usesPerDay } } : {}),
             // A server that existed before its tools were checked keeps working in text, and reads Not checked yet (#738)

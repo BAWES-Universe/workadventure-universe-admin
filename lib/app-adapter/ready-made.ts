@@ -9,6 +9,7 @@ import { personKeyOf } from '@/lib/meter-values';
 import { priceCall } from '@/lib/composio-rates';
 import { readComposioBilling } from '@/lib/composio-billing';
 import { truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
+import { getGitHubApp } from '@/lib/github/app';
 
 /**
  * Ready-made apps through the adapter (game #2001, step 8). Everything here answers "not there" while the adapter is off, which
@@ -25,7 +26,9 @@ export async function listReadyMadeForPerson(ownerId: string): Promise<{ key: st
     prisma.appConnection.findMany({ where: { ownerId, providerToolkit: { not: null } }, select: { id: true, providerToolkit: true } }),
   ]);
   const connectionOf = new Map(mine.map((row) => [row.providerToolkit, row.id]));
-  return apps.filter((app) => app.enabled).map((app) => ({ key: app.key, name: app.name, connectionId: connectionOf.get(app.key) ?? null }));
+  // Once Universe's own GitHub App is made, GitHub is connected through it (game #2041), not offered here any more
+  const ownGitHub = !!(await getGitHubApp());
+  return apps.filter((app) => app.enabled && !(ownGitHub && app.key === 'github')).map((app) => ({ key: app.key, name: app.name, connectionId: connectionOf.get(app.key) ?? null }));
 }
 
 /**
@@ -39,6 +42,9 @@ export async function connectReadyMade(ownerId: string, key: string, returnUrl: 
   if (!adapter) return null;
   const app = (await readReadyMadeApps()).find((entry) => entry.key === key && entry.enabled);
   if (!app) return null;
+  // Once Universe's own GitHub App is made, no NEW ready-made GitHub connection is started (game #2041); an older one is still
+  // looked up below, so a person whose sign-in was lost can still recover it
+  const ownGitHub = key === 'github' && !!(await getGitHubApp());
   // One person's connect of one app at a time: the lock is taken before looking for an existing connection and held until the
   // connection is saved, so a second tap at the same moment waits, then finds the first one's connection, instead of opening a
   // second account at the provider that nothing would ever use
@@ -49,6 +55,7 @@ export async function connectReadyMade(ownerId: string, key: string, returnUrl: 
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`ready-made:${ownerId}:${key}`}, 0))`;
         const existing = await tx.appConnection.findFirst({ where: { ownerId, providerToolkit: key } });
         if (existing) return await restartIfNotSignedIn(ownerId, existing, key, returnUrl, adapter, tx, app.authConfigId);
+        if (ownGitHub) return null;
 
         const start = await adapter.startConnect({ person: ownerId, toolkit: key, returnUrl, authConfigId: app.authConfigId });
         const link = await adapter.appLink({ person: ownerId, toolkits: [key], accounts: { [key]: start.providerAccountId } });
@@ -112,13 +119,13 @@ async function restartIfNotSignedIn(
  * The use is written to the meter, first, under an event id taken from the call's own id (a retry never counts twice). Paid by the
  * universe, at the provider's own list price for what the call is (lib/composio-rates.ts): a search or lookup is free (written
  * with 0 and no tool run), a sandbox run and a tool run are priced by app, a batch is the sum of the tools inside it, and the
- * zero data retention add-on is counted where it covers. The figure is always `estimated` (the provider sends no cost back); the
+ * zero data retention add-on is counted where it covers, and a single run sent outside a session (`useReadyMade`) carries the direct execution add-on. The figure is always `estimated` (the provider sends no cost back); the
  * month's free calls and the plan's credit are taken off at the account level (lib/composio-billing.ts), not here. A price a super
  * admin saved (`appUseMicros`) replaces the list price of each paid step.
  */
-async function meterUse(input: { botId: string; ownerId: string; toolkit: string; tool: string; arguments?: unknown; callId: string }) {
+async function meterUse(input: { botId: string; ownerId: string; toolkit: string; tool: string; arguments?: unknown; callId: string; direct?: boolean }) {
   const [settings, app, billing] = await Promise.all([getMeterSettings(), readyMadeApp(input.toolkit), readComposioBilling()]);
-  const priced = priceCall({ toolkit: input.toolkit, tool: input.tool, arguments: input.arguments, ownAuth: !!app?.authConfigId, zdrOn: billing.zdrOn });
+  const priced = priceCall({ toolkit: input.toolkit, tool: input.tool, arguments: input.arguments, ownAuth: !!app?.authConfigId, zdrOn: billing.zdrOn, direct: input.direct === true });
   const steps = priced.executions + priced.sandboxRuns;
   const cost = settings.appUseMicros === null ? priced.listMicros : steps * settings.appUseMicros;
   return recordMeterEvent({
@@ -152,6 +159,7 @@ async function meterUse(input: { botId: string; ownerId: string; toolkit: string
       executions: priced.executions,
       sandboxRuns: priced.sandboxRuns,
       zdrCalls: priced.zdrCalls,
+      directCalls: priced.directCalls,
       ...(Object.keys(priced.inner).length > 0 ? { inner: priced.inner } : {}),
     },
   });
@@ -225,7 +233,7 @@ export async function useReadyMade(input: { botId: string; connectionId: string;
   const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true } });
   if (!bot || bot.roomId !== null || bot.ownerId !== input.ownerId) return { status: 'not_owner' };
 
-  const written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit: connection.providerToolkit, tool: input.tool, arguments: input.arguments, callId: input.callId });
+  const written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit: connection.providerToolkit, tool: input.tool, arguments: input.arguments, callId: input.callId, direct: true });
   if (!written.recorded) return { status: 'already_asked' };
 
   try {

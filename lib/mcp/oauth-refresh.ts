@@ -224,6 +224,12 @@ export async function ensureFreshOAuthConfig(params: {
     };
   }
 
+  // A person's GitHub (game #2041) is renewed by lib/github/connection.ts with the GitHub App's own secret, never here: this
+  // path would send it to an endpoint it does not have and could mark a working sign-in as lost
+  if ((config as { provider?: unknown }).provider === 'github') {
+    return { status: 'fresh', config, authConfig };
+  }
+
   // Terminal states are reported without a network call. The verdict itself is
   // recorded once (a guarded write), so the panel can say why instead of showing a
   // green badge on a dead token; after that the marker alone short-circuits every
@@ -275,6 +281,14 @@ export async function ensureFreshOAuthConfig(params: {
  * function lets go (a row that is already gone is not an error).
  */
 export async function holdRefreshLease(connectionId: string): Promise<() => Promise<void>> {
+  return (await takeRefreshLease(connectionId)) ?? (async () => undefined);
+}
+
+/**
+ * The same lease, strictly: null when it could not be had within the lease length (or the row is gone), so a caller that must
+ * never run beside a renewal (one that rotates a refresh token, game #2041) stops instead of carrying on.
+ */
+export async function takeRefreshLease(connectionId: string): Promise<(() => Promise<void>) | null> {
   const claim = () =>
     prisma.appConnection.updateMany({
       where: { id: connectionId, OR: [{ refreshLeaseUntil: null }, { refreshLeaseUntil: { lt: new Date() } }] },
@@ -288,8 +302,8 @@ export async function holdRefreshLease(connectionId: string): Promise<() => Prom
       };
     }
     // A row that is gone (disconnected at the same moment) has no lease to wait for: stop looking at once
-    if (!(await prisma.appConnection.findUnique({ where: { id: connectionId }, select: { id: true } }))) return async () => undefined;
-    if (Date.now() > deadline) return async () => undefined;
+    if (!(await prisma.appConnection.findUnique({ where: { id: connectionId }, select: { id: true } }))) return null;
+    if (Date.now() > deadline) return null;
     await new Promise((resolve) => setTimeout(resolve, WAIT_STEP_MS));
   }
 }

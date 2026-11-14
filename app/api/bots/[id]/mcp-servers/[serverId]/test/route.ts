@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { testGitHub } from '@/lib/github/check';
 import { testReadyMade } from '@/lib/app-adapter/ready-made';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
@@ -124,6 +125,9 @@ export async function POST(
     const result = row.connection?.source === 'ready_made'
       ? // A ready-made app's link needs the provider key, which only Orbit holds: tested through the adapter
         await testReadyMade(row.connection)
+      : row.connection?.source === 'github'
+      ? // A person's GitHub is answered by Orbit itself, with their own token (game #2041)
+        await testGitHub(row.connection.id)
       : reconnectReason
       ? {
           success: false as const,
