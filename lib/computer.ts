@@ -299,7 +299,7 @@ const queueReasonOf = (no: NoRoom): QueuedFor | null => (no.reason === 'allowanc
  * is writing it waits its turn, if the person's allowance or our room is used up it waits with its work saved (and the first
  * leads to "Ask for more"), and otherwise it runs and the machine is made or woken, here and nowhere else.
  */
-export async function startJob(input: { botId: string; personId: string; title: string; writes?: boolean; runId?: string | null }, now: Date = new Date()): Promise<Started> {
+export async function startJob(input: { botId: string; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null }, now: Date = new Date()): Promise<Started> {
   const bot = await brickOf(input.botId, input.personId);
   if (!bot) return { ok: false, reason: 'not_owner' };
   const row = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
@@ -315,7 +315,7 @@ export async function startJob(input: { botId: string; personId: string; title: 
   let created;
   try {
     created = await prisma.computerJob.create({
-      data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', writes: input.writes !== false, runId: input.runId ?? null },
+      data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null },
     });
   } catch (error) {
     // Two asks for the same run at once: the first made the job, the second finds it
@@ -625,7 +625,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   const seconds = job.secondsRun + stretch;
   const ended = await prisma.computerJob.updateMany({
     where: { id: jobId, status: job.status },
-    data: { status, endedBy, endedAt: now, queuedFor: null, waitingFor: null, readyWhat: null, readyWhere: null, control: 'brick', stretchStarted: null, secondsRun: seconds, agentResponseId: null },
+    data: { status, endedBy, endedAt: now, queuedFor: null, waitingFor: null, readyWhat: null, readyWhere: null, control: 'brick', stretchStarted: null, secondsRun: seconds, agentResponseId: null, brief: null },
   });
   // Someone else ended it between the read and the write: that one counts and settles
   if (ended.count === 0) return;
@@ -1114,6 +1114,28 @@ export async function settleEffect(jobId: string, key: string, state: 'done' | '
 }
 
 /** The job, for the bot server. Null when it is not there. */
+/** What the runner needs of a job that Brick is working on: the words for the agent, and nothing the owner sees on a page. */
+export interface RunnableJob {
+  jobId: string;
+  botId: string;
+  title: string;
+  brief: string | null;
+  writes: boolean;
+  /** The agent has a turn going (the runner reconnects to it instead of starting another). */
+  hasTurn: boolean;
+}
+
+/** Jobs running under Brick's hands now (not waiting for their person, not in the person's hands), oldest first. */
+export async function runnableJobs(limit = 50): Promise<RunnableJob[]> {
+  const rows = await prisma.computerJob.findMany({
+    where: { status: 'running', control: 'brick' },
+    orderBy: { startedAt: 'asc' },
+    take: Math.max(1, Math.min(limit, 200)),
+    select: { id: true, botId: true, title: true, brief: true, writes: true, agentResponseId: true },
+  });
+  return rows.map((row) => ({ jobId: row.id, botId: row.botId, title: row.title, brief: row.brief, writes: row.writes, hasTurn: row.agentResponseId !== null }));
+}
+
 export async function getJob(jobId: string): Promise<(JobView & { botId: string; personId: string }) | null> {
   const row = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return row ? { ...jobView(row), botId: row.botId, personId: row.personId } : null;

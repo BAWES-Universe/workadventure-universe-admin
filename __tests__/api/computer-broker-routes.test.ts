@@ -8,11 +8,14 @@ import { POST as prepare } from '@/app/api/computer/jobs/[jobId]/prepare/route';
 import { POST as turn } from '@/app/api/computer/jobs/[jobId]/turn/route';
 import { POST as cancel } from '@/app/api/computer/jobs/[jobId]/cancel/route';
 import { GET as stream } from '@/app/api/computer/jobs/[jobId]/stream/route';
+import { GET as running } from '@/app/api/computer/jobs/running/route';
+import * as computer from '@/lib/computer';
 import * as broker from '@/lib/computer-broker';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
 
 jest.mock('@/lib/db', () => ({ prisma: {} }));
 jest.mock('@/lib/computer-broker');
+jest.mock('@/lib/computer', () => ({ runnableJobs: jest.fn() }));
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 
 const SERVICE_TOKEN = 'bot-server-secret';
@@ -142,5 +145,20 @@ describe('cancel and stream', () => {
     expect(await none.json()).toEqual({ ok: false, reason: 'no_turn' });
     lib.reattachJobTurn.mockResolvedValueOnce({ ok: false, reason: 'person_has_it' });
     expect((await stream(req('GET'), params)).status).toBe(409);
+  });
+});
+
+describe('the running jobs', () => {
+  it('are for the bot server only, and come with the words for the agent', async () => {
+    const list = computer.runnableJobs as jest.Mock;
+    expect((await running(req('GET', undefined, null))).status).toBe(401);
+    expect((await running(req('GET', undefined, 'nope'))).status).toBe(401);
+    expect(list).not.toHaveBeenCalled();
+    list.mockResolvedValueOnce([{ jobId: 'j', botId: 'b', title: 'Visa', brief: 'Fill it', writes: true, hasTurn: false }]);
+    const answer = await running(req('GET'));
+    expect(await answer.json()).toEqual({ jobs: [{ jobId: 'j', botId: 'b', title: 'Visa', brief: 'Fill it', writes: true, hasTurn: false }] });
+    expect(answer.headers.get('Cache-Control')).toBe('no-store');
+    list.mockRejectedValueOnce(new Error('db'));
+    expect((await running(req('GET'))).status).toBe(500);
   });
 });

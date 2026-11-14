@@ -185,9 +185,12 @@ describe('the bot server’s calls', () => {
     const started = await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'Visa form' } }), params);
     expect(await started.json()).toEqual({ ok: true, job: { id: JOB, status: 'queued', queuedFor: 'allowance' }, restoredFrom: null });
     expect(lib.startJob).toHaveBeenCalledWith({ botId: BRICK, personId: 'u-sara', title: 'Visa form', writes: undefined });
+    await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'Visa form', brief: 'Two people, passport ready' } }), params);
+    expect(lib.startJob).toHaveBeenLastCalledWith(expect.objectContaining({ brief: 'Two people, passport ready' }));
+    expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x', brief: 'y'.repeat(4001) } }), params)).status).toBe(400);
     resolve.mockResolvedValue({ personId: null, guest: true });
     expect(await (await startRoute(asBot('/x', { body: { userId: 'wa-guest', isGuest: true, title: 'x' } }), params)).json()).toEqual({ ok: false, reason: 'not_owner' });
-    expect(lib.startJob).toHaveBeenCalledTimes(1);
+    expect(lib.startJob).toHaveBeenCalledTimes(2);
   });
 
   it('says whether the computer is on for its owner, read only, and "off" for anyone else', async () => {

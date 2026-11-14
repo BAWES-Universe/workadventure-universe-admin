@@ -2479,6 +2479,8 @@ model ComputerJob {
   // still going before it starts another, and the take-over fence knows which turn to cancel. Empty when no turn is running.
   agentSessionId    String? @map("agent_session_id") @db.VarChar(80)
   agentResponseId   String? @map("agent_response_id") @db.VarChar(120)
+  // What the person asked for in more words than the title, for the agent only: never shown, never sent anywhere else, and cleared when the job ends
+  brief             String? @db.VarChar(4000)
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]

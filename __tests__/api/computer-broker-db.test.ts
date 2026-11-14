@@ -14,7 +14,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests, type TurnEvent } from '@/lib/computer-provider';
 import { Agent37Error } from '@/lib/agent37/client';
-import { fenceMachine, giveComputer, handBack, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
+import { fenceMachine, giveComputer, handBack, runnableJobs, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { verifyJobToken } from '@/lib/computer-token';
 import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/computer-broker';
 
@@ -324,6 +324,38 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       fake.failExec = false;
       await sweepComputers(minutes(2));
       expect(fake.commands.filter((entry) => entry.command === 'true')).toHaveLength(2);
+    });
+  });
+
+  describe('the words for the agent', () => {
+    it('are kept with the job, handed only to the runner, and cleared when the job ends', async () => {
+      const sara = await person('words');
+      await giveComputer(sara.brickId, sara.id);
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form', brief: '  Fill the Kuwait visa form for two people  ' }, NOW);
+      if (!started.ok) throw new Error('the job did not start');
+      // never part of what the owner is shown
+      expect(JSON.stringify(started.job)).not.toContain('Kuwait visa');
+      const mine = (await runnableJobs()).filter((job) => job.botId === sara.brickId);
+      expect(mine).toEqual([{ jobId: started.job.id, botId: sara.brickId, title: 'Visa form', brief: 'Fill the Kuwait visa form for two people', writes: true, hasTurn: false }]);
+      await stopJobFor(sara.brickId, sara.id, NOW);
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).brief).toBeNull();
+      expect((await runnableJobs()).filter((job) => job.botId === sara.brickId)).toEqual([]);
+    });
+
+    it('are cut to their limit, and a job with none has none', async () => {
+      const sara = await person('longwords');
+      await giveComputer(sara.brickId, sara.id);
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Long', brief: 'x'.repeat(9000) }, NOW);
+      if (!started.ok) throw new Error('the job did not start');
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).brief).toHaveLength(4000);
+    });
+
+    it('leave out a job the person has taken over, or one waiting for them, and say when a turn is going', async () => {
+      const { sara, jobId } = await running('hands');
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-1' } });
+      expect((await runnableJobs()).find((job) => job.jobId === jobId)).toMatchObject({ hasTurn: true });
+      await takeOver(sara.brickId, sara.id, NOW);
+      expect((await runnableJobs()).find((job) => job.jobId === jobId)).toBeUndefined();
     });
   });
 });
