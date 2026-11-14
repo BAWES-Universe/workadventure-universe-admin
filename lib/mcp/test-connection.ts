@@ -22,6 +22,13 @@ export interface McpToolShape {
 
 const MAX_SHAPE_FIELDS = 100;
 
+const allPropertyNames = (schema: unknown): string[] => {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return [];
+  const properties = (schema as { properties?: unknown }).properties;
+  if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return [];
+  return Object.keys(properties);
+};
+
 const propertyNames = (schema: unknown): string[] | null => {
   if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return null;
   const properties = (schema as { properties?: unknown }).properties;
@@ -33,10 +40,16 @@ export function shapeOfTool(tool: McpToolDescriptor, name: string): McpToolShape
   const input = (tool.inputSchema ?? (tool.function as { parameters?: unknown } | undefined)?.parameters) as { required?: unknown } | undefined;
   const required = Array.isArray(input?.required) ? input.required.filter((entry): entry is string => typeof entry === 'string') : [];
   const description = typeof tool.description === 'string' ? tool.description : typeof tool.function?.description === 'string' ? tool.function.description : null;
+  // The size cut never drops a required input: a job that cannot be given what it must have could never be asked for. The required
+  // ones come first, then as many of the others as fit.
+  const all = allPropertyNames(input);
+  const mustHave = all.filter((field) => required.includes(field));
+  const rest = all.filter((field) => !required.includes(field)).slice(0, Math.max(0, MAX_SHAPE_FIELDS - mustHave.length));
+  const kept = new Set([...mustHave, ...rest]);
   return {
     name,
     description: description ? description.slice(0, 300) : null,
-    inputs: (propertyNames(input) ?? []).map((field) => ({ name: field, required: required.includes(field) })),
+    inputs: all.filter((field) => kept.has(field)).map((field) => ({ name: field, required: required.includes(field) })),
     outputs: propertyNames(tool.outputSchema),
   };
 }

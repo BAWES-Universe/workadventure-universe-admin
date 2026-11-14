@@ -92,12 +92,14 @@ export async function checkSharedUse(
       if (outcome.which === 'everyone') await tellOwnerOfLimit({ shareId: found.id, ownerId: owner.ownerId, connectionId: grant.connectionId, botId: grant.botId, serverId: grant.id, appName: connectionName, botName, limit: outcome.limit });
       return { allowed: false, reason: 'limit_reached', resetsAt: nextDay(new Date()) };
     default:
+      // The use that takes the last of the day's uses tells the owner now, not only when someone is turned away
+      if (outcome.lastOfDay !== null) await tellOwnerOfLimit({ shareId: found.id, ownerId: owner.ownerId, connectionId: grant.connectionId, botId: grant.botId, serverId: grant.id, appName: connectionName, botName, limit: outcome.lastOfDay });
       return { allowed: true, ownerId: owner.ownerId, returns: outcome.returns };
   }
 }
 
 type ReserveOutcome =
-  | { kind: 'recorded'; returns: string[] | null }
+  | { kind: 'recorded'; returns: string[] | null; lastOfDay: number | null }
   | { kind: 'not_shared' }
   | { kind: 'again'; status: string; busy: boolean }
   | { kind: 'busy' }
@@ -119,8 +121,9 @@ async function reserve(input: { shareId: string; grant: { id: string; botId: str
     // The same first lock as taking an app back or removing a grant: the app's own row, then the grant's, then the share's
     const app = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_connections" WHERE "id" = ${grant.connectionId} FOR SHARE`;
     if (app.length === 0) return { kind: 'gone' } as const;
-    const held = await tx.$queryRaw<{ id: string }[]>`SELECT s."id" FROM "app_shares" s JOIN "bot_mcp_servers" g ON g."id" = s."server_id" WHERE s."id" = ${shareId} AND g."id" = ${grant.id} AND g."bot_id" = ${grant.botId} FOR SHARE OF s, g`;
-    if (held.length === 0) return { kind: 'gone' } as const;
+    const held = await tx.$queryRaw<{ id: string; enabled: boolean }[]>`SELECT s."id", g."enabled" FROM "app_shares" s JOIN "bot_mcp_servers" g ON g."id" = s."server_id" WHERE s."id" = ${shareId} AND g."id" = ${grant.id} AND g."bot_id" = ${grant.botId} FOR SHARE OF s, g`;
+    // A grant switched off since the check before the lock is gone too
+    if (held.length === 0 || !held[0].enabled) return { kind: 'gone' } as const;
 
     // The share as it is now (a change holds it for update, so it is never half done here): the picked job, its inputs and the limits
     const share = await tx.appShare.findUniqueOrThrow({ where: { id: shareId }, include: { jobs: true } });
@@ -140,6 +143,11 @@ async function reserve(input: { shareId: string; grant: { id: string; botId: str
       await tx.appShareUse.update({ where: { id: seen.id }, data: { retries: { increment: 1 } } });
       return { kind: 'again', status: seen.status, busy: false } as const;
     }
+
+    // The books outlast a share. If sharing was stopped and started again after this call was accepted, a retry of it finds no use
+    // row under the new share but finds its meter event: it is a repeat, and runs nothing.
+    const earlier = await tx.meterEvent.findUnique({ where: { eventId: `app:${grant.botId}:${callId}` }, select: { id: true } });
+    if (earlier) return { kind: 'again', status: 'unknown', busy: false } as const;
 
     const hourAgo = new Date(now.getTime() - 60 * 60 * 1000);
     const staleBefore = new Date(now.getTime() - limits.sharedJobMinutes * 60 * 1000);
@@ -182,7 +190,7 @@ async function reserve(input: { shareId: string; grant: { id: string; botId: str
       },
       tx,
     );
-    return { kind: 'recorded', returns: stringList(job.returns) } as const;
+    return { kind: 'recorded', returns: stringList(job.returns), lastOfDay: everyone + 1 >= share.usesPerDayEveryone ? share.usesPerDayEveryone : null } as const;
   });
 }
 

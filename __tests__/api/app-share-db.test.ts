@@ -423,6 +423,47 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       expect(await prisma.meterEvent.count({ where: { botId: saraBrick, kind: 'app_use' } })).toBe(1);
     });
 
+    it('tells the owner when the last of the day’s uses is taken, even if nobody is turned away after it', async () => {
+      const { app, serverId } = await music();
+      await shareSong(app.id, saraBrick, { usesPerDayEveryone: 1, usesPerDayPerson: 1 });
+      expect((await ask(saraBrick, serverId, omarKey(), 'k1')).body.allowed).toBe(true);
+      expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(1);
+      // Turned away after it, the owner still has the one note for the day
+      expect((await ask(saraBrick, serverId, `lena-${tag}`, 'k2')).body.reason).toBe('limit_reached');
+      expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(1);
+    });
+
+    it('turns an ask away when the Brick’s use of the app was switched off', async () => {
+      const { app, serverId } = await music();
+      await shareSong(app.id);
+      await prisma.botMcpServer.update({ where: { id: serverId }, data: { enabled: false } });
+      expect((await ask(saraBrick, serverId, omarKey(), 'l1')).body.allowed).toBe(false);
+      expect(await prisma.appShareUse.count({ where: { share: { serverId } } })).toBe(0);
+    });
+
+    it('does not run a call again when sharing was stopped and started again in between', async () => {
+      const { app, serverId } = await music();
+      await shareSong(app.id);
+      expect((await ask(saraBrick, serverId, omarKey(), 'm1')).body.allowed).toBe(true);
+      as(sara);
+      expect((await shareRoute('DELETE', app.id, saraBrick)).status).toBe(204);
+      await shareSong(app.id);
+      const again = await ask(saraBrick, serverId, omarKey(), 'm1');
+      expect(again.body).toMatchObject({ allowed: false, reason: 'already_asked' });
+      expect(await prisma.meterEvent.count({ where: { botId: saraBrick, kind: 'app_use' } })).toBe(1);
+    });
+
+    it('turns away a body that is not valid JSON, and still takes no body as the one job there is', async () => {
+      const { app } = await music();
+      as(sara);
+      const bad = await startShareRoute(new Request(`http://localhost/api/me/apps/${app.id}/bricks/${saraBrick}/share`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"jobs":[' }) as never, params({ connectionId: app.id, botId: saraBrick }));
+      expect(bad.status).toBe(400);
+      expect(await prisma.appShare.count({ where: { server: { botId: saraBrick } } })).toBe(0);
+      // No body at all is still the one job there is (when there is one)
+      mockTools.current = [SONG];
+      expect((await shareRoute('POST', app.id, saraBrick)).status).toBe(201);
+    });
+
     it('is not used up by days gone by: only today’s uses count', async () => {
       const { app, serverId } = await music();
       await shareSong(app.id, saraBrick, { usesPerDayEveryone: 1, usesPerDayPerson: 1 });

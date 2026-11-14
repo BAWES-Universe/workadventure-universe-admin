@@ -45,7 +45,15 @@ export async function GET(request: NextRequest, { params }: Params) {
 export async function POST(request: NextRequest, { params }: Params) {
   return appsRoute(request, METHODS, 'sharing an app', async (user, respond) => {
     const { connectionId, botId } = await params;
-    const parsed = startShareSchema.safeParse(await request.json().catch(() => ({})));
+    // No body at all means the one job there is; a body that is not valid JSON is turned away rather than read as "no body"
+    const text = await request.text();
+    let body: unknown = {};
+    try {
+      if (text.trim() !== '') body = JSON.parse(text);
+    } catch {
+      return respond({ error: 'Invalid input data' }, 400);
+    }
+    const parsed = startShareSchema.safeParse(body);
     if (!parsed.success) return respond({ error: 'Invalid input data' }, 400);
     const result = await startShare(user.id, connectionId, botId, parsed.data);
     if (result.status === 'not_found') return respond({ error: NOT_FOUND }, 404);

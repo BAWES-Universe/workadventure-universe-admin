@@ -54,6 +54,13 @@ describe('what a tool takes and gives back, by field name only', () => {
     expect(JSON.stringify(shape)).not.toContain('secret default');
   });
 
+  it('never cuts a required input off when there are more fields than fit', () => {
+    const properties = Object.fromEntries(Array.from({ length: 120 }, (_, i) => [`p${i + 1}`, {}]));
+    const shape = shapeOfTool({ name: 'big', inputSchema: { type: 'object', properties, required: ['p120'] } }, 'big');
+    expect(shape.inputs).toHaveLength(100);
+    expect(shape.inputs).toContainEqual({ name: 'p120', required: true });
+  });
+
   it('says nothing about what comes back when the tool does not say, and reads an OpenAI style tool too', () => {
     expect(shapeOfTool({ name: 'x' }, 'x')).toEqual({ name: 'x', description: null, inputs: [], outputs: null });
     expect(shapeOfTool({ function: { name: 'y', description: 'Why', parameters: { properties: { q: {} }, required: ['q'] } } } as never, 'y').inputs).toEqual([{ name: 'q', required: true }]);
