@@ -13,9 +13,11 @@ const plain = (text: string, status: number, extra: Record<string, string> = {})
  * Orbit gave the job (HTTP Basic, the pass as the password). Orbit adds the owner's own GitHub token and passes the request to
  * github.com; the computer never holds that token. A push that deletes a branch or pushes a tag is turned down here.
  */
+const needPass = () => plain('A job pass from Universe is needed (it lasts 15 minutes).', 401, { 'WWW-Authenticate': 'Basic realm="Universe git"' });
+
 async function handle(request: NextRequest, { params }: Params): Promise<NextResponse | Response> {
-  const pass = await checkGitPass(request.headers.get('authorization'));
-  if (!pass) return plain('A job pass from Universe is needed (it lasts 15 minutes).', 401, { 'WWW-Authenticate': 'Basic realm="Universe git"' });
+  let pass = await checkGitPass(request.headers.get('authorization'));
+  if (!pass) return needPass();
   const target = readRelayPath((await params).path ?? []);
   if (!target) return plain('Not a git address Universe passes on.', 404);
   let body: Buffer | null = null;
@@ -25,6 +27,10 @@ async function handle(request: NextRequest, { params }: Params): Promise<NextRes
     // Read as it streams and stopped past the limit: a chunked push declares no length
     body = await readCapped(request.body, MAX_PUSH_BYTES);
     if (!body) return plain('This push is too big for Universe to pass on.', 413);
+    // A slow upload may outlast the pass, or the owner may have turned GitHub off for this Brick meanwhile: checked again before
+    // anything goes to GitHub
+    pass = await checkGitPass(request.headers.get('authorization'));
+    if (!pass) return needPass();
   }
   const url = new URL(request.url);
   const outcome = await relayGit(pass, target, {

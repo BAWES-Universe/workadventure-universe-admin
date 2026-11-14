@@ -26,8 +26,9 @@ export async function POST(request: NextRequest) {
   const body = (await request.json().catch(() => null)) as { again?: unknown } | null;
   const existing = await getGitHubApp();
   if (existing && body?.again !== true) return NextResponse.json({ existing: { slug: existing.slug, url: existing.htmlUrl } }, { headers });
-  // Who asked, and until when: the return is refused after an hour (GitHub's own limit for the code), or once they are no longer a super admin
-  const state = encryptApiKey(JSON.stringify({ kind: 'github-app-create', userId: user.id, exp: Math.floor(Date.now() / 1000) + 60 * 60 }));
+  // Who asked, until when, and which app it replaces (none for the first): the return is refused after an hour (GitHub's own limit for
+  // the code), once they are no longer a super admin, or when the app kept is no longer the one it set out to replace
+  const state = encryptApiKey(JSON.stringify({ kind: 'github-app-create', userId: user.id, replaces: existing?.appId ?? null, exp: Math.floor(Date.now() / 1000) + 60 * 60 }));
   return NextResponse.json(
     { action: `${GITHUB_WEB}/organizations/${GITHUB_APP_ORG}/settings/apps/new?state=${encodeURIComponent(state)}`, manifest: JSON.stringify(buildManifest(base)) },
     { headers: { ...headers, 'Cache-Control': 'no-store' } },

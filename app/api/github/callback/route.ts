@@ -1,28 +1,24 @@
 import { NextRequest } from 'next/server';
-import { markConnectionReconnected } from '@/lib/app-connections';
-import { getGitHubApp } from '@/lib/github/app';
-import { finishGitHubSignIn, installPageFor, readSignInState } from '@/lib/github/connection';
+import { readSignInState } from '@/lib/github/connection';
 import { popupRedirect } from '@/lib/github/popup';
 
 export const runtime = 'nodejs';
 
 /**
  * GET /api/github/callback?code&state - GitHub sends the person back here after they signed in through Universe's GitHub App
- * (game #2041). Their token is kept in Orbit; when the app is not installed anywhere of theirs yet, they go straight on to pick
- * where it works, and the window closes after that.
+ * (game #2041). Nothing is exchanged here: GitHub's return carries no sign-in of ours, so anyone holding a sign-in address could
+ * otherwise land their own GitHub on someone else's connection (or the other way round). The code goes on to the small return page
+ * of the window that opened the sign-in (the game, an address of ours checked when the sign-in started), which hands it to that
+ * window only; that window finishes it with the person's own sign-in (POST /api/me/apps/github/finish), which must be the person
+ * who started it.
  */
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
-  const state = readSignInState(searchParams.get('state'));
+  const rawState = searchParams.get('state');
+  const state = readSignInState(rawState);
   const code = searchParams.get('code');
   const refused = searchParams.get('error');
-  if (!state) return popupRedirect(null, { oauth: 'error', message: 'sign_in_expired' });
+  if (!state || !rawState) return popupRedirect(null, { oauth: 'error', message: 'sign_in_expired' });
   if (refused || !code) return popupRedirect(state.redirectUrl, { oauth: 'error', message: refused ?? 'missing_code' });
-  const outcome = await finishGitHubSignIn(state, code);
-  if (outcome.status === 'expired') return popupRedirect(state.redirectUrl, { oauth: 'error', message: 'sign_in_expired' });
-  if (outcome.status !== 'done') return popupRedirect(state.redirectUrl, { oauth: 'error', message: outcome.status === 'gone' ? 'server_not_found' : 'token_exchange_failed' });
-  await markConnectionReconnected(state.connectionId, state.personId);
-  const app = await getGitHubApp();
-  if (outcome.needsInstall && app) return Response.redirect(installPageFor(app, state.connectionId, state.redirectUrl), 302);
-  return popupRedirect(state.redirectUrl, { oauth: 'success' });
+  return popupRedirect(state.redirectUrl, { oauth: 'github', code, state: rawState });
 }

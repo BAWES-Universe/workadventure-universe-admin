@@ -13,14 +13,15 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => moc
 
 import { prisma } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
-import { forgetGitHubApp, saveGitHubApp } from '@/lib/github/app';
-import { gitHubToken, readGitHubAuth } from '@/lib/github/connection';
+import { forgetGitHubApp, getGitHubApp, saveGitHubApp } from '@/lib/github/app';
+import { gitHubToken, gitHubTokenRefused, readGitHubAuth } from '@/lib/github/connection';
 import { GITHUB_TOOLS } from '@/lib/github/tools';
 import { GET as catalog } from '@/app/api/me/apps/catalog/route';
 import { POST as connectApp } from '@/app/api/me/apps/route';
 import { GET as readApp, DELETE as disconnectApp } from '@/app/api/me/apps/[connectionId]/route';
 import { GET as signIn } from '@/app/api/me/apps/[connectionId]/sign-in/route';
 import { GET as callback } from '@/app/api/github/callback/route';
+import { POST as finish } from '@/app/api/me/apps/github/finish/route';
 import { GET as installed } from '@/app/api/github/installed/route';
 import { POST as webhook } from '@/app/api/github/webhook/route';
 import { POST as saveKey, DELETE as dropKey } from '@/app/api/me/apps/github/key/route';
@@ -72,7 +73,19 @@ let sara = '';
 let saraBrick = '';
 
 async function makeApp() {
-  await saveGitHubApp({ id: 77, slug: 'bawes-universe', client_id: 'Iv1.client', client_secret: 'app-secret', webhook_secret: 'hook-secret', pem: PEM, html_url: 'https://github.com/apps/bawes-universe' }, null);
+  await saveGitHubApp({ id: 77, slug: 'bawes-universe', client_id: 'Iv1.client', client_secret: 'app-secret', webhook_secret: 'hook-secret', pem: PEM, html_url: 'https://github.com/apps/bawes-universe' }, null, null);
+}
+
+/**
+ * What the game does with GitHub's return: the return page hands the code and state to the window that opened the sign-in, which
+ * finishes it with the person's own sign-in.
+ */
+async function finishFrom(back: Response, as = sara): Promise<Response> {
+  const page = new URL(back.headers.get('location') as string);
+  expect(page.origin + page.pathname).toBe('https://play.example.com/oauth-popup-callback.html');
+  expect(page.searchParams.get('oauth')).toBe('github');
+  mockUser.current = { id: as };
+  return finish(request('/api/me/apps/github/finish', { method: 'POST', body: { state: page.searchParams.get('state'), code: page.searchParams.get('code') } }));
 }
 
 /** Connect, sign in and come back, as Sara: her GitHub connection's id. */
@@ -87,7 +100,7 @@ async function signedIn(installs = 1): Promise<string> {
     'GET https://api.github.com/user': { body: { login: 'sara-gh', id: 501 } },
     'GET https://api.github.com/user/installations': { body: { total_count: installs } },
   });
-  await callback(request(`/api/github/callback?code=abc&state=${encodeURIComponent(state)}`));
+  expect((await finishFrom(await callback(request(`/api/github/callback?code=abc&state=${encodeURIComponent(state)}`)))).status).toBe(200);
   return id;
 }
 
@@ -161,6 +174,39 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body: {} }))).json()).toEqual({ existing: { slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe' } });
   });
 
+  it('a second setup page started before the app was made never replaces it; replacing it on purpose does', async () => {
+    mockUser.current = { id: sara, isSuperAdmin: true };
+    const stateOf = async (body: unknown) => new URL((await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body }))).json()).action).searchParams.get('state') as string;
+    const firstTab = await stateOf({});
+    const secondTab = await stateOf({});
+    const conversion = (id: number) => ({ status: 201, body: { id, slug: `app-${id}`, client_id: `Iv1.${id}`, client_secret: 'app-secret', webhook_secret: null, pem: PEM, html_url: `https://github.com/apps/app-${id}` } });
+    const calls = pretendGitHub({
+      'POST https://api.github.com/app-manifests/one/conversions': conversion(77),
+      'POST https://api.github.com/app-manifests/two/conversions': conversion(78),
+      'POST https://api.github.com/app-manifests/three/conversions': conversion(79),
+    });
+    const adminsBefore = process.env.SUPER_ADMINS;
+    try {
+      process.env.SUPER_ADMINS = `sara-${tag}@example.test`;
+      expect((await created(request(`/api/admin/github-app/created?code=one&state=${encodeURIComponent(firstTab)}`))).status).toBe(200);
+      // The other tab, finished later: refused before its code is spent, and the app everyone signs in through is kept
+      expect((await created(request(`/api/admin/github-app/created?code=two&state=${encodeURIComponent(secondTab)}`))).status).toBe(409);
+      expect(calls.map((call) => call.key)).toEqual(['POST https://api.github.com/app-manifests/one/conversions']);
+      forgetGitHubApp();
+      expect((await getGitHubApp())?.appId).toBe(77);
+      // "Set it up again", asked in so many words, replaces the app it saw
+      const replace = await stateOf({ again: true });
+      expect((await created(request(`/api/admin/github-app/created?code=three&state=${encodeURIComponent(replace)}`))).status).toBe(200);
+      forgetGitHubApp();
+      expect((await getGitHubApp())?.appId).toBe(79);
+      // ...and only that one: a replace started before it is now out of date
+      expect(await saveGitHubApp(conversion(80).body, sara, 77)).toBeNull();
+    } finally {
+      if (adminsBefore === undefined) delete process.env.SUPER_ADMINS;
+      else process.env.SUPER_ADMINS = adminsBefore;
+    }
+  });
+
   it('connects once, signs in on GitHub with PKCE, keeps the token in Orbit and sends a person with no install on to pick where it works', async () => {
     await makeApp();
     mockUser.current = { id: sara };
@@ -182,8 +228,18 @@ run('Connect GitHub for Bricks, in a real database', () => {
       'GET https://api.github.com/user/installations': { body: { total_count: 0 } },
     });
     const back = await callback(request(`/api/github/callback?code=abc&state=${encodeURIComponent(url.searchParams.get('state') as string)}`));
-    expect(back.status).toBe(302);
-    const install = new URL(back.headers.get('location') as string);
+    // GitHub's return carries no sign-in of ours: nothing is exchanged there, the code goes on to the window that opened it
+    expect(back.status).toBe(307);
+    expect(calls).toHaveLength(0);
+    // Someone else holding this return (a sign-in address sent to them) cannot finish it
+    const stranger = await finishFrom(back, `someone-else-${tag}`);
+    expect(stranger.status).toBe(404);
+    expect(calls).toHaveLength(0);
+    const finished = await finishFrom(back);
+    expect(finished.status).toBe(200);
+    const answer = await finished.json();
+    expect(answer.id).toBe(id);
+    const install = new URL(answer.installUrl);
     expect(install.origin + install.pathname).toBe('https://github.com/apps/bawes-universe/installations/new');
     const exchange = new URLSearchParams(String(calls[0].init.body));
     expect(Object.fromEntries(exchange)).toMatchObject({ client_id: 'Iv1.client', client_secret: 'app-secret', grant_type: 'authorization_code', code: 'abc' });
@@ -199,8 +255,14 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(done.headers.get('location')).toBe('https://play.example.com/oauth-popup-callback.html?oauth=success');
 
     // The same return again is refused before GitHub is asked: the ticket was used
-    const again = await callback(request(`/api/github/callback?code=abc&state=${encodeURIComponent(url.searchParams.get('state') as string)}`));
-    expect(again.headers.get('location')).toBe('https://play.example.com/oauth-popup-callback.html?oauth=error&message=sign_in_expired');
+    const asked = calls.length;
+    const again = await finishFrom(await callback(request(`/api/github/callback?code=abc&state=${encodeURIComponent(url.searchParams.get('state') as string)}`)));
+    expect(again.status).toBe(400);
+    expect(await again.json()).toMatchObject({ code: 'sign_in_expired' });
+    expect(calls).toHaveLength(asked);
+    // A return Orbit did not make goes nowhere
+    const madeUp = await callback(request('/api/github/callback?code=abc&state=made-up'));
+    expect(new URL(madeUp.headers.get('location') as string).searchParams.get('message')).toBe('sign_in_expired');
   });
 
   it('closes the window at once when the app is already installed somewhere', async () => {
@@ -214,7 +276,8 @@ run('Connect GitHub for Bricks, in a real database', () => {
       'GET https://api.github.com/user/installations': { body: { total_count: 2 } },
     });
     const back = await callback(request(`/api/github/callback?code=abc&state=${encodeURIComponent(new URL(started.authorizeUrl).searchParams.get('state') as string)}`));
-    expect(back.headers.get('location')).toBe('https://play.example.com/oauth-popup-callback.html?oauth=success');
+    const finished = await finishFrom(back);
+    expect(await finished.json()).toEqual({ id });
   });
 
   it('a Brick gets GitHub through Orbit: no token is handed out, the tools are listed, a call runs once', async () => {
@@ -264,6 +327,15 @@ run('Connect GitHub for Bricks, in a real database', () => {
     await prisma.appConnection.update({ where: { id }, data: { authConfig: encryptApiKey(JSON.stringify({ ...renewed, expiresAt: Math.floor(Date.now() / 1000) - 10 })) } });
     pretendGitHub({ 'POST https://github.com/login/oauth/access_token': { body: { error: 'bad_refresh_token' } } });
     expect(await gitHubToken(id)).toMatchObject({ status: 'reconnect' });
+    expect(await readConnection(id, sara)).toMatchObject({ connected: false, reconnectRequired: true });
+  });
+
+  it('a 401 for an old token never clears a newer sign-in saved meanwhile', async () => {
+    await makeApp();
+    const id = await signedIn();
+    await gitHubTokenRefused(id, 'ghu_from_before');
+    expect(await readConnection(id, sara)).toMatchObject({ connected: true, reconnectRequired: false });
+    await gitHubTokenRefused(id, 'ghu_first');
     expect(await readConnection(id, sara)).toMatchObject({ connected: false, reconnectRequired: true });
   });
 
@@ -377,8 +449,26 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(sent).toBeLessThan(MAX_PUSH_BYTES + 20 * piece.length);
     expect(cancelled).toBe(true);
     expect(calls.length).toBe(before);
-    // GitHub taken away from the Brick: the pass stops at once
-    await removeGrant(sara, id, saraBrick);
+    // GitHub taken away from the Brick while a push is still uploading: checked again once it is read, and nothing goes to GitHub
+    let taken = false;
+    const slow = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (taken) return controller.close();
+        taken = true;
+        await removeGrant(sara, id, saraBrick);
+        controller.enqueue(new Uint8Array([48, 48, 48, 48]));
+      },
+    });
+    const paused = new NextRequest('https://orbit.example.com/api/git/acme/tools.git/git-receive-pack', {
+      method: 'POST',
+      headers: { authorization: basic(issued.pass), 'content-type': 'application/x-git-receive-pack-request', 'transfer-encoding': 'chunked' },
+      body: slow,
+      duplex: 'half',
+    } as ConstructorParameters<typeof NextRequest>[1] & { duplex: 'half' });
+    expect((await gitPost(paused, params({ path: ['acme', 'tools.git', 'git-receive-pack'] }))).status).toBe(401);
+    expect(taken).toBe(true);
+    expect(calls.length).toBe(before);
+    // ...and the pass stops for everything else at once
     expect((await refs(basic(issued.pass))).status).toBe(401);
   });
 

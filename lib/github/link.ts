@@ -88,18 +88,19 @@ export async function linkGitHub(
     default: {
       const params = (input.message.params ?? {}) as { name?: unknown; arguments?: unknown };
       if (typeof params.name !== 'string' || !isGitHubTool(params.name) || !input.callId) return { status: 'refused' };
-      // The token first: when none can be had nothing runs, and the same call may be asked again
+      // The token first: when none can be had (or the owner must sign in again) nothing runs and nothing is kept, so the same call
+      // may be asked again once it can work
       const token = await gitHubToken(input.connectionId, fetchImpl);
       if (token.status === 'unavailable') return { status: 'unavailable' };
-      if (!(await firstTime({ botId: input.botId, ownerId: input.ownerId, connectionId: input.connectionId, callId: input.callId, tool: params.name }))) {
-        return { status: 'already_asked' };
-      }
       if (token.status === 'reconnect') {
         return { status: 'done', answer: rpc(id, { content: [{ type: 'text', text: 'GitHub needs the owner to sign in again (Apps, GitHub, Reconnect).' }], isError: true }) };
       }
+      if (!(await firstTime({ botId: input.botId, ownerId: input.ownerId, connectionId: input.connectionId, callId: input.callId, tool: params.name }))) {
+        return { status: 'already_asked' };
+      }
       const args = params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments) ? (params.arguments as Record<string, unknown>) : {};
       const result = await runGitHubTool(token.token, params.name, args, fetchImpl);
-      if (result.unauthorized) await gitHubTokenRefused(input.connectionId);
+      if (result.unauthorized) await gitHubTokenRefused(input.connectionId, token.token);
       return { status: 'done', answer: rpc(id, { content: [{ type: 'text', text: result.text }], isError: result.isError }) };
     }
   }

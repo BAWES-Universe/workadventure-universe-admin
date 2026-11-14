@@ -3,7 +3,7 @@ import { Prisma, type AppConnection } from '@prisma/client';
 import type { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
-import { holdRefreshLease } from '@/lib/mcp/oauth-refresh';
+import { holdRefreshLease, takeRefreshLease } from '@/lib/mcp/oauth-refresh';
 import { gitHubRequest, type FetchLike } from '@/lib/github/api';
 import {
   appJwt,
@@ -245,19 +245,28 @@ export async function finishGitHubSignIn(state: SignInState, code: string, fetch
   if (!app || !base) return { status: 'failed' };
   const connection = await prisma.appConnection.findFirst({ where: { id: state.connectionId, ownerId: state.personId, source: GITHUB_SOURCE } });
   if (!connection) return { status: 'gone' };
-  // One ticket per sign-in: a replayed return, or one a newer sign-in replaced, is refused before the code is spent
-  const taken = await prisma.appConnection.updateMany({ where: { id: connection.id, signInNonce: state.nonce }, data: { signInNonce: null } });
-  if (taken.count !== 1) return { status: 'expired' };
-  const answer = await tokenRequest(app, { grant_type: 'authorization_code', code, redirect_uri: `${base}${GITHUB_CALLBACK_PATH}`, code_verifier: state.codeVerifier }, fetchImpl);
-  if (!answer?.access_token) {
-    console.error('[GitHub] Sign-in exchange refused:', answer?.error ?? 'no answer');
-    return { status: 'failed' };
+  // Never beside a renewal: one that read the old sign-in would otherwise write it back over this new one
+  const letGo = await takeRefreshLease(connection.id);
+  if (!letGo) return { status: 'failed' };
+  let token: string;
+  try {
+    // One ticket per sign-in: a replayed return, or one a newer sign-in replaced, is refused before the code is spent
+    const taken = await prisma.appConnection.updateMany({ where: { id: connection.id, signInNonce: state.nonce }, data: { signInNonce: null } });
+    if (taken.count !== 1) return { status: 'expired' };
+    const answer = await tokenRequest(app, { grant_type: 'authorization_code', code, redirect_uri: `${base}${GITHUB_CALLBACK_PATH}`, code_verifier: state.codeVerifier }, fetchImpl);
+    if (!answer?.access_token) {
+      console.error('[GitHub] Sign-in exchange refused:', answer?.error ?? 'no answer');
+      return { status: 'failed' };
+    }
+    token = answer.access_token;
+    let auth = withTokens({ provider: 'github' }, answer, Date.now());
+    const me = await gitHubRequest<{ login?: string; id?: number }>(token, '/user', {}, fetchImpl).catch(() => null);
+    if (me?.ok) auth = { ...auth, login: me.data.login, githubId: me.data.id };
+    await prisma.appConnection.update({ where: { id: connection.id }, data: { authConfig: sealAuth(auth) } });
+  } finally {
+    await letGo();
   }
-  let auth = withTokens({ provider: 'github' }, answer, Date.now());
-  const me = await gitHubRequest<{ login?: string; id?: number }>(answer.access_token, '/user', {}, fetchImpl).catch(() => null);
-  if (me?.ok) auth = { ...auth, login: me.data.login, githubId: me.data.id };
-  await prisma.appConnection.update({ where: { id: connection.id }, data: { authConfig: sealAuth(auth) } });
-  const installs = await gitHubRequest<{ total_count?: number }>(answer.access_token, '/user/installations?per_page=1', {}, fetchImpl).catch(() => null);
+  const installs = await gitHubRequest<{ total_count?: number }>(token, '/user/installations?per_page=1', {}, fetchImpl).catch(() => null);
   // Not known (GitHub did not answer): the sign-in is done; "Where it works" offers the install page
   return { status: 'done', needsInstall: !!installs?.ok && installs.data.total_count === 0 };
 }
@@ -271,9 +280,20 @@ const renewing = new Map<string, Promise<TokenOutcome>>();
 
 export type TokenOutcome = { status: 'ok'; token: string; login: string | null } | { status: 'reconnect'; reason: string } | { status: 'unavailable' };
 
-async function markReconnect(connectionId: string, auth: GitHubAuth, reason: string): Promise<void> {
+/**
+ * The sign-in is put back to "sign in again", but only while it still holds the token GitHub turned down: a newer sign-in (or key)
+ * saved meanwhile is never cleared by an answer about the old one. The stored value is compared as it was read, so a write that
+ * landed in between wins.
+ */
+async function markReconnect(connectionId: string, rejectedToken: string, reason: string): Promise<boolean> {
+  const row = await prisma.appConnection.findUnique({ where: { id: connectionId }, select: { authConfig: true } });
+  const auth = row ? readGitHubAuth(row) : null;
+  if (!row?.authConfig || !auth || auth.accessToken !== rejectedToken) return false;
   const kept: GitHubAuth = { provider: 'github', login: auth.login, githubId: auth.githubId, reconnectRequired: { at: new Date().toISOString(), reason } };
-  await prisma.appConnection.update({ where: { id: connectionId }, data: { authConfig: sealAuth(kept), signInLostAt: new Date() } }).catch(() => undefined);
+  const written = await prisma.appConnection
+    .updateMany({ where: { id: connectionId, authConfig: row.authConfig }, data: { authConfig: sealAuth(kept), signInLostAt: new Date() } })
+    .catch(() => ({ count: 0 }));
+  return written.count === 1;
 }
 
 /**
@@ -297,7 +317,16 @@ export async function gitHubToken(connectionId: string, fetchImpl: FetchLike = f
 }
 
 async function renewUnderLease(connectionId: string, fetchImpl: FetchLike): Promise<TokenOutcome> {
-  const letGo = await holdRefreshLease(connectionId);
+  const stillGood = (auth: GitHubAuth): TokenOutcome =>
+    auth.accessToken && auth.expiresAt && auth.expiresAt > Math.floor(Date.now() / 1000) ? { status: 'ok', token: auth.accessToken, login: auth.login ?? null } : { status: 'unavailable' };
+  // GitHub turns the old refresh token off on every renewal, so this never runs without the lease: when it cannot be had, the token
+  // still in hand is used while it lasts, and nothing is renewed
+  const letGo = await takeRefreshLease(connectionId);
+  if (!letGo) {
+    const connection = await prisma.appConnection.findUnique({ where: { id: connectionId } });
+    const auth = connection ? readGitHubAuth(connection) : null;
+    return auth ? stillGood(auth) : { status: 'unavailable' };
+  }
   try {
     // Read again under the lease: another server may have just renewed it
     const connection = await prisma.appConnection.findUnique({ where: { id: connectionId } });
@@ -307,27 +336,29 @@ async function renewUnderLease(connectionId: string, fetchImpl: FetchLike): Prom
     const now = Math.floor(Date.now() / 1000);
     if (auth.ownKey || !auth.expiresAt || auth.expiresAt - RENEW_BEFORE_SECONDS > now) return { status: 'ok', token: auth.accessToken, login: auth.login ?? null };
     if (!auth.refreshToken || (auth.refreshTokenExpiresAt && auth.refreshTokenExpiresAt <= now)) {
-      await markReconnect(connectionId, auth, 'The GitHub sign-in ran out');
+      await markReconnect(connectionId, auth.accessToken, 'The GitHub sign-in ran out');
       return { status: 'reconnect', reason: 'The GitHub sign-in ran out' };
     }
     const app = await getGitHubApp();
     if (!app) return { status: 'unavailable' };
     const answer = await tokenRequest(app, { grant_type: 'refresh_token', refresh_token: auth.refreshToken }, fetchImpl);
-    if (!answer) return auth.expiresAt > now ? { status: 'ok', token: auth.accessToken, login: auth.login ?? null } : { status: 'unavailable' };
+    // Checked against the time now, after the request: a token that ran out while GitHub was asked is not handed out
+    if (!answer) return stillGood(auth);
     if (!answer.access_token) {
       // GitHub answers a dead refresh token with 200 and an error: only a new sign-in fixes it
       if (answer.error === 'bad_refresh_token' || answer.error === 'invalid_grant') {
-        await markReconnect(connectionId, auth, 'GitHub asked for a new sign-in');
+        await markReconnect(connectionId, auth.accessToken, 'GitHub asked for a new sign-in');
         return { status: 'reconnect', reason: 'GitHub asked for a new sign-in' };
       }
-      return auth.expiresAt > now ? { status: 'ok', token: auth.accessToken, login: auth.login ?? null } : { status: 'unavailable' };
+      return stillGood(auth);
     }
     const renewed = withTokens(auth, answer, Date.now());
-    // GitHub has already turned the old refresh token off: the new one must be kept, so the write is tried more than once.
-    // If it still fails, the new token works for this call and the next renewal asks for a new sign-in.
+    // GitHub has already turned the old refresh token off: the new one must be kept, so the write is tried more than once. It
+    // lands only on the sign-in it renewed (compared as read), never over a newer one saved meanwhile. If it still fails, the new
+    // token works for this call and the next renewal asks for a new sign-in.
     for (let attempt = 1; ; attempt += 1) {
       try {
-        await prisma.appConnection.update({ where: { id: connectionId }, data: { authConfig: sealAuth(renewed) } });
+        await prisma.appConnection.updateMany({ where: { id: connectionId, authConfig: connection.authConfig }, data: { authConfig: sealAuth(renewed) } });
         break;
       } catch (error) {
         if (attempt >= 3) {
@@ -343,11 +374,14 @@ async function renewUnderLease(connectionId: string, fetchImpl: FetchLike): Prom
   }
 }
 
-/** GitHub refused the token outright (401): the person signs in again (or pastes a new key). */
-export async function gitHubTokenRefused(connectionId: string): Promise<void> {
+/**
+ * GitHub refused a token outright (401): the person signs in again (or pastes a new key). Only that token is cleared; one saved
+ * after the request went out is kept.
+ */
+export async function gitHubTokenRefused(connectionId: string, rejectedToken: string): Promise<void> {
   const connection = await prisma.appConnection.findUnique({ where: { id: connectionId } });
   const auth = connection ? readGitHubAuth(connection) : null;
-  if (auth) await markReconnect(connectionId, auth, auth.ownKey ? 'GitHub no longer takes this key' : 'GitHub asked for a new sign-in');
+  if (auth) await markReconnect(connectionId, rejectedToken, auth.ownKey ? 'GitHub no longer takes this key' : 'GitHub asked for a new sign-in');
 }
 
 /* ----------------------------------- own key ----------------------------------- */

@@ -262,7 +262,7 @@ export async function relayGit(
   }
   if (upstream.status === 401) {
     // GitHub refused the token itself: the owner sees Reconnect in Apps
-    await gitHubTokenRefused(pass.connectionId);
+    await gitHubTokenRefused(pass.connectionId, token.token);
     return { status: 'reconnect' };
   }
   const out = new Headers();

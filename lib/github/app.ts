@@ -79,12 +79,37 @@ export async function getGitHubApp(): Promise<GitHubApp | null> {
   return app;
 }
 
-/** Keeps what GitHub gave back for the app it made. The secrets are stored encrypted, never shown again. */
-export async function saveGitHubApp(conversion: ManifestConversion, userId: string | null): Promise<GitHubApp> {
+/** The id of the app that is kept now, read straight from the store (no cache), or null while none is. */
+export async function keptGitHubAppId(): Promise<number | null> {
+  const row = await prisma.appSetting.findUnique({ where: { key: SETTING_KEY } });
+  const appId = (row?.value as { appId?: unknown } | undefined)?.appId;
+  return typeof appId === 'number' ? appId : null;
+}
+
+/**
+ * Keeps what GitHub gave back for the app it made. The secrets are stored encrypted, never shown again. `replaces` is the app the
+ * setup was started to replace (null: the first app): the save lands only while that is still the app kept, so an older setup
+ * page finished later never replaces the app another one made (null comes back, and nothing is changed).
+ */
+export async function saveGitHubApp(conversion: ManifestConversion, userId: string | null, replaces: number | null): Promise<GitHubApp | null> {
   const secrets = encryptApiKey(JSON.stringify({ clientSecret: conversion.client_secret, webhookSecret: conversion.webhook_secret ?? null, pem: conversion.pem }));
   const value = { appId: conversion.id, slug: conversion.slug, clientId: conversion.client_id, htmlUrl: conversion.html_url, secrets, createdAt: new Date().toISOString() };
-  await prisma.appSetting.upsert({ where: { key: SETTING_KEY }, create: { key: SETTING_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });
+  let saved: boolean;
+  if (replaces === null) {
+    // The first app: made only when there is none yet (the key is unique, so two at once cannot both land)
+    saved = await prisma.appSetting.create({ data: { key: SETTING_KEY, value, updatedById: userId } }).then(
+      () => true,
+      (error: unknown) => {
+        if ((error as { code?: unknown })?.code === 'P2002') return false;
+        throw error;
+      },
+    );
+  } else {
+    const written = await prisma.appSetting.updateMany({ where: { key: SETTING_KEY, value: { path: ['appId'], equals: replaces } }, data: { value, updatedById: userId } });
+    saved = written.count === 1;
+  }
   forgetGitHubApp();
+  if (!saved) return null;
   return {
     appId: conversion.id,
     slug: conversion.slug,

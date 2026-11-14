@@ -42,7 +42,9 @@ export async function connectReadyMade(ownerId: string, key: string, returnUrl: 
   if (!adapter) return null;
   const app = (await readReadyMadeApps()).find((entry) => entry.key === key && entry.enabled);
   if (!app) return null;
-  if (key === 'github' && (await getGitHubApp())) return null;
+  // Once Universe's own GitHub App is made, no NEW ready-made GitHub connection is started (game #2041); an older one is still
+  // looked up below, so a person whose sign-in was lost can still recover it
+  const ownGitHub = key === 'github' && !!(await getGitHubApp());
   // One person's connect of one app at a time: the lock is taken before looking for an existing connection and held until the
   // connection is saved, so a second tap at the same moment waits, then finds the first one's connection, instead of opening a
   // second account at the provider that nothing would ever use
@@ -53,6 +55,7 @@ export async function connectReadyMade(ownerId: string, key: string, returnUrl: 
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`ready-made:${ownerId}:${key}`}, 0))`;
         const existing = await tx.appConnection.findFirst({ where: { ownerId, providerToolkit: key } });
         if (existing) return await restartIfNotSignedIn(ownerId, existing, key, returnUrl, adapter, tx, app.authConfigId);
+        if (ownGitHub) return null;
 
         const start = await adapter.startConnect({ person: ownerId, toolkit: key, returnUrl, authConfigId: app.authConfigId });
         const link = await adapter.appLink({ person: ownerId, toolkits: [key], accounts: { [key]: start.providerAccountId } });

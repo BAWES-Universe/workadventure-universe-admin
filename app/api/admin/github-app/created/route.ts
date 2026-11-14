@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db';
 import { decryptApiKey } from '@/lib/encryption';
 import { gitHubRequest } from '@/lib/github/api';
-import { saveGitHubApp, type ManifestConversion } from '@/lib/github/app';
+import { keptGitHubAppId, saveGitHubApp, type ManifestConversion } from '@/lib/github/app';
 import { setupPage } from '@/lib/github/page';
 import { isSuperAdmin } from '@/lib/super-admin';
 
@@ -19,7 +19,7 @@ export const runtime = 'nodejs';
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const code = searchParams.get('code');
-  let state: { kind?: string; userId?: string; exp?: number } | null = null;
+  let state: { kind?: string; userId?: string; replaces?: unknown; exp?: number } | null = null;
   try {
     state = JSON.parse(decryptApiKey(searchParams.get('state') ?? ''));
   } catch {
@@ -31,12 +31,19 @@ export async function GET(request: NextRequest) {
   }
   const asker = await prisma.user.findUnique({ where: { id: state.userId }, select: { email: true } });
   if (!asker || !isSuperAdmin(asker.email)) return setupPage('Not available', ['Only a super admin can set up GitHub for Universe.'], 403);
+  const replaces = typeof state.replaces === 'number' ? state.replaces : null;
+  // Another setup page finished first: this one would replace the app everyone signs in through, which it never set out to do
+  if ((await keptGitHubAppId()) !== replaces) return alreadySetUp();
   const answer = await gitHubRequest<ManifestConversion>(null, `/app-manifests/${code}/conversions`, { method: 'POST' }).catch(() => null);
   if (!answer?.ok || !answer.data?.id || !answer.data.pem || !answer.data.client_secret) {
     console.error('[GitHubApp] Conversion failed:', answer?.status ?? 'no answer');
     return setupPage('GitHub did not finish', ['Orbit could not keep the app GitHub made. Open the setup page in Orbit again.'], 502);
   }
-  const app = await saveGitHubApp(answer.data, state.userId);
+  const app = await saveGitHubApp(answer.data, state.userId, replaces);
+  if (!app) return alreadySetUp();
   console.log(`[GitHubApp] Made ${app.slug} (${app.appId})`);
   return setupPage('GitHub is set up', ['Everyone can now connect GitHub in Apps, and their Bricks work on GitHub as them.', 'You can close this page.']);
 }
+
+const alreadySetUp = () =>
+  setupPage('GitHub was already set up', ['Another setup finished first, so this one changed nothing. GitHub works as it is.', 'You can close this page.'], 409);

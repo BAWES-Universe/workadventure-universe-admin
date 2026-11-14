@@ -100,7 +100,28 @@ export interface ToolResult {
   unauthorized?: boolean;
 }
 
-class ToolError extends Error {}
+class ToolError extends Error {
+  constructor(
+    message: string,
+    /** GitHub refused the token itself, found by a step inside a tool: kept so the person is still asked to sign in again. */
+    readonly unauthorized = false,
+  ) {
+    super(message);
+  }
+}
+
+/** Stops the tool with GitHub's refusal, keeping whether it was the sign-in itself that GitHub turned down. */
+function refused(answer: GitHubAnswer, what: string): never {
+  const result = refusal(answer, what);
+  throw new ToolError(result.text, result.unauthorized === true);
+}
+
+/** A list of label names: every entry must be text (an empty list is allowed and clears them). Undefined when not given. */
+function labelList(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.some((label) => typeof label !== 'string')) throw new ToolError('labels must be a list of label names.');
+  return value as string[];
+}
 
 const REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
 
@@ -161,7 +182,7 @@ export async function runGitHubTool(token: string, name: string, args: Record<st
   try {
     return await run(request, name, args ?? {}, fetchImpl);
   } catch (error) {
-    if (error instanceof ToolError) return { text: error.message, isError: true };
+    if (error instanceof ToolError) return error.unauthorized ? { text: error.message, isError: true, unauthorized: true } : { text: error.message, isError: true };
     console.error('[GitHub] Tool failed:', name, error instanceof Error ? error.message : 'unknown');
     return { text: 'GitHub could not be reached just now. Try again in a moment.', isError: true };
   }
@@ -169,20 +190,20 @@ export async function runGitHubTool(token: string, name: string, args: Record<st
 
 async function defaultBranch(request: Request, repo: string): Promise<string> {
   const answer = await request<{ default_branch?: string }>(repo);
-  if (!answer.ok || !answer.data.default_branch) throw new ToolError(refusal(answer, 'reading the repository').text);
+  if (!answer.ok || !answer.data.default_branch) refused(answer, 'reading the repository');
   return answer.data.default_branch;
 }
 
 async function headOf(request: Request, repo: string, branch: string): Promise<string | null> {
   const answer = await request<{ object?: { sha?: string } }>(`${repo}/git/ref/heads/${refPath(branch)}`);
   if (answer.status === 404) return null;
-  if (!answer.ok || !answer.data.object?.sha) throw new ToolError(refusal(answer, `reading branch ${branch}`).text);
+  if (!answer.ok || !answer.data.object?.sha) refused(answer, `reading branch ${branch}`);
   return answer.data.object.sha;
 }
 
 async function shaOf(request: Request, repo: string, ref: string): Promise<string> {
   const answer = await request<{ sha?: string }>(`${repo}/commits/${refPath(ref)}`);
-  if (!answer.ok || !answer.data.sha) throw new ToolError(refusal(answer, `finding ${ref}`).text);
+  if (!answer.ok || !answer.data.sha) refused(answer, `finding ${ref}`);
   return answer.data.sha;
 }
 
@@ -321,7 +342,9 @@ async function run(request: Request, name: string, args: Record<string, unknown>
     }
     case 'github_create_repo': {
       const owner = text(args.owner, 'owner', false);
-      const body = { name: text(args.name, 'name'), private: args.private === undefined ? true : args.private === true, description: text(args.description, 'description', false), auto_init: true };
+      if (args.private !== undefined && args.private !== null && typeof args.private !== 'boolean') throw new ToolError('private must be true or false.');
+      // Private unless the Brick says otherwise in so many words
+      const body = { name: text(args.name, 'name'), private: args.private !== false, description: text(args.description, 'description', false), auto_init: true };
       const me = owner ? await request<{ login?: string }>('/user') : null;
       const toOrg = owner && me?.data.login?.toLowerCase() !== owner.toLowerCase();
       const answer = await request<{ full_name: string; html_url: string; default_branch: string }>(toOrg ? `/orgs/${encodeURIComponent(owner as string)}/repos` : '/user/repos', { method: 'POST', body });
@@ -348,7 +371,7 @@ async function run(request: Request, name: string, args: Record<string, unknown>
       return answer.ok ? out({ number: answer.data.number, url: answer.data.html_url }) : refusal(answer, 'opening the pull request');
     }
     case 'github_create_issue': {
-      const labels = Array.isArray(args.labels) ? args.labels.filter((label): label is string => typeof label === 'string') : undefined;
+      const labels = labelList(args.labels);
       const answer = await request<{ number: number; html_url: string }>(`${repoPath(args.repo)}/issues`, { method: 'POST', body: { title: text(args.title, 'title'), body: text(args.body, 'body', false), labels } });
       return answer.ok ? out({ number: answer.data.number, url: answer.data.html_url }) : refusal(answer, 'opening the issue');
     }
@@ -368,7 +391,8 @@ async function run(request: Request, name: string, args: Record<string, unknown>
       // An empty body clears it
       if (args.body === '' || args.body === null) body.body = '';
       else if (args.body !== undefined) body.body = text(args.body, 'body');
-      if (Array.isArray(args.labels)) body.labels = args.labels.filter((label): label is string => typeof label === 'string');
+      const labels = labelList(args.labels);
+      if (labels) body.labels = labels;
       if (Object.keys(body).length === 0) throw new ToolError('Say what to change: title, body, state or labels.');
       const answer = await request<{ number: number; html_url: string; state: string }>(`${repoPath(args.repo)}/issues/${whole(args.number, 'number')}`, { method: 'PATCH', body });
       return answer.ok ? out({ number: answer.data.number, state: answer.data.state, url: answer.data.html_url }) : refusal(answer, 'changing it');
@@ -382,13 +406,47 @@ async function run(request: Request, name: string, args: Record<string, unknown>
   }
 }
 
-/** The mode of each file in a tree (100644, 100755 or 120000), read once for the whole tree. Empty when it cannot be read. */
-async function modesOf(request: Request, repo: string, treeSha: string): Promise<Map<string, string>> {
-  const answer = await request<{ tree?: { path?: string; mode?: string; type?: string }[] }>(`${repo}/git/trees/${treeSha}?recursive=1`);
+const FILE_MODES = new Set(['100644', '100755', '120000']);
+
+type TreeEntry = { path?: string; mode?: string; type?: string; sha?: string };
+
+/**
+ * The mode (100644, 100755 or 120000) of each of these paths that is already in the tree; a path not there is new. The whole tree
+ * is read once; when it is too big for one answer, each path's own folders are read instead. Stops the tool when the modes cannot
+ * be known, so a script is never quietly made a plain file.
+ */
+async function modesOf(request: Request, repo: string, treeSha: string, paths: string[]): Promise<Map<string, string>> {
+  const wanted = new Set(paths);
   const modes = new Map<string, string>();
-  if (!answer.ok || !Array.isArray(answer.data.tree)) return modes;
-  for (const entry of answer.data.tree) {
-    if (entry.type === 'blob' && typeof entry.path === 'string' && (entry.mode === '100755' || entry.mode === '120000' || entry.mode === '100644')) modes.set(entry.path, entry.mode);
+  const keep = (path: string, entry: TreeEntry) => {
+    if (entry.type === 'blob' && typeof entry.mode === 'string' && FILE_MODES.has(entry.mode)) modes.set(path, entry.mode);
+  };
+  const whole = await request<{ tree?: TreeEntry[]; truncated?: boolean }>(`${repo}/git/trees/${treeSha}?recursive=1`);
+  if (!whole.ok || !Array.isArray(whole.data.tree)) refused(whole, 'reading the files already there');
+  if (!whole.data.truncated) {
+    for (const entry of whole.data.tree) if (typeof entry.path === 'string' && wanted.has(entry.path)) keep(entry.path, entry);
+    return modes;
+  }
+  const folders = new Map<string, TreeEntry[]>();
+  const folder = async (sha: string): Promise<TreeEntry[]> => {
+    const known = folders.get(sha);
+    if (known) return known;
+    const answer = await request<{ tree?: TreeEntry[]; truncated?: boolean }>(`${repo}/git/trees/${sha}`);
+    if (!answer.ok || !Array.isArray(answer.data.tree)) refused(answer, 'reading the files already there');
+    if (answer.data.truncated) throw new ToolError('This folder is too big for GitHub to list, so the files cannot be written safely.');
+    folders.set(sha, answer.data.tree);
+    return answer.data.tree;
+  };
+  for (const path of wanted) {
+    const parts = path.split('/');
+    let sha = treeSha;
+    for (let i = 0; i < parts.length; i += 1) {
+      const entry = (await folder(sha)).find((item) => item.path === parts[i]);
+      if (!entry) break;
+      if (i === parts.length - 1) keep(path, entry);
+      else if (entry.type === 'tree' && typeof entry.sha === 'string') sha = entry.sha;
+      else break;
+    }
   }
   return modes;
 }
@@ -422,7 +480,7 @@ async function writeFiles(request: Request, args: Record<string, unknown>): Prom
   if (!commit.ok || !commit.data.tree?.sha) return refusal(commit, 'reading the branch');
 
   // A file that is already there keeps its mode (a script stays executable, a link stays a link); a new one is a plain file
-  const modes = await modesOf(request, repo, commit.data.tree.sha);
+  const modes = await modesOf(request, repo, commit.data.tree.sha, files.map((file) => file.path));
   const tree = files.map((file) => {
     const mode = modes.get(file.path) ?? '100644';
     if ('delete' in file) return { path: file.path, mode, type: 'blob', sha: null };

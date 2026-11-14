@@ -22,7 +22,7 @@ jest.mock('@/lib/github/connection', () => ({
   gitHubTokenRefused: jest.fn(),
 }));
 
-import { gitHubToken } from '@/lib/github/connection';
+import { gitHubToken, gitHubTokenRefused } from '@/lib/github/connection';
 import { recordMeterEvent } from '@/lib/meter';
 import { linkGitHub } from '@/lib/github/link';
 
@@ -47,5 +47,24 @@ describe('a GitHub tool call', () => {
     expect(recordMeterEvent).toHaveBeenCalledWith(
       expect.objectContaining({ eventId: 'github:b:call-1', kind: 'app_use', route: 'github', quantity: 0, costMicros: 0, payerKind: 'person', payerPersonId: 'o' }),
     );
+  });
+
+  it('keeps nothing while the owner must sign in again, so the same call works once they have', async () => {
+    const github = jest.fn(async () => new Response(JSON.stringify({ content: Buffer.from('hi').toString('base64'), encoding: 'base64', size: 2 }), { status: 200 })) as unknown as typeof fetch;
+    jest.mocked(gitHubToken).mockResolvedValueOnce({ status: 'reconnect', reason: 'GitHub asked for a new sign-in' });
+    const asked = await call('call-2', github);
+    expect(asked.status).toBe('done');
+    expect(JSON.stringify(asked)).toContain('sign in again');
+    expect(written.has('github:b:call-2')).toBe(false);
+    jest.mocked(gitHubToken).mockResolvedValue({ status: 'ok', token: 'ghu_x', login: 'sara' });
+    expect((await call('call-2', github)).status).toBe('done');
+    expect(github).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears only the token GitHub turned down', async () => {
+    const github = jest.fn(async () => new Response(JSON.stringify({ message: 'Bad credentials' }), { status: 401 })) as unknown as typeof fetch;
+    jest.mocked(gitHubToken).mockResolvedValue({ status: 'ok', token: 'ghu_old', login: 'sara' });
+    await call('call-3', github);
+    expect(gitHubTokenRefused).toHaveBeenCalledWith('c', 'ghu_old');
   });
 });

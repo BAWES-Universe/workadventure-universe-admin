@@ -16,7 +16,7 @@ export async function testGitHub(connectionId: string, fetchImpl: FetchLike = fe
   try {
     const me = await gitHubRequest(token.token, '/user', {}, fetchImpl);
     if (me.status === 401) {
-      await gitHubTokenRefused(connectionId);
+      await gitHubTokenRefused(connectionId, token.token);
       return failed('Reconnect required: GitHub asked for a new sign-in', 401);
     }
     if (!me.ok) return failed(`GitHub answered ${me.status}.`, me.status);

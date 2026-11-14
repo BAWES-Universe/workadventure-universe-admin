@@ -154,7 +154,9 @@ const hasHttpBackend = (() => {
   });
 
   it('turns down deleting a branch and pushing a tag, and git says why', async () => {
-    const clone = path.join(work, 'clone');
+    // Its own clone, so this runs on its own too
+    const clone = path.join(work, 'clone-refused');
+    expect(await tryGit(work, 'clone', '-q', `http://127.0.0.1:${port}/api/git/acme/tools.git`, clone)).toMatchObject({ ok: true });
     const deleted = await tryGit(clone, 'push', 'origin', '--delete', 'old');
     expect(deleted.ok).toBe(false);
     expect(deleted.out).toContain('[remote rejected] old (Deleting is not allowed for Bricks');
@@ -252,6 +254,6 @@ describe('reading a git address and a push', () => {
     expect(gitHubTokenRefused).not.toHaveBeenCalled();
     const refused = (async () => new Response('Bad credentials', { status: 401 })) as unknown as typeof fetch;
     expect(await refs(refused)).toEqual({ status: 'reconnect' });
-    expect(gitHubTokenRefused).toHaveBeenCalledWith('c');
+    expect(gitHubTokenRefused).toHaveBeenCalledWith('c', 'ghu_owner');
   });
 });

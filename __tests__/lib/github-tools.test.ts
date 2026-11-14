@@ -147,10 +147,78 @@ describe('what a Brick can do on GitHub', () => {
   });
 
   it('never writes inside .git or outside the repository', async () => {
-    for (const path of ['.git/config', 'a/../../b', './x']) {
-      const result = await runGitHubTool('t', 'github_write_files', { repo: 'o/r', branch: 'b', message: 'm', files: [{ path, content: 'x' }] }, fakeGitHub([]).impl);
-      expect(result.isError).toBe(true);
+    for (const [path, said] of [
+      ['.git/config', '.git/config cannot be written.'],
+      ['a/../../b', 'a/../../b is not a file path.'],
+      ['./x', './x is not a file path.'],
+    ]) {
+      const github = fakeGitHub([]);
+      const result = await runGitHubTool('t', 'github_write_files', { repo: 'o/r', branch: 'b', message: 'm', files: [{ path, content: 'x' }] }, github.impl);
+      expect(result).toEqual({ text: said, isError: true });
+      // Turned down before GitHub is asked anything
+      expect(github.calls).toHaveLength(0);
     }
+  });
+
+  it('keeps a script executable in a repository too big for one tree answer, reading only the folders it needs', async () => {
+    const github = fakeGitHub([
+      ['GET', '/repos/o/r/git/ref/heads/main', 200, { object: { sha: 'parent' } }],
+      ['GET', '/repos/o/r/git/commits/parent', 200, { tree: { sha: 'root' } }],
+      ['GET', '/repos/o/r/git/trees/root?recursive=1', 200, { tree: [{ path: 'README.md', mode: '100644', type: 'blob' }], truncated: true }],
+      ['GET', '/repos/o/r/git/trees/root', 200, { tree: [{ path: 'bin', mode: '040000', type: 'tree', sha: 'binTree' }, { path: 'README.md', mode: '100644', type: 'blob' }] }],
+      ['GET', '/repos/o/r/git/trees/binTree', 200, { tree: [{ path: 'run', mode: '100755', type: 'blob' }, { path: 'link', mode: '120000', type: 'blob' }] }],
+      ['POST', '/repos/o/r/git/trees', 201, { sha: 'tree1' }],
+      ['POST', '/repos/o/r/git/commits', 201, { sha: 'c1' }],
+      ['PATCH', '/repos/o/r/git/refs/heads/main', 200, {}],
+    ]);
+    const files = [
+      { path: 'bin/run', content: 'x' },
+      { path: 'bin/link', content: 'target' },
+      { path: 'bin/new', content: 'y' },
+      { path: 'docs/new.md', content: 'z' },
+    ];
+    const result = await runGitHubTool('t', 'github_write_files', { repo: 'o/r', branch: 'main', message: 'm', files }, github.impl);
+    expect(result.isError).toBe(false);
+    const posted = github.calls.find((call) => call.method === 'POST' && call.url.endsWith('/git/trees'));
+    expect((posted?.body as { tree: { path: string; mode: string }[] }).tree.map((entry) => [entry.path, entry.mode])).toEqual([
+      ['bin/run', '100755'],
+      ['bin/link', '120000'],
+      ['bin/new', '100644'],
+      ['docs/new.md', '100644'],
+    ]);
+    // Each folder is read once
+    expect(github.calls.filter((call) => call.url.endsWith('/git/trees/binTree'))).toHaveLength(1);
+  });
+
+  it('writes nothing when it cannot tell which files are already there', async () => {
+    const github = fakeGitHub([
+      ['GET', '/repos/o/r/git/ref/heads/main', 200, { object: { sha: 'parent' } }],
+      ['GET', '/repos/o/r/git/commits/parent', 200, { tree: { sha: 'root' } }],
+      ['GET', '/repos/o/r/git/trees/root?recursive=1', 502, { message: 'Server Error' }],
+    ]);
+    const result = await runGitHubTool('t', 'github_write_files', { repo: 'o/r', branch: 'main', message: 'm', files: [{ path: 'run.sh', content: 'x' }] }, github.impl);
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('reading the files already there');
+    expect(github.calls.some((call) => call.method !== 'GET')).toBe(false);
+  });
+
+  it('still asks for a new sign-in when GitHub turns the token down in a step inside a tool', async () => {
+    const github = fakeGitHub([['GET', '/repos/o/r/git/ref/heads/main', 401, { message: 'Bad credentials' }]]);
+    const result = await runGitHubTool('t', 'github_write_files', { repo: 'o/r', branch: 'main', message: 'm', files: [{ path: 'a', content: 'x' }] }, github.impl);
+    expect(result).toMatchObject({ isError: true, unauthorized: true });
+  });
+
+  it('turns down labels that are not all names, and never clears them by mistake', async () => {
+    for (const tool of ['github_update_issue', 'github_create_issue']) {
+      const github = fakeGitHub([]);
+      const result = await runGitHubTool('t', tool, { repo: 'o/r', number: 7, title: 'T', labels: [123] }, github.impl);
+      expect(result).toEqual({ text: 'labels must be a list of label names.', isError: true });
+      expect(github.calls).toHaveLength(0);
+    }
+    // An empty list is asked for in so many words: it clears them
+    const cleared = fakeGitHub([['PATCH', '/repos/o/r/issues/7', 200, { number: 7, state: 'open', html_url: 'u' }]]);
+    await runGitHubTool('t', 'github_update_issue', { repo: 'o/r', number: 7, labels: [] }, cleared.impl);
+    expect(cleared.calls[0].body).toEqual({ labels: [] });
   });
 
   it('merges with the method asked', async () => {
@@ -216,5 +284,12 @@ describe('what a Brick can do on GitHub', () => {
     const result = await runGitHubTool('t', 'github_create_repo', { name: 'new', private: false }, mine.impl);
     expect(JSON.parse(result.text)).toMatchObject({ repo: 'khalid/new' });
     expect(mine.calls[0].body).toMatchObject({ private: false });
+  });
+
+  it('never makes a public repository from a private value that is not true or false', async () => {
+    const github = fakeGitHub([]);
+    const result = await runGitHubTool('t', 'github_create_repo', { name: 'new', private: 'true' }, github.impl);
+    expect(result).toEqual({ text: 'private must be true or false.', isError: true });
+    expect(github.calls).toHaveLength(0);
   });
 });

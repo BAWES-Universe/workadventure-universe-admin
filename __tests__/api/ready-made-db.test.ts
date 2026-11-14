@@ -25,6 +25,7 @@ import { grantToBrick, createConnection, readConnection, listConnections } from 
 import { saveMeterSettings } from '@/lib/meter';
 import { saveComposioBilling } from '@/lib/composio-billing';
 import { createBrick } from '@/lib/brick-create';
+import { forgetGitHubApp, saveGitHubApp } from '@/lib/github/app';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const tag = randomUUID().slice(0, 8);
@@ -280,6 +281,28 @@ run('ready-made apps through the adapter, in a real database', () => {
     expect((await readConnection(first.id, sara))?.connected).toBe(false);
     adapter.connectionStatus.mockResolvedValue('active');
     expect((await readConnection(first.id, sara))?.connected).toBe(true);
+  });
+
+  it('once Universe’s own GitHub App is made, starts no new ready-made GitHub, but an older one whose sign-in was lost can still sign in again', async () => {
+    const adapter = fake();
+    setAdapterForTests(adapter);
+    await saveReadyMadeApps({ apps: { github: { name: 'GitHub', authConfigId: 'ac_gh', enabled: true } } }, boss);
+    asSara();
+    const connectGitHub = () => connectReadyMadeApp(request('/api/me/apps/ready-made', { method: 'POST', body: { key: 'github' } }));
+    const older = await (await connectGitHub()).json();
+    await saveGitHubApp({ id: 77, slug: 'bawes-universe', client_id: 'Iv1.client', client_secret: 's', webhook_secret: null, pem: 'pem', html_url: 'https://github.com/apps/bawes-universe' }, null, null);
+    try {
+      await prisma.appConnection.update({ where: { id: older.id }, data: { signInLostAt: new Date(), signInLostStatus: 401 } });
+      const again = await connectGitHub();
+      expect(again.status).toBe(200);
+      expect(await again.json()).toMatchObject({ id: older.id, redirectUrl: 'https://connect.example/sign-in' });
+      // Someone with none gets none
+      mockUser.current = { id: omar, email: `omar-${tag}@example.test` };
+      expect((await connectGitHub()).status).toBe(404);
+    } finally {
+      await prisma.appSetting.deleteMany({ where: { key: 'github-app' } });
+      forgetGitHubApp();
+    }
   });
 
   it('never stores the provider key, even when the provider’s session answer carries headers, and shows it nowhere', async () => {
