@@ -395,8 +395,14 @@ run('apps a person connects once, in a real database', () => {
 
   it('needs a signed-in person who is not a guest', async () => {
     expect((await listApps(request('/api/me/apps'))).status).toBe(401);
-    mockUser.current = { id: sara, isGuest: true };
-    expect((await listApps(request('/api/me/apps'))).status).toBe(403);
+    // A guest is read from the account itself
+    mockUser.current = { id: sara };
+    await prisma.user.update({ where: { id: sara }, data: { isGuest: true } });
+    try {
+      expect((await listApps(request('/api/me/apps'))).status).toBe(403);
+    } finally {
+      await prisma.user.update({ where: { id: sara }, data: { isGuest: false } });
+    }
   });
 
   it('adds an app by its link with the same checks a bot’s own takes, and no Brick uses it yet', async () => {

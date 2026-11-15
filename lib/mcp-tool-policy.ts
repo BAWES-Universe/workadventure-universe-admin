@@ -1,3 +1,4 @@
+import { ensureKeyAppTools } from '@/lib/app-direct/policy';
 import { z } from 'zod';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
@@ -239,6 +240,8 @@ const bump = { policyRevision: { increment: 1 } } as const;
 /** One server's tools, their settings and state. */
 export async function readServerTools(botId: string, serverId: string): Promise<ServerToolsJson> {
   await loadServer(prisma, botId, serverId);
+  // A key app's operations are its tools (game #2044): they are made to match its definition before they are read, so the gate never sees a stale list
+  await ensureKeyAppTools(serverId);
   return describe(prisma, serverId);
 }
 

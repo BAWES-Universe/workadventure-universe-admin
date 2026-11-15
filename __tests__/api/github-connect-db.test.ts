@@ -232,7 +232,9 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(back.status).toBe(307);
     expect(calls).toHaveLength(0);
     // Someone else holding this return (a sign-in address sent to them) cannot finish it
-    const stranger = await finishFrom(back, `someone-else-${tag}`);
+    const other = await prisma.user.create({ data: { uuid: `someone-else-${tag}`, email: `someone-else-${tag}@example.test`, name: 'Someone else' } });
+    const stranger = await finishFrom(back, other.id);
+    await prisma.user.delete({ where: { id: other.id } });
     expect(stranger.status).toBe(404);
     expect(calls).toHaveLength(0);
     const finished = await finishFrom(back);

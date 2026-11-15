@@ -62,6 +62,10 @@ export async function GET(
     if (!server || server.botId !== botId) {
       return NextResponse.json({ error: 'Server not found' }, { status: 404, headers: corsHeaders(request) });
     }
+    // An app with a key (game #2044) has no sign-in page
+    if (server.connection?.kind === 'direct') {
+      return NextResponse.json({ error: 'Server not found' }, { status: 404, headers: corsHeaders(request) });
+    }
     // A Brick's grant on a person's connection signs in through the connection: its link and way in are the connection's
     const effective = effectiveServer(server);
 

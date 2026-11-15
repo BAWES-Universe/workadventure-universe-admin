@@ -54,3 +54,26 @@ export function scrubPrivateAddress<E extends object>(event: E): E {
   scrub(event as Record<string, unknown>, 0, new WeakSet());
   return event;
 }
+
+
+/**
+ * A key is typed into the safe form of Keys for Apps (game #2044) and posted to /api/me/apps/key-forms/:id/key. The key is only ever the
+ * body of that request, so an error report about it is sent without the body, the cookies and the headers, whatever the SDK captured.
+ */
+const KEY_ROUTE = /\/api\/me\/apps\/key-forms\/[^/?#]+\/key/;
+
+export function scrubKeyRequest<E extends object>(event: E): E {
+  const request = (event as { request?: { url?: string; data?: unknown; cookies?: unknown; headers?: unknown; query_string?: unknown } }).request;
+  const holdsKeyRoute = (value: unknown) => typeof value === 'string' && KEY_ROUTE.test(value);
+  const contexts = (event as { contexts?: { nextjs?: { request_path?: unknown } } }).contexts;
+  if (request && (holdsKeyRoute(request.url) || holdsKeyRoute(contexts?.nextjs?.request_path))) {
+    delete request.data;
+    delete request.cookies;
+    delete request.headers;
+    delete request.query_string;
+  }
+  // The breadcrumbs the SDK keeps of a failed fetch carry its request body too
+  const breadcrumbs = (event as { breadcrumbs?: { data?: { url?: unknown; request_body?: unknown } }[] }).breadcrumbs;
+  if (Array.isArray(breadcrumbs)) for (const crumb of breadcrumbs) if (crumb?.data && holdsKeyRoute(crumb.data.url)) delete crumb.data.request_body;
+  return event;
+}

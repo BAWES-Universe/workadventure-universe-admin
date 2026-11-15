@@ -16,33 +16,36 @@ jest.mock('@/lib/db', () => {
     jest.fn(async () => {
       throw new Error(`A Brick's rules must not read ${what}`);
     });
-  return {
-    prisma: {
-      bot: {
-        findUnique: jest.fn(async ({ where }: { where: { id: string } }) => (state.bot && state.bot.id === where.id ? { ...state.bot, room: null, privateBot: false, refusalReply: null, accessRules: [] } : null)),
-        create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
-          state.created.push(data);
-          return { id: 'new-brick', roomId: null, ...data };
-        }),
-      },
-      user: {
-        findFirst: jest.fn(async ({ where }: { where: { OR: { uuid?: string; email?: string }[] } }) =>
-          state.users.find((user) => where.OR.some((cond) => cond.uuid === user.uuid || (!!cond.email && cond.email === user.email))) ?? null,
-        ),
-        findMany: jest.fn(async ({ where }: { where: { matrixChatId: string } }) => state.users.filter((user) => user.matrixChatId === where.matrixChatId)),
-      },
-      // Nobody's Brick is visiting anywhere in these tests: another person is refused, as before visits (game #2005)
-      brickVisit: { findUnique: jest.fn(async () => null) },
-      brickHome: { findUnique: jest.fn(async () => null) },
-      room: { findUnique: noRoomReads('a room') },
-      aiKeyLend: { findUnique: noRoomReads('a lend') },
-      ban: { findFirst: noRoomReads('a ban') },
-      worldMember: { findFirst: noRoomReads('a world membership') },
-      universeMember: { findUnique: noRoomReads('a universe membership') },
-      role: { findUnique: noRoomReads('a role'), findMany: noRoomReads('roles') },
-      botAccessRule: { findMany: noRoomReads('bot rules') },
+  const prisma: Record<string, unknown> = {
+    // A Brick starts with every key app its owner has (game #2044): none here
+    appConnection: { findMany: jest.fn(async () => []) },
+    bot: {
+      findUnique: jest.fn(async ({ where }: { where: { id: string } }) => (state.bot && state.bot.id === where.id ? { ...state.bot, room: null, privateBot: false, refusalReply: null, accessRules: [] } : null)),
+      create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
+        state.created.push(data);
+        return { id: 'new-brick', roomId: null, ...data };
+      }),
     },
+    user: {
+      findFirst: jest.fn(async ({ where }: { where: { OR: { uuid?: string; email?: string }[] } }) =>
+        state.users.find((user) => where.OR.some((cond) => cond.uuid === user.uuid || (!!cond.email && cond.email === user.email))) ?? null,
+      ),
+      findMany: jest.fn(async ({ where }: { where: { matrixChatId: string } }) => state.users.filter((user) => user.matrixChatId === where.matrixChatId)),
+    },
+    // Nobody's Brick is visiting anywhere in these tests: another person is refused, as before visits (game #2005)
+    brickVisit: { findUnique: jest.fn(async () => null) },
+    brickHome: { findUnique: jest.fn(async () => null) },
+    room: { findUnique: noRoomReads('a room') },
+    aiKeyLend: { findUnique: noRoomReads('a lend') },
+    ban: { findFirst: noRoomReads('a ban') },
+    worldMember: { findFirst: noRoomReads('a world membership') },
+    universeMember: { findUnique: noRoomReads('a universe membership') },
+    role: { findUnique: noRoomReads('a role'), findMany: noRoomReads('roles') },
+    botAccessRule: { findMany: noRoomReads('bot rules') },
   };
+  // A Brick and its starting access are written in one transaction: here the same stand-in, handed over as a separate object like a real one
+  prisma.$transaction = jest.fn(async (work: (tx: unknown) => unknown) => work({ ...prisma }));
+  return { prisma };
 });
 
 import { prisma } from '@/lib/db';
