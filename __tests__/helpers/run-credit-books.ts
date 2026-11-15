@@ -41,7 +41,7 @@ async function main() {
       await fn();
       return null;
     } catch (error) {
-      return { code: error instanceof values.CreditRefused ? error.code : undefined, error };
+      return { code: values.isCreditRefused(error) ? error.code : undefined, error };
     }
   };
   const setMeter = (value: Record<string, unknown>) => prisma.appSetting.upsert({ where: { key: 'meter' }, create: { key: 'meter', value: value as never }, update: { value: value as never } });

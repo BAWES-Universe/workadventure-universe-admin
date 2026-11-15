@@ -28,7 +28,9 @@ describe('the funding books on a real database', () => {
   });
 
   it('passes every check', () => {
-    const failed = report.checks.filter((check) => !check.ok).map((check) => `${check.name}: ${JSON.stringify(check.detail)?.slice(0, 400)}`);
-    expect(failed).toEqual([]);
+    const failed = report.checks.filter((check) => !check.ok);
+    // Names first and short: CI shows only the tail of the log, so the first failure's detail comes last
+    const message = failed.length === 0 ? '' : `${failed.length} checks failed:\n${failed.slice(0, 15).map((check) => `- ${check.name.slice(0, 110)}`).join('\n')}\nfirst: ${JSON.stringify(failed[0].detail)?.slice(0, 500)}`;
+    expect(message).toBe('');
   });
 });

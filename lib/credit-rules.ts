@@ -4,6 +4,7 @@ import { getMeterSettings } from '@/lib/meter';
 import { envelopeIn } from '@/lib/meter-allowance';
 import {
   CreditRefused,
+  isCreditRefused,
   findClashes,
   isCategory,
   isMoneyCategory,
@@ -647,7 +648,7 @@ export async function previewGrant(kind: ProgramKind, input: GrantInput, now: Da
       ids = await snapshotIds(tx, checked.recipient);
     } catch (error) {
       // A preview of an empty universe says so rather than failing: the screen shows "nobody yet"
-      if (!(error instanceof CreditRefused && error.message.startsWith('Nobody has joined'))) throw error;
+      if (!(isCreditRefused(error) && error.message.startsWith('Nobody has joined'))) throw error;
     }
     return previewIn(tx, checked, ids, now);
   });

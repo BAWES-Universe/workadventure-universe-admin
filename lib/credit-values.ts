@@ -94,8 +94,12 @@ export class CreditRefused extends Error {
     readonly code: string = 'refused',
   ) {
     super(message);
+    this.name = 'CreditRefused';
   }
 }
+
+/** A refusal from these rules, by what it says it is: two copies of this module (a test runner loads one per path) still agree. */
+export const isCreditRefused = (error: unknown): error is CreditRefused => error instanceof CreditRefused || (error instanceof Error && error.name === 'CreditRefused' && typeof (error as { code?: unknown }).code === 'string');
 
 const isDate = (value: unknown): value is Date => value instanceof Date && !Number.isNaN(value.getTime());
 
