@@ -445,6 +445,26 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
     });
 
+    it('a second ask for a run, made while the first is being refused by a rule, gets the same rule words: never "started" and never "controls not set up"', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 10_000 });
+      const item = await prisma.brickItem.create({ data: { ownerId: sara.id, botId: sara.brickId, kind: 'goal', words: 'Make the report', outcome: 'Done', cadence: { type: 'none' }, timeZone: 'Asia/Kuwait' } as never });
+      // The job the first ask has just stopped for the rule, not yet taken away
+      const run = await prisma.brickItemRun.create({ data: { itemId: item.id, dueAt: NOW, revision: 1, leaseUntil: new Date(NOW.getTime() + 600_000) } });
+      await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Report', status: 'stopped', endedBy: 'rule', endedAt: NOW, runId: run.id } });
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'Report', runId: run.id }, NOW)).toEqual({ ok: false, reason: 'rule', words: expect.stringContaining('No more than $0.01 a month') });
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
+      // Then the real thing, many times: two asks at once for one run are both the rule's refusal, whichever got there first
+      for (let round = 0; round < 15; round++) {
+        const again = await prisma.brickItemRun.create({ data: { itemId: item.id, dueAt: new Date(NOW.getTime() + (round + 1) * 60_000), revision: round + 2, leaseUntil: new Date(NOW.getTime() + 600_000) } });
+        const ask = () => startJob({ botId: sara.brickId, personId: sara.id, title: 'Report', runId: again.id }, NOW);
+        const answers = await Promise.all([ask(), ask(), ask()]);
+        for (const answer of answers) expect(answer).toEqual({ ok: false, reason: 'rule', words: expect.stringContaining('No more than $0.01 a month') });
+      }
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
+    });
+
     it('through the route: what is left is above the first millionth but under a stretch of room, so the pre-check passes and the start itself is refused, still with the rule’s words', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
