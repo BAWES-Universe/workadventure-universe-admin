@@ -583,6 +583,23 @@ run('the bounded Instant executor, in a real database', () => {
       expect(held.every((n) => n === 0)).toBe(true);
     });
 
+    it('a log line with a status nobody can read is looked at again until the wait is over, then ends like no log: the hold goes back and exposure is closed', async () => {
+      await setLimits({ unclearWaitMinutes: 30 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'timeout', status: null });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const row = await runOf(await runIdOf(id));
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'unknown', null, 'log-odd')]);
+      await reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 10 * MIN) });
+      expect((await runOf(row.id)).state).toBe('ambiguous');
+      expect(f.left()).toBeLessThan(1_000_000);
+      await reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 40 * MIN) });
+      expect(await runOf(row.id)).toMatchObject({ state: 'failed', reason: 'unclear', customerState: 'released', providerState: 'settled', providerBasis: 'estimated', providerLogId: 'log-odd' });
+      expect(f.left()).toBe(1_000_000);
+    });
+
     it('no log yet is not a decision: the run stays unclear and the hold stays until the wait is over', async () => {
       await setLimits({ unclearWaitMinutes: 30 });
       const p = fakeProvider();

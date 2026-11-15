@@ -570,15 +570,17 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
         if (line.chargeMicros !== null) await settleProvider({ ...run, state: 'failed' }, tx, line.chargeMicros, 'measured', now);
         return;
       }
-      if (line) return; // a line with no readable status: still being looked at
+      // A line with no readable status (or no line at all) is not an answer: it is looked at again until the wait is over, and then it
+      // ends like a run nobody can vouch for. It never stays open for good, holding the person's credit and our exposure.
       if (now < deadline) {
         // Not found yet: Composio's log can lag. A run that was only "sent" is now treated as unclear, and looked up again.
         if (run.state === 'sent') await tx.instantRun.update({ where: { id: run.id }, data: { state: 'ambiguous', reason: 'unclear' } });
         return;
       }
-      // No log of it by the end of the wait: nothing is known to have run. The person has nothing, so the hold goes back.
+      // Nothing readable of it by the end of the wait: nothing is known to have worked. The person is not charged for what nobody can
+      // vouch for, so the hold goes back, and our own exposure is closed at the top price as an estimate until the monthly check.
       await releaseCustomer(run, tx, ctx);
-      await tx.instantRun.update({ where: { id: run.id }, data: { state: 'failed', reason: 'unclear', finishedAt: now, detail: { noLog: true } } });
+      await tx.instantRun.update({ where: { id: run.id }, data: { state: 'failed', reason: 'unclear', finishedAt: now, providerLogId: line?.id ?? run.providerLogId, detail: line ? { unreadableLog: true } : { noLog: true } } });
       await settleProvider({ ...run, state: 'failed' }, tx, topMicros, 'estimated', now);
       return;
     }
