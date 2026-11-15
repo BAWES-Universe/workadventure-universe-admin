@@ -726,6 +726,15 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(second?.lines).toEqual([]);
     });
 
+    it('a job a rule refused before it ever ran is not an Activity line, and one that ran and was stopped by a rule is', async () => {
+      const sara = await person('sara');
+      await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Never ran', status: 'stopped', endedBy: 'rule', endedAt: NOW } });
+      await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Ran then stopped', status: 'stopped', endedBy: 'rule', startedAt: NOW, endedAt: new Date(NOW.getTime() + 1000) } });
+      // Jobs with nothing said about how they ended are listed as before (a missing value is not "not a rule")
+      await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Plain done', status: 'done', endedAt: new Date(NOW.getTime() + 2000) } });
+      expect((await activityFor(sara.id)).map((item) => item.title)).toEqual(['Plain done', 'Ran then stopped']);
+    });
+
     it('closing says what happened and then stays: done and refunded do not change, checking can still become either', async () => {
       const sara = await person('sara');
       await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'vid', title: 'Welcome video', category: 'apps' }, NOW);

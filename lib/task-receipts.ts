@@ -216,7 +216,8 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
 export async function activityFor(personId: string, limit: number = ACTIVITY_LISTED): Promise<ActivityItem[]> {
   const [rows, jobs] = await Promise.all([
     prisma.taskReceipt.findMany({ where: { personId, state: { not: 'running' } }, orderBy: [{ startedAt: 'desc' }, { id: 'desc' }], take: limit }),
-    prisma.computerJob.findMany({ where: { personId, status: { in: ['done', 'stopped', 'failed'] }, endedAt: { not: null } }, orderBy: [{ endedAt: 'desc' }, { id: 'desc' }], take: limit }),
+    // A job a rule the person said refused before it ever ran took nothing and did nothing: it is not a task they had, so it is not listed
+    prisma.computerJob.findMany({ where: { personId, status: { in: ['done', 'stopped', 'failed'] }, endedAt: { not: null }, OR: [{ endedBy: null }, { endedBy: { not: 'rule' } }, { startedAt: { not: null } }] }, orderBy: [{ endedAt: 'desc' }, { id: 'desc' }], take: limit }),
   ]);
   const headers = rows.map(headerOfRow);
   // A computer's job with a receipt of its own is that receipt: shown once
