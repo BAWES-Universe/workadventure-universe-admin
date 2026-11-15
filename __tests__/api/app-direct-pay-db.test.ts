@@ -35,7 +35,7 @@ import { disconnect } from '@/lib/app-connections';
 import { definitionSchema, hashDefinition } from '@/lib/app-direct/definition';
 import { openKeyForm, submitKey } from '@/lib/app-direct/connect';
 import { getBrickLimits, saveServerLimits } from '@/lib/bot-limits';
-import { orderForArtifact, startCheckout, verifyOrder } from '@/lib/app-direct/pay';
+import { isWaiting, orderForArtifact, startCheckout, verifyOrder } from '@/lib/app-direct/pay';
 import { POST as makeJob } from '@/app/api/bots/[id]/key-apps/[serverId]/page-jobs/route';
 import { GET as listPages } from '@/app/api/me/apps/pages/route';
 import { DELETE as stopPage } from '@/app/api/me/apps/pages/[jobId]/route';
@@ -517,6 +517,27 @@ run('payments for pages, in a real database', () => {
       gateway({ record: (order) => paidRecord(order) });
       await prisma.appPageOrder.update({ where: { id: late.orderId }, data: { createdAt: new Date(Date.now() - 2 * 3_600_000) } });
       expect(await settle(late.orderId)).toMatchObject({ status: 'paid' });
+    });
+
+    it('closes an order whose look keeps failing once it has been open too long, so the buyer stops waiting, and still finds a late payment', async () => {
+      await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
+      const { artifactId } = await pending();
+      gateway({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
+      const stuck = await checkout(artifactId, '198.51.100.30');
+      // The service now refuses every look (a charge it no longer knows): within the open time this is only "asked again"
+      mockSend.current = () => ({ status: 404, body: { error: 'not found' } });
+      const waiting = await settle(stuck.orderId);
+      expect(waiting).toMatchObject({ status: 'checking' });
+      expect(isWaiting(waiting as never)).toBe(true);
+      // Past the open time it ends, however the service answers: no look waits for ever
+      await prisma.appPageOrder.update({ where: { id: stuck.orderId }, data: { createdAt: new Date(Date.now() - 2 * 3_600_000) } });
+      const ended = await settle(stuck.orderId);
+      expect(ended).toMatchObject({ status: 'not_paid' });
+      expect(isWaiting(ended as never)).toBe(false);
+      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: stuck.orderId } })).closedAt).not.toBeNull();
+      // Closed is not final: a payment that turns out to be real is still counted
+      gateway({ record: (order) => paidRecord(order) });
+      expect(await settle(stuck.orderId)).toMatchObject({ status: 'paid' });
     });
 
     describe('a payment that completes after the order was closed as not paid', () => {

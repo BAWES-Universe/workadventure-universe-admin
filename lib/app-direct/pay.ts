@@ -469,32 +469,42 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
     })
     .catch(() => false);
   if (!budget) return later(view(order.status));
+  // A look the service never answered in a way we can read (an error, a refusal, an answer with no state) is asked again, as before. But an
+  // order that has been open longer than its time allows, and still cannot be read, is closed like any other that ran out of time: the buyer's
+  // page stops waiting, and a payment that turns out to be real is still found by the later looks (a closed order is asked about for a while).
+  const unreadable = async (): Promise<OrderView> => {
+    if (!wasClosed && now.getTime() - order.createdAt.getTime() > limits.checkoutOpenHours * HOUR) {
+      const closed = await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'pending' }, data: { status: 'not_paid', closedAt: now } });
+      if (closed.count === 1) return view('not_paid');
+    }
+    return later(view(order.status));
+  };
   const startedAt = new Date();
   let answer;
   try {
     const built = buildRequest(definition, lookup.operation, { [lookup.idParam]: order.providerRef }, key);
     answer = await guardedRequest({ ...built, timeoutMs: limits.keyCallSeconds * 1000, maxBytes: limits.keyAnswerKb * 1024 }, deps);
   } catch (error) {
-    if (error instanceof RequestError || error instanceof GuardError) return later(view(order.status));
+    if (error instanceof RequestError || error instanceof GuardError) return unreadable();
     throw error;
   }
   if (answer.status === 401 || answer.status === 403) {
     await reportConnectionSignIn(connection.id, { state: 'expired', status: answer.status }, startedAt).catch(() => undefined);
-    return later(view(order.status));
+    return unreadable();
   }
-  if (answer.redirected || answer.truncated || answer.status < 200 || answer.status >= 300) return later(view(order.status));
+  if (answer.redirected || answer.truncated || answer.status < 200 || answer.status >= 300) return unreadable();
   await reportKeyWorked(connection.id, connection.keyVersion).catch(() => undefined);
   let record: unknown;
   try {
     const asked = definition.operations.find((candidate) => candidate.id === lookup.operation);
     record = pickFields(JSON.parse(answer.body), asked?.returns ?? []);
   } catch {
-    return later(view(order.status));
+    return unreadable();
   }
 
   const status = valueAt(record, lookup.statusPath);
   // An answer that names no state at all is not an answer: asked again, never read as "still open" and left
-  if (typeof status !== 'string' || !status) return later(view(order.status));
+  if (typeof status !== 'string' || !status) return unreadable();
   const expired = now.getTime() - order.createdAt.getTime() > limits.checkoutOpenHours * HOUR;
   if (typeof status === 'string' && lookup.successStates.includes(status)) {
     const amount = valueAt(record, lookup.amountPath);
