@@ -817,21 +817,76 @@ run('payments for pages, in a real database', () => {
       }
     });
 
-    it('fits the owner’s words to the description field of the service instead of failing the checkout', async () => {
-      const { id: connectionId, serverId } = await connectGateway();
-      const artifactId = await makeArtifact();
-      expect((await job(serverId, artifactId, { description: 'A mug with a very long name' })).status).toBe(200);
-      // A service whose description field is short
-      const before = await prisma.appConnection.findUniqueOrThrow({ where: { id: connectionId } });
-      const definition = JSON.parse(JSON.stringify(before.definition)) as { operations: { id: string; params: { name: string; maxLength?: number }[] }[] };
-      definition.operations.find((operation) => operation.id === 'makePaymentLink')!.params.find((param) => param.name === 'description')!.maxLength = 5;
-      const hash = hashDefinition(definitionSchema.parse(definition));
-      await prisma.appConnection.update({ where: { id: connectionId }, data: { definition: definition as never, definitionHash: hash } });
-      await prisma.appPageJob.update({ where: { artifactId }, data: { definitionHash: hash } });
-      const sent = gateway();
-      const { orderId } = await checkout(artifactId, '198.51.100.59');
-      expect(orderId).toBeTruthy();
-      expect(JSON.parse(sent.find((entry) => entry.method === 'POST')!.body ?? '{}')).toMatchObject({ description: 'A mug' });
+    describe('the owner’s words in the service’s description field', () => {
+      type Op = { id: string; params: { name: string; type: string; maxLength?: number; oneOf?: string[] }[]; body?: Record<string, unknown> };
+      /** Starts a checkout on a service whose create operation was changed by `change`, and answers what was sent to it. */
+      async function sentWith(description: string, change: (operation: Op) => void, address: string): Promise<Record<string, unknown>> {
+        const { id: connectionId, serverId } = await connectGateway();
+        const artifactId = await makeArtifact();
+        expect((await job(serverId, artifactId, { description })).status).toBe(200);
+        const before = await prisma.appConnection.findUniqueOrThrow({ where: { id: connectionId } });
+        const definition = JSON.parse(JSON.stringify(before.definition)) as { operations: Op[] };
+        change(definition.operations.find((operation) => operation.id === 'makePaymentLink')!);
+        const hash = hashDefinition(definitionSchema.parse(definition));
+        await prisma.appConnection.update({ where: { id: connectionId }, data: { definition: definition as never, definitionHash: hash } });
+        await prisma.appPageJob.update({ where: { artifactId }, data: { definitionHash: hash } });
+        const sent = gateway();
+        await checkout(artifactId, address);
+        return JSON.parse(sent.find((entry) => entry.method === 'POST')!.body ?? '{}');
+      }
+      const limit = (maxLength: number) => (operation: Op) => {
+        operation.params.find((param) => param.name === 'description')!.maxLength = maxLength;
+      };
+
+      it('cuts words longer than the limit, and leaves words of exactly the limit alone', async () => {
+        expect(await sentWith('A mug with a very long name', limit(5), '198.51.100.60')).toMatchObject({ description: 'A mug' });
+        expect(await sentWith('A mug', limit(5), '198.51.100.61')).toMatchObject({ description: 'A mug' });
+      });
+
+      it('never cuts in the middle of a character, and never goes over the limit', async () => {
+        // Each of these is two units long: a limit of 5 holds two of them, not two and half
+        const body = await sentWith('😀😀😀😀', limit(5), '198.51.100.62');
+        expect(body.description).toBe('😀😀');
+      });
+
+      it('trims the words, and leaves them out when nothing is left', async () => {
+        expect(await sentWith('   A mug   ', limit(50), '198.51.100.63')).toMatchObject({ description: 'A mug' });
+        const empty = await sentWith('   ', limit(50), '198.51.100.64');
+        expect(empty).not.toHaveProperty('description');
+      });
+
+      it('leaves them out for a field that is not text or only takes set values', async () => {
+        const numeric = await sentWith(
+          'A mug',
+          (operation) => {
+            operation.params.find((param) => param.name === 'description')!.type = 'number';
+            delete (operation.params.find((param) => param.name === 'description') as { maxLength?: number }).maxLength;
+          },
+          '198.51.100.65',
+        );
+        expect(numeric).not.toHaveProperty('description');
+        const fixed = await sentWith(
+          'A mug',
+          (operation) => {
+            operation.params.find((param) => param.name === 'description')!.oneOf = ['Gift', 'Order'];
+          },
+          '198.51.100.66',
+        );
+        expect(fixed).not.toHaveProperty('description');
+      });
+
+      it('leaves them out when the service has no description field', async () => {
+        const body = await sentWith(
+          'A mug',
+          (operation) => {
+            operation.params = operation.params.filter((param) => param.name !== 'description');
+            const template = operation.body as Record<string, unknown>;
+            delete template.description;
+          },
+          '198.51.100.67',
+        );
+        expect(body).not.toHaveProperty('description');
+      });
     });
 
     it('counts a look at a payment against what everyone may send an hour, and waits when that is spent', async () => {

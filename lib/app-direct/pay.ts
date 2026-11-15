@@ -103,6 +103,19 @@ export type CreateJobOutcome =
   | { status: 'no_payments' }
   | { status: 'bad_terms'; message: string };
 
+/**
+ * Trims, then cuts to at most `max` in length as the argument check counts it (UTF-16 units), but only between whole characters, so an
+ * emoji is never split and never pushed over the limit. Nothing left means null.
+ */
+export function fitWords(text: string, max: number): string | null {
+  let kept = '';
+  for (const character of text.trim()) {
+    if (kept.length + character.length > max) break;
+    kept += character;
+  }
+  return kept.trim() || null;
+}
+
 export interface CreateJob {
   botId: string;
   serverId: string;
@@ -136,7 +149,7 @@ export async function createPageJob(input: CreateJob): Promise<CreateJobOutcome>
   if (currencyExponent(currency) === null) return { status: 'bad_terms', message: 'That currency is not supported for payments yet' };
   const amountMinor = amountToMinor(input.amount, currency);
   if (amountMinor === null) return { status: 'bad_terms', message: 'The amount must be more than zero, with no more decimals than the currency has' };
-  const description = input.description ? input.description.replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 200) || null : null;
+  const description = input.description ? fitWords(input.description.replace(/[\u0000-\u001f\u007f]/g, ' '), 200) : null;
   const data = { ownerId: connection.ownerId, connectionId: connection.id, definitionHash: connection.definitionHash as string, artifactVersion: artifact.latestVersion, amountMinor, currency, description, madeByBot: row.bot.name.slice(0, 255), status: 'active', stoppedAt: null };
   const existing = await prisma.appPageJob.findUnique({ where: { artifactId: artifact.id }, select: { id: true } });
   const job = await prisma.appPageJob.upsert({ where: { artifactId: artifact.id }, create: { artifactId: artifact.id, ...data }, update: data });
@@ -269,10 +282,14 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
   };
   // The service insists on a customer: a plain placeholder, never the buyer's name, which nobody gave us
   if (create.customerName) args[create.customerName] = 'Customer';
-  // The owner's words go in only as the service's own description field allows: a short limit cuts them, a field that is not plain text
-  // or only takes set values is left out, so a service's own limits never end a checkout
+  // The owner's words go in only as the service's own description field allows: a string, trimmed, cut to its maxLength in whole
+  // characters (never in the middle of one). A field that is not plain text or only takes set values, or words that are empty, are left
+  // out, so a service's own limits never end a checkout.
   const wording = operation.params.find((param) => param.name === 'description');
-  if (job.description && wording && wording.type === 'string' && !wording.oneOf) args.description = wording.maxLength ? job.description.slice(0, wording.maxLength) : job.description;
+  if (wording && wording.type === 'string' && !wording.oneOf && typeof job.description === 'string') {
+    const fitted = fitWords(job.description, wording.maxLength ?? 500);
+    if (fitted) args.description = fitted;
+  }
 
   const startedAt = new Date();
   let answer;
