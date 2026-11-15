@@ -210,7 +210,9 @@ async function* scanAppSteps(from: Date, to: Date): AsyncGenerator<ScannedEvent>
       ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       select: { id: true, occurredAt: true, costMicros: true, detail: true },
     });
-    for (const row of rows) yield readEvent(row);
+    // A run on Universe's own version (detail.provider = universe, spec "Paying for Apps" section 21) is not Composio's: it takes none of
+    // Composio's free calls, is not priced at Composio's rates, and never shows as a gap against Composio's own numbers
+    for (const row of rows) if (!(isRecord(row.detail) && row.detail.provider === 'universe')) yield readEvent(row);
     if (rows.length < BATCH) return;
     cursor = rows[rows.length - 1].id;
   }
