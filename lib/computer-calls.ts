@@ -33,7 +33,9 @@ export type Authorized =
   /** The person's own computer allowance is used up: "Ask for more". */
   | { ok: false; reason: 'allowance' }
   /** Our pool, or the controls, have no room: nothing the person can ask for. */
-  | { ok: false; reason: 'pool' };
+  | { ok: false; reason: 'pool' }
+  /** A rule the person said in chat does not let this call take that much: the rule's own words, and nothing to ask more credit for. */
+  | { ok: false; reason: 'rule'; ruleId: string; why: 'own_accounts' | 'cap'; leftMicros: number | null; words: string };
 
 export async function authorizeModelCall(
   input: { token: string; callId: string; estimateMicros: number; payer: 'universe' | 'own-key' },
@@ -60,6 +62,7 @@ export async function authorizeModelCall(
     return { ok: true, ...base, reservedMicros: room.reservation.amountMicros };
   }
   if (room.reason === 'allowance') return { ok: false, reason: 'allowance' };
+  if (room.reason === 'rule') return { ok: false, reason: 'rule', ruleId: room.ruleId, why: room.why, leftMicros: room.leftMicros, words: room.words };
   // Asked again for a call whose room was settled or lapsed: the first try is the call, and a second one is not another
   if (room.reason === 'closed' || room.reason === 'key_reused') return { ok: false, reason: 'refused' };
   return { ok: false, reason: 'pool' };

@@ -1,5 +1,6 @@
 import { classifyCharge } from '@/lib/credit-values';
 import { holdCredit, refundHold, releaseHold, settleHold, type GiveBackLimits } from '@/lib/credit-spend';
+import { checkSpend } from '@/lib/spend-rules';
 
 /**
  * What the Instant executor (O2) needs from the funding books, as one small contract. Amounts are whole micros of a dollar and every call
@@ -17,7 +18,11 @@ export interface InstantReserve {
   charge: { class: 'instant'; route: string; provider: string; priceVersion?: string | null };
 }
 
-export type InstantReserved = { ok: true; created: boolean } | { ok: false; reason: 'credit_used_up' | 'not_set' | 'unavailable' };
+export type InstantReserved =
+  | { ok: true; created: boolean }
+  | { ok: false; reason: 'credit_used_up' | 'not_set' | 'unavailable' }
+  /** A rule the person said in chat ("no more than $1 a month", "only my own accounts") does not let this step take that much: the rule's own words, and nothing to ask more credit for. */
+  | { ok: false; reason: 'rule'; ruleId: string; why: 'own_accounts' | 'cap'; leftMicros: number | null; words: string };
 
 export interface InstantFunds {
   reserve(input: InstantReserve): Promise<InstantReserved>;
@@ -45,8 +50,15 @@ export function createInstantFunds(clock: () => Date = () => new Date()): Instan
           provider: input.charge.provider,
           priceVersion: input.charge.priceVersion ?? null,
           jobKey: input.runId ?? null,
+          // What the person said in chat is checked inside the hold's own transaction, under the person's lock, before any credit is held:
+          // two steps asked at the same moment cannot both pass a cap that only has room for one
+          guard: async (tx) => {
+            const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.runId ?? null, chargeClass: 'apps', amountMicros: input.amountMicros }, clock(), tx);
+            return ruled.ok ? null : { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
+          },
         }, clock());
         if (held.ok) return { ok: true, created: held.created };
+        if (held.reason === 'rule') return held;
         return { ok: false, reason: held.reason === 'credit_used_up' || held.reason === 'not_set' ? held.reason : 'unavailable' };
       } catch (error) {
         console.error('[Funding] Could not hold Instant credit:', error instanceof Error ? error.message : 'unknown');

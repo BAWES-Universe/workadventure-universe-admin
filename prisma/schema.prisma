@@ -1897,6 +1897,84 @@ model MeterRequest {
   @@map("meter_requests")
 }
 
+// A rule a person said in chat, held by the server (paying spec 3, part O4): "only use my accounts", "no more than $1 a month for
+// this Brick". It has a scope (one task, one bot, everything the person pays for), a period for a cap, and what it is about
+// (Instant Apps credit, computer credit or both). Only what the rule means is kept, never the words that were said. One row
+// per rule, made once under its key, so the same chat message saved twice is one rule. No foreign keys on purpose, like the books.
+model SpendRule {
+  id              String    @id @default(uuid())
+  // The chat message it came from (bot, message), so a retry finds the rule it made; a rule made on a page has its own
+  ruleKey         String    @unique @map("rule_key") @db.VarChar(255)
+  // Whose credit or accounts it protects: the person who pays
+  ownerPersonId   String    @map("owner_person_id")
+  // task, bot or person
+  scope           String    @db.VarChar(6)
+  botId           String?   @map("bot_id")
+  taskKey         String?   @map("task_key") @db.VarChar(255)
+  // task, day or month; empty when there is no cap
+  period          String?   @db.VarChar(5)
+  // Millionths of a dollar. Empty when the rule has no cap; 0 is a real zero
+  capMicros       BigInt?   @map("cap_micros")
+  onlyOwnAccounts Boolean   @default(false) @map("only_own_accounts")
+  // apps, computer or all
+  covers          String    @default("all") @db.VarChar(8)
+  // The plain sentence shown back to the person
+  words           String    @db.VarChar(300)
+  version         Int       @default(1)
+  // active or ended
+  state           String    @default("active") @db.VarChar(6)
+  createdById     String    @map("created_by_id")
+  // chat or page
+  via             String    @default("chat") @db.VarChar(5)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at")
+  endedAt         DateTime? @map("ended_at")
+  endedById       String?   @map("ended_by_id")
+
+  @@index([ownerPersonId, state])
+  @@index([botId, state])
+  @@map("spend_rules")
+}
+
+// One receipt per task, for the Activity list on Usage (paying spec 3, part O4): what a task was called, who asked, who paid, what it
+// was held up to and what was really taken. What it used is read from the meter's books (events under the task's key or its run),
+// never copied here, so a receipt can only say what was recorded. A computer's job has a receipt without a row here until
+// somebody opens one (see lib/task-receipts.ts). No foreign keys on purpose, like the books.
+model TaskReceipt {
+  id            String    @id @default(uuid())
+  botId         String    @map("bot_id")
+  // Who asked
+  personId      String    @map("person_id")
+  // The task: a computer job id, or the id the bot server gives an Instant task. One receipt per bot and task.
+  taskKey       String    @map("task_key") @db.VarChar(255)
+  // The run of a goal or task that made it, when it came from one: model calls the run made are read by it
+  runId         String?   @map("run_id") @db.VarChar(255)
+  // Short, written by the Brick; shown only to the person who asked
+  title         String    @db.VarChar(120)
+  // apps or computer; empty when nothing is charged to credit
+  category      String?   @db.VarChar(8)
+  // running, done, refunded or checking
+  state         String    @default("running") @db.VarChar(10)
+  // The most it could take while it ran ("up to $1.20"), and what it really took from credit
+  boundMicros   BigInt?   @map("bound_micros")
+  chargedMicros BigInt?   @map("charged_micros")
+  // Who paid, as it stood when the task began: person, platform or sponsor
+  payerKind     String    @map("payer_kind") @db.VarChar(8)
+  payerPersonId String?   @map("payer_person_id")
+  // The sponsor's name when a universe pays
+  payerName     String?   @map("payer_name") @db.VarChar(100)
+  // When the person tapped "Didn't work?"; one tap is one report
+  problemAt     DateTime? @map("problem_at")
+  startedAt     DateTime  @default(now()) @map("started_at")
+  endedAt       DateTime? @map("ended_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([botId, taskKey])
+  @@index([personId, startedAt])
+  @@map("task_receipts")
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Funding books (paying spec v3, section 16, O1). Who pays, what a grant is, the credit it issues, and what is taken from it.
 // Customer credit is kept apart from what a provider bills us: the provider's side stays in meter_events and the envelope

@@ -18,7 +18,7 @@ const bodySchema = z
 /**
  * POST /api/computer/llm/authorize { token, callId, estimateMicros, payer } - before a model call a Brick's computer makes: the
  * computer's key is checked against Orbit's records and room for this one call is reserved from the person's computer allowance.
- * Answers { ok: true, jobId, botId, reservedMicros } or { ok: false, reason: refused | allowance | pool }: nothing is sent to an AI
+ * Answers { ok: true, jobId, botId, reservedMicros } or { ok: false, reason: refused | allowance | pool | rule }: nothing is sent to an AI
  * provider unless it says ok. Whose AI it runs on is the bot server's to say (it reads the Brick's own AI policy); Orbit records who
  * paid when the call is settled. Asked again with the same callId it is the same call. Auth: service token only (the computer never calls this).
  */
