@@ -204,6 +204,24 @@ export const definitionSchema = z
       const amountParam = made?.params.find((param) => param.name === create.amount);
       if (amountParam && amountParam.type !== 'number') ctx.addIssue({ code: 'custom', path: ['payment', 'create', 'amount'], message: `${create.amount} must be a number` });
       need(made, [create.amount, create.currency, create.orderRef, create.idempotentKey, create.returnUrl, create.notifyUrl, create.customerName], 'create');
+      // Everything else the checkout sends is text made by Orbit: its parameter must take text, no fixed set of values, and be long enough for it
+      // (an order id is 36 characters; the two addresses are the site's own address and a short path; the customer is a plain word)
+      const takesText = (name: string | undefined, shortest: number, what: string, fixedSetOk = false) => {
+        const param = name ? made?.params.find((candidate) => candidate.name === name) : undefined;
+        if (!name || !param) return;
+        if (param.type !== 'string') ctx.addIssue({ code: 'custom', path: ['payment', 'create', what], message: `${name} must be text` });
+        else if (param.oneOf && !fixedSetOk) ctx.addIssue({ code: 'custom', path: ['payment', 'create', what], message: `${name} cannot be limited to a fixed set of values` });
+        else if (!param.oneOf && (param.maxLength ?? 500) < shortest) ctx.addIssue({ code: 'custom', path: ['payment', 'create', what], message: `${name} must allow at least ${shortest} characters` });
+      };
+      takesText(create.orderRef, 36, 'orderRef');
+      takesText(create.idempotentKey, 36, 'idempotentKey');
+      takesText(create.returnUrl, 250, 'returnUrl');
+      takesText(create.notifyUrl, 250, 'notifyUrl');
+      takesText(create.customerName, 8, 'customerName');
+      // The currency may be limited to the ones the service takes: a page that asks for another one is refused when it is set up
+      takesText(create.currency, 3, 'currency', true);
+      const idParam = asked?.params.find((candidate) => candidate.name === lookup.idParam);
+      if (idParam && (idParam.type !== 'string' || idParam.oneOf)) ctx.addIssue({ code: 'custom', path: ['payment', 'lookup', 'idParam'], message: `${lookup.idParam} must be free text` });
       need(asked, [lookup.idParam], 'lookup');
       for (const path of [create.idPath, create.checkoutUrlPath]) if (made && !made.returns.includes(path)) ctx.addIssue({ code: 'custom', path: ['payment', 'create'], message: `${path} is not among what the operation returns` });
       for (const path of [lookup.statusPath, lookup.amountPath, lookup.currencyPath, lookup.orderPath, lookup.livePath]) if (path && asked && !asked.returns.includes(path)) ctx.addIssue({ code: 'custom', path: ['payment', 'lookup'], message: `${path} is not among what the look-up returns` });

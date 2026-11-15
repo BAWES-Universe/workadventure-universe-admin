@@ -140,6 +140,30 @@ describe('a definition is data with hard edges', () => {
     expect(JSON.stringify(result.success ? '' : result.error.issues)).toContain('must be a number');
   });
 
+  it('refuses a payment whose checkout fields could not take what the checkout sends', () => {
+    const base = JSON.parse(JSON.stringify(EXAMPLE_GATEWAY));
+    const change = (name: string, edit: (param: Record<string, unknown>) => void) => {
+      const copy = JSON.parse(JSON.stringify(base));
+      const made = copy.operations.find((operation: { id: string }) => operation.id === copy.payment.create.operation);
+      edit(made.params.find((param: { name: string }) => param.name === copy.payment.create[name]));
+      return definitionSchema.safeParse(copy);
+    };
+    const refused = (result: ReturnType<typeof definitionSchema.safeParse>) => JSON.stringify(result.success ? '' : result.error.issues);
+    // Numbers, fixed sets and short limits where the checkout sends an order id, an address or a name
+    expect(refused(change('orderRef', (param) => (param.type = 'number')))).toContain('orderRef must be text');
+    expect(refused(change('idempotentKey', (param) => (param.maxLength = 20)))).toContain('at least 36');
+    expect(refused(change('returnUrl', (param) => (param.maxLength = 100)))).toContain('at least 250');
+    expect(refused(change('notifyUrl', (param) => (param.oneOf = ['https://a.example']))).toString()).toContain('fixed set');
+    expect(refused(change('customerName', (param) => (param.maxLength = 3)))).toContain('at least 8');
+    // The currency may be limited to a set, but not made too short to hold a currency
+    expect(change('currency', (param) => { param.oneOf = ['KWD', 'USD']; delete param.maxLength; }).success).toBe(true);
+    expect(refused(change('currency', (param) => (param.maxLength = 2)))).toContain('at least 3');
+    // The look-up takes the service's own id as free text
+    const copy = JSON.parse(JSON.stringify(base));
+    copy.operations.find((operation: { id: string }) => operation.id === copy.payment.lookup.operation).params.find((param: { name: string }) => param.name === copy.payment.lookup.idParam).type = 'number';
+    expect(refused(definitionSchema.safeParse(copy))).toContain('must be free text');
+  });
+
   it('knows a site from a different one', () => {
     expect(siteOf('api.shiplink.com')).toBe('shiplink.com');
     expect(siteOf('shop.example.co.uk')).toBe('example.co.uk');

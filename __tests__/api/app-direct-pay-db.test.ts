@@ -915,6 +915,43 @@ run('payments for pages, in a real database', () => {
       }
     });
 
+    describe('what a service insists on is said when the page is set up', () => {
+      /** Changes the create operation of the connected service, and the job-making that follows sees the new definition. */
+      async function connectChanged(change: (operation: { params: { name: string; required?: boolean; oneOf?: string[] }[] }) => void) {
+        const { id: connectionId, serverId } = await connectGateway();
+        const before = await prisma.appConnection.findUniqueOrThrow({ where: { id: connectionId } });
+        const definition = JSON.parse(JSON.stringify(before.definition)) as { operations: { id: string; params: { name: string; required?: boolean; oneOf?: string[] }[] }[] };
+        change(definition.operations.find((operation) => operation.id === 'makePaymentLink')!);
+        const hash = hashDefinition(definitionSchema.parse(definition));
+        await prisma.appConnection.update({ where: { id: connectionId }, data: { definition: definition as never, definitionHash: hash } });
+        return serverId;
+      }
+
+      it('refuses a page with no description when the service insists on one, and accepts it with one', async () => {
+        const serverId = await connectChanged((operation) => {
+          operation.params.find((param) => param.name === 'description')!.required = true;
+        });
+        const artifactId = await makeArtifact();
+        const refused = await job(serverId, artifactId, { description: '' });
+        expect(refused.status).toBe(400);
+        expect(JSON.stringify(await refused.json())).toContain('description');
+        expect(await prisma.appPageJob.count({ where: { artifactId } })).toBe(0);
+        expect((await job(serverId, artifactId, { description: 'A mug' })).status).toBe(200);
+      });
+
+      it('refuses a currency the service does not take, and accepts one it does', async () => {
+        const serverId = await connectChanged((operation) => {
+          const field = operation.params.find((param) => param.name === 'currency')!;
+          field.oneOf = ['USD'];
+        });
+        const artifactId = await makeArtifact();
+        const refused = await job(serverId, artifactId, { currency: 'KWD' });
+        expect(refused.status).toBe(400);
+        expect(JSON.stringify(await refused.json())).toContain('USD');
+        expect((await job(serverId, artifactId, { currency: 'USD', amount: '4.50' })).status).toBe(200);
+      });
+    });
+
     describe('the owner’s words in the service’s description field', () => {
       type Op = { id: string; params: { name: string; type: string; maxLength?: number; oneOf?: string[] }[]; body?: Record<string, unknown> };
       /** Starts a checkout on a service whose create operation was changed by `change`, and answers what was sent to it. */

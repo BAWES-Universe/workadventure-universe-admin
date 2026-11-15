@@ -104,6 +104,17 @@ export type CreateJobOutcome =
   | { status: 'bad_terms'; message: string };
 
 /**
+ * What goes in the service's description field for the owner's words: only as the field allows (see `fitWords`). `required` says the
+ * service insists on one, and `value` is null when there is nothing that can be sent.
+ */
+export function wordsFor(operation: { params: { name: string; type: string; required: boolean; maxLength?: number; oneOf?: string[] }[] }, text: string | null | undefined): { required: boolean; value: string | null } {
+  const field = operation.params.find((param) => param.name === 'description');
+  if (!field) return { required: false, value: null };
+  if (field.type !== 'string' || field.oneOf || typeof text !== 'string') return { required: field.required, value: null };
+  return { required: field.required, value: fitWords(text, field.maxLength ?? 500) };
+}
+
+/**
  * Trims, then cuts to at most `max` in length as the argument check counts it (UTF-16 units), but only between whole characters, so an
  * emoji is never split and never pushed over the limit. Nothing left means null.
  */
@@ -150,6 +161,15 @@ export async function createPageJob(input: CreateJob): Promise<CreateJobOutcome>
   const amountMinor = amountToMinor(input.amount, currency);
   if (amountMinor === null) return { status: 'bad_terms', message: 'The amount must be more than zero, with no more decimals than the currency has' };
   const description = input.description ? fitWords(input.description.replace(/[\u0000-\u001f\u007f]/g, ' '), 200) : null;
+  // A service that insists on a description, or only takes some currencies, says so now, to the one setting this up, instead of every
+  // checkout failing later where nobody sees it
+  const made = definition.operations.find((candidate) => candidate.id === definition.payment?.create.operation);
+  if (made) {
+    const wording = wordsFor(made, description);
+    if (wording.required && !wording.value) return { status: 'bad_terms', message: 'This payment service needs a short description of what is being paid for' };
+    const currencyField = made.params.find((param) => param.name === definition.payment?.create.currency);
+    if (currencyField?.oneOf && !currencyField.oneOf.some((allowed) => allowed.toUpperCase() === currency)) return { status: 'bad_terms', message: `This payment service takes only ${currencyField.oneOf.join(', ')}` };
+  }
   const data = { ownerId: connection.ownerId, connectionId: connection.id, definitionHash: connection.definitionHash as string, artifactVersion: artifact.latestVersion, amountMinor, currency, description, madeByBot: row.bot.name.slice(0, 255), status: 'active', stoppedAt: null };
   const existing = await prisma.appPageJob.findUnique({ where: { artifactId: artifact.id }, select: { id: true } });
   const job = await prisma.appPageJob.upsert({ where: { artifactId: artifact.id }, create: { artifactId: artifact.id, ...data }, update: data });
@@ -286,11 +306,8 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
   // The owner's words go in only as the service's own description field allows: a string, trimmed, cut to its maxLength in whole
   // characters (never in the middle of one). A field that is not plain text or only takes set values, or words that are empty, are left
   // out, so a service's own limits never end a checkout.
-  const wording = operation.params.find((param) => param.name === 'description');
-  if (wording && wording.type === 'string' && !wording.oneOf && typeof job.description === 'string') {
-    const fitted = fitWords(job.description, wording.maxLength ?? 500);
-    if (fitted) args.description = fitted;
-  }
+  const wording = wordsFor(operation, job.description);
+  if (wording.value) args.description = wording.value;
 
   const startedAt = new Date();
   let answer;
