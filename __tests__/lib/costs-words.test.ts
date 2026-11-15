@@ -74,6 +74,8 @@ describe('our count and theirs', () => {
   });
   it('counts app uses and says the files we keep with no price until one is set', () => {
     expect(goesLines(row({ key: 'apps', uses: 1240, ourMicros: 0 }))).toEqual(['1,240 uses', 'Our count $0.00']);
+    expect(goesLines(row({ key: 'instant', uses: 1, ourMicros: 7_000 }))).toEqual(['1 use', 'Our count $0.01']);
+    expect(goesLines(row({ key: 'instant', uses: 3, ourMicros: null }))).toEqual(['3 uses', 'no price known yet']);
     expect(goesLines(row({ key: 'files', bytes: 3_100_000_000, ourMicros: null }))).toEqual(['3.1 GB kept', 'no price set yet']);
     expect(goesLines(row({ key: 'files', bytes: 0, ourMicros: null }))[0]).toBe('Nothing kept yet');
   });
