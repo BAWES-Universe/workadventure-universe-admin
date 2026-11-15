@@ -158,6 +158,9 @@ describe('a definition is data with hard edges', () => {
     // The currency may be limited to a set, but not made too short to hold a currency
     expect(change('currency', (param) => { param.oneOf = ['KWD', 'USD']; delete param.maxLength; }).success).toBe(true);
     expect(refused(change('currency', (param) => (param.maxLength = 2)))).toContain('at least 3');
+    // Lower or mixed case is fine (the checkout sends the service's own spelling), but the same currency twice, in any case, is not
+    expect(change('currency', (param) => { param.oneOf = ['usd', 'kwd']; delete param.maxLength; }).success).toBe(true);
+    expect(refused(change('currency', (param) => { param.oneOf = ['usd', 'USD']; delete param.maxLength; }))).toContain('more than once');
     // The look-up takes the service's own id as free text
     const copy = JSON.parse(JSON.stringify(base));
     copy.operations.find((operation: { id: string }) => operation.id === copy.payment.lookup.operation).params.find((param: { name: string }) => param.name === copy.payment.lookup.idParam).type = 'number';

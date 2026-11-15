@@ -220,6 +220,9 @@ export const definitionSchema = z
       takesText(create.customerName, 8, 'customerName');
       // The currency may be limited to the ones the service takes: a page that asks for another one is refused when it is set up
       takesText(create.currency, 3, 'currency', true);
+      // A currency listed twice (in any case) leaves "the service's own spelling" ambiguous: refused, so the checkout sends one spelling
+      const currencyList = made?.params.find((param) => param.name === create.currency)?.oneOf;
+      if (currencyList && new Set(currencyList.map((code) => code.trim().toUpperCase())).size !== currencyList.length) ctx.addIssue({ code: 'custom', path: ['payment', 'create', 'currency'], message: `${create.currency} lists the same currency more than once` });
       const idParam = asked?.params.find((candidate) => candidate.name === lookup.idParam);
       if (idParam && (idParam.type !== 'string' || idParam.oneOf)) ctx.addIssue({ code: 'custom', path: ['payment', 'lookup', 'idParam'], message: `${lookup.idParam} must be free text` });
       need(asked, [lookup.idParam], 'lookup');
