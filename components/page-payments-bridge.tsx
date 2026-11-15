@@ -42,6 +42,9 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
     frame?.contentWindow?.postMessage({ universe: 'app-result', status }, '*');
   }, []);
 
+  /** Any order that ran out unpaid: what "Check again" is offered for when the order the buyer was on cannot be asked about again. */
+  const firstExpired = useCallback((): string | null => Array.from(expired.current)[0] ?? null, []);
+
   const stopAll = useCallback(() => {
     watchers.current.forEach((stop) => stop());
     watchers.current.clear();
@@ -94,7 +97,7 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
             busy.current = false;
             setResume(null);
             // Older orders that ran out are still worth asking about
-            setRecheck(expired.current.size > 0 ? orderId : null);
+            setRecheck(firstExpired());
             setLine(WORDS.cant_confirm);
             tell('cant_confirm');
             return;
@@ -118,8 +121,12 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
         finish();
         // The look ran out with the order unpaid: "Check again" can ask about it once more
         expired.current.add(orderId);
-        // An older order's look ends without a word: the buyer is on a newer one
-        if (primary.current !== orderId) return;
+        // An older order's look ends without a word while the buyer is on a newer one; if there is none to be on (it ended, or never
+        // started), the button is how the older one can be asked about again
+        if (primary.current !== orderId) {
+          if (!busy.current) setRecheck((now) => now ?? orderId);
+          return;
+        }
         if (toldNotPaid) {
           // The look ends here, and the buyer can ask for another one
           setRecheck(orderId);
@@ -134,7 +141,7 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
       };
       timer = setTimeout(poll, POLL_MS);
     },
-    [artifactId, tell, stopAll],
+    [artifactId, tell, stopAll, firstExpired],
   );
 
   useEffect(() => {
@@ -153,6 +160,8 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
       // A checkout that never started leaves the screen about the order it was about
       const restore = () => {
         if (primary.current === null) primary.current = before;
+        // The button for orders that ran out, which this tap cleared, comes back
+        setRecheck(firstExpired());
       };
       const generation = current.current;
       // Open the window now, in the tap's own moment, so a blocked pop-up is the only thing left that can go wrong
@@ -202,7 +211,7 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
       setResume(null);
       setRecheck(null);
     };
-  }, [artifactId, tell, watch, stopAll]);
+  }, [artifactId, tell, watch, stopAll, firstExpired]);
 
   if (!line && !resume && !recheck) return null;
   return (

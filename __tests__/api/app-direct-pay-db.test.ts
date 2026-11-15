@@ -855,6 +855,66 @@ run('payments for pages, in a real database', () => {
       }
     });
 
+    it('holds the lock on the app the locked job names: a key replacement there waits until the order is written, the other app is free', async () => {
+      const { id: firstId, serverId } = await connectGateway();
+      const artifactId = await makeArtifact();
+      expect((await job(serverId, artifactId)).status).toBe(200);
+      const original = await prisma.appConnection.findUniqueOrThrow({ where: { id: firstId } });
+      const { id: _id, createdAt: _created, updatedAt: _updated, ...scalars } = original;
+      void _id;
+      void _created;
+      void _updated;
+      const second = await prisma.appConnection.create({ data: { ...scalars, name: 'Second account', catalogKey: `direct:locked-${tag}` } as never });
+      gateway();
+      const touch = (id: string) => prisma.$executeRaw`UPDATE "app_connections" SET "name" = "name" WHERE "id" = ${id}`;
+      const seen = { secondWaited: false, firstFree: false };
+      let replaced: Promise<unknown> = Promise.resolve();
+      let replacedDone = false;
+      const real = prisma.$transaction.bind(prisma);
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((fn: (tx: unknown) => Promise<unknown>, ...rest: unknown[]) => {
+        return (async () => {
+          // Between the first read and the lock the page moves to the second app
+          await prisma.appPageJob.update({ where: { artifactId }, data: { connectionId: second.id } });
+          const wrap = (tx: Record<string, unknown>) =>
+            new Proxy(tx, {
+              get(target, property) {
+                const value = Reflect.get(target, property) as unknown;
+                if (property === 'appPageOrder') {
+                  return new Proxy(value as Record<string, unknown>, {
+                    get(model, name) {
+                      const inner = Reflect.get(model, name) as (...args: unknown[]) => unknown;
+                      if (name !== 'create') return typeof inner === 'function' ? inner.bind(model) : inner;
+                      // The order is about to be written, so the locks are held now: try to replace the key on each app
+                      return async (...args: unknown[]) => {
+                        replaced = touch(second.id).then(() => {
+                          replacedDone = true;
+                        });
+                        await touch(firstId);
+                        seen.firstFree = true;
+                        await new Promise((resolve) => setTimeout(resolve, 400));
+                        seen.secondWaited = !replacedDone;
+                        return inner.apply(model, args);
+                      };
+                    },
+                  });
+                }
+                return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+              },
+            });
+          return (real as (...args: unknown[]) => Promise<unknown>)((tx: Record<string, unknown>) => fn(wrap(tx)), ...rest);
+        })();
+      }) as never);
+      try {
+        const { orderId } = await checkout(artifactId, '198.51.100.69');
+        await replaced;
+        expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).connectionId).toBe(second.id);
+        // The app the page was on when the lock was taken was held; the one it had left was not
+        expect(seen).toEqual({ secondWaited: true, firstFree: true });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     describe('the owner’s words in the service’s description field', () => {
       type Op = { id: string; params: { name: string; type: string; maxLength?: number; oneOf?: string[] }[]; body?: Record<string, unknown> };
       /** Starts a checkout on a service whose create operation was changed by `change`, and answers what was sent to it. */
