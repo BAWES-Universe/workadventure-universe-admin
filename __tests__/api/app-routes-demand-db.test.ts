@@ -254,6 +254,8 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
       const send = (message: Record<string, unknown>, callId?: string) =>
         linkApp(request('/api/ready-made/link', { method: 'POST', token: SERVICE_TOKEN, body: { botId: saraBrick, serverId, requesterKey: `sara-${tag}`, message, ...(callId ? { callId } : {}) } }));
       const listed = await (await send({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).json();
+      // Our own version keeps no session, so it hands out no session id that could be replayed to Composio after a move back
+      expect(listed.sessionId).toBeNull();
       expect(JSON.parse(listed.body).result.tools.map((tool: { name: string }) => tool.name)).toEqual(['GMAIL_FETCH_EMAILS']);
       const called = await (await send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'GMAIL_FETCH_EMAILS', arguments: { n: 1 } } }, 'link-1')).json();
       expect(JSON.parse(called.body).result.isError).toBe(false);

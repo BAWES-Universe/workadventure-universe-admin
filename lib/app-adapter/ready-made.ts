@@ -247,14 +247,18 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
   }
 }
 
-/** The link's own protocol, answered by Universe's own version of the App: the same four messages the Composio link takes, and nothing more. */
+/**
+ * The link's own protocol, answered by Universe's own version of the App: the same four messages the Composio link takes, and nothing more.
+ * Our own version keeps no session, so it never gives a session id: one made up here could be sent back later to Composio's link, which
+ * would refuse it.
+ */
 async function answerFromOwnVersion(
   own: OwnAppVersion,
   message: Record<string, unknown>,
   call: { name: string; arguments: Record<string, unknown> } | null,
   who: { person: string; providerAccountId: string | null; callId: string },
 ): Promise<LinkAnswer> {
-  const reply = (body: Record<string, unknown> | null): LinkAnswer => ({ status: body ? 200 : 202, contentType: body ? 'application/json' : null, sessionId: 'universe', body: body ? JSON.stringify({ jsonrpc: '2.0', id: message.id ?? null, ...body }) : '' });
+  const reply = (body: Record<string, unknown> | null): LinkAnswer => ({ status: body ? 200 : 202, contentType: body ? 'application/json' : null, sessionId: null, body: body ? JSON.stringify({ jsonrpc: '2.0', id: message.id ?? null, ...body }) : '' });
   switch (message.method) {
     case 'initialize':
       return reply({ result: { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: `universe-${own.key}`, version: '1' } } });
