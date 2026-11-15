@@ -49,6 +49,11 @@ export interface KeyFormView {
   differentSite: boolean;
   /** What the form will do to prove the key ("Looks up one payment"), or null when nothing is checked. */
   check: string | null;
+  /**
+   * Set when the service can take a payment for a page: where buyers are sent to pay, and the answers of the service that count as
+   * paid. Shown for every setup, shipped or a Brick's draft, because confirming the form is what lets pages of this person take payments.
+   */
+  payments: { checkoutHosts: string[]; paidWhen: string[]; testAndLive: boolean } | null;
   /** When it replaces the key of an app the person already has: how that one ends, and its mode. */
   replacing: { keyLast4: string | null; mode: string | null } | null;
   triesLeft: number;
@@ -176,6 +181,7 @@ export async function readKeyForm(requestId: string, ownerId: string): Promise<K
     source: custom ? (from ?? null) : null,
     differentSite: custom && !!from && siteOf(from) !== siteOf(host),
     check: checkOperation ? checkOperation.label : null,
+    payments: definition.payment ? { checkoutHosts: definition.payment.checkoutHosts, paidWhen: definition.payment.lookup.successStates, testAndLive: !!definition.modes } : null,
     replacing: replacing ? { keyLast4: replacing.keyLast4, mode: replacing.keyMode } : null,
     triesLeft: Math.max(0, limits.keyTries - row.tries),
     expiresAt: row.expiresAt,

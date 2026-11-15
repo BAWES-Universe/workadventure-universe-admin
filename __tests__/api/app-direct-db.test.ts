@@ -22,6 +22,7 @@ import { GET as readForm } from '@/app/api/me/apps/key-forms/[formId]/route';
 import { POST as sendKey } from '@/app/api/me/apps/key-forms/[formId]/key/route';
 import { GET as listApps } from '@/app/api/me/apps/route';
 import { saveServerLimits } from '@/lib/bot-limits';
+import { EXAMPLE_GATEWAY } from '../helpers/example-gateway';
 jest.mock('@/lib/app-direct/catalog', () => require('../helpers/example-gateway').catalogWithExample());
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -335,5 +336,15 @@ run('key apps, in a real database', () => {
 
   it('does not tell a form error apart from one that was never there, for a draft that is not valid', async () => {
     await expect(openKeyForm({ ownerId: sara, draft: { origin: 'http://x' } })).rejects.toBeInstanceOf(KeyFormError);
+  });
+  it('shows, for a setup a Brick wrote from a gateway’s docs, where buyers will pay and what counts as paid, so confirming the form is confirming that', async () => {
+    const draft = { ...EXAMPLE_GATEWAY, service: 'some-gateway' };
+    const { id } = await openKeyForm({ ownerId: sara, draft, source: 'https://docs.examplepay.com/api' });
+    const view = await readKeyForm(id, sara);
+    expect(view).toMatchObject({ mode: 'custom', payments: { checkoutHosts: ['examplepay.com'], paidWhen: ['CAPTURED'], testAndLive: true } });
+    // A setup that cannot take payments says nothing about them
+    const plain = { ...EXAMPLE_GATEWAY, service: 'x', payment: undefined, modes: undefined };
+    const other = await openKeyForm({ ownerId: sara, draft: plain, source: 'https://docs.examplepay.com/api' });
+    expect((await readKeyForm(other.id, sara)).payments).toBeNull();
   });
 });
