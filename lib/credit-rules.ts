@@ -112,7 +112,8 @@ export interface ProgramView extends RuleView {
 
 export class ClashRefused extends CreditRefused {
   constructor(
-    readonly clashes: { programId: string; label: string; people: { userId: string; name: string | null }[] }[],
+    /** `people` is who to name on screen (the first 50); `userIds` is everyone the two rules disagree about, for settling it. */
+    readonly clashes: { programId: string; label: string; people: { userId: string; name: string | null }[]; userIds: string[] }[],
   ) {
     super('Two rules disagree for the same people. Choose which one applies to them, then save again.', 'clash');
   }
@@ -439,7 +440,7 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
     const clashes = await clashesOf(tx, candidate, { exclude: programId });
     if (clashes.length > 0) {
       const labels = await tx.grantProgram.findMany({ where: { id: { in: clashes.map((c) => c.programId) } }, select: { id: true, label: true } });
-      throw new ClashRefused(await Promise.all(clashes.map(async (c) => ({ programId: c.programId, label: labels.find((l) => l.id === c.programId)?.label ?? c.programId, people: await chooseNames(c.userIds) }))));
+      throw new ClashRefused(await Promise.all(clashes.map(async (c) => ({ programId: c.programId, label: labels.find((l) => l.id === c.programId)?.label ?? c.programId, people: await chooseNames(c.userIds), userIds: [...c.userIds] }))));
     }
     const preview = await previewIn(tx, checked, ids, now, { forProgramId: programId });
     const budget = preview.budget;

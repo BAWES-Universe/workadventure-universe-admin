@@ -20,6 +20,7 @@ import { PUT as putDefault } from '@/app/api/admin/grants/defaults/[category]/ro
 import { POST as postException } from '@/app/api/admin/grants/exceptions/route';
 import { DELETE as deleteException } from '@/app/api/admin/grants/exceptions/[id]/route';
 import { ensureIssued } from '@/lib/credit-issue';
+import { askForMore, openRequestFor } from '@/lib/meter-requests';
 import { POST as postGift } from '@/app/api/admin/grants/gifts/route';
 import { PATCH as patchGift } from '@/app/api/admin/grants/gifts/[id]/route';
 import { GET as getFind } from '@/app/api/admin/grants/find/route';
@@ -111,6 +112,17 @@ run('the grants routes, on the real books', () => {
     await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 3 * MILLION, interval: 'monthly', recipients: { kind: 'all' }, startsOn: 'next' } }, ctx({ category: 'instant_apps' }));
     expect((await overview()).money.instant_apps).toMatchObject({ amountMicros: 3 * MILLION, interval: 'monthly' });
     expect(await prisma.grantProgram.count({ where: { categoryId: 'instant_apps', kind: 'default', status: 'active' } })).toBe(1);
+  });
+
+  it('answers an ask for more Apps credit when Apps credit reaches the person, and leaves a computers ask alone', async () => {
+    const asker = await person('Asker');
+    await askForMore(asker, new Date(Date.now() - 60_000), 'apps');
+    await askForMore(asker, new Date(Date.now() - 60_000), 'computer');
+    expect(await openRequestFor(asker, 'apps')).not.toBeNull();
+    await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 10 * MILLION, interval: 'once', recipients: { kind: 'all' } } }, ctx({ category: 'instant_apps' }));
+    await ensureIssued(asker);
+    expect(await openRequestFor(asker, 'apps')).toBeNull();
+    expect(await openRequestFor(asker, 'computer')).not.toBeNull();
   });
 
   it('saves "None" by ending the default, and then says so rather than "Not set"', async () => {
@@ -325,6 +337,26 @@ run('the grants routes, on the real books', () => {
       expect(exceptions[0].audience.people.map((p: any) => p.name).sort()).toEqual(['Noor', 'Omar']);
       expect(exceptions[0].instant_apps.amountMicros).toBe(9 * MILLION);
       expect(exceptions[0].computers.amountMicros).toBe(5 * MILLION);
+    });
+
+    it('clears every person the two rules disagree about, however many there are', async () => {
+      const crowd: string[] = [];
+      for (let i = 0; i < 60; i++) crowd.push(await person(`Crowd${i}`));
+      const extra = await person('Extra');
+      const mk = (ids: string[], dollars: number) => ({ audience: { kind: 'people', userIds: ids }, instant_apps: { mode: 'same' }, computers: { mode: 'own', amountMicros: dollars * MILLION, interval: 'monthly' } });
+      expect((await call(postException, '/x', { method: 'POST', body: mk(crowd, 1) })).status).toBe(201);
+      const refused = await call<any>(postException, '/x', { method: 'POST', body: mk([...crowd, extra], 2) });
+      expect(refused.status).toBe(409);
+      // The screen is shown 50 names at most, never the ids
+      const shown = (await refused.json()).clashes[0];
+      expect(shown.people.length).toBe(50);
+      expect(shown.userIds).toBeUndefined();
+      const saved = await call(postException, '/x', { method: 'POST', body: { ...mk([...crowd, extra], 2), clashChoice: 'this' } });
+      expect(saved.status).toBe(201);
+      const { exceptions } = await overview();
+      expect(exceptions).toHaveLength(1);
+      expect(exceptions[0].audience.people.length).toBe(61);
+      expect(exceptions[0].computers.amountMicros).toBe(2 * MILLION);
     });
 
     it('"the other one" takes those people out of this rule', async () => {

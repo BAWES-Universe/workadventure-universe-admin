@@ -27,7 +27,7 @@ export async function readBody(request: NextRequest): Promise<Record<string, unk
 /** Turns what the books or this layer refused into the answer the screen reads: the line to show, and a code where the screen acts on it. */
 export function refusal(error: unknown): NextResponse | null {
   if (error instanceof ClashRefused) {
-    return NextResponse.json({ error: error.message, code: 'clash', clashes: error.clashes }, { status: 409 });
+    return NextResponse.json({ error: error.message, code: 'clash', clashes: error.clashes.map(({ userIds: _everyone, ...shown }) => shown) }, { status: 409 });
   }
   if (error instanceof OverBudget) {
     return NextResponse.json(

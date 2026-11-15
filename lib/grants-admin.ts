@@ -479,9 +479,9 @@ export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 
       }
       // The admin chose which rule applies to the people the two disagree about
       try {
-        const clashing = new Set(error.clashes.flatMap((clash) => clash.people.map((person) => person.userId)));
+        const clashing = new Set(error.clashes.flatMap((clash) => clash.userIds));
         if (request.clashChoice === 'this') {
-          for (const clash of error.clashes) await takeOut(clash.programId, clash.people.map((person) => person.userId), issuer, now, taken);
+          for (const clash of error.clashes) await takeOut(clash.programId, clash.userIds, issuer, now, taken);
         } else {
           if (recipients.kind !== 'people') throw new GrantsRefused('This rule is for a universe’s members, so those people can’t be taken out of it. Pick “This one”, or give each of them a rule of their own.', 400, 'clash');
           const left = recipients.userIds.filter((id) => !clashing.has(id));
