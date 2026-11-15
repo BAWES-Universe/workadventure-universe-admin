@@ -94,7 +94,7 @@ export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}, again = 
     const already = await tx.appKeyCall.findUnique({ where: { botId_callId: { botId: input.botId, callId: input.callId } }, select: { id: true } });
     if (already) return 'again' as const;
     const since = new Date(Date.now() - 3_600_000);
-    const [mine, everyone] = await Promise.all([tx.appKeyCall.count({ where: { ownerId, createdAt: { gte: since } } }), tx.appKeyCall.count({ where: { createdAt: { gte: since } } })]);
+    const [mine, everyone] = await Promise.all([tx.appKeyCall.count({ where: { ownerId, createdAt: { gte: since } } }), tx.appKeyCall.count({ where: { createdAt: { gte: since }, NOT: { ownerId: 'page-payments' } } })]);
     if (mine >= limits.keyCallsPerPerson || everyone >= limits.keyCallsPlatform) return 'limit' as const;
     await tx.appKeyCall.create({ data: { connectionId: connection.id, ownerId, botId: input.botId, callId: input.callId, operation: operation.id } });
     // Old rows are kept long enough for a retry to be recognised, and no longer

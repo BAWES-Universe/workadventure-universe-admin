@@ -247,6 +247,8 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
       ? await tx.appConnection.findFirst({ where: { id: row.connectionId, ownerId: input.ownerId, kind: 'direct' } })
       : await findExisting(input.ownerId, definition, tx);
     if (existing) {
+      // An app that told a test key from a real one must keep being able to: a replacement it cannot tell would quietly stop its payments
+      if (existing.keyMode && !mode) throw new KeyFormError(400, 'invalid_key', 'This key does not start like a test key or a real key for this app');
       if (existing.keyMode && mode && existing.keyMode !== mode && !input.confirmChange) {
         // Nothing is changed and the form stays open for the answer: the use above is undone by the throw
         throw new KeyFormError(409, 'mode_change', existing.keyMode === 'test' ? 'This switches from a test key to a real one' : 'This switches from a real key to a test one', { from: existing.keyMode, to: mode });

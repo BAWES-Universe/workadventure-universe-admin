@@ -230,6 +230,19 @@ run('key apps, in a real database', () => {
     expect(readKey(row)).toBe(LIVE_KEY);
   });
 
+  it('refuses a replacement key whose kind it cannot tell, for an app that told test from real, and changes nothing', async () => {
+    const first = await submitKey({ requestId: await open(), ownerId: sara, key: TEST_KEY }, service(404).deps);
+    const form = (await openKeyForm({ ownerId: sara, connectionId: first.id })).id;
+    // Neither prefix: accepting it would set the kind to nothing and quietly stop payments on pages that use this app
+    const odd = `zz_${TEST_KEY.slice(8)}`;
+    await expect(submitKey({ requestId: form, ownerId: sara, key: odd, confirmChange: true }, service(404).deps)).rejects.toMatchObject({ status: 400, code: 'invalid_key' });
+    const row = await prisma.appConnection.findUniqueOrThrow({ where: { id: first.id } });
+    expect(row).toMatchObject({ keyMode: 'test', keyVersion: 1 });
+    expect(readKey(row)).toBe(TEST_KEY);
+    // The form is still open for a good key
+    expect((await readKeyForm(form, sara)).triesLeft).toBeGreaterThan(0);
+  });
+
   it("never lets one person replace another's key, or open a form on another's app", async () => {
     const mine = await submitKey({ requestId: await open(), ownerId: sara, key: TEST_KEY }, service(404).deps);
     await expect(openKeyForm({ ownerId: omar, connectionId: mine.id })).rejects.toMatchObject({ status: 404 });

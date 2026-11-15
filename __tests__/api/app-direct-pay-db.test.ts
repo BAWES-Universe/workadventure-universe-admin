@@ -987,20 +987,46 @@ run('payments for pages, in a real database', () => {
       });
     });
 
-    it('counts a look at a payment against what everyone may send an hour, and waits when that is spent', async () => {
-      await saveServerLimits({ bricks: { keyCallsPlatform: 2 } }, sara);
+    it('counts looks at payments for each owner, and waits when that is spent', async () => {
+      await saveServerLimits({ bricks: { paymentLooksPerOwner: 1 } }, sara);
       const { artifactId } = await pending();
       const sent = gateway({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
       const { orderId } = await checkout(artifactId, '198.51.100.53');
       await settle(orderId);
       expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(1);
       expect(await prisma.appKeyCall.count({ where: { ownerId: 'page-payments' } })).toBe(1);
-      // The one order and the one look are all there is: the next look waits, and says so to a notice
+      // This owner's room for looks is spent: the next look waits, and says so to a notice
       const again = await settle(orderId);
       expect(again).toMatchObject({ status: 'checking' });
       expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(1);
       // Never charged to the owner's own allowance
       expect(await prisma.appKeyCall.count({ where: { ownerId: sara } })).toBe(0);
+    });
+
+    it('counts looks at payments for everyone together, apart from what Bricks and checkouts may do', async () => {
+      await saveServerLimits({ bricks: { keyCallsPlatform: 2 } }, sara);
+      const { artifactId } = await pending();
+      const sent = gateway({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
+      const { orderId } = await checkout(artifactId, '198.51.100.70');
+      await settle(orderId);
+      await settle(orderId);
+      expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(2);
+      // Everyone's room for looks is spent
+      expect(await settle(orderId)).toMatchObject({ status: 'checking' });
+      expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(2);
+    });
+
+    it('does not let looks at payments use up what checkouts may do', async () => {
+      await saveServerLimits({ bricks: { keyCallsPlatform: 3 } }, sara);
+      const { artifactId } = await pending();
+      const sent = gateway({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
+      const { orderId } = await checkout(artifactId, '198.51.100.71');
+      await settle(orderId);
+      await settle(orderId);
+      expect(await prisma.appKeyCall.count({ where: { ownerId: 'page-payments' } })).toBe(2);
+      // One order and two looks: counted together that would be the three the platform may send, and a second checkout would be refused
+      expect((await start(artifactId, '198.51.100.72')).status).toBe(200);
+      expect(sent.filter((entry) => entry.method === 'POST')).toHaveLength(2);
     });
 
     it('answers a notice that had to wait with a request to come back, so the service asks again', async () => {

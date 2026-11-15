@@ -909,6 +909,19 @@ export function brickLimits(values: BrickLimits): Limit[] {
       ],
     },
     {
+      id: 'paymentLooksPerOwner',
+      label: 'Asks about payments an hour, for each owner',
+      hint: 'However many pages and buyers one owner has, their payment service is asked about payments at most this often an hour. It does not use up what Bricks may do with a key.',
+      unit: 'asks',
+      value: values.paymentLooksPerOwner,
+      recommended: recommended.paymentLooksPerOwner,
+      options: [
+        { value: 500, label: '500 an hour', meaning: 'A small shop.' },
+        { value: 2000, label: '2,000 an hour', meaning: 'A busy shop.' },
+        { value: 10000, label: '10,000 an hour', meaning: 'Many shops at once.' },
+      ],
+    },
+    {
       id: 'appsPerBot',
       label: 'Apps one bot or Brick can use',
       hint: 'Apps added by hand and Apps lent to a universe count together. A bot that is full says so and asks for one to be taken off first.',

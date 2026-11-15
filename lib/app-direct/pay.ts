@@ -244,7 +244,8 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
       tx.appPageOrder.count({ where: { jobId: terms.job.id, createdAt: { gte: since } } }),
       tx.appPageOrder.count({ where: { jobId: terms.job.id, visitorHash: hash, createdAt: { gte: since } } }),
       tx.appPageOrder.count({ where: { createdAt: { gte: since } } }),
-      tx.appKeyCall.count({ where: { createdAt: { gte: since } } }),
+      // Asks about payments are counted apart (below), so they can never use up what checkouts and Bricks may do
+      tx.appKeyCall.count({ where: { createdAt: { gte: since }, NOT: { ownerId: LOOKUP_ROWS } } }),
     ]);
     if (visitor >= limits.checkoutsPerVisitor || page >= limits.checkoutsPerPage || mine >= limits.checkoutsPerOwner || platform + calls >= limits.keyCallsPlatform) return 'limit' as const;
     const made = await tx.appPageOrder.create({
@@ -433,15 +434,19 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
     await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'pending' }, data: { status: 'cant_confirm' } });
     return view('cant_confirm');
   }
-  // Looks count against what everyone may send an hour, like every other use of a key: when that is spent the look waits for the next one
+  // Looks have a budget of their own, so that asking about payments can never use up what Bricks and checkouts may do with a key: what
+  // everyone may send an hour, and what one owner's services may be asked. When either is spent the look waits for the next hour's room.
   const budget = await prisma
     .$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('key-calls:everyone', 0))`;
       const since = new Date(now.getTime() - HOUR);
-      const [orders, calls] = await Promise.all([tx.appPageOrder.count({ where: { createdAt: { gte: since } } }), tx.appKeyCall.count({ where: { createdAt: { gte: since } } })]);
-      if (orders + calls >= limits.keyCallsPlatform) return false;
-      // Not counted for the owner's own hourly allowance (a buyer's page asks, not the owner), only for everyone
-      await tx.appKeyCall.create({ data: { connectionId: connection.id, ownerId: LOOKUP_ROWS, botId: LOOKUP_ROWS, callId: `look:${order.id}:${order.checks + 1}`, operation: lookup.operation.slice(0, 60), state: 'done', outcome: 'ok' } });
+      const [everyone, owners] = await Promise.all([
+        tx.appKeyCall.count({ where: { ownerId: LOOKUP_ROWS, createdAt: { gte: since } } }),
+        tx.appKeyCall.count({ where: { ownerId: LOOKUP_ROWS, callId: { startsWith: `look:${order.ownerId}:` }, createdAt: { gte: since } } }),
+      ]);
+      if (everyone >= limits.keyCallsPlatform || owners >= limits.paymentLooksPerOwner) return false;
+      // Not counted for the owner's own hourly allowance (a buyer's page asks, not the owner)
+      await tx.appKeyCall.create({ data: { connectionId: connection.id, ownerId: LOOKUP_ROWS, botId: LOOKUP_ROWS, callId: `look:${order.ownerId}:${order.id}:${order.checks + 1}`, operation: lookup.operation.slice(0, 60), state: 'done', outcome: 'ok' } });
       return true;
     })
     .catch(() => false);
