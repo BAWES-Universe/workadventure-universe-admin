@@ -490,6 +490,21 @@ async function main() {
     check('a one-off that turned monthly shows this month’s lot and what is left of the one-off: $6 of $7, still monthly', line.kind === 'monthly' && line.availableMicros === 6 * M && line.totalMicros === 7 * M, line);
   }
 
+  // ---------- Saving a program again does not count what it already issued ----------
+  {
+    for (const id of ['bud1', 'bud2', 'bud3']) await user(id, '2027-02-11T00:00:00Z');
+    const issuedSoFar = (await funding.exposureOf('funding-platform', G)).issuedThisMonthMicros;
+    await setMeter({ rolloutBudgetMicros: issuedSoFar + 10 * M, renewMinutes: 10 });
+    const prog = await rules.saveException({ categoryId: 'computers', amount: 5 * M, schedule: 'monthly', recipients: { kind: 'people', userIds: ['bud1', 'bud2'] } }, root, G);
+    await Promise.all([issue.ensureIssued('bud1', G), issue.ensureIssued('bud2', G)]);
+    const roomLeft = (await funding.exposureOf('funding-platform', G)).issuedThisMonthMicros;
+    const again = await refuses(() => rules.saveException({ programId: prog.programId, categoryId: 'computers', amount: 5 * M, schedule: 'monthly', claimEndsAt: at('2027-06-01T00:00:00Z'), recipients: { kind: 'people', userIds: ['bud1', 'bud2'] } }, root, G));
+    check('saving a program again with the month’s budget already used by its own lots is not over budget', roomLeft === issuedSoFar + 10 * M && again === null, { roomLeft, issuedSoFar, again });
+    const more = await refuses(() => rules.saveException({ programId: prog.programId, categoryId: 'computers', amount: 5 * M, schedule: 'monthly', claimEndsAt: at('2027-06-01T00:00:00Z'), recipients: { kind: 'people', userIds: ['bud1', 'bud2', 'bud3'] } }, root, G));
+    check('adding one more person counts only that person: $5 needed, $0 left', more?.code === 'over_budget' && (more.error as { mostIssuedMicros: number }).mostIssuedMicros === 5 * M, more);
+    await setMeter({ rolloutBudgetMicros: 10_000 * M, renewMinutes: 10 });
+  }
+
   // ---------- The Instant executor's contract ----------
   {
     await user('inst', '2027-02-11T00:00:00Z');
@@ -505,6 +520,12 @@ async function main() {
     const r2 = await funds.refund({ key: 'run-1:1', refundKey: 'run-1:refund', amountMicros: 900_000, reason: 'platform_failure' });
     const left = await spend.availableCredit('inst', 'instant_apps', G);
     check('settle charges less than reserved, refund goes back to the lot once, and the books end whole at $2', s.ok && r.ok && r.refundedMicros === 900_000 && r2.ok && r2.refundedMicros === 900_000 && left.availableMicros === 2 * M, { s, r, r2, left });
+    const afterSettle = await funds.release({ key: 'run-1:1' });
+    check('releasing a step that was already charged is not ok: nothing was given back', afterSettle.ok === false, afterSettle);
+    await funds.reserve({ ...run, key: 'run-3:1', runId: 'run-3', amountMicros: 300_000 });
+    await funds.release({ key: 'run-3:1' });
+    const settleReleased = await funds.settle({ key: 'run-3:1', chargeMicros: 300_000 });
+    check('settling a step that was released is not ok: nothing was charged', settleReleased.ok === false, settleReleased);
     const none = await funds.release({ key: 'nothing-here' });
     check('releasing a hold that does not exist is not ok, not a throw', none.ok === false);
   }
