@@ -14,6 +14,13 @@ import { UniverseAiLimits } from '@/app/admin/components/limits';
 import { SERVER_LIMITS_RECOMMENDED } from '@/lib/bot-limit-values';
 import { VOICE_LIMITS_RECOMMENDED } from '@/lib/voice-limit-values';
 
+// What /api/admin/instant says for two of its limits: money held in millionths of a dollar, shares in hundredths of a percent
+const instant: { on?: boolean; goodwillMaxMicros?: number | null; markupBps?: number | null } = {};
+const instantViews = () => ({
+  goodwillMaxMicros: { value: instant.goodwillMaxMicros ?? null, range: { min: 0, max: 1_000_000_000 }, recommended: null, label: 'Most one give-back may be', hint: 'Empty: nothing is given back for “Didn’t work”.', unit: 'micros', required: false },
+  markupBps: { value: instant.markupBps ?? null, range: { min: 0, max: 100_000 }, recommended: null, label: 'Added to Composio’s charge for what the person pays', hint: 'In hundredths of a percent.', unit: 'bps', required: false },
+});
+
 function answer(limits = SERVER_LIMITS_RECOMMENDED, voice = VOICE_LIMITS_RECOMMENDED, memberAllowanceMicros: number | null = null) {
   let allowance = memberAllowanceMicros;
   fetchMock.mockImplementation((url: string, init?: RequestInit) => {
@@ -21,6 +28,11 @@ function answer(limits = SERVER_LIMITS_RECOMMENDED, voice = VOICE_LIMITS_RECOMME
     if (url === '/api/admin/meter-settings') {
       if (init?.method === 'PATCH') allowance = JSON.parse(String(init.body)).memberAllowanceMicros;
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ settings: { memberAllowanceMicros: allowance }, missing: [] }) });
+    }
+    // Instant Apps' limits (spec v3 O2) come from their own route
+    if (url === '/api/admin/instant') {
+      if (init?.method === 'PATCH') Object.assign(instant, JSON.parse(String(init.body)));
+      return Promise.resolve({ ok: instant.on !== false, status: instant.on !== false ? 200 : 404, json: () => Promise.resolve({ limits: instantViews() }) });
     }
     // The voice limits (#792) are read and saved on their own route
     if (url === '/api/admin/voice-limits') {
@@ -50,6 +62,7 @@ function answer(limits = SERVER_LIMITS_RECOMMENDED, voice = VOICE_LIMITS_RECOMME
 }
 
 beforeEach(() => {
+  for (const key of Object.keys(instant)) delete (instant as Record<string, unknown>)[key];
   fetchMock.mockReset();
   mockAddToast.mockReset();
 });
@@ -237,6 +250,36 @@ describe('Universe AI limits', () => {
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/meter-settings' && init?.method === 'PATCH')).toBe(true));
     const patch = fetchMock.mock.calls.find(([url, init]) => url === '/api/admin/meter-settings' && init?.method === 'PATCH')!;
     expect(JSON.parse(String(patch[1].body))).toEqual({ memberAllowanceMicros: 7_500_000 });
+  });
+
+  it('shows the Instant Apps limits as the route says them: dollars and percents, "Not set" with nothing recommended, saved in its own units', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    const give = await screen.findByTestId('limit-goodwillMaxMicros');
+    expect(give.textContent).toContain('Most one give-back may be');
+    expect(give.textContent).toContain('Not set');
+    expect(give.textContent).not.toContain('Recommended');
+    fireEvent.click(give);
+    fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
+    fireEvent.change(screen.getByLabelText(/Most one give-back may be, in dollars/), { target: { value: '0.50' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')).toBe(true));
+    expect(JSON.parse(String(fetchMock.mock.calls.find(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')![1].body))).toEqual({ goodwillMaxMicros: 500_000 });
+    await waitFor(() => expect(screen.getByTestId('limit-goodwillMaxMicros').textContent).toContain('$0.5'));
+    fireEvent.click(screen.getByTestId('limit-markupBps'));
+    fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
+    fireEvent.change(screen.getByLabelText(/Added to Composio’s charge for what the person pays, in percent/), { target: { value: '12.5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')).toHaveLength(2));
+    expect(JSON.parse(String(fetchMock.mock.calls.filter(([url, init]) => url === '/api/admin/instant' && init?.method === 'PATCH')[1][1].body))).toEqual({ markupBps: 1250 });
+  });
+
+  it('shows no Instant Apps group when its route is not there', async () => {
+    instant.on = false;
+    answer();
+    render(<UniverseAiLimits />);
+    expect(await screen.findByTestId('limit-computerMonth')).toBeTruthy();
+    expect(screen.queryByLabelText('Instant Apps')).toBeNull();
   });
 
   it('saves the switch', async () => {
