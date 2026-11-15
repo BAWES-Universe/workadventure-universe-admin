@@ -54,6 +54,8 @@ type Tx = Prisma.TransactionClient;
 
 const MINUTE = 60 * 1000;
 const POOL_LOCK = 'meter:pool';
+/** The room held for one model call inside a job (lib/computer-calls.ts): it is not another job running. */
+export const CALL_ROOM_PREFIX = 'computer:call:';
 
 const viewOf = (row: { reservationKey: string; personKey: string; botId: string | null; jobId: string | null; amountMicros: bigint; state: string; expiresAt: Date; renewals: number; settledMicros: bigint | null }): Reservation => ({
   key: row.reservationKey,
@@ -129,7 +131,7 @@ export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Pr
     tx.meterEvent.aggregate({ where: { ...universeComputer, settledAt: null }, _sum: { costMicros: true } }),
     tx.meterEvent.count({ where: { ...universeComputer, costMicros: null } }),
     tx.meterEvent.aggregate({ where: { pool: 'chat', payerKind: 'universe', occurredAt: { gte: month.start, lt: month.end } }, _sum: { costMicros: true } }),
-    tx.meterReservation.findMany({ where: stillCounts(now), select: { amountMicros: true, expiresAt: true } }),
+    tx.meterReservation.findMany({ where: stillCounts(now), select: { amountMicros: true, expiresAt: true, reservationKey: true } }),
     // The newest size recorded for each bot: a disk is a level, not something that adds up
     tx.$queryRaw<{ bytes: bigint | null }[]>`
       SELECT COALESCE(SUM(latest.quantity), 0)::bigint AS bytes FROM (
@@ -161,7 +163,8 @@ export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Pr
     totalMicros: committedMicros + reserved + unsettledMicros + keptStorageMicros + reserveMicros,
     unknownEvents: unknown,
     chatMicros: asNumber(chat._sum.costMicros),
-    jobsRunning: held.filter((row) => row.expiresAt > now).length,
+    // The room held for one model call inside a job is not another job running
+    jobsRunning: held.filter((row) => row.expiresAt > now && !row.reservationKey.startsWith(CALL_ROOM_PREFIX)).length,
   };
 }
 
@@ -177,18 +180,23 @@ async function lockPool(tx: Tx): Promise<void> {
 }
 
 /** Whether `extra` more fits for this member and the pool; the reason it does not, or null. The member's own allowance comes first: a member who used theirs up asks for more, whatever the pool holds. */
+/** Room held for a person's steps that still counts against what they can start: held and in time, or ran out and not yet settled or released. */
+export async function heldRoom(personId: string, now: Date, db: Pick<Tx, 'meterReservation'> = prisma): Promise<number> {
+  const held = await db.meterReservation.aggregate({ where: { personKey: `person:${personId}`, ...stillCounts(now) }, _sum: { amountMicros: true } });
+  return asNumber(held._sum.amountMicros);
+}
+
 async function fits(tx: Tx, personId: string, extraMicros: number, now: Date, settings: MeterSettings, opts: { newJob: boolean }): Promise<NoRoom | null> {
   const missing = missingSettings(settings);
   if (missing.length > 0) return { ok: false, reason: 'not_set', missing };
   const allowance = await memberAllowance(personId, now, settings, tx);
   if (allowance && !allowance.unlimited) {
-    const held = await tx.meterReservation.aggregate({ where: { personKey: `person:${personId}`, ...stillCounts(now) }, _sum: { amountMicros: true } });
-    const left = (allowance.leftMicros ?? 0) - asNumber(held._sum.amountMicros);
+    const left = (allowance.leftMicros ?? 0) - (await heldRoom(personId, now, tx));
     if (left < extraMicros) return { ok: false, reason: 'allowance', leftMicros: Math.max(0, left) };
   }
   const envelope = await envelopeIn(tx, now, settings);
   if (opts.newJob) {
-    const mine = await tx.meterReservation.count({ where: { personKey: `person:${personId}`, state: 'held', expiresAt: { gt: now } } });
+    const mine = await tx.meterReservation.count({ where: { personKey: `person:${personId}`, state: 'held', expiresAt: { gt: now }, NOT: { reservationKey: { startsWith: CALL_ROOM_PREFIX } } } });
     if (mine >= (settings.atOnceMember ?? 0) || envelope.jobsRunning >= (settings.atOnceAll ?? 0)) return { ok: false, reason: 'busy' };
   }
   if (envelope.totalMicros + extraMicros > (settings.poolCeilingMicros ?? 0)) return { ok: false, reason: 'pool' };
@@ -205,7 +213,7 @@ const wholeMicros = (value: number, what: string): void => {
  * the envelope keeps counting until it is settled or released. Never throws for "no room": that is an answer.
  */
 export async function reserveRoom(
-  input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass },
+  input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass; /** False for a step inside a job that already holds its place (a model call): it is not another job at once. */ newJob?: boolean },
   now: Date = new Date(),
 ): Promise<Room> {
   wholeMicros(input.amountMicros, 'amountMicros');
@@ -222,7 +230,7 @@ export async function reserveRoom(
     const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.jobId ?? null, chargeClass: input.chargeClass ?? 'computer', amountMicros: input.amountMicros }, now, tx);
     if (!ruled.ok) return { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
     const settings = await getMeterSettings(tx);
-    const no = await fits(tx, input.personId, input.amountMicros, now, settings, { newJob: true });
+    const no = await fits(tx, input.personId, input.amountMicros, now, settings, { newJob: input.newJob !== false });
     if (no) return no;
     const row = await tx.meterReservation.create({
       data: {

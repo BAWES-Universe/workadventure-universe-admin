@@ -121,7 +121,17 @@ run('usage for people, and cost for us, in a real database', () => {
   describe('the Usage page: one bar and plain words', () => {
     it('is a full bar of plenty for someone who has not used anything, with no computer or storage shown', async () => {
       const sara = await person('sara');
-      expect(await memberUsage(sara.id, NOW)).toEqual({ chat: { left: 1, words: 'plenty', fullAgainAt: null }, computer: null, storage: null, extra: null, activity: [] });
+      // The words and bar as before; the real reply counts (no window started by looking), no Instant Apps section, no extra credit and no finished tasks
+      expect(await memberUsage(sara.id, NOW)).toEqual({
+        version: expect.any(Number),
+        chat: { left: 1, words: 'plenty', fullAgainAt: null, replies: { available: 30, total: 30, running: false, windowHours: 5 } },
+        computer: null,
+        storage: null,
+        extra: null,
+        activity: [],
+        apps: null,
+        credit: [],
+      });
     });
 
     it('counts only what Universe AI paid for: a Brick on their own key uses none of the bar', async () => {
@@ -134,9 +144,11 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(bar.left).toBeCloseTo(1 - 10 / 30, 5);
       expect(bar.words).toBe('plenty');
       expect(bar.fullAgainAt).toBe(hours(3).toISOString());
-      // Spend the rest on Universe AI and it is out, in words, with no count anywhere
+      // The real count agrees with the bar: 10 of 30 used on Universe AI, the 29 on their own key not counted
+      expect(bar.replies).toEqual({ available: 20, total: 30, running: true, windowHours: 5 });
+      // Spend the rest on Universe AI and it is out, in words and in the count
       await addUsage(sara, 20);
-      expect((await memberUsage(sara.id, NOW)).chat).toEqual({ left: 0, words: 'out', fullAgainAt: hours(3).toISOString() });
+      expect((await memberUsage(sara.id, NOW)).chat).toEqual({ left: 0, words: 'out', fullAgainAt: hours(3).toISOString(), replies: { available: 0, total: 30, running: true, windowHours: 5 } });
     });
 
     it('is full again once the window has ended, and a greeting or a failed reply never used any of it', async () => {
@@ -164,6 +176,16 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(await memberUsage(omar.id, NOW)).toMatchObject({ computer: null, storage: null });
     });
 
+    it('counts room held for steps in progress, as admission does, in what is left (a hold that ran out and is not settled still counts)', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 300);
+      await prisma.meterReservation.create({ data: { reservationKey: `live-${tag}`, personKey: `person:${sara.id}`, personId: sara.id, amountMicros: BigInt(400), state: 'held', expiresAt: hours(0.1), createdAt: hours(-0.02) } });
+      await prisma.meterReservation.create({ data: { reservationKey: `lapsed-${tag}`, personKey: `person:${sara.id}`, personId: sara.id, amountMicros: BigInt(200), state: 'held', expiresAt: hours(-0.5), createdAt: hours(-1) } });
+      const computer = (await memberUsage(sara.id, NOW)).computer;
+      expect(computer).toMatchObject({ availableMicros: 100, inProgressMicros: 400, left: 0.1, words: 'low' });
+    });
+
     it('says low, then out, and only offers "Ask for more" when it is out', async () => {
       await setUp();
       const sara = await person('sara');
@@ -186,9 +208,9 @@ run('usage for people, and cost for us, in a real database', () => {
       const response = await usageGet(adminCall('/api/me/usage'));
       expect(response.status).toBe(200);
       const json = await response.json();
-      expect(Object.keys(json).sort()).toEqual(['activity', 'chat', 'computer', 'extra', 'storage']);
-      // Never a count of replies and never a price
-      expect(JSON.stringify(json)).not.toMatch(/cost|price|micros|replies|\$/i);
+      expect(Object.keys(json).sort()).toEqual(['activity', 'apps', 'chat', 'computer', 'credit', 'extra', 'storage', 'version']);
+      // Real reply counts and the person's own credit are theirs to see; never what a provider charged us, and never a price
+      expect(JSON.stringify(json)).not.toMatch(/cost|price|provider|\$/i);
     });
   });
 
@@ -240,6 +262,18 @@ run('usage for people, and cost for us, in a real database', () => {
       session.mockResolvedValue({ id: sara.id, email: 'sara@example.test' });
       expect((await askPost(body('POST', '/api/me/usage/ask-for-more', {}))).status).toBe(409);
       expect(await prisma.meterRequest.count({})).toBe(0);
+    });
+
+    it('treats a missing body as the old computer ask, but a blank or broken body as a bad request', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 1_000, new Date());
+      session.mockResolvedValue({ id: sara.id, email: 'sara@example.test' });
+      const raw = (text: string) => new NextRequest('http://localhost:3333/api/me/usage/ask-for-more', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
+      expect((await askPost(raw('   '))).status).toBe(400);
+      expect((await askPost(raw('{nope'))).status).toBe(400);
+      expect(await prisma.meterRequest.count({})).toBe(0);
+      expect((await askPost(new NextRequest('http://localhost:3333/api/me/usage/ask-for-more', { method: 'POST' }))).status).toBe(201);
     });
   });
 

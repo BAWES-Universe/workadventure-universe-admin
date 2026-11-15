@@ -5,8 +5,11 @@
  * person: every member can give their own Bricks a computer, inside the allowance of the meter (game #1998).
  */
 
-/** Where the machine is, as stored. `none` is a computer that was given and not made yet: it is made at the first real need. */
-export const MACHINE_STATES = ['none', 'waking', 'resting', 'working', 'cold', 'broken', 'restoring', 'stopped'] as const;
+/**
+ * Where the machine is, as stored. `none` is a computer that was given and not made yet: it is made at the first real need. `stopping` is one
+ * that must be put to sleep and is not yet proved asleep: nothing uses it, and every sweep tries again until the provider says it is not running.
+ */
+export const MACHINE_STATES = ['none', 'waking', 'resting', 'working', 'cold', 'broken', 'restoring', 'stopped', 'stopping'] as const;
 export type MachineState = (typeof MACHINE_STATES)[number];
 
 export const JOB_STATUSES = ['queued', 'running', 'waiting', 'done', 'stopped', 'failed'] as const;

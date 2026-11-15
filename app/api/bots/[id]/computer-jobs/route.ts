@@ -13,6 +13,8 @@ const bodySchema = z
     userId: z.string().min(1).max(255),
     isGuest: z.boolean().optional(),
     title: z.string().trim().min(1).max(200),
+    // The task in the person's words, for the agent on the computer only (never shown)
+    brief: z.string().max(4000).optional(),
     writes: z.boolean().optional(),
     // The run of a goal or task that asks for the computer (game #2002): a run handed out again finds its job and never starts a second
     runId: z.string().min(1).max(36).optional(),
@@ -72,7 +74,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // A rule the person said in chat ("no more than $1 a month", "only my own accounts") is held before a job exists, so Brick can say so at once
     const ruled = await ownerSpendAllowed(id, person.personId, 'computer', new Date(), parsed.data.runId ?? null);
     if (!ruled.ok) return NextResponse.json({ ok: false, reason: 'rule', rule: { id: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words } });
-    const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, writes: parsed.data.writes, runId: parsed.data.runId });
+    const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, brief: parsed.data.brief, writes: parsed.data.writes, runId: parsed.data.runId });
     if (started.ok) return NextResponse.json({ ok: true, job: started.job, restoredFrom: started.restoredFrom });
     // A rule that stopped it on the try itself (the pre-check only asks for a first millionth): the same shape as above, with the rule's words
     if (started.reason === 'rule') return NextResponse.json({ ok: false, reason: 'rule', rule: { id: null, why: null, leftMicros: null, words: started.words } });

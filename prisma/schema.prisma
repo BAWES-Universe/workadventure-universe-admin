@@ -67,6 +67,7 @@ model User {
   appConnections    AppConnection[] @relation("AppConnectionOwner")
   appConnectionsMade AppConnection[] @relation("AppConnectionConnectedBy")
   appLendsMade      AppLend[]       @relation("AppLendLentBy")
+  appSharesMade     AppShare[]      @relation("AppShareBy")
   appManagerOf      AppConnectionManager[] @relation("AppManagerUser")
   appManagersAdded  AppConnectionManager[] @relation("AppManagerAddedBy")
   botConversations BotsConversation[]
@@ -1163,6 +1164,9 @@ model BrickItemRun {
   // chat) before it writes anything, so a message is never sent twice. Never claimed as exactly once outside Universe.
   deliveredEventId String? @map("delivered_event_id") @db.VarChar(255)
   deliveredAt      DateTime? @map("delivered_at")
+  // How the run was to be reported, kept with the delivery (what a goal that reached its outcome said, its progress, whether it waits): a
+  // run handed out again after a restart reports that, not a plain "said". Null for a reminder and for a run from before this.
+  deliveredReport  Json?     @map("delivered_report")
 
   item BrickItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
 
@@ -1345,6 +1349,8 @@ model BotMcpServer {
   connection  AppConnection? @relation(fields: [connectionId], references: [id], onDelete: Cascade)
   connectedBy User?         @relation("BotMcpServerConnectedBy", fields: [connectedById], references: [id], onDelete: SetNull)
   tools       BotMcpTool[]
+  share       AppShare?
+  shareUses   AppShareUse[] @relation("AppShareUses")
 
   @@unique([botId, connectionId])
   @@index([botId])
@@ -1461,6 +1467,69 @@ model AppUse {
   @@unique([connectionId, botId, callId])
   @@index([connectionId, universeId, usedAt])
   @@map("app_uses")
+}
+
+// A person letting other people ask one of their Bricks for a job from an app of theirs (#2006, mock Part 17). It sits on the
+// grant (a Brick's use of the app), never on the app: the same app used by another Brick stays "only you". Deleting the grant, the
+// app, or this row stops everyone at once. What can be asked for is the jobs below, nothing else of the app.
+model AppShare {
+  id                 String   @id @default(uuid())
+  serverId           String   @unique @map("server_id")
+  sharedById         String?  @map("shared_by_id")
+  // Uses a day, for everyone who asks together and for each person. They start at what a super admin set (Limits) and the owner
+  // changes them for their own app.
+  usesPerDayEveryone Int      @map("uses_per_day_everyone")
+  usesPerDayPerson   Int      @map("uses_per_day_person")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  server   BotMcpServer   @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  sharedBy User?          @relation("AppShareBy", fields: [sharedById], references: [id], onDelete: SetNull)
+  jobs     AppShareJob[]
+
+  @@map("app_shares")
+}
+
+// One job the owner picked: a tool of the app, the input names people may fill in, and the names of what may come back. The tool's
+// fingerprint is kept so a tool that changed afterwards stops being shared until its owner picks it again.
+model AppShareJob {
+  id          String   @id @default(uuid())
+  shareId     String   @map("share_id")
+  toolName    String   @map("tool_name") @db.VarChar(255)
+  fingerprint String   @db.VarChar(128)
+  inputs      Json
+  // Names of the fields that may come back, or null for the whole answer (a tool that does not say what it gives back)
+  returns     Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  share AppShare @relation(fields: [shareId], references: [id], onDelete: Cascade)
+
+  @@unique([shareId, toolName])
+  @@map("app_share_jobs")
+}
+
+// One try by someone else at a shared job, written once under the bot server's call id (a retry is the same try and never runs the
+// job again). `status`: running (asked, not settled), done, unknown (it timed out or the answer was lost: still counted, never
+// run again, given back only once confirmed failed), refunded (confirmed failed: not counted as a use, still a try).
+model AppShareUse {
+  id        String    @id @default(uuid())
+  // The Brick's use of the app (the grant), not the share: stopping and starting sharing again never gives back what was used today
+  serverId  String    @map("server_id")
+  callId    String    @map("call_id") @db.VarChar(200)
+  // "person:<id>" or "guest:<id>", as the meter keeps them
+  askerKey  String    @map("asker_key") @db.VarChar(320)
+  toolName  String    @map("tool_name") @db.VarChar(255)
+  status    String    @default("running") @db.VarChar(10)
+  retries   Int       @default(0)
+  createdAt DateTime  @default(now()) @map("created_at")
+  settledAt DateTime? @map("settled_at")
+
+  server BotMcpServer @relation("AppShareUses", fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@unique([serverId, callId])
+  @@index([serverId, createdAt])
+  @@index([serverId, askerKey, createdAt])
+  @@map("app_share_uses")
 }
 
 // The apps a person can connect with one tap (#2001): a list a super admin keeps, never written in code. Each entry is an app that
@@ -1904,6 +1973,285 @@ model TaskReceipt {
   @@unique([botId, taskKey])
   @@index([personId, startedAt])
   @@map("task_receipts")
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Funding books (paying spec v3, section 16, O1). Who pays, what a grant is, the credit it issues, and what is taken from it.
+// Customer credit is kept apart from what a provider bills us: the provider's side stays in meter_events and the envelope
+// (lib/meter-allowance.ts); a hold here carries its own customer amount and, once known, the provider cost beside it, never mixed.
+// Like the meter's books these keep what happened after a person is deleted, so people are plain ids with no foreign key; the
+// rows that belong to each other (a rule and its recipients, a hold and its allocations) do have them.
+// Today's 2x, 5x and no-limit extras stay in meter_grants exactly as built.
+// ---------------------------------------------------------------------------------------------------------------------
+
+// What a grant is for. Data for display and settings only: a category alone never authorises running or billing anything.
+// universe_ai (reply entitlement), instant_apps and computers (money, in millionths of a dollar).
+model CreditCategory {
+  id        String   @id @db.VarChar(30)
+  label     String   @db.VarChar(80)
+  // reply or money
+  benefit   String   @db.VarChar(10)
+  // reply or usd_micros: fixed per category, so replies and dollars never pay for each other
+  unit      String   @db.VarChar(12)
+  // The trusted list of charge classes this category may pay for (lib/credit-values.ts CHARGE_CLASSES)
+  pays      String[] @default([])
+  status    String   @default("active") @db.VarChar(10)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  programs GrantProgram[]
+
+  @@map("credit_categories")
+}
+
+// Who pays: the platform itself, a person, or a universe. It has named administrators and survives a manager leaving.
+model FundingAccount {
+  id           String   @id @default(uuid())
+  // platform, person or universe
+  kind         String   @db.VarChar(10)
+  // "platform", the person's user id, or the universe's id: one account per owner
+  ownerKey     String   @map("owner_key") @db.VarChar(255)
+  name         String   @db.VarChar(120)
+  currency     String   @default("USD") @db.VarChar(3)
+  // The most this account funds in a calendar month (UTC), in millionths. The platform account reads Limits (rollout budget) when empty.
+  budgetMicros BigInt?  @map("budget_micros")
+  // active, paused or closed. Paused or closed funds nothing new and never lets a hold draw from its lots.
+  status       String   @default("active") @db.VarChar(10)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  admins FundingAccountAdmin[]
+  rules  GrantRule[]
+  lots   CreditLot[]
+
+  @@unique([kind, ownerKey])
+  @@map("funding_accounts")
+}
+
+model FundingAccountAdmin {
+  id        String   @id @default(uuid())
+  accountId String   @map("account_id")
+  userId    String   @map("user_id")
+  addedById String?  @map("added_by_id")
+  addedAt   DateTime @default(now()) @map("added_at")
+
+  account FundingAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, userId])
+  @@index([userId])
+  @@map("funding_account_admins")
+}
+
+// A grant program: one thing a super admin gives, kept through every change. Each change is a new version (grant_rules); the program
+// is what "exactly once" is keyed on, so editing a rule never issues a second grant for the same period.
+model GrantProgram {
+  id          String    @id @default(uuid())
+  categoryId  String    @map("category_id") @db.VarChar(30)
+  // default (the category's default), exception (a person or group differs) or gift (a one-time extra)
+  kind        String    @db.VarChar(10)
+  label       String    @db.VarChar(120)
+  createdById String    @map("created_by_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  // Makes a gift once: the same key again (a double tap, a retry after a lost answer) finds the program it made and gives nothing more
+  requestKey  String?   @unique @map("request_key") @db.VarChar(255)
+  // active or ended. Ending stops new issuance; credit already given stays until it ends.
+  status      String    @default("active") @db.VarChar(10)
+  endedAt     DateTime? @map("ended_at")
+
+  category CreditCategory @relation(fields: [categoryId], references: [id])
+  rules    GrantRule[]
+
+  @@index([categoryId, kind, status])
+  @@map("grant_programs")
+}
+
+// One version of a program's rule. Never edited in place except to say it was superseded or ended.
+model GrantRule {
+  id                  String    @id @default(uuid())
+  programId           String    @map("program_id")
+  version             Int
+  // current, superseded or ended
+  state               String    @default("current") @db.VarChar(12)
+  fundingAccountId    String    @map("funding_account_id")
+  // The categories it may be spent on. A gift for both Instant Apps and computers is ONE dollar amount covering both.
+  covers              String[]
+  // replace (the base amount for people it reaches: universe AI replies, or a money default or exception) or add_credit (a gift on top)
+  benefitKind         String    @map("benefit_kind") @db.VarChar(12)
+  // Replies for universe_ai, millionths of a dollar for money. 0 with schedule none is "no grant".
+  amount              BigInt
+  // once, monthly or none
+  schedule            String    @db.VarChar(8)
+  // each ("$5 each") or shared ("$5 shared in total")
+  share               String    @db.VarChar(8)
+  // all, new_from, people or universe
+  recipientType       String    @map("recipient_type") @db.VarChar(10)
+  // new_from: accounts created from this moment (included) until this one (not included)
+  recipientFrom       DateTime? @map("recipient_from")
+  recipientTo         DateTime? @map("recipient_to")
+  recipientUniverseId String?   @map("recipient_universe_id")
+  // universe: snapshot (people in it now, saved as rows) or changing (current members, needs an end, a joiner cap and a total cap)
+  recipientMode       String?   @map("recipient_mode") @db.VarChar(10)
+  joinerCap           Int?      @map("joiner_cap")
+  totalCapMicros      BigInt?   @map("total_cap_micros")
+  // The claim period: when this rule may issue. Separate from how long a lot lasts and from how often it renews.
+  claimStartsAt       DateTime  @map("claim_starts_at")
+  claimEndsAt         DateTime? @map("claim_ends_at")
+  // How long an issued lot lasts: a fixed moment, or days after issuing. Empty for monthly (a month's lot ends with the month, no roll-over) or a lot that never ends.
+  lotExpiresAt        DateTime? @map("lot_expires_at")
+  lotExpiresInDays    Int?      @map("lot_expires_in_days")
+  // free (a gift, never owed) or to_bill (agreed with the person outside the product; the note and the reference say what)
+  settlement          String    @default("free") @db.VarChar(10)
+  agreementNote       String?   @map("agreement_note") @db.VarChar(1000)
+  agreementRef        String?   @map("agreement_ref") @db.VarChar(120)
+  createdById         String    @map("created_by_id")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  supersededAt        DateTime? @map("superseded_at")
+
+  program    GrantProgram     @relation(fields: [programId], references: [id], onDelete: Cascade)
+  account    FundingAccount   @relation(fields: [fundingAccountId], references: [id])
+  recipients GrantRecipient[]
+
+  @@unique([programId, version])
+  @@index([state, recipientType])
+  @@map("grant_rules")
+}
+
+// The people a rule reaches when they are chosen by id: "people you pick", and a universe's members as they were when it was saved.
+model GrantRecipient {
+  id     String @id @default(uuid())
+  ruleId String @map("rule_id")
+  userId String @map("user_id")
+
+  rule GrantRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@unique([ruleId, userId])
+  @@index([userId])
+  @@map("grant_recipients")
+}
+
+// Issued credit: one lot per program (or base slot) + person (or shared pool) + period. The unique key is what makes issuance exactly
+// once, whatever the path (a sign-up, a migration, a retry, a new device, a rule edit, joining and rejoining). A lot has no mutable
+// balance: what is held and used comes from credit_allocations and credit_refunds, so the books can always be recounted.
+model CreditLot {
+  id               String    @id @default(uuid())
+  // "base:<category>" for a default or exception (they take turns, never both), "gift:<program id>" for a gift
+  slotKey          String    @map("slot_key") @db.VarChar(140)
+  // "person:<user id>" or "pool:<program id>" for a shared amount
+  subjectKey       String    @map("subject_key") @db.VarChar(320)
+  // "once", a UTC month "2026-12", or "gift" (a gift's one period)
+  periodKey        String    @map("period_key") @db.VarChar(40)
+  programId        String?   @map("program_id")
+  ruleId           String?   @map("rule_id")
+  ruleVersion      Int?      @map("rule_version")
+  fundingAccountId String    @map("funding_account_id")
+  personId         String?   @map("person_id")
+  // default, gift, manual_billing, purchase (later, only after a verified payment) or replacement (a separate small credit for a platform failure)
+  source           String    @db.VarChar(16)
+  // Money lots hold only money
+  unit             String    @default("usd_micros") @db.VarChar(12)
+  amountMicros     BigInt    @map("amount_micros")
+  covers           String[]
+  issuedAt         DateTime  @default(now()) @map("issued_at")
+  startsAt         DateTime  @map("starts_at")
+  expiresAt        DateTime? @map("expires_at")
+  // free or to_bill, copied from the rule. billedAt can only be said of to_bill; a gift is never owed.
+  settlement       String    @default("free") @db.VarChar(10)
+  billedAt         DateTime? @map("billed_at")
+  // Where a replacement lot came from
+  refundOfHoldId   String?   @map("refund_of_hold_id")
+  note             String?   @db.VarChar(1000)
+
+  account     FundingAccount     @relation(fields: [fundingAccountId], references: [id])
+  allocations CreditAllocation[]
+
+  @@unique([slotKey, subjectKey, periodKey])
+  @@index([personId, expiresAt])
+  @@index([fundingAccountId, issuedAt])
+  @@index([programId])
+  @@map("credit_lots")
+}
+
+// Room kept for a paid step against a person's credit, once per operation + attempt, and the ledger line it becomes. The customer's
+// amount and the provider's cost are different columns on purpose. A hold never goes away: it ends settled or released.
+model CreditHold {
+  id                 String    @id @default(uuid())
+  // The operation and attempt: asking again for the same step finds the same hold and takes nothing more
+  holdKey            String    @unique @map("hold_key") @db.VarChar(255)
+  personId           String    @map("person_id")
+  botId              String?   @map("bot_id")
+  // Who asked, when that is not the person whose credit pays (a schedule, a visitor)
+  askerKey           String?   @map("asker_key") @db.VarChar(320)
+  // instant_apps or computers: replies are not money and never come here
+  category           String    @db.VarChar(30)
+  chargeClass        String    @map("charge_class") @db.VarChar(20)
+  priceVersion       String?   @map("price_version") @db.VarChar(40)
+  route              String?   @db.VarChar(40)
+  // composio or universe (our own version of an App), and so on
+  provider           String?   @db.VarChar(40)
+  // The job this belongs to, and the hold of the job that contains it (nested work is charged once)
+  jobKey             String?   @map("job_key") @db.VarChar(255)
+  parentHoldKey      String?   @map("parent_hold_key") @db.VarChar(255)
+  // What happened in the world: the same execution is never charged twice. The migration makes a partial unique index (effect_key WHERE state <> 'released'), because a released hold took nothing and the execution may be asked for again
+  effectKey          String?   @map("effect_key") @db.VarChar(255)
+  // held, settled or released
+  state              String    @db.VarChar(10)
+  amountMicros       BigInt    @map("amount_micros")
+  customerMicros     BigInt?   @map("customer_micros")
+  refundedMicros     BigInt    @default(0) @map("refunded_micros")
+  providerCostMicros BigInt?   @map("provider_cost_micros")
+  // measured, estimated or unknown
+  providerCostBasis  String?   @map("provider_cost_basis") @db.VarChar(16)
+  expiresAt          DateTime  @map("expires_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  closedAt           DateTime? @map("closed_at")
+  detail             Json?
+
+  allocations CreditAllocation[]
+
+  @@index([personId, state])
+  @@index([jobKey])
+  @@index([state, expiresAt])
+  @@index([category, createdAt])
+  @@map("credit_holds")
+}
+
+// Which lots a hold took from, in the order they were spent. The split is recorded when room is held and again when it settles.
+model CreditAllocation {
+  id            String   @id @default(uuid())
+  holdId        String   @map("hold_id")
+  lotId         String   @map("lot_id")
+  amountMicros  BigInt   @map("amount_micros")
+  settledMicros BigInt?  @map("settled_micros")
+  // held, settled or released
+  state         String   @db.VarChar(10)
+  position      Int
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  hold CreditHold @relation(fields: [holdId], references: [id], onDelete: Cascade)
+  lot  CreditLot  @relation(fields: [lotId], references: [id])
+
+  @@unique([holdId, lotId])
+  @@index([lotId, state])
+  @@map("credit_allocations")
+}
+
+// A refund keeps its source: it goes back into the lot it came from (while that lot still lasts), never turns into cash, and never
+// renews an expired gift. If the lot ended, a small separately recorded replacement lot is made instead.
+model CreditRefund {
+  id               String   @id @default(uuid())
+  refundKey        String   @unique @map("refund_key") @db.VarChar(255)
+  holdId           String   @map("hold_id")
+  allocationId     String   @map("allocation_id")
+  lotId            String   @map("lot_id")
+  amountMicros     BigInt   @map("amount_micros")
+  // restored (back into the lot) or replacement (a new lot, because the lot had ended)
+  mode             String   @db.VarChar(12)
+  replacementLotId String?  @map("replacement_lot_id")
+  // platform_failure, goodwill or redelivery
+  reason           String   @db.VarChar(20)
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@index([holdId])
+  @@index([lotId, mode])
+  @@map("credit_refunds")
 }
 
 // Bot Metrics
@@ -2596,7 +2944,7 @@ model BrickComputer {
   enabled       Boolean   @default(true)
   // none (not made yet), waking, resting, working, cold (resting a long while), broken, restoring, stopped (stopped by us)
   machine       String    @default("none") @db.VarChar(10)
-  // Which provider holds the machine: "fake" (the pretend one, for tests and the dev server) or "real" (off until Khalid says)
+  // Which provider holds the machine: "fake" (the pretend one, for tests and the dev server) or "real" (Agent37, on wherever the Agent37 key is set)
   provider      String    @default("fake") @db.VarChar(10)
   providerRef   String?   @map("provider_ref") @db.VarChar(255)
   madeAt        DateTime? @map("made_at")
@@ -2605,8 +2953,14 @@ model BrickComputer {
   filesBytes    BigInt    @default(0) @map("files_bytes")
   filesSavedAt  DateTime? @map("files_saved_at")
   restoredFrom  DateTime? @map("restored_from")
+  // What was on the computer's home folder when the last job ended (names, sizes, days; newest first), for the Files list. Null until a job has ended.
+  filesList     Json?     @map("files_list")
   // Set while a rest is claimed and not finished, empty once it is done: a rest a stopped server left half way is told apart from a finished one
   restClaimedAt DateTime? @map("rest_claimed_at")
+  // Set while the browser is being cleared after a job: a job that starts meanwhile waits for it, so it is never cleared under it
+  cleanClaimedAt DateTime? @map("clean_claimed_at")
+  // When the sweep last sent the machine a no-op command to keep it awake while a job holds it
+  keptAwakeAt   DateTime? @map("kept_awake_at")
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again
   noticeDismissedJobId String? @map("notice_dismissed_job_id") @db.VarChar(40)
   createdAt     DateTime  @default(now()) @map("created_at")
@@ -2654,9 +3008,19 @@ model ComputerJob {
   lastTriedAt    DateTime? @map("last_tried_at")
   // The run of a goal or task that started it (game #2002), so a run handed out again finds its job and never starts a second
   runId          String?   @map("run_id") @db.VarChar(36)
+  // Goes up each time the person takes the machine and each time it is handed back (the take-over fence): a token and an agent
+  // callback made under an older number are refused, so nothing the agent had in flight can act after the person took over
+  controlGeneration Int    @default(0) @map("control_generation")
+  // The agent's conversation for this job and the turn it is running now (Agent37 ids), so the runner reconnects to a turn that is
+  // still going before it starts another, and the take-over fence knows which turn to cancel. Empty when no turn is running.
+  agentSessionId    String? @map("agent_session_id") @db.VarChar(80)
+  agentResponseId   String? @map("agent_response_id") @db.VarChar(120)
+  // What the person asked for in more words than the title, for the agent only: never shown, never sent anywhere else, and cleared when the job ends
+  brief             String? @db.VarChar(4000)
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]
+  tokens  ComputerJobToken[]
 
   @@unique([botId, runId])
   @@index([botId, status])
@@ -2761,4 +3125,24 @@ model VoiceNoteCleanup {
   @@unique([providerId, kind, objectId])
   @@index([state, nextAt])
   @@map("voice_note_cleanups")
+}
+
+// A short-lived key a job's computer holds, and the ONLY one: it names no account and grants nothing by itself. Orbit keeps the
+// digest only; the job, the Brick, the person who pays and what is allowed are all read from Orbit's own records when it is used,
+// never from the token or from anything the agent says. Tokens end with the job, on a take over (the generation moves) and after
+// 15 minutes unless the job's lease renews them. `scope` keeps what a computer may ask apart: "model" is a model call and nothing more.
+model ComputerJobToken {
+  id         String    @id @default(uuid())
+  jobId      String    @map("job_id")
+  scope      String    @db.VarChar(12)
+  generation Int
+  digest     String    @unique @db.VarChar(64)
+  expiresAt  DateTime  @map("expires_at")
+  revokedAt  DateTime? @map("revoked_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, revokedAt])
+  @@map("computer_job_tokens")
 }
