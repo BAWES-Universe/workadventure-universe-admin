@@ -217,6 +217,10 @@ function settingInput(category: MoneyCategory, setting: ExceptionSetting, recipi
 }
 
 export function defaultInput(request: Extract<PreviewRequest, { what: 'default' }>, now: Date): GrantInput {
+  // Until computer jobs draw from credit lots they follow one monthly allowance for every member, so a computers default can only say that
+  if (request.category === 'computers' && request.interval !== 'none' && (request.interval !== 'monthly' || request.recipients.kind !== 'all')) {
+    throw new GrantsRefused('For now computer credit is given every month to everyone, or not at all. Use an exception or a gift for anything else.');
+  }
   if (request.interval === 'none') return { categoryId: request.category, amount: 0, schedule: 'none', recipients: recipientOf(request.recipients), claimStartsAt: now };
   const monthlyNext = request.interval === 'monthly' && request.startsOn !== 'now';
   return { categoryId: request.category, amount: request.amountMicros ?? 0, schedule: request.interval as Schedule, recipients: recipientOf(request.recipients), claimStartsAt: monthlyNext ? firstOfNextMonth(now) : now };

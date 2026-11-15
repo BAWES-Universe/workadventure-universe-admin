@@ -113,7 +113,8 @@ export function DefaultSheet({ category, view, onClose, onSaved }: { category: M
   useEffect(() => {
     if (!category || !view) return;
     setAmount(dollarsText(view.amountMicros));
-    setInterval(view.set ? view.interval : 'once');
+    // Computer credit is monthly for everyone for now: it follows the one monthly allowance every member has
+    setInterval(category === 'computers' ? (view.set && view.interval === 'none' ? 'none' : 'monthly') : view.set ? view.interval : 'once');
     setWhom(view.recipients?.kind === 'new_from' ? 'new_from' : 'all');
     setFrom(view.recipients?.kind === 'new_from' ? view.recipients.from.slice(0, 10) : dateInput(new Date()));
     setStartsOn('next');
@@ -168,7 +169,7 @@ export function DefaultSheet({ category, view, onClose, onSaved }: { category: M
               value={interval}
               onChange={setInterval}
               options={[
-                { value: 'once', label: 'Once' },
+                ...(category === 'computers' ? [] : [{ value: 'once' as Interval, label: 'Once' }]),
                 { value: 'monthly', label: 'Every month' },
                 { value: 'none', label: 'None' },
               ]}

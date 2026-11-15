@@ -129,6 +129,15 @@ run('the grants routes, on the real books', () => {
     expect((await getMeterSettings()).memberAllowanceMicros).toBe(10 * MILLION);
   });
 
+  it('refuses a computers default that the monthly allowance could not follow, rather than saving one that does nothing', async () => {
+    const once = await call<any>(putDefault, '/x', { method: 'PUT', body: { amountMicros: 5 * MILLION, interval: 'once', recipients: { kind: 'all' } } }, ctx({ category: 'computers' }));
+    expect(once.status).toBe(400);
+    expect((await once.json()).error).toMatch(/every month to everyone/);
+    const fromDate = await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 5 * MILLION, interval: 'monthly', recipients: { kind: 'new_from', from: new Date().toISOString() } } }, ctx({ category: 'computers' }));
+    expect(fromDate.status).toBe(400);
+    expect((await overview()).money.computers.set).toBe(false);
+  });
+
   it('refuses things the books refuse, with the books’ own line and the right status', async () => {
     const roles = await call<any>(postException, '/x', { method: 'POST', body: { audience: { kind: 'role', roleId: 'r' }, instant_apps: { mode: 'none' }, computers: { mode: 'same' } } });
     expect(roles.status).toBe(400);
