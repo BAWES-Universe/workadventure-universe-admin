@@ -219,6 +219,25 @@ describe('gifts', () => {
     expect(body(calls('POST', '/gifts')[0])).toMatchObject({ settlement: 'to_bill', note: 'Agreed on 15 Nov' });
   });
 
+  it('needs the note before credit to be billed can be given', async () => {
+    render(<GrantsPage />);
+    await pickOmar();
+    fireEvent.change(await screen.findByLabelText('Gift amount'), { target: { value: '5' } });
+    fireEvent.click(screen.getByRole('radio', { name: 'I’ll bill for it' }));
+    await waitFor(() => expect(calls('POST', '/preview').length).toBeGreaterThan(0));
+    expect(screen.getByRole('button', { name: 'Give $5 each' })).toBeDisabled();
+  });
+
+  it('marks credit to be billed as billed, and only that kind', async () => {
+    overview = { ...set, gifts: [{ ...set.gifts[0], id: 'g2', settlement: 'to_bill' }, set.gifts[0]] };
+    render(<GrantsPage />);
+    const buttons = await screen.findAllByTestId('grants-mark-billed');
+    expect(buttons).toHaveLength(1);
+    fireEvent.click(buttons[0]);
+    await waitFor(() => expect(calls('PATCH', '/gifts/g2')).toHaveLength(1));
+    expect(body(calls('PATCH', '/gifts/g2')[0])).toEqual({ action: 'billed' });
+  });
+
   it('needs a day in the future', async () => {
     render(<GrantsPage />);
     await pickOmar();

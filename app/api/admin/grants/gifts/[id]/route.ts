@@ -24,6 +24,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (body.action === 'billed') {
       const result = await markGiftBilled(id);
       if (result === 'not_found') return NextResponse.json({ error: 'That gift was not found' }, { status: 404 });
+      if (result === 'nothing_yet') return NextResponse.json({ error: 'Nothing has been given yet, so there is nothing to mark billed' }, { status: 400 });
       if (result === 'not_billable') return NextResponse.json({ error: 'A gift is never owed, so it cannot be marked billed' }, { status: 400 });
       return NextResponse.json({ ok: true, alreadyBilled: result === 'already_billed' });
     }

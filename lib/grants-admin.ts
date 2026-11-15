@@ -16,6 +16,7 @@ import {
   type Preview,
   type ProgramView,
 } from '@/lib/credit-rules';
+import { markCreditBilled } from '@/lib/credit-billing';
 import { CreditRefused, readRecipient, type MoneyCategory, type Recipient, type Schedule } from '@/lib/credit-values';
 import { PLATFORM_ACCOUNT_ID, exposureOf } from '@/lib/credit-funding';
 import { currentRules, idsReached } from '@/lib/credit-store';
@@ -144,7 +145,8 @@ export async function overview(now: Date = new Date()): Promise<GrantsOverview> 
   for (const category of MONEY_CATEGORIES) {
     const active = money.find((program) => program.kind === 'default' && program.categoryId === category && program.status === 'active');
     const ended = money.find((program) => program.kind === 'default' && program.categoryId === category && program.status === 'ended');
-    if (active) defaults[category] = { set: true, amountMicros: active.amount, interval: active.schedule, recipients: recipientsView(active.recipients) };
+    if (active && active.schedule === 'none') defaults[category] = { set: true, amountMicros: null, interval: 'none', recipients: null };
+    else if (active) defaults[category] = { set: true, amountMicros: active.amount, interval: active.schedule, recipients: recipientsView(active.recipients) };
     // Computers have followed one monthly allowance for each member since the meter began; until a default is saved here, that is the default
     else if (category === 'computers' && settings.memberAllowanceMicros !== null && !ended) defaults[category] = { set: true, amountMicros: settings.memberAllowanceMicros, interval: 'monthly', recipients: { kind: 'all' } };
     else if (ended) defaults[category] = { set: true, amountMicros: null, interval: 'none', recipients: null };
@@ -209,12 +211,12 @@ function settingInput(category: MoneyCategory, setting: ExceptionSetting, recipi
 }
 
 export function defaultInput(request: Extract<PreviewRequest, { what: 'default' }>, now: Date): GrantInput {
-  if (request.interval === 'none') throw new GrantsRefused('A default with no credit is ended, not saved');
+  if (request.interval === 'none') return { categoryId: request.category, amount: 0, schedule: 'none', recipients: recipientOf(request.recipients), claimStartsAt: now };
   const monthlyNext = request.interval === 'monthly' && request.startsOn !== 'now';
   return { categoryId: request.category, amount: request.amountMicros ?? 0, schedule: request.interval as Schedule, recipients: recipientOf(request.recipients), claimStartsAt: monthlyNext ? firstOfNextMonth(now) : now };
 }
 
-export async function giftInput(request: Extract<PreviewRequest, { what: 'gift' }> & { settlement?: 'gift' | 'to_bill'; note?: string | null }, now: Date): Promise<GrantInput> {
+export async function giftInput(request: Extract<PreviewRequest, { what: 'gift' }> & { settlement?: 'gift' | 'to_bill'; note?: string | null; grantKey?: string }, now: Date): Promise<GrantInput> {
   const endsAt = new Date(request.endsAt);
   if (Number.isNaN(endsAt.getTime()) || endsAt <= now) throw new GrantsRefused('A gift ends on a day in the future');
   if (endsAt.getTime() - now.getTime() > 366 * DAY) throw new GrantsRefused('A gift can end up to a year from now');
@@ -232,6 +234,7 @@ export async function giftInput(request: Extract<PreviewRequest, { what: 'gift' 
     lotExpiresAt: endsAt,
     settlement: request.settlement === 'to_bill' ? 'to_bill' : 'free',
     agreementNote: request.settlement === 'to_bill' ? (request.note ?? null) : null,
+    ...(request.grantKey ? { requestKey: request.grantKey } : {}),
   };
   if (recipients.kind === 'universe' && recipients.mode === 'changing') {
     const cap = request.joinerCap;
@@ -343,12 +346,7 @@ export async function previewFor(request: PreviewRequest, now: Date = new Date()
 
 export async function saveDefaultFor(request: Extract<PreviewRequest, { what: 'default' }>, issuer: Issuer, now: Date = new Date()): Promise<void> {
   const category = request.category;
-  if (request.interval === 'none') {
-    const active = (await listPrograms(category, { kind: 'default' }))[0];
-    if (active) await endProgram(active.programId, issuer, now);
-  } else {
-    await saveDefault(defaultInput(request, now), issuer, now);
-  }
+  await saveDefault(defaultInput(request, now), issuer, now);
   // Until computer jobs draw from credit lots, they follow one monthly allowance for each member: it follows the default saved here
   if (category === 'computers') {
     const everyone = request.recipients.kind === 'all';
@@ -434,12 +432,12 @@ export async function createGiftFor(request: Extract<PreviewRequest, { what: 'gi
 }
 
 /** "Mark as billed": says a gift that was to be billed was, and when. Said once; a gift is never owed, so it cannot be marked. */
-export async function markGiftBilled(programId: string, now: Date = new Date()): Promise<'billed' | 'already_billed' | 'not_billable' | 'not_found'> {
-  const program = await prisma.grantProgram.findUnique({ where: { id: programId }, select: { id: true, kind: true, rules: { where: { state: { in: ['current', 'ended'] } }, orderBy: { version: 'desc' }, take: 1, select: { settlement: true } } } });
+export async function markGiftBilled(programId: string, now: Date = new Date()): Promise<'billed' | 'already_billed' | 'not_billable' | 'not_found' | 'nothing_yet'> {
+  const program = await prisma.grantProgram.findUnique({ where: { id: programId }, select: { kind: true, rules: { orderBy: { version: 'desc' }, take: 1, select: { settlement: true } } } });
   if (!program || program.kind !== 'gift') return 'not_found';
   if (program.rules[0]?.settlement !== 'to_bill') return 'not_billable';
-  const { count } = await prisma.creditLot.updateMany({ where: { programId, settlement: 'to_bill', billedAt: null }, data: { billedAt: now } });
-  return count > 0 ? 'billed' : 'already_billed';
+  const { result } = await markCreditBilled({ programId }, now);
+  return result === 'not_found' ? 'nothing_yet' : result;
 }
 
 export const issuerFor = (user: { id: string }, superAdmin: boolean): Issuer => ({ userId: user.id, superAdmin });

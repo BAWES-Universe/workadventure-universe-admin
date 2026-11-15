@@ -103,6 +103,16 @@ export default function GrantsPage() {
     load();
   }
 
+  async function markBilled(gift: GiftView) {
+    const result = await sendJson(`/api/admin/grants/gifts/${encodeURIComponent(gift.id)}`, 'PATCH', { action: 'billed' });
+    if (!result.ok) {
+      addToast({ description: result.error ?? 'That didn’t save.', variant: 'error' });
+      return;
+    }
+    addToast({ description: 'Marked as billed.', variant: 'success', duration: 3000 });
+    load();
+  }
+
   const totals = overview?.totals ?? null;
 
   return (
@@ -220,11 +230,18 @@ export default function GrantsPage() {
                       meta={<StatLine items={giftMeta(gift)} />}
                       aside={<span className={styles.pill}>{giftPill(gift)}</span>}
                     />
-                    {!gift.ended && (
+                    {(!gift.ended || (gift.settlement === 'to_bill' && !gift.billedAt)) && (
                       <div className="flex gap-2 px-1 pb-2">
-                        <Button variant="outline" className="h-11 px-4" onClick={() => endGift(gift)}>
-                          End it now
-                        </Button>
+                        {gift.settlement === 'to_bill' && !gift.billedAt && (
+                          <Button variant="outline" className="h-11 px-4" data-testid="grants-mark-billed" onClick={() => markBilled(gift)}>
+                            Mark as billed
+                          </Button>
+                        )}
+                        {!gift.ended && (
+                          <Button variant="outline" className="h-11 px-4" onClick={() => endGift(gift)}>
+                            End it now
+                          </Button>
+                        )}
                       </div>
                     )}
                   </div>

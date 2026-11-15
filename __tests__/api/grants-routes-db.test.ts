@@ -19,6 +19,7 @@ import { POST as postPreview } from '@/app/api/admin/grants/preview/route';
 import { PUT as putDefault } from '@/app/api/admin/grants/defaults/[category]/route';
 import { POST as postException } from '@/app/api/admin/grants/exceptions/route';
 import { DELETE as deleteException } from '@/app/api/admin/grants/exceptions/[id]/route';
+import { ensureIssued } from '@/lib/credit-issue';
 import { POST as postGift } from '@/app/api/admin/grants/gifts/route';
 import { PATCH as patchGift } from '@/app/api/admin/grants/gifts/[id]/route';
 import { GET as getFind } from '@/app/api/admin/grants/find/route';
@@ -138,12 +139,11 @@ run('the grants routes, on the real books', () => {
     expect(wrongCategory.status).toBe(404);
   });
 
-  it('refuses a default bigger than the room left in the rollout budget, in dollars', async () => {
+  it('refuses a gift bigger than the room left in the rollout budget, in dollars', async () => {
     await saveMeterSettings({ rolloutBudgetMicros: 5 * MILLION }, admin.id);
-    await person('Sara');
-    await person('Omar');
-    const refused = await call<any>(putDefault, '/x', { method: 'PUT', body: { amountMicros: 5 * MILLION, interval: 'once', recipients: { kind: 'all' } } }, ctx({ category: 'instant_apps' }));
-    // Fixed set of people (including the test admin): more than $5 in all is refused now, not half-issued later
+    const [sara, omar] = [await person('Sara'), await person('Omar')];
+    const refused = await call<any>(postGift, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [sara, omar] }, amountMicros: 3 * MILLION, scope: 'both', shared: false, endsAt: new Date(Date.now() + 30 * 86400_000).toISOString(), settlement: 'gift', grantKey: randomUUID() } });
+    // Two people at $3 each is more than the $5 left: refused now, not half-issued later
     expect(refused.status).toBe(400);
     expect((await refused.json()).code).toBe('over_budget');
   });
@@ -183,6 +183,9 @@ run('the grants routes, on the real books', () => {
     const free = await call<any>(postGift, '/x', { method: 'POST', body: { grantKey: randomUUID(), audience: { kind: 'people', userIds: [omar] }, scope: 'apps', amountMicros: 1 * MILLION, shared: false, endsAt: ends, settlement: 'gift' } });
     const [mineId, freeId] = [(await mine.json()).id, (await free.json()).id];
     expect((await call(patchGift, '/x', { method: 'PATCH', body: { action: 'billed' } }, ctx({ id: freeId }))).status).toBe(400);
+    // Credit reaches a person when it is first needed, so before that there is nothing to mark
+    expect((await call(patchGift, '/x', { method: 'PATCH', body: { action: 'billed' } }, ctx({ id: mineId }))).status).toBe(400);
+    await ensureIssued(omar);
     const first = await call<any>(patchGift, '/x', { method: 'PATCH', body: { action: 'billed' } }, ctx({ id: mineId }));
     expect(first.status).toBe(200);
     const again = await call<any>(patchGift, '/x', { method: 'PATCH', body: { action: 'billed' } }, ctx({ id: mineId }));
@@ -269,7 +272,10 @@ run('the grants routes, on the real books', () => {
     });
 
     it('never saves a rule that would be left with nobody', async () => {
-      const { omar, noor } = await twoRules();
+      const { omar, noor, faisal } = await twoRules();
+      // A wider rule that already holds Omar and Noor with a different figure, then a narrower one made only of them
+      const wider = await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor, faisal] }, instant_apps: { mode: 'same' }, computers: { mode: 'own', amountMicros: 7 * MILLION, interval: 'monthly' }, clashChoice: 'this' } });
+      expect(wider.status).toBe(201);
       const refused = await call<any>(postException, '/x', { method: 'POST', body: { ...second([omar, noor]), clashChoice: 'other' } });
       expect(refused.status).toBe(400);
       expect((await refused.json()).error).toMatch(/Nobody would be left/);
