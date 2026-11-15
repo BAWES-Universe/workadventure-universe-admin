@@ -535,6 +535,9 @@ async function main() {
     await spend.settleHold({ holdKey: 'ask1-b', customerMicros: 2 * M }, G);
     const out = (await usage.moneyLine('ask1', 'instant_apps', G)) as { canAskForMore: boolean };
     check('with the gift used up too, "Ask for more" is offered', out.canAskForMore === true, out);
+    await prisma.creditLot.create({ data: { slotKey: 'gift:ask1-comp', subjectKey: 'person:ask1', periodKey: 'gift', personId: 'ask1', source: 'gift', amountMicros: BigInt(5) * BigInt(M), covers: ['computers'], fundingAccountId: 'funding-platform', startsAt: G, issuedAt: G } });
+    const stillOut = (await usage.moneyLine('ask1', 'instant_apps', G)) as { canAskForMore: boolean };
+    check('a gift that covers only computers does not block an Instant Apps ask', stillOut.canAskForMore === true, stillOut);
   }
 
   // ---------- The Instant executor's contract ----------
