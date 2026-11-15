@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
+import { unsendableIssueMessage } from '@/lib/mcp/server-input';
 import { addCatalogEntry, catalogEntrySchema, listCatalogForAdmin } from '@/lib/app-catalog';
 
 export const runtime = 'nodejs';
@@ -30,7 +31,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   if (!(await superAdmin(request))) return refused();
   const parsed = catalogEntrySchema.safeParse(await request.json().catch(() => null));
-  if (!parsed.success) return NextResponse.json({ error: 'Invalid input data', details: z.treeifyError(parsed.error) }, { status: 400 });
+  if (!parsed.success) return NextResponse.json({ error: unsendableIssueMessage(parsed.error.issues) ?? 'Invalid input data', details: z.treeifyError(parsed.error) }, { status: 400 });
   try {
     const added = await addCatalogEntry(parsed.data);
     if (added === 'taken') return NextResponse.json({ error: 'An app with this key is already on the list' }, { status: 409 });

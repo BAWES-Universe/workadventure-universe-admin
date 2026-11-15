@@ -7,6 +7,7 @@ import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
 import { z } from 'zod';
 import { corsHeaders } from '@/lib/cors';
 import { isAllowedServerUrl } from '@/lib/mcp/outbound-guard';
+import { headerProblem } from '@/lib/mcp/header-text';
 import { endApprovalsForServers } from '@/lib/bot-actions';
 
 export const runtime = 'nodejs';
@@ -199,6 +200,16 @@ export async function PATCH(
 
     const body = await request.json();
     const validatedData = updateMcpServerSchema.parse(body);
+
+    // A key, token or extra header with text that cannot be sent is named here, in words (the sign-in kind is the one in the save, or the stored one)
+    const unsendable = headerProblem({
+      authType: validatedData.authType ?? existing.authType,
+      authValue: validatedData.authConfig,
+      headers: validatedData.headers,
+    });
+    if (unsendable) {
+      return NextResponse.json({ error: unsendable }, { status: 400, headers: corsHeaders(request) });
+    }
 
     // A Brick's grant on a person's connection (game #2001) keeps only what is the Brick's own: its switch. The app's name,
     // link, sign-in, key and headers are changed on the app's own page, for every Brick at once.
