@@ -757,6 +757,66 @@ run('payments for pages, in a real database', () => {
       expect((await start(artifactId, '198.51.100.52')).status).toBe(409);
     });
 
+    it('also refuses an address with a stray percent sign beside a partly encoded key', async () => {
+      const { artifactId } = await pending();
+      // A "%" that cannot be decoded must not hide a key that is partly encoded
+      gateway({ create: { transaction: { url: `https://checkout.examplepay.com/?t=${'%73' + KEY.slice(1)}&x=%` } } });
+      const response = await start(artifactId, '198.51.100.56');
+      expect(response.status).toBe(409);
+      expect(JSON.stringify(await response.json())).not.toContain(KEY);
+      expect(await prisma.appPageOrder.findFirstOrThrow({ where: { artifactId } })).toMatchObject({ status: 'cant_confirm', checkoutUrl: null });
+    });
+
+    it('answers a notice with a request to come back when the service could not be asked, and waits for it', async () => {
+      const { artifactId } = await pending();
+      gateway();
+      const { orderId } = await checkout(artifactId, '198.51.100.57');
+      const ask = () => notice(request(`/api/app-pay/notice/${orderId}`, { method: 'POST', body: { status: 'CAPTURED' } }), params({ orderId }));
+      const old = () => prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 60_000) } });
+      // The service is down
+      mockSend.current = () => ({ status: 503, body: {} });
+      await old();
+      const down = await ask();
+      expect(down.status).toBe(429);
+      expect(Number(down.headers.get('retry-after'))).toBeGreaterThan(0);
+      // Redirected: the key is never followed anywhere
+      mockSend.current = () => ({ status: 200, redirected: true, body: {} });
+      await old();
+      expect((await ask()).status).toBe(429);
+      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('pending');
+      // When it is back, the same notice is answered and the order is paid
+      gateway({ record: (order) => paidRecord(order) });
+      await old();
+      expect((await ask()).status).toBe(200);
+      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('paid');
+    });
+
+    it('takes the app the page is on when the lock is taken, not the one read before it', async () => {
+      const { id: firstId, serverId } = await connectGateway();
+      const artifactId = await makeArtifact();
+      expect((await job(serverId, artifactId)).status).toBe(200);
+      gateway();
+      // Between the first read and the lock the owner connects the service again
+      const real = prisma.$transaction.bind(prisma);
+      let second = '';
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((fn: unknown, ...rest: unknown[]) => {
+        return (async () => {
+          second = (await connectGateway()).id;
+          return (real as (...args: unknown[]) => Promise<unknown>)(fn, ...rest);
+        })();
+      }) as never);
+      try {
+        const { orderId } = await checkout(artifactId, '198.51.100.58');
+        const order = await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } });
+        const held = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+        // Whichever app the page ended up on, the order is on that one and nothing else
+        expect(order.connectionId).toBe(held.connectionId);
+        expect([firstId, second]).toContain(order.connectionId);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it('counts a look at a payment against what everyone may send an hour, and waits when that is spent', async () => {
       await saveServerLimits({ bricks: { keyCallsPlatform: 2 } }, sara);
       const { artifactId } = await pending();

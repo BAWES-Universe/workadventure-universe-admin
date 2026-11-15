@@ -28,9 +28,11 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
   /** An order that was not paid when the watch ended: it can be looked at again, because paying at the service late still counts. */
   const [recheck, setRecheck] = useState<string | null>(null);
   const busy = useRef(false);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  /** Which watch is current: an answer that comes back for an older one (another page, another order, or after cleanup) is dropped unread. */
+  /** Which watch is current: an answer that comes back for an older page (or after cleanup) is dropped unread. */
   const current = useRef(0);
+  /** The order the buyer is looking at now. Earlier orders keep being looked at, but only to hear that one of them was paid. */
+  const primary = useRef<string | null>(null);
+  const watchers = useRef(new Map<string, () => void>());
 
   const tell = useCallback((status: Status) => {
     const frame = document.querySelector<HTMLIFrameElement>('iframe[data-artifact-frame]');
@@ -38,43 +40,80 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
     frame?.contentWindow?.postMessage({ universe: 'app-result', status }, '*');
   }, []);
 
+  const stopAll = useCallback(() => {
+    watchers.current.forEach((stop) => stop());
+    watchers.current.clear();
+  }, []);
+
   const watch = useCallback(
     (orderId: string) => {
-      if (timer.current) clearTimeout(timer.current);
-      const mine = ++current.current;
+      watchers.current.get(orderId)?.();
+      // A new checkout takes over the screen, but an earlier one is not dropped: a buyer who paid it late must still be heard
+      primary.current = orderId;
+      const page = current.current;
       const until = Date.now() + POLL_FOR_MS;
       let toldNotPaid = false;
-      const alive = () => mine === current.current;
+      let stopped = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const stop = () => {
+        stopped = true;
+        if (timer) clearTimeout(timer);
+      };
+      watchers.current.set(orderId, stop);
+      const alive = () => !stopped && page === current.current;
+      const finish = () => {
+        stop();
+        if (watchers.current.get(orderId) === stop) watchers.current.delete(orderId);
+      };
       const poll = async () => {
         if (!alive()) return;
         try {
           const response = await fetch(`/api/pay/${encodeURIComponent(artifactId)}?order=${encodeURIComponent(orderId)}`, { cache: 'no-store' });
           const body = response.ok ? ((await response.json()) as { status: Status }) : null;
           if (!alive()) return;
-          if (body?.status === 'paid' || body?.status === 'cant_confirm') {
+          if (body?.status === 'paid') {
+            // Paid wins whichever order it is: everything else stops, and a checkout still on its way is dropped
+            stopAll();
+            primary.current = null;
+            current.current += 1;
             busy.current = false;
             setResume(null);
             setRecheck(null);
-            setLine(body.status === 'paid' ? null : WORDS[body.status] ?? null);
-            tell(body.status);
+            setLine(null);
+            tell('paid');
             return;
           }
-          if (body?.status === 'not_paid') {
+          const mine = primary.current === orderId;
+          if (body?.status === 'cant_confirm') {
+            finish();
+            if (!mine) return;
+            busy.current = false;
+            setResume(null);
+            setRecheck(null);
+            setLine(WORDS.cant_confirm);
+            tell('cant_confirm');
+            return;
+          }
+          if (body?.status === 'not_paid' && mine && !toldNotPaid) {
             // Said once, and the order goes on being looked at until the time is up: a payment made at the service after the checkout closed still arrives
-            if (!toldNotPaid) {
-              toldNotPaid = true;
-              busy.current = false;
-              setResume(null);
-              setLine(WORDS.not_paid);
-              tell('not_paid');
-            }
+            toldNotPaid = true;
+            busy.current = false;
+            setResume(null);
+            setLine(WORDS.not_paid);
+            tell('not_paid');
           }
         } catch {
           // Try again on the next turn
         }
         if (!alive()) return;
-        if (Date.now() < until) timer.current = setTimeout(poll, POLL_MS);
-        else if (toldNotPaid) {
+        if (Date.now() < until) {
+          timer = setTimeout(poll, POLL_MS);
+          return;
+        }
+        finish();
+        // An older order's look ends without a word: the buyer is on a newer one
+        if (primary.current !== orderId) return;
+        if (toldNotPaid) {
           // The look ends here, and the buyer can ask for another one
           setRecheck(orderId);
         } else {
@@ -86,9 +125,9 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
           tell('cant_confirm');
         }
       };
-      timer.current = setTimeout(poll, POLL_MS);
+      timer = setTimeout(poll, POLL_MS);
     },
-    [artifactId, tell],
+    [artifactId, tell, stopAll],
   );
 
   useEffect(() => {
@@ -140,12 +179,13 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
       // Everything still in flight belongs to a page that is gone, and so do its line, its link and its busy tap
       current.current += 1;
       busy.current = false;
+      primary.current = null;
+      stopAll();
       setLine(null);
       setResume(null);
       setRecheck(null);
-      if (timer.current) clearTimeout(timer.current);
     };
-  }, [artifactId, tell, watch]);
+  }, [artifactId, tell, watch, stopAll]);
 
   if (!line && !resume && !recheck) return null;
   return (

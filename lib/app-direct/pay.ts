@@ -216,11 +216,12 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
 
   const started = await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`page-orders:${first.job.ownerId}`}, 0))`;
-    // Holding both rows keeps the owner from replacing the terms or the key until this order is written; what they hold NOW is what the
-    // order and the request use, never what was read before the lock
-    const held = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_page_jobs" WHERE "id" = ${first.job.id} AND "status" = 'active' FOR SHARE`;
+    // Holding both rows keeps the owner from replacing the terms, the app or its key until this order is written; what they hold NOW is what
+    // the order and the request use, never what was read before the lock
+    const held = await tx.$queryRaw<{ connectionId: string }[]>`SELECT "connection_id" AS "connectionId" FROM "app_page_jobs" WHERE "id" = ${first.job.id} AND "status" = 'active' FOR SHARE`;
     if (held.length === 0) return 'gone' as const;
-    const app = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_connections" WHERE "id" = ${first.connection.id} FOR SHARE`;
+    // The app to hold is the one the locked job names now: the owner may have pointed the page at another app since the first read
+    const app = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_connections" WHERE "id" = ${held[0].connectionId} FOR SHARE`;
     if (app.length === 0) return 'gone' as const;
     const terms = checkoutTerms(await tx.appPageJob.findUnique({ where: { id: first.job.id }, include: { connection: true, artifact: { select: { expiresAt: true } } } }));
     if (!terms) return 'gone' as const;
@@ -306,14 +307,17 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
   return { status: 'ok', orderId: order.id, checkoutUrl, amount: minorToText(job.amountMinor, job.currency), currency: job.currency, app: definition.short };
 }
 
-/** Whether the key is written anywhere in an address, as it is or percent-encoded. */
+/**
+ * Whether the key may be written anywhere in an address: as it is, percent-encoded, or hidden by escapes. An address that cannot be decoded
+ * (a stray "%") could be hiding the key behind the broken escape, so it counts as carrying it.
+ */
 function carriesKey(address: string, key: string): boolean {
   if (!key) return false;
-  let decoded = address;
+  let decoded: string;
   try {
     decoded = decodeURIComponent(address);
   } catch {
-    // A malformed escape: the text as it is was already checked
+    return true;
   }
   return address.includes(key) || decoded.includes(key) || address.includes(encodeURIComponent(key));
 }
@@ -343,8 +347,12 @@ export interface OrderView {
   testPayment: boolean;
 }
 
-/** Answers that did not ask the service this time (it was asked a moment ago, or the hour's budget is spent): a notice that gets one is to be sent again later. */
+/** Answers that did not settle anything this time (the service was asked a moment ago, the hour's budget is spent, or the look itself failed): a notice that gets one is to be sent again later. */
 const waiting = new WeakSet<OrderView>();
+const later = (view: OrderView): OrderView => {
+  waiting.add(view);
+  return view;
+};
 export const isWaiting = (view: OrderView): boolean => waiting.has(view);
 
 const stateOf = (status: string): OrderState => (status === 'paid' ? 'paid' : status === 'not_paid' ? 'not_paid' : status === 'cant_confirm' ? 'cant_confirm' : 'checking');
@@ -392,11 +400,7 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
     where: { id: order.id, status: open, OR: [{ checkedAt: null }, { checkedAt: { lt: new Date(now.getTime() - limits.paymentCheckSeconds * 1000) } }] },
     data: { checkedAt: now, checks: { increment: 1 } },
   });
-  if (taken.count === 0) {
-    const same = view(order.status);
-    waiting.add(same);
-    return same;
-  }
+  if (taken.count === 0) return later(view(order.status));
 
   const { lookup } = definition.payment;
   let key: string;
@@ -420,32 +424,28 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
       return true;
     })
     .catch(() => false);
-  if (!budget) {
-    const same = view(order.status);
-    waiting.add(same);
-    return same;
-  }
+  if (!budget) return later(view(order.status));
   const startedAt = new Date();
   let answer;
   try {
     const built = buildRequest(definition, lookup.operation, { [lookup.idParam]: order.providerRef }, key);
     answer = await guardedRequest({ ...built, timeoutMs: limits.keyCallSeconds * 1000, maxBytes: limits.keyAnswerKb * 1024 }, deps);
   } catch (error) {
-    if (error instanceof RequestError || error instanceof GuardError) return view(order.status);
+    if (error instanceof RequestError || error instanceof GuardError) return later(view(order.status));
     throw error;
   }
   if (answer.status === 401 || answer.status === 403) {
     await reportConnectionSignIn(connection.id, { state: 'expired', status: answer.status }, startedAt).catch(() => undefined);
-    return view(order.status);
+    return later(view(order.status));
   }
-  if (answer.redirected || answer.truncated || answer.status < 200 || answer.status >= 300) return view(order.status);
+  if (answer.redirected || answer.truncated || answer.status < 200 || answer.status >= 300) return later(view(order.status));
   await reportKeyWorked(connection.id, connection.keyVersion).catch(() => undefined);
   let record: unknown;
   try {
     const asked = definition.operations.find((candidate) => candidate.id === lookup.operation);
     record = pickFields(JSON.parse(answer.body), asked?.returns ?? []);
   } catch {
-    return view(order.status);
+    return later(view(order.status));
   }
 
   const status = valueAt(record, lookup.statusPath);
