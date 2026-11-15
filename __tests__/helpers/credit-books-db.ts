@@ -70,15 +70,17 @@ export async function startTestDatabase(): Promise<TestDatabase> {
   const { PGlite } = await import('@electric-sql/pglite');
   const { PGLiteSocketServer } = await import('@electric-sql/pglite-socket');
   const db = await PGlite.create();
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const server = new PGLiteSocketServer({ db, port, host: '127.0.0.1' });
   try {
     for (const migration of migrationFiles()) await db.exec(migration.sql);
+    await server.start();
   } catch (error) {
+    // A setup that fails (migration or the socket) closes what was opened, then the real error goes on
+    await server.stop().catch(() => undefined);
     await db.close().catch(() => undefined);
     throw error;
   }
-  const port = 20000 + Math.floor(Math.random() * 20000);
-  const server = new PGLiteSocketServer({ db, port, host: '127.0.0.1' });
-  await server.start();
   return {
     kind: 'pglite',
     url: `postgres://postgres:postgres@127.0.0.1:${port}/postgres`,

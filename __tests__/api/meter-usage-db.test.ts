@@ -262,6 +262,18 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await askPost(body('POST', '/api/me/usage/ask-for-more', {}))).status).toBe(409);
       expect(await prisma.meterRequest.count({})).toBe(0);
     });
+
+    it('treats a missing body as the old computer ask, but a blank or broken body as a bad request', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 1_000, new Date());
+      session.mockResolvedValue({ id: sara.id, email: 'sara@example.test' });
+      const raw = (text: string) => new NextRequest('http://localhost:3333/api/me/usage/ask-for-more', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
+      expect((await askPost(raw('   '))).status).toBe(400);
+      expect((await askPost(raw('{nope'))).status).toBe(400);
+      expect(await prisma.meterRequest.count({})).toBe(0);
+      expect((await askPost(new NextRequest('http://localhost:3333/api/me/usage/ask-for-more', { method: 'POST' }))).status).toBe(201);
+    });
   });
 
   describe('a person’s page', () => {

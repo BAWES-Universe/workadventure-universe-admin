@@ -24,10 +24,10 @@ export async function POST(request: NextRequest) {
   const user = await getSessionUser(request);
   if (!user) return respond(request, { error: 'Unauthorized' }, 401);
   try {
-    // No body at all is the old call (computer time); a body that was sent must be a JSON object, with an optional category of apps or computer
+    // No body at all (nothing sent) is the old call (computer time); a body that was sent, even blank, must be a JSON object, with an optional category of apps or computer
     const text = await request.text();
     let body: unknown = {};
-    if (text.trim()) {
+    if (text.length > 0) {
       try {
         body = JSON.parse(text);
       } catch {
