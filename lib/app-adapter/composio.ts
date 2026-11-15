@@ -1,4 +1,5 @@
-import { AdapterError, type AppLink, type ConnectStart, type LinkAnswer, type ReadyMadeAdapter, type UseResult } from '@/lib/app-adapter/types';
+import { AdapterError, type AppLink, type ConnectStart, type InstantAdapter, type InstantCall, type InstantLog, type LinkAnswer, type ReadyMadeAdapter, type UseResult } from '@/lib/app-adapter/types';
+import { INSTANT_ACCOUNT, readInstantCharge } from '@/lib/instant/values';
 
 /**
  * The real adapter, written from the provider's live docs (docs.composio.dev, read 12 Nov 2026), wired but never switched on
@@ -18,6 +19,12 @@ import { AdapterError, type AppLink, type ConnectStart, type LinkAnswer, type Re
  *
  * The key is sent on every call to a person's app link too (it answers 401 without it), by Orbit alone (callLink). A 429 is asked again
  * after the wait the provider names (its limit is 2,000 calls a minute for the account).
+ *
+ * INSTANT: an Instant tool runs on the provider's own accounts and is charged to OUR prepaid balance, and the provider's session has
+ * no dollar cap. So every session made here says `instant: false` out loud (a session that says nothing lets Instant run the day
+ * the project switch goes on), and an Instant tool runs only through `instant.run` below, sent on purpose through the Instant
+ * account by the bounded executor (lib/instant/executor.ts). A single app step (`use`) names its connected account and never
+ * runs without one, because a call with no account named is one the provider may serve from Instant.
  *
  * The provider's sandbox (its "workbench", which runs code on the person's own data) is ON in every session (the provider's default,
  * stated explicitly); each run is counted like an app step by whoever sends it (the bot server).
@@ -56,6 +63,27 @@ const USAGE_GROUP_LIMIT = 1000;
 function readCount(value: unknown): number | null {
   const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
   return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : null;
+}
+
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** One execution log line, as far as the executor reads it. A line with no id is not one. */
+function readLog(row: Record<string, unknown>): InstantLog | null {
+  const id = typeof row.id === 'string' && row.id ? row.id : null;
+  if (!id) return null;
+  const metadata = isObject(row.metadata) ? row.metadata : {};
+  const tool = isObject(metadata.tool) ? metadata.tool.slug : undefined;
+  const status = row.status === 'success' ? 'success' : row.status === 'failed' ? 'failed' : 'unknown';
+  const at = typeof row.timestamp === 'string' ? Date.parse(row.timestamp) : NaN;
+  return {
+    id,
+    status,
+    chargeMicros: readInstantCharge(metadata.instant_charge),
+    credentialSource: typeof metadata.credential_source === 'string' ? metadata.credential_source : null,
+    tool: typeof tool === 'string' ? tool : null,
+    userId: typeof metadata.user_id === 'string' ? metadata.user_id : null,
+    atMs: Number.isFinite(at) ? at : null,
+  };
 }
 
 export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapter {
@@ -107,7 +135,109 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
     return id;
   }
 
+  const instant: InstantAdapter = {
+    async run({ runUserId, tool, arguments: args }): Promise<InstantCall> {
+      let response: Response;
+      try {
+        response = await doFetch(`${base}/tools/execute/${encodeURIComponent(tool)}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-api-key': options.apiKey },
+          // Instant is chosen on purpose, by name, and never by the provider's own order of accounts
+          body: JSON.stringify({ user_id: runUserId, connected_account_id: INSTANT_ACCOUNT, arguments: args }),
+          signal: AbortSignal.timeout(60_000),
+          redirect: 'error',
+        });
+      } catch (error) {
+        // Sent, and nothing came back that can be read: it may have run
+        const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+        return { kind: 'unclear', why: timedOut ? 'timeout' : 'network', status: null };
+      }
+      const status = response.status;
+      const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      const error = json && typeof json.error === 'object' && json.error !== null ? (json.error as Record<string, unknown>) : null;
+      const code = str(error?.slug) ?? (typeof error?.code === 'number' ? String(error.code) : str(error?.code));
+      // Refused before anything ran: not signed in, balance empty, Instant not switched on, too many requests
+      if (status === 401 || status === 402 || status === 403 || status === 429) return { kind: 'rejected', status, code };
+      if (status === 400 || status === 404 || status === 422) return { kind: 'invalid', status, code };
+      if (status >= 500 || status === 408) return { kind: 'unclear', why: 'server', status };
+      if (!response.ok || !json || typeof json.successful !== 'boolean') return { kind: 'unclear', why: 'unreadable', status };
+      const data = isObject(json.data) || Array.isArray(json.data) ? json.data : (json.data ?? null);
+      // The charge, when the answer carries it. Composio's REST docs do not say it does, so its log is also asked after the run.
+      const reported = readInstantCharge(json.instant_charge ?? (isObject(json.metadata) ? (json.metadata as Record<string, unknown>).instant_charge : undefined));
+      return { kind: 'done', successful: json.successful === true, data, error: json.successful === true ? null : (str(json.error) ?? 'failed'), logId: str(json.log_id), chargeMicros: reported };
+    },
+
+    async log(logId) {
+      const json = await call(`/logs/tool_execution/${encodeURIComponent(logId)}`, null).catch((error) => {
+        // A line that is not there (404) is "none"; anything else is Composio not being reachable
+        if (error instanceof AdapterError && /answered 404/.test(error.message)) return null;
+        throw error;
+      });
+      if (!json) return null;
+      const log = readLog(json);
+      if (!log) return null;
+      const body = isObject(json.data) && isObject((json.data as Record<string, unknown>).response) ? ((json.data as Record<string, unknown>).response as Record<string, unknown>).body : undefined;
+      return { log, response: body ?? null };
+    },
+
+    async findLogs({ userId, fromMs, toMs }) {
+      const json = await call('/logs/tool_execution', {
+        limit: 20,
+        filters: [{ field: 'user_id', operator: '==', value: userId }],
+        time_range: { from: fromMs, to: toMs },
+      });
+      const rows = Array.isArray(json.logs) ? (json.logs as Record<string, unknown>[]) : [];
+      return rows.map(readLog).filter((entry): entry is InstantLog => entry !== null);
+    },
+
+    async tool(slug) {
+      const json = await call(`/tools/${encodeURIComponent(slug)}?toolkit_versions=latest&include_pricing=true`, null).catch((error) => {
+        if (error instanceof AdapterError && /answered 404/.test(error.message)) return null;
+        throw error;
+      });
+      if (!json) return null;
+      const price = isObject(json.instant) && isObject((json.instant as Record<string, unknown>).price) ? ((json.instant as Record<string, unknown>).price as Record<string, unknown>) : null;
+      return {
+        slug: str(json.slug) ?? slug,
+        toolkit: isObject(json.toolkit) ? str((json.toolkit as Record<string, unknown>).slug) : null,
+        description: str(json.description),
+        inputSchema: json.input_parameters ?? null,
+        instantSupported: isObject(json.instant) && (json.instant as Record<string, unknown>).supported === true,
+        priceWords: str(price?.description),
+      };
+    },
+
+    async sessionInstant(sessionId) {
+      const json = await call(`/tool_router/session/${encodeURIComponent(sessionId)}`, null).catch((error) => {
+        if (error instanceof AdapterError && /answered 404/.test(error.message)) return null;
+        throw error;
+      });
+      if (!json) return 'gone';
+      const config = isObject(json.config) ? (json.config as Record<string, unknown>) : {};
+      // `instant` is always `false` or a policy object (the provider's docs): only an explicit false is a denial
+      return config.instant === false ? 'denied' : 'allowed';
+    },
+
+    async denySessionInstant(sessionId) {
+      const response = await send(`${base}/tool_router/session/${encodeURIComponent(sessionId)}`, () => ({
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', 'x-api-key': options.apiKey },
+        body: JSON.stringify({ instant: false }),
+        signal: AbortSignal.timeout(30_000),
+        redirect: 'error',
+      }));
+      if (response.status === 404) return 'gone';
+      const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      if (!response.ok || !json) throw new AdapterError('provider', `Provider answered ${response.status}`);
+      // Whatever it says, it is trusted only once it reads back as denied
+      const config = isObject(json.config) ? (json.config as Record<string, unknown>) : {};
+      if (config.instant !== false) throw new AdapterError('provider', 'The session still allows Instant after the change');
+      return 'denied';
+    },
+  };
+
   return {
+    instant,
     async startConnect({ person, toolkit, returnUrl, authConfigId: given }): Promise<ConnectStart> {
       // A caller that already read the setting passes it (undefined: read it here), so a caller inside a database transaction never
       // takes a second pooled connection for it
@@ -134,6 +264,8 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
         user_id: person,
         toolkits: { enable: toolkits },
         workbench: { enable: true },
+        // Explicit, never left out: a session with no word about Instant allows it once the project switch is on
+        instant: false,
         ...(pinned && Object.keys(pinned).length > 0 ? { connected_accounts: pinned } : {}),
       });
       const mcp = json.mcp && typeof json.mcp === 'object' ? (json.mcp as Record<string, unknown>) : {};
@@ -177,9 +309,11 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
 
     async use({ person, toolkit, tool, arguments: args, providerAccountId }): Promise<UseResult> {
       void toolkit;
+      // No account named is a call the provider may serve from Instant (its order is the person's, then a shared one, then Instant)
+      if (!providerAccountId) throw new AdapterError('provider', 'A tool run needs the connected account it is for');
       const json = await call(`/tools/execute/${encodeURIComponent(tool)}`, {
         user_id: person,
-        ...(providerAccountId ? { connected_account_id: providerAccountId } : {}),
+        connected_account_id: providerAccountId,
         arguments: args,
       });
       return { ok: json.successful === true, data: json.data ?? null, error: str(json.error), providerCallId: str(json.log_id) };

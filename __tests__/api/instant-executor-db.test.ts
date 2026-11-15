@@ -1,0 +1,829 @@
+/**
+ * The bounded Instant executor (spec O2, acceptance tests 5, 6, 9, 10), against a real database, a FAKE credit source and a FAKE
+ * provider. Runs only with ROLES_DB_TEST=yes and a DATABASE_URL to a migrated throwaway database. Composio is never called.
+ */
+import { randomUUID } from 'node:crypto';
+import { NextRequest } from 'next/server';
+
+import { prisma } from '@/lib/db';
+import { setAdapterForTests, type InstantAdapter, type InstantCall, type InstantLog, type ReadyMadeAdapter } from '@/lib/app-adapter';
+import { evaluatePause, giveBack, instantRunKey, reconcileRun, runInstant, setInstantHooks } from '@/lib/instant/executor';
+import { setInstantFunds, shutFunds, type InstantFunds } from '@/lib/instant/funds';
+import { getInstantPause, resumeInstant, saveInstantLimits } from '@/lib/instant/state';
+import { checkPriceDrift, forgetDriftClock, sweepInstant } from '@/lib/instant/sweep';
+import { denyInstantOnSessions } from '@/lib/instant/sessions';
+import { admitInstantTool } from '@/lib/instant/values';
+import { POST as runRoute } from '@/app/api/instant/run/route';
+
+const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
+const tag = randomUUID().slice(0, 8);
+const SERVICE_TOKEN = `service-${tag}`;
+const SEARCH = admitInstantTool('EXA_SEARCH', { query: 'x' });
+const TOP = SEARCH.ok ? SEARCH.topMicros : 0;
+const MIN = 60 * 1000;
+
+/** A pretend credit source: a balance, holds by key, and the same idempotence the real books promise. */
+function fakeFunds(balance: number) {
+  const holds = new Map<string, { amount: number; state: 'held' | 'charged' | 'released'; charged: number }>();
+  const state = { balance, settleOk: true, releaseOk: true, reserveReason: null as null | 'unavailable' | 'not_set' | 'credit_used_up', refunds: new Map<string, number>() };
+  const left = () => state.balance - [...holds.values()].filter((h) => h.state === 'held').reduce((sum, h) => sum + h.amount, 0) - [...holds.values()].filter((h) => h.state === 'charged').reduce((sum, h) => sum + h.charged, 0);
+  const funds = {
+    reserve: jest.fn(async (input: { key: string; amountMicros: number }) => {
+      if (state.reserveReason) return { ok: false as const, reason: state.reserveReason };
+      const known = holds.get(input.key);
+      if (known) return { ok: true as const, created: false };
+      if (left() < input.amountMicros) return { ok: false as const, reason: 'credit_used_up' as const };
+      holds.set(input.key, { amount: input.amountMicros, state: 'held', charged: 0 });
+      return { ok: true as const, created: true };
+    }),
+    settle: jest.fn(async (input: { key: string; chargeMicros: number }) => {
+      if (!state.settleOk) return { ok: false };
+      const hold = holds.get(input.key);
+      if (!hold) return { ok: false };
+      if (hold.state === 'held') {
+        expect(input.chargeMicros).toBeLessThanOrEqual(hold.amount);
+        hold.state = 'charged';
+        hold.charged = input.chargeMicros;
+      }
+      return { ok: true };
+    }),
+    release: jest.fn(async (input: { key: string }) => {
+      if (!state.releaseOk) return { ok: false };
+      const hold = holds.get(input.key);
+      if (hold && hold.state === 'held') hold.state = 'released';
+      return { ok: !!hold };
+    }),
+    refund: jest.fn(async (input: { key: string; refundKey: string; amountMicros: number }): Promise<{ ok: boolean; refundedMicros: number; reason?: string }> => {
+      if (state.refunds.has(input.refundKey)) return { ok: true, refundedMicros: state.refunds.get(input.refundKey)! };
+      state.refunds.set(input.refundKey, input.amountMicros);
+      const hold = holds.get(input.key);
+      if (hold) hold.charged -= input.amountMicros;
+      return { ok: true, refundedMicros: input.amountMicros };
+    }),
+  } satisfies InstantFunds;
+  return { funds, holds, state, left };
+}
+
+type Script = { runs: (InstantCall | Error)[]; logs: Map<string, InstantLog>; byUser: Map<string, InstantLog[]>; responses: Map<string, unknown> };
+function fakeProvider() {
+  const script: Script = { runs: [], logs: new Map(), byUser: new Map(), responses: new Map() };
+  const sent: { runUserId: string; tool: string; arguments: Record<string, unknown> }[] = [];
+  let logsDown = false;
+  const instant = {
+    run: jest.fn(async (input: { runUserId: string; tool: string; arguments: Record<string, unknown> }) => {
+      sent.push(input);
+      const next = script.runs.shift();
+      if (next instanceof Error) throw next;
+      return next ?? ({ kind: 'done', successful: true, data: { hits: 1 }, error: null, logId: `log-${sent.length}`, chargeMicros: 7_000 } as InstantCall);
+    }),
+    log: jest.fn(async (id: string) => {
+      if (logsDown) throw new Error('down');
+      const log = script.logs.get(id);
+      return log ? { log, response: script.responses.get(id) ?? null } : null;
+    }),
+    findLogs: jest.fn(async (input: { userId: string }) => {
+      if (logsDown) throw new Error('down');
+      return script.byUser.get(input.userId) ?? [];
+    }),
+    tool: jest.fn(async () => null),
+    sessionInstant: jest.fn(async () => 'allowed' as const),
+    denySessionInstant: jest.fn(async () => 'denied' as const),
+  } satisfies InstantAdapter;
+  const adapter = { instant } as unknown as ReadyMadeAdapter;
+  const line = (userId: string, status: InstantLog['status'], chargeMicros: number | null, id = `line-${randomUUID().slice(0, 6)}`): InstantLog => ({ id, status, chargeMicros, credentialSource: 'instant', tool: 'EXA_SEARCH', userId, atMs: Date.now() });
+  return { adapter, instant, script, sent, line, setLogsDown: (down: boolean) => (logsDown = down) };
+}
+
+let sara = '';
+let omar = '';
+let brick = '';
+let roomBot = '';
+let omarBrick = '';
+const envBefore = { service: process.env.BOT_SERVICE_TOKEN };
+const callId = () => `call-${randomUUID()}`;
+const ask = (over: Record<string, unknown> = {}) => ({ botId: brick, personId: sara, tool: 'EXA_SEARCH', arguments: { query: 'weather' }, callId: callId(), ...over });
+const setLimits = (over: Record<string, number | null> = {}) =>
+  saveInstantLimits({ maxRunMicros: 50_000, exposureCeilingMicros: 1_000_000, pauseFailureRateBps: 5_000, pauseMinRuns: 10, ...over }, sara);
+const runOf = (id: string) => prisma.instantRun.findUniqueOrThrow({ where: { id } });
+const runIdOf = async (key: string) => (await prisma.instantRun.findUniqueOrThrow({ where: { runKey: instantRunKey(brick, key) } })).id;
+
+run('the bounded Instant executor, in a real database', () => {
+  beforeAll(async () => {
+    process.env.BOT_SERVICE_TOKEN = SERVICE_TOKEN;
+    const person = (name: string) => prisma.user.create({ data: { uuid: `${name}-${tag}`, email: `${name}-${tag}@example.test`, name } });
+    sara = (await person('sara')).id;
+    omar = (await person('omar')).id;
+    brick = (await prisma.bot.create({ data: { name: `Brick ${tag}`, ownerId: sara, roomId: null } as never })).id;
+    omarBrick = (await prisma.bot.create({ data: { name: `Omar ${tag}`, ownerId: omar, roomId: null } as never })).id;
+  });
+  beforeEach(async () => {
+    setAdapterForTests(null);
+    setInstantFunds(undefined);
+    forgetDriftClock();
+    await resumeInstant(sara);
+    await prisma.appSetting.deleteMany({ where: { key: { in: ['instant-limits'] } } });
+  });
+  afterEach(async () => {
+    setAdapterForTests(undefined);
+    setInstantFunds(undefined);
+    await prisma.instantRefund.deleteMany({ where: { personId: { in: [sara, omar] } } });
+    await prisma.instantRun.deleteMany({ where: { personId: { in: [sara, omar] } } });
+    await prisma.meterEvent.deleteMany({ where: { personId: { in: [sara, omar] } } });
+    await prisma.instantSessionCheck.deleteMany({});
+    await prisma.appConnection.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
+  });
+  afterAll(async () => {
+    if (envBefore.service === undefined) delete process.env.BOT_SERVICE_TOKEN;
+    else process.env.BOT_SERVICE_TOKEN = envBefore.service;
+    await prisma.appSetting.deleteMany({ where: { key: { in: ['instant-limits', 'instant-state'] } } });
+    await prisma.bot.deleteMany({ where: { id: { in: [brick, omarBrick] } } });
+    await prisma.user.deleteMany({ where: { id: { in: [sara, omar] } } });
+    await prisma.$disconnect();
+  });
+
+  describe('nothing runs until it is bounded (test 6)', () => {
+    it('refuses with no limits set, and never calls the provider or the credit books', async () => {
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'not_set' });
+      expect(p.instant.run).not.toHaveBeenCalled();
+      expect(f.funds.reserve).not.toHaveBeenCalled();
+    });
+
+    it('with the credit books not wired (the shut door), holds nothing and runs nothing', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: shutFunds })).toMatchObject({ status: 'refused', reason: 'credit_unavailable' });
+      expect(p.instant.run).not.toHaveBeenCalled();
+    });
+
+    it('refuses a tool not in the table, arguments with no bound, and a run over the most one run may cost', async () => {
+      await setLimits({ maxRunMicros: TOP - 1 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      expect(await runInstant(ask({ tool: 'GMAIL_FETCH_EMAILS' }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ reason: 'not_offered' });
+      expect(await runInstant(ask({ arguments: {} }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ reason: 'unbounded' });
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ reason: 'too_costly' });
+      expect(p.instant.run).not.toHaveBeenCalled();
+      expect(f.funds.reserve).not.toHaveBeenCalled();
+    });
+
+    it('refuses an adapter that cannot run Instant', async () => {
+      await setLimits();
+      expect(await runInstant(ask(), { adapter: {} as ReadyMadeAdapter, funds: fakeFunds(1_000_000).funds })).toMatchObject({ reason: 'not_set' });
+    });
+
+    it('refuses anyone but the owner of a personal Brick, and a room bot', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      expect(await runInstant(ask({ personId: omar }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ reason: 'not_owner' });
+      expect(await runInstant(ask({ botId: omarBrick }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ reason: 'not_owner' });
+      expect(await runInstant(ask({ botId: randomUUID() }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ reason: 'not_owner' });
+      expect(p.instant.run).not.toHaveBeenCalled();
+    });
+
+    it('does not start when the person credit does not cover the top price, and says so without a provider call', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(TOP - 1);
+      const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      expect(outcome).toMatchObject({ status: 'refused', reason: 'credit_used_up' });
+      expect(p.instant.run).not.toHaveBeenCalled();
+      expect(await prisma.instantRun.findFirst({ where: { personId: sara }, select: { state: true, reason: true } })).toEqual({ state: 'refused', reason: 'credit_used_up' });
+    });
+
+    it("says the books cannot be read as that, never as the person's credit being used up", async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.state.reserveReason = 'unavailable';
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ reason: 'credit_unavailable' });
+      f.funds.reserve.mockRejectedValueOnce(new Error('db down'));
+      f.state.reserveReason = null;
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ reason: 'credit_unavailable' });
+      expect(p.instant.run).not.toHaveBeenCalled();
+    });
+
+    it('stops at the exposure ceiling, and two runs at the same moment cannot both take the last room', async () => {
+      await setLimits({ exposureCeilingMicros: TOP });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const results = await Promise.all([runInstant(ask({ arguments: { query: 'a' } }), { adapter: p.adapter, funds: f.funds }), runInstant(ask({ arguments: { query: 'b' } }), { adapter: p.adapter, funds: f.funds })]);
+      expect(results.filter((r) => r.status === 'refused' && r.reason === 'exposure_full')).toHaveLength(1);
+      expect(p.instant.run).toHaveBeenCalledTimes(1);
+    });
+
+    it('settled charges of the month count against the ceiling, not only runs in flight', async () => {
+      await setLimits({ exposureCeilingMicros: 7_000 + TOP - 1 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      expect((await runInstant(ask({ arguments: { query: 'a' } }), { adapter: p.adapter, funds: f.funds })).status).toBe('done');
+      // 7,000 charged + a second top price of 7,600 is one micro past the ceiling
+      expect(await runInstant(ask({ arguments: { query: 'b' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'exposure_full' });
+    });
+
+    it('does not run while paused', async () => {
+      await setLimits();
+      const { pauseInstant } = await import('@/lib/instant/state');
+      await pauseInstant('manual', sara);
+      const p = fakeProvider();
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: fakeFunds(1_000_000).funds })).toMatchObject({ reason: 'paused' });
+      expect(p.instant.run).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('a run that works (test 10)', () => {
+    it('holds the top price before the run, charges Composios figure, and keeps customer and provider apart', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.funds.settle.mockImplementation(async (input: { key: string; chargeMicros: number }) => {
+        const hold = f.holds.get(input.key)!;
+        hold.state = 'charged';
+        hold.charged = input.chargeMicros;
+        return { ok: true };
+      });
+      const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      expect(outcome).toMatchObject({ status: 'done', ok: true, chargedMicros: 7_000, pending: false, data: { hits: 1 } });
+      // The hold was the top price, taken before the provider was called
+      expect(f.funds.reserve.mock.invocationCallOrder[0]).toBeLessThan(p.instant.run.mock.invocationCallOrder[0]);
+      expect(f.funds.reserve.mock.calls[0][0]).toMatchObject({ amountMicros: TOP, charge: { class: 'instant', route: 'composio', provider: 'composio' } });
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      expect(row).toMatchObject({ state: 'succeeded', customerState: 'charged', providerState: 'settled', providerBasis: 'measured' });
+      expect(Number(row.customerMicros)).toBe(7_000);
+      expect(Number(row.providerMicros)).toBe(7_000);
+      expect(Number(row.topMicros)).toBe(TOP);
+      // Sent through the Instant path under an opaque id, never a person's id
+      expect(p.sent[0].runUserId).toBe(`universe-instant-${row.id}`);
+      expect(JSON.stringify(p.sent[0])).not.toContain(sara);
+      // One line in the meter's books, labelled Instant, provider cost only
+      const events = await prisma.meterEvent.findMany({ where: { personId: sara } });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ kind: 'app_use', route: 'instant', pool: 'chat', payerKind: 'universe', eventId: `instant:${row.id}` });
+      expect(events[0].detail).toMatchObject({ instant: true, provider: 'composio', tool: 'EXA_SEARCH' });
+      expect(Number(events[0].costMicros)).toBe(7_000);
+    });
+
+    it('applies the markup a super admin set to what the person pays, never past the hold', async () => {
+      await setLimits({ markupBps: 1_000 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      expect(outcome).toMatchObject({ status: 'done', chargedMicros: 7_700 });
+      expect(f.funds.reserve.mock.calls[0][0].amountMicros).toBe(Math.ceil(TOP * 1.1));
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      expect(Number(row.providerMicros)).toBe(7_000);
+      expect(Number(row.customerMicros)).toBe(7_700);
+    });
+
+    it('reads the charge from Composios log when the answer does not carry it', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      p.script.runs.push({ kind: 'done', successful: true, data: { a: 1 }, error: null, logId: 'log-x', chargeMicros: null });
+      p.script.logs.set('log-x', p.line('whatever', 'success', 6_500, 'log-x'));
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done', chargedMicros: 6_500, pending: false });
+    });
+
+    it('with no charge anywhere, hands the answer over and keeps the top price pending, then settles on the log, or at the top price after the wait', async () => {
+      await setLimits({ chargeWaitMinutes: 60 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'done', successful: true, data: { a: 1 }, error: null, logId: 'log-y', chargeMicros: null });
+      const outcome = await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      expect(outcome).toMatchObject({ status: 'done', pending: true });
+      let row = await runOf(await runIdOf(id));
+      expect(row).toMatchObject({ customerState: 'held', providerState: 'pending' });
+      // Still no charge before the wait is over: nothing changes, and the top price still counts as exposure
+      await reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 10 * MIN) });
+      expect(await runOf(row.id)).toMatchObject({ customerState: 'held', providerState: 'pending' });
+      // Past the wait: the top price stands as an estimate, the person pays at most the hold
+      await reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 61 * MIN) });
+      row = await runOf(row.id);
+      expect(row).toMatchObject({ customerState: 'charged', providerState: 'settled', providerBasis: 'estimated' });
+      expect(Number(row.customerMicros)).toBe(TOP);
+      expect(Number(row.providerMicros)).toBe(TOP);
+    });
+
+    it('settles on the logs figure when it turns up before the wait ends', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'done', successful: true, data: {}, error: null, logId: 'log-z', chargeMicros: null });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const rowId = await runIdOf(id);
+      p.script.logs.set('log-z', p.line('u', 'success', 5_000, 'log-z'));
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      const row = await runOf(rowId);
+      expect(row).toMatchObject({ customerState: 'charged', providerState: 'settled', providerBasis: 'measured' });
+      expect(Number(row.customerMicros)).toBe(5_000);
+    });
+
+    it('a charge above the top price still settles, the person pays the hold at most, and Instant stops', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      p.script.runs.push({ kind: 'done', successful: true, data: {}, error: null, logId: 'l', chargeMicros: TOP * 5 });
+      const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      expect(outcome).toMatchObject({ status: 'done', chargedMicros: TOP });
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      expect(Number(row.providerMicros)).toBe(TOP * 5);
+      expect(Number(row.customerMicros)).toBe(TOP);
+      expect(await getInstantPause()).toMatchObject({ paused: true, reason: 'price_over_top' });
+    });
+  });
+
+  describe('a failure never costs the person, and our provider charge stays on our books (test 5)', () => {
+    it('releases the whole hold when the tool ran and did not work, and records our own charge from the log', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'boom', logId: 'log-f', chargeMicros: null });
+      const outcome = await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      expect(outcome).toMatchObject({ status: 'failed', reason: 'provider_failed', message: 'It did not work. You were not charged.' });
+      expect(f.left()).toBe(1_000_000);
+      const rowId = await runIdOf(id);
+      expect(await runOf(rowId)).toMatchObject({ state: 'failed', customerState: 'released', providerState: 'pending' });
+      // Our own charge is on our books: at the top price (estimated) until the log or the wait settles it
+      p.script.logs.set('log-f', p.line('u', 'failed', 3_000, 'log-f'));
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      const row = await runOf(rowId);
+      expect(row).toMatchObject({ providerState: 'settled', providerBasis: 'measured', customerState: 'released' });
+      expect(Number(row.providerMicros)).toBe(3_000);
+      expect(Number(row.customerMicros)).toBe(0);
+      expect(f.funds.settle).not.toHaveBeenCalled();
+    });
+
+    it('an absent charge on a failed run is not read as free: the top price stands as an estimate after the wait', async () => {
+      await setLimits({ chargeWaitMinutes: 30 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'boom', logId: 'log-f', chargeMicros: null });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const rowId = await runIdOf(id);
+      p.script.logs.set('log-f', p.line('u', 'failed', null, 'log-f'));
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 31 * MIN) });
+      const row = await runOf(rowId);
+      expect(row).toMatchObject({ providerState: 'settled', providerBasis: 'estimated' });
+      expect(Number(row.providerMicros)).toBe(TOP);
+    });
+
+    it('a refusal before anything ran releases the hold and costs nothing; an empty provider balance pauses Instant', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      p.script.runs.push({ kind: 'rejected', status: 402, code: 'Metering_WalletBalanceExhausted' });
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'failed', reason: 'provider_empty' });
+      expect(f.left()).toBe(1_000_000);
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      expect(row).toMatchObject({ providerState: 'settled', customerState: 'released' });
+      expect(Number(row.providerMicros)).toBe(0);
+      expect(await getInstantPause()).toMatchObject({ paused: true, reason: 'provider_empty' });
+    });
+
+    it("Instant not switched on for the tool reads as off, and nothing is charged", async () => {
+      await setLimits({ pauseMinRuns: 100 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      p.script.runs.push({ kind: 'rejected', status: 403, code: 'ManagedCredential_NotEnabled' });
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'failed', reason: 'provider_off' });
+      expect(f.left()).toBe(1_000_000);
+    });
+
+    it('an invalid request releases the hold and waits for the log to say whether anything was charged', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      p.script.runs.push({ kind: 'invalid', status: 400, code: 'Bad' });
+      const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      expect(outcome).toMatchObject({ status: 'failed', reason: 'provider_failed' });
+      expect(await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } })).toMatchObject({ customerState: 'released', providerState: 'pending' });
+    });
+
+    it('when the books do not take the release, the hold stays and the sweep says it again', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.state.releaseOk = false;
+      p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'x', logId: 'l', chargeMicros: null });
+      await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      expect(await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } })).toMatchObject({ state: 'failed', customerState: 'held' });
+      f.state.releaseOk = true;
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } })).toMatchObject({ customerState: 'released' });
+      expect(f.left()).toBe(1_000_000);
+    });
+
+    it('when the books do not take the charge, the person is not marked charged and the sweep says it again', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.state.settleOk = false;
+      const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      expect(outcome).toMatchObject({ status: 'done', pending: true });
+      expect(await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } })).toMatchObject({ customerState: 'held', providerState: 'settled' });
+      f.state.settleOk = true;
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      expect(row.customerState).toBe('charged');
+      expect(Number(row.customerMicros)).toBe(7_000);
+    });
+  });
+
+  describe('an ambiguous result is looked up before anything is decided or repeated (test 5)', () => {
+    it('a timeout keeps the hold, says checking, and a second ask for the same call never runs again', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push(Object.assign(new Error('timeout'), { name: 'TimeoutError' }));
+      const first = await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      expect(first).toMatchObject({ status: 'checking' });
+      expect(f.holds.get(`instant:${await runIdOf(id)}`)?.state).toBe('held');
+      const again = await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      expect(again).toMatchObject({ status: 'checking' });
+      expect(p.instant.run).toHaveBeenCalledTimes(1);
+    });
+
+    it('the very same ask under a new call id waits while the first is unclear: never paid twice', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      p.script.runs.push({ kind: 'unclear', why: 'server', status: 502 });
+      await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'already_checking' });
+      expect(p.instant.run).toHaveBeenCalledTimes(1);
+      // A different ask is not held up by it
+      expect((await runInstant(ask({ arguments: { query: 'something else' } }), { adapter: p.adapter, funds: f.funds })).status).toBe('done');
+    });
+
+    it('finds the run by its own id: a log that says it worked charges the person and the answer is handed back from that log, never run again', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'timeout', status: null });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const row = await runOf(await runIdOf(id));
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', 7_000, 'log-late')]);
+      p.script.logs.set('log-late', p.line(row.providerUserId, 'success', 7_000, 'log-late'));
+      p.script.responses.set('log-late', { successful: true, data: { hits: 42 } });
+      const outcome = await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      expect(outcome).toMatchObject({ status: 'done', recovered: true, data: { hits: 42 }, chargedMicros: 7_000 });
+      expect(p.instant.run).toHaveBeenCalledTimes(1);
+      expect(p.instant.findLogs.mock.calls[0][0]).toMatchObject({ userId: row.providerUserId });
+      expect(await runOf(row.id)).toMatchObject({ state: 'succeeded', customerState: 'charged', providerState: 'settled' });
+    });
+
+    it('a log that says it failed releases the hold', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'network', status: null });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const row = await runOf(await runIdOf(id));
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'failed', null)]);
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(await runOf(row.id)).toMatchObject({ state: 'failed', customerState: 'released' });
+      expect(f.left()).toBe(1_000_000);
+    });
+
+    it('no log yet is not a decision: the run stays unclear and the hold stays until the wait is over', async () => {
+      await setLimits({ unclearWaitMinutes: 30 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'server', status: 500 });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const rowId = await runIdOf(id);
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 10 * MIN) });
+      expect(await runOf(rowId)).toMatchObject({ state: 'ambiguous', customerState: 'held', providerState: 'pending' });
+    });
+
+    it('past the wait with no log at all, the person hold goes back and our exposure closes at the top price as an estimate', async () => {
+      await setLimits({ unclearWaitMinutes: 30 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'server', status: 500 });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const rowId = await runIdOf(id);
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 31 * MIN) });
+      const row = await runOf(rowId);
+      expect(row).toMatchObject({ state: 'failed', customerState: 'released', providerState: 'settled', providerBasis: 'estimated' });
+      expect(Number(row.providerMicros)).toBe(TOP);
+      expect(f.left()).toBe(1_000_000);
+    });
+
+    it('when Composio cannot be asked, nothing is decided on a guess, even past the wait', async () => {
+      await setLimits({ unclearWaitMinutes: 30 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'server', status: 500 });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const rowId = await runIdOf(id);
+      p.setLogsDown(true);
+      await reconcileRun(rowId, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 120 * MIN) });
+      expect(await runOf(rowId)).toMatchObject({ state: 'ambiguous', customerState: 'held', providerState: 'pending' });
+    });
+
+    it('a run still in flight is never called unclear by a look-up that happens during its wait', async () => {
+      await setLimits({ sentWaitMinutes: 5 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      const created = await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      expect(created.status).toBe('done');
+      // Make a "sent" run by hand, as if the request were still going out
+      const inflight = await prisma.instantRun.create({ data: { runKey: `k-${randomUUID()}`, botId: brick, personId: sara, toolSlug: 'EXA_SEARCH', toolkit: 'exa', argsHash: 'h', priceVersion: 'v', topMicros: BigInt(TOP), holdMicros: BigInt(TOP), state: 'sent', customerState: 'held', providerState: 'pending', providerUserId: 'u-x', sentAt: new Date() } });
+      f.holds.set(`instant:${inflight.id}`, { amount: TOP, state: 'held', charged: 0 });
+      await reconcileRun(inflight.id, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + MIN) });
+      expect((await runOf(inflight.id)).state).toBe('sent');
+    });
+
+    it('a run that crashed between its steps never went out, so its hold goes back', async () => {
+      await setLimits({ sentWaitMinutes: 5 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const stuck = await prisma.instantRun.create({ data: { runKey: `k-${randomUUID()}`, botId: brick, personId: sara, toolSlug: 'EXA_SEARCH', toolkit: 'exa', argsHash: 'h2', priceVersion: 'v', topMicros: BigInt(TOP), holdMicros: BigInt(TOP), state: 'held', customerState: 'held', providerUserId: 'u-y' } });
+      f.holds.set(`instant:${stuck.id}`, { amount: TOP, state: 'held', charged: 0 });
+      await reconcileRun(stuck.id, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 6 * MIN) });
+      expect(await runOf(stuck.id)).toMatchObject({ state: 'refused', customerState: 'released' });
+      expect(f.left()).toBe(1_000_000);
+      expect(p.instant.run).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the same call never runs or pays twice', () => {
+    it('a retry with the same call id gets the same run back and the provider is called once', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'done', successful: true, data: { hits: 7 }, error: null, logId: 'log-r', chargeMicros: 7_000 });
+      p.script.logs.set('log-r', p.line('u', 'success', 7_000, 'log-r'));
+      p.script.responses.set('log-r', { data: { hits: 7 } });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const again = await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      expect(again).toMatchObject({ status: 'done', recovered: true, data: { hits: 7 } });
+      expect(p.instant.run).toHaveBeenCalledTimes(1);
+      expect(f.funds.reserve).toHaveBeenCalledTimes(1);
+    });
+
+    it('a retry of a run whose saved answer is gone says it was done, without running it again', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      expect(await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'already_done', chargedMicros: 7_000 });
+      expect(p.instant.run).toHaveBeenCalledTimes(1);
+    });
+
+    it('two asks for the same call id at the same moment make one run', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      await Promise.all([runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds }), runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds })]);
+      expect(p.instant.run).toHaveBeenCalledTimes(1);
+      expect(await prisma.instantRun.count({ where: { personId: sara } })).toBe(1);
+    });
+
+    it('a refused call stays refused for that call id', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(0);
+      const id = callId();
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      expect(await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: fakeFunds(1_000_000).funds })).toMatchObject({ status: 'refused', reason: 'credit_used_up' });
+    });
+  });
+
+  describe('Instant stops by itself', () => {
+    it('pauses when the failure share of recent runs passes what a super admin set, once enough runs happened', async () => {
+      await setLimits({ pauseFailureRateBps: 5_000, pauseMinRuns: 4 });
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      for (const n of [1, 2, 3]) {
+        p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'x', logId: `l${n}`, chargeMicros: null });
+        await runInstant(ask({ arguments: { query: `q${n}` } }), { adapter: p.adapter, funds: f.funds });
+      }
+      // Three failures but fewer runs than the minimum: not an alarm yet
+      expect((await getInstantPause()).paused).toBe(false);
+      p.script.runs.push({ kind: 'done', successful: true, data: {}, error: null, logId: 'l4', chargeMicros: 7_000 });
+      await runInstant(ask({ arguments: { query: 'q4' } }), { adapter: p.adapter, funds: f.funds });
+      expect(await getInstantPause()).toMatchObject({ paused: true, reason: 'failure_rate' });
+      // New runs stop
+      expect(await runInstant(ask({ arguments: { query: 'q5' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ reason: 'paused' });
+      // And only a super admin turns it back on
+      await resumeInstant(sara);
+      expect((await getInstantPause()).paused).toBe(false);
+    });
+
+    it('does not pause on a healthy run history', async () => {
+      await setLimits({ pauseFailureRateBps: 5_000, pauseMinRuns: 2 });
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      await runInstant(ask({ arguments: { query: 'a' } }), { adapter: p.adapter, funds: f.funds });
+      await runInstant(ask({ arguments: { query: 'b' } }), { adapter: p.adapter, funds: f.funds });
+      expect(await evaluatePause()).toBe(false);
+    });
+
+    it('a trusted price that moved up in Composios own listing pauses Instant; one that is the same does not', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const { instantListedPrices } = await import('@/lib/instant/values');
+      const listed = new Map(instantListedPrices().map((row) => [row.tool, row.listed]));
+      p.instant.tool.mockImplementation((async (slug: string) => ({ slug, toolkit: 'x', description: null, inputSchema: null, instantSupported: true, priceWords: listed.get(slug) ?? null })) as never);
+      expect(await checkPriceDrift(p.adapter)).toMatchObject({ up: [], changed: [], gone: [], unreachable: [] });
+      expect((await getInstantPause()).paused).toBe(false);
+      p.instant.tool.mockImplementation((async (slug: string) => ({ slug, toolkit: 'x', description: null, inputSchema: null, instantSupported: true, priceWords: slug === 'EXA_SEARCH' ? '$0.02 per search' : (listed.get(slug) ?? null) })) as never);
+      const report = await checkPriceDrift(p.adapter);
+      expect(report.up).toEqual(['EXA_SEARCH']);
+      expect(await getInstantPause()).toMatchObject({ paused: true, reason: 'price_drift' });
+    });
+
+    it('words with no readable figure count as higher, and a tool Composio no longer serves is reported, not trusted', async () => {
+      const p = fakeProvider();
+      p.instant.tool.mockImplementation((async (slug: string) => (slug === 'TAVILY_SEARCH' ? null : { slug, toolkit: 'x', description: null, inputSchema: null, instantSupported: true, priceWords: 'varies' })) as never);
+      const paused: string[] = [];
+      const report = await checkPriceDrift(p.adapter, async (reason) => paused.push(reason));
+      expect(report.gone).toEqual(['TAVILY_SEARCH']);
+      expect(report.up).toContain('EXA_SEARCH');
+      expect(paused).toEqual(['price_drift']);
+    });
+  });
+
+  describe('giving back after a charge is bounded by limits a super admin sets', () => {
+    async function charged(f: ReturnType<typeof fakeFunds>, p: ReturnType<typeof fakeProvider>, query = 'a') {
+      const id = callId();
+      await runInstant(ask({ callId: id, arguments: { query } }), { adapter: p.adapter, funds: f.funds });
+      return runIdOf(id);
+    }
+
+    it('gives back nothing until the limits are set', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const runId = await charged(f, p);
+      expect(await giveBack({ personId: sara, runId }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'not_set' });
+      expect(f.funds.refund).not.toHaveBeenCalled();
+    });
+
+    it('gives back once, at most the limit, passes the limits to the books, and counts it towards the pause check', async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 3 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const runId = await charged(f, p);
+      expect(await giveBack({ personId: sara, runId }, { funds: f.funds })).toEqual({ status: 'given', amountMicros: 5_000 });
+      expect(f.funds.refund.mock.calls[0][0]).toMatchObject({ reason: 'goodwill', amountMicros: 5_000, limits: { giveBackMaxMicros: 5_000, goodwillBudgetMicros: 100_000 } });
+      expect(await giveBack({ personId: sara, runId }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'already_given' });
+      expect(Number((await runOf(runId)).refundedMicros)).toBe(5_000);
+      expect(await prisma.instantRefund.count({ where: { runId } })).toBe(1);
+    });
+
+    it("refuses someone else's run and a run that was never charged", async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 3 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const runId = await charged(f, p);
+      expect(await giveBack({ personId: omar, runId }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'not_found' });
+      p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'x', logId: 'l', chargeMicros: null });
+      const failed = await charged(f, p, 'b');
+      expect(await giveBack({ personId: sara, runId: failed }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'not_charged' });
+    });
+
+    it('stops at the month budget for everyone and at the limit for one person', async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 7_000, goodwillPerPersonPerMonth: 1 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const first = await charged(f, p, 'a');
+      const second = await charged(f, p, 'b');
+      expect(await giveBack({ personId: sara, runId: first }, { funds: f.funds })).toMatchObject({ status: 'given' });
+      expect(await giveBack({ personId: sara, runId: second }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'person_limit' });
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 7_000, goodwillPerPersonPerMonth: 5 });
+      expect(await giveBack({ personId: sara, runId: second }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'budget' });
+    });
+
+    it('when the books do not take it, nothing is recorded as given back', async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 3 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const runId = await charged(f, p);
+      f.funds.refund.mockResolvedValueOnce({ ok: false, refundedMicros: 0, reason: 'unavailable' });
+      expect(await giveBack({ personId: sara, runId }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'unavailable' });
+      expect(await prisma.instantRefund.count({ where: { runId } })).toBe(0);
+    });
+  });
+
+  describe('existing sessions are read back before Instant can be switched on (test 9)', () => {
+    const connection = (name: string, url: string) =>
+      prisma.appConnection.create({ data: { ownerId: sara, name, serverUrl: url, authType: 'none', source: 'ready_made', providerToolkit: name } as never });
+
+    it('switches Instant off on a session that allows it, records it, and never touches one that is already off', async () => {
+      const p = fakeProvider();
+      const a = await connection(`a-${tag}`, 'https://backend.composio.dev/tool_router/trs_a/mcp');
+      const b = await connection(`b-${tag}`, 'https://backend.composio.dev/tool_router/trs_b/mcp');
+      p.instant.sessionInstant.mockImplementation((async (id: string) => (id === 'trs_a' ? 'allowed' : 'denied')) as never);
+      const sweep = await denyInstantOnSessions(50, p.adapter);
+      expect(sweep).toMatchObject({ checked: 2, denied: 1, alreadyDenied: 1, failed: 0, remaining: 0 });
+      expect(p.instant.denySessionInstant).toHaveBeenCalledTimes(1);
+      expect(p.instant.denySessionInstant).toHaveBeenCalledWith('trs_a');
+      expect((await prisma.instantSessionCheck.findMany({ where: { connectionId: { in: [a.id, b.id] } } })).map((row) => row.state)).toEqual(['denied', 'denied']);
+      // Checked sessions are not asked about again
+      p.instant.sessionInstant.mockClear();
+      expect((await denyInstantOnSessions(50, p.adapter)).checked).toBe(0);
+      expect(p.instant.sessionInstant).not.toHaveBeenCalled();
+    });
+
+    it('a session that will not switch off stays unchecked and is looked at again, and a link that is not a session is counted as failed', async () => {
+      const p = fakeProvider();
+      await connection(`c-${tag}`, 'https://backend.composio.dev/tool_router/trs_c/mcp');
+      await connection(`d-${tag}`, 'https://mcp.example/nothing/mcp');
+      p.instant.sessionInstant.mockResolvedValue('allowed');
+      p.instant.denySessionInstant.mockRejectedValueOnce(new Error('still allows'));
+      const first = await denyInstantOnSessions(50, p.adapter);
+      expect(first).toMatchObject({ checked: 0, denied: 0, failed: 2, remaining: 2 });
+      const second = await denyInstantOnSessions(50, p.adapter);
+      expect(second).toMatchObject({ checked: 1, denied: 1, failed: 1 });
+    });
+
+    it('a session the provider no longer has is recorded as gone', async () => {
+      const p = fakeProvider();
+      await connection(`e-${tag}`, 'https://backend.composio.dev/tool_router/trs_e/mcp');
+      p.instant.sessionInstant.mockResolvedValue('gone' as never);
+      expect(await denyInstantOnSessions(50, p.adapter)).toMatchObject({ checked: 1, gone: 1 });
+    });
+
+    it('does nothing with an adapter that has no Instant side', async () => {
+      await connection(`f-${tag}`, 'https://backend.composio.dev/tool_router/trs_f/mcp');
+      expect(await denyInstantOnSessions(50, {} as ReadyMadeAdapter)).toMatchObject({ checked: 0 });
+    });
+  });
+
+  describe('rules and receipts attach without touching the executor', () => {
+    afterEach(() => setInstantHooks(undefined));
+
+    it('a rule that says no refuses in its own words before anything is held or sent', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      setInstantHooks({ beforeRun: async () => ({ refuse: true, words: 'No more than $1 for this task.' }) });
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toEqual({ status: 'refused', reason: 'rule', words: 'No more than $1 for this task.' });
+      expect(f.funds.reserve).not.toHaveBeenCalled();
+      expect(p.instant.run).not.toHaveBeenCalled();
+    });
+
+    it('a rule check that breaks stops the run: nothing runs on a rule nobody could read', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      setInstantHooks({ beforeRun: async () => { throw new Error('boom'); } });
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: fakeFunds(1_000_000).funds })).toMatchObject({ status: 'refused', reason: 'credit_unavailable' });
+      expect(p.instant.run).not.toHaveBeenCalled();
+    });
+
+    it('is told how every run ended, and a receipt hook that breaks changes nothing', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const seen: string[] = [];
+      setInstantHooks({ afterRun: async (_input, outcome) => { seen.push(outcome.status); throw new Error('receipt down'); } });
+      expect((await runInstant(ask(), { adapter: p.adapter, funds: fakeFunds(1_000_000).funds })).status).toBe('done');
+      expect(seen).toEqual(['done']);
+    });
+  });
+
+  describe('the route', () => {
+    const post = (body: unknown, token: string | null = SERVICE_TOKEN) =>
+      runRoute(new NextRequest('http://localhost/api/instant/run', { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) }));
+
+    it('needs the service token', async () => {
+      expect((await post({}, null)).status).toBe(401);
+      expect((await post({}, 'wrong')).status).toBe(401);
+    });
+
+    it('answers 404 to anyone but the Brick owner, and a fixed word for a refusal', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      setAdapterForTests(p.adapter);
+      expect((await post({ botId: brick, forOwner: false, requesterKey: `omar-${tag}`, tool: 'EXA_SEARCH', arguments: { query: 'x' }, callId: callId() })).status).toBe(404);
+      expect((await post({ botId: brick, tool: 'EXA_SEARCH', arguments: { query: 'x' }, callId: callId() })).status).toBe(404);
+      const refused = await post({ botId: brick, forOwner: true, tool: 'EXA_SEARCH', arguments: { query: 'x' }, callId: callId() });
+      expect(refused.status).toBe(200);
+      // No credit source is wired in this test: the shut door
+      expect(await refused.json()).toMatchObject({ status: 'refused', reason: 'credit_unavailable', message: 'I cannot read your credit right now, so nothing ran.' });
+      expect(p.instant.run).not.toHaveBeenCalled();
+    });
+
+    it('rejects a body with anything extra', async () => {
+      expect((await post({ botId: brick, forOwner: true, tool: 'EXA_SEARCH', callId: callId(), price: 0 })).status).toBe(400);
+    });
+  });
+});

@@ -38,7 +38,53 @@ export interface UseResult {
   providerCallId: string | null;
 }
 
+/** How one Instant run came back (see `InstantAdapter.run`). */
+export type InstantCall =
+  /** Composio answered the run. `successful` is its own word for whether the tool worked; `chargeMicros` is the charge it reported with the answer, when it did (null: not reported, never zero). */
+  | { kind: 'done'; successful: boolean; data: unknown; error: string | null; logId: string | null; chargeMicros: number | null }
+  /** Composio refused before anything ran (not signed in, the balance is empty, Instant is not switched on for the tool, rate limited): nothing was charged. `code` is Composio's own error slug. */
+  | { kind: 'rejected'; status: number; code: string | null }
+  /** Composio answered that the request was not a valid one (bad arguments, no such tool): it did not run, and its log of the refusal is what decides whether anything was charged. */
+  | { kind: 'invalid'; status: number; code: string | null }
+  /** No readable answer (a timeout, a broken connection, a server error): it may have run and may have been charged. */
+  | { kind: 'unclear'; why: 'timeout' | 'network' | 'server' | 'unreadable'; status: number | null };
+
+/** One line of Composio's execution log, as far as the executor reads it. */
+export interface InstantLog {
+  id: string;
+  /** Composio's own word: success or failed (anything else reads as unknown). */
+  status: 'success' | 'failed' | 'unknown';
+  /** The charge on the line (`metadata.instant_charge`) in micros; null when the line has none, which is never read as free. */
+  chargeMicros: number | null;
+  credentialSource: string | null;
+  tool: string | null;
+  userId: string | null;
+  atMs: number | null;
+}
+
+/** What the executor needs of Composio for Instant runs (spec O2). Optional on the adapter: an adapter without it cannot run Instant. */
+export interface InstantAdapter {
+  /**
+   * One Instant run, sent on purpose through the Instant account (`connected_account_id: "instant_account"`, never a session, never the
+   * MCP link): the only way an Instant tool is ever run. `runUserId` is the opaque id the run goes out under, so its log can be found
+   * by it exactly. A refused or unreadable answer is a value, not an error, so the caller always knows which of the four it is.
+   */
+  run(input: { runUserId: string; tool: string; arguments: Record<string, unknown> }): Promise<InstantCall>;
+  /** One execution log line by its id, or null when there is none. Throws when Composio cannot be asked. */
+  log(logId: string): Promise<{ log: InstantLog; response: unknown } | null>;
+  /** The log lines a run id produced (it is the filter), newest first. Throws when Composio cannot be asked. */
+  findLogs(input: { userId: string; fromMs: number; toMs: number }): Promise<InstantLog[]>;
+  /** Composio's own listing of one tool with its Instant pricing words, for the schema a Brick needs and for the price drift check; null when there is no such tool. */
+  tool(slug: string): Promise<{ slug: string; toolkit: string | null; description: string | null; inputSchema: unknown; instantSupported: boolean; priceWords: string | null } | null>;
+  /** Whether an app link's session lets Instant run: `denied`, `allowed`, or `gone` when Composio has no such session. */
+  sessionInstant(sessionId: string): Promise<'denied' | 'allowed' | 'gone'>;
+  /** Switches Instant off on a session that is already there. `gone` when Composio has no such session. */
+  denySessionInstant(sessionId: string): Promise<'denied' | 'gone'>;
+}
+
 export interface ReadyMadeAdapter {
+  /** The Instant executor's side of the provider. Absent on an adapter that cannot run Instant. */
+  instant?: InstantAdapter;
   /** Starts a person's sign-in to one app on the provider's own page. `person` is our id for them, never their email. `authConfigId` is the sign-in setup already read by the caller (null: the provider's managed one); left out, the adapter reads the setting itself. A caller holding a database transaction passes it so no second connection is taken from the pool. */
   startConnect(input: { person: string; toolkit: string; returnUrl: string; authConfigId?: string | null }): Promise<ConnectStart>;
   /** Whether the person finished signing in for a connection started by `startConnect`: `active` once they did, `pending` while the page is still open, `failed` when it expired or was refused. */
