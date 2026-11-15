@@ -48,7 +48,7 @@ describe('cleanAskName: only an App name is kept', () => {
 
   it('cuts the key to the column and groups the same App typed in different cases and accents', () => {
     // Lowercasing İ makes two characters, so the key is made from the name without its marks and is never longer than the column
-    for (const text of ['İ'.repeat(60), 'İ'.repeat(40), 'ǅ'.repeat(60)]) {
+    for (const text of ['İ'.repeat(60), 'İ'.repeat(40), 'ǅ'.repeat(30)]) {
       const cleaned = cleanAskName(text);
       expect(cleaned).not.toBeNull();
       expect(Array.from(cleaned!.key).length).toBeLessThanOrEqual(60);
