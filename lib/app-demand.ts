@@ -193,7 +193,10 @@ export function cleanAskName(raw: unknown): { name: string; key: string } | null
   if (name.split(' ').length > ASK_WORDS_MAX) return null;
   if (!NAME_SHAPE.test(name)) return null;
   if (/https?:|www\.|@/i.test(name)) return null;
-  return { name, key: name.toLowerCase() };
+  const key = name.toLowerCase();
+  // Lowercasing can make a name longer (İ becomes two characters), and the key is a column of the same width as a name
+  if (key.length > ASK_NAME_MAX) return null;
+  return { name, key };
 }
 
 const hashOf = (personKey: string) => createHash('sha256').update(`app-ask:${personKey}`).digest('hex').slice(0, 32);

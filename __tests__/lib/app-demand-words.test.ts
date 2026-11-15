@@ -47,6 +47,9 @@ describe('cleanAskName: only an App name is kept', () => {
   });
 
   it('keeps nothing that is not a name', () => {
+    // Lowercasing İ makes two characters, so 40 of them are 40 as a name and 80 as a key: too long to keep
+    expect(cleanAskName('İ'.repeat(40))).toBeNull();
+    expect(cleanAskName('İ'.repeat(10))).not.toBeNull();
     for (const text of [null, 5, '', ' ', 'a', 'x'.repeat(61), 'one two three four five six', 'what is my balance?', 'hello, can you help', 'https://example.com', 'www.example.com', 'me@example.com', '<script>', 'a\nb\nc d e f']) {
       expect(cleanAskName(text)).toBeNull();
     }
