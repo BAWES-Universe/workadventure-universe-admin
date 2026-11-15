@@ -505,6 +505,20 @@ async function main() {
     await setMeter({ rolloutBudgetMicros: 10_000 * M, renewMinutes: 10 });
   }
 
+  // ---------- A refund after the sponsor's account closed is made whole by the platform ----------
+  {
+    await user('cl', '2027-02-11T00:00:00Z');
+    const sponsor = await funding.ensureFundingAccount({ kind: 'universe', ownerKey: 'u-closing', name: 'Closing', adminIds: ['admin'], budgetMicros: 10 * M });
+    await prisma.creditLot.create({ data: { slotKey: 'gift:cl', subjectKey: 'person:cl', periodKey: 'gift', personId: 'cl', source: 'gift', amountMicros: BigInt(2) * BigInt(M), covers: ['instant_apps'], fundingAccountId: sponsor.id, startsAt: G, issuedAt: G } });
+    await spend.holdCredit({ holdKey: 'cl-1', personId: 'cl', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, G);
+    await spend.settleHold({ holdKey: 'cl-1', customerMicros: 1 * M }, G);
+    await funding.setAccountStatus(sponsor.id, 'closed');
+    const refunded = await spend.refundHold({ holdKey: 'cl-1', refundKey: 'cl-ref', amountMicros: 1 * M, reason: 'platform_failure' }, G);
+    const repl = await prisma.creditLot.findFirst({ where: { personId: 'cl', source: 'replacement' } });
+    const spendable = await spend.availableCredit('cl', 'instant_apps', G);
+    check('a failure found after the sponsor’s account closed is made whole by the platform, in credit the person can spend', refunded.ok && repl?.fundingAccountId === 'funding-platform' && spendable.availableMicros === 1 * M, { refunded, repl, spendable });
+  }
+
   // ---------- The Instant executor's contract ----------
   {
     await user('inst', '2027-02-11T00:00:00Z');

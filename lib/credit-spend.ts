@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { prisma } from '@/lib/db';
+import { PLATFORM_ACCOUNT_ID } from '@/lib/credit-funding';
 import { getMeterSettings } from '@/lib/meter';
 import { ensureIssued } from '@/lib/credit-issue';
 import { allocate, asNumber, categoryFor, monthEnd, monthStart, wholeMicros, type ChargeClass, type MoneyCategory } from '@/lib/credit-values';
@@ -334,7 +335,9 @@ export async function refundHold(input: { holdKey: string; refundKey: string; am
           // One replacement per refund, never per allocation: a second partial refund of the same step makes its own (the refund key already
           // makes asking again the same as asking once, before this point). 'r:' + a uuid fits the 40 characters of a period key
           periodKey: `r:${randomUUID()}`,
-          fundingAccountId: lot.fundingAccountId,
+          // A closed account funds nothing new, so a lot made under it could never be spent: when a failure on our side is found after
+          // its sponsor's account closed, the platform makes the person whole (still bounded by the give-back limit the caller passes)
+          fundingAccountId: lot.account.status === 'closed' ? PLATFORM_ACCOUNT_ID : lot.fundingAccountId,
           personId: hold.personId,
           source: 'replacement',
           amountMicros: BigInt(given),
