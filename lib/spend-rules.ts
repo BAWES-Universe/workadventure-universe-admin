@@ -12,6 +12,7 @@ import {
   type Allowed,
   type ChargeClass,
   type DraftInput,
+  type RuleDraft,
   type Refused,
   type RuleCovers,
   type RulePeriod,
@@ -102,7 +103,27 @@ export type Proposed =
   | { ok: true; rule: RuleCard; created: boolean }
   | { ok: false; reason: 'invalid'; error: string }
   | { ok: false; reason: 'needs_answer'; ask: Ask }
-  | { ok: false; reason: 'not_allowed' };
+  | { ok: false; reason: 'not_allowed' }
+  /** The same message id already made a rule that means something else: it is not that message again, so nothing is saved or shown. */
+  | { ok: false; reason: 'key_reused' };
+
+/**
+ * Whether a stored rule is what this message says (a replay of it). A rule the person has corrected since (a later version) is theirs
+ * to have changed, and the same message again still finds it.
+ */
+function isReplayOf(row: Prisma.SpendRuleGetPayload<object>, draft: RuleDraft, ownerPersonId: string): boolean {
+  if (row.ownerPersonId !== ownerPersonId) return false;
+  if (row.version > 1) return true;
+  return (
+    row.scope === draft.scope &&
+    row.botId === draft.botId &&
+    row.taskKey === draft.taskKey &&
+    row.period === draft.period &&
+    (row.capMicros === null ? null : Number(row.capMicros)) === draft.capMicros &&
+    row.onlyOwnAccounts === draft.onlyOwnAccounts &&
+    row.covers === draft.covers
+  );
+}
 
 /**
  * Saves a rule a person said in chat, once per message: the same message again finds the rule it made. A rule that is missing one
@@ -123,7 +144,7 @@ export async function proposeRule(input: DraftInput & { speakerId: string; sayin
   const ruleKey = input.sayingKey ? `chat:${input.botId}:${input.speakerId}:${input.sayingKey}`.slice(0, 255) : null;
   if (ruleKey) {
     const seen = await prisma.spendRule.findUnique({ where: { ruleKey } });
-    if (seen && seen.ownerPersonId === owner.ownerPersonId) return { ok: true, rule: await cardOf(seen), created: false };
+    if (seen) return isReplayOf(seen, draft, owner.ownerPersonId) ? { ok: true, rule: await cardOf(seen), created: false } : { ok: false, reason: 'key_reused' };
   }
   try {
     const row = await prisma.spendRule.create({
@@ -148,7 +169,7 @@ export async function proposeRule(input: DraftInput & { speakerId: string; sayin
     const code = (error as { code?: string } | null)?.code;
     if (ruleKey && code === 'P2002') {
       const winner = await prisma.spendRule.findUnique({ where: { ruleKey } });
-      if (winner && winner.ownerPersonId === owner.ownerPersonId) return { ok: true, rule: await cardOf(winner), created: false };
+      if (winner) return isReplayOf(winner, draft, owner.ownerPersonId) ? { ok: true, rule: await cardOf(winner), created: false } : { ok: false, reason: 'key_reused' };
     }
     throw error;
   }

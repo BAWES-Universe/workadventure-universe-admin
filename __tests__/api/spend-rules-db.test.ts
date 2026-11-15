@@ -158,6 +158,10 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(b).toMatchObject({ ok: true, created: true, rule: { words: expect.stringContaining('$2.00 a day') } });
       expect(await prisma.spendRule.count({ where: { ownerPersonId: sara.id } })).toBe(1);
       expect(await prisma.spendRule.count({ where: { ownerPersonId: omar.id } })).toBe(1);
+      // The same person and message id with a different cap is not that message again: nothing is saved and no rule is shown
+      const clash = await proposeRule({ botId: sara.brickId, speakerId: omar.id, sayingKey: 'shared-id', scope: 'person', period: 'day', capMicros: 9_000_000 });
+      expect(clash).toEqual({ ok: false, reason: 'key_reused' });
+      expect(await prisma.spendRule.count({ where: { ownerPersonId: omar.id } })).toBe(1);
       // Each person's own replay still finds their own rule
       expect(await proposeRule({ botId: sara.brickId, speakerId: omar.id, sayingKey: 'shared-id', scope: 'person', period: 'day', capMicros: 2_000_000 })).toMatchObject({ ok: true, created: false, rule: { words: expect.stringContaining('$2.00 a day') } });
     });
@@ -346,6 +350,20 @@ run('rules said in chat and task receipts, in a real database', () => {
         // The one that did not get through was stopped by the rule, not by anything else
         expect([a, b].filter((one) => !one.ok)).toEqual([expect.objectContaining({ reason: 'rule' })]);
       }
+    });
+  });
+
+  describe('a message id used for a different rule', () => {
+    it('through the route: answers 409 in plain words with none of the other rule, and saves nothing', async () => {
+      const sara = await person('sara');
+      expect((await postRule(json('/x', 'POST', { userId: sara.uuid, sayingKey: 'say-clash', scope: 'bot', period: 'month', capMicros: 1_000_000 }), ctx(sara.brickId))).status).toBe(201);
+      const clash = await postRule(json('/x', 'POST', { userId: sara.uuid, sayingKey: 'say-clash', scope: 'bot', period: 'month', capMicros: 5_000_000 }), ctx(sara.brickId));
+      expect(clash.status).toBe(409);
+      const body = await clash.json();
+      expect(body).toEqual({ error: expect.stringContaining('already used for a different rule') });
+      expect(Object.keys(body)).toEqual(['error']);
+      expect(JSON.stringify(body)).not.toMatch(/\$|capMicros|words/);
+      expect(await prisma.spendRule.count({ where: { ownerPersonId: sara.id } })).toBe(1);
     });
   });
 

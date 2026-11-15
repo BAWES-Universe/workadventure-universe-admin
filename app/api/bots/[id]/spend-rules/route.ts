@@ -58,6 +58,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
  *    to show the person so they can correct it;
  *  - `{ ok: false, reason: 'needs_answer', ask: { about, question, options } }` the rule is missing one thing to be clear ("$1 for each
  *    task, each day or each month?"): Brick asks that one question, then sends the same call again with the answer;
+ *  - a 409 `{ error }` when the same message id already made a rule that says something else (nothing is saved or shown);
  *  - `{ ok: false, reason: 'not_allowed' }` only the person who pays (a Brick's owner, or a room bot's universe owner) makes rules
  *    about a bot; a guest never has any to make.
  *
@@ -88,6 +89,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       covers: said.covers,
     });
     if (!result.ok && result.reason === 'invalid') return NextResponse.json({ error: result.error }, { status: 400 });
+    // The same message id already made a rule that says something else: nothing is saved, and nothing of that rule is shown
+    if (!result.ok && result.reason === 'key_reused') return NextResponse.json({ error: 'That message was already used for a different rule. Say it again as a new message.' }, { status: 409 });
     return NextResponse.json(result, { status: result.ok && result.created ? 201 : 200 });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'spend-rules' } });
