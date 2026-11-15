@@ -289,6 +289,10 @@ async function main() {
     const late = await spend.refundHold({ holdKey: 'rf-1', refundKey: 'ref-5', amountMicros: 1.5 * M, reason: 'platform_failure', limits: { giveBackMaxMicros: 400_000 } }, after);
     const replacement = await prisma.creditLot.findFirst({ where: { personId: 'rf', source: 'replacement' } });
     check('a failure found after the gift ended makes a small separate replacement credit, capped by the give-back limit, never a renewal of the old gift', late.ok && late.replacementMicros === 400_000 && !!replacement && Number(replacement.amountMicros) === 400_000 && replacement.slotKey === 'replacement' && (replacement.expiresAt?.toISOString() ?? '') === '2027-05-01T00:00:00.000Z' && replacement.id !== monthly.id, { late, replacement });
+    const second = await spend.refundHold({ holdKey: 'rf-1', refundKey: 'ref-6', amountMicros: 300_000, reason: 'platform_failure', limits: { giveBackMaxMicros: 400_000 } }, after).catch((error: unknown) => ({ ok: false as const, reason: error instanceof Error ? error.message : 'threw' }));
+    check('a second partial refund of the same step after the gift ended makes its own replacement credit, not a clash', second.ok && (await prisma.creditLot.count({ where: { personId: 'rf', source: 'replacement' } })) === 2, second);
+    const none = await spend.refundHold({ holdKey: 'rf-1', refundKey: 'ref-7', amountMicros: 100_000, reason: 'platform_failure', limits: { giveBackMaxMicros: 0 } }, after).catch((error: unknown) => ({ ok: false as const, reason: error instanceof Error ? error.message : 'threw' }));
+    check('a give-back limit of nothing gives nothing back after the credit ended, and does not fail', none.ok && none.refundedMicros === 0 && (await prisma.creditLot.count({ where: { personId: 'rf', source: 'replacement' } })) === 2, none);
     const oldLot = await prisma.creditLot.findUniqueOrThrow({ where: { id: monthly.id } });
     check('the ended gift is untouched', oldLot.expiresAt?.toISOString() === '2027-03-01T00:00:00.000Z' && Number(oldLot.amountMicros) === 5 * M);
   }
@@ -467,6 +471,18 @@ async function main() {
     await requests.askForMore('tardy', lateDay, 'apps');
     await requests.answerRequests('tardy', 'grant-x', lateDay, lateDay, 'computer');
     check('extra computer usage does not close an ask for Instant Apps credit', (await requests.openRequestFor('tardy', 'apps')) !== null);
+  }
+
+  // ---------- A schedule that changes keeps what was left of the one before ----------
+  {
+    const ex = await rules.saveException({ categoryId: 'computers', amount: 3 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['tardy'] } }, root, G);
+    await issue.ensureIssued('tardy', G);
+    await spend.holdCredit({ holdKey: 'sch-1', personId: 'tardy', category: 'computers', amountMicros: 1 * M, chargeClass: 'computer_job' }, G);
+    await spend.settleHold({ holdKey: 'sch-1', customerMicros: 1 * M }, G);
+    await rules.saveException({ programId: ex.programId, categoryId: 'computers', amount: 4 * M, schedule: 'monthly', recipients: { kind: 'people', userIds: ['tardy'] } }, root, at('2027-02-14T00:00:00Z'));
+    await issue.ensureIssued('tardy', at('2027-02-14T00:00:00Z'));
+    const line = (await usage.moneyLine('tardy', 'computers', at('2027-02-14T00:00:00Z'))) as { kind: string; availableMicros: number; totalMicros: number };
+    check('a one-off that turned monthly shows this month’s lot and what is left of the one-off: $6 of $7, still monthly', line.kind === 'monthly' && line.availableMicros === 6 * M && line.totalMicros === 7 * M, line);
   }
 
   // ---------- The Instant executor's contract ----------

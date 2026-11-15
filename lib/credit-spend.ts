@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
 import { ensureIssued } from '@/lib/credit-issue';
@@ -319,12 +320,20 @@ export async function refundHold(input: { holdKey: string; refundKey: string; am
         continue;
       }
       // The lot ended: never renew it. A small separate credit, kept apart and ending soon, for the person whose credit it was
-      const given = limits.giveBackMaxMicros == null ? take : Math.min(take, limits.giveBackMaxMicros);
+      // The give-back limit is for the whole refund, not for each ended lot: it is what we are willing to make whole after the credit ended.
+      // What it does not cover is not given at all (it is not passed on to another lot), so `left` goes down by all of `take`.
+      const given = limits.giveBackMaxMicros == null ? take : Math.min(take, Math.max(0, limits.giveBackMaxMicros - replacement));
+      if (given <= 0) {
+        left -= take;
+        continue;
+      }
       const replacementLot = await tx.creditLot.create({
         data: {
           slotKey: 'replacement',
           subjectKey: `person:${hold.personId}`,
-          periodKey: allocation.id,
+          // One replacement per refund, never per allocation: a second partial refund of the same step makes its own (the refund key already
+          // makes asking again the same as asking once, before this point). 'r:' + a uuid fits the 40 characters of a period key
+          periodKey: `r:${randomUUID()}`,
           fundingAccountId: lot.fundingAccountId,
           personId: hold.personId,
           source: 'replacement',
