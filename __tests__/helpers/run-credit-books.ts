@@ -474,6 +474,8 @@ async function main() {
     await requests.askForMore('tardy', lateDay, 'apps');
     await requests.answerRequests('tardy', 'grant-x', lateDay, lateDay, 'computer');
     check('extra computer usage does not close an ask for Instant Apps credit', (await requests.openRequestFor('tardy', 'apps')) !== null);
+    const person = await (await import('@/lib/meter-person')).personUsage('tardy', lateDay);
+    check('the admin’s computer-time view does not show an Instant Apps ask as a computer ask', person.asked === null, person.asked);
   }
 
   // ---------- A schedule that changes keeps what was left of the one before ----------
