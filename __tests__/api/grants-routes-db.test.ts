@@ -312,6 +312,21 @@ run('the grants routes, on the real books', () => {
       expect(exceptions.find((e: any) => e.computers.amountMicros === 5 * MILLION)).toBeUndefined();
     });
 
+    it('gives the other rule its people back when the choice still can’t be saved', async () => {
+      const [omar, noor, faisal] = [await person('Omar'), await person('Noor'), await person('Faisal')];
+      // One rule over Omar and Noor sets two categories. Taking them out of one category's rule is not enough: the other clashes too
+      const first = await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'own', amountMicros: 9 * MILLION, interval: 'monthly' }, computers: { mode: 'own', amountMicros: 5 * MILLION, interval: 'monthly' } } });
+      expect(first.status).toBe(201);
+      const refused = await call<any>(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor, faisal] }, instant_apps: { mode: 'own', amountMicros: 20 * MILLION, interval: 'monthly' }, computers: { mode: 'own', amountMicros: 25 * MILLION, interval: 'monthly' }, clashChoice: 'this' } });
+      expect(refused.status).toBe(409);
+      const { exceptions } = await overview();
+      // Nothing was left half-done: the old rule still holds both people, and the new one is not there
+      expect(exceptions).toHaveLength(1);
+      expect(exceptions[0].audience.people.map((p: any) => p.name).sort()).toEqual(['Noor', 'Omar']);
+      expect(exceptions[0].instant_apps.amountMicros).toBe(9 * MILLION);
+      expect(exceptions[0].computers.amountMicros).toBe(5 * MILLION);
+    });
+
     it('"the other one" takes those people out of this rule', async () => {
       const { omar, noor, faisal } = await twoRules();
       const extra = await person('Lina');
@@ -369,7 +384,8 @@ run('the grants routes, on the real books', () => {
     const open = await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'gift', ...base } });
     expect((await open.json()).problem).toMatch(/Say the most people who can join/);
     const capped = await (await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'gift', ...base, joinerCap: 3 } })).json();
-    expect(capped.numbers).toMatchObject({ people: 1, laterToo: true, noLifetimeMax: false });
+    // The most it can issue counts the people there now and the three who may join: $5 each for four people
+    expect(capped.numbers).toMatchObject({ people: 1, laterToo: true, noLifetimeMax: false, mostNowMicros: 20 * MILLION });
   });
 
   it('keeps a changing universe gift to its members now plus the joiners the admin allowed', async () => {

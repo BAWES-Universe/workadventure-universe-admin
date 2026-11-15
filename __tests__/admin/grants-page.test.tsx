@@ -205,6 +205,34 @@ describe('gifts', () => {
     expect(body(calls('POST', '/gifts')[0]).grantKey).toBe(body(calls('POST', '/gifts')[1]).grantKey);
   });
 
+  it('keeps the key after a server error (it may have saved) and drops it after a clear refusal', async () => {
+    render(<GrantsPage />);
+    await pickOmar();
+    fireEvent.change(await screen.findByLabelText('Gift amount'), { target: { value: '5' } });
+    const give = await screen.findByRole('button', { name: 'Give $5 each' });
+    await waitFor(() => expect(give).not.toBeDisabled());
+    const original = fetchMock.getMockImplementation()!;
+    let status = 500;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) =>
+      url === '/api/admin/grants/gifts' ? Promise.resolve({ ok: false, status, json: async () => ({ error: 'Nope' }) } as Response) : original(url, init),
+    );
+    fireEvent.click(give);
+    await waitFor(() => expect(calls('POST', '/gifts')).toHaveLength(1));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Give $5 each' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Give $5 each' }));
+    await waitFor(() => expect(calls('POST', '/gifts')).toHaveLength(2));
+    expect(body(calls('POST', '/gifts')[0]).grantKey).toBe(body(calls('POST', '/gifts')[1]).grantKey);
+    // A clear refusal ends the key: the next try is a new one
+    status = 400;
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Give $5 each' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Give $5 each' }));
+    await waitFor(() => expect(calls('POST', '/gifts')).toHaveLength(3));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Give $5 each' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Give $5 each' }));
+    await waitFor(() => expect(calls('POST', '/gifts')).toHaveLength(4));
+    expect(body(calls('POST', '/gifts')[3]).grantKey).not.toBe(body(calls('POST', '/gifts')[2]).grantKey);
+  });
+
   it('records what was agreed only for extra usage that will be billed', async () => {
     render(<GrantsPage />);
     await pickOmar();

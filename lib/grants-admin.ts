@@ -311,7 +311,8 @@ function numbersOf(preview: Preview, request: PreviewRequest, extra: { interval:
     interval: extra.interval,
     shared,
     startsOn: extra.startsOn,
-    mostNowMicros: shared ? each : each * countNow,
+    // A changing universe gift can reach the people there now and the joiners the admin allowed: that is the most it can issue
+    mostNowMicros: shared ? each : each * (countNow + (request.what === 'gift' && request.joinerCap && preview.recipients.growing ? request.joinerCap : 0)),
     noLifetimeMax: preview.mostIssued.unbounded,
     endsOn: extra.endsOn,
     audienceName: extra.audienceName,
@@ -377,15 +378,40 @@ function inputOfProgram(program: ProgramView): GrantInput {
   return { categoryId: program.categoryId, amount: program.amount, schedule: program.schedule, recipients: program.recipients, share: program.share, claimStartsAt: program.claimStartsAt, claimEndsAt: program.claimEndsAt, lotExpiresAt: program.lotExpiresAt, label: program.label };
 }
 
-async function takeOut(programId: string, people: string[], issuer: Issuer, now: Date): Promise<void> {
+/** What taking people out of another rule changed, so a refused save can put the other rule back. */
+interface TakenOut {
+  before: ProgramView;
+  ended: boolean;
+}
+
+async function takeOut(programId: string, people: string[], issuer: Issuer, now: Date, taken: TakenOut[]): Promise<void> {
   const other = (await listPrograms(undefined, { kind: 'exception' })).find((program) => program.programId === programId);
   if (!other) return;
   if (other.recipients.kind !== 'people') {
     throw new GrantsRefused('That other rule is for a universe’s members, so these people can’t be taken out of it. End that rule, or give each of them a rule of their own (a person’s own rule comes first).', 400, 'clash');
   }
   const left = other.recipients.userIds.filter((id) => !people.includes(id));
-  if (left.length === 0) await endProgram(programId, issuer, now);
-  else await saveException({ ...inputOfProgram(other), recipients: { kind: 'people', userIds: left }, programId }, issuer, now);
+  if (left.length === 0) {
+    await endProgram(programId, issuer, now);
+    taken.push({ before: other, ended: true });
+  } else {
+    await saveException({ ...inputOfProgram(other), recipients: { kind: 'people', userIds: left }, programId }, issuer, now);
+    taken.push({ before: other, ended: false });
+  }
+}
+
+/**
+ * Gives other rules back the people a refused save had taken out of them. A shortened rule is saved as it was. A rule that had to
+ * end can't be reopened, so it is made again with the same figures and people (its old id is gone, its people have it again).
+ */
+async function putBack(taken: TakenOut[], issuer: Issuer, now: Date): Promise<void> {
+  for (const { before, ended } of [...taken].reverse()) {
+    try {
+      await saveException({ ...inputOfProgram(before), programId: ended ? undefined : before.programId }, issuer, now);
+    } catch (error) {
+      console.error('[Grants] Could not give a rule back its people after a refused save:', error instanceof Error ? error.message : 'unknown');
+    }
+  }
 }
 
 /** Puts back what a refused save had already changed: a new rule ends, a changed one goes back to what it was. */
@@ -416,6 +442,8 @@ export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 
     return named ?? active.find((program) => program.categoryId === category && recipientKey(program.recipients) === recipientKey(recipients));
   };
 
+  // Changes to other rules made to settle a clash: put back if the save is refused after all
+  const taken: TakenOut[] = [];
   for (let attempt = 0; attempt < 2; attempt++) {
     // What this attempt changed, so a refusal part-way puts it back: one rule for each category is saved on its own, never half-saved
     const done: { before: ProgramView | undefined; after: ProgramView }[] = [];
@@ -435,17 +463,24 @@ export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 
       return;
     } catch (error) {
       await undo(done, issuer, now);
-      active = await listPrograms(undefined, { kind: 'exception' });
-      if (!(error instanceof ClashRefused) || !request.clashChoice || attempt > 0) throw error;
+      if (!(error instanceof ClashRefused) || !request.clashChoice || attempt > 0) {
+        await putBack(taken, issuer, now);
+        throw error;
+      }
       // The admin chose which rule applies to the people the two disagree about
-      const clashing = new Set(error.clashes.flatMap((clash) => clash.people.map((person) => person.userId)));
-      if (request.clashChoice === 'this') {
-        for (const clash of error.clashes) await takeOut(clash.programId, clash.people.map((person) => person.userId), issuer, now);
-      } else {
-        if (recipients.kind !== 'people') throw new GrantsRefused('This rule is for a universe’s members, so those people can’t be taken out of it. Pick “This one”, or give each of them a rule of their own.', 400, 'clash');
-        const left = recipients.userIds.filter((id) => !clashing.has(id));
-        if (left.length === 0) throw new GrantsRefused('Nobody would be left in this rule. Pick “This one”, or change the people.', 400, 'clash');
-        recipients = { kind: 'people', userIds: left };
+      try {
+        const clashing = new Set(error.clashes.flatMap((clash) => clash.people.map((person) => person.userId)));
+        if (request.clashChoice === 'this') {
+          for (const clash of error.clashes) await takeOut(clash.programId, clash.people.map((person) => person.userId), issuer, now, taken);
+        } else {
+          if (recipients.kind !== 'people') throw new GrantsRefused('This rule is for a universe’s members, so those people can’t be taken out of it. Pick “This one”, or give each of them a rule of their own.', 400, 'clash');
+          const left = recipients.userIds.filter((id) => !clashing.has(id));
+          if (left.length === 0) throw new GrantsRefused('Nobody would be left in this rule. Pick “This one”, or change the people.', 400, 'clash');
+          recipients = { kind: 'people', userIds: left };
+        }
+      } catch (settling) {
+        await putBack(taken, issuer, now);
+        throw settling;
       }
       active = await listPrograms(undefined, { kind: 'exception' });
     }
