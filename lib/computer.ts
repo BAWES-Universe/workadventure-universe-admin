@@ -356,7 +356,7 @@ export async function startJob(input: { botId: string; personId: string; title: 
   const outcome = await tryStart(created.id, now);
   if (typeof outcome === 'object') {
     // Refused by a rule the person said in chat: no job was ever going to run, so none is left behind, and the answer carries the rule's words
-    await prisma.computerJob.deleteMany({ where: { id: created.id, status: 'stopped', endedBy: 'rule' } });
+    await prisma.computerJob.deleteMany({ where: { id: created.id, status: 'stopped', endedBy: 'rule', startedAt: null } });
     return { ok: false, reason: 'rule', words: outcome.rule };
   }
   if (outcome === 'not_set') {
@@ -372,8 +372,8 @@ export async function startJob(input: { botId: string; personId: string; title: 
     return words !== null ? { ok: false, reason: 'rule', words } : { ok: false, reason: 'not_set' };
   }
   // The same, seen after that ask stopped the job and before it took it away
-  if (job.status === 'stopped' && job.endedBy === 'rule') {
-    await prisma.computerJob.deleteMany({ where: { id: job.id, status: 'stopped', endedBy: 'rule' } });
+  if (job.status === 'stopped' && job.endedBy === 'rule' && job.startedAt === null) {
+    await prisma.computerJob.deleteMany({ where: { id: job.id, status: 'stopped', endedBy: 'rule', startedAt: null } });
     return { ok: false, reason: 'rule', words: (await ruleWordsOf(input.botId, input.personId, now)) ?? 'A rule you said stopped this job' };
   }
   if (job.status === 'failed') return { ok: false, reason: 'broken_start' };
@@ -407,7 +407,7 @@ async function reuseRunJob(botId: string, runId: string, now: Date): Promise<Sta
     const tried = await tryStart(found.id, now);
     if (typeof tried === 'object') {
       // A rule the person said stops it on this try: nothing ran, so none is left behind, the same answer as the first ask
-      await prisma.computerJob.deleteMany({ where: { id: found.id, status: 'stopped', endedBy: 'rule' } });
+      await prisma.computerJob.deleteMany({ where: { id: found.id, status: 'stopped', endedBy: 'rule', startedAt: null } });
       return { ok: false, reason: 'rule', words: tried.rule };
     }
     if (tried === 'not_set') {
@@ -421,9 +421,10 @@ async function reuseRunJob(botId: string, runId: string, now: Date): Promise<Sta
       return words !== null ? { ok: false, reason: 'rule', words } : { ok: false, reason: 'not_set' };
     }
   }
-  // A job a rule the person said has just stopped, seen before the ask that stopped it took it away: the same answer as that ask
-  if (found.status === 'stopped' && found.endedBy === 'rule') {
-    await prisma.computerJob.deleteMany({ where: { id: found.id, status: 'stopped', endedBy: 'rule' } });
+  // A job a rule the person said has just stopped at the start (it never ran), seen before the ask that stopped it took it away: the same
+  // answer as that ask. A job that ran and was stopped later by a rule is over like any other and is returned as it stands, never removed
+  if (found.status === 'stopped' && found.endedBy === 'rule' && found.startedAt === null) {
+    await prisma.computerJob.deleteMany({ where: { id: found.id, status: 'stopped', endedBy: 'rule', startedAt: null } });
     return { ok: false, reason: 'rule', words: (await ruleWordsOf(botId, found.personId, now)) ?? 'A rule you said stopped this job' };
   }
   if (found.status === 'failed') return { ok: false, reason: 'broken_start' };

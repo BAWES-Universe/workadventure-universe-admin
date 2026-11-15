@@ -497,6 +497,18 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
     });
 
+    it('a job that ran and was stopped later by a rule is never removed when its run is asked for again: it is over, returned as it stands', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 10_000 });
+      const item = await prisma.brickItem.create({ data: { ownerId: sara.id, botId: sara.brickId, kind: 'goal', words: 'Make the report', outcome: 'Done', cadence: { type: 'none' }, timeZone: 'Asia/Kuwait' } as never });
+      const run = await prisma.brickItemRun.create({ data: { itemId: item.id, dueAt: NOW, revision: 1, leaseUntil: new Date(NOW.getTime() + 600_000) } });
+      const ran = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Report', status: 'stopped', endedBy: 'rule', startedAt: NOW, endedAt: NOW, runId: run.id } });
+      const again = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Report', runId: run.id }, NOW);
+      expect(again).toMatchObject({ ok: true, job: { id: ran.id, status: 'stopped' } });
+      expect(await prisma.computerJob.count({ where: { id: ran.id } })).toBe(1);
+    });
+
     it('through the route: what is left is above the first millionth but under a stretch of room, so the pre-check passes and the start itself is refused, still with the rule’s words', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
