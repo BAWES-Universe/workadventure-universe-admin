@@ -118,6 +118,9 @@ export class ClashRefused extends CreditRefused {
   }
 }
 
+/** A default was made by someone else between looking for it and taking the category's lock: look again and save over it. */
+class DefaultAppeared extends Error {}
+
 export class OverBudget extends CreditRefused {
   constructor(
     readonly mostIssuedMicros: number,
@@ -391,6 +394,9 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
     const currentAccountId = input.programId ? (await tx.grantRule.findFirst({ where: { programId: input.programId, state: 'current' }, select: { fundingAccountId: true } }))?.fundingAccountId : undefined;
     await lockAll(tx, [`credit:rules:${checked.categoryId}`, lockOfAccount(checked.fundingAccountId), ...(currentAccountId ? [lockOfAccount(currentAccountId)] : []), ...(input.requestKey ? [`credit:request:${input.requestKey}`] : [])]);
     await checkIssuer(tx, checked, issuer);
+    // The default is looked for before the lock is held, so two first saves at the same moment can both find none: the second, now holding
+    // the lock, finds the first's and starts over from it as a new version, not as a second default
+    if (kind === 'default' && !input.programId && (await tx.grantProgram.findFirst({ where: { categoryId: checked.categoryId, kind: 'default', status: 'active' }, select: { id: true } }))) throw new DefaultAppeared();
     if (input.requestKey && !input.programId) {
       const made = await loadProgramByKey(tx, input.requestKey);
       if (made) {
@@ -495,8 +501,14 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
 
 /** The category's default: how much, how often, and who gets it. Saving again makes a new version of the same program. */
 export async function saveDefault(input: GrantInput, issuer: Issuer, now: Date = new Date()): Promise<ProgramView> {
-  const current = await prisma.grantProgram.findFirst({ where: { categoryId: input.categoryId, kind: 'default', status: 'active' }, select: { id: true } });
-  return save('default', { ...input, programId: current?.id }, issuer, now);
+  for (let attempt = 0; ; attempt += 1) {
+    const current = await prisma.grantProgram.findFirst({ where: { categoryId: input.categoryId, kind: 'default', status: 'active' }, select: { id: true } });
+    try {
+      return await save('default', { ...input, programId: current?.id }, issuer, now);
+    } catch (error) {
+      if (!(error instanceof DefaultAppeared) || attempt >= 3) throw error;
+    }
+  }
 }
 
 /** An exception for a person, people you pick, or a universe's members: a different amount or how often, or no grant at all. */

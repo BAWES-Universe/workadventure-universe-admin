@@ -638,6 +638,13 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     const both = await Promise.all([funding.removeAdmin(duo.id, 'cr1'), funding.removeAdmin(duo.id, 'cr2')]);
     check('two removals at once never leave an account without an administrator', both.filter((r) => r === 'removed').length === 1 && both.filter((r) => r === 'last_admin').length === 1 && (await prisma.fundingAccountAdmin.count({ where: { accountId: duo.id } })) === 1, both);
 
+    // Several first saves of a default at the same moment make one default with versions, never a second default or a thrown unique error
+    const nowDefaults = await rules.listPrograms(undefined, { kind: 'default' });
+    await Promise.all(nowDefaults.filter((p) => p.status === 'active').map((p) => rules.endProgram(p.programId, root, at('2027-02-12T00:00:00Z'))));
+    const firsts = await Promise.all([1, 2, 3, 4].map(() => rules.saveDefault({ categoryId: 'computers', amount: 5 * M, schedule: 'monthly', recipients: { kind: 'all' } }, root, at('2027-02-12T00:00:00Z')).then(() => 'saved', (e: unknown) => `threw: ${e instanceof Error ? e.message.slice(0, 80) : 'unknown'}`)));
+    const activeDefaults = await prisma.grantProgram.findMany({ where: { categoryId: 'computers', kind: 'default', status: 'active' }, include: { rules: true } });
+    check('four first saves of a default at once make one default with four versions, none throws', firsts.every((r) => r === 'saved') && activeDefaults.length === 1 && activeDefaults[0].rules.length === 4, { firsts, programs: activeDefaults.length });
+
     // Room held against a lot that ended since still counts as held while the step runs
     await user('cr5', '2027-02-11T00:00:00Z');
     await rules.createGift({ categoryId: 'instant_apps', amount: 3 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['cr5'] }, lotExpiresAt: at('2027-03-01T00:00:00Z') }, root, at('2027-02-28T23:00:00Z'));
