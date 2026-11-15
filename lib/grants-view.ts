@@ -100,6 +100,8 @@ export interface PreviewNumbers {
   startsOn?: 'next' | 'now';
   /** The most credit issued to the people there are now (per month for a monthly rule); null when it is not a money figure. */
   mostNowMicros: number | null;
+  /** What saving issues straight away to the people there now (the funding check). Never more than the most it can issue. */
+  issuedNowMicros?: number | null;
   /** True when nothing caps how long or how many it reaches, so there is no lifetime maximum. */
   noLifetimeMax: boolean;
   endsOn?: string;
@@ -271,7 +273,7 @@ export function previewRows(request: PreviewRequest, numbers: PreviewNumbers | n
 /** The funding line: nothing is given out until the rollout budget is set, and a rule bigger than what is left this month is refused on save. */
 function fundingRow(n: PreviewNumbers): PreviewRow | null {
   if (n.budget.budgetMicros === null) return ['Funding', ['Nothing is given out until you set the rollout budget in Limits.']];
-  const first = n.interval === 'none' ? 0 : n.mostNowMicros ?? 0;
+  const first = n.interval === 'none' ? 0 : n.issuedNowMicros ?? n.mostNowMicros ?? 0;
   if (first > n.budget.roomMicros) return ['Funding', [`This is more than the ${usd(n.budget.roomMicros)} left in this month’s rollout budget. Raise the budget in Limits first.`]];
   return null;
 }

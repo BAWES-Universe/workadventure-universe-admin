@@ -121,4 +121,16 @@ describe('the three-part preview', () => {
     expect(shared['Who gets what']).toContain('The 4 share one $20');
     expect(shared['Who gets what']).toContain('Two people can never spend the same dollar at once');
   });
+
+  it('warns about the budget by what is issued now, not by the most a changing gift can reach', () => {
+    const changing: PreviewRequest = { what: 'gift', audience: { kind: 'universe', universeId: 'u', mode: 'changing' }, scope: 'both', amountMicros: 5_000_000, shared: false, endsAt: '2026-12-31T00:00:00Z', joinerCap: 3 };
+    // One member now, three may join: up to $20, but only $5 is issued at saving and $10 of room is left
+    const rows = previewRows(changing, numbers({ people: 1, ownRules: 0, laterToo: true, amountMicros: 5_000_000, mostNowMicros: 20_000_000, issuedNowMicros: 5_000_000, noLifetimeMax: false, endsOn: '31 Dec', budget: { budgetMicros: 100_000_000, roomMicros: 10_000_000 } }));
+    const said = words(rows);
+    expect(said['Most credit issued']).toContain('$20 in total');
+    expect(said['Funding']).toBeUndefined();
+    // When what is issued now is more than the room, it still says so
+    const tight = words(previewRows(changing, numbers({ people: 3, ownRules: 0, laterToo: true, amountMicros: 5_000_000, mostNowMicros: 30_000_000, issuedNowMicros: 15_000_000, noLifetimeMax: false, endsOn: '31 Dec', budget: { budgetMicros: 100_000_000, roomMicros: 10_000_000 } })));
+    expect(tight['Funding']).toContain('Raise the budget in Limits first');
+  });
 });

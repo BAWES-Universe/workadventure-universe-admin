@@ -385,7 +385,7 @@ run('the grants routes, on the real books', () => {
     expect((await open.json()).problem).toMatch(/Say the most people who can join/);
     const capped = await (await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'gift', ...base, joinerCap: 3 } })).json();
     // The most it can issue counts the people there now and the three who may join: $5 each for four people
-    expect(capped.numbers).toMatchObject({ people: 1, laterToo: true, noLifetimeMax: false, mostNowMicros: 20 * MILLION });
+    expect(capped.numbers).toMatchObject({ people: 1, laterToo: true, noLifetimeMax: false, mostNowMicros: 20 * MILLION, issuedNowMicros: 5 * MILLION });
   });
 
   it('keeps a changing universe gift to its members now plus the joiners the admin allowed', async () => {

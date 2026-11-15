@@ -313,6 +313,8 @@ function numbersOf(preview: Preview, request: PreviewRequest, extra: { interval:
     startsOn: extra.startsOn,
     // A changing universe gift can reach the people there now and the joiners the admin allowed: that is the most it can issue
     mostNowMicros: shared ? each : each * (countNow + (request.what === 'gift' && request.joinerCap && preview.recipients.growing ? request.joinerCap : 0)),
+    // The funding check is about who is there now: joiners are funded as they join
+    issuedNowMicros: shared ? each : each * countNow,
     noLifetimeMax: preview.mostIssued.unbounded,
     endsOn: extra.endsOn,
     audienceName: extra.audienceName,
@@ -343,17 +345,21 @@ export async function previewFor(request: PreviewRequest, now: Date = new Date()
     let numbers: PreviewNumbers | null = null;
     let clash: ClashView | null = null;
     let most = 0;
+    let issuedNow = 0;
     for (const category of MONEY_CATEGORIES) {
       const setting = request[category];
       const input = settingInput(category, setting, recipients, now);
       if (!input) continue;
       const preview = await previewGrant('exception', input, now);
       const first = numbersOf(preview, request, { interval: setting.mode === 'own' ? setting.interval : 'none', ownRules: 0 });
-      if (setting.mode === 'own') most += first.mostNowMicros ?? 0;
+      if (setting.mode === 'own') {
+        most += first.mostNowMicros ?? 0;
+        issuedNow += first.issuedNowMicros ?? 0;
+      }
       numbers = numbers ?? first;
       if (!clash && setting.mode === 'own') clash = await clashOf(category, recipients, request.replaceId ? (readExceptionId(request.replaceId)?.[category] ?? undefined) : undefined, { amountMicros: setting.amountMicros, interval: setting.interval });
     }
-    return { numbers: numbers ? { ...numbers, mostNowMicros: most > 0 ? most : null } : null, clash };
+    return { numbers: numbers ? { ...numbers, mostNowMicros: most > 0 ? most : null, issuedNowMicros: issuedNow > 0 ? issuedNow : null } : null, clash };
   } catch (error) {
     if (error instanceof CreditRefused || error instanceof GrantsRefused) return { numbers: null, clash: null, problem: error.message };
     throw error;
