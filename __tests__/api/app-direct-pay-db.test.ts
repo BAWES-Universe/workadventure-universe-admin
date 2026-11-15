@@ -34,7 +34,7 @@ import { createBrick } from '@/lib/brick-create';
 import { disconnect } from '@/lib/app-connections';
 import { definitionSchema, hashDefinition } from '@/lib/app-direct/definition';
 import { openKeyForm, submitKey } from '@/lib/app-direct/connect';
-import { saveServerLimits } from '@/lib/bot-limits';
+import { getBrickLimits, saveServerLimits } from '@/lib/bot-limits';
 import { orderForArtifact, startCheckout, verifyOrder } from '@/lib/app-direct/pay';
 import { POST as makeJob } from '@/app/api/bots/[id]/key-apps/[serverId]/page-jobs/route';
 import { GET as listPages } from '@/app/api/me/apps/pages/route';
@@ -1001,6 +1001,25 @@ run('payments for pages, in a real database', () => {
       expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(1);
       // Never charged to the owner's own allowance
       expect(await prisma.appKeyCall.count({ where: { ownerId: sara } })).toBe(0);
+    });
+
+    it('has a built-in ceiling on looks for each owner that applies when Limits was never touched', async () => {
+      // No Limits row at all (the suite starts and ends each test without one)
+      expect(await prisma.appSetting.findUnique({ where: { key: 'bot-limits' } })).toBeNull();
+      expect((await getBrickLimits()).paymentLooksPerOwner).toBe(2_000);
+      const { artifactId } = await pending();
+      const sent = gateway({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
+      const { orderId } = await checkout(artifactId, '198.51.100.73');
+      // This owner's room for the hour is used up by 2,000 earlier looks: the next one waits, and the service is not asked
+      await prisma.appKeyCall.createMany({
+        data: Array.from({ length: 2_000 }, (_, index) => ({ ownerId: 'page-payments', botId: 'page-payments', callId: `look:${sara}:seed-${tag}:${index}`, operation: 'lookUpPayment', state: 'done', outcome: 'ok' })),
+      });
+      expect(await settle(orderId)).toMatchObject({ status: 'checking' });
+      expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(0);
+      // One look fewer and it goes through: the ceiling is exactly 2,000, not "none" and not "all refused"
+      await prisma.appKeyCall.deleteMany({ where: { callId: `look:${sara}:seed-${tag}:0` } });
+      await settle(orderId);
+      expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(1);
     });
 
     it('counts looks at payments for everyone together, apart from what Bricks and checkouts may do', async () => {
