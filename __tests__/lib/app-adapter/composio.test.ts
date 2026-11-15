@@ -116,13 +116,13 @@ describe('the real adapter speaks the provider as its docs say, against a preten
     const adapter = make([answer({ session_id: 'trs_1', mcp: { type: 'http', url: 'https://mcp.example/trs_1/mcp' } })]);
     const link = await adapter.appLink({ person: 'person-1', toolkits: ['gmail'] });
     expect(link).toEqual({ url: 'https://mcp.example/trs_1/mcp' });
-    expect(sent()).toEqual({ user_id: 'person-1', toolkits: { enable: ['gmail'] }, workbench: { enable: true } });
+    expect(sent()).toEqual({ user_id: 'person-1', toolkits: { enable: ['gmail'] }, workbench: { enable: true }, instant: false });
   });
 
   it('pins the app link to the connected account the person signed in with, a list of one for the app', async () => {
     const adapter = make([answer({ mcp: { url: 'https://mcp.example/pinned' } })]);
     await adapter.appLink({ person: 'person-1', toolkits: ['gmail'], accounts: { gmail: 'ca_9' } });
-    expect(sent()).toEqual({ user_id: 'person-1', toolkits: { enable: ['gmail'] }, workbench: { enable: true }, connected_accounts: { gmail: ['ca_9'] } });
+    expect(sent()).toEqual({ user_id: 'person-1', toolkits: { enable: ['gmail'] }, workbench: { enable: true }, instant: false, connected_accounts: { gmail: ['ca_9'] } });
   });
 
   it('never follows a redirect on a request that carries the provider key', async () => {
@@ -203,9 +203,9 @@ describe('the real adapter speaks the provider as its docs say, against a preten
 
   it('a provider that says no, or is down, is an error and never a success', async () => {
     const failed = make([answer({ successful: false, data: {}, error: 'nope', log_id: 'l' })]);
-    expect((await failed.use({ person: 'p', toolkit: 'gmail', tool: 'T', arguments: {}, providerAccountId: null, callId: 'c' })).ok).toBe(false);
+    expect((await failed.use({ person: 'p', toolkit: 'gmail', tool: 'T', arguments: {}, providerAccountId: 'ca_1', callId: 'c' })).ok).toBe(false);
     const down = make([answer({ error: { message: 'x' } }, 503)]);
-    await expect(down.use({ person: 'p', toolkit: 'gmail', tool: 'T', arguments: {}, providerAccountId: null, callId: 'c' })).rejects.toThrow('503');
+    await expect(down.use({ person: 'p', toolkit: 'gmail', tool: 'T', arguments: {}, providerAccountId: 'ca_1', callId: 'c' })).rejects.toThrow('503');
   });
 
   it('reads the provider’s own count of tool calls for a period: counts only, nothing else kept (a row with no tool name is dropped and the list says it is partial)', async () => {

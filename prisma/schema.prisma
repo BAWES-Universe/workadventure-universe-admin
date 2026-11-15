@@ -3341,6 +3341,97 @@ model VoiceNoteCleanup {
   @@map("voice_note_cleanups")
 }
 
+// One paid run of an Instant App tool (spec "Paying for Apps and computers", O2). Instant tools run on Composio's own accounts and
+// are charged to OUR prepaid balance, so every run is bounded before it starts: the trusted top price is held from the person's
+// Instant Apps credit AND counted in our own exposure, the run goes out through our executor only (never through a session), and
+// it ends as charged, released (a failure never costs the person) or unresolved. The customer's side (what the person paid) and
+// the provider's side (what Composio charged us) are kept in separate columns on purpose. No foreign keys: the books outlive bots.
+model InstantRun {
+  id                String    @id @default(uuid())
+  // The bot server's call id with the Brick: asking again finds this run, so a retry never runs or pays twice
+  runKey            String    @unique @map("run_key") @db.VarChar(255)
+  botId             String    @map("bot_id")
+  // The person who asked and pays (the Brick's owner)
+  personId          String    @map("person_id")
+  toolSlug          String    @map("tool_slug") @db.VarChar(120)
+  toolkit           String    @db.VarChar(80)
+  // sha256 of the canonical arguments: lets a second ask for the very same thing wait while the first is unclear. Never the arguments.
+  argsHash          String    @map("args_hash") @db.VarChar(64)
+  // Which version of the trusted price table bounded this run
+  priceVersion      String    @map("price_version") @db.VarChar(40)
+  // The trusted top price of the run, all fees included, and what was held from the person's credit for it
+  topMicros         BigInt    @map("top_micros")
+  holdMicros        BigInt    @map("hold_micros")
+  // The markup (in basis points) the hold was made with: the charge is always worked out with this one, so a settlement said again
+  // after the markup was changed asks the books for the same amount as the first time
+  markupBps         Int?      @map("markup_bps")
+  // reserving, held, sent, succeeded, failed, ambiguous, refused
+  state             String    @db.VarChar(12)
+  // Why it did not happen or did not work, in a fixed word; never a message from the provider
+  reason            String?   @db.VarChar(40)
+  // The customer's side: held, charged or released; what was charged; what was given back later
+  customerState     String    @default("none") @map("customer_state") @db.VarChar(10)
+  customerMicros    BigInt?   @map("customer_micros")
+  refundedMicros    BigInt    @default(0) @map("refunded_micros")
+  // The provider's side: pending (Composio's charge is not known yet; the top price counts as our exposure) or settled
+  providerState     String    @default("none") @map("provider_state") @db.VarChar(10)
+  providerMicros    BigInt?   @map("provider_micros")
+  // measured (Composio's own figure) or estimated
+  providerBasis     String?   @map("provider_basis") @db.VarChar(10)
+  providerLogId     String?   @map("provider_log_id") @db.VarChar(255)
+  // The opaque id the run was sent under, so Composio's log of it can be found exactly (never a person's id)
+  providerUserId    String    @map("provider_user_id") @db.VarChar(120)
+  provider          String    @default("composio") @db.VarChar(20)
+  // When the request went out; a run that stays "sent" past the hold time is treated as unclear
+  sentAt            DateTime? @map("sent_at")
+  finishedAt        DateTime? @map("finished_at")
+  // When an unclear run stops being looked for (it is closed on what is known), or a charge not reported stops being waited for
+  checkAfter        DateTime? @map("check_after")
+  // When a sweep or a retry last tried to settle it: the sweep goes oldest attempt first, so runs that cannot be settled never starve the rest
+  checkedAt         DateTime? @map("checked_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  detail            Json?
+
+  @@index([state, createdAt])
+  @@index([providerState, createdAt])
+  @@index([personId, createdAt])
+  @@index([personId, argsHash, state])
+  @@map("instant_runs")
+}
+
+// Money given back for a run: a verified platform failure (the person never paid) is a release and needs no row; a row here is a
+// give-back after a charge ("Didn't work", goodwill) or a late fix. One row per refund key, so asking twice gives back once.
+model InstantRefund {
+  id           String   @id @default(uuid())
+  refundKey    String   @unique @map("refund_key") @db.VarChar(255)
+  runId        String   @map("run_id")
+  personId     String   @map("person_id")
+  kind         String   @db.VarChar(20)
+  amountMicros BigInt   @map("amount_micros")
+  // Null while only the intent is saved (written before the books are asked, so a give-back the books made and we never recorded is
+  // found again and finished by the retry); set once the books confirmed it. Both count against the limits.
+  confirmedAt  DateTime? @map("confirmed_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([runId])
+  @@index([personId, createdAt])
+  @@index([createdAt])
+  @@map("instant_refunds")
+}
+
+// Which app link sessions were checked to say "Instant: no" out loud (spec O2, test 9). A session made before the executor said nothing
+// about Instant, and the provider lets such a session run Instant tools the day the project switch goes on, so each is read back
+// and switched off first. One row per connection, with the session id that was checked.
+model InstantSessionCheck {
+  connectionId String   @id @map("connection_id")
+  sessionId    String   @map("session_id") @db.VarChar(255)
+  // denied (reads back as off), gone (the provider has no such session any more) or failed (the last try did not work; tried again later)
+  state        String   @db.VarChar(10)
+  checkedAt    DateTime @default(now()) @map("checked_at")
+
+  @@map("instant_session_checks")
+}
+
 // A short-lived key a job's computer holds, and the ONLY one: it names no account and grants nothing by itself. Orbit keeps the
 // digest only; the job, the Brick, the person who pays and what is allowed are all read from Orbit's own records when it is used,
 // never from the token or from anything the agent says. Tokens end with the job, on a take over (the generation moves) and after
