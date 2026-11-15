@@ -231,9 +231,11 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
   if (!held.ok) {
     // "Unavailable" is the books being unreachable: said as that, never as the person's credit being used up
     const reason: InstantReason = held.reason === 'unavailable' ? 'credit_unavailable' : held.reason;
-    await moveRun(run.id, 'reserving', { state: 'refused', reason, finishedAt: now, customerState: 'none', providerState: 'none' });
-    // A rule the person said is final and carries its own words; nothing was held and no credit is offered
-    return refuse(reason, held.reason === 'rule' ? { runId: run.id, words: held.words, leftMicros: held.leftMicros ?? null } : { runId: run.id });
+    // A rule's own words are kept on the run, so asking again with the same call id says the same words (not a general sentence)
+    const ruleDetail = held.reason === 'rule' ? { detail: { ruleWords: held.words, leftMicros: held.leftMicros } } : {};
+    await moveRun(run.id, 'reserving', { state: 'refused', reason, finishedAt: now, customerState: 'none', providerState: 'none', ...ruleDetail });
+    // A rule the person said in chat that stopped the hold says so in its own words (nothing is held, and there is nothing to ask more credit for)
+    return refuse(reason, held.reason === 'rule' ? { runId: run.id, words: held.words, leftMicros: held.leftMicros } : { runId: run.id });
   }
   // Each step only moves the run from the step before it. A reservation that came back after the clean-up wait found the run closed
   // and its hold given back: that run never goes out, and a hold that reached the books late is given back again.
@@ -498,6 +500,12 @@ async function finishCustomer(runId: string, ctx: Pick<Ctx, 'funds'>): Promise<R
  * Composio's charge is known: written on the run (provider side) and once to the meter's books. A charge above the top price
  * means the table is too low: the run still settles, the excess is ours, and Instant stops.
  */
+/**
+ * What the person was charged, as the meter event records it. A failed run released its hold, so the person paid nothing: that is a
+ * zero, not "not known" (which would show as "Price not known yet" on the task's receipt for good). A run still held is not known yet.
+ */
+const customerChargedMicros = (run: Row): number | null => (run.customerMicros === null ? (run.state === 'failed' ? 0 : null) : Number(run.customerMicros));
+
 async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: number, basis: 'measured' | 'estimated', now: Date): Promise<void> {
   if (run.providerState === 'settled') return;
   await tx.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt: run.finishedAt ?? now } });
@@ -520,7 +528,7 @@ async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: nu
       costMicros: micros,
       basis,
       sourceRef: `instant_runs:${run.id}`,
-      detail: { instant: true, provider: INSTANT_PROVIDER, ...(run.taskKey ? { taskKey: run.taskKey } : {}), tool: run.toolSlug, toolkit: run.toolkit, runId: run.id, customerMicros: run.customerMicros === null ? null : Number(run.customerMicros), basis, state: run.state },
+      detail: { instant: true, provider: INSTANT_PROVIDER, ...(run.taskKey ? { taskKey: run.taskKey } : {}), tool: run.toolSlug, toolkit: run.toolkit, runId: run.id, customerMicros: customerChargedMicros(run), basis, state: run.state },
     },
     tx,
   ).catch((error) => console.error('[Instant] Could not write the meter event:', error instanceof Error ? error.message : 'unknown'));
@@ -556,8 +564,13 @@ async function describeKnown(run: Row, ctx: Ctx): Promise<InstantOutcome> {
 
 function outcomeOf(run: Row): InstantOutcome {
   switch (run.state) {
-    case 'refused':
+    case 'refused': {
+      const detail = isObject(run.detail) ? run.detail : null;
+      if (run.reason === 'rule' && detail && typeof detail.ruleWords === 'string') {
+        return refuse('rule', { runId: run.id, words: detail.ruleWords, leftMicros: typeof detail.leftMicros === 'number' ? detail.leftMicros : null });
+      }
       return refuse((run.reason as InstantReason) ?? 'unclear', { runId: run.id });
+    }
     case 'failed': {
       const reason = (run.reason as InstantReason) ?? 'provider_failed';
       return { status: 'failed', runId: run.id, reason, message: REASON_WORDS[reason] };

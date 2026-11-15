@@ -2468,6 +2468,14 @@ model CreditRefundRequest {
   @@map("credit_refund_requests")
 }
 
+/// A hold key closed before any hold was made under it: a hold that arrives later under the key is refused (see releaseKeyIfNothingHeld).
+model CreditClosedKey {
+  holdKey  String   @id @map("hold_key") @db.VarChar(255)
+  closedAt DateTime @default(now()) @map("closed_at")
+
+  @@map("credit_closed_keys")
+}
+
 // Bot Metrics
 model BotsMetric {
   id          Int      @id @default(autoincrement())

@@ -32,7 +32,7 @@ function fakeFunds(balance: number) {
   const state = { balance, settleOk: true, releaseOk: true, reserveReason: null as null | 'unavailable' | 'not_set' | 'credit_used_up', refunds: new Map<string, number>() };
   const left = () => state.balance - [...holds.values()].filter((h) => h.state === 'held').reduce((sum, h) => sum + h.amount, 0) - [...holds.values()].filter((h) => h.state === 'charged').reduce((sum, h) => sum + h.charged, 0);
   const funds = {
-    reserve: jest.fn(async (input: { key: string; amountMicros: number }) => {
+    reserve: jest.fn(async (input: { key: string; amountMicros: number }): ReturnType<InstantFunds['reserve']> => {
       if (state.reserveReason) return { ok: false as const, reason: state.reserveReason };
       const known = holds.get(input.key);
       if (known) return { ok: true as const, created: false };
@@ -202,6 +202,17 @@ run('the bounded Instant executor, in a real database', () => {
       expect(outcome).toMatchObject({ status: 'refused', reason: 'credit_used_up' });
       expect(p.instant.run).not.toHaveBeenCalled();
       expect(await prisma.instantRun.findFirst({ where: { personId: sara }, select: { state: true, reason: true } })).toEqual({ state: 'refused', reason: 'credit_used_up' });
+    });
+
+    it('a rule the person said in chat that the books apply at the hold ends the run in the rule\'s own words: nothing sent, nothing to ask more credit for', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.funds.reserve.mockResolvedValueOnce({ ok: false as const, reason: 'rule' as const, ruleId: 'r1', why: 'cap' as const, leftMicros: 5, words: 'No more than $1 a month' });
+      const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      expect(outcome).toMatchObject({ status: 'refused', reason: 'rule', words: 'No more than $1 a month', leftMicros: 5 });
+      expect(p.instant.run).not.toHaveBeenCalled();
+      expect(await prisma.instantRun.findFirst({ where: { personId: sara }, select: { state: true, reason: true } })).toEqual({ state: 'refused', reason: 'rule' });
     });
 
     it("says the books cannot be read as that, never as the person's credit being used up", async () => {
@@ -1629,7 +1640,7 @@ run('the bounded Instant executor, in a real database', () => {
       await setLimits();
       const p = fakeProvider();
       const f = fakeFunds(1_000_000);
-      f.funds.reserve.mockResolvedValueOnce({ ok: false, reason: 'rule', words: 'No more than $1 a month for this Brick.', leftMicros: 0 } as never);
+      f.funds.reserve.mockResolvedValueOnce({ ok: false, reason: 'rule', ruleId: 'r0', why: 'cap', words: 'No more than $1 a month for this Brick.', leftMicros: 0 } as never);
       const outcome = await runInstant(ask({ taskKey: 'task-a' }), { adapter: p.adapter, funds: f.funds });
       expect(outcome).toMatchObject({ status: 'refused', reason: 'rule', words: 'No more than $1 a month for this Brick.' });
       expect(f.funds.reserve).toHaveBeenCalledWith(expect.objectContaining({ taskKey: 'task-a' }));
@@ -1672,6 +1683,33 @@ run('the bounded Instant executor, in a real database', () => {
       expect(charged).toBeGreaterThan(7_000);
       const [item] = await activityFor(sara);
       expect(item).toMatchObject({ title: 'Find the weather', state: 'done', category: 'apps', spentMicros: charged, lines: [{ label: 'Instant Apps, 1 use', amountMicros: charged }] });
+    });
+
+    it('a run that failed puts a zero on the meter event as what the person was charged (not "not known"), so the receipt does not wait for a price', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'task-f', title: 'Find the weather', category: 'apps' });
+      p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'boom', logId: 'log-g', chargeMicros: 4_000 });
+      const outcome = await runInstant(ask({ callId: id, taskKey: 'task-f' }), { adapter: p.adapter, funds: f.funds });
+      expect(outcome).toMatchObject({ status: 'failed', reason: 'provider_failed' });
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      const event = await prisma.meterEvent.findFirstOrThrow({ where: { eventId: `instant:${row.id}` } });
+      expect(event.detail).toMatchObject({ instant: true, taskKey: 'task-f', customerMicros: 0 });
+      expect(Number(event.costMicros)).toBe(4_000);
+    });
+
+    it('asking again with the same call id after a rule refused it says the rule’s own words, not a general sentence', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      f.funds.reserve.mockResolvedValueOnce({ ok: false, reason: 'rule', ruleId: 'r1', why: 'cap', words: 'No more than $1 a month for this Brick.', leftMicros: 250 } as never);
+      expect(await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'rule', words: 'No more than $1 a month for this Brick.' });
+      const again = await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      expect(again).toMatchObject({ status: 'refused', reason: 'rule', words: 'No more than $1 a month for this Brick.', leftMicros: 250 });
+      expect(f.funds.reserve).toHaveBeenCalledTimes(1);
     });
 
     it('a run whose answer did not come back puts the task’s receipt in "checking", and a call with no task touches nothing', async () => {
