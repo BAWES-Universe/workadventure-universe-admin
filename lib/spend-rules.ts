@@ -118,10 +118,12 @@ export async function proposeRule(input: DraftInput & { speakerId: string; sayin
   const owner = await ruleOwnerFor(input.botId, input.speakerId, draft.scope);
   if (!owner) return { ok: false, reason: 'not_allowed' };
   const words = ruleWords(draft, owner.botName);
-  const ruleKey = input.sayingKey ? `chat:${input.botId}:${input.sayingKey}`.slice(0, 255) : null;
+  // The speaker is in the key: the same message id said by two people (on a Brick they both talk to) is two different rules, and one
+  // person's replay never finds, or shows, another person's rule
+  const ruleKey = input.sayingKey ? `chat:${input.botId}:${input.speakerId}:${input.sayingKey}`.slice(0, 255) : null;
   if (ruleKey) {
     const seen = await prisma.spendRule.findUnique({ where: { ruleKey } });
-    if (seen) return { ok: true, rule: await cardOf(seen), created: false };
+    if (seen && seen.ownerPersonId === owner.ownerPersonId) return { ok: true, rule: await cardOf(seen), created: false };
   }
   try {
     const row = await prisma.spendRule.create({
@@ -146,7 +148,7 @@ export async function proposeRule(input: DraftInput & { speakerId: string; sayin
     const code = (error as { code?: string } | null)?.code;
     if (ruleKey && code === 'P2002') {
       const winner = await prisma.spendRule.findUnique({ where: { ruleKey } });
-      if (winner) return { ok: true, rule: await cardOf(winner), created: false };
+      if (winner && winner.ownerPersonId === owner.ownerPersonId) return { ok: true, rule: await cardOf(winner), created: false };
     }
     throw error;
   }

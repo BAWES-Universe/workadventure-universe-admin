@@ -148,6 +148,20 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(columns).not.toEqual(expect.arrayContaining(['text', 'message', 'said']));
     });
 
+    it('the same message id said by two people is two rules: a replay never finds or shows another person\'s rule', async () => {
+      const sara = await person('sara');
+      const omar = await person('omar');
+      const a = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'shared-id', scope: 'person', period: 'month', capMicros: 1_000_000 });
+      // Omar says a different rule under the same message id, on Sara's Brick (a person-wide rule is about his own credit)
+      const b = await proposeRule({ botId: sara.brickId, speakerId: omar.id, sayingKey: 'shared-id', scope: 'person', period: 'day', capMicros: 2_000_000 });
+      expect(a).toMatchObject({ ok: true, created: true });
+      expect(b).toMatchObject({ ok: true, created: true, rule: { words: expect.stringContaining('$2.00 a day') } });
+      expect(await prisma.spendRule.count({ where: { ownerPersonId: sara.id } })).toBe(1);
+      expect(await prisma.spendRule.count({ where: { ownerPersonId: omar.id } })).toBe(1);
+      // Each person's own replay still finds their own rule
+      expect(await proposeRule({ botId: sara.brickId, speakerId: omar.id, sayingKey: 'shared-id', scope: 'person', period: 'day', capMicros: 2_000_000 })).toMatchObject({ ok: true, created: false, rule: { words: expect.stringContaining('$2.00 a day') } });
+    });
+
     it('asks one short question when it is not clear, saves nothing, and saves when it is answered', async () => {
       const sara = await person('sara');
       const asked = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'm2', scope: 'bot', capMicros: 1_000_000 });
