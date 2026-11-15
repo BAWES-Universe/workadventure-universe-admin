@@ -226,14 +226,23 @@ const OPTIONAL_MONEY: (keyof MeterSettings)[] = ['appUseMicros', 'rolloutBudgetM
 const fits = (value: unknown, range: MeterRange): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= range.min && value <= range.max;
 
 /** Saved settings read back: each value that is there and fits, empty (or the recommended renew time) for the rest. */
-export function readMeterSettings(saved: unknown): MeterSettings {
+export function readMeterSettings(saved: unknown, now: Date = new Date()): MeterSettings {
   const out: MeterSettings = { ...METER_SETTINGS_EMPTY };
   if (!isRecord(saved)) return out;
   for (const key of Object.keys(METER_RANGES) as (keyof MeterSettings)[]) {
     if (fits(saved[key], METER_RANGES[key])) (out as unknown as Record<string, number>)[key] = saved[key] as number;
   }
+  // A computers default saved to start on the 1st waits beside the allowance and takes its place from that day, with nothing to run on the day
+  const later = saved[MEMBER_ALLOWANCE_LATER_KEY];
+  if (isRecord(later) && fits(later.micros, METER_RANGES.memberAllowanceMicros) && typeof later.from === 'string') {
+    const from = new Date(later.from);
+    if (!Number.isNaN(from.getTime()) && from.getTime() <= now.getTime()) out.memberAllowanceMicros = later.micros;
+  }
   return out;
 }
+
+/** Where a monthly computer allowance that starts on a later day is kept, in the saved settings (not one of the settings a super admin edits). */
+export const MEMBER_ALLOWANCE_LATER_KEY = 'memberAllowanceLater';
 
 /** A change to the settings: only known names, each inside its range; null empties a money or count setting again. */
 export function checkMeterSettings(input: unknown): Checked<Partial<MeterSettings>> {

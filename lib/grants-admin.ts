@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db';
-import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
+import { getMeterSettings, saveMeterSettings, scheduleMemberAllowance } from '@/lib/meter';
 import { getServerLimits } from '@/lib/bot-limits';
 import { FAIR_USAGE_WINDOW_HOURS } from '@/lib/bot-limit-values';
 import { wokaLayersForMany } from '@/lib/woka-avatar';
@@ -375,7 +375,11 @@ export async function saveDefaultFor(request: Extract<PreviewRequest, { what: 'd
   if (category === 'computers') {
     const everyone = request.recipients.kind === 'all';
     if (request.interval === 'none') await saveMeterSettings({ memberAllowanceMicros: null }, issuer.userId);
-    else if (request.interval === 'monthly' && everyone && request.amountMicros) await saveMeterSettings({ memberAllowanceMicros: request.amountMicros }, issuer.userId);
+    else if (request.interval === 'monthly' && everyone && request.amountMicros) {
+      // "On the 1st" waits for the 1st, as the default itself does; "Now" changes the allowance now
+      if (request.startsOn === 'now') await saveMeterSettings({ memberAllowanceMicros: request.amountMicros }, issuer.userId);
+      else await scheduleMemberAllowance(request.amountMicros, firstOfNextMonth(now), issuer.userId);
+    }
   }
 }
 

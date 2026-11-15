@@ -14,6 +14,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => ses
 
 import { prisma } from '@/lib/db';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
+import { readMeterSettings } from '@/lib/meter-values';
 import { GET as getOverview } from '@/app/api/admin/grants/route';
 import { POST as postPreview } from '@/app/api/admin/grants/preview/route';
 import { PUT as putDefault } from '@/app/api/admin/grants/defaults/[category]/route';
@@ -135,14 +136,31 @@ run('the grants routes, on the real books', () => {
   it('keeps computers following its monthly allowance, and mirrors the default into it', async () => {
     await saveMeterSettings({ memberAllowanceMicros: 5 * MILLION }, admin.id);
     expect((await overview()).money.computers).toMatchObject({ set: true, amountMicros: 5 * MILLION, interval: 'monthly' });
-    await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 10 * MILLION, interval: 'monthly', recipients: { kind: 'all' } } }, ctx({ category: 'computers' }));
+    await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 10 * MILLION, interval: 'monthly', recipients: { kind: 'all' }, startsOn: 'now' } }, ctx({ category: 'computers' }));
     expect((await prisma.appSetting.findFirst({ where: { key: { contains: 'meter' } } }))?.value).toBeDefined();
     const { getMeterSettings } = await import('@/lib/meter');
     expect((await getMeterSettings()).memberAllowanceMicros).toBe(10 * MILLION);
   });
 
+  it('keeps the allowance as it is until the 1st when the computers default starts on the 1st, then follows it, and a save now replaces the wait', async () => {
+    await saveMeterSettings({ memberAllowanceMicros: 5 * MILLION }, admin.id);
+    const next = await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 8 * MILLION, interval: 'monthly', recipients: { kind: 'all' }, startsOn: 'next' } }, ctx({ category: 'computers' }));
+    expect(next.status).toBe(200);
+    expect((await getMeterSettings()).memberAllowanceMicros).toBe(5 * MILLION);
+    // The default shows as saved, like every default that starts on the 1st; the allowance computers follow waits
+    expect((await overview()).money.computers).toMatchObject({ amountMicros: 8 * MILLION, interval: 'monthly' });
+    const row = await prisma.appSetting.findUnique({ where: { key: 'meter' } });
+    const later = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 1));
+    expect((row?.value as any).memberAllowanceLater).toEqual({ micros: 8 * MILLION, from: later.toISOString() });
+    expect(readMeterSettings(row?.value, later).memberAllowanceMicros).toBe(8 * MILLION);
+    // Saving an allowance now (here or from the Limits page) replaces the one that was waiting
+    await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 6 * MILLION, interval: 'monthly', recipients: { kind: 'all' }, startsOn: 'now' } }, ctx({ category: 'computers' }));
+    expect((await getMeterSettings()).memberAllowanceMicros).toBe(6 * MILLION);
+    expect(readMeterSettings((await prisma.appSetting.findUnique({ where: { key: 'meter' } }))?.value, later).memberAllowanceMicros).toBe(6 * MILLION);
+  });
+
   it('refuses a computers default that the monthly allowance could not follow, rather than saving one that does nothing', async () => {
-    await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 4 * MILLION, interval: 'monthly', recipients: { kind: 'all' } } }, ctx({ category: 'computers' }));
+    await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 4 * MILLION, interval: 'monthly', recipients: { kind: 'all' }, startsOn: 'now' } }, ctx({ category: 'computers' }));
     expect((await getMeterSettings()).memberAllowanceMicros).toBe(4 * MILLION);
     const once = await call<any>(putDefault, '/x', { method: 'PUT', body: { amountMicros: 5 * MILLION, interval: 'once', recipients: { kind: 'all' } } }, ctx({ category: 'computers' }));
     expect(once.status).toBe(400);

@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
-import { readMeterSettings, basisOfCall, personKeyOf, type MeterEventInput, type MeterSettings } from '@/lib/meter-values';
+import { readMeterSettings, MEMBER_ALLOWANCE_LATER_KEY, basisOfCall, personKeyOf, type MeterEventInput, type MeterSettings } from '@/lib/meter-values';
 
 /**
  * The meter's books (game #1998, Brick 7), written. Every writer goes through `recordMeterEvent`: the one write path, once
@@ -36,9 +36,22 @@ export async function saveMeterSettings(change: Partial<MeterSettings>, userId: 
       if (value === null) delete next[key];
       else next[key] = value;
     }
+    // An allowance saved now replaces one that was waiting for a later day
+    if (Object.prototype.hasOwnProperty.call(change, 'memberAllowanceMicros')) delete next[MEMBER_ALLOWANCE_LATER_KEY];
     const value = next as Prisma.InputJsonValue;
     await tx.appSetting.upsert({ where: { key: SETTING_KEY }, create: { key: SETTING_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });
     return readMeterSettings(next);
+  });
+}
+
+/** Saves a monthly computer allowance that takes the place of the current one from a later day (the 1st), and changes nothing before it. */
+export async function scheduleMemberAllowance(micros: number, from: Date, userId: string): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('meter:settings'))`;
+    const row = await tx.appSetting.findUnique({ where: { key: SETTING_KEY } });
+    const saved = row?.value && typeof row.value === 'object' && !Array.isArray(row.value) ? (row.value as Record<string, unknown>) : {};
+    const value = { ...saved, [MEMBER_ALLOWANCE_LATER_KEY]: { micros, from: from.toISOString() } } as Prisma.InputJsonValue;
+    await tx.appSetting.upsert({ where: { key: SETTING_KEY }, create: { key: SETTING_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });
   });
 }
 
