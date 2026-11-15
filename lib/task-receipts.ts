@@ -166,6 +166,7 @@ async function eventsFor(headers: readonly Header[]): Promise<Map<string, LineEv
     SELECT "kind", "route", "quantity", "cost_micros" AS "costMicros", "detail", "job_id" AS "jobId", "bot_id" AS "botId"
     FROM meter_events
     WHERE "job_id" = ANY(${keys}::text[])
+       OR ("job_id" IS NULL AND "bot_id" = ANY(${bots}::text[]) AND "detail"->>'taskKey' = ANY(${keys}::text[]))
        OR ("job_id" IS NULL AND "bot_id" = ANY(${bots}::text[]) AND ${runs.length > 0 ? Prisma.sql`"detail"->>'runId' = ANY(${runs}::text[])` : Prisma.sql`FALSE`})`),
     runs.length === 0 ? Promise.resolve([]) : prisma.taskReceipt.findMany({ where: { runId: { in: runs } }, select: { id: true, botId: true, runId: true }, orderBy: [{ startedAt: 'asc' }, { id: 'asc' }] }),
   ]);
@@ -181,7 +182,11 @@ async function eventsFor(headers: readonly Header[]): Promise<Map<string, LineEv
     const owner = header.runId !== null && (ownerOfRun.get(runKey) ?? header.id) === header.id;
     const mine = rows.filter(
       (row) =>
-        row.botId === header.botId && (row.jobId === header.taskKey || (owner && row.jobId === null && isRecord(row.detail) && row.detail.runId === header.runId)),
+        row.botId === header.botId &&
+        (row.jobId === header.taskKey ||
+          // A run of an Instant tool says which task it belongs to: it is that task's, whatever run the task came from
+          (row.jobId === null && isRecord(row.detail) && row.detail.taskKey === header.taskKey) ||
+          (owner && row.jobId === null && isRecord(row.detail) && row.detail.runId === header.runId)),
     );
     out.set(
       header.id,

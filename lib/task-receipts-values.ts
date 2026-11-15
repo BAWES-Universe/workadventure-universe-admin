@@ -27,6 +27,16 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 
 const plural = (n: number, one: string, many: string) => `${n.toLocaleString('en')} ${n === 1 ? one : many}`;
 
+/**
+ * What an Instant use took from the person's credit. The executor's own record of a run carries two figures: the provider's charge to us
+ * (`costMicros`) and what the person was charged (`detail.customerMicros`); only the second is theirs, and a run whose charge is not known
+ * yet has none. A use recorded without the executor's mark is read by its cost as before.
+ */
+function instantTaken(event: LineEvent): number | null {
+  if (isRecord(event.detail) && event.detail.instant === true) return typeof event.detail.customerMicros === 'number' ? event.detail.customerMicros : null;
+  return event.costMicros;
+}
+
 /** The name of an App an Instant use was for, when the event carries it. Only a short name; never anything a person wrote. */
 function appName(detail: unknown): string | null {
   const app = isRecord(detail) && typeof detail.app === 'string' ? detail.app.trim() : '';
@@ -66,9 +76,10 @@ export function receiptLines(events: readonly LineEvent[], botName: string): Rec
       const name = appName(event.detail);
       const found = group(`instant:${name ?? ''}`, 0, name ? `Instant ${name}` : 'Instant Apps', true);
       found.count += event.quantity;
-      if (event.costMicros === null) found.unpriced = true;
+      const taken = instantTaken(event);
+      if (taken === null) found.unpriced = true;
       else {
-        found.micros += event.costMicros;
+        found.micros += taken;
         found.priced = true;
       }
     } else if (event.kind === 'computer_time') {

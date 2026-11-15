@@ -59,6 +59,9 @@ export function instantRunKey(botId: string, callId: string): string {
 
 const fundsKey = (runId: string): string => `instant:${runId}`;
 
+/** The task a run belongs to, or null when it belongs to none. */
+const taskKeyOf = (input: Pick<RunInput, 'taskKey'>): string | null => (input.taskKey ? input.taskKey : null);
+
 function instantAdapter(adapter?: ReadyMadeAdapter | null): InstantAdapter | null {
   return (adapter === undefined ? getAdapter() : adapter)?.instant ?? null;
 }
@@ -71,6 +74,11 @@ export interface RunInput {
   arguments: Record<string, unknown>;
   /** The bot server's own id for this call: a retry is the same call and never runs or pays twice. */
   callId: string;
+  /**
+   * The task this run belongs to (the same key its receipt is opened under): a rule about one task counts all of its runs, "for each task"
+   * counts the task's own, and the task's receipt reads what its runs used. A call that belongs to no task has none.
+   */
+  taskKey?: string | null;
 }
 
 export interface Deps {
@@ -174,6 +182,7 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
           runKey,
           botId: input.botId,
           personId: input.personId,
+          taskKey: taskKeyOf(input),
           toolSlug: input.tool,
           toolkit: admitted.toolkit,
           argsHash: fingerprint,
@@ -203,7 +212,7 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
   let run = created.run;
 
   // Step 2: the person's credit
-  const held = await holdCustomer(run, funds);
+  const held = await holdCustomer(run, funds, taskKeyOf(input));
   if (!held.ok && held.unsure === true) {
     // The books failed in a way that may have left a hold behind: it is given back now, and when that cannot be said either the run
     // stays open for the sweep, which says it again until the books answer (never closed over a hold that may exist)
@@ -223,7 +232,8 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
     // "Unavailable" is the books being unreachable: said as that, never as the person's credit being used up
     const reason: InstantReason = held.reason === 'unavailable' ? 'credit_unavailable' : held.reason;
     await moveRun(run.id, 'reserving', { state: 'refused', reason, finishedAt: now, customerState: 'none', providerState: 'none' });
-    return refuse(reason, { runId: run.id });
+    // A rule the person said is final and carries its own words; nothing was held and no credit is offered
+    return refuse(reason, held.reason === 'rule' ? { runId: run.id, words: held.words, leftMicros: held.leftMicros ?? null } : { runId: run.id });
   }
   // Each step only moves the run from the step before it. A reservation that came back after the clean-up wait found the run closed
   // and its hold given back: that run never goes out, and a hold that reached the books late is given back again.
@@ -291,7 +301,7 @@ async function standDown(runId: string, ctx: Ctx): Promise<InstantOutcome> {
 const holdIsGone = (answer: { ok: boolean; none?: boolean }): boolean => answer.ok || answer.none === true;
 
 /** The credit hold for a run, with an error from the books read as "unavailable": a hold nobody could make is no hold. */
-async function holdCustomer(run: Row, funds: InstantFunds): Promise<Awaited<ReturnType<InstantFunds['reserve']>> & { unsure?: boolean }> {
+async function holdCustomer(run: Row, funds: InstantFunds, taskKey: string | null): Promise<Awaited<ReturnType<InstantFunds['reserve']>> & { unsure?: boolean }> {
   try {
     return await funds.reserve({
       key: fundsKey(run.id),
@@ -299,6 +309,7 @@ async function holdCustomer(run: Row, funds: InstantFunds): Promise<Awaited<Retu
       amountMicros: asNumber(run.holdMicros),
       botId: run.botId,
       runId: run.id,
+      taskKey,
       charge: { class: 'instant', route: 'composio', provider: 'composio', priceVersion: run.priceVersion },
     });
   } catch (error) {
@@ -509,7 +520,7 @@ async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: nu
       costMicros: micros,
       basis,
       sourceRef: `instant_runs:${run.id}`,
-      detail: { instant: true, provider: INSTANT_PROVIDER, tool: run.toolSlug, toolkit: run.toolkit, runId: run.id, customerMicros: run.customerMicros === null ? null : Number(run.customerMicros), basis, state: run.state },
+      detail: { instant: true, provider: INSTANT_PROVIDER, ...(run.taskKey ? { taskKey: run.taskKey } : {}), tool: run.toolSlug, toolkit: run.toolkit, runId: run.id, customerMicros: run.customerMicros === null ? null : Number(run.customerMicros), basis, state: run.state },
     },
     tx,
   ).catch((error) => console.error('[Instant] Could not write the meter event:', error instanceof Error ? error.message : 'unknown'));

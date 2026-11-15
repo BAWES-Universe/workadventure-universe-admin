@@ -17,7 +17,11 @@ export type HoldRefusal =
   /** The books could not be read or written: nothing was held. */
   | 'unavailable';
 
-export type Hold = { ok: true; created: boolean } | { ok: false; reason: HoldRefusal };
+export type Hold =
+  | { ok: true; created: boolean }
+  | { ok: false; reason: HoldRefusal }
+  /** A rule the person said in chat does not let this step take that much: it is final, nothing was held, and the rule's own words are given. */
+  | { ok: false; reason: 'rule'; words: string; leftMicros?: number | null };
 
 /** How a charge is classed in the books, so nested work is charged once and the provider is on every line. */
 export interface ChargeClass {
@@ -38,7 +42,7 @@ export interface InstantFunds {
    * Holds up to `amountMicros` of the person's Instant Apps credit for one run, once per key, from the Instant category only
    * (replies and computer money never pay for it), earliest expiry first. A hold already made under the key is returned as it was.
    */
-  reserve(input: { key: string; personId: string; amountMicros: number; botId?: string | null; runId?: string | null; charge: ChargeClass }): Promise<Hold>;
+  reserve(input: { key: string; personId: string; amountMicros: number; botId?: string | null; runId?: string | null; /** The bot server's id for the task this run belongs to, so a rule about one task counts all of its runs. */ taskKey?: string | null; charge: ChargeClass }): Promise<Hold>;
   /**
    * The run happened: charges `chargeMicros` (never more than was held) and gives back the rest of the hold. `ok: false` means the books
    * did not take it: nothing is decided, and it is said again later. `chargedMicros` is REQUIRED on `ok: true`: what the key was charged at,
