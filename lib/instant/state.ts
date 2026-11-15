@@ -63,8 +63,9 @@ export async function getInstantPause(db: SettingsDb = prisma): Promise<InstantP
 }
 
 /** Pauses Instant (new runs only: runs already going finish and are settled). The first reason stands until it is resumed. */
-export async function pauseInstant(reason: string, userId: string | null = null): Promise<InstantPause> {
-  return prisma.$transaction(async (tx) => {
+export async function pauseInstant(reason: string, userId: string | null = null, within?: Prisma.TransactionClient): Promise<InstantPause> {
+  // Called from inside a transaction, it uses that one: a second connection from the pool is never taken while one is held
+  const pause = async (tx: Prisma.TransactionClient): Promise<InstantPause> => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('instant:state'))`;
     const current = await getInstantPause(tx);
     if (current.paused) return current;
@@ -73,7 +74,8 @@ export async function pauseInstant(reason: string, userId: string | null = null)
     await tx.appSetting.upsert({ where: { key: STATE_KEY }, create: { key: STATE_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });
     console.error(`[Instant] Paused: ${reason}`);
     return state;
-  });
+  };
+  return within ? pause(within) : prisma.$transaction(pause);
 }
 
 /** A super admin turns Instant back on after looking at why it stopped. */

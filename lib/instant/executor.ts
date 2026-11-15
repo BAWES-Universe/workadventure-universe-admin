@@ -149,6 +149,9 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
   // The very same ask, by the same person, that is still being looked up: wait for it instead of paying twice
   const unsettled = await prisma.instantRun.findFirst({ where: { personId: input.personId, argsHash: fingerprint, state: { in: ['sent', 'ambiguous'] } }, select: { id: true } });
   if (unsettled) return refuse('already_checking', { runId: unsettled.id });
+  // Details Composio did not accept leave our exposure open at the top price until its log is read: one such run at a time per person
+  const unreadInvalid = await prisma.instantRun.findFirst({ where: { personId: input.personId, state: 'failed', reason: 'invalid_request', providerState: 'pending' }, select: { id: true } });
+  if (unreadInvalid) return refuse('already_checking', { runId: unreadInvalid.id });
 
   const holdMicros = holdFor(admitted.topMicros, limits.markupBps);
 
@@ -195,6 +198,17 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
 
   // Step 2: the person's credit
   const held = await holdCustomer(run, funds);
+  if (!held.ok && held.unsure === true) {
+    // The books failed in a way that may have left a hold behind: it is given back now, and when that cannot be said either the run
+    // stays open for the sweep, which says it again until the books answer (never closed over a hold that may exist)
+    let gone = false;
+    try {
+      gone = (await funds.release({ key: fundsKey(run.id) })).ok;
+    } catch {
+      gone = false;
+    }
+    if (!gone) return refuse('credit_unavailable', { runId: run.id });
+  }
   if (!held.ok) {
     // "Unavailable" is the books being unreachable: said as that, never as the person's credit being used up
     const reason: InstantReason = held.reason === 'unavailable' ? 'credit_unavailable' : held.reason;
@@ -221,7 +235,7 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
 }
 
 /** The credit hold for a run, with an error from the books read as "unavailable": a hold nobody could make is no hold. */
-async function holdCustomer(run: Row, funds: InstantFunds) {
+async function holdCustomer(run: Row, funds: InstantFunds): Promise<Awaited<ReturnType<InstantFunds['reserve']>> & { unsure?: boolean }> {
   try {
     return await funds.reserve({
       key: fundsKey(run.id),
@@ -233,7 +247,7 @@ async function holdCustomer(run: Row, funds: InstantFunds) {
     });
   } catch (error) {
     console.error('[Instant] The credit books could not hold:', error instanceof Error ? error.message : 'unknown');
-    return { ok: false as const, reason: 'unavailable' as const };
+    return { ok: false, reason: 'unavailable', unsure: true };
   }
 }
 
@@ -290,17 +304,19 @@ async function finishCall(runId: string, call: InstantCall, ctx: Ctx): Promise<I
         await settleProvider(run, tx, 0, 'measured', ctx.now);
         await tx.instantRun.update({ where: { id: run.id }, data: { state: 'failed', reason, finishedAt: ctx.now, detail: { status: call.status, code: call.code } } });
         // Composio's balance is empty: every run would fail the same way, so Instant stops until a super admin has looked
-        if (reason === 'provider_empty') await pauseInstant('provider_empty');
+        if (reason === 'provider_empty') await pauseInstant('provider_empty', null, tx);
         return { status: 'failed', runId: run.id, reason, message: REASON_WORDS[reason] };
       }
       case 'invalid': {
         // It did not run, but Composio logs a refusal like this, so its charge is decided from the log, never assumed
         await releaseCustomer(run, tx, ctx);
+        // Its own reason, so details Composio would not take never count toward the failure rate that pauses Instant, and a short wait
+        // (the sent wait): one person's bad details can hold the exposure for minutes, not an hour, and only one at a time
         await tx.instantRun.update({
           where: { id: run.id },
-          data: { state: 'failed', reason: 'provider_failed', finishedAt: ctx.now, providerState: 'pending', detail: { status: call.status, code: call.code } },
+          data: { state: 'failed', reason: 'invalid_request', finishedAt: ctx.now, providerState: 'pending', checkAfter: new Date(ctx.now.getTime() + limits.sentWaitMinutes * MINUTE), detail: { status: call.status, code: call.code } },
         });
-        return { status: 'failed', runId: run.id, reason: 'provider_failed', message: REASON_WORDS.provider_failed };
+        return { status: 'failed', runId: run.id, reason: 'invalid_request', message: REASON_WORDS.invalid_request };
       }
       case 'unclear': {
         // It may have run and may have been charged: the hold stays, nothing is repeated, and it is looked up by its own id
@@ -386,7 +402,7 @@ async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: nu
     },
     tx,
   ).catch((error) => console.error('[Instant] Could not write the meter event:', error instanceof Error ? error.message : 'unknown'));
-  if (micros > asNumber(run.topMicros)) await pauseInstant('price_over_top');
+  if (micros > asNumber(run.topMicros)) await pauseInstant('price_over_top', null, tx);
 }
 
 /**
@@ -590,9 +606,11 @@ export async function evaluatePause(now: Date = new Date()): Promise<boolean> {
   const limits = await getInstantLimits();
   if (limits.pauseFailureRateBps === null || limits.pauseMinRuns === null) return false;
   const since = new Date(now.getTime() - limits.pauseWindowMinutes * MINUTE);
+  // Details Composio would not take are the caller's, not the provider's: they are not runs the failure rate is about
+  const notInvalid = { OR: [{ reason: null }, { reason: { not: 'invalid_request' } }] };
   const [done, failed, givenBack] = await Promise.all([
-    prisma.instantRun.count({ where: { state: { in: ['succeeded', 'failed'] }, finishedAt: { gte: since } } }),
-    prisma.instantRun.count({ where: { state: 'failed', finishedAt: { gte: since } } }),
+    prisma.instantRun.count({ where: { state: { in: ['succeeded', 'failed'] }, finishedAt: { gte: since }, ...notInvalid } }),
+    prisma.instantRun.count({ where: { state: 'failed', finishedAt: { gte: since }, ...notInvalid } }),
     prisma.instantRefund.count({ where: { kind: 'goodwill', createdAt: { gte: since } } }),
   ]);
   if (done < limits.pauseMinRuns) return false;

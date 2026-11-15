@@ -326,6 +326,7 @@ export type InstantReason =
   | 'provider_off' // Composio refused: Instant is not switched on for the tool
   | 'provider_empty' // Composio's balance is empty
   | 'provider_failed' // it ran and did not work (nothing charged to the person)
+  | 'invalid_request' // Composio did not accept the details, so it did not run (nothing charged to the person)
   | 'unclear'; // no answer: being looked up
 
 export type InstantOutcome =
@@ -351,5 +352,6 @@ export const REASON_WORDS: Record<InstantReason, string> = {
   provider_off: 'This is not available right now.',
   provider_empty: 'This is not available right now.',
   provider_failed: 'It did not work. You were not charged.',
+  invalid_request: 'Those details were not accepted, so it did not run. You were not charged.',
   unclear: 'Checking whether it worked.',
 };

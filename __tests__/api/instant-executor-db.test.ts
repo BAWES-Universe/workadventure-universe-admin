@@ -400,8 +400,50 @@ run('the bounded Instant executor, in a real database', () => {
       const f = fakeFunds(1_000_000);
       p.script.runs.push({ kind: 'invalid', status: 400, code: 'Bad' });
       const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
-      expect(outcome).toMatchObject({ status: 'failed', reason: 'provider_failed' });
-      expect(await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } })).toMatchObject({ customerState: 'released', providerState: 'pending' });
+      expect(outcome).toMatchObject({ status: 'failed', reason: 'invalid_request' });
+      expect(await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } })).toMatchObject({ customerState: 'released', providerState: 'pending', reason: 'invalid_request' });
+    });
+
+    it('details Composio would not take never count toward the failure rate, and only one waits at a time for a person', async () => {
+      await setLimits({ pauseFailureRateBps: 5_000, pauseMinRuns: 2 });
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      p.script.runs.push({ kind: 'invalid', status: 400, code: 'Bad' });
+      await runInstant(ask({ arguments: { query: 'bad1' } }), { adapter: p.adapter, funds: f.funds });
+      // The next ask waits while the first one's charge is still unread
+      expect(await runInstant(ask({ arguments: { query: 'bad2' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'already_checking' });
+      await prisma.instantRun.updateMany({ where: { personId: sara }, data: { providerState: 'settled', providerMicros: BigInt(0) } });
+      p.script.runs.push({ kind: 'invalid', status: 400, code: 'Bad' });
+      await runInstant(ask({ arguments: { query: 'bad3' } }), { adapter: p.adapter, funds: f.funds });
+      await prisma.instantRun.updateMany({ where: { personId: sara }, data: { providerState: 'settled', providerMicros: BigInt(0) } });
+      expect(await evaluatePause()).toBe(false);
+      expect((await getInstantPause()).paused).toBe(false);
+    });
+
+    it('a hold the books may have made before they failed is given back, and when that fails too the run stays open', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.funds.reserve.mockImplementationOnce(async (input: { key: string; amountMicros: number }) => {
+        f.holds.set(input.key, { amount: input.amountMicros, state: 'held', charged: 0 });
+        throw new Error('connection lost after commit');
+      });
+      expect(await runInstant(ask({ arguments: { query: 'lost1' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'credit_unavailable' });
+      expect(f.left()).toBe(1_000_000);
+      expect(await prisma.instantRun.findFirstOrThrow({ where: { personId: sara }, orderBy: { createdAt: 'desc' } })).toMatchObject({ state: 'refused' });
+      // The release fails as well: the run is not closed over a hold that may exist
+      f.state.releaseOk = false;
+      f.funds.reserve.mockImplementationOnce(async (input: { key: string; amountMicros: number }) => {
+        f.holds.set(input.key, { amount: input.amountMicros, state: 'held', charged: 0 });
+        throw new Error('connection lost after commit');
+      });
+      expect(await runInstant(ask({ arguments: { query: 'lost2' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'credit_unavailable' });
+      const open = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara }, orderBy: { createdAt: 'desc' } });
+      expect(open.state).toBe('reserving');
+      f.state.releaseOk = true;
+      await reconcileRun(open.id, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 6 * MIN) });
+      expect(await runOf(open.id)).toMatchObject({ state: 'refused' });
+      expect(f.left()).toBe(1_000_000);
     });
 
     it('when the books do not take the release, the hold stays and the sweep says it again', async () => {
