@@ -148,21 +148,38 @@ const headerOfRow = (row: ReceiptRow): Header => ({
   problemAt: row.problemAt,
 });
 
-/** The books' events for a set of tasks, in one read: by the task's own key, or by the run the task's model calls were made under. */
+/**
+ * The books' events for a set of tasks, in one read: by the task's own key, or by the run the task's chat model calls were made under.
+ * A run's own events (no job on them) belong to one task: the first receipt opened for that run (a run can have several receipts, and
+ * each must not show the same run-wide cost again). An event that belongs to a job is only ever that job's.
+ */
 async function eventsFor(headers: readonly Header[]): Promise<Map<string, LineEvent[]>> {
   const out = new Map<string, LineEvent[]>();
   if (headers.length === 0) return out;
   const keys = headers.map((header) => header.taskKey);
   const bots = [...new Set(headers.map((header) => header.botId))];
-  const runs = headers.map((header) => header.runId).filter((run): run is string => !!run);
-  const rows = await prisma.$queryRaw<Array<{ kind: string; route: string | null; quantity: bigint; costMicros: bigint | null; detail: unknown; jobId: string | null; botId: string | null }>>(Prisma.sql`
+  const runs = [...new Set(headers.map((header) => header.runId).filter((run): run is string => !!run))];
+  const [rows, opened] = await Promise.all([
+    prisma.$queryRaw<Array<{ kind: string; route: string | null; quantity: bigint; costMicros: bigint | null; detail: unknown; jobId: string | null; botId: string | null }>>(Prisma.sql`
     SELECT "kind", "route", "quantity", "cost_micros" AS "costMicros", "detail", "job_id" AS "jobId", "bot_id" AS "botId"
     FROM meter_events
     WHERE "job_id" = ANY(${keys}::text[])
-       OR ("bot_id" = ANY(${bots}::text[]) AND ${runs.length > 0 ? Prisma.sql`"detail"->>'runId' = ANY(${runs}::text[])` : Prisma.sql`FALSE`})`);
+       OR ("job_id" IS NULL AND "bot_id" = ANY(${bots}::text[]) AND ${runs.length > 0 ? Prisma.sql`"detail"->>'runId' = ANY(${runs}::text[])` : Prisma.sql`FALSE`})`),
+    runs.length === 0 ? Promise.resolve([]) : prisma.taskReceipt.findMany({ where: { runId: { in: runs } }, select: { id: true, botId: true, runId: true }, orderBy: [{ startedAt: 'asc' }, { id: 'asc' }] }),
+  ]);
+  // The receipt that owns each run's own events: the first one opened for it
+  const ownerOfRun = new Map<string, string>();
+  for (const row of opened) {
+    const key = `${row.botId}:${row.runId}`;
+    if (!ownerOfRun.has(key)) ownerOfRun.set(key, activityIdOf(row.id));
+  }
   for (const header of headers) {
+    const runKey = `${header.botId}:${header.runId}`;
+    // A computer job with no receipt of its own takes its run's events only when no receipt owns them
+    const owner = header.runId !== null && (ownerOfRun.get(runKey) ?? header.id) === header.id;
     const mine = rows.filter(
-      (row) => row.botId === header.botId && (row.jobId === header.taskKey || (header.runId !== null && isRecord(row.detail) && row.detail.runId === header.runId)),
+      (row) =>
+        row.botId === header.botId && (row.jobId === header.taskKey || (owner && row.jobId === null && isRecord(row.detail) && row.detail.runId === header.runId)),
     );
     out.set(
       header.id,

@@ -595,6 +595,28 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(item.id).toMatch(/^act_/);
     });
 
+    it('two tasks of one run do not both show the run\'s own cost, and another job of the run is never added to either', async () => {
+      const sara = await person('sara');
+      const later = new Date(NOW.getTime() + 1000);
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'first', runId: 'run-7', title: 'First', category: 'apps' }, NOW);
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'second', runId: 'run-7', title: 'Second', category: 'apps' }, later);
+      await prisma.meterEvent.create({
+        data: { eventId: `think7-${tag}`, kind: 'model_call', pool: 'chat', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'universe-ai', quantity: BigInt(1), unit: 'call', costMicros: BigInt(1000), basis: 'measured', detail: { runId: 'run-7' } },
+      });
+      // A job of the same run that took computer time is that job's, never the receipts'
+      await prisma.meterEvent.create({
+        data: { eventId: `job7-${tag}`, kind: 'computer_time', pool: 'computer', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'computer', jobId: 'other-job', quantity: BigInt(60), unit: 'second', costMicros: BigInt(500_000), basis: 'measured', detail: { runId: 'run-7' } },
+      });
+      await closeReceipt({ botId: sara.brickId, taskKey: 'first', personId: sara.id, state: 'done' }, NOW);
+      await closeReceipt({ botId: sara.brickId, taskKey: 'second', personId: sara.id, state: 'done' }, later);
+      const items = await activityFor(sara.id);
+      const first = items.find((one) => one.title === 'First');
+      const second = items.find((one) => one.title === 'Second');
+      // The run's own thinking is on the first receipt only; the other job's computer time is on neither
+      expect(first?.lines).toEqual([expect.objectContaining({ note: 'Universe AI' })]);
+      expect(second?.lines).toEqual([]);
+    });
+
     it('closing says what happened and then stays: done and refunded do not change, checking can still become either', async () => {
       const sara = await person('sara');
       await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'vid', title: 'Welcome video', category: 'apps' }, NOW);
