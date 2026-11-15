@@ -472,7 +472,15 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
 
     // Crashed between its steps: it never went out, so it never cost anything
     if ((run.state === 'reserving' || run.state === 'held') && waitedPast(run.createdAt, limits.sentWaitMinutes)) {
-      await ctx.funds.release({ key: fundsKey(run.id) });
+      // The hold goes back only when the books say so. A run that never recorded its hold may truly have none (the books then say
+      // "not found"), so for that one a "no" is believed only once the unclear wait is over; until then it is asked again.
+      let released = false;
+      try {
+        released = (await ctx.funds.release({ key: fundsKey(run.id) })).ok;
+      } catch (error) {
+        console.error('[Instant] The credit books could not release:', error instanceof Error ? error.message : 'unknown');
+      }
+      if (!released && (run.customerState !== 'none' || !waitedPast(run.createdAt, limits.unclearWaitMinutes))) return;
       await tx.instantRun.update({ where: { id: run.id }, data: { state: 'refused', reason: 'unclear', customerState: run.customerState === 'none' ? 'none' : 'released', customerMicros: run.customerState === 'none' ? null : BigInt(0), providerState: 'none', finishedAt: now } });
       return;
     }

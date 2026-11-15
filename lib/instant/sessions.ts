@@ -32,21 +32,40 @@ export interface SessionSweep {
   remaining: number;
 }
 
+/** Writes down that a try failed, so the next pass looks at other rows first. It never counts as checked. */
+async function markFailed(connectionId: string, sessionId: string): Promise<void> {
+  try {
+    await prisma.instantSessionCheck.upsert({
+      where: { connectionId },
+      create: { connectionId, sessionId, state: 'failed' },
+      update: { sessionId, state: 'failed', checkedAt: new Date() },
+    });
+  } catch (error) {
+    console.error('[Instant] Could not write a failed try down:', error instanceof Error ? error.message : 'unknown');
+  }
+}
+
 /** One bounded pass over ready-made connections that have no checked session yet (or whose session changed). Safe to run again and again. */
 export async function denyInstantOnSessions(limit = 50, adapter: ReadyMadeAdapter | null = getAdapter()): Promise<SessionSweep> {
   const out: SessionSweep = { checked: 0, alreadyDenied: 0, denied: 0, gone: 0, failed: 0, remaining: 0 };
   const instant = adapter?.instant;
   if (!instant) return out;
   const rows = await prisma.appConnection.findMany({ where: { source: 'ready_made' }, select: { id: true, serverUrl: true } });
-  const done = new Map((await prisma.instantSessionCheck.findMany()).map((row) => [row.connectionId, row.sessionId]));
-  const todo = rows.filter((row) => {
-    const id = sessionIdOfLink(row.serverUrl);
-    return !id || done.get(row.id) !== id;
-  });
+  const checks = await prisma.instantSessionCheck.findMany();
+  const done = new Map(checks.filter((row) => row.state !== 'failed').map((row) => [row.connectionId, row.sessionId]));
+  const triedAt = new Map(checks.map((row) => [row.connectionId, row.checkedAt.getTime()]));
+  const todo = rows
+    .filter((row) => {
+      const id = sessionIdOfLink(row.serverUrl);
+      return !id || done.get(row.id) !== id;
+    })
+    // A row that failed goes to the back of the line, oldest try first, so rows that keep failing never crowd out the rest
+    .sort((a, b) => (triedAt.get(a.id) ?? 0) - (triedAt.get(b.id) ?? 0));
   for (const row of todo.slice(0, limit)) {
     const sessionId = sessionIdOfLink(row.serverUrl);
     if (!sessionId) {
       out.failed += 1;
+      await markFailed(row.id, '');
       continue;
     }
     try {
@@ -66,6 +85,7 @@ export async function denyInstantOnSessions(limit = 50, adapter: ReadyMadeAdapte
     } catch (error) {
       out.failed += 1;
       console.error('[Instant] Could not check a session:', error instanceof Error ? error.message : 'unknown');
+      await markFailed(row.id, sessionId);
     }
   }
   out.remaining = Math.max(0, todo.length - out.checked);
@@ -75,7 +95,7 @@ export async function denyInstantOnSessions(limit = 50, adapter: ReadyMadeAdapte
 /** How many ready-made connections have a checked session and how many do not. Reads only. */
 export async function sessionCheckStatus(): Promise<{ total: number; checked: number; unchecked: number }> {
   const rows = await prisma.appConnection.findMany({ where: { source: 'ready_made' }, select: { id: true, serverUrl: true } });
-  const done = new Map((await prisma.instantSessionCheck.findMany()).map((row) => [row.connectionId, row.sessionId]));
+  const done = new Map((await prisma.instantSessionCheck.findMany({ where: { state: { not: 'failed' } } })).map((row) => [row.connectionId, row.sessionId]));
   const checked = rows.filter((row) => {
     const id = sessionIdOfLink(row.serverUrl);
     return id !== null && done.get(row.id) === id;

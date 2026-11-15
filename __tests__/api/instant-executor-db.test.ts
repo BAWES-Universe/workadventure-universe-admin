@@ -558,6 +558,21 @@ run('the bounded Instant executor, in a real database', () => {
       expect(f.left()).toBe(1_000_000);
       expect(p.instant.run).not.toHaveBeenCalled();
     });
+
+    it('a crashed run whose hold the books could not release is not closed: it is asked again', async () => {
+      await setLimits({ sentWaitMinutes: 5 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const stuck = await prisma.instantRun.create({ data: { runKey: `k-${randomUUID()}`, botId: brick, personId: sara, toolSlug: 'EXA_SEARCH', toolkit: 'exa', argsHash: 'h3', priceVersion: 'v', topMicros: BigInt(TOP), holdMicros: BigInt(TOP), state: 'held', customerState: 'held', providerUserId: 'u-z' } });
+      f.holds.set(`instant:${stuck.id}`, { amount: TOP, state: 'held', charged: 0 });
+      f.state.releaseOk = false;
+      await reconcileRun(stuck.id, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 6 * MIN) });
+      expect(await runOf(stuck.id)).toMatchObject({ state: 'held', customerState: 'held' });
+      f.state.releaseOk = true;
+      await reconcileRun(stuck.id, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 7 * MIN) });
+      expect(await runOf(stuck.id)).toMatchObject({ state: 'refused', customerState: 'released' });
+      expect(f.left()).toBe(1_000_000);
+    });
   });
 
   describe('the same call never runs or pays twice', () => {
@@ -753,6 +768,25 @@ run('the bounded Instant executor, in a real database', () => {
       expect(first).toMatchObject({ checked: 0, denied: 0, failed: 2, remaining: 2 });
       const second = await denyInstantOnSessions(50, p.adapter);
       expect(second).toMatchObject({ checked: 1, denied: 1, failed: 1 });
+    });
+
+    it('rows that keep failing do not crowd out the rest: a failed row goes to the back of the line', async () => {
+      const p = fakeProvider();
+      await connection(`f1-${tag}`, 'https://backend.composio.dev/tool_router/trs_f1/mcp');
+      await connection(`f2-${tag}`, 'https://backend.composio.dev/tool_router/trs_f2/mcp');
+      await connection(`f3-${tag}`, 'https://backend.composio.dev/tool_router/trs_f3/mcp');
+      const asked: string[] = [];
+      p.instant.sessionInstant.mockImplementation((async (id: string) => {
+        asked.push(id);
+        if (id === 'trs_f1') throw new Error('provider down for this one');
+        return 'denied';
+      }) as never);
+      // Whatever order the rows come in, the failing row is tried once, then the other two are reached before it is tried again
+      for (let pass = 0; pass < 4; pass += 1) await denyInstantOnSessions(1, p.adapter);
+      expect(asked.slice(0, 3).sort()).toEqual(['trs_f1', 'trs_f2', 'trs_f3']);
+      expect(asked.filter((id) => id === 'trs_f1').length).toBeLessThanOrEqual(2);
+      const rows = await prisma.instantSessionCheck.findMany({ where: { sessionId: { in: ['trs_f1', 'trs_f2', 'trs_f3'] } }, orderBy: { sessionId: 'asc' } });
+      expect(rows.map((row) => row.state)).toEqual(['failed', 'denied', 'denied']);
     });
 
     it('a session the provider no longer has is recorded as gone', async () => {

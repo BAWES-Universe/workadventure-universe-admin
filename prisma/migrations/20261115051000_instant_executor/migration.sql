@@ -72,4 +72,4 @@ CREATE TABLE "instant_session_checks" (
     CONSTRAINT "instant_session_checks_pkey" PRIMARY KEY ("connection_id")
 );
 
-ALTER TABLE "instant_session_checks" ADD CONSTRAINT "instant_session_checks_state_check" CHECK ("state" IN ('denied', 'gone'));
+ALTER TABLE "instant_session_checks" ADD CONSTRAINT "instant_session_checks_state_check" CHECK ("state" IN ('denied', 'gone', 'failed'));

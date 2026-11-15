@@ -2761,7 +2761,7 @@ model InstantRefund {
 model InstantSessionCheck {
   connectionId String   @id @map("connection_id")
   sessionId    String   @map("session_id") @db.VarChar(255)
-  // denied (reads back as off) or gone (the provider has no such session any more)
+  // denied (reads back as off), gone (the provider has no such session any more) or failed (the last try did not work; tried again later)
   state        String   @db.VarChar(10)
   checkedAt    DateTime @default(now()) @map("checked_at")
 
