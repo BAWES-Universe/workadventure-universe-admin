@@ -648,7 +648,9 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     // A preview whose computer figures cannot be read still previews (the failed read must not abort the transaction around it)
     await prisma.$executeRawUnsafe('ALTER TABLE meter_reservations RENAME TO meter_reservations_away');
     const blind = await rules.previewGrant('gift', { categoryId: 'instant_apps', amount: 2 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['cr1'] } }, G).catch((e: unknown) => e);
+    const savedBlind = await rules.createGift({ categoryId: 'instant_apps', amount: 1 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['cr1'] }, label: 'blind save' }, root, at('2027-02-12T00:00:00Z')).catch((e: unknown) => e);
     await prisma.$executeRawUnsafe('ALTER TABLE meter_reservations_away RENAME TO meter_reservations');
+    check('a save whose preview figures cannot be read still ends whole: one program with one rule, nothing half-written', !(savedBlind instanceof Error) && (await prisma.grantProgram.count({ where: { label: 'blind save' } })) === 1 && (await prisma.grantRule.count({ where: { program: { label: 'blind save' } } })) === 1, savedBlind instanceof Error ? savedBlind.message : savedBlind);
     check('a preview still works when the computer figures cannot be read, with those figures at nothing', !(blind instanceof Error) && (blind as { cost?: { reservedMicros?: number } }).cost?.reservedMicros === 0, blind instanceof Error ? blind.message : blind);
 
     // Room held against a lot that ended since still counts as held while the step runs
