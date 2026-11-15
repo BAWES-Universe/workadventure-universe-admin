@@ -364,10 +364,11 @@ export function GiftSheet({ open, onClose, onSaved }: { open: boolean; onClose: 
 
   const endsAtDate = until ? new Date(`${until}T23:59:59`) : null;
   const endsAt = endsAtDate && !Number.isNaN(endsAtDate.getTime()) && endsAtDate.getTime() > Date.now() ? endsAtDate.toISOString() : null;
-  const who = recipientsOf(audience, endsAt ?? undefined);
+  const who = recipientsOf(audience);
   const micros = microsOfDollars(amount);
-  const ready = !!who && micros !== null && !!endsAt;
-  const request: PreviewRequest | null = who && micros !== null && endsAt ? { what: 'gift', audience: who, scope, amountMicros: micros, shared: shared === 'shared', endsAt } : null;
+  // Credit to be billed says what was agreed: the books refuse it without
+  const ready = !!who && micros !== null && !!endsAt && (settlement === 'gift' || note.trim() !== '');
+  const request: PreviewRequest | null = who && micros !== null && endsAt ? { what: 'gift', audience: who, scope, amountMicros: micros, shared: shared === 'shared', endsAt, ...(audience.kind === 'universe' && audience.changing ? { joinerCap: Number(audience.joinerCap) } : {}) } : null;
   const { preview, loading } = usePreview(open && !picking ? request : null);
 
   async function save() {
@@ -390,7 +391,7 @@ export function GiftSheet({ open, onClose, onSaved }: { open: boolean; onClose: 
   }
 
   // The recipients step is done when it names who: people, a universe (and, for a changing group, how many may join), a date
-  const audienceComplete = audience.kind === 'universe' && audience.changing ? !!audience.universe && Number.isInteger(Number(audience.joinerCap)) && Number(audience.joinerCap) >= 1 : !!recipientsOf(audience, new Date(Date.now() + 86_400_000).toISOString());
+  const audienceComplete = !!recipientsOf(audience);
   const audienceTitle = audience.kind === 'all' ? 'All signed-in members' : audience.kind === 'new_from' ? 'New people from a date' : audience.kind === 'universe' ? `${audience.universe?.name ?? 'A universe'}’s members` : `${audience.people.length} ${audience.people.length === 1 ? 'person' : 'people'} you picked`;
 
   return (

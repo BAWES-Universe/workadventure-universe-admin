@@ -5,7 +5,7 @@ import { amountLine, audienceTitle, defaultLines, exceptionLines, giftLines, gif
 const flat = (parts: Seg[]) => parts.map((part) => (typeof part === 'string' ? part : part.b)).join('');
 const words = (rows: ReturnType<typeof previewRows>) => Object.fromEntries(rows.map(([label, text]) => [label, flat(text)]));
 
-const numbers = (over: Partial<PreviewNumbers> = {}): PreviewNumbers => ({ people: 56, ownRules: 5, laterToo: true, amountMicros: 2_000_000, interval: 'once', shared: false, mostNowMicros: 112_000_000, noLifetimeMax: true, already: [], ...over });
+const numbers = (over: Partial<PreviewNumbers> = {}): PreviewNumbers => ({ people: 56, ownRules: 5, laterToo: true, amountMicros: 2_000_000, interval: 'once', shared: false, mostNowMicros: 112_000_000, noLifetimeMax: true, already: [], budget: { budgetMicros: 1_000_000_000, roomMicros: 900_000_000 }, ...over });
 
 describe('typed dollars', () => {
   it('reads only a positive amount in dollars and never guesses', () => {

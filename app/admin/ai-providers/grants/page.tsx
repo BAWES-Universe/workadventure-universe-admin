@@ -115,8 +115,8 @@ export default function GrantsPage() {
           totals && (
             <Figures>
               <Figure value={totals.people.toLocaleString('en')} label="people" />
-              <Figure value={usd(totals.givenOnceMicros)} label="given once" />
-              <Figure value={usd(totals.mostMonthMicros)} label="most a month" />
+              <Figure value={usd(totals.issuedMonthMicros)} label="given this month" />
+              <Figure value={totals.budgetMicros === null ? 'Not set' : usd(totals.budgetMicros)} label="rollout budget" />
               <Figure value={usd(totals.usedMonthMicros)} label="used this month" />
             </Figures>
           )

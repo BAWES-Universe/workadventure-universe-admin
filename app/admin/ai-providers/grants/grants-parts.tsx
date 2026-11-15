@@ -151,16 +151,15 @@ export const RECIPIENT_CHOICES: Record<RecipientKind, { title: string; descripti
 };
 
 /** The draft as the routes take it, or null while it is not complete (no people, no universe, no date). */
-export function recipientsOf(draft: RecipientDraft, endsAt?: string): Recipients | null {
+export function recipientsOf(draft: RecipientDraft): Recipients | null {
   if (draft.kind === 'all') return { kind: 'all' };
   if (draft.kind === 'new_from') return draft.from ? { kind: 'new_from', from: draft.from } : null;
   if (draft.kind === 'people') return draft.people.length ? { kind: 'people', userIds: draft.people.map((person) => person.id) } : null;
   if (!draft.universe) return null;
   if (!draft.changing) return { kind: 'universe', universeId: draft.universe.id, mode: 'snapshot' };
   const cap = Number(draft.joinerCap);
-  if (!Number.isInteger(cap) || cap < 1 || !endsAt) return null;
-  // A changing group needs an end, a cap on how many can join (the totals are capped by it), so it is never open-ended
-  return { kind: 'universe', universeId: draft.universe.id, mode: 'changing', joinerCap: cap, endsAt };
+  // A changing group is only complete with a cap on how many can join (the gift's end date ends it too), so it is never open-ended
+  return Number.isInteger(cap) && cap >= 1 ? { kind: 'universe', universeId: draft.universe.id, mode: 'changing' } : null;
 }
 
 export const draftOfAudience = (audience: AudienceView): RecipientDraft => ({

@@ -27,7 +27,7 @@ const unset: GrantsOverview = {
   },
   exceptions: [],
   gifts: [],
-  totals: null,
+  totals: { people: 61, issuedMonthMicros: 0, usedMonthMicros: 0, budgetMicros: null },
 };
 
 const omar = { id: 'omar', name: 'Omar', woka: [] };
@@ -39,10 +39,10 @@ const set: GrantsOverview = {
   },
   exceptions: [{ id: 'e1', audience: { kind: 'people', people: [omar], universe: null, count: 1 }, instant_apps: { mode: 'own', amountMicros: 10_000_000, interval: 'monthly' }, computers: { mode: 'same' } }],
   gifts: [{ id: 'g1', audience: { kind: 'people', people: [omar], universe: null, count: 1 }, amountMicros: 5_000_000, shared: false, totalMicros: 5_000_000, scope: 'both', endsAt: new Date(Date.now() + 20 * 86_400_000).toISOString(), ended: false, usedMicros: 1_000_000, givenByName: 'Khalid', settlement: 'gift', billedAt: null, payer: 'Paid by Universe' }],
-  totals: { people: 61, givenOnceMicros: 122_000_000, mostMonthMicros: 700_000_000, usedMonthMicros: 214_000_000 },
+  totals: { people: 61, issuedMonthMicros: 122_000_000, usedMonthMicros: 214_000_000, budgetMicros: 1_000_000_000 },
 };
 
-const nums = (over: Partial<PreviewNumbers> = {}): PreviewNumbers => ({ people: 56, ownRules: 0, laterToo: true, amountMicros: 2_000_000, interval: 'once', shared: false, mostNowMicros: 112_000_000, noLifetimeMax: true, already: [], ...over });
+const nums = (over: Partial<PreviewNumbers> = {}): PreviewNumbers => ({ people: 56, ownRules: 0, laterToo: true, amountMicros: 2_000_000, interval: 'once', shared: false, mostNowMicros: 112_000_000, noLifetimeMax: true, already: [], budget: { budgetMicros: 1_000_000_000, roomMicros: 900_000_000 }, ...over });
 
 let overview: GrantsOverview;
 let preview: { numbers: PreviewNumbers | null; clash: ClashView | null };

@@ -17,7 +17,7 @@ export type Recipients =
   | { kind: 'all' }
   | { kind: 'new_from'; from: string; to?: string }
   | { kind: 'people'; userIds: string[] }
-  | { kind: 'universe'; universeId: string; mode?: 'snapshot' | 'changing'; joinerCap?: number; endsAt?: string };
+  | { kind: 'universe'; universeId: string; mode?: 'snapshot' | 'changing' };
 
 export interface PersonView {
   id: string;
@@ -76,14 +76,15 @@ export interface GrantsOverview {
   money: Record<MoneyCategory, MoneyDefaultView>;
   exceptions: ExceptionView[];
   gifts: GiftView[];
-  totals: { people: number; givenOnceMicros: number; mostMonthMicros: number; usedMonthMicros: number } | null;
+  /** What Universe has promised this month against the rollout budget (null until that is set), and what has been used. */
+  totals: { people: number; issuedMonthMicros: number; usedMonthMicros: number; budgetMicros: number | null };
 }
 
 /** What a preview request asks about. The server answers with `PreviewView`, and a clash is also checked again when saving. */
 export type PreviewRequest =
   | { what: 'default'; category: MoneyCategory; amountMicros: number | null; interval: Interval; recipients: Recipients; startsOn?: 'next' | 'now' }
   | { what: 'exception'; audience: Recipients; instant_apps: ExceptionSetting; computers: ExceptionSetting; replaceId?: string }
-  | { what: 'gift'; audience: Recipients; scope: GiftScope; amountMicros: number; shared: boolean; endsAt: string };
+  | { what: 'gift'; audience: Recipients; scope: GiftScope; amountMicros: number; shared: boolean; endsAt: string; /** A changing universe: the most people who can join before the end. */ joinerCap?: number };
 
 /** The numbers behind the three parts of a preview (spec 7a), never one "most it can cost" number. */
 export interface PreviewNumbers {
@@ -106,6 +107,8 @@ export interface PreviewNumbers {
   audienceName?: string;
   /** Lines about credit the same people already have, such as "Omar already has $10 a month from an exception." */
   already: string[];
+  /** The funding account's room this month: null budget means nothing is issued until the rollout budget is set in Limits. */
+  budget: { budgetMicros: number | null; roomMicros: number };
 }
 
 export interface ClashView {
@@ -236,12 +239,16 @@ export function previewRows(request: PreviewRequest, numbers: PreviewNumbers | n
       rows.push(['Most credit issued', ['Up to ', { b: `${usd(n.mostNowMicros ?? 0)} a month` }, ` for these people${n.laterToo ? `, plus ${amount} a month for each new member` : ''}.`]]);
     }
     rows.push(cost);
+    const funding = fundingRow(n);
+    if (funding) rows.push(funding);
     return rows;
   }
   if (request.what === 'exception') {
     rows.push(['Who gets what', [{ b: plural(n.people, 'person', 'people') }, ' get their own rule in place of the defaults. Someone taken off goes back to the defaults at the next renewal. Credit already given stays.']]);
     rows.push(['Most credit issued', n.mostNowMicros === null ? ['No credit from this rule.'] : ['Up to ', { b: `${usd(n.mostNowMicros)} a month` }, n.laterToo ? '. A universe’s members change, so it grows when people join.' : '. It only grows if you add people.']]);
     rows.push(cost);
+    const funding = fundingRow(n);
+    if (funding) rows.push(funding);
     return rows;
   }
   // A gift
@@ -255,8 +262,18 @@ export function previewRows(request: PreviewRequest, numbers: PreviewNumbers | n
   ]);
   rows.push(['Most credit issued', [{ b: `${usd(total)} in total` }, n.endsOn ? `, ending ${n.endsOn}. Used before their own credit, because it ends sooner.` : '.']]);
   rows.push(cost);
+  const funding = fundingRow(n);
+  if (funding) rows.push(funding);
   for (const line of n.already) rows.push(['Already has', [line]]);
   return rows;
+}
+
+/** The funding line: nothing is given out until the rollout budget is set, and a rule bigger than what is left this month is refused on save. */
+function fundingRow(n: PreviewNumbers): PreviewRow | null {
+  if (n.budget.budgetMicros === null) return ['Funding', ['Nothing is given out until you set the rollout budget in Limits.']];
+  const first = n.interval === 'none' ? 0 : n.mostNowMicros ?? 0;
+  if (first > n.budget.roomMicros) return ['Funding', [`This is more than the ${usd(n.budget.roomMicros)} left in this month’s rollout budget. Raise the budget in Limits first.`]];
+  return null;
 }
 
 const scopeWords = (scope: GiftScope) => (scope === 'both' ? 'Instant Apps or computers' : scope === 'apps' ? 'Instant Apps' : 'computers');
