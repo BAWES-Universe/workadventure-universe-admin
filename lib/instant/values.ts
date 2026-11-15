@@ -56,10 +56,8 @@ type ArgRule = (value: unknown) => boolean;
 const textArg: ArgRule = (v) => shortText(v) !== null;
 const flag = (only?: boolean): ArgRule => (v) => typeof v === 'boolean' && (only === undefined || v === only);
 const whole = (min: number, max: number): ArgRule => (v) => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
-const number = (min: number, max: number): ArgRule => (v) => typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
 const oneOf = (...allowed: string[]): ArgRule => (v) => typeof v === 'string' && allowed.includes(v);
 const textList = (max: number): ArgRule => (v) => Array.isArray(v) && v.length >= 1 && v.length <= max && v.every((item) => shortText(item) !== null);
-const smallObject: ArgRule = (v) => isRecord(v) && JSON.stringify(v).length <= 500;
 
 /** A search is priced per search: the most results it may ask for. Above this the provider's own price steps up. */
 const MAX_RESULTS = 10;
@@ -90,27 +88,6 @@ const ALLOWED: Record<string, { args: Record<string, ArgRule>; required: string[
   TAVILY_SEARCH: {
     args: { query: textArg, max_results: whole(1, MAX_RESULTS), search_depth: oneOf('basic'), include_domains: textList(20), exclude_domains: textList(20) },
     required: ['query'],
-  },
-  GOOGLE_MAPS_GEOCODE_ADDRESS_WITH_QUERY: { args: { address_query: textArg, region_code: textArg, language_code: textArg }, required: ['address_query'] },
-  GOOGLE_MAPS_GEOCODE_LOCATION: {
-    args: { latitude: number(-90, 90), longitude: number(-180, 180), regionCode: textArg, languageCode: textArg, types: textList(20) },
-    required: ['latitude', 'longitude'],
-  },
-  GOOGLE_MAPS_GEOCODE_PLACE: { args: { place_id: textArg, regionCode: textArg, languageCode: textArg }, required: ['place_id'] },
-  GOOGLE_MAPS_AUTOCOMPLETE: {
-    args: {
-      input: textArg,
-      origin: smallObject,
-      regionCode: textArg,
-      inputOffset: whole(0, 2_000),
-      languageCode: textArg,
-      locationBias: smallObject,
-      sessionToken: textArg,
-      includedRegionCodes: textList(15),
-      locationRestriction: smallObject,
-      includedPrimaryTypes: textList(5),
-    },
-    required: ['input'],
   },
 };
 
@@ -162,16 +139,15 @@ const TABLE: Record<string, InstantTool> = {
   EXA_ANSWER: { toolkit: 'exa', unitMicros: 5_000, listed: '$0.005 per answer', bound: (args) => oneUnit('EXA_ANSWER', args) },
   EXA_GET_CONTENTS_ACTION: { toolkit: 'exa', unitMicros: 1_000, listed: '$0.001 per page per content type', bound: exaContentsBound },
   TAVILY_SEARCH: { toolkit: 'tavily', unitMicros: 8_000, listed: '$0.008 per web search.', bound: (args) => oneUnit('TAVILY_SEARCH', args) },
-  GOOGLE_MAPS_GEOCODE_ADDRESS_WITH_QUERY: { toolkit: 'google_maps', unitMicros: 5_000, listed: '$0.005 per address geocoding request', bound: (args) => oneUnit('GOOGLE_MAPS_GEOCODE_ADDRESS_WITH_QUERY', args) },
-  GOOGLE_MAPS_GEOCODE_LOCATION: { toolkit: 'google_maps', unitMicros: 5_000, listed: '$0.005 per reverse geocoding request', bound: (args) => oneUnit('GOOGLE_MAPS_GEOCODE_LOCATION', args) },
-  GOOGLE_MAPS_GEOCODE_PLACE: { toolkit: 'google_maps', unitMicros: 5_000, listed: '$0.005 per place geocoding request', bound: (args) => oneUnit('GOOGLE_MAPS_GEOCODE_PLACE', args) },
-  GOOGLE_MAPS_AUTOCOMPLETE: { toolkit: 'google_maps', unitMicros: 2_830, listed: '$0.00283 per request', bound: (args) => oneUnit('GOOGLE_MAPS_AUTOCOMPLETE', args) },
 };
 
-/** The call fee Composio adds to a managed-account tool run (its rate card tier for the app) and the direct execution add-on. */
-function feeMicros(toolkit: string): number {
-  // Google Maps is "from $0.01" on the rate card; every other tool of the table is in "all other managed apps" ($0.0005)
-  return (toolkit === 'google_maps' ? RATE_MICROS.managed_maps : RATE_MICROS.managed_other) + DIRECT_EXECUTION_MICROS;
+/**
+ * The call fee Composio adds to a managed-account tool run (its rate card tier for the app) and the direct execution add-on. Every
+ * tool of the table is in "all other managed apps" ($0.0005), a settled figure. An app whose rate card figure is only a floor (Google
+ * Maps is "from $0.01", varying by API) has no row: a floor is not a top price, and it comes back once Composio states a maximum.
+ */
+function feeMicros(): number {
+  return RATE_MICROS.managed_other + DIRECT_EXECUTION_MICROS;
 }
 
 export type Admission =
@@ -187,14 +163,14 @@ export function admitInstantTool(tool: string, args: unknown): Admission {
   if (!row) return { ok: false, reason: 'not_offered' };
   const units = row.bound(isRecord(args) ? args : {});
   if (units === null || !Number.isSafeInteger(units) || units < 1) return { ok: false, reason: 'unbounded' };
-  const topMicros = units * row.unitMicros + feeMicros(row.toolkit);
+  const topMicros = units * row.unitMicros + feeMicros();
   if (!Number.isSafeInteger(topMicros) || topMicros < 1) return { ok: false, reason: 'unbounded' };
   return { ok: true, tool, toolkit: row.toolkit, topMicros, priceVersion: INSTANT_PRICE_VERSION, units };
 }
 
 /** What Universe offers: each tool's slug and app, and the most one run of the simplest kind costs (for a list, never for holding a run). */
 export function instantCatalog(): { tool: string; toolkit: string; fromMicros: number }[] {
-  return Object.entries(TABLE).map(([tool, row]) => ({ tool, toolkit: row.toolkit, fromMicros: row.unitMicros + feeMicros(row.toolkit) }));
+  return Object.entries(TABLE).map(([tool, row]) => ({ tool, toolkit: row.toolkit, fromMicros: row.unitMicros + feeMicros() }));
 }
 
 /** The words Composio's own listing gave for each tool's price when the table was read, for the drift check. */
@@ -216,19 +192,33 @@ export function usdToMicros(value: unknown): number | null {
   let text: string;
   if (typeof value === 'number') {
     if (!Number.isFinite(value) || value < 0) return null;
-    // Numbers come as shortest round trip text; very small ones use exponent notation, which toFixed spells out
-    text = value.toFixed(12);
+    // The shortest text that reads back as the same number, never rounded to a set number of places (a tiny positive amount stays positive)
+    text = plainDecimal(String(value));
   } else if (typeof value === 'string') {
     text = value.trim().replace(/^\$/, '');
   } else return null;
-  const match = /^(\d{1,12})(?:\.(\d{1,12}))?$/.exec(text);
+  const match = /^(\d{1,12})(?:\.(\d{1,40}))?$/.exec(text);
   if (!match) return null;
   const whole = BigInt(match[1]) * BigInt(1_000_000);
-  const fraction = (match[2] ?? '').padEnd(12, '0');
+  const fraction = (match[2] ?? '').padEnd(6, '0');
   const micros = BigInt(fraction.slice(0, 6));
-  const rest = BigInt(fraction.slice(6)) > BigInt(0) ? BigInt(1) : BigInt(0);
+  // Anything at all past the sixth decimal rounds the charge UP
+  const rest = /[1-9]/.test(fraction.slice(6)) ? BigInt(1) : BigInt(0);
   const total = whole + micros + rest;
   return total <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(total) : null;
+}
+
+/** A number's text without an exponent ("1e-13" is "0.0000000000001"), digit for digit. */
+function plainDecimal(text: string): string {
+  const lower = text.toLowerCase();
+  if (!lower.includes('e')) return lower;
+  const [mantissa, exponent] = lower.split('e');
+  const [integer, fraction = ''] = mantissa.split('.');
+  const digits = integer + fraction;
+  const point = integer.length + Number(exponent);
+  if (point <= 0) return `0.${'0'.repeat(-point)}${digits}`;
+  if (point >= digits.length) return digits + '0'.repeat(point - digits.length);
+  return `${digits.slice(0, point)}.${digits.slice(point)}`;
 }
 
 /** The charge Composio reported for one run, in micros, from the shapes its docs and logs show: an object with an amount, or the amount itself. Null when it is not there or cannot be read (never zero). */

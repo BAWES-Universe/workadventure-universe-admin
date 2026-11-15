@@ -79,7 +79,8 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
         { state: { in: ['succeeded', 'failed'] }, customerState: 'held' },
       ],
     },
-    orderBy: { createdAt: 'asc' },
+    // The oldest attempt first (never tried first): runs that cannot be settled yet never keep the later ones from being tried
+    orderBy: [{ checkedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
     take: BATCH,
     select: { id: true },
   });
@@ -93,8 +94,12 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
   });
   let drift: DriftReport | null = null;
   if (deps.forceDrift || Date.now() - lastDriftAt >= DRIFT_EVERY_MS) {
-    lastDriftAt = Date.now();
-    drift = await checkPriceDrift(adapter).catch(() => null);
+    drift = await checkPriceDrift(adapter).catch((error) => {
+      console.error('[Instant] The price check failed:', error instanceof Error ? error.message : 'unknown');
+      return null;
+    });
+    // The clock starts only when the check finished and Composio answered for every tool (and any pause it needed was made): a failed or partial check is tried again by the next sweep
+    if (drift && drift.unreachable.length === 0) lastDriftAt = Date.now();
   }
   return { looked: open.length, paused, sessions, drift };
 }

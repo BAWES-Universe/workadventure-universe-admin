@@ -11,6 +11,7 @@ CREATE TABLE "instant_runs" (
     "price_version" VARCHAR(40) NOT NULL,
     "top_micros" BIGINT NOT NULL,
     "hold_micros" BIGINT NOT NULL,
+    "markup_bps" INTEGER,
     "state" VARCHAR(12) NOT NULL,
     "reason" VARCHAR(40),
     "customer_state" VARCHAR(10) NOT NULL DEFAULT 'none',
@@ -25,6 +26,7 @@ CREATE TABLE "instant_runs" (
     "sent_at" TIMESTAMP(3),
     "finished_at" TIMESTAMP(3),
     "check_after" TIMESTAMP(3),
+    "checked_at" TIMESTAMP(3),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "detail" JSONB,
 

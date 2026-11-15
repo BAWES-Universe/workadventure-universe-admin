@@ -59,9 +59,14 @@ describe('a tool is offered only when its arguments can be held to a top price',
     expect(admitInstantTool('EXA_GET_CONTENTS_ACTION', { urls: Array.from({ length: 12 }, (_, i) => `https://x${i}.example`), ids: Array.from({ length: 12 }, (_, i) => `i${i}`) })).toEqual({ ok: false, reason: 'unbounded' });
   });
 
-  it('holds Google Maps at its rate card floor for the call fee', () => {
-    const admitted = admitInstantTool('GOOGLE_MAPS_GEOCODE_PLACE', { place_id: 'ChIJj61dQgK6j4AR4GeTYWZsKWw' });
-    expect(admitted.ok && admitted.topMicros).toBe(5_000 + RATE_MICROS.managed_maps + DIRECT_EXECUTION_MICROS);
+  it('offers no tool whose rate card price is only a floor (Google Maps is "from $0.01")', () => {
+    expect(admitInstantTool('GOOGLE_MAPS_GEOCODE_PLACE', { place_id: 'ChIJj61dQgK6j4AR4GeTYWZsKWw' })).toEqual({ ok: false, reason: 'not_offered' });
+    expect(instantCatalog().some((row) => row.toolkit === 'google_maps')).toBe(false);
+  });
+
+  it('holds every offered tool at its unit price plus the settled call fee', () => {
+    const admitted = admitInstantTool('EXA_SEARCH', { query: 'x' });
+    expect(admitted.ok && admitted.topMicros).toBe(7_000 + RATE_MICROS.managed_other + DIRECT_EXECUTION_MICROS);
   });
 
   it('lists only tools with a price above zero', () => {
@@ -80,6 +85,18 @@ describe('money is exact', () => {
     expect(usdToMicros('0.0000001')).toBe(1);
     expect(usdToMicros('0.0000011')).toBe(2);
     expect(usdToMicros('0')).toBe(0);
+  });
+
+  it('never rounds before rounding up: a figure a hair over a micro is the next micro, and a tiny positive one is not zero', () => {
+    expect(usdToMicros(0.0000010000001)).toBe(2);
+    expect(usdToMicros('0.0000010000001')).toBe(2);
+    expect(usdToMicros('0.0000010000000000000001')).toBe(2);
+    expect(usdToMicros(1e-13)).toBe(1);
+    expect(usdToMicros(1e-7)).toBe(1);
+    expect(usdToMicros(2e-6)).toBe(2);
+    expect(usdToMicros(1.5e3)).toBe(1_500_000_000);
+    expect(usdToMicros(0.000001)).toBe(1);
+    expect(usdToMicros(0)).toBe(0);
   });
 
   it('refuses what is not a plain non-negative decimal', () => {
@@ -126,8 +143,6 @@ describe('a run may carry only arguments known to stay inside its priced unit', 
     expect(admitInstantTool('EXA_SEARCH', { query: 'x', numResults: 10, includeDomains: ['a.example'] })).toMatchObject({ ok: true, units: 1 });
     expect(admitInstantTool('EXA_ANSWER', { query: 'x', model: 'exa' })).toMatchObject({ ok: true });
     expect(admitInstantTool('TAVILY_SEARCH', { query: 'x', max_results: 5, search_depth: 'basic' })).toMatchObject({ ok: true });
-    expect(admitInstantTool('GOOGLE_MAPS_GEOCODE_LOCATION', { latitude: 29.37, longitude: 47.97 })).toMatchObject({ ok: true });
-    expect(admitInstantTool('GOOGLE_MAPS_AUTOCOMPLETE', { input: 'Kuwait Tow' })).toMatchObject({ ok: true });
   });
 
   it('refuses any argument that could raise the cost: more results, deeper search, contents, a pro model, a stream', () => {
@@ -143,14 +158,12 @@ describe('a run may carry only arguments known to stay inside its priced unit', 
     expect(admitInstantTool('TAVILY_SEARCH', { query: 'x', search_depth: 'advanced' })).toEqual(refused);
     expect(admitInstantTool('TAVILY_SEARCH', { query: 'x', max_results: 50 })).toEqual(refused);
     expect(admitInstantTool('TAVILY_SEARCH', { query: 'x', include_raw_content: true })).toEqual(refused);
-    expect(admitInstantTool('GOOGLE_MAPS_AUTOCOMPLETE', { input: 'x', includeQueryPredictions: true })).toEqual(refused);
   });
 
   it('refuses a call missing what the tool needs, and a number that is not a number', () => {
     const refused = { ok: false, reason: 'unbounded' };
-    expect(admitInstantTool('GOOGLE_MAPS_GEOCODE_PLACE', {})).toEqual(refused);
-    expect(admitInstantTool('GOOGLE_MAPS_GEOCODE_LOCATION', { latitude: 1 })).toEqual(refused);
-    expect(admitInstantTool('GOOGLE_MAPS_GEOCODE_LOCATION', { latitude: 'a', longitude: 2 })).toEqual(refused);
+    expect(admitInstantTool('EXA_SEARCH', {})).toEqual(refused);
+    expect(admitInstantTool('TAVILY_SEARCH', { query: 5 })).toEqual(refused);
     expect(admitInstantTool('EXA_SEARCH', { query: 'x', numResults: 2.5 })).toEqual(refused);
   });
 

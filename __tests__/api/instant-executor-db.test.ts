@@ -7,7 +7,7 @@ import { NextRequest } from 'next/server';
 
 import { prisma } from '@/lib/db';
 import { setAdapterForTests, type InstantAdapter, type InstantCall, type InstantLog, type ReadyMadeAdapter } from '@/lib/app-adapter';
-import { evaluatePause, giveBack, instantRunKey, reconcileRun, runInstant, setInstantHooks } from '@/lib/instant/executor';
+import { evaluatePause, exposureIn, giveBack, instantRunKey, reconcileRun, runInstant, setInstantHooks } from '@/lib/instant/executor';
 import { setInstantFunds, shutFunds, type InstantFunds } from '@/lib/instant/funds';
 import { getInstantPause, resumeInstant, saveInstantLimits } from '@/lib/instant/state';
 import { checkPriceDrift, forgetDriftClock, sweepInstant } from '@/lib/instant/sweep';
@@ -736,12 +736,12 @@ run('the bounded Instant executor, in a real database', () => {
       await prisma.bot.delete({ where: { id: other } });
     });
 
-    it("google_maps matches the provider's googlemaps name", async () => {
+    it("matches an App's name loosely (the provider's spelling, any case)", async () => {
       await setLimits();
-      await giveApp(brick, sara, 'googlemaps');
+      await giveApp(brick, sara, 'TAVILY');
       const f = fakeFunds(1_000_000);
       const p = fakeProvider();
-      expect(await runInstant(ask({ tool: 'GOOGLE_MAPS_GEOCODE_LOCATION', arguments: { latitude: 1, longitude: 2 } }), { adapter: p.adapter, funds: f.funds })).not.toMatchObject({ reason: 'not_offered' });
+      expect(await runInstant(ask({ tool: 'TAVILY_SEARCH' }), { adapter: p.adapter, funds: f.funds })).not.toMatchObject({ reason: 'not_offered' });
     });
   });
 
@@ -1027,6 +1027,198 @@ run('the bounded Instant executor, in a real database', () => {
       setInstantHooks({ afterRun: async (_input, outcome) => { seen.push(outcome.status); throw new Error('receipt down'); } });
       expect((await runInstant(ask(), { adapter: p.adapter, funds: fakeFunds(1_000_000).funds })).status).toBe('done');
       expect(seen).toEqual(['done']);
+    });
+  });
+
+  describe('findings from the code review: the edges of admission, settlement and clean-up', () => {
+    const stuckRow = (over: Record<string, unknown> = {}) =>
+      prisma.instantRun.create({ data: { runKey: `k-${randomUUID()}`, botId: brick, personId: sara, toolSlug: 'EXA_SEARCH', toolkit: 'exa', argsHash: `h-${randomUUID().slice(0, 6)}`, priceVersion: 'v', topMicros: BigInt(TOP), holdMicros: BigInt(TOP), state: 'held', customerState: 'held', providerUserId: `u-${randomUUID().slice(0, 6)}`, ...over } as never });
+    /** Holds the books' answer to a reservation back until `open()`, as a slow books would. */
+    function gatedReserve(f: ReturnType<typeof fakeFunds>) {
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => (open = resolve));
+      const real = f.funds.reserve.getMockImplementation()!;
+      f.funds.reserve.mockImplementation((async (input: { key: string; amountMicros: number }) => {
+        await gate;
+        return real(input);
+      }) as never);
+      return open;
+    }
+    const waitForRuns = async (n: number) => {
+      for (let i = 0; i < 200; i += 1) {
+        if ((await prisma.instantRun.count({ where: { personId: sara } })) >= n) return;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      throw new Error('the run was never made');
+    };
+
+    it('two asks that arrive together under different call ids make one run, even while the first is only reserving', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const open = gatedReserve(f);
+      setTimeout(open, 300);
+      const both = await Promise.all([runInstant(ask(), { adapter: p.adapter, funds: f.funds }), runInstant(ask(), { adapter: p.adapter, funds: f.funds })]);
+      expect(both.filter((r) => r.status === 'done')).toHaveLength(1);
+      expect(both.filter((r) => r.status === 'refused' && r.reason === 'already_checking')).toHaveLength(1);
+      expect(p.instant.run).toHaveBeenCalledTimes(1);
+      expect(await prisma.instantRun.count({ where: { personId: sara } })).toBe(1);
+    });
+
+    it('looking an old run up at Composio never holds the admission lock: another ask goes through while that look-up waits', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'timeout', status: null });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      let letGo!: () => void;
+      const hang = new Promise<InstantLog[]>((resolve) => (letGo = () => resolve([])));
+      p.instant.findLogs.mockImplementation((() => hang) as never);
+      await prisma.instantRun.updateMany({ where: { personId: sara }, data: { state: 'ambiguous', sentAt: new Date(Date.now() - 600 * MIN) } });
+      const asking = runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const other = await Promise.race([runInstant(ask({ arguments: { query: 'something else' } }), { adapter: p.adapter, funds: f.funds }), new Promise<'stuck'>((resolve) => setTimeout(() => resolve('stuck'), 5_000))]);
+      expect(other).not.toBe('stuck');
+      expect(other).toMatchObject({ status: 'done' });
+      letGo();
+      await asking;
+    });
+
+    it('a reservation that comes back after the clean-up closed the run is never sent, and its hold is given back', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const open = gatedReserve(f);
+      const pending = runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      await waitForRuns(1);
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      // The clean-up got there first: closed the run as one that never went out
+      await prisma.instantRun.update({ where: { id: row.id }, data: { state: 'refused', reason: 'unclear', finishedAt: new Date(), customerState: 'none', providerState: 'none' } });
+      open();
+      const outcome = await pending;
+      expect(outcome).toMatchObject({ status: 'refused' });
+      expect(p.instant.run).not.toHaveBeenCalled();
+      expect(f.funds.release).toHaveBeenCalledWith({ key: `instant:${row.id}` });
+      expect(await runOf(row.id)).toMatchObject({ state: 'refused', customerState: 'none' });
+      expect(f.left()).toBe(1_000_000);
+    });
+
+    it('our exposure counts each run once: open ones at the top price, settled ones at their charge', async () => {
+      const open = await stuckRow({ state: 'sent', providerState: 'pending', topMicros: BigInt(10_000) });
+      await stuckRow({ state: 'succeeded', customerState: 'charged', providerState: 'settled', providerMicros: BigInt(3_000), finishedAt: new Date(), topMicros: BigInt(10_000) });
+      await stuckRow({ state: 'refused', customerState: 'none', providerState: 'none', topMicros: BigInt(10_000) });
+      expect(await exposureIn(prisma, new Date())).toBe(13_000);
+      await prisma.instantRun.update({ where: { id: open.id }, data: { state: 'failed', providerState: 'settled', providerMicros: BigInt(2_000), finishedAt: new Date() } });
+      expect(await exposureIn(prisma, new Date())).toBe(5_000);
+    });
+
+    it('a tool that failed but reported a charge records that charge at once, and the person is still not charged', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'boom', logId: 'log-c', chargeMicros: 38_000 });
+      expect(await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'failed', reason: 'provider_failed' });
+      const row = await runOf(await runIdOf(id));
+      expect(row).toMatchObject({ state: 'failed', customerState: 'released', providerState: 'settled', providerBasis: 'measured' });
+      expect(Number(row.providerMicros)).toBe(38_000);
+      expect(f.funds.settle).not.toHaveBeenCalled();
+      expect(f.left()).toBe(1_000_000);
+      // Above the top price: the table is too low, so Instant stops
+      expect(await getInstantPause()).toMatchObject({ paused: true, reason: 'price_over_top' });
+    });
+
+    it('a tool that failed with a charge only in its log is settled from that log at once', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.logs.set('log-d', p.line('u', 'failed', 3_000, 'log-d'));
+      p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'boom', logId: 'log-d', chargeMicros: null });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const row = await runOf(await runIdOf(id));
+      expect(row).toMatchObject({ state: 'failed', providerState: 'settled', providerBasis: 'measured' });
+      expect(Number(row.providerMicros)).toBe(3_000);
+    });
+
+    it('a settlement said again after the markup changed asks the books for the same amount as the first time', async () => {
+      await setLimits({ markupBps: 1_000 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.state.settleOk = false;
+      await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      expect(row.markupBps).toBe(1_000);
+      await setLimits({ markupBps: 5_000 });
+      f.state.settleOk = true;
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      const asked = f.funds.settle.mock.calls.map((call) => call[0].chargeMicros);
+      expect(asked.length).toBeGreaterThanOrEqual(2);
+      expect(new Set(asked)).toEqual(new Set([7_700]));
+      expect(Number((await runOf(row.id)).customerMicros)).toBe(7_700);
+    });
+
+    it('a run whose reservation was never answered is not closed on a plain "no" from the books, only when they confirm nothing is held', async () => {
+      await setLimits({ sentWaitMinutes: 5, unclearWaitMinutes: 10 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const stuck = await stuckRow({ state: 'reserving', customerState: 'none', createdAt: new Date(Date.now() - 1_000 * MIN) });
+      f.funds.release.mockImplementation((async () => ({ ok: false })) as never);
+      await reconcileRun(stuck.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      expect(await runOf(stuck.id)).toMatchObject({ state: 'reserving' });
+      f.funds.release.mockImplementation((async () => ({ ok: false, none: true })) as never);
+      await reconcileRun(stuck.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      expect(await runOf(stuck.id)).toMatchObject({ state: 'refused', customerState: 'none' });
+    });
+
+    it('a give-back the books made before and say again is recorded at the amount they say, not at today\'s limit', async () => {
+      await setLimits({ goodwillMaxMicros: 2_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 3 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const runId = await runIdOf(id);
+      f.state.refunds.set(`goodwill:${runId}`, 5_000);
+      expect(await giveBack({ personId: sara, runId }, { funds: f.funds })).toEqual({ status: 'given', amountMicros: 5_000 });
+      expect(Number((await runOf(runId)).refundedMicros)).toBe(5_000);
+      expect(Number((await prisma.instantRefund.findFirstOrThrow({ where: { runId } })).amountMicros)).toBe(5_000);
+    });
+
+    it('the sweep goes oldest attempt first, so runs that cannot be settled never keep the later ones from being tried', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const recent = new Date(Date.now() - 2 * MIN);
+      const base = Date.now() - 600 * MIN;
+      await prisma.instantRun.createMany({
+        data: Array.from({ length: 51 }, (_, i) => ({ runKey: `sw-${tag}-${i}`, botId: brick, personId: sara, toolSlug: 'EXA_SEARCH', toolkit: 'exa', argsHash: `sw-${i}`, priceVersion: 'v', topMicros: BigInt(TOP), holdMicros: BigInt(TOP), state: 'sent', customerState: 'held', providerState: 'pending', sentAt: new Date(), providerUserId: `sw-${i}`, createdAt: new Date(base + i * 1_000), checkedAt: i < 50 ? recent : null })) as never,
+      });
+      const started = Date.now();
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      const last = await prisma.instantRun.findUniqueOrThrow({ where: { runKey: `sw-${tag}-50` } });
+      expect(last.checkedAt && last.checkedAt.getTime() >= started).toBe(true);
+    });
+
+    it('a price check that could not finish is tried again by the next sweep, and one that finished is not repeated for hours', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      p.instant.tool.mockImplementation((async () => {
+        throw new Error('down');
+      }) as never);
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      const afterFirst = p.instant.tool.mock.calls.length;
+      expect(afterFirst).toBeGreaterThan(0);
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(p.instant.tool.mock.calls.length).toBe(afterFirst * 2);
+      const { instantListedPrices } = await import('@/lib/instant/values');
+      const listed = new Map(instantListedPrices().map((row) => [row.tool, row.listed]));
+      p.instant.tool.mockImplementation((async (slug: string) => ({ slug, toolkit: 'x', description: null, inputSchema: null, instantSupported: true, priceWords: listed.get(slug) ?? null })) as never);
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      const afterGood = p.instant.tool.mock.calls.length;
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(p.instant.tool.mock.calls.length).toBe(afterGood);
     });
   });
 

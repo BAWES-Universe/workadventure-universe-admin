@@ -149,23 +149,24 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
   }
 
   const fingerprint = argsFingerprint(input.tool, input.arguments);
-  // The very same ask, by the same person, that is still being looked up: wait for it instead of paying twice
-  const unsettled = await prisma.instantRun.findFirst({ where: { personId: input.personId, argsHash: fingerprint, state: { in: ['sent', 'ambiguous'] } }, select: { id: true } });
-  if (unsettled) return refuse('already_checking', { runId: unsettled.id });
-  // Details Composio did not accept leave our exposure open at the top price until its log is read: one such run at a time per person
-  const unreadInvalid = await prisma.instantRun.findFirst({ where: { personId: input.personId, state: 'failed', reason: 'invalid_request', providerState: 'pending' }, select: { id: true } });
-  if (unreadInvalid) return refuse('already_checking', { runId: unreadInvalid.id });
+  // Asked first without any lock, so a plain repeat is answered cheaply; asked again under the admission lock below, where it counts
+  const twin = await openTwin(prisma, input.personId, fingerprint);
+  if (twin) return refuse('already_checking', { runId: twin });
 
   const holdMicros = holdFor(admitted.topMicros, limits.markupBps);
 
   // Step 1: our own exposure, under one lock, and the intent saved with it
   const created = await prisma.$transaction(
-    async (tx): Promise<{ ok: true; run: Row } | { ok: false; outcome: InstantOutcome }> => {
+    async (tx): Promise<{ kind: 'run'; run: Row } | { kind: 'known'; run: Row } | { kind: 'refused'; outcome: InstantOutcome }> => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${EXPOSURE_LOCK}))`;
+      // The existing run is only handed back from here: looking it up at Composio waits on the network, never under this lock
       const again = await tx.instantRun.findUnique({ where: { runKey } });
-      if (again) return { ok: false, outcome: await describeKnown(again, { funds, adapter, now }) };
+      if (again) return { kind: 'known', run: again };
+      // Two asks that arrive together with different call ids both passed the check above: only one gets past this one
+      const sameAsk = await openTwin(tx, input.personId, fingerprint);
+      if (sameAsk) return { kind: 'refused', outcome: refuse('already_checking', { runId: sameAsk }) };
       const exposure = await exposureIn(tx, now);
-      if (exposure + admitted.topMicros > (limits.exposureCeilingMicros ?? 0)) return { ok: false, outcome: refuse('exposure_full') };
+      if (exposure + admitted.topMicros > (limits.exposureCeilingMicros ?? 0)) return { kind: 'refused', outcome: refuse('exposure_full') };
       const id = crypto.randomUUID();
       const run = await tx.instantRun.create({
         data: {
@@ -179,24 +180,26 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
           priceVersion: admitted.priceVersion,
           topMicros: BigInt(admitted.topMicros),
           holdMicros: BigInt(holdMicros),
+          markupBps: limits.markupBps ?? 0,
           state: 'reserving',
           providerUserId: providerUserIdFor(id),
           provider: INSTANT_PROVIDER,
           createdAt: now,
         },
       });
-      return { ok: true, run };
+      return { kind: 'run', run };
     },
     { maxWait: 15_000, timeout: 30_000 },
   ).catch(async (error) => {
     // A second ask for the same call id at the same moment: the first one's run is the answer
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
       const winner = await prisma.instantRun.findUnique({ where: { runKey } });
-      if (winner) return { ok: false as const, outcome: await describeKnown(winner, { funds, adapter, now }) };
+      if (winner) return { kind: 'known' as const, run: winner };
     }
     throw error;
   });
-  if (!created.ok) return created.outcome;
+  if (created.kind === 'refused') return created.outcome;
+  if (created.kind === 'known') return describeKnown(created.run, { funds, adapter, now });
   let run = created.run;
 
   // Step 2: the person's credit
@@ -206,7 +209,7 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
     // stays open for the sweep, which says it again until the books answer (never closed over a hold that may exist)
     let gone = false;
     try {
-      gone = (await funds.release({ key: fundsKey(run.id) })).ok;
+      gone = holdIsGone(await funds.release({ key: fundsKey(run.id) }));
     } catch {
       gone = false;
     }
@@ -215,16 +218,18 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
   if (!held.ok) {
     // "Unavailable" is the books being unreachable: said as that, never as the person's credit being used up
     const reason: InstantReason = held.reason === 'unavailable' ? 'credit_unavailable' : held.reason;
-    await prisma.instantRun.update({ where: { id: run.id }, data: { state: 'refused', reason, finishedAt: now, customerState: 'none', providerState: 'none' } });
+    await moveRun(run.id, 'reserving', { state: 'refused', reason, finishedAt: now, customerState: 'none', providerState: 'none' });
     return refuse(reason, { runId: run.id });
   }
-  run = await prisma.instantRun.update({ where: { id: run.id }, data: { state: 'held', customerState: 'held' } });
+  // Each step only moves the run from the step before it. A reservation that came back after the clean-up wait found the run closed
+  // and its hold given back: that run never goes out, and a hold that reached the books late is given back again.
+  const heldRun = await moveRun(run.id, 'reserving', { state: 'held', customerState: 'held' });
+  if (!heldRun) return standDown(run.id, { funds, adapter, now });
 
   // Step 3: the intent is saved before the request goes out, and from here our exposure counts the top price until Composio's charge is known
-  run = await prisma.instantRun.update({
-    where: { id: run.id },
-    data: { state: 'sent', sentAt: now, providerState: 'pending', checkAfter: new Date(now.getTime() + limits.unclearWaitMinutes * MINUTE) },
-  });
+  const sentRun = await moveRun(run.id, 'held', { state: 'sent', sentAt: now, providerState: 'pending', checkAfter: new Date(now.getTime() + limits.unclearWaitMinutes * MINUTE) });
+  if (!sentRun) return standDown(run.id, { funds, adapter, now });
+  run = sentRun;
 
   // Step 4: out through the Instant account
   let call: InstantCall;
@@ -236,6 +241,27 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
   }
   return finishCall(run.id, call, { funds, adapter, now: new Date() });
 }
+
+/** One run's own move from one state to the next, only if it is still in the state it was left in; null when something else (the clean-up) got there first. */
+async function moveRun(runId: string, from: string, data: Prisma.InstantRunUpdateManyMutationInput): Promise<Row | null> {
+  const { count } = await prisma.instantRun.updateMany({ where: { id: runId, state: from }, data });
+  if (count !== 1) return null;
+  return prisma.instantRun.findUnique({ where: { id: runId } });
+}
+
+/** A run that was taken over while its request was still on its way: the hold goes back (said again, it is idempotent) and the run is answered as it now stands. */
+async function standDown(runId: string, ctx: Ctx): Promise<InstantOutcome> {
+  try {
+    await ctx.funds.release({ key: fundsKey(runId) });
+  } catch (error) {
+    console.error('[Instant] The credit books could not release:', error instanceof Error ? error.message : 'unknown');
+  }
+  const row = await prisma.instantRun.findUnique({ where: { id: runId } });
+  return row ? outcomeOf(row) : refuse('unclear', { runId });
+}
+
+/** Whether the books say nothing is held under a key any more: given back just now, or never held at all. A plain "no" proves neither. */
+const holdIsGone = (answer: { ok: boolean; none?: boolean }): boolean => answer.ok || answer.none === true;
 
 /** The credit hold for a run, with an error from the books read as "unavailable": a hold nobody could make is no hold. */
 async function holdCustomer(run: Row, funds: InstantFunds): Promise<Awaited<ReturnType<InstantFunds['reserve']>> & { unsure?: boolean }> {
@@ -254,14 +280,31 @@ async function holdCustomer(run: Row, funds: InstantFunds): Promise<Awaited<Retu
   }
 }
 
-/** Everything Instant may still owe Composio at a moment: runs not finished and runs whose charge is not known count at their top price; settled charges count as charged, for the month. */
-export async function exposureIn(tx: Pick<Prisma.TransactionClient, 'instantRun'>, now: Date): Promise<number> {
+/**
+ * A run of this person that makes asking again wrong: the very same ask that is still going or still being looked up (reservations
+ * that have not gone out yet count), or details Composio did not accept whose charge is not known yet (one at a time per person).
+ * Run under the admission lock it is what keeps two simultaneous asks from both going out.
+ */
+async function openTwin(db: Pick<Prisma.TransactionClient, 'instantRun'>, personId: string, fingerprint: string): Promise<string | null> {
+  const same = await db.instantRun.findFirst({ where: { personId, argsHash: fingerprint, state: { in: ['reserving', 'held', 'sent', 'ambiguous'] } }, select: { id: true } });
+  if (same) return same.id;
+  const unreadInvalid = await db.instantRun.findFirst({ where: { personId, state: 'failed', reason: 'invalid_request', providerState: 'pending' }, select: { id: true } });
+  return unreadInvalid?.id ?? null;
+}
+
+/**
+ * Everything Instant may still owe Composio at a moment: runs not finished and runs whose charge is not known count at their top
+ * price; settled charges count as charged, for the month. Both sums are read in ONE statement, so one snapshot: a run that settles
+ * while this reads is counted once, never at its top price and again at its charge.
+ */
+export async function exposureIn(tx: Pick<Prisma.TransactionClient, '$queryRaw'>, now: Date): Promise<number> {
   const month = monthOf(now);
-  const [open, settled] = await Promise.all([
-    tx.instantRun.aggregate({ where: { OR: [{ state: { in: ['reserving', 'held', 'sent', 'ambiguous'] } }, { providerState: 'pending' }] }, _sum: { topMicros: true } }),
-    tx.instantRun.aggregate({ where: { providerState: 'settled', finishedAt: { gte: month.start, lt: month.end } }, _sum: { providerMicros: true } }),
-  ]);
-  return asNumber(open._sum.topMicros) + asNumber(settled._sum.providerMicros);
+  const rows = await tx.$queryRaw<{ open: bigint; settled: bigint }[]>`
+    SELECT
+      COALESCE(SUM("top_micros") FILTER (WHERE "state" IN ('reserving', 'held', 'sent', 'ambiguous') OR "provider_state" = 'pending'), 0)::bigint AS "open",
+      COALESCE(SUM("provider_micros") FILTER (WHERE "provider_state" = 'settled' AND "finished_at" >= ${month.start} AND "finished_at" < ${month.end}), 0)::bigint AS "settled"
+    FROM "instant_runs"`;
+  return asNumber(rows[0]?.open) + asNumber(rows[0]?.settled);
 }
 
 // ---------- How a run ended ----------
@@ -295,7 +338,7 @@ const reasonOfRejection = (code: string | null, status: number): InstantReason =
 async function finishCall(runId: string, call: InstantCall, ctx: Ctx): Promise<InstantOutcome> {
   const limits = await getInstantLimits();
   // Composio's log is read before the transaction opens, never inside it: a slow Composio must not hold a connection or a lock
-  const loggedCharge = call.kind === 'done' && call.successful && call.chargeMicros === null && call.logId ? await chargeFromLog(ctx.adapter, call.logId) : null;
+  const loggedCharge = call.kind === 'done' && call.chargeMicros === null && call.logId ? await chargeFromLog(ctx.adapter, call.logId) : null;
   const outcome = await withRun(runId, async (run, tx): Promise<InstantOutcome> => {
     // Settled already (a sweep got there first): that is the answer
     if (run.state !== 'sent' && run.state !== 'ambiguous') return outcomeOf(run);
@@ -331,6 +374,9 @@ async function finishCall(runId: string, call: InstantCall, ctx: Ctx): Promise<I
           // It ran and did not work: the person is never charged for that. Our own charge, if any, is read from the log.
           await releaseCustomer(run, tx, ctx);
           await tx.instantRun.update({ where: { id: run.id }, data: { state: 'failed', reason: 'provider_failed', finishedAt: ctx.now, providerLogId: call.logId, providerState: 'pending' } });
+          // A charge the answer (or its log) reports is ours and is written now; only a charge nobody has reported waits for the log
+          const failedCharge = call.chargeMicros ?? loggedCharge;
+          if (failedCharge !== null) await settleProvider({ ...run, state: 'failed' }, tx, failedCharge, 'measured', ctx.now);
           return { status: 'failed', runId: run.id, reason: 'provider_failed', message: REASON_WORDS.provider_failed };
         }
         // It worked: Composio's own charge, from the answer or from its log, else the top price waits (never read as free)
@@ -367,7 +413,7 @@ async function releaseCustomer(run: Row, tx: Prisma.TransactionClient, ctx: Pick
   if (run.customerState !== 'held') return true;
   let done = false;
   try {
-    done = (await ctx.funds.release({ key: fundsKey(run.id) })).ok;
+    done = holdIsGone(await ctx.funds.release({ key: fundsKey(run.id) }));
   } catch (error) {
     console.error('[Instant] The credit books could not release:', error instanceof Error ? error.message : 'unknown');
   }
@@ -413,7 +459,8 @@ async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: nu
  * Returns what the person was charged, and whether the books took it (when they did not, the hold stays and is said again later).
  */
 async function settleSuccess(run: Row, tx: Prisma.TransactionClient, providerMicros: number, basis: 'measured' | 'estimated', limits: InstantLimits, ctx: Ctx): Promise<{ charged: number; customerDone: boolean }> {
-  const charged = customerChargeFor(providerMicros, asNumber(run.holdMicros), limits.markupBps);
+  // The markup the hold was made with, never today's: a settlement said again after a markup change asks the books for the same amount
+  const charged = customerChargeFor(providerMicros, asNumber(run.holdMicros), run.markupBps ?? limits.markupBps);
   let customerDone = run.customerState !== 'held';
   if (run.customerState === 'held') {
     try {
@@ -518,6 +565,8 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
   // Ask Composio first, outside the transaction; the locked read below decides what the answer means for the run as it is by then
   const seen = await prisma.instantRun.findUnique({ where: { id: runId } });
   if (!seen) return;
+  // Tried now: the sweep goes oldest attempt first, so runs that cannot be settled never keep the rest from being tried
+  await prisma.instantRun.updateMany({ where: { id: runId }, data: { checkedAt: new Date() } });
   const looked = instant && needsLookup(seen, ctx.now, limits) ? await lookUp(seen, instant, ctx.now) : null;
   await withRun(runId, async (run, tx) => {
     const now = ctx.now;
@@ -525,15 +574,15 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
 
     // Crashed between its steps: it never went out, so it never cost anything
     if ((run.state === 'reserving' || run.state === 'held') && waitedPast(run.createdAt, limits.sentWaitMinutes)) {
-      // The hold goes back only when the books say so. A run that never recorded its hold may truly have none (the books then say
-      // "not found"), so for that one a "no" is believed only once the unclear wait is over; until then it is asked again.
+      // The run is closed only when the books say the hold is gone: given back just now, or confirmed not to exist. A plain "no" does
+      // not say that (a reservation that was made but never answered may exist), so the run stays open and the sweep asks again.
       let released = false;
       try {
-        released = (await ctx.funds.release({ key: fundsKey(run.id) })).ok;
+        released = holdIsGone(await ctx.funds.release({ key: fundsKey(run.id) }));
       } catch (error) {
         console.error('[Instant] The credit books could not release:', error instanceof Error ? error.message : 'unknown');
       }
-      if (!released && (run.customerState !== 'none' || !waitedPast(run.createdAt, limits.unclearWaitMinutes))) return;
+      if (!released) return;
       await tx.instantRun.update({ where: { id: run.id }, data: { state: 'refused', reason: 'unclear', customerState: run.customerState === 'none' ? 'none' : 'released', customerMicros: run.customerState === 'none' ? null : BigInt(0), providerState: 'none', finishedAt: now } });
       return;
     }
@@ -663,7 +712,7 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
       const amount = Math.min(asNumber(run.customerMicros) - asNumber(run.refundedMicros), limits.goodwillMaxMicros!);
       if (amount < 1) return { status: 'refused', reason: 'not_charged' };
       if (asNumber(everyone._sum.amountMicros) + amount > limits.goodwillBudgetMicros!) return { status: 'refused', reason: 'budget' };
-      let done: { ok: boolean };
+      let done: { ok: boolean; refundedMicros?: number };
       try {
         done = await funds.refund({ key: fundsKey(run.id), refundKey, amountMicros: amount, reason: 'goodwill', limits: { giveBackMaxMicros: limits.goodwillMaxMicros, goodwillBudgetMicros: limits.goodwillBudgetMicros } });
       } catch (error) {
@@ -671,9 +720,12 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
         return { status: 'refused', reason: 'unavailable' };
       }
       if (!done.ok) return { status: 'refused', reason: 'unavailable' };
-      await tx.instantRefund.create({ data: { refundKey, runId: run.id, personId: run.personId, kind: 'goodwill', amountMicros: BigInt(amount) } });
-      await tx.instantRun.update({ where: { id: run.id }, data: { refundedMicros: { increment: BigInt(amount) } } });
-      return { status: 'given', amountMicros: amount };
+      // What the books say they gave back is what is recorded: a give-back that was made before and said again returns its first amount,
+      // which may differ from today's figure after a Limits change
+      const given = typeof done.refundedMicros === 'number' && Number.isSafeInteger(done.refundedMicros) && done.refundedMicros > 0 ? done.refundedMicros : amount;
+      await tx.instantRefund.create({ data: { refundKey, runId: run.id, personId: run.personId, kind: 'goodwill', amountMicros: BigInt(given) } });
+      await tx.instantRun.update({ where: { id: run.id }, data: { refundedMicros: { increment: BigInt(given) } } });
+      return { status: 'given', amountMicros: given };
     },
     { maxWait: 15_000, timeout: 30_000 },
   );

@@ -2791,6 +2791,9 @@ model InstantRun {
   // The trusted top price of the run, all fees included, and what was held from the person's credit for it
   topMicros         BigInt    @map("top_micros")
   holdMicros        BigInt    @map("hold_micros")
+  // The markup (in basis points) the hold was made with: the charge is always worked out with this one, so a settlement said again
+  // after the markup was changed asks the books for the same amount as the first time
+  markupBps         Int?      @map("markup_bps")
   // reserving, held, sent, succeeded, failed, ambiguous, refused
   state             String    @db.VarChar(12)
   // Why it did not happen or did not work, in a fixed word; never a message from the provider
@@ -2813,6 +2816,8 @@ model InstantRun {
   finishedAt        DateTime? @map("finished_at")
   // When an unclear run stops being looked for (it is closed on what is known), or a charge not reported stops being waited for
   checkAfter        DateTime? @map("check_after")
+  // When a sweep or a retry last tried to settle it: the sweep goes oldest attempt first, so runs that cannot be settled never starve the rest
+  checkedAt         DateTime? @map("checked_at")
   createdAt         DateTime  @default(now()) @map("created_at")
   detail            Json?
 

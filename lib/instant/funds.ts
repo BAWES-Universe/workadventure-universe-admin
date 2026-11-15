@@ -41,8 +41,12 @@ export interface InstantFunds {
   reserve(input: { key: string; personId: string; amountMicros: number; botId?: string | null; runId?: string | null; charge: ChargeClass }): Promise<Hold>;
   /** The run happened: charges `chargeMicros` (never more than was held) and gives back the rest of the hold. `ok: false` means the books did not take it: nothing is decided, and it is said again later. */
   settle(input: { key: string; chargeMicros: number; providerCostMicros?: number | null }): Promise<{ ok: boolean }>;
-  /** The run did not happen or did not work: gives back the whole hold. `ok: false` means it is still held and is said again later. */
-  release(input: { key: string }): Promise<{ ok: boolean }>;
+  /**
+   * The run did not happen or did not work: gives back the whole hold. `ok: false` means it may still be held and is said again later.
+   * `none: true` means the books CONFIRM nothing is held under the key (it never was): the only way a run whose reservation was never
+   * answered may be closed without a release. A plain `ok: false` never closes it.
+   */
+  release(input: { key: string }): Promise<{ ok: boolean; none?: boolean }>;
   /** After a charge: gives `amountMicros` back to the lots it came from, once per `refundKey`. Free credit never becomes cash. */
   refund(input: { key: string; refundKey: string; amountMicros: number; reason: 'platform_failure' | 'goodwill'; limits?: GiveBackLimits }): Promise<{ ok: boolean; refundedMicros: number; reason?: string }>;
 }
