@@ -1,7 +1,7 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 /** "Apps: use and demand" (spec "Paying for Apps", sections 21 and 22), in the words of the approved mock. */
 
@@ -171,6 +171,35 @@ describe('Apps: use and demand', () => {
     await waitFor(() => expect(screen.queryByTestId('apps-sheet')).not.toBeInTheDocument());
     fireEvent.click(screen.getByTestId('apps-row-video'));
     expect(within(await screen.findByTestId('apps-sheet')).queryByTestId('apps-sheet-error')).not.toBeInTheDocument();
+  });
+
+  it('a save that finishes after its sheet was closed does not close or warn in the same App opened again', async () => {
+    let finish: (value: unknown) => void = () => {};
+    const ready = report({ apps: [app({ own: { ready: true, why: [], passedChecksOn: null, topPriceMicros: 100 } })] });
+    fetchMock.mockImplementation((url: string, init?: { method?: string }) =>
+      init?.method === 'PUT' ? new Promise((resolve) => (finish = resolve)) : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(ready) }),
+    );
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    let sheet = await screen.findByTestId('apps-sheet');
+    fireEvent.click(within(sheet).getByTestId('apps-route-universe'));
+    fireEvent.click(within(sheet).getByTestId('apps-route-save'));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PUT')).toBe(true));
+    // Close it while the save is still going, then open the same App again
+    fireEvent.keyDown(sheet, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByTestId('apps-sheet')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    sheet = await screen.findByTestId('apps-sheet');
+    // The first save now ends with "someone moved it": the new sheet must not show that, and a success must not close it
+    finish({ ok: false, status: 409, json: () => Promise.resolve({ code: 'stale', route: 'universe', version: 1 }) });
+    // The first save has ended: it asked for the page again
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method !== 'PUT')).toHaveLength(2));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(screen.getByTestId('apps-sheet')).toBeInTheDocument();
+    expect(within(screen.getByTestId('apps-sheet')).queryByTestId('apps-sheet-error')).not.toBeInTheDocument();
   });
 
   it('goes back to Orbit home for anyone who is not a super admin, and offers a retry when the read fails', async () => {

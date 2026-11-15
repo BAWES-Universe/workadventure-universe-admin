@@ -25,12 +25,12 @@ export default function AppsDemandPage() {
   const [open, setOpenKey] = useState<string | null>(null);
   // What a refused save said. It lives here, not in the sheet: reading the page again after a stale save makes a new sheet (it is keyed by the App's version), which would clear it before it is read
   const [note, setNote] = useState<string | null>(null);
-  // Which App's sheet is open right now: a save that finishes late must only touch its own sheet
-  const openRef = useRef<string | null>(null);
-  openRef.current = open;
+  // Which opening of a sheet this is. Every open and every close makes a new one, so a save that finishes late can only touch the
+  // opening it started in: not another App's sheet, and not a sheet of the same App opened again after it was closed
+  const opening = useRef(0);
   const setOpen = (key: string | null) => {
     setNote(null);
-    openRef.current = key;
+    opening.current += 1;
     setOpenKey(key);
   };
   // Only the latest read may show: a slower read of other days must not land on top of the days now showing
@@ -65,6 +65,7 @@ export default function AppsDemandPage() {
   loadRef.current = load;
 
   const app = report?.apps.find((row) => row.key === open) ?? null;
+  const thisOpening = opening.current;
 
   return (
     <div className="grid min-w-0 gap-6" data-testid="apps-demand-page">
@@ -147,7 +148,7 @@ export default function AppsDemandPage() {
 
       <Sheet open={app !== null} onOpenChange={(next) => !next && setOpen(null)}>
         <SheetContent side="bottom" data-testid="apps-sheet">
-          {app && report && <RouteSheet key={`${app.key}:${app.routeVersion}`} app={app} days={report.days} note={note} onNote={(words) => openRef.current === app.key && setNote(words)} onClose={() => openRef.current === app.key && setOpen(null)} onSaved={() => loadRef.current()} />}
+          {app && report && <RouteSheet key={`${app.key}:${app.routeVersion}`} app={app} days={report.days} note={note} onNote={(words) => opening.current === thisOpening && setNote(words)} onClose={() => opening.current === thisOpening && setOpen(null)} onSaved={() => loadRef.current()} />}
         </SheetContent>
       </Sheet>
     </div>
