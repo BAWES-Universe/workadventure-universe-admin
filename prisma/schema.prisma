@@ -1164,6 +1164,9 @@ model BrickItemRun {
   // chat) before it writes anything, so a message is never sent twice. Never claimed as exactly once outside Universe.
   deliveredEventId String? @map("delivered_event_id") @db.VarChar(255)
   deliveredAt      DateTime? @map("delivered_at")
+  // How the run was to be reported, kept with the delivery (what a goal that reached its outcome said, its progress, whether it waits): a
+  // run handed out again after a restart reports that, not a plain "said". Null for a reminder and for a run from before this.
+  deliveredReport  Json?     @map("delivered_report")
 
   item BrickItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
 
