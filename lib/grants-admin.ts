@@ -451,9 +451,11 @@ export async function endException(id: string, issuer: Issuer, now: Date = new D
   const parts = readExceptionId(id);
   if (!parts) return 'not_found';
   let found = false;
+  // Only exception rules are ended here, never a default or a gift that an id happens to name
+  const exceptionIds = new Set((await listPrograms(undefined, { kind: 'exception' })).map((program) => program.programId));
   for (const category of MONEY_CATEGORIES) {
     const programId = parts[category];
-    if (!programId) continue;
+    if (!programId || !exceptionIds.has(programId)) continue;
     const result = await endProgram(programId, issuer, now);
     if (result !== 'not_found') found = true;
   }
@@ -462,6 +464,13 @@ export async function endException(id: string, issuer: Issuer, now: Date = new D
 
 export async function createGiftFor(request: Extract<PreviewRequest, { what: 'gift' }> & { settlement?: 'gift' | 'to_bill'; note?: string | null; grantKey?: string }, issuer: Issuer, now: Date = new Date()): Promise<ProgramView> {
   return createGift(await giftInput(request, now), issuer, now);
+}
+
+/** "End it now" for a gift: stops it reaching anyone new. Only a gift can be ended here, never a default or an exception. */
+export async function endGift(programId: string, issuer: Issuer, now: Date = new Date()): Promise<'ended' | 'already_ended' | 'not_found'> {
+  const program = await prisma.grantProgram.findUnique({ where: { id: programId }, select: { kind: true } });
+  if (!program || program.kind !== 'gift') return 'not_found';
+  return endProgram(programId, issuer, now);
 }
 
 /** "Mark as billed": says a gift that was to be billed was, and when. Said once; a gift is never owed, so it cannot be marked. */

@@ -208,6 +208,21 @@ run('the grants routes, on the real books', () => {
     expect(gifts.filter((gift: any) => gift.ended)).toHaveLength(30);
   });
 
+  it('never ends a default or an exception through the gift routes', async () => {
+    await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 2 * MILLION, interval: 'once', recipients: { kind: 'all' } } }, ctx({ category: 'instant_apps' }));
+    const omar = await person('Omar');
+    await call(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar] }, instant_apps: { mode: 'own', amountMicros: 1 * MILLION, interval: 'once' }, computers: { mode: 'same' } } });
+    const programs = await prisma.grantProgram.findMany({ where: { kind: { in: ['default', 'exception'] } }, select: { id: true } });
+    for (const program of programs) expect((await call(patchGift, '/x', { method: 'PATCH', body: { action: 'end' } }, ctx({ id: program.id }))).status).toBe(404);
+    const { exceptions, money } = await overview();
+    expect(exceptions).toHaveLength(1);
+    expect(money.instant_apps.interval).toBe('once');
+    // A made-up exception id that names a default does not end it either
+    const defaultId = (await prisma.grantProgram.findFirst({ where: { kind: 'default' }, select: { id: true } }))!.id;
+    await call(deleteException, '/x', { method: 'DELETE' }, ctx({ id: `${defaultId}~none` }));
+    expect((await overview()).money.instant_apps.interval).toBe('once');
+  });
+
   it('ends a gift now: it stays listed as ended', async () => {
     const omar = await person('Omar');
     const made_ = await call<any>(postGift, '/x', { method: 'POST', body: { grantKey: randomUUID(), audience: { kind: 'people', userIds: [omar] }, scope: 'both', amountMicros: 5 * MILLION, shared: false, endsAt: new Date(Date.now() + 20 * 86_400_000).toISOString(), settlement: 'gift' } });
