@@ -927,7 +927,7 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
       const bad = pairs.filter((p) => {
         const state = heldKeys.get(p.key);
         // Either the hold won (and is given back, and the key is not closed) or the closing won (nothing held, the reservation refused)
-        const holdWon = state === 'released' && !closedKeys.has(p.key) && p.reserved.ok;
+        const holdWon = state === 'released' && !closedKeys.has(p.key) && p.reserved.ok && p.gone.ok === true;
         const closeWon = state === undefined && closedKeys.has(p.key) && !p.reserved.ok && p.gone.none === true;
         return !(holdWon || closeWon);
       });
