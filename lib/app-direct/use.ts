@@ -3,7 +3,7 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { checkAppUse, type AppUseVerdict } from '@/lib/app-connections';
 import { recordMeterEvent } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
-import { reportToolSignIn } from '@/lib/tool-signin';
+import { reportKeyWorked, reportToolSignIn } from '@/lib/tool-signin';
 import { definitionSchema, hashDefinition, type Definition } from '@/lib/app-direct/definition';
 import { operationViews, headingOf, type KeyAppOperationView } from '@/lib/app-direct/describe';
 import { guardedRequest, GuardError, type GuardDeps } from '@/lib/app-direct/guard';
@@ -51,7 +51,7 @@ export interface RunKeyApp {
   definitionHash: string;
 }
 
-export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}): Promise<KeyAppOutcome> {
+export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}, again = false): Promise<KeyAppOutcome> {
   const verdict: AppUseVerdict | null = await checkAppUse(input.botId, input.serverId, { requesterKey: input.requesterKey, forOwner: input.forOwner, callId: input.callId });
   if (!verdict) return { status: 'refused', reason: 'gone' };
   if (!verdict.allowed) return { status: 'refused', reason: (verdict.reason === 'not_owner' || verdict.reason === 'off' || verdict.reason === 'incomplete' ? verdict.reason : 'gone') };
@@ -82,12 +82,17 @@ export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}): Promise
   const taken = await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`key-calls:${ownerId}`}, 0))`;
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('key-calls:everyone', 0))`;
-    const held = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_connections" WHERE "id" = ${connection.id} FOR SHARE`;
+    // What was read before the lock may have moved: the request was built from that key and that definition, and the grant may have been
+    // switched off since the check. Read all of it again under the lock, so nothing is sent that a committed change has already ended
+    const held = await tx.$queryRaw<{ id: string; keyVersion: number; definitionHash: string | null }[]>`SELECT "id", "key_version" AS "keyVersion", "definition_hash" AS "definitionHash" FROM "app_connections" WHERE "id" = ${connection.id} FOR SHARE`;
     if (held.length === 0) return 'gone' as const;
-    const stillThere = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "bot_mcp_servers" WHERE "id" = ${row.id} AND "bot_id" = ${input.botId} FOR SHARE`;
+    const stillThere = await tx.$queryRaw<{ id: string; enabled: boolean }[]>`SELECT "id", "enabled" FROM "bot_mcp_servers" WHERE "id" = ${row.id} AND "bot_id" = ${input.botId} FOR SHARE`;
     if (stillThere.length === 0) return 'gone' as const;
-    const again = await tx.appKeyCall.findUnique({ where: { botId_callId: { botId: input.botId, callId: input.callId } }, select: { id: true } });
-    if (again) return 'again' as const;
+    if (!stillThere[0].enabled) return 'off' as const;
+    if (held[0].definitionHash !== connection.definitionHash) return 'changed' as const;
+    if (held[0].keyVersion !== connection.keyVersion) return 'stale' as const;
+    const already = await tx.appKeyCall.findUnique({ where: { botId_callId: { botId: input.botId, callId: input.callId } }, select: { id: true } });
+    if (already) return 'again' as const;
     const since = new Date(Date.now() - 3_600_000);
     const [mine, everyone] = await Promise.all([tx.appKeyCall.count({ where: { ownerId, createdAt: { gte: since } } }), tx.appKeyCall.count({ where: { createdAt: { gte: since } } })]);
     if (mine >= limits.keyCallsPerPerson || everyone >= limits.keyCallsPlatform) return 'limit' as const;
@@ -98,6 +103,10 @@ export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}): Promise
     return 'ok' as const;
   });
   if (taken === 'gone') return { status: 'refused', reason: 'gone' };
+  if (taken === 'off') return { status: 'refused', reason: 'off' };
+  if (taken === 'changed') return { status: 'changed' };
+  // The key was replaced while this call was being set up: build it again once with the new key, never send the old one
+  if (taken === 'stale') return again ? { status: 'refused', reason: 'gone' } : runKeyApp(input, deps, true);
   if (taken === 'again') return { status: 'already_asked' };
   if (taken === 'limit') return { status: 'limit' };
 
@@ -124,6 +133,8 @@ export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}): Promise
     detail: { app: connection.name, operation: operation.id, heading: headingOf(operation), verified: operation.verified },
   }).catch((error) => console.error('[KeyApps] Could not write the use to the books:', error instanceof Error ? error.message : 'unknown'));
 
+  // Reports are ordered by when the request went out, not when the answer came back: a refusal for a key that was replaced meanwhile is old news
+  const startedAt = new Date();
   let answer;
   try {
     answer = await guardedRequest({ ...built, timeoutMs: limits.keyCallSeconds * 1000, maxBytes: limits.keyAnswerKb * 1024 }, deps);
@@ -141,12 +152,12 @@ export async function runKeyApp(input: RunKeyApp, deps: GuardDeps = {}): Promise
   if (rejected) {
     await finish(input, 'rejected', answer.status);
     // "Key stopped working": one place, for every Brick that uses it, cleared by a new key or a good call
-    await reportToolSignIn(input.botId, input.serverId, { state: 'expired', status: answer.status }).catch(() => undefined);
+    await reportToolSignIn(input.botId, input.serverId, { state: 'expired', status: answer.status, at: startedAt }).catch(() => undefined);
     return { status: 'key_rejected', httpStatus: answer.status };
   }
   const ok = answer.status >= 200 && answer.status < 300;
   await finish(input, ok ? 'ok' : 'failed', answer.status);
-  if (ok && connection.signInLostAt) await reportToolSignIn(input.botId, input.serverId, { state: 'ok' }).catch(() => undefined);
+  if (ok) await reportKeyWorked(connection.id, connection.keyVersion).catch(() => undefined);
   if (!ok) return { status: 'done', ok: false, httpStatus: answer.status, data: null, truncated: false };
 
   let data: unknown = null;

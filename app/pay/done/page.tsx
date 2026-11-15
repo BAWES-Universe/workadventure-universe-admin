@@ -9,7 +9,8 @@ export const metadata: Metadata = { title: 'Payment', robots: { index: false, fo
 const WORDS: Record<OrderState, { title: string; body: string }> = {
   paid: { title: 'Payment received', body: 'Thank you. You can close this window and go back to the page.' },
   checking: { title: 'Checking your payment', body: 'This usually takes a few seconds. This page will update by itself.' },
-  not_paid: { title: 'Payment did not go through', body: 'Nothing was taken. You can close this window and try again from the page.' },
+  // A closed checkout can still be paid for a while at the service, so this never says that nothing was taken, and never sends the buyer to pay again
+  not_paid: { title: 'We have not received this payment yet', body: 'If you already paid, it can take a little while to show. Keep this window or the page open, or contact the page’s owner with the time of the payment.' },
   cant_confirm: { title: 'We could not confirm this payment', body: 'If money left your account, contact the page’s owner with the time of the payment.' },
 };
 

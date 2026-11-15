@@ -14,7 +14,8 @@ type Status = 'checking' | 'paid' | 'not_paid' | 'cant_confirm' | 'unavailable' 
 const WORDS: Record<string, string> = {
   unavailable: 'Payments unavailable',
   limit: 'Too many tries for now. Try again in a little while.',
-  not_paid: 'The payment did not go through',
+  // A closed checkout can still be paid for a while at the service: this never says that nothing was taken
+  not_paid: 'We have not received this payment yet. If you already paid, it can take a little while to show.',
   cant_confirm: 'We could not confirm the payment',
 };
 
@@ -24,8 +25,12 @@ const POLL_FOR_MS = 20 * 60_000;
 export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
   const [line, setLine] = useState<string | null>(null);
   const [resume, setResume] = useState<{ url: string; app: string } | null>(null);
+  /** An order that was not paid when the watch ended: it can be looked at again, because paying at the service late still counts. */
+  const [recheck, setRecheck] = useState<string | null>(null);
   const busy = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Which watch is current: an answer that comes back for an older one (another page, another order, or after cleanup) is dropped unread. */
+  const current = useRef(0);
 
   const tell = useCallback((status: Status) => {
     const frame = document.querySelector<HTMLIFrameElement>('iframe[data-artifact-frame]');
@@ -35,27 +40,49 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
 
   const watch = useCallback(
     (orderId: string) => {
+      if (timer.current) clearTimeout(timer.current);
+      const mine = ++current.current;
       const until = Date.now() + POLL_FOR_MS;
+      let toldNotPaid = false;
+      const alive = () => mine === current.current;
       const poll = async () => {
+        if (!alive()) return;
         try {
           const response = await fetch(`/api/pay/${encodeURIComponent(artifactId)}?order=${encodeURIComponent(orderId)}`, { cache: 'no-store' });
           const body = response.ok ? ((await response.json()) as { status: Status }) : null;
-          if (body && body.status !== 'checking') {
+          if (!alive()) return;
+          if (body?.status === 'paid' || body?.status === 'cant_confirm') {
             busy.current = false;
             setResume(null);
+            setRecheck(null);
             setLine(body.status === 'paid' ? null : WORDS[body.status] ?? null);
             tell(body.status);
             return;
           }
+          if (body?.status === 'not_paid') {
+            // Said once, and the order goes on being looked at until the time is up: a payment made at the service after the checkout closed still arrives
+            if (!toldNotPaid) {
+              toldNotPaid = true;
+              busy.current = false;
+              setResume(null);
+              setLine(WORDS.not_paid);
+              tell('not_paid');
+            }
+          }
         } catch {
           // Try again on the next turn
         }
+        if (!alive()) return;
         if (Date.now() < until) timer.current = setTimeout(poll, POLL_MS);
-        else {
+        else if (toldNotPaid) {
+          // The look ends here, and the buyer can ask for another one
+          setRecheck(orderId);
+        } else {
           // Twenty minutes without an answer: said plainly, never a silent end. The order may still be counted later.
           busy.current = false;
           setResume(null);
           setLine(WORDS.cant_confirm);
+          setRecheck(orderId);
           tell('cant_confirm');
         }
       };
@@ -65,18 +92,26 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
   );
 
   useEffect(() => {
+    busy.current = false;
     const onMessage = async (event: MessageEvent) => {
       const frame = document.querySelector<HTMLIFrameElement>('iframe[data-artifact-frame]');
       if (!frame || event.source !== frame.contentWindow) return;
       const data = event.data as { universe?: unknown; app?: unknown } | null;
       if (!data || data.universe !== 'use-app' || typeof data.app !== 'string' || busy.current) return;
       busy.current = true;
+      setRecheck(null);
+      const generation = current.current;
       // Open the window now, in the tap's own moment, so a blocked pop-up is the only thing left that can go wrong
       const popup = window.open('about:blank', '_blank');
       if (popup) popup.opener = null;
       try {
         const response = await fetch(`/api/pay/${encodeURIComponent(artifactId)}`, { method: 'POST', cache: 'no-store' });
         const body = (await response.json().catch(() => null)) as { orderId?: string; checkoutUrl?: string; app?: string; code?: string } | null;
+        // The page changed while this was on its way: its answer is not for the page that is here now
+        if (generation !== current.current) {
+          popup?.close();
+          return;
+        }
         if (!response.ok || !body?.orderId || !body.checkoutUrl) {
           popup?.close();
           busy.current = false;
@@ -87,11 +122,13 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
         }
         setLine(null);
         if (popup) popup.location.href = body.checkoutUrl;
-        else setResume({ url: body.checkoutUrl, app: body.app ?? 'the payment page' });
+        // The link stays whether or not the window opened: a buyer who closes it unpaid can open the same checkout again
+        setResume({ url: body.checkoutUrl, app: body.app ?? 'the payment page' });
         tell('started');
         watch(body.orderId);
       } catch {
         popup?.close();
+        if (generation !== current.current) return;
         busy.current = false;
         setLine(WORDS.unavailable);
         tell('unavailable');
@@ -100,18 +137,37 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
     window.addEventListener('message', onMessage);
     return () => {
       window.removeEventListener('message', onMessage);
+      // Everything still in flight belongs to a page that is gone, and so do its line, its link and its busy tap
+      current.current += 1;
+      busy.current = false;
+      setLine(null);
+      setResume(null);
+      setRecheck(null);
       if (timer.current) clearTimeout(timer.current);
     };
   }, [artifactId, tell, watch]);
 
-  if (!line && !resume) return null;
+  if (!line && !resume && !recheck) return null;
   return (
     <div role="status" data-testid="pagePayments" className="fixed bottom-[max(3.25rem,env(safe-area-inset-bottom))] left-1/2 z-10 grid -translate-x-1/2 gap-2 rounded-2xl border border-[#2a2638] bg-[#15121f] px-4 py-3 text-center text-[14px] text-[#f3f1fa] shadow-[0_8px_24px_rgba(0,0,0,.45)] [font-family:var(--font-inter),system-ui,sans-serif]">
       {line ? <p>{line}</p> : null}
       {resume ? (
         <a href={resume.url} target="_blank" rel="noopener noreferrer" className="rounded-full bg-[#f3f1fa] px-4 py-2 font-semibold text-[#0A0814] no-underline">
-          Continue to {resume.app}
+          Open {resume.app} again
         </a>
+      ) : null}
+      {recheck ? (
+        <button
+          type="button"
+          onClick={() => {
+            setRecheck(null);
+            setLine(null);
+            watch(recheck);
+          }}
+          className="rounded-full bg-[#f3f1fa] px-4 py-2 font-semibold text-[#0A0814]"
+        >
+          Check again
+        </button>
       ) : null}
     </div>
   );

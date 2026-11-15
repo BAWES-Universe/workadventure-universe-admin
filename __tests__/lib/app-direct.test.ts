@@ -9,7 +9,8 @@ import { lastFour, scrubDeep, scrubSecret, secretForms } from '@/lib/app-direct/
 import { GuardError, guardedRequest, isPublicAddress, targetOf } from '@/lib/app-direct/guard';
 import { looksLikeAKey, parseDraft, KeyFormError } from '@/lib/app-direct/connect';
 import { scrubKeyRequest } from '@/lib/sentry-private';
-jest.mock('@/lib/app-direct/catalog', () => require('../helpers/example-gateway').catalogWithExample());
+import { EXAMPLE_GATEWAY } from '../helpers/example-gateway';
+jest.mock('@/lib/app-direct/catalog', () => jest.requireActual('../helpers/example-gateway').catalogWithExample());
 
 const KEY = 'sk_test_4f9a8c1d2e3b7a60';
 
@@ -114,6 +115,27 @@ describe('a definition is data with hard edges', () => {
     expect(parsed.service).toBe('custom');
     expect(parsed.operations.every((operation) => operation.verified === false)).toBe(true);
     expect(() => parseDraft({ nonsense: true })).toThrow(KeyFormError);
+  });
+
+  it('refuses test and live prefixes that cannot tell the two apart', () => {
+    const withModes = (modes: { test: string; live: string }) => definitionSchema.safeParse({ ...draft(), modes });
+    expect(withModes({ test: 'sk_test_', live: 'sk_live_' }).success).toBe(true);
+    // One starts the other: a live key would pass for a test key and a switch would go unasked
+    expect(withModes({ test: 'sk_', live: 'sk_live_' }).success).toBe(false);
+    expect(withModes({ test: 'sk_test_', live: 'sk_' }).success).toBe(false);
+    expect(withModes({ test: 'sk_', live: 'sk_' }).success).toBe(false);
+    expect(definitionSchema.safeParse(draft()).success).toBe(true);
+  });
+
+  it('refuses a payment setup whose amount is not a number, since the checkout always sends one', () => {
+    const base = JSON.parse(JSON.stringify(EXAMPLE_GATEWAY));
+    expect(definitionSchema.safeParse(base).success).toBe(true);
+    const text = JSON.parse(JSON.stringify(base));
+    const made = text.operations.find((operation: { id: string }) => operation.id === text.payment.create.operation);
+    made.params.find((param: { name: string }) => param.name === text.payment.create.amount).type = 'string';
+    const result = definitionSchema.safeParse(text);
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result.success ? '' : result.error.issues)).toContain('must be a number');
   });
 
   it('knows a site from a different one', () => {

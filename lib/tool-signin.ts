@@ -74,17 +74,19 @@ export async function syncToolSignInNotices(botId: string, fresh?: { serverId: s
       const downRows = bot
         ? await tx.botMcpServer.findMany({
             where: { botId, OR: [{ signInLostAt: { not: null }, connectionId: null }, { connection: { signInLostAt: { not: null } } }] },
-            select: { id: true, name: true, authType: true, signInLostAt: true, connectedById: true, connectionId: true, connection: { select: { name: true, authType: true, kind: true, signInLostAt: true, connectedById: true } } },
+            select: { id: true, name: true, authType: true, signInLostAt: true, connectedById: true, connectionId: true, connection: { select: { name: true, authType: true, kind: true, signInLostAt: true, connectedById: true, ownerId: true } } },
           })
         : [];
       const lost = downRows
-        .map((row) => (row.connection ? { id: row.id, name: row.connection.name, authType: row.connection.authType, direct: row.connection.kind === 'direct', signInLostAt: row.connection.signInLostAt, connectedById: row.connection.connectedById } : row))
+        .map((row) => (row.connection ? { id: row.id, name: row.connection.name, authType: row.connection.authType, direct: row.connection.kind === 'direct', signInLostAt: row.connection.signInLostAt, connectedById: row.connection.connectedById, keyOwnerId: row.connection.ownerId } : row))
         .filter((row) => row.signInLostAt !== null)
         .sort((a, b) => (a.signInLostAt as Date).getTime() - (b.signInLostAt as Date).getTime());
       const byPerson = new Map<string, typeof lost>();
       for (const server of lost) {
-        // The one who connected it; the bot's maker when that person can no longer manage it (or never was recorded)
-        const person = [server.connectedById, bot?.createdById].find((candidate): candidate is string => !!candidate && mayBeTold.has(candidate));
+        // The one who connected it; the bot's maker when that person can no longer manage it (or never was recorded). A key belongs to
+        // the person who gave it and only they can replace it, so its card goes to them alone: the maker could not do what it asks
+        const candidates = 'direct' in server && server.direct ? [server.keyOwnerId] : [server.connectedById, bot?.createdById];
+        const person = candidates.find((candidate): candidate is string => !!candidate && mayBeTold.has(candidate));
         if (person) byPerson.set(person, [...(byPerson.get(person) ?? []), server]);
       }
       const open = await tx.userNotice.findMany({
@@ -228,6 +230,17 @@ export async function dropOrphanedToolSignInNotices(userId: string): Promise<voi
     Sentry.captureException(error, { tags: { area: 'tool-signin' } });
     console.error('[ToolSignIn] Could not check the cards for deleted bots:', error instanceof Error ? error.message : 'unknown');
   }
+}
+
+/**
+ * A good answer from a key: clears a "stopped working" mark, but only when the key is still the one that was used (a late answer from a
+ * key that has been replaced says nothing about the new one) and only when the connection is marked right now (not as it was when the
+ * call began, since another call may have reported a refusal in between).
+ */
+export async function reportKeyWorked(connectionId: string, keyVersion: number): Promise<void> {
+  const now = await prisma.appConnection.findUnique({ where: { id: connectionId }, select: { keyVersion: true, signInLostAt: true } });
+  if (!now || now.keyVersion !== keyVersion || !now.signInLostAt) return;
+  await reportConnectionSignIn(connectionId, { state: 'ok' }, new Date());
 }
 
 /** The same report, for the connection a grant belongs to: its fields move, and the cards of every Brick that uses it follow. */

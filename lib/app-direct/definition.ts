@@ -189,6 +189,8 @@ export const definitionSchema = z
       if (operation.body !== undefined && operation.method === 'GET') ctx.addIssue({ code: 'custom', path: [...path, 'body'], message: 'A GET has no body' });
       if (operation.verified && def.service === 'custom') ctx.addIssue({ code: 'custom', path: [...path, 'verified'], message: 'A custom operation is never verified' });
     });
+    // A test prefix that starts the live one (or the other way round) cannot tell the two apart: a switch between them would pass unasked
+    if (def.modes && (def.modes.test.startsWith(def.modes.live) || def.modes.live.startsWith(def.modes.test))) ctx.addIssue({ code: 'custom', path: ['modes'], message: 'The test and live key prefixes must differ from the start' });
     if (def.payment) {
       const { create, lookup } = def.payment;
       const made = def.operations.find((candidate) => candidate.id === create.operation);
@@ -198,6 +200,9 @@ export const definitionSchema = z
       };
       if (!made || made.method !== 'POST' || made.category !== 'make') ctx.addIssue({ code: 'custom', path: ['payment', 'create'], message: 'A checkout is made by a POST operation that makes something' });
       if (!asked || asked.method !== 'GET' || asked.category !== 'lookUp') ctx.addIssue({ code: 'custom', path: ['payment', 'lookup'], message: 'A payment is read by a GET look-up' });
+      // The checkout always sends the amount as a number: a parameter declared as text could never be filled
+      const amountParam = made?.params.find((param) => param.name === create.amount);
+      if (amountParam && amountParam.type !== 'number') ctx.addIssue({ code: 'custom', path: ['payment', 'create', 'amount'], message: `${create.amount} must be a number` });
       need(made, [create.amount, create.currency, create.orderRef, create.idempotentKey, create.returnUrl, create.notifyUrl, create.customerName], 'create');
       need(asked, [lookup.idParam], 'lookup');
       for (const path of [create.idPath, create.checkoutUrlPath]) if (made && !made.returns.includes(path)) ctx.addIssue({ code: 'custom', path: ['payment', 'create'], message: `${path} is not among what the operation returns` });

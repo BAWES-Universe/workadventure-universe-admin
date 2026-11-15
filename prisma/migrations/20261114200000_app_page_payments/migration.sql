@@ -38,6 +38,7 @@ CREATE TABLE "app_page_orders" (
     "checks" INTEGER NOT NULL DEFAULT 0,
     "checked_at" TIMESTAMP(3),
     "paid_at" TIMESTAMP(3),
+    "closed_at" TIMESTAMP(3),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "app_page_orders_pkey" PRIMARY KEY ("id")

@@ -3,7 +3,7 @@
 -- CreateTable
 CREATE TABLE "app_key_calls" (
     "id" TEXT NOT NULL,
-    "connection_id" TEXT NOT NULL,
+    "connection_id" TEXT,
     "owner_id" TEXT NOT NULL,
     "bot_id" VARCHAR(255) NOT NULL,
     "call_id" VARCHAR(200) NOT NULL,
@@ -26,4 +26,4 @@ CREATE INDEX "app_key_calls_owner_id_created_at_idx" ON "app_key_calls"("owner_i
 CREATE INDEX "app_key_calls_created_at_idx" ON "app_key_calls"("created_at");
 
 -- AddForeignKey
-ALTER TABLE "app_key_calls" ADD CONSTRAINT "app_key_calls_connection_id_fkey" FOREIGN KEY ("connection_id") REFERENCES "app_connections"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "app_key_calls" ADD CONSTRAINT "app_key_calls_connection_id_fkey" FOREIGN KEY ("connection_id") REFERENCES "app_connections"("id") ON DELETE SET NULL ON UPDATE CASCADE;

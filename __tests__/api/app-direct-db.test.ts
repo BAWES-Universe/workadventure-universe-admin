@@ -9,6 +9,22 @@ import { NextRequest } from 'next/server';
 
 const mockUser: { current: { id: string; isGuest?: boolean } | null } = { current: null };
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => mockUser.current) }));
+// The real guard, except when a test says what the service answers: nothing here reaches the internet
+const mockSend: { current: ((target: { path: string }) => number) | null } = { current: null };
+jest.mock('@/lib/app-direct/guard', () => {
+  const actual = jest.requireActual('@/lib/app-direct/guard');
+  return {
+    ...actual,
+    guardedRequest: jest.fn((request: Parameters<typeof actual.guardedRequest>[0], deps?: Parameters<typeof actual.guardedRequest>[1]) =>
+      mockSend.current
+        ? actual.guardedRequest(request, {
+            resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+            send: async (target: { path: string }) => ({ status: mockSend.current!(target), redirected: false, body: '{}', truncated: false, contentType: 'application/json' }),
+          })
+        : actual.guardedRequest(request, deps),
+    ),
+  };
+});
 
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
@@ -23,7 +39,7 @@ import { POST as sendKey } from '@/app/api/me/apps/key-forms/[formId]/key/route'
 import { GET as listApps } from '@/app/api/me/apps/route';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { EXAMPLE_GATEWAY } from '../helpers/example-gateway';
-jest.mock('@/lib/app-direct/catalog', () => require('../helpers/example-gateway').catalogWithExample());
+jest.mock('@/lib/app-direct/catalog', () => jest.requireActual('../helpers/example-gateway').catalogWithExample());
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -283,8 +299,14 @@ run('key apps, in a real database', () => {
     it('opens a form, shows it, takes the key, and refuses a guest, a stranger and a body with anything else in it', async () => {
       const spec = await listServices(request('/api/me/apps/key-services'));
       expect(spec.status).toBe(401);
-      mockUser.current = { id: sara, isGuest: true };
-      expect((await openForm(request('/api/me/apps/key-forms', { service: 'examplepay' }))).status).toBe(403);
+      // A guest is read from the account itself, not from anything the session carries
+      mockUser.current = { id: sara };
+      await prisma.user.update({ where: { id: sara }, data: { isGuest: true } });
+      try {
+        expect((await openForm(request('/api/me/apps/key-forms', { service: 'examplepay' }))).status).toBe(403);
+      } finally {
+        await prisma.user.update({ where: { id: sara }, data: { isGuest: false } });
+      }
 
       mockUser.current = { id: sara };
       expect((await (await listServices(request('/api/me/apps/key-services'))).json()).services.map((entry: { service: string }) => entry.service)).toEqual(['examplepay']);
@@ -307,15 +329,25 @@ run('key apps, in a real database', () => {
       expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(0);
     });
 
-    it('answers a key the service takes with the app and never the key', async () => {
-      const form = await open();
-      const real = global.fetch;
-      // The route uses the real guard: a name that resolves nowhere public is refused as unreachable and stores nothing
+    it('answers a key the service takes with the app and never the key, and one it refuses with a plain no', async () => {
       mockUser.current = { id: sara };
-      const response = await sendKey(request(`/api/me/apps/key-forms/${form}/key`, { key: TEST_KEY }), params({ formId: form }));
-      global.fetch = real;
-      expect([502, 201, 422]).toContain(response.status);
-      expect(JSON.stringify(await response.json())).not.toContain(TEST_KEY);
+      try {
+        const refused = await open();
+        mockSend.current = () => 401;
+        const no = await sendKey(request(`/api/me/apps/key-forms/${refused}/key`, { key: TEST_KEY }), params({ formId: refused }));
+        expect(no.status).toBe(422);
+        expect(JSON.stringify(await no.json())).not.toContain(TEST_KEY);
+        expect(await prisma.appConnection.count({ where: { ownerId: sara } })).toBe(0);
+
+        const form = await open();
+        mockSend.current = () => 404;
+        const response = await sendKey(request(`/api/me/apps/key-forms/${form}/key`, { key: TEST_KEY }), params({ formId: form }));
+        expect(response.status).toBe(201);
+        expect(JSON.stringify(await response.json())).not.toContain(TEST_KEY);
+        expect(await prisma.appConnection.count({ where: { ownerId: sara, kind: 'direct' } })).toBe(1);
+      } finally {
+        mockSend.current = null;
+      }
     });
   });
 

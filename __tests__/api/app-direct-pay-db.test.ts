@@ -42,7 +42,7 @@ import { DELETE as stopPage } from '@/app/api/me/apps/pages/[jobId]/route';
 import { GET as publicGet, POST as publicStart } from '@/app/api/pay/[artifactId]/route';
 import { POST as gamePay } from '@/app/api/artifacts/[id]/pay/route';
 import { POST as notice } from '@/app/api/app-pay/notice/[orderId]/route';
-jest.mock('@/lib/app-direct/catalog', () => require('../helpers/example-gateway').catalogWithExample());
+jest.mock('@/lib/app-direct/catalog', () => jest.requireActual('../helpers/example-gateway').catalogWithExample());
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -109,6 +109,12 @@ async function checkout(artifactId: string, address?: string): Promise<{ orderId
   expect(response.status).toBe(200);
   return response.json();
 }
+async function pending(): Promise<{ artifactId: string; connectionId: string }> {
+  const { id, serverId } = await connectGateway();
+  const artifactId = await makeArtifact();
+  await job(serverId, artifactId);
+  return { artifactId, connectionId: id };
+}
 const settle = async (orderId: string) => {
   // The check is rate limited per order: let the last look be old enough
   await prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 60_000) } });
@@ -134,6 +140,8 @@ run('payments for pages, in a real database', () => {
     mockSend.current = null;
     mockUser.current = null;
     await prisma.appPageOrder.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
+    // The rows that count uses of a key stay when the app is disconnected, so they are cleared here (and the rows that count payment looks)
+    await prisma.appKeyCall.deleteMany({ where: { ownerId: { in: [sara, omar, 'page-payments'] } } });
     await prisma.appPageJob.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
     await prisma.artifact.deleteMany({ where: { id: { in: artifacts.splice(0) } } });
     await prisma.appKeyRequest.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
@@ -439,13 +447,6 @@ run('payments for pages, in a real database', () => {
   /* ------------------------- is it paid ------------------------- */
 
   describe('deciding that it is paid', () => {
-    async function pending(): Promise<{ artifactId: string; connectionId: string }> {
-      const { id, serverId } = await connectGateway();
-      const artifactId = await makeArtifact();
-      await job(serverId, artifactId);
-      return { artifactId, connectionId: id };
-    }
-
     it('writes paid only when the service’s own record says completed for this order, amount, currency and mode, and tells the owner once', async () => {
       const { artifactId } = await pending();
       gateway({ record: (order) => paidRecord(order) });
@@ -574,7 +575,8 @@ run('payments for pages, in a real database', () => {
       it('is not asked about again once it is older than the late-payment hours from Limits', async () => {
         const { artifactId } = await pending();
         const orderId = await closeByExpiry(artifactId, '198.51.100.34');
-        await prisma.appPageOrder.update({ where: { id: orderId }, data: { createdAt: new Date(Date.now() - 60 * 3_600_000) } });
+        // The window runs from when it was closed: closed more than the late hours ago, it is not asked about again
+        await prisma.appPageOrder.update({ where: { id: orderId }, data: { createdAt: new Date(Date.now() - 80 * 3_600_000), closedAt: new Date(Date.now() - 60 * 3_600_000) } });
         const sent = gateway({ record: (order) => paidRecord(order) });
         expect(await settle(orderId)).toMatchObject({ status: 'not_paid' });
         expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(0);
@@ -711,6 +713,103 @@ run('payments for pages, in a real database', () => {
       gateway();
       expect((await startCheckout({ artifactId, visitor: 'one' })).status).toBe('ok');
       expect((await startCheckout({ artifactId, visitor: 'two' })).status).toBe('limit');
+    });
+  });
+
+  describe('after the review of the first version', () => {
+    it('measures the late-payment window from when the order was closed, not from when it was made', async () => {
+      const { artifactId } = await pending();
+      await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
+      gateway({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
+      const order = await checkout(artifactId, '198.51.100.50');
+      // Made 60 hours ago, and only now found to have run out of time: still a day and a half to come in
+      await prisma.appPageOrder.update({ where: { id: order.orderId }, data: { createdAt: new Date(Date.now() - 60 * 3_600_000) } });
+      expect(await settle(order.orderId)).toMatchObject({ status: 'not_paid' });
+      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: order.orderId } })).closedAt).not.toBeNull();
+      gateway({ record: (id) => paidRecord(id) });
+      expect(await settle(order.orderId)).toMatchObject({ status: 'paid' });
+    });
+
+    it('ends an order whose start never finished, instead of leaving it checking for ever', async () => {
+      const { artifactId } = await pending();
+      const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+      const stuck = await prisma.appPageOrder.create({
+        data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, status: 'creating', visitorHash: 'v', createdAt: new Date(Date.now() - 3_600_000) },
+      });
+      const fresh = await prisma.appPageOrder.create({
+        data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, status: 'creating', visitorHash: 'v2' },
+      });
+      expect(await verifyOrder(fresh.id)).toMatchObject({ status: 'checking' });
+      expect(await verifyOrder(stuck.id)).toMatchObject({ status: 'cant_confirm' });
+      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: stuck.id } })).status).toBe('cant_confirm');
+    });
+
+    it('never keeps or gives out a checkout address that carries the key', async () => {
+      const { artifactId } = await pending();
+      gateway({ create: { transaction: { url: `https://checkout.examplepay.com/?mode=page&token=${KEY}` } } });
+      const response = await start(artifactId, '198.51.100.51');
+      expect(response.status).toBe(409);
+      expect(JSON.stringify(await response.json())).not.toContain(KEY);
+      const order = await prisma.appPageOrder.findFirstOrThrow({ where: { artifactId } });
+      expect(order).toMatchObject({ status: 'cant_confirm', checkoutUrl: null });
+      // Percent-encoded is the same key
+      gateway({ create: { transaction: { url: `https://checkout.examplepay.com/?t=${'%73' + KEY.slice(1)}` } } });
+      expect((await start(artifactId, '198.51.100.52')).status).toBe(409);
+    });
+
+    it('counts a look at a payment against what everyone may send an hour, and waits when that is spent', async () => {
+      await saveServerLimits({ bricks: { keyCallsPlatform: 2 } }, sara);
+      const { artifactId } = await pending();
+      const sent = gateway({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
+      const { orderId } = await checkout(artifactId, '198.51.100.53');
+      await settle(orderId);
+      expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(1);
+      expect(await prisma.appKeyCall.count({ where: { ownerId: 'page-payments' } })).toBe(1);
+      // The one order and the one look are all there is: the next look waits, and says so to a notice
+      const again = await settle(orderId);
+      expect(again).toMatchObject({ status: 'checking' });
+      expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(1);
+      // Never charged to the owner's own allowance
+      expect(await prisma.appKeyCall.count({ where: { ownerId: sara } })).toBe(0);
+    });
+
+    it('answers a notice that had to wait with a request to come back, so the service asks again', async () => {
+      const { artifactId } = await pending();
+      gateway({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
+      const { orderId } = await checkout(artifactId, '198.51.100.54');
+      await settle(orderId);
+      // The order was asked about a moment ago
+      const waited = await notice(request(`/api/app-pay/notice/${orderId}`, { method: 'POST', body: { status: 'CAPTURED' } }), params({ orderId }));
+      expect(waited.status).toBe(429);
+      expect(Number(waited.headers.get('retry-after'))).toBeGreaterThan(0);
+      // After the wait it asks, and is done
+      await prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 60_000) } });
+      gateway({ record: (order) => paidRecord(order) });
+      const done = await notice(request(`/api/app-pay/notice/${orderId}`, { method: 'POST', body: { status: 'CAPTURED' } }), params({ orderId }));
+      expect(done.status).toBe(200);
+      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('paid');
+    });
+
+    it('starts a checkout with the terms the owner holds when the lock is taken, not the ones read before it', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await makeArtifact();
+      expect((await job(serverId, artifactId)).status).toBe(200);
+      gateway();
+      // The owner replaces the terms between the first read and the lock
+      const real = prisma.$transaction.bind(prisma);
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((fn: unknown, ...rest: unknown[]) => {
+        return (async () => {
+          await prisma.appPageJob.update({ where: { artifactId }, data: { amountMinor: 9_000 } });
+          return (real as (...args: unknown[]) => Promise<unknown>)(fn, ...rest);
+        })();
+      }) as never);
+      try {
+        const { orderId } = await checkout(artifactId, '198.51.100.55');
+        const order = await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } });
+        expect(order.amountMinor).toBe(9_000);
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 });

@@ -82,7 +82,7 @@ const RAW: Definition = {
 
 export const EXAMPLE_GATEWAY: Definition = definitionSchema.parse(RAW);
 
-/** For `jest.mock('@/lib/app-direct/catalog', () => require('../helpers/example-gateway').catalogWithExample())`. */
+/** For `jest.mock('@/lib/app-direct/catalog', () => jest.requireActual('../helpers/example-gateway').catalogWithExample())`. */
 export const catalogWithExample = () => {
   const actual = jest.requireActual('@/lib/app-direct/catalog') as typeof import('@/lib/app-direct/catalog');
   return { ...actual, ...actual.makeCatalog([EXAMPLE_GATEWAY]) };

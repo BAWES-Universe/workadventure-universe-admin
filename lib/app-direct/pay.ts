@@ -4,13 +4,12 @@ import { prisma } from '@/lib/db';
 import { getBrickLimits } from '@/lib/bot-limits';
 import { checkAppUse } from '@/lib/app-connections';
 import { addNotice } from '@/lib/notices';
-import { reportConnectionSignIn } from '@/lib/tool-signin';
+import { reportConnectionSignIn, reportKeyWorked } from '@/lib/tool-signin';
 import { resolveExpectedLoginOrigin } from '@/lib/auth';
 import { definitionSchema, hashDefinition, type Definition } from '@/lib/app-direct/definition';
 import { guardedRequest, GuardError, type GuardDeps } from '@/lib/app-direct/guard';
 import { buildRequest, pickFields, RequestError } from '@/lib/app-direct/request';
 import { readKey } from '@/lib/app-direct/connect';
-import { scrubDeep } from '@/lib/app-direct/scrub';
 
 /**
  * Payments for pages (game #2044, step 3). A page the owner asked a Brick to make can ask for one fixed amount, through an app of theirs
@@ -185,48 +184,71 @@ export interface StartCheckout {
 }
 
 const HOUR = 3_600_000;
+/** What the rows that count a payment look in the hour's key calls hold in place of a person and a Brick. */
+const LOOKUP_ROWS = 'page-payments';
 
-export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}): Promise<CheckoutOutcome> {
-  const job = await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId }, include: { connection: true, artifact: { select: { expiresAt: true } } } });
+type CheckoutJob = Prisma.AppPageJobGetPayload<{ include: { connection: true; artifact: { select: { expiresAt: true } } } }>;
+
+/**
+ * Whether a checkout may start on this job right now, and with what: the definition it would use. The same test runs twice, once to
+ * find the owner and once under the lock on the job and the app, so a change that committed in between is never missed.
+ */
+function checkoutTerms(job: CheckoutJob | null) {
   const connection = job?.connection;
-  if (!job || job.status !== 'active' || !connection || connection.kind !== 'direct') return { status: 'unavailable' };
+  if (!job || job.status !== 'active' || !connection || connection.kind !== 'direct') return null;
   // A key marked as stopped is not a reason to refuse here: the call itself finds out, and a good call is what clears the mark
-  if (job.artifact.expiresAt && job.artifact.expiresAt.getTime() <= Date.now()) return { status: 'unavailable' };
+  if (job.artifact.expiresAt && job.artifact.expiresAt.getTime() <= Date.now()) return null;
   const definition = definitionOf(connection);
   // An app with test and live keys needs to know which one this key is: a payment is never taken with a key of a kind it could not tell
-  if (definition?.modes && !connection.keyMode) return { status: 'unavailable' };
+  if (definition?.modes && !connection.keyMode) return null;
   // A definition that changed since the owner asked for this is not the one they agreed to: payments wait for them to ask again
-  if (!definition?.payment || job.definitionHash !== connection.definitionHash) return { status: 'unavailable' };
+  if (!definition?.payment || job.definitionHash !== connection.definitionHash) return null;
+  return { job, connection, definition, payment: definition.payment };
+}
+
+export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}): Promise<CheckoutOutcome> {
+  const first = checkoutTerms(await prisma.appPageJob.findUnique({ where: { artifactId: input.artifactId }, include: { connection: true, artifact: { select: { expiresAt: true } } } }));
+  if (!first) return { status: 'unavailable' };
   const origin = ownOrigin();
   if (!origin) return { status: 'unavailable' };
   const limits = await getBrickLimits();
   const hash = visitorHash(input.visitor);
 
-  const order = await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`page-orders:${job.ownerId}`}, 0))`;
-    const held = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_page_jobs" WHERE "id" = ${job.id} AND "status" = 'active' FOR SHARE`;
+  const started = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`page-orders:${first.job.ownerId}`}, 0))`;
+    // Holding both rows keeps the owner from replacing the terms or the key until this order is written; what they hold NOW is what the
+    // order and the request use, never what was read before the lock
+    const held = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_page_jobs" WHERE "id" = ${first.job.id} AND "status" = 'active' FOR SHARE`;
     if (held.length === 0) return 'gone' as const;
+    const app = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "app_connections" WHERE "id" = ${first.connection.id} FOR SHARE`;
+    if (app.length === 0) return 'gone' as const;
+    const terms = checkoutTerms(await tx.appPageJob.findUnique({ where: { id: first.job.id }, include: { connection: true, artifact: { select: { expiresAt: true } } } }));
+    if (!terms) return 'gone' as const;
     const since = new Date(Date.now() - HOUR);
     const [mine, page, visitor, platform, calls] = await Promise.all([
-      tx.appPageOrder.count({ where: { ownerId: job.ownerId, createdAt: { gte: since } } }),
-      tx.appPageOrder.count({ where: { jobId: job.id, createdAt: { gte: since } } }),
-      tx.appPageOrder.count({ where: { jobId: job.id, visitorHash: hash, createdAt: { gte: since } } }),
+      tx.appPageOrder.count({ where: { ownerId: terms.job.ownerId, createdAt: { gte: since } } }),
+      tx.appPageOrder.count({ where: { jobId: terms.job.id, createdAt: { gte: since } } }),
+      tx.appPageOrder.count({ where: { jobId: terms.job.id, visitorHash: hash, createdAt: { gte: since } } }),
       tx.appPageOrder.count({ where: { createdAt: { gte: since } } }),
       tx.appKeyCall.count({ where: { createdAt: { gte: since } } }),
     ]);
     if (visitor >= limits.checkoutsPerVisitor || page >= limits.checkoutsPerPage || mine >= limits.checkoutsPerOwner || platform + calls >= limits.keyCallsPlatform) return 'limit' as const;
-    return tx.appPageOrder.create({
-      data: { jobId: job.id, ownerId: job.ownerId, connectionId: connection.id, artifactId: job.artifactId, definitionHash: job.definitionHash, amountMinor: job.amountMinor, currency: job.currency, mode: connection.keyMode, status: 'creating', visitorHash: hash },
+    const made = await tx.appPageOrder.create({
+      data: { jobId: terms.job.id, ownerId: terms.job.ownerId, connectionId: terms.connection.id, artifactId: terms.job.artifactId, definitionHash: terms.job.definitionHash, amountMinor: terms.job.amountMinor, currency: terms.job.currency, mode: terms.connection.keyMode, status: 'creating', visitorHash: hash },
     });
+    return { order: made, ...terms };
   });
-  if (order === 'gone') return { status: 'unavailable' };
-  if (order === 'limit') return { status: 'limit' };
+  if (started === 'gone') return { status: 'unavailable' };
+  if (started === 'limit') return { status: 'limit' };
+  const { order, job, connection, definition, payment } = started;
 
   const fail = async (status: 'not_paid' | 'cant_confirm') => {
-    await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'creating' }, data: { status } }).catch(() => undefined);
+    // Nobody was ever given a link for an order that fails here (the buyer is told "unavailable" and never learns its id), so nothing can be paid
+    // against it: it is closed, and a try again makes a new order
+    await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'creating' }, data: { status, ...(status === 'not_paid' ? { closedAt: new Date() } : {}) } }).catch(() => undefined);
     return { status: 'unavailable' } as const;
   };
-  const { create } = definition.payment;
+  const { create } = payment;
   const operation = definition.operations.find((candidate) => candidate.id === create.operation);
   if (!operation) return fail('not_paid');
   // A key that cannot be read (damaged, or sealed with a key we no longer have) is a payment that cannot start: the order is closed, never left open
@@ -248,6 +270,7 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
   if (create.customerName) args[create.customerName] = 'Customer';
   if (job.description && operation.params.some((param) => param.name === 'description')) args.description = job.description;
 
+  const startedAt = new Date();
   let answer;
   try {
     const built = buildRequest(definition, operation.id, args, key);
@@ -260,12 +283,12 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
   }
   if (answer.redirected || answer.truncated) return fail('not_paid');
   if (answer.status === 401 || answer.status === 403) {
-    await reportConnectionSignIn(connection.id, { state: 'expired', status: answer.status }, new Date()).catch(() => undefined);
+    await reportConnectionSignIn(connection.id, { state: 'expired', status: answer.status }, startedAt).catch(() => undefined);
     return fail('not_paid');
   }
   if (answer.status < 200 || answer.status >= 300) return fail('not_paid');
   // The service accepted the key: a "stopped working" mark from an earlier refusal (even one for another operation) no longer holds
-  if (connection.signInLostAt) await reportConnectionSignIn(connection.id, { state: 'ok' }, new Date()).catch(() => undefined);
+  await reportKeyWorked(connection.id, connection.keyVersion).catch(() => undefined);
   let picked: unknown;
   try {
     picked = pickFields(JSON.parse(answer.body), operation.returns);
@@ -274,11 +297,25 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
   }
   const providerRef = valueAt(picked, create.idPath);
   const where = valueAt(picked, create.checkoutUrlPath);
-  const checkoutUrl = typeof where === 'string' ? safeCheckoutUrl(where, definition.payment.checkoutHosts) : null;
+  const checkoutUrl = typeof where === 'string' ? safeCheckoutUrl(where, payment.checkoutHosts) : null;
+  // An address that carries the key is never kept or given out, and never rewritten either (it may be signed): the checkout is not used
+  if (checkoutUrl && carriesKey(checkoutUrl, key)) return fail('cant_confirm');
   if (typeof providerRef !== 'string' || !providerRef || providerRef.length > 255 || !checkoutUrl) return fail('cant_confirm');
   // Kept so a blocked pop-up can go on with the SAME order, and so a later look can find the payment
-  await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'creating' }, data: { status: 'pending', providerRef, checkoutUrl: scrubDeep(checkoutUrl, key) as string } });
+  await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'creating' }, data: { status: 'pending', providerRef, checkoutUrl } });
   return { status: 'ok', orderId: order.id, checkoutUrl, amount: minorToText(job.amountMinor, job.currency), currency: job.currency, app: definition.short };
+}
+
+/** Whether the key is written anywhere in an address, as it is or percent-encoded. */
+function carriesKey(address: string, key: string): boolean {
+  if (!key) return false;
+  let decoded = address;
+  try {
+    decoded = decodeURIComponent(address);
+  } catch {
+    // A malformed escape: the text as it is was already checked
+  }
+  return address.includes(key) || decoded.includes(key) || address.includes(encodeURIComponent(key));
 }
 
 /** The address the buyer is sent to, only if it is https on the default port with no credentials, at a host the definition names. */
@@ -306,6 +343,10 @@ export interface OrderView {
   testPayment: boolean;
 }
 
+/** Answers that did not ask the service this time (it was asked a moment ago, or the hour's budget is spent): a notice that gets one is to be sent again later. */
+const waiting = new WeakSet<OrderView>();
+export const isWaiting = (view: OrderView): boolean => waiting.has(view);
+
 const stateOf = (status: string): OrderState => (status === 'paid' ? 'paid' : status === 'not_paid' ? 'not_paid' : status === 'cant_confirm' ? 'cant_confirm' : 'checking');
 
 /**
@@ -316,13 +357,23 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
   const order = await prisma.appPageOrder.findUnique({ where: { id: orderId }, include: { connection: true, job: { select: { artifact: { select: { title: true } } } } } });
   if (!order) return null;
   const view = (status: string, mode: string | null = order.mode): OrderView => ({ status: stateOf(status), checkoutUrl: status === 'pending' ? order.checkoutUrl : null, testPayment: mode === 'test' });
+  const limits = await getBrickLimits();
+  const now = new Date();
+  // An order still being made, past the time the service had to answer, is one whose start never finished (the server stopped, or the answer
+  // was lost): the buyer was never given a link for it, so nothing can have been paid against it. It ends as "could not confirm" and
+  // stays that way, instead of being "checking" for ever.
+  if (order.status === 'creating') {
+    if (now.getTime() - order.createdAt.getTime() <= limits.keyCallSeconds * 3 * 1000) return view('creating');
+    const ended = await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'creating' }, data: { status: 'cant_confirm' } });
+    return view(ended.count === 1 ? 'cant_confirm' : order.status);
+  }
   // Paid and cannot-confirm are final. A closed (not paid) order is asked about again for a while: the buyer may still pay at the service
   // after it was closed, and that is real money.
   if (order.status !== 'pending' && order.status !== 'not_paid') return view(order.status);
-  const limits = await getBrickLimits();
-  const now = new Date();
   const wasClosed = order.status === 'not_paid';
-  if (wasClosed && now.getTime() - order.createdAt.getTime() > (limits.checkoutOpenHours + limits.latePaymentHours) * HOUR) return view(order.status);
+  // The late window runs from when the order was closed (an order closed because its time ran out closed at the end of that time)
+  const closedAt = order.closedAt ?? new Date(order.createdAt.getTime() + limits.checkoutOpenHours * HOUR);
+  if (wasClosed && now.getTime() - closedAt.getTime() > limits.latePaymentHours * HOUR) return view(order.status);
   // What the order may still become: a pending one anything, a closed one only paid (or cannot-confirm for a payment that does not match)
   const open = { in: ['pending', 'not_paid'] };
 
@@ -341,7 +392,11 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
     where: { id: order.id, status: open, OR: [{ checkedAt: null }, { checkedAt: { lt: new Date(now.getTime() - limits.paymentCheckSeconds * 1000) } }] },
     data: { checkedAt: now, checks: { increment: 1 } },
   });
-  if (taken.count === 0) return view(order.status);
+  if (taken.count === 0) {
+    const same = view(order.status);
+    waiting.add(same);
+    return same;
+  }
 
   const { lookup } = definition.payment;
   let key: string;
@@ -353,6 +408,24 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
     await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'pending' }, data: { status: 'cant_confirm' } });
     return view('cant_confirm');
   }
+  // Looks count against what everyone may send an hour, like every other use of a key: when that is spent the look waits for the next one
+  const budget = await prisma
+    .$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('key-calls:everyone', 0))`;
+      const since = new Date(now.getTime() - HOUR);
+      const [orders, calls] = await Promise.all([tx.appPageOrder.count({ where: { createdAt: { gte: since } } }), tx.appKeyCall.count({ where: { createdAt: { gte: since } } })]);
+      if (orders + calls >= limits.keyCallsPlatform) return false;
+      // Not counted for the owner's own hourly allowance (a buyer's page asks, not the owner), only for everyone
+      await tx.appKeyCall.create({ data: { connectionId: connection.id, ownerId: LOOKUP_ROWS, botId: LOOKUP_ROWS, callId: `look:${order.id}:${order.checks + 1}`, operation: lookup.operation.slice(0, 60), state: 'done', outcome: 'ok' } });
+      return true;
+    })
+    .catch(() => false);
+  if (!budget) {
+    const same = view(order.status);
+    waiting.add(same);
+    return same;
+  }
+  const startedAt = new Date();
   let answer;
   try {
     const built = buildRequest(definition, lookup.operation, { [lookup.idParam]: order.providerRef }, key);
@@ -362,11 +435,11 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
     throw error;
   }
   if (answer.status === 401 || answer.status === 403) {
-    await reportConnectionSignIn(connection.id, { state: 'expired', status: answer.status }, new Date()).catch(() => undefined);
+    await reportConnectionSignIn(connection.id, { state: 'expired', status: answer.status }, startedAt).catch(() => undefined);
     return view(order.status);
   }
   if (answer.redirected || answer.truncated || answer.status < 200 || answer.status >= 300) return view(order.status);
-  if (connection.signInLostAt) await reportConnectionSignIn(connection.id, { state: 'ok' }, new Date()).catch(() => undefined);
+  await reportKeyWorked(connection.id, connection.keyVersion).catch(() => undefined);
   let record: unknown;
   try {
     const asked = definition.operations.find((candidate) => candidate.id === lookup.operation);
@@ -406,7 +479,7 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
   // open until it has been open too long. A payment that completes after that is still real money and is still counted above.
   const failed = typeof status === 'string' && lookup.failedStates.includes(status);
   if (!failed && !expired) return view('pending');
-  const closed = await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'pending' }, data: { status: 'not_paid' } });
+  const closed = await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'pending' }, data: { status: 'not_paid', closedAt: now } });
   return closed.count === 1 ? view('not_paid') : view('pending');
 }
 

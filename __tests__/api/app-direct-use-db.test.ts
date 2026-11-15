@@ -11,7 +11,24 @@ import { NextRequest } from 'next/server';
 const mockUser: { current: { id: string; isGuest?: boolean } | null } = { current: null };
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => mockUser.current) }));
 // The real guard, except when a test says what the service answers
-const mockSend: { current: ((target: { host: string; path: string; method: string; headers: Record<string, string>; body?: string }) => { status: number; body?: string; redirected?: boolean; truncated?: boolean }) | null } = { current: null };
+type Answer = { status: number; body?: string; redirected?: boolean; truncated?: boolean };
+const mockSend: { current: ((target: { host: string; path: string; method: string; headers: Record<string, string>; body?: string }) => Answer | Promise<Answer>) | null } = { current: null };
+const mockDown = { current: false };
+// A change that commits right after the admission check, to see what the call does about it
+const mockAfterCheck: { current: (() => Promise<void>) | null } = { current: null };
+jest.mock('@/lib/app-connections', () => {
+  const actual = jest.requireActual('@/lib/app-connections');
+  return {
+    ...actual,
+    checkAppUse: jest.fn(async (...args: Parameters<typeof actual.checkAppUse>) => {
+      const verdict = await actual.checkAppUse(...args);
+      const hook = mockAfterCheck.current;
+      mockAfterCheck.current = null;
+      if (hook) await hook();
+      return verdict;
+    }),
+  };
+});
 jest.mock('@/lib/app-direct/guard', () => {
   const actual = jest.requireActual('@/lib/app-direct/guard');
   return {
@@ -19,9 +36,10 @@ jest.mock('@/lib/app-direct/guard', () => {
     guardedRequest: jest.fn((request: Parameters<typeof actual.guardedRequest>[0], deps?: Parameters<typeof actual.guardedRequest>[1]) =>
       mockSend.current
         ? actual.guardedRequest(request, {
-            resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+            // A name that resolves nowhere is a service that cannot be reached
+            resolve: async () => (mockDown.current ? [] : [{ address: '93.184.216.34', family: 4 }]),
             send: async (target: { host: string; path: string; method: string; headers: Record<string, string>; body?: string }) => {
-              const answer = mockSend.current!(target);
+              const answer = await mockSend.current!(target);
               return { status: answer.status, redirected: answer.redirected ?? false, body: answer.body ?? '{}', truncated: answer.truncated ?? false, contentType: 'application/json' };
             },
           })
@@ -43,7 +61,7 @@ import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { GET as readTools } from '@/app/api/bots/[id]/mcp-servers/[serverId]/tools/route';
 import { confirmTools } from '@/lib/mcp-tool-policy';
 import { saveServerLimits } from '@/lib/bot-limits';
-jest.mock('@/lib/app-direct/catalog', () => require('../helpers/example-gateway').catalogWithExample());
+jest.mock('@/lib/app-direct/catalog', () => jest.requireActual('../helpers/example-gateway').catalogWithExample());
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -104,7 +122,10 @@ run('using a key app, in a real database', () => {
 
   afterEach(async () => {
     mockSend.current = null;
+    mockAfterCheck.current = null;
     mockUser.current = null;
+    // The rows that count uses of a key stay when an app is disconnected, so they are cleared here
+    await prisma.appKeyCall.deleteMany({ where: { ownerId: { in: [sara, omar, 'page-payments'] } } });
     await prisma.appKeyRequest.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
     await prisma.appConnection.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
     await prisma.botMcpServer.deleteMany({ where: { botId: { in: [saraBrick, saraStudio, omarBrick, roomBot] } } });
@@ -428,10 +449,17 @@ run('using a key app, in a real database', () => {
     const redirected = await call(saraBrick, app.serverId, app.definitionHash);
     expect(redirected.status).toBe(502);
     expect((await redirected.json()).code).toBe('unavailable');
-    mockSend.current = null;
-    // The real guard, with no service to reach in the sandbox: refused or unreachable, never a raw error
-    const unreachable = await call(saraBrick, app.serverId, app.definitionHash);
-    expect([502]).toContain(unreachable.status);
+    // A service that cannot be reached: said as unavailable, never a raw error
+    mockSend.current = () => ({ status: 200 });
+    mockDown.current = true;
+    try {
+      const unreachable = await call(saraBrick, app.serverId, app.definitionHash);
+      expect(unreachable.status).toBe(502);
+      expect((await unreachable.json()).code).toBe('unavailable');
+    } finally {
+      mockDown.current = false;
+      mockSend.current = null;
+    }
   });
 
   it('cuts a long answer and gives back nothing from it, rather than half of it', async () => {
@@ -497,5 +525,122 @@ run('using a key app, in a real database', () => {
     const [app] = await keyAppsOf(saraBrick);
     const outcome = await runKeyApp({ botId: saraBrick, serverId: app.serverId, requesterKey: `sara-${tag}`, callId: `lib-${tag}`, operation: 'lookUpPayment', arguments: { chargeId: 'chg_9' }, definitionHash: app.definitionHash }, { resolve: async () => [{ address: '93.184.216.34', family: 4 }], send: async () => ({ status: 200, redirected: false, body: '{"id":"chg_9","status":"INITIATED"}', truncated: false, contentType: null }) });
     expect(outcome).toEqual({ status: 'done', ok: true, httpStatus: 200, data: { id: 'chg_9', status: 'INITIATED' }, truncated: false });
+  });
+
+  describe('after the review of the first version', () => {
+    it('sends nothing when the owner switches the app off right after it was admitted', async () => {
+      await connectGateway();
+      const [app] = await keyAppsOf(saraBrick);
+      let sent = 0;
+      mockSend.current = () => ((sent += 1), { status: 200 });
+      mockAfterCheck.current = async () => {
+        await prisma.botMcpServer.update({ where: { id: app.serverId }, data: { enabled: false } });
+      };
+      const response = await call(saraBrick, app.serverId, app.definitionHash);
+      expect(response.status).toBeGreaterThanOrEqual(400);
+      expect(sent).toBe(0);
+      expect(await prisma.appKeyCall.count({ where: { ownerId: sara } })).toBe(0);
+    });
+
+    it('builds the request again with the new key when the key was replaced after it was admitted, never sending the old one', async () => {
+      const id = await connectGateway();
+      const [app] = await keyAppsOf(saraBrick);
+      const fresh = `sk_test_${randomUUID().replace(/-/g, '')}`;
+      const seen: string[] = [];
+      mockAfterCheck.current = async () => {
+        mockSend.current = () => ({ status: 404 });
+        const form = await openKeyForm({ ownerId: sara, connectionId: id });
+        await submitKey({ requestId: form.id, ownerId: sara, key: fresh });
+      };
+      mockSend.current = () => ({ status: 404 });
+      // The check inside the replacement is the first thing sent; then this call's own request
+      const sendSpy = (target: { headers: Record<string, string> }) => (seen.push(target.headers.Authorization ?? target.headers.authorization ?? ''), { status: 200 });
+      const hookBefore = mockAfterCheck.current;
+      mockAfterCheck.current = async () => {
+        await hookBefore();
+        mockSend.current = sendSpy;
+      };
+      const response = await call(saraBrick, app.serverId, app.definitionHash);
+      expect(response.status).toBe(200);
+      expect(seen).toEqual([`Bearer ${fresh}`]);
+    });
+
+    it('ignores a refusal that comes back from a key that was replaced while the request was out', async () => {
+      const id = await connectGateway();
+      const [app] = await keyAppsOf(saraBrick);
+      let swapped = false;
+      mockSend.current = async () => {
+        if (swapped) return { status: 404 };
+        swapped = true;
+        const form = await openKeyForm({ ownerId: sara, connectionId: id });
+        await submitKey({ requestId: form.id, ownerId: sara, key: `sk_test_${randomUUID().replace(/-/g, '')}` });
+        // The old key's answer arrives after the new key was saved
+        return { status: 401 };
+      };
+      const response = await call(saraBrick, app.serverId, app.definitionHash);
+      expect(response.status).toBe(502);
+      const row = await prisma.appConnection.findUniqueOrThrow({ where: { id } });
+      expect(row.signInLostAt).toBeNull();
+      expect((await keyAppsOf(saraBrick))[0].working).toBe(true);
+    });
+
+    it('clears a refusal another call reported while this one was out, and never one for a key that was replaced', async () => {
+      const id = await connectGateway();
+      const [app] = await keyAppsOf(saraBrick);
+      // Two calls at once: one refused, one accepted (the accepted one began when nothing was marked)
+      let order = 0;
+      mockSend.current = async () => {
+        order += 1;
+        if (order === 1) return { status: 401 };
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return { status: 200 };
+      };
+      const [first, second] = await Promise.all([call(saraBrick, app.serverId, app.definitionHash), call(saraBrick, app.serverId, app.definitionHash)]);
+      expect([first.status, second.status].sort()).toEqual([200, 502]);
+      expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
+    });
+
+    it('keeps what was used this hour when the app is disconnected and connected again', async () => {
+      await saveServerLimits({ bricks: { keyCallsPerPerson: 2 } }, sara);
+      const first = await connectGateway();
+      const [app] = await keyAppsOf(saraBrick);
+      mockSend.current = () => ({ status: 200 });
+      expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
+      expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
+      expect(await disconnect(sara, first)).toBe(true);
+      expect(await prisma.appKeyCall.count({ where: { ownerId: sara } })).toBe(2);
+      await connectGateway();
+      const [again] = await keyAppsOf(saraBrick);
+      expect((await call(saraBrick, again.serverId, again.definitionHash)).status).toBe(429);
+    });
+
+    it('leaves no Brick behind when its starting access cannot be written', async () => {
+      await connectGateway();
+      const before = await prisma.bot.count({ where: { ownerId: sara } });
+      // The write of the grant fails inside the transaction that makes the Brick
+      const real = prisma.$transaction.bind(prisma);
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((fn: (tx: unknown) => Promise<unknown>, ...rest: unknown[]) =>
+        (real as (...args: unknown[]) => Promise<unknown>)(
+          (tx: Record<string, unknown>) =>
+            fn(
+              new Proxy(tx, {
+                get: (target, prop) => {
+                  if (prop !== 'botMcpServer') return Reflect.get(target, prop);
+                  const model = target.botMcpServer as Record<string, unknown>;
+                  return new Proxy(model, {
+                    get: (m, name) => (name === 'create' ? () => Promise.reject(new Error('grant failed')) : typeof m[name as string] === 'function' ? (m[name as string] as (...args: unknown[]) => unknown).bind(m) : m[name as string]),
+                  });
+                },
+              }),
+            ),
+          ...rest,
+        )) as never);
+      try {
+        await expect(createBrick({ ownerId: sara, name: 'Half made' })).rejects.toThrow('grant failed');
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await prisma.bot.count({ where: { ownerId: sara } })).toBe(before);
+    });
   });
 });

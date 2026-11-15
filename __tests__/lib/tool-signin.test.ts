@@ -241,6 +241,24 @@ describe('the card on Orbit home', () => {
     expect(created().userId).toBe('maker');
   });
 
+  describe('a key app (the key belongs to the person who gave it)', () => {
+    const keyApp = { id: 's9', name: 'Example', authType: 'none', signInLostAt: T1, connectedById: 'maker', connectionId: 'c1', connection: { name: 'Example', authType: 'none', kind: 'direct', signInLostAt: T1, connectedById: 'maker', ownerId: 'yousef' } };
+
+    it('goes to the one who gave the key', async () => {
+      db.botMcpServer.findMany.mockResolvedValue([keyApp]);
+      await syncToolSignInNotices('bot-1', { serverId: 's9', at: T1 });
+      expect(created().userId).toBe('yousef');
+      expect(created().badge).toBe('Key stopped working');
+    });
+
+    it('never goes to the maker, who could not replace it: when the key owner can no longer manage the Brick there is no card', async () => {
+      mayManage.mockImplementation(async (userId: string) => userId !== 'yousef');
+      db.botMcpServer.findMany.mockResolvedValue([keyApp]);
+      await syncToolSignInNotices('bot-1', { serverId: 's9', at: T1 });
+      expect(addNotice).not.toHaveBeenCalled();
+    });
+  });
+
   it('is one card for two connections of one bot, updated in place and not made again', async () => {
     db.botMcpServer.findMany.mockResolvedValue([tavily, attio]);
     db.userNotice.findMany.mockResolvedValue([{ id: 'n1', userId: 'yousef' }]);

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
+import { prisma } from '@/lib/db';
 import { AppConnectionError } from '@/lib/app-connections';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 
@@ -19,7 +20,8 @@ export async function appsRoute(
   const user = await getSessionUser(request);
   if (!user) return respond({ error: 'Unauthorized' }, 401);
   // A guest has no account of their own to connect an app to
-  if ('isGuest' in user && (user as { isGuest?: boolean }).isGuest) return respond({ error: 'Sign in to connect apps' }, 403);
+  const account = await prisma.user.findUnique({ where: { id: user.id }, select: { isGuest: true } });
+  if (!account || account.isGuest) return respond({ error: 'Sign in to connect apps' }, 403);
   try {
     return await run(user, respond);
   } catch (error) {

@@ -1,7 +1,7 @@
 import { amountToMinor, minorToText, currencyExponent, safeCheckoutUrl } from '@/lib/app-direct/pay';
 import { catalogDefinition } from '@/lib/app-direct/catalog';
 import { definitionSchema, hashDefinition } from '@/lib/app-direct/definition';
-jest.mock('@/lib/app-direct/catalog', () => require('../helpers/example-gateway').catalogWithExample());
+jest.mock('@/lib/app-direct/catalog', () => jest.requireActual('../helpers/example-gateway').catalogWithExample());
 
 /** Payments for pages (game #2044, step 3): the exact amounts, where a buyer may be sent, and the payment contract of a definition. */
 

@@ -1,17 +1,26 @@
 import { NextResponse } from 'next/server';
-import { verifyOrder } from '@/lib/app-direct/pay';
+import { isWaiting, verifyOrder } from '@/lib/app-direct/pay';
+import { getBrickLimits } from '@/lib/bot-limits';
 
 export const runtime = 'nodejs';
 
 /**
  * The payment service tells us an order moved (game #2044). Nothing in the notice is believed: it only makes Orbit ask the service itself
  * about this one order, which is rate-limited per order, so this can be called by anyone, any number of times, and learns them nothing.
- * Always 200, so the service does not keep retrying an order we have already settled.
+ * 200 once the service has been asked, so it does not keep retrying an order we have already looked at. When the look had to wait (the order
+ * was asked about a moment ago, or the hour's budget is spent) the answer is 429 with when to come back, so the service's own retry makes the
+ * look that nobody else may: a buyer who has closed the page cannot be what finishes the order.
  */
 async function notice(params: Promise<{ orderId: string }>) {
   const { orderId } = await params;
   try {
-    if (/^[0-9a-f-]{36}$/i.test(orderId)) await verifyOrder(orderId);
+    if (/^[0-9a-f-]{36}$/i.test(orderId)) {
+      const view = await verifyOrder(orderId);
+      if (view && isWaiting(view)) {
+        const { paymentCheckSeconds } = await getBrickLimits();
+        return NextResponse.json({ ok: false, retry: true }, { status: 429, headers: { 'Cache-Control': 'no-store', 'Retry-After': String(Math.max(1, paymentCheckSeconds)) } });
+      }
+    }
   } catch (error) {
     console.error('[PagePayments] A notice could not be checked:', error instanceof Error ? error.message : 'unknown');
   }
