@@ -386,7 +386,7 @@ async function finishCall(runId: string, call: InstantCall, ctx: Ctx): Promise<I
       case 'rejected': {
         // Refused before anything ran: nothing is charged to anyone
         const reason = reasonOfRejection(call.code, call.status);
-        await settleProvider(run, tx, 0, 'measured', ctx.now);
+        await settleProvider({ ...run, state: 'failed' }, tx, 0, 'measured', ctx.now);
         await tx.instantRun.update({ where: { id: run.id }, data: { state: 'failed', reason, finishedAt: ctx.now, detail: { status: call.status, code: call.code } } });
         // Composio's balance is empty: every run would fail the same way, so Instant stops until a super admin has looked
         if (reason === 'provider_empty') await pauseInstant('provider_empty', null, tx);

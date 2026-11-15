@@ -1700,6 +1700,17 @@ run('the bounded Instant executor, in a real database', () => {
       expect(Number(event.costMicros)).toBe(4_000);
     });
 
+    it('a run Composio refused before anything ran also records a zero charge on its meter event', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      p.script.runs.push({ kind: 'rejected', status: 403, code: 'ManagedCredential_NotEnabled' });
+      expect(await runInstant(ask({ taskKey: 'task-j' }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'failed' });
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      const event = await prisma.meterEvent.findFirstOrThrow({ where: { eventId: `instant:${row.id}` } });
+      expect(event.detail).toMatchObject({ instant: true, taskKey: 'task-j', customerMicros: 0 });
+    });
+
     it('asking again with the same call id after a rule refused it says the rule’s own words, not a general sentence', async () => {
       await setLimits();
       const p = fakeProvider();
