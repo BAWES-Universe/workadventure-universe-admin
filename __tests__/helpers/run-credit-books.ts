@@ -664,6 +664,223 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     check('held room is still counted after the lot it came from has ended, while the hold itself is in time; once it runs out it is unresolved', cr5.ok && before.heldMicros >= 1 * M && lotEnded.heldMicros === before.heldMicros && lapsed.heldMicros === 0 && lapsed.unresolvedMicros >= 1 * M, { before, lotEnded, lapsed });
   }
 
+  // ---------- Follow-up round: findings from the review of the work built on these books ----------
+  {
+    const FU = at('2027-02-13T10:00:00Z');
+    const { Client } = await import('pg');
+
+    // A clash over many people carries every id (only the names shown are limited)
+    const crowd = Array.from({ length: 60 }, (_, i) => `fu-crowd-${i}`);
+    for (const id of crowd) await user(id, '2027-02-11T00:00:00Z');
+    await rules.saveException({ categoryId: 'computers', amount: 1 * M, schedule: 'once', recipients: { kind: 'people', userIds: crowd } }, root, FU);
+    const crowdClash = await refuses(() => rules.saveException({ categoryId: 'computers', amount: 2 * M, schedule: 'once', recipients: { kind: 'people', userIds: crowd } }, root, FU));
+    const crowdFinding = (crowdClash?.error as { clashes?: { userIds: string[]; people: unknown[]; totalPeople: number }[] } | undefined)?.clashes?.[0];
+    check('a clash over 60 people carries all 60 ids, names only the first 50, and says how many there are', crowdClash?.code === 'clash' && crowdFinding?.userIds.length === 60 && crowdFinding.people.length === 50 && crowdFinding.totalPeople === 60, crowdFinding && { ids: crowdFinding.userIds.length, names: crowdFinding.people.length, total: crowdFinding.totalPeople });
+
+    // A refund asked for again is found by its exact key, also when it gave nothing back
+    await user('fu-r', '2027-02-11T00:00:00Z');
+    await rules.createGift({ categoryId: 'instant_apps', amount: 3 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-r'] }, lotExpiresAt: at('2027-03-01T00:00:00Z') }, root, at('2027-02-13T00:00:00Z'));
+    const heldR = await spend.holdCredit({ holdKey: 'fu-r-1', personId: 'fu-r', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, at('2027-02-13T00:05:00Z'));
+    await spend.settleHold({ holdKey: 'fu-r-1', customerMicros: 1 * M }, at('2027-02-13T00:06:00Z'));
+    const lateAt = at('2027-03-02T00:00:00Z');
+    const none1 = await spend.refundHold({ holdKey: 'fu-r-1', refundKey: 'fu-z', amountMicros: 1 * M, reason: 'goodwill', limits: { giveBackMaxMicros: 0 } }, lateAt);
+    const none2 = await spend.refundHold({ holdKey: 'fu-r-1', refundKey: 'fu-z', amountMicros: 1 * M, reason: 'goodwill', limits: { giveBackMaxMicros: 0 } }, lateAt);
+    const none3 = await spend.refundHold({ holdKey: 'fu-r-1', refundKey: 'fu-z', amountMicros: 500_000, reason: 'goodwill', limits: { giveBackMaxMicros: 0 } }, lateAt);
+    check('a refund that gave nothing back is remembered: asking again answers the same, another figure under the key is refused', heldR.ok && none1.ok && none1.created && none1.refundedMicros === 0 && none2.ok && !none2.created && none2.refundedMicros === 0 && !none3.ok && none3.reason === 'key_reused', { none1, none2, none3 });
+    const sameKey = await spend.refundHold({ holdKey: 'fu-r-1', refundKey: 'fu-z#0', amountMicros: 100_000, reason: 'goodwill' }, lateAt);
+    check('a key that only begins like another refund’s key is its own refund', sameKey.ok && sameKey.created, sameKey);
+
+    // Rows from before the payer and the refund requests were stored are still replays of what they were
+    await user('fu-lg', '2027-02-11T00:00:00Z');
+    await rules.createGift({ categoryId: 'instant_apps', amount: 3 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-lg'] } }, root, at('2027-02-13T00:00:00Z'));
+    await spend.holdCredit({ holdKey: 'fu-lg-1', personId: 'fu-lg', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, at('2027-02-13T00:05:00Z'));
+    await spend.settleHold({ holdKey: 'fu-lg-1', customerMicros: 1 * M }, at('2027-02-13T00:06:00Z'));
+    const lgFirst = await spend.refundHold({ holdKey: 'fu-lg-1', refundKey: 'fu-lg-r', amountMicros: 400_000, reason: 'goodwill' }, at('2027-02-13T00:07:00Z'));
+    const lgRows = await prisma.creditRefund.count({ where: { holdId: (await prisma.creditHold.findUniqueOrThrow({ where: { holdKey: 'fu-lg-1' } })).id } });
+    await prisma.creditRefundRequest.deleteMany({ where: { requestKey: 'fu-lg-r' } });
+    const lgAgain = await spend.refundHold({ holdKey: 'fu-lg-1', refundKey: 'fu-lg-r', amountMicros: 400_000, reason: 'goodwill' }, at('2027-02-13T00:08:00Z'));
+    const lgOther = await spend.refundHold({ holdKey: 'fu-lg-1', refundKey: 'fu-lg-r', amountMicros: 400_000, reason: 'platform_failure' }, at('2027-02-13T00:08:30Z'));
+    const lgRowsAfter = await prisma.creditRefund.count({ where: { holdId: (await prisma.creditHold.findUniqueOrThrow({ where: { holdKey: 'fu-lg-1' } })).id } });
+    check('a refund made before request rows existed is replayed from its refund rows: same totals, nothing written, another reason refused', lgFirst.ok && lgAgain.ok && !lgAgain.created && lgAgain.refundedMicros === 400_000 && lgAgain.restoredMicros === 400_000 && !lgOther.ok && lgOther.reason === 'key_reused' && lgRowsAfter === lgRows, { lgFirst, lgAgain, lgOther, lgRows, lgRowsAfter });
+    await spend.holdCredit({ holdKey: 'fu-lg-2', personId: 'fu-lg', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, at('2027-02-13T00:10:00Z'));
+    await prisma.$executeRawUnsafe(`UPDATE credit_holds SET payer_known = false WHERE hold_key = 'fu-lg-2'`);
+    const lgHold = await spend.holdCredit({ holdKey: 'fu-lg-2', personId: 'fu-lg', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run', onlyAccountId: 'funding-platform' }, at('2027-02-13T00:11:00Z'));
+    const lgHoldAmount = await spend.holdCredit({ holdKey: 'fu-lg-2', personId: 'fu-lg', category: 'instant_apps', amountMicros: 2 * M, chargeClass: 'instant_run', onlyAccountId: 'funding-platform' }, at('2027-02-13T00:11:30Z'));
+    check('a live hold made before its payer was stored is found again whatever payer the retry names (never taken twice); another amount is still refused', lgHold.ok && !lgHold.created && !lgHoldAmount.ok && lgHoldAmount.reason === 'key_reused', { lgHold, lgHoldAmount });
+
+    // A replayed hold must be the same step: the same amount, and the same named payer
+    await user('fu-h', '2027-02-11T00:00:00Z');
+    await rules.createGift({ categoryId: 'instant_apps', amount: 5 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-h'] } }, root, FU);
+    const h1 = await spend.holdCredit({ holdKey: 'fu-h-1', personId: 'fu-h', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, FU);
+    const h2 = await spend.holdCredit({ holdKey: 'fu-h-1', personId: 'fu-h', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, FU);
+    const h3 = await spend.holdCredit({ holdKey: 'fu-h-1', personId: 'fu-h', category: 'instant_apps', amountMicros: 2 * M, chargeClass: 'instant_run' }, FU);
+    const h4 = await spend.holdCredit({ holdKey: 'fu-h-1', personId: 'fu-h', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run', onlyAccountId: 'funding-platform' }, FU);
+    check('the same hold key finds the same hold only for the same amount and payer; another amount or payer is key_reused', h1.ok && h2.ok && !h2.created && !h3.ok && h3.reason === 'key_reused' && !h4.ok && h4.reason === 'key_reused', { h2, h3, h4 });
+
+    // A default replaced by one that starts later keeps issuing under the old one until the new one starts
+    await user('fu-old', '2027-02-11T00:00:00Z');
+    await user('fu-new', '2027-02-11T00:00:00Z');
+    const before = await rules.getProgram((await rules.listPrograms('computers', { kind: 'default' }))[0].programId);
+    const oldAmount = before?.program.amount ?? 0;
+    await rules.saveDefault({ categoryId: 'computers', amount: 9 * M, schedule: 'monthly', recipients: { kind: 'all' }, claimStartsAt: at('2027-04-01T00:00:00Z') }, root, FU);
+    await issue.ensureIssued('fu-old', at('2027-02-14T00:00:00Z'));
+    await issue.ensureIssued('fu-new', at('2027-04-02T00:00:00Z'));
+    const [lotOld] = await lotsOf('fu-old');
+    const [lotNew] = await lotsOf('fu-new');
+    check('a default that starts next month does not take over now: someone who claims before it gets the old amount, after it the new', oldAmount > 0 && lotOld && Number(lotOld.amountMicros) === oldAmount && lotNew && Number(lotNew.amountMicros) === 9 * M, { oldAmount, old: lotOld && Number(lotOld.amountMicros), now: lotNew && Number(lotNew.amountMicros) });
+    const waiting = await prisma.grantRule.count({ where: { state: 'superseded', supersededAt: { gt: at('2027-03-01T00:00:00Z') }, program: { kind: 'default', categoryId: 'computers' } } });
+    await rules.saveDefault({ categoryId: 'computers', amount: 4 * M, schedule: 'monthly', recipients: { kind: 'all' } }, root, at('2027-02-20T00:00:00Z'));
+    const stillWaiting = await prisma.grantRule.count({ where: { state: 'superseded', supersededAt: { gt: at('2027-02-21T00:00:00Z') }, program: { kind: 'default', categoryId: 'computers' } } });
+    check('an edit that starts at once cuts a version that was waiting to be replaced, so two versions are never open together', waiting === 1 && stillWaiting === 0, { waiting, stillWaiting });
+
+    // A version that is waiting to be replaced still counts when another rule is saved: it is the rule people are issued under until then
+    for (const id of ['fu-c1', 'fu-c2']) await user(id, '2027-02-11T00:00:00Z');
+    const waitingGroup = await rules.saveException({ categoryId: 'computers', amount: 1 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-c1', 'fu-c2'] } }, root, FU);
+    await rules.saveException({ programId: waitingGroup.programId, categoryId: 'computers', amount: 2 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-c1', 'fu-c2'] }, claimStartsAt: at('2027-05-01T00:00:00Z') }, root, FU);
+    const duringWait = await refuses(() => rules.saveException({ categoryId: 'computers', amount: 3 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-c1', 'fu-c2'] }, claimEndsAt: at('2027-04-15T00:00:00Z') }, root, FU));
+    check('a rule saved for a period that ends before a waiting version takes over still clashes with the version issuing until then', duringWait?.code === 'clash', duringWait?.code);
+
+    // A program with a version issuing and one waiting is still one program: a rule spanning both is one clash and one overlap, with everyone
+    const spanning = { categoryId: 'computers' as const, amount: 3 * M, schedule: 'once' as const, recipients: { kind: 'people' as const, userIds: ['fu-c1', 'fu-c2'] } };
+    const spanClash = await refuses(() => rules.saveException(spanning, root, FU));
+    const spanFindings = (spanClash?.error as { clashes?: { programId: string; userIds: string[] }[] } | undefined)?.clashes ?? [];
+    check('a rule that spans a program’s issuing version and its waiting one is one clash for that program, naming each person once', spanClash?.code === 'clash' && spanFindings.filter((f) => f.programId === waitingGroup.programId).length === 1 && spanFindings.find((f) => f.programId === waitingGroup.programId)?.userIds.length === 2, spanFindings);
+    const spanPreview = await rules.previewGrant('exception', spanning, FU);
+    const spanOverlaps = spanPreview.overlaps.filter((o) => o.programId === waitingGroup.programId);
+    check('and one overlap line for it, counting each person once', spanOverlaps.length === 1 && spanOverlaps[0].people === 2, spanOverlaps);
+
+    // A shared Instant Apps amount answers the earlier asks of everyone it reaches, also when the pool was made by the first of the others
+    {
+      const requests = await import('@/lib/meter-requests');
+      for (const id of ['fu-s1', 'fu-s2', 'fu-s3']) await user(id, '2027-02-11T00:00:00Z');
+      const morning = at('2027-02-13T09:00:00Z');
+      for (const id of ['fu-s1', 'fu-s2', 'fu-s3']) await requests.askForMore(id, morning, 'apps');
+      await requests.askForMore('fu-s2', morning, 'computer');
+      await rules.createGift({ categoryId: 'instant_apps', amount: 5 * M, schedule: 'once', share: 'shared', recipients: { kind: 'people', userIds: ['fu-s1', 'fu-s2'] } }, root, at('2027-02-13T09:30:00Z'));
+      await issue.ensureIssued('fu-s1', at('2027-02-13T12:00:00Z'));
+      await issue.ensureIssued('fu-s2', at('2027-02-13T12:30:00Z'));
+      await requests.askForMore('fu-s2', at('2027-02-13T13:00:00Z'), 'apps');
+      await issue.ensureIssued('fu-s2', at('2027-02-13T13:30:00Z'));
+      const open = async (id: string, what: string) => prisma.meterRequest.count({ where: { personId: id, what, answeredAt: null } });
+      check('a shared Instant Apps amount answers the earlier asks of everyone it reaches, leaves computer asks, later asks and other people alone', (await open('fu-s1', 'apps')) === 0 && (await open('fu-s2', 'computer')) === 1 && (await open('fu-s2', 'apps')) === 1 && (await open('fu-s3', 'apps')) === 1, { s1: await open('fu-s1', 'apps'), s2computer: await open('fu-s2', 'computer'), s2apps: await open('fu-s2', 'apps'), s3: await open('fu-s3', 'apps') });
+    }
+
+    // A group that can change can clash later, when someone joins both: nobody gets a number by guesswork
+    await prisma.$executeRawUnsafe(`INSERT INTO universes (id, slug, name, owner_id, updated_at) VALUES ('u2', 'later', 'Later', 'admin', now())`);
+    for (const id of ['fu-rx', 'fu-ry']) await user(id, '2027-02-11T00:00:00Z');
+    await rules.saveException({ categoryId: 'universe_ai', amount: 10, schedule: 'once', recipients: { kind: 'universe', universeId: 'u2', mode: 'changing' }, claimEndsAt: at('2028-01-01T00:00:00Z'), joinerCap: 10, totalCapMicros: 100 }, root, FU);
+    await rules.saveException({ categoryId: 'universe_ai', amount: 20, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-rx', 'fu-ry'] } }, root, FU);
+    const beforeJoin = await replies.repliesPerWindowFor('fu-rx', 30, FU);
+    await prisma.$executeRawUnsafe(`INSERT INTO universe_members (id, universe_id, user_id) VALUES ('fu-um1', 'u2', 'fu-rx')`);
+    const afterJoin = await replies.repliesPerWindowFor('fu-rx', 30, FU);
+    const other = await replies.repliesPerWindowFor('fu-ry', 30, FU);
+    check('someone who joins a group that disagrees with another group they are in keeps the base number (no winner by guesswork); the other person keeps theirs', beforeJoin === 20 && afterJoin === 30 && other === 20, { beforeJoin, afterJoin, other });
+
+    // A pool only answers an ask when the person can really spend from it: one whose account was paused after the pool was made does not
+    {
+      const requests = await import('@/lib/meter-requests');
+      for (const id of ['fu-pz1', 'fu-pz2']) await user(id, '2027-02-11T00:00:00Z');
+      const sponsor = await funding.ensureFundingAccount({ kind: 'universe', ownerKey: 'u1', name: 'Acme', adminIds: ['owner'] });
+      await requests.askForMore('fu-pz2', at('2027-02-14T09:00:00Z'), 'apps');
+      await rules.createGift({ categoryId: 'instant_apps', amount: 1 * M, schedule: 'once', share: 'shared', recipients: { kind: 'people', userIds: ['fu-pz1', 'fu-pz2'] }, fundingAccountId: sponsor.id }, { userId: 'owner', superAdmin: false }, at('2027-02-14T09:30:00Z'));
+      await issue.ensureIssued('fu-pz1', at('2027-02-14T10:00:00Z'));
+      await funding.setAccountStatus(sponsor.id, 'paused');
+      await issue.ensureIssued('fu-pz2', at('2027-02-14T11:00:00Z'));
+      const stillAsking = await prisma.meterRequest.count({ where: { personId: 'fu-pz2', what: 'apps', answeredAt: null } });
+      await funding.setAccountStatus(sponsor.id, 'closed');
+      await issue.ensureIssued('fu-pz2', at('2027-02-14T11:30:00Z'));
+      const stillAskingClosed = await prisma.meterRequest.count({ where: { personId: 'fu-pz2', what: 'apps', answeredAt: null } });
+      await funding.setAccountStatus(sponsor.id, 'active');
+      await issue.ensureIssued('fu-pz2', at('2027-02-14T12:00:00Z'));
+      const answeredAfter = await prisma.meterRequest.count({ where: { personId: 'fu-pz2', what: 'apps', answeredAt: { not: null } } });
+      check('a pool whose account was paused or closed answers no ask (nothing there can be spent); once the account is active again it does', stillAsking === 1 && stillAskingClosed === 1 && answeredAfter === 1, { stillAsking, stillAskingClosed, answeredAfter });
+    }
+
+    if (database.kind === 'postgres') {
+      // A second connection holds the names a writer holds, changes the books, and lets go while the issuing is waiting for them
+      const writer = new Client({ connectionString: database.url });
+      // A database dropped at the end closes this connection: that is the end of the run, not an error
+      writer.on('error', () => undefined);
+      await writer.connect();
+      const waitForWaiter = async () => {
+        for (let i = 0; i < 100; i++) {
+          const { rows } = await writer.query(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`);
+          if (rows[0].n > 0) return true;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        return false;
+      };
+      // The rules are read again under the locks: an edit that landed while issuing waited is what issues
+      await user('fu-late1', '2027-02-11T00:00:00Z');
+      await setMeter({ rolloutBudgetMicros: 10_000 * M, renewMinutes: 10 });
+      const current = await prisma.grantRule.findFirstOrThrow({ where: { state: 'current', program: { kind: 'default', categoryId: 'computers' } } });
+      await writer.query('BEGIN');
+      await writer.query(`SELECT pg_advisory_xact_lock(hashtext('credit:account:funding-platform'))`);
+      const pending = issue.ensureIssued('fu-late1', at('2027-02-21T00:00:00Z'));
+      pending.catch(() => undefined);
+      const waited = await waitForWaiter();
+      await writer.query(`UPDATE grant_rules SET amount = 8000000 WHERE id = $1`, [current.id]);
+      await writer.query('COMMIT');
+      const late = await pending;
+      const [lateLot] = await lotsOf('fu-late1');
+      check('what is due is read again under the locks: an edit made while issuing waited is the amount that issues', waited && late.issued.length === 1 && Number(lateLot.amountMicros) === 8 * M, { waited, late, amount: lateLot && Number(lateLot.amountMicros) });
+      await prisma.grantRule.update({ where: { id: current.id }, data: { amount: BigInt(4 * M) } });
+
+      // The rollout budget is read again under the locks: one lowered while issuing waited is the one that counts
+      await user('fu-late2', '2027-02-11T00:00:00Z');
+      await writer.query('BEGIN');
+      await writer.query(`SELECT pg_advisory_xact_lock(hashtext('meter:settings'))`);
+      const pendingBudget = issue.ensureIssued('fu-late2', at('2027-02-22T00:00:00Z'));
+      pendingBudget.catch(() => undefined);
+      const waitedBudget = await waitForWaiter();
+      await writer.query(`UPDATE app_settings SET value = jsonb_set(value, '{rolloutBudgetMicros}', '1') WHERE key = 'meter'`);
+      await writer.query('COMMIT');
+      const lowered = await pendingBudget;
+      await setMeter({ rolloutBudgetMicros: 10_000 * M, renewMinutes: 10 });
+      check('the rollout budget is read again under the locks: one lowered while issuing waited stops it', waitedBudget && lowered.issued.length === 0 && lowered.skipped.some((s) => s.reason === 'over_budget'), { waitedBudget, lowered });
+      // A start over works from the person's facts as they are now: joining a group while issuing waited brings that group's gift in, funded from another account, and issuing still ends whole
+      await user('fu-late5', '2027-02-11T00:00:00Z');
+      const acme = await funding.ensureFundingAccount({ kind: 'universe', ownerKey: 'u1', name: 'Acme', adminIds: ['owner'] });
+      await rules.createGift({ categoryId: 'instant_apps', amount: 1 * M, schedule: 'once', recipients: { kind: 'universe', universeId: 'u1', mode: 'changing' }, claimEndsAt: at('2027-04-01T00:00:00Z'), joinerCap: 5, totalCapMicros: 5 * M, fundingAccountId: acme.id }, { userId: 'owner', superAdmin: false }, FU);
+      await writer.query('BEGIN');
+      await writer.query(`SELECT pg_advisory_xact_lock(hashtext('credit:account:funding-platform'))`);
+      const pendingJoin = issue.ensureIssued('fu-late5', at('2027-02-24T00:00:00Z'));
+      pendingJoin.catch(() => undefined);
+      const waitedJoin = await waitForWaiter();
+      await writer.query(`INSERT INTO universe_members (id, universe_id, user_id) VALUES ('fu-um5', 'u1', 'fu-late5')`);
+      await writer.query('COMMIT');
+      const joined = await pendingJoin.catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }));
+      check('joining a group while issuing waited does not stop the issuing: the start over reads the person again, and the group’s gift is issued from', waitedJoin && !('error' in joined) && joined.issued.some((lot) => lot.subjectKey === 'person:fu-late5' && lot.amountMicros === 1 * M), { waitedJoin, joined });
+
+      // Ending a program waits for issuing in the category it reads (issuing holds the category's rules lock shared)
+      const toEnd = await rules.createGift({ categoryId: 'instant_apps', amount: 1 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-late1'] } }, root, FU);
+      await writer.query('BEGIN');
+      await writer.query(`SELECT pg_advisory_xact_lock_shared(hashtext('credit:rules:instant_apps'))`);
+      const pendingEnd = rules.endProgram(toEnd.programId, root, FU);
+      pendingEnd.catch(() => undefined);
+      const waitedEnd = await waitForWaiter();
+      await writer.query('COMMIT');
+      check('ending a program waits for issuing that reads the category’s rules, then ends it', waitedEnd && (await pendingEnd) === 'ended', { waitedEnd });
+
+      // A save of one category's rules holds up issuing only for people due something from that category
+      await user('fu-late3', '2027-02-11T00:00:00Z');
+      await user('fu-late4', '2027-02-11T00:00:00Z');
+      await writer.query('BEGIN');
+      await writer.query(`SELECT pg_advisory_xact_lock(hashtext('credit:rules:universe_ai'))`);
+      const apart = await Promise.race([issue.ensureIssued('fu-late3', at('2027-02-23T00:00:00Z')).then(() => 'done'), new Promise((resolve) => setTimeout(() => resolve('held up'), 5000))]);
+      await writer.query('COMMIT');
+      await writer.query('BEGIN');
+      await writer.query(`SELECT pg_advisory_xact_lock(hashtext('credit:rules:computers'))`);
+      const pendingRules = issue.ensureIssued('fu-late4', at('2027-02-23T00:00:00Z'));
+      pendingRules.catch(() => undefined);
+      const waitedRules = await waitForWaiter();
+      await writer.query('COMMIT');
+      const afterRules = await pendingRules;
+      check('a save of the rules of a category nobody here is due from does not hold issuing up; a save of one they are due from does, and issuing goes on once it lets go', apart === 'done' && waitedRules && afterRules.issued.length === 1, { apart, waitedRules, afterRules });
+      await writer.end();
+    }
+  }
+
   // The result goes out first: nothing that happens while the database is taken down can lose it
   console.log(printable({ kind: database.kind, checks }));
 }

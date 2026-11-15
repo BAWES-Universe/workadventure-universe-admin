@@ -18,14 +18,24 @@ export async function lockName(tx: Pick<Tx, '$executeRaw'>, name: string): Promi
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${name}))`;
 }
 
-export async function lockAll(tx: Pick<Tx, '$executeRaw'>, names: Iterable<string>): Promise<void> {
-  for (const name of [...new Set(names)].sort()) await lockName(tx, name);
+export async function lockAll(tx: Pick<Tx, '$executeRaw'>, names: Iterable<string>, shared: Iterable<string> = []): Promise<void> {
+  // `shared` names are read-locked: many holders at once, but a writer of the name (which takes it as above) waits for all of them and
+  // they wait for it. Both kinds are taken in one sorted order, so mixing them cannot make two transactions wait on each other
+  const readers = new Set(shared);
+  for (const name of [...new Set([...names, ...readers])].sort()) {
+    if (readers.has(name) && ![...names].includes(name)) await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtext(${name}))`;
+    else await lockName(tx, name);
+  }
 }
 
 export const lockOfPerson = (personId: string): string => `credit:person:${personId}`;
 export const lockOfPool = (programId: string): string => `credit:pool:${programId}`;
 export const lockOfEffect = (effectKey: string): string => `credit:effect:${effectKey}`;
 export const lockOfAccount = (accountId: string): string => `credit:account:${accountId}`;
+/** What a save of a category's rules holds while it checks and writes them: issuing holds it shared, so it reads rules that are not half-saved. */
+export const lockOfRules = (categoryId: string): string => `credit:rules:${categoryId}`;
+/** The meter's settings (Limits): a save holds it exclusive, issuing holds it shared while it reads the rollout budget. */
+export const LOCK_METER_SETTINGS = 'meter:settings';
 
 type RuleRow = Prisma.GrantRuleGetPayload<{ include: { program: true; recipients: { select: { userId: true } } } }>;
 
@@ -66,18 +76,27 @@ export function ruleFacts(row: RuleRow): RuleFacts {
 
 const ruleInclude = { program: true, recipients: { select: { userId: true } } } as const;
 
-/** The rules in force: the current version of every active program. `now` keeps only those whose claim period is open. */
-export async function currentRules(db: Pick<Db, 'grantRule'>, filter: { categoryId?: CategoryId; programId?: string; now?: Date } = {}): Promise<RuleFacts[]> {
+/**
+ * The rules in force: the current version of every active program. `now` keeps only those whose claim period is open, and also keeps a
+ * version that a later one will replace only when that one starts (a default replaced by one that begins next month): until then it is
+ * the rule people are issued under, so nobody is left with nothing in between.
+ */
+export async function currentRules(db: Pick<Db, 'grantRule'>, filter: { categoryId?: CategoryId; programId?: string; now?: Date; waitingAfter?: Date } = {}): Promise<RuleFacts[]> {
   const rows = await db.grantRule.findMany({
     where: {
-      state: 'current',
+      ...(filter.now || filter.waitingAfter ? { OR: [{ state: 'current' }, { state: 'superseded', supersededAt: { gt: (filter.now ?? filter.waitingAfter) as Date } }] } : { state: 'current' }),
       program: { status: 'active', ...(filter.categoryId ? { categoryId: filter.categoryId } : {}) },
       ...(filter.programId ? { programId: filter.programId } : {}),
     },
     include: ruleInclude,
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
-  const facts = rows.map(ruleFacts);
+  // `waitingAfter` is for checks between rules (a clash, an overlap): a version that a later one will replace counts until then, so its claim
+  // period ends where the replacement starts
+  const facts = rows.map((row) => {
+    const rule = ruleFacts(row);
+    return filter.waitingAfter && row.state === 'superseded' && row.supersededAt && (!rule.claimEndsAt || row.supersededAt < rule.claimEndsAt) ? { ...rule, claimEndsAt: row.supersededAt } : rule;
+  });
   return filter.now ? facts.filter((rule) => claimOpen(rule, filter.now as Date)) : facts;
 }
 

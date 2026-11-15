@@ -1,6 +1,7 @@
 import { artifactKindLabel } from '@/lib/artifact-labels';
 import { markdownDocument } from '@/lib/artifact-public';
 import type { PublicView } from '@/lib/artifact-service';
+import { PagePaymentsBridge } from '@/components/page-payments-bridge';
 
 /** The BAWES emblem in its colours (the game's favicon), small enough for the corner pill. */
 function Emblem() {
@@ -58,7 +59,7 @@ function ArtifactFrame({ view, className }: { view: PublicView; className: strin
       className={className}
     />
   ) : (
-    <iframe title={view.title} sandbox="allow-scripts allow-forms" src={view.url ?? undefined} referrerPolicy="no-referrer" className={className} />
+    <iframe title={view.title} sandbox="allow-scripts allow-forms" src={view.url ?? undefined} referrerPolicy="no-referrer" data-artifact-frame className={className} />
   );
 }
 
@@ -89,10 +90,11 @@ export function ArtifactBox({ view }: { view: PublicView }) {
  * What anyone with the link sees (Orbit #711): just the artifact, filling the window, with only the small "Made with Universe"
  * badge floating in the bottom right corner. The name, maker and version header stays in the game's window.
  */
-export function PublicArtifact({ view, universeUrl }: { view: PublicView; universeUrl: string }) {
+export function PublicArtifact({ view, universeUrl, artifactId }: { view: PublicView; universeUrl: string; artifactId?: string }) {
   return (
     <main data-shared-page className="fixed inset-0 bg-[#0A0814]" data-testid="publicArtifact">
       <ArtifactFrame view={view} className="block size-full border-0" />
+      {artifactId && view.url !== null ? <PagePaymentsBridge artifactId={artifactId} /> : null}
       <MadeWithUniverse href={universeUrl} floating />
     </main>
   );
