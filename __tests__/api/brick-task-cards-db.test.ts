@@ -15,13 +15,14 @@ process.env.ENCRYPTION_KEY = 'ab'.repeat(32);
 import { prisma } from '@/lib/db';
 import { ensureDefaultBrick } from '@/lib/brick-default';
 import { changeItem, claimDueRuns, createItem, finishRun, type NewItemInput } from '@/lib/brick-items';
-import { BotActionError, createRequest, decide, extendReview, supersedeWaiting, taskConversationKey, type CreateRequestInput } from '@/lib/bot-actions';
+import { BotActionError, claim, createRequest, decide, extendReview, supersedeWaiting, taskConversationKey, type CreateRequestInput } from '@/lib/bot-actions';
 import { saveServerLimits } from '@/lib/bot-limits';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
 const tag = randomUUID().slice(0, 8);
 const people: string[] = [];
+const SECOND = 1000;
 const MINUTE = 60 * 1000;
 const NOW = new Date('2026-11-13T06:00:00Z');
 const at = (ms: number) => new Date(NOW.getTime() + ms);
@@ -177,5 +178,39 @@ run('goal and task cards, in a real database', () => {
     await createRequest(sara.brickId, card(sara, going.id), NOW);
     await changeItem(sara.brickId, going.id, { userId: sara.uuid, action: 'pause' }, at(MINUTE));
     expect(await cardsOf(going.id)).toEqual(['waiting:null']);
+  });
+
+  it('starts a step only while its goal is going: a tap on a paused, finished or switched-off goal sends nothing', async () => {
+    const sara = await person('sara');
+    const goal = await goalOf(sara);
+    const approve = async (itemId: string, over: Partial<CreateRequestInput> = {}) => {
+      const made = await createRequest(sara.brickId, card(sara, itemId, over), NOW);
+      await decide(sara.brickId, made.action.id, { actorKey: sara.uuid, revision: made.action.revision, decision: 'approve' }, at(MINUTE));
+      return made.action.id;
+    };
+    // Going: the step is started
+    const going = await approve(goal.id);
+    expect((await claim(sara.brickId, going, {}, at(MINUTE + SECOND))).claimed).toBe(true);
+
+    // Paused after the tap and before it started: nothing starts, and the card ends
+    const paused = await approve(goal.id, { arguments: { title: 'Pay the fee' } });
+    await changeItem(sara.brickId, goal.id, { userId: sara.uuid, action: 'pause' }, at(MINUTE + SECOND));
+    const refused = await claim(sara.brickId, paused, {}, at(MINUTE + 2 * SECOND));
+    expect(refused).toMatchObject({ claimed: false, reason: 'stale' });
+    expect((await prisma.botActionRequest.findUnique({ where: { id: paused } }))).toMatchObject({ status: 'closed', closedReason: 'cancelled' });
+    expect(await prisma.botActionAttempt.count({ where: { requestId: paused } })).toBe(0);
+
+    // A card of a chat is not held to any goal
+    const chat = await createRequest(sara.brickId, card(sara, goal.id, { conversationKey: 'dm:sara:brick', arguments: { title: 'In chat' } }), NOW);
+    await decide(sara.brickId, chat.action.id, { actorKey: sara.uuid, revision: chat.action.revision, decision: 'approve' }, at(MINUTE));
+    expect((await claim(sara.brickId, chat.action.id, {}, at(MINUTE + 3 * SECOND))).claimed).toBe(true);
+
+    // The Brick switched off: nothing starts either
+    const other = await person('omar');
+    const second = await goalOf(other);
+    const made = await createRequest(other.brickId, card(other, second.id), NOW);
+    await decide(other.brickId, made.action.id, { actorKey: other.uuid, revision: made.action.revision, decision: 'approve' }, at(MINUTE));
+    await prisma.bot.update({ where: { id: other.brickId }, data: { enabled: false } });
+    expect(await claim(other.brickId, made.action.id, {}, at(MINUTE + 4 * SECOND))).toMatchObject({ claimed: false, reason: 'stale' });
   });
 });
