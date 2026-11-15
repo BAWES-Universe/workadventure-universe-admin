@@ -631,7 +631,16 @@ async function previewIn(db: Tx, checked: Checked, ids: readonly string[], now: 
   if (checked.schedule === 'none') sentence = 'Gives nothing: those people get no grant.';
   else if (unbounded) sentence = growing && !capped ? `Issues ${amountWords} to each person who qualifies, including people who join or sign up later. It has no lifetime maximum.` : `Renews every month with no end date, so it has no lifetime maximum.`;
   else sentence = `Issues at most ${universeAi ? `${lifetime} ${unit}` : dollars(lifetime ?? 0)} in all${checked.schedule === 'monthly' ? ` over ${months} month${months === 1 ? '' : 's'}` : ''}.`;
-  const envelope = await envelopeIn(db, now, settings).catch(() => null);
+  // The envelope is only a figure beside the preview: if it cannot be read, the preview goes on without it. It is read inside a savepoint,
+  // because a failed query otherwise leaves the whole transaction aborted and every read after it fails too
+  let envelope: Awaited<ReturnType<typeof envelopeIn>> | null = null;
+  await db.$executeRaw`SAVEPOINT preview_envelope`;
+  try {
+    envelope = await envelopeIn(db, now, settings);
+    await db.$executeRaw`RELEASE SAVEPOINT preview_envelope`;
+  } catch {
+    await db.$executeRaw`ROLLBACK TO SAVEPOINT preview_envelope`;
+  }
   const account = await getFundingAccount(checked.fundingAccountId, db);
   const budget = account ? budgetOf(account, settings) : null;
   const issued = account ? await issuedInMonth(db, account.id, now) : 0;

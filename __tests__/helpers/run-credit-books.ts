@@ -645,6 +645,12 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     const activeDefaults = await prisma.grantProgram.findMany({ where: { categoryId: 'computers', kind: 'default', status: 'active' }, include: { rules: true } });
     check('four first saves of a default at once make one default with four versions, none throws', firsts.every((r) => r === 'saved') && activeDefaults.length === 1 && activeDefaults[0].rules.length === 4, { firsts, programs: activeDefaults.length });
 
+    // A preview whose computer figures cannot be read still previews (the failed read must not abort the transaction around it)
+    await prisma.$executeRawUnsafe('ALTER TABLE meter_reservations RENAME TO meter_reservations_away');
+    const blind = await rules.previewGrant('gift', { categoryId: 'instant_apps', amount: 2 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['cr1'] } }, G).catch((e: unknown) => e);
+    await prisma.$executeRawUnsafe('ALTER TABLE meter_reservations_away RENAME TO meter_reservations');
+    check('a preview still works when the computer figures cannot be read, with those figures at nothing', !(blind instanceof Error) && (blind as { cost?: { reservedMicros?: number } }).cost?.reservedMicros === 0, blind instanceof Error ? blind.message : blind);
+
     // Room held against a lot that ended since still counts as held while the step runs
     await user('cr5', '2027-02-11T00:00:00Z');
     await rules.createGift({ categoryId: 'instant_apps', amount: 3 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['cr5'] }, lotExpiresAt: at('2027-03-01T00:00:00Z') }, root, at('2027-02-28T23:00:00Z'));
