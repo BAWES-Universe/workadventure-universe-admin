@@ -690,6 +690,14 @@ run('the bounded Instant executor, in a real database', () => {
       setAdapterForTests(p.adapter);
       const names = await toolNames();
       expect(names).toEqual(['EXA_ANSWER', 'EXA_GET_CONTENTS_ACTION', 'EXA_SEARCH']);
+      // The schema a Brick is offered is cut to the arguments a run may carry: no contents, no result count past the limit
+      p.instant.tool.mockImplementation((async (slug: string) => ({ slug, toolkit: 'x', description: null, inputSchema: { type: 'object', properties: { query: {}, contents: {}, type: {} }, required: ['query'] }, instantSupported: true, priceWords: null })) as never);
+      const { forgetToolSchemas } = await import('@/lib/instant/tools');
+      forgetToolSchemas();
+      const listed = (await (await toolsRoute(new NextRequest(`http://localhost/api/instant/tools?botId=${brick}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }))).json()) as { tools: { name: string; inputSchema: { properties: Record<string, unknown>; required: string[] } }[] };
+      const search = listed.tools.find((tool) => tool.name === 'EXA_SEARCH');
+      expect(Object.keys(search?.inputSchema.properties ?? {})).toEqual(['query']);
+      expect(search?.inputSchema.required).toEqual(['query']);
       const f = fakeFunds(1_000_000);
       // Exa is on: it runs. Tavily is not on: it is refused without a hold.
       expect(await runInstant(ask({ tool: 'TAVILY_SEARCH' }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'not_offered' });

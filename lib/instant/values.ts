@@ -43,12 +43,94 @@ interface InstantTool {
   bound: (args: Record<string, unknown>) => number | null;
 }
 
-const one = (): number => 1;
-
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /** A string argument that is there and short enough, or null. Used so a bound never depends on text the model could stretch without limit. */
 const shortText = (value: unknown): string | null => (typeof value === 'string' && value.trim() && value.length <= MAX_TEXT ? value : null);
+
+// ---------- What arguments a run may carry ----------
+
+/** One argument's rule: true when its value cannot make the call cost more than the priced unit. */
+type ArgRule = (value: unknown) => boolean;
+
+const textArg: ArgRule = (v) => shortText(v) !== null;
+const flag = (only?: boolean): ArgRule => (v) => typeof v === 'boolean' && (only === undefined || v === only);
+const whole = (min: number, max: number): ArgRule => (v) => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
+const number = (min: number, max: number): ArgRule => (v) => typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
+const oneOf = (...allowed: string[]): ArgRule => (v) => typeof v === 'string' && allowed.includes(v);
+const textList = (max: number): ArgRule => (v) => Array.isArray(v) && v.length >= 1 && v.length <= max && v.every((item) => shortText(item) !== null);
+const smallObject: ArgRule = (v) => isRecord(v) && JSON.stringify(v).length <= 500;
+
+/** A search is priced per search: the most results it may ask for. Above this the provider's own price steps up. */
+const MAX_RESULTS = 10;
+
+/**
+ * The arguments each tool may carry, each with the rule that keeps it inside its priced unit. An argument not listed is not known
+ * to be free (more results, deeper search, page contents, a pro model), so a call carrying one is not bounded and is refused;
+ * the schema a Brick is offered is cut to these too, so it is never invited to ask for what would be refused.
+ */
+const ALLOWED: Record<string, { args: Record<string, ArgRule>; required: string[] }> = {
+  EXA_SEARCH: {
+    args: {
+      query: textArg,
+      numResults: whole(1, MAX_RESULTS),
+      category: textArg,
+      moderation: flag(),
+      userLocation: textArg,
+      includeDomains: textList(20),
+      excludeDomains: textList(20),
+      includeText: textList(1),
+      excludeText: textList(1),
+      startPublishedDate: textArg,
+      endPublishedDate: textArg,
+    },
+    required: ['query'],
+  },
+  EXA_ANSWER: { args: { query: textArg, model: oneOf('exa') }, required: ['query'] },
+  TAVILY_SEARCH: {
+    args: { query: textArg, max_results: whole(1, MAX_RESULTS), search_depth: oneOf('basic'), include_domains: textList(20), exclude_domains: textList(20) },
+    required: ['query'],
+  },
+  GOOGLE_MAPS_GEOCODE_ADDRESS_WITH_QUERY: { args: { address_query: textArg, region_code: textArg, language_code: textArg }, required: ['address_query'] },
+  GOOGLE_MAPS_GEOCODE_LOCATION: {
+    args: { latitude: number(-90, 90), longitude: number(-180, 180), regionCode: textArg, languageCode: textArg, types: textList(20) },
+    required: ['latitude', 'longitude'],
+  },
+  GOOGLE_MAPS_GEOCODE_PLACE: { args: { place_id: textArg, regionCode: textArg, languageCode: textArg }, required: ['place_id'] },
+  GOOGLE_MAPS_AUTOCOMPLETE: {
+    args: {
+      input: textArg,
+      origin: smallObject,
+      regionCode: textArg,
+      inputOffset: whole(0, 2_000),
+      languageCode: textArg,
+      locationBias: smallObject,
+      sessionToken: textArg,
+      includedRegionCodes: textList(15),
+      locationRestriction: smallObject,
+      includedPrimaryTypes: textList(5),
+    },
+    required: ['input'],
+  },
+};
+
+/** One priced unit when every argument is one the tool is known to carry at that price, and the needed ones are there; else null. */
+function oneUnit(tool: string, args: Record<string, unknown>): number | null {
+  const rules = ALLOWED[tool];
+  if (!rules) return null;
+  for (const [key, value] of Object.entries(args)) {
+    const rule = Object.prototype.hasOwnProperty.call(rules.args, key) ? rules.args[key] : undefined;
+    if (!rule || !rule(value)) return null;
+  }
+  return rules.required.every((key) => args[key] !== undefined) ? 1 : null;
+}
+
+/** The argument names a Brick may use on a tool, or null for a tool that is not in the table; for cutting the schema it is offered. */
+export function instantAllowedArguments(tool: string): { names: string[]; required: string[] } | null {
+  const rules = Object.prototype.hasOwnProperty.call(ALLOWED, tool) ? ALLOWED[tool] : undefined;
+  if (rules) return { names: Object.keys(rules.args), required: rules.required };
+  return tool === 'EXA_GET_CONTENTS_ACTION' ? { names: [...EXA_CONTENTS_KEYS], required: [] } : null;
+}
 
 /** The arguments of Exa's contents tool that are known not to add to its price. Any other argument could, so a call with one is not bounded. */
 const EXA_CONTENTS_KEYS = new Set(['urls', 'ids', 'text', 'highlights', 'summary', 'livecrawl', 'livecrawl_timeout']);
@@ -73,14 +155,14 @@ function exaContentsBound(args: Record<string, unknown>): number | null {
  * gets its own rule and review. Adding a tool is a code change with its own tests, never a setting a model or a page can make.
  */
 const TABLE: Record<string, InstantTool> = {
-  EXA_SEARCH: { toolkit: 'exa', unitMicros: 7_000, listed: '$0.007 per search', bound: (args) => (shortText(args.query) ? 1 : null) },
-  EXA_ANSWER: { toolkit: 'exa', unitMicros: 5_000, listed: '$0.005 per answer', bound: (args) => (shortText(args.query) ? 1 : null) },
+  EXA_SEARCH: { toolkit: 'exa', unitMicros: 7_000, listed: '$0.007 per search', bound: (args) => oneUnit('EXA_SEARCH', args) },
+  EXA_ANSWER: { toolkit: 'exa', unitMicros: 5_000, listed: '$0.005 per answer', bound: (args) => oneUnit('EXA_ANSWER', args) },
   EXA_GET_CONTENTS_ACTION: { toolkit: 'exa', unitMicros: 1_000, listed: '$0.001 per page per content type', bound: exaContentsBound },
-  TAVILY_SEARCH: { toolkit: 'tavily', unitMicros: 8_000, listed: '$0.008 per web search.', bound: (args) => (shortText(args.query) ? 1 : null) },
-  GOOGLE_MAPS_GEOCODE_ADDRESS_WITH_QUERY: { toolkit: 'google_maps', unitMicros: 5_000, listed: '$0.005 per address geocoding request', bound: one },
-  GOOGLE_MAPS_GEOCODE_LOCATION: { toolkit: 'google_maps', unitMicros: 5_000, listed: '$0.005 per reverse geocoding request', bound: one },
-  GOOGLE_MAPS_GEOCODE_PLACE: { toolkit: 'google_maps', unitMicros: 5_000, listed: '$0.005 per place geocoding request', bound: one },
-  GOOGLE_MAPS_AUTOCOMPLETE: { toolkit: 'google_maps', unitMicros: 2_830, listed: '$0.00283 per request', bound: one },
+  TAVILY_SEARCH: { toolkit: 'tavily', unitMicros: 8_000, listed: '$0.008 per web search.', bound: (args) => oneUnit('TAVILY_SEARCH', args) },
+  GOOGLE_MAPS_GEOCODE_ADDRESS_WITH_QUERY: { toolkit: 'google_maps', unitMicros: 5_000, listed: '$0.005 per address geocoding request', bound: (args) => oneUnit('GOOGLE_MAPS_GEOCODE_ADDRESS_WITH_QUERY', args) },
+  GOOGLE_MAPS_GEOCODE_LOCATION: { toolkit: 'google_maps', unitMicros: 5_000, listed: '$0.005 per reverse geocoding request', bound: (args) => oneUnit('GOOGLE_MAPS_GEOCODE_LOCATION', args) },
+  GOOGLE_MAPS_GEOCODE_PLACE: { toolkit: 'google_maps', unitMicros: 5_000, listed: '$0.005 per place geocoding request', bound: (args) => oneUnit('GOOGLE_MAPS_GEOCODE_PLACE', args) },
+  GOOGLE_MAPS_AUTOCOMPLETE: { toolkit: 'google_maps', unitMicros: 2_830, listed: '$0.00283 per request', bound: (args) => oneUnit('GOOGLE_MAPS_AUTOCOMPLETE', args) },
 };
 
 /** The call fee Composio adds to a managed-account tool run (its rate card tier for the app) and the direct execution add-on. */

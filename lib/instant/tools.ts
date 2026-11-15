@@ -2,7 +2,7 @@ import { getAdapter } from '@/lib/app-adapter';
 import { appKeyOf, brickApps } from '@/lib/instant/asker';
 import { instantFundsAreWired } from '@/lib/instant/funds';
 import { getInstantLimits, getInstantPause } from '@/lib/instant/state';
-import { instantCatalog, missingInstantLimits } from '@/lib/instant/values';
+import { instantAllowedArguments, instantCatalog, missingInstantLimits } from '@/lib/instant/values';
 
 /**
  * What a Brick may be offered: only Apps its owner switched on for it, only tools in the trusted table, only while Instant can really run (limits set, not paused, the
@@ -21,6 +21,16 @@ export interface OfferedTool {
   inputSchema: unknown;
   /** The least one run costs the person (before any markup), in micros. For the Brick's own judgement ("this is a small run"), never a bound. */
   fromMicros: number;
+}
+
+/** Composio's input schema cut to the arguments a run may carry at its priced unit, so a Brick is never invited to ask for what would be refused. */
+function cutSchema(tool: string, schema: unknown): unknown {
+  const allowed = instantAllowedArguments(tool);
+  if (!allowed || typeof schema !== 'object' || schema === null || Array.isArray(schema)) return schema;
+  const source = schema as Record<string, unknown>;
+  const properties = typeof source.properties === 'object' && source.properties !== null ? (source.properties as Record<string, unknown>) : {};
+  const kept = Object.fromEntries(Object.entries(properties).filter(([name]) => allowed.names.includes(name)));
+  return { ...source, properties: kept, required: allowed.required.filter((name) => name in kept) };
 }
 
 export async function offeredInstantTools(botId: string | null): Promise<{ ready: boolean; reason: string | null; tools: OfferedTool[] }> {
@@ -42,7 +52,7 @@ export async function offeredInstantTools(botId: string | null): Promise<{ ready
         const live = await instant.tool(row.tool);
         // Composio does not serve it as Instant (any more): not offered
         if (!live || !live.instantSupported) continue;
-        known = { at: Date.now(), description: live.description, inputSchema: live.inputSchema };
+        known = { at: Date.now(), description: live.description, inputSchema: cutSchema(row.tool, live.inputSchema) };
         schemas.set(row.tool, known);
       } catch (error) {
         console.error('[Instant] Could not read a tool:', error instanceof Error ? error.message : 'unknown');

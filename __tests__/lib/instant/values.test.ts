@@ -2,6 +2,7 @@ import {
   INSTANT_LIMITS_EMPTY,
   INSTANT_NEEDED,
   admitInstantTool,
+  instantAllowedArguments,
   argsFingerprint,
   checkInstantLimits,
   customerChargeFor,
@@ -50,7 +51,7 @@ describe('a tool is offered only when its arguments can be held to a top price',
   });
 
   it('holds Google Maps at its rate card floor for the call fee', () => {
-    const admitted = admitInstantTool('GOOGLE_MAPS_GEOCODE_PLACE', {});
+    const admitted = admitInstantTool('GOOGLE_MAPS_GEOCODE_PLACE', { place_id: 'ChIJj61dQgK6j4AR4GeTYWZsKWw' });
     expect(admitted.ok && admitted.topMicros).toBe(5_000 + RATE_MICROS.managed_maps + DIRECT_EXECUTION_MICROS);
   });
 
@@ -108,6 +109,47 @@ describe('money is exact', () => {
 
   it('sends a run under an id that is nothing of a person', () => {
     expect(providerUserIdFor('run-1')).toBe('universe-instant-run-1');
+  });
+});
+
+describe('a run may carry only arguments known to stay inside its priced unit', () => {
+  it('lets the plain forms of each tool through, and bounded extras', () => {
+    expect(admitInstantTool('EXA_SEARCH', { query: 'x', numResults: 10, includeDomains: ['a.example'] })).toMatchObject({ ok: true, units: 1 });
+    expect(admitInstantTool('EXA_ANSWER', { query: 'x', model: 'exa' })).toMatchObject({ ok: true });
+    expect(admitInstantTool('TAVILY_SEARCH', { query: 'x', max_results: 5, search_depth: 'basic' })).toMatchObject({ ok: true });
+    expect(admitInstantTool('GOOGLE_MAPS_GEOCODE_LOCATION', { latitude: 29.37, longitude: 47.97 })).toMatchObject({ ok: true });
+    expect(admitInstantTool('GOOGLE_MAPS_AUTOCOMPLETE', { input: 'Kuwait Tow' })).toMatchObject({ ok: true });
+  });
+
+  it('refuses any argument that could raise the cost: more results, deeper search, contents, a pro model, a stream', () => {
+    const refused = { ok: false, reason: 'unbounded' };
+    expect(admitInstantTool('EXA_SEARCH', { query: 'x', numResults: 100 })).toEqual(refused);
+    expect(admitInstantTool('EXA_SEARCH', { query: 'x', numResults: 11 })).toEqual(refused);
+    expect(admitInstantTool('EXA_SEARCH', { query: 'x', contents: { text: true } })).toEqual(refused);
+    expect(admitInstantTool('EXA_SEARCH', { query: 'x', type: 'deep' })).toEqual(refused);
+    expect(admitInstantTool('EXA_SEARCH', { query: 'x', additionalQueries: ['a', 'b'] })).toEqual(refused);
+    expect(admitInstantTool('EXA_ANSWER', { query: 'x', model: 'exa-pro' })).toEqual(refused);
+    expect(admitInstantTool('EXA_ANSWER', { query: 'x', text: true })).toEqual(refused);
+    expect(admitInstantTool('EXA_ANSWER', { query: 'x', stream: true })).toEqual(refused);
+    expect(admitInstantTool('TAVILY_SEARCH', { query: 'x', search_depth: 'advanced' })).toEqual(refused);
+    expect(admitInstantTool('TAVILY_SEARCH', { query: 'x', max_results: 50 })).toEqual(refused);
+    expect(admitInstantTool('TAVILY_SEARCH', { query: 'x', include_raw_content: true })).toEqual(refused);
+    expect(admitInstantTool('GOOGLE_MAPS_AUTOCOMPLETE', { input: 'x', includeQueryPredictions: true })).toEqual(refused);
+  });
+
+  it('refuses a call missing what the tool needs, and a number that is not a number', () => {
+    const refused = { ok: false, reason: 'unbounded' };
+    expect(admitInstantTool('GOOGLE_MAPS_GEOCODE_PLACE', {})).toEqual(refused);
+    expect(admitInstantTool('GOOGLE_MAPS_GEOCODE_LOCATION', { latitude: 1 })).toEqual(refused);
+    expect(admitInstantTool('GOOGLE_MAPS_GEOCODE_LOCATION', { latitude: 'a', longitude: 2 })).toEqual(refused);
+    expect(admitInstantTool('EXA_SEARCH', { query: 'x', numResults: 2.5 })).toEqual(refused);
+  });
+
+  it('names the arguments a Brick may use, for cutting the schema it is offered', () => {
+    expect(instantAllowedArguments('TAVILY_SEARCH')?.names).not.toContain('include_raw_content');
+    expect(instantAllowedArguments('EXA_SEARCH')?.names).not.toContain('contents');
+    expect(instantAllowedArguments('EXA_SEARCH')?.required).toEqual(['query']);
+    expect(instantAllowedArguments('NOT_A_TOOL')).toBeNull();
   });
 });
 
