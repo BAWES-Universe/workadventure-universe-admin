@@ -315,6 +315,24 @@ run('rules said in chat and task receipts, in a real database', () => {
     });
   });
 
+  describe('one rule over both kinds of credit', () => {
+    it('a computer step and an Instant step asked at the same moment meet at one lock: a cap with room for one lets exactly one through', async () => {
+      const funds = createInstantFunds(() => NOW);
+      for (let round = 0; round < 6; round++) {
+        const sara = await person(`sara${round}`);
+        await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000, covers: 'all' });
+        const account = await prisma.fundingAccount.create({ data: { kind: 'person', ownerKey: sara.id, name: 'Sara', budgetMicros: BigInt(100_000_000) } });
+        await prisma.creditLot.create({
+          data: { slotKey: 'base:instant_apps', subjectKey: `person:${sara.id}`, periodKey: '2026-11', fundingAccountId: account.id, personId: sara.id, source: 'default', amountMicros: BigInt(1_000_000), covers: ['instant_apps'], startsAt: new Date('2026-11-01T00:00:00Z') },
+        });
+        const computer = reserveRoom({ key: `mix-c-${round}-${tag}`, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: `mix-job-${round}` }, NOW);
+        const instant = funds.reserve({ key: `mix-i-${round}-${tag}`, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, runId: null, charge: { class: 'instant', route: 'instant', provider: 'composio' } });
+        const [a, b] = await Promise.all([computer, instant]);
+        expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
+      }
+    });
+  });
+
   describe('where room is taken', () => {
     it('refuses room a rule does not allow, takes nothing, and says it is the rule: never "your allowance", so more credit is not offered', async () => {
       const sara = await person('sara');

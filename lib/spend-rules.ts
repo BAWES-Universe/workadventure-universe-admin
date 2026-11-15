@@ -29,7 +29,7 @@ import {
  * falls back to somebody else's credit and never lifts a limit: it only ever makes the allowed amount smaller.
  */
 
-type Db = Pick<typeof prisma, 'spendRule' | 'meterEvent' | 'meterReservation' | 'creditHold'>;
+type Db = Pick<typeof prisma, 'spendRule' | 'meterEvent' | 'meterReservation' | 'creditHold'> & Partial<Pick<Prisma.TransactionClient, '$executeRaw'>>;
 
 const toNumber = (value: bigint | number | null): number => (value === null ? 0 : Number(value));
 
@@ -299,6 +299,11 @@ export async function checkSpend(attempt: SpendAttempt, now: Date = new Date(), 
   const rows = await db.spendRule.findMany({ where });
   if (rows.length === 0) return { ok: true };
   const rules = rows.map(viewOf);
+  // One rule can cover both computers and Instant Apps, whose rooms are taken under different locks (the meter's pool, the person's
+  // credit). Every step that is held to a rule meets here first, on the paying person, so two of them never read the same totals
+  // and both pass. The lock lasts to the end of the caller's transaction, which also writes the room, so the next one sees it.
+  // Always taken after the caller's own lock and never before it, so it cannot make a cycle.
+  if (db !== prisma && db.$executeRaw) await db.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`spend-check:${attempt.payerPersonId}`}))`;
   const spent = new Map<string, SpentSoFar>();
   for (const rule of rules) {
     if (rule.capMicros !== null) spent.set(rule.id, await spentFor(db, rule, attempt, now));
