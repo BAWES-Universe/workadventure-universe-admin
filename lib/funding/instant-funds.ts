@@ -1,6 +1,5 @@
 import { classifyCharge } from '@/lib/credit-values';
 import { holdCredit, refundHold, releaseHold, settleHold, type GiveBackLimits } from '@/lib/credit-spend';
-import { prisma } from '@/lib/db';
 import { checkSpend } from '@/lib/spend-rules';
 
 /**
@@ -40,13 +39,6 @@ export function createInstantFunds(clock: () => Date = () => new Date()): Instan
   return {
     async reserve(input) {
       try {
-        // What the person said in chat comes first, before any credit is held. A step asked again for a hold that already exists is that same hold:
-        // its own room is already counted, so it is not held to the rules a second time
-        const existing = await prisma.creditHold.findUnique({ where: { holdKey: input.key }, select: { id: true } });
-        if (!existing) {
-          const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.runId ?? null, chargeClass: 'apps', amountMicros: input.amountMicros }, clock());
-          if (!ruled.ok) return { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
-        }
         const held = await holdCredit({
           holdKey: input.key,
           personId: input.personId,
@@ -58,8 +50,15 @@ export function createInstantFunds(clock: () => Date = () => new Date()): Instan
           provider: input.charge.provider,
           priceVersion: input.charge.priceVersion ?? null,
           jobKey: input.runId ?? null,
+          // What the person said in chat is checked inside the hold's own transaction, under the person's lock, before any credit is held:
+          // two steps asked at the same moment cannot both pass a cap that only has room for one
+          guard: async (tx) => {
+            const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.runId ?? null, chargeClass: 'apps', amountMicros: input.amountMicros }, clock(), tx);
+            return ruled.ok ? null : { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
+          },
         }, clock());
         if (held.ok) return { ok: true, created: held.created };
+        if (held.reason === 'rule') return held;
         return { ok: false, reason: held.reason === 'credit_used_up' || held.reason === 'not_set' ? held.reason : 'unavailable' };
       } catch (error) {
         console.error('[Funding] Could not hold Instant credit:', error instanceof Error ? error.message : 'unknown');

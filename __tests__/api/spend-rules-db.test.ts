@@ -116,7 +116,10 @@ const wipe = async () => {
   await prisma.computerJob.deleteMany({ where: { personId: { in: ids } } });
   await prisma.meterEvent.deleteMany({ where: { personKey: { in: ids.map((id) => `person:${id}`) } } });
   await prisma.meterReservation.deleteMany({ where: { personKey: { in: ids.map((id) => `person:${id}`) } } });
+  await prisma.creditAllocation.deleteMany({ where: { lot: { personId: { in: ids } } } });
   await prisma.creditHold.deleteMany({ where: { personId: { in: ids } } });
+  await prisma.creditLot.deleteMany({ where: { personId: { in: ids } } });
+  await prisma.fundingAccount.deleteMany({ where: { kind: 'person', ownerKey: { in: ids } } });
 };
 
 run('rules said in chat and task receipts, in a real database', () => {
@@ -294,6 +297,21 @@ run('rules said in chat and task receipts, in a real database', () => {
       // A hold that is already there is asked about again: it is that hold, not a new step
       await hold(sara.id, sara.brickId, 'instant-c', { state: 'held', amount: 10_000 });
       expect(await step(`instant-c-${tag}`, 10_000)).not.toMatchObject({ reason: 'rule' });
+    });
+
+    it('two Instant steps asked at the same moment meet at the person’s lock: a cap with room for one lets exactly one through', async () => {
+      const sara = await person('sara');
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 10_000, covers: 'apps' });
+      const account = await prisma.fundingAccount.create({ data: { kind: 'person', ownerKey: sara.id, name: 'Sara', budgetMicros: BigInt(100_000_000) } });
+      await prisma.creditLot.create({
+        data: { slotKey: 'base:instant_apps', subjectKey: `person:${sara.id}`, periodKey: '2026-11', fundingAccountId: account.id, personId: sara.id, source: 'default', amountMicros: BigInt(1_000_000), covers: ['instant_apps'], startsAt: new Date('2026-11-01T00:00:00Z') },
+      });
+      const funds = createInstantFunds(() => NOW);
+      const step = (key: string) => funds.reserve({ key: `${key}-${tag}`, personId: sara.id, amountMicros: 6_000, botId: sara.brickId, runId: null, charge: { class: 'instant', route: 'instant', provider: 'composio' } });
+      const answers = await Promise.all([step('race-a'), step('race-b'), step('race-c')]);
+      expect(answers.filter((one) => one.ok)).toHaveLength(1);
+      expect(answers.filter((one) => !one.ok && one.reason === 'rule')).toHaveLength(2);
+      expect(await prisma.creditHold.count({ where: { personId: sara.id, state: 'held' } })).toBe(1);
     });
   });
 
