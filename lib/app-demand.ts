@@ -183,7 +183,7 @@ export const ASK_WORDS_MAX = 5;
 const ASK_TIMES_PER_DAY = 25;
 const ASK_NAMES_PER_DAY = 20;
 
-const NAME_SHAPE = /^[\p{L}\p{N}][\p{L}\p{N} .&'+\-/]*$/u;
+const NAME_SHAPE = /^[\p{L}\p{N}][\p{L}\p{M}\p{N} .&'+\-/]*$/u;
 
 /** The App name to count, or null when it is not an App name (empty, too long, a link, an email, or reads like a sentence). */
 export function cleanAskName(raw: unknown): { name: string; key: string } | null {
@@ -193,9 +193,10 @@ export function cleanAskName(raw: unknown): { name: string; key: string } | null
   if (name.split(' ').length > ASK_WORDS_MAX) return null;
   if (!NAME_SHAPE.test(name)) return null;
   if (/https?:|www\.|@/i.test(name)) return null;
-  const key = name.toLowerCase();
-  // Lowercasing can make a name longer (İ becomes two characters), and the key is a column of the same width as a name
-  if (key.length > ASK_NAME_MAX) return null;
+  // The key is what asks are grouped by: lower case, and without accents or other marks, so "Café", "CAFÉ" and "cafe" are one App.
+  // Lowercasing can make a name longer (İ becomes two characters before its mark is dropped), so the key is also cut to the width
+  // of its column, counted in characters (code points), never in the middle of one.
+  const key = Array.from(name.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '').normalize('NFC')).slice(0, ASK_NAME_MAX).join('');
   return { name, key };
 }
 

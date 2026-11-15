@@ -388,6 +388,18 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
       expect(await prisma.appAsk.count({ where: { personKey: { not: '' }, name: { in: ['https://example.com/pay', 'sara@example.com'] } } })).toBe(0);
     });
 
+    it('never fails on a name whose lower case is longer, and groups one App typed in different cases and accents', async () => {
+      expect(await (await ask('İ'.repeat(60), sara)).json()).toEqual({ counted: true });
+      await prisma.appAsk.deleteMany({ where: { nameKey: 'i'.repeat(60) } });
+      expect(await (await ask(`Café ${tag}`, sara)).json()).toEqual({ counted: true });
+      await ask(`CAFÉ ${tag}`, omar);
+      await ask(`cafe ${tag}`, omar);
+      asBoss();
+      const row = (await demand()).asked.find((item) => item.name.toLowerCase().includes(`caf`) && item.name.includes(tag));
+      expect(row).toMatchObject({ times: 3, people: 2 });
+      expect(await prisma.appAsk.count({ where: { nameKey: `cafe ${tag}` } })).toBe(2);
+    });
+
     it('does not count an App that is already there', async () => {
       await list();
       expect(await (await ask('Notion', sara)).json()).toEqual({ counted: false, reason: 'exists' });

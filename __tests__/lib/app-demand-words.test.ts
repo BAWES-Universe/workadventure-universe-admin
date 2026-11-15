@@ -46,10 +46,26 @@ describe('cleanAskName: only an App name is kept', () => {
     expect(cleanAskName('Stack Exchange.com')).not.toBeNull();
   });
 
+  it('cuts the key to the column and groups the same App typed in different cases and accents', () => {
+    // Lowercasing İ makes two characters, so the key is made from the name without its marks and is never longer than the column
+    for (const text of ['İ'.repeat(60), 'İ'.repeat(40), 'ǅ'.repeat(60)]) {
+      const cleaned = cleanAskName(text);
+      expect(cleaned).not.toBeNull();
+      expect(Array.from(cleaned!.key).length).toBeLessThanOrEqual(60);
+    }
+    const keys = ['Café', 'CAFÉ', 'cafe', 'Cafe\u0301'].map((text) => cleanAskName(text)!.key);
+    expect(new Set(keys)).toEqual(new Set(['cafe']));
+    // A character that NFKC spreads into a whole phrase is measured after that, so it is refused, not cut
+    expect(cleanAskName('ﷺ'.repeat(12))).toBeNull();
+    // The name is kept as typed (after NFKC), only the key loses its accents
+    expect(cleanAskName('Café')!.name).toBe('Café');
+    // An emoji is not a name: refused, never a crash
+    expect(cleanAskName('Talabat 🍔')).toBeNull();
+    // Letters with marks of their own (Arabic, Hindi) stay names
+    expect(cleanAskName('طَلَبات')).not.toBeNull();
+  });
+
   it('keeps nothing that is not a name', () => {
-    // Lowercasing İ makes two characters, so 40 of them are 40 as a name and 80 as a key: too long to keep
-    expect(cleanAskName('İ'.repeat(40))).toBeNull();
-    expect(cleanAskName('İ'.repeat(10))).not.toBeNull();
     for (const text of [null, 5, '', ' ', 'a', 'x'.repeat(61), 'one two three four five six', 'what is my balance?', 'hello, can you help', 'https://example.com', 'www.example.com', 'me@example.com', '<script>', 'a\nb\nc d e f']) {
       expect(cleanAskName(text)).toBeNull();
     }
