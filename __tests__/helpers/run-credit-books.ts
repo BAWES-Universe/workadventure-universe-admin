@@ -521,6 +521,22 @@ async function main() {
     check('a failure found after the sponsor’s account closed is made whole by the platform, in credit the person can spend', refunded.ok && repl?.fundingAccountId === 'funding-platform' && spendable.availableMicros === 1 * M, { refunded, repl, spendable });
   }
 
+  // ---------- "Ask for more" only when nothing at all is left ----------
+  {
+    await user('ask1', '2027-02-11T00:00:00Z');
+    await rules.saveException({ categoryId: 'instant_apps', amount: 1 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['ask1'] } }, root, G);
+    await rules.createGift({ categoryId: 'instant_apps', amount: 2 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['ask1'] } }, root, G);
+    await issue.ensureIssued('ask1', G);
+    await spend.holdCredit({ holdKey: 'ask1-a', personId: 'ask1', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, G);
+    await spend.settleHold({ holdKey: 'ask1-a', customerMicros: 1 * M }, G);
+    const line = (await usage.moneyLine('ask1', 'instant_apps', G)) as { availableMicros: number; canAskForMore: boolean };
+    check('the line is used up but a gift still covers Apps: not out, so no "Ask for more"', line.availableMicros === 0 && line.canAskForMore === false, line);
+    await spend.holdCredit({ holdKey: 'ask1-b', personId: 'ask1', category: 'instant_apps', amountMicros: 2 * M, chargeClass: 'instant_run' }, G);
+    await spend.settleHold({ holdKey: 'ask1-b', customerMicros: 2 * M }, G);
+    const out = (await usage.moneyLine('ask1', 'instant_apps', G)) as { canAskForMore: boolean };
+    check('with the gift used up too, "Ask for more" is offered', out.canAskForMore === true, out);
+  }
+
   // ---------- The Instant executor's contract ----------
   {
     await user('inst', '2027-02-11T00:00:00Z');

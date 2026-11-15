@@ -71,7 +71,8 @@ export async function moneyLine(personId: string, category: MoneyCategory, now: 
       inProgressMicros: inProgress,
       renewsAt: monthly ? monthEnd(now).toISOString() : null,
       asked,
-      canAskForMore: available + inProgress <= 0,
+      // Used up means nothing spendable is left for this category at all: a gift or shared amount that covers it counts, not only the line
+      canAskForMore: lots.every((lot) => lot.availableMicros + lot.balance.heldMicros <= 0),
       unavailable: false,
     };
   } catch (error) {
