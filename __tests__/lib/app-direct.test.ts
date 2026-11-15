@@ -343,11 +343,11 @@ describe('the strict outgoing guard', () => {
   });
 
   it('sends a body with its exact length, so a service that wants one is never sent chunks', async () => {
-    const seen: { headers?: Record<string, string>; written: string[] } = { written: [] };
+    const seen: { headers?: Record<string, string>; written: (string | Buffer)[] } = { written: [] };
     const spy = jest.spyOn(https, 'request').mockImplementation(((options: { headers: Record<string, string> }, onResponse: (response: EventEmitter & { statusCode: number; headers: Record<string, string> }) => void) => {
       seen.headers = options.headers;
       const fake = Object.assign(new EventEmitter(), {
-        write: (chunk: string) => seen.written.push(chunk),
+        write: (chunk: string | Buffer) => seen.written.push(chunk),
         destroy: () => undefined,
         end: () => {
           const response = Object.assign(new EventEmitter(), { statusCode: 200, headers: { 'content-type': 'application/json' }, destroy: () => undefined });
@@ -364,8 +364,21 @@ describe('the strict outgoing guard', () => {
       // Counted in bytes, not characters
       expect(Buffer.byteLength(body)).toBeGreaterThan(body.length);
       expect(seen.headers?.['content-length']).toBe(String(Buffer.byteLength(body)));
-      expect(seen.written).toEqual([body]);
-      // No body, no length
+      expect(seen.written.map((chunk) => Buffer.from(chunk).toString('utf8'))).toEqual([body]);
+      // A length the caller named, in any spelling, never survives next to the real one, and neither does a transfer coding
+      await guardedRequest({ ...request('https://api.example.com/v1/a'), method: 'POST', headers: { 'Content-Length': '3', 'Transfer-Encoding': 'chunked', authorization: 'Bearer x' }, body, maxBytes: 1000 }, { resolve: async () => [{ address: '93.184.216.34', family: 4 }] });
+      expect(Object.keys(seen.headers ?? {}).filter((name) => name.toLowerCase() === 'content-length')).toEqual(['content-length']);
+      expect(seen.headers?.['content-length']).toBe(String(Buffer.byteLength(body)));
+      expect(Object.keys(seen.headers ?? {}).map((name) => name.toLowerCase())).not.toContain('transfer-encoding');
+      expect(seen.headers?.authorization).toBe('Bearer x');
+      // An Arabic body counts the same way
+      const arabic = JSON.stringify({ note: 'شكراً جزيلاً' });
+      await guardedRequest({ ...request('https://api.example.com/v1/a'), method: 'POST', body: arabic, maxBytes: 1000 }, { resolve: async () => [{ address: '93.184.216.34', family: 4 }] });
+      expect(seen.headers?.['content-length']).toBe(String(Buffer.byteLength(arabic)));
+      // No body, no length (and none the caller named)
+      seen.written.length = 0;
+      await guardedRequest({ ...request('https://api.example.com/v1/a'), headers: { 'content-length': '9' }, maxBytes: 1000 }, { resolve: async () => [{ address: '93.184.216.34', family: 4 }] });
+      expect(seen.written).toEqual([]);
       await guardedRequest({ ...request('https://api.example.com/v1/a'), maxBytes: 1000 }, { resolve: async () => [{ address: '93.184.216.34', family: 4 }] });
       expect(seen.headers).not.toHaveProperty('content-length');
     } finally {

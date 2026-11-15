@@ -115,14 +115,20 @@ const defaultSend: Send = (target) =>
       clearTimeout(timer);
       action();
     };
+    // A body goes with its exact length, counted in bytes once: without it Node sends the body in chunks, and some services answer that
+    // with 411 or 400. Whatever length or transfer coding the caller named is dropped (any spelling), so the two can never disagree.
+    const payload = target.body === undefined ? null : Buffer.from(target.body, 'utf8');
+    const headers: Record<string, string> = {};
+    for (const [name, value] of Object.entries(target.headers)) if (!['content-length', 'transfer-encoding', 'host'].includes(name.toLowerCase())) headers[name] = value;
+    headers.host = target.host;
+    if (payload) headers['content-length'] = String(payload.length);
     const request = https.request(
       {
         host: target.host,
         port: 443,
         method: target.method,
         path: target.path,
-        // A body goes with its exact length: without it Node sends it in chunks, and some services answer that with 411 or 400
-        headers: { ...target.headers, host: target.host, ...(target.body !== undefined ? { 'content-length': String(Buffer.byteLength(target.body)) } : {}) },
+        headers,
         servername: target.host,
         // Node may ask for one address or for all of them; either way the answer is the one that was checked
         lookup: ((_name: string, options: { all?: boolean }, callback: (...args: unknown[]) => void) => {
@@ -169,7 +175,7 @@ const defaultSend: Send = (target) =>
       done(() => reject(new GuardError('timeout', 'No answer in time')));
     }, target.timeoutMs);
     request.on('error', () => done(() => reject(new GuardError('unreachable', 'The service could not be reached'))));
-    if (target.body !== undefined) request.write(target.body);
+    if (payload) request.write(payload);
     request.end();
   });
 
