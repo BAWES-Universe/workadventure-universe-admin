@@ -56,7 +56,8 @@ export function createInstantFunds(clock: () => Date = () => new Date()): Instan
     async settle(input) {
       try {
         const hold = await settleHold({ holdKey: input.key, customerMicros: input.chargeMicros, provider: input.providerCostMicros === undefined ? undefined : { costMicros: input.providerCostMicros, basis: input.providerCostMicros === null ? 'unknown' : 'measured' } }, clock());
-        return { ok: hold !== null };
+        // Charged only if it is now settled: a hold that was released (or never existed) was not charged, whatever it answers
+        return { ok: hold?.state === 'settled' };
       } catch (error) {
         console.error('[Funding] Could not settle Instant credit:', error instanceof Error ? error.message : 'unknown');
         return { ok: false };
@@ -64,7 +65,7 @@ export function createInstantFunds(clock: () => Date = () => new Date()): Instan
     },
     async release(input) {
       try {
-        return { ok: (await releaseHold({ holdKey: input.key }, clock())) !== null };
+        return { ok: (await releaseHold({ holdKey: input.key }, clock()))?.state === 'released' };
       } catch (error) {
         console.error('[Funding] Could not release Instant credit:', error instanceof Error ? error.message : 'unknown');
         return { ok: false };

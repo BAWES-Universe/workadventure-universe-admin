@@ -246,6 +246,16 @@ async function main() {
     const eff1 = await spend.holdCredit({ ...input, holdKey: 'e1', amountMicros: 1, effectKey: 'exec-1' }, G);
     const eff2 = await spend.holdCredit({ ...input, holdKey: 'e2', amountMicros: 1, effectKey: 'exec-1' }, G);
     check('the same execution is never charged under two keys', eff1.ok && !eff2.ok && eff2.reason === 'effect_charged', eff2);
+    // Nothing was taken by a released hold, so the same execution can be asked for again under a new key; while a hold is held or settled it cannot
+    await spend.releaseHold({ holdKey: 'e1' }, G);
+    const effRetry = await spend.holdCredit({ ...input, holdKey: 'e3', amountMicros: 1, effectKey: 'exec-1' }, G);
+    const effBlockedHeld = await spend.holdCredit({ ...input, holdKey: 'e4', amountMicros: 1, effectKey: 'exec-1' }, G);
+    check('a released hold does not block asking again for the same execution, but a live one still does', eff2.ok === false && effRetry.ok && !effBlockedHeld.ok && effBlockedHeld.reason === 'effect_charged', { effRetry, effBlockedHeld });
+    await spend.settleHold({ holdKey: 'e3', customerMicros: 1 }, G);
+    const effBlockedSettled = await spend.holdCredit({ ...input, holdKey: 'e5', amountMicros: 1, effectKey: 'exec-1' }, G);
+    check('a settled hold keeps its execution to one charge', !effBlockedSettled.ok && effBlockedSettled.reason === 'effect_charged', effBlockedSettled);
+    const race = await Promise.all([1, 2, 3, 4].map((n) => spend.holdCredit({ ...input, holdKey: `er-${n}`, amountMicros: 1, effectKey: 'exec-race' }, G).catch((error: unknown) => ({ ok: false as const, reason: `threw: ${error instanceof Error ? error.message.slice(0, 80) : 'unknown'}` }))));
+    check('one execution asked for under four keys at once is held once, and the others are told it is already charged, never a throw', race.filter((r) => r.ok).length === 1 && race.filter((r) => !r.ok && r.reason === 'effect_charged').length === 3, race);
   }
 
   // ---------- Spending order ----------
@@ -291,6 +301,9 @@ async function main() {
     check('a failure found after the gift ended makes a small separate replacement credit, capped by the give-back limit, never a renewal of the old gift', late.ok && late.replacementMicros === 400_000 && !!replacement && Number(replacement.amountMicros) === 400_000 && replacement.slotKey === 'replacement' && (replacement.expiresAt?.toISOString() ?? '') === '2027-05-01T00:00:00.000Z' && replacement.id !== monthly.id, { late, replacement });
     const second = await spend.refundHold({ holdKey: 'rf-1', refundKey: 'ref-6', amountMicros: 300_000, reason: 'platform_failure', limits: { giveBackMaxMicros: 400_000 } }, after).catch((error: unknown) => ({ ok: false as const, reason: error instanceof Error ? error.message : 'threw' }));
     check('a second partial refund of the same step after the gift ended makes its own replacement credit, not a clash', second.ok && (await prisma.creditLot.count({ where: { personId: 'rf', source: 'replacement' } })) === 2, second);
+    const replayA = await spend.refundHold({ holdKey: 'rf-1', refundKey: 'ref-5', amountMicros: 1.5 * M, reason: 'platform_failure', limits: { giveBackMaxMicros: 400_000 } }, after);
+    const heldRow = await prisma.creditHold.findUniqueOrThrow({ where: { holdKey: 'rf-1' } });
+    check('asking again for a replacement refund makes nothing new, and the step’s refunded total is the sum of what was given', replayA.ok && !replayA.created && (await prisma.creditLot.count({ where: { personId: 'rf', source: 'replacement' } })) === 2 && Number(heldRow.refundedMicros) === 1 * M + 400_000 + 300_000 && Number(heldRow.refundedMicros) <= 3 * M, { replayA, refunded: Number(heldRow.refundedMicros) });
     const none = await spend.refundHold({ holdKey: 'rf-1', refundKey: 'ref-7', amountMicros: 100_000, reason: 'platform_failure', limits: { giveBackMaxMicros: 0 } }, after).catch((error: unknown) => ({ ok: false as const, reason: error instanceof Error ? error.message : 'threw' }));
     check('a give-back limit of nothing gives nothing back after the credit ended, and does not fail', none.ok && none.refundedMicros === 0 && (await prisma.creditLot.count({ where: { personId: 'rf', source: 'replacement' } })) === 2, none);
     const oldLot = await prisma.creditLot.findUniqueOrThrow({ where: { id: monthly.id } });
@@ -471,6 +484,8 @@ async function main() {
     await requests.askForMore('tardy', lateDay, 'apps');
     await requests.answerRequests('tardy', 'grant-x', lateDay, lateDay, 'computer');
     check('extra computer usage does not close an ask for Instant Apps credit', (await requests.openRequestFor('tardy', 'apps')) !== null);
+    const person = await (await import('@/lib/meter-person')).personUsage('tardy', lateDay);
+    check('the admin’s computer-time view does not show an Instant Apps ask as a computer ask', person.asked === null, person.asked);
   }
 
   // ---------- A schedule that changes keeps what was left of the one before ----------
@@ -483,6 +498,55 @@ async function main() {
     await issue.ensureIssued('tardy', at('2027-02-14T00:00:00Z'));
     const line = (await usage.moneyLine('tardy', 'computers', at('2027-02-14T00:00:00Z'))) as { kind: string; availableMicros: number; totalMicros: number };
     check('a one-off that turned monthly shows this month’s lot and what is left of the one-off: $6 of $7, still monthly', line.kind === 'monthly' && line.availableMicros === 6 * M && line.totalMicros === 7 * M, line);
+  }
+
+  // ---------- Saving a program again does not count what it already issued ----------
+  {
+    for (const id of ['bud1', 'bud2', 'bud3']) await user(id, '2027-02-11T00:00:00Z');
+    const issuedSoFar = (await funding.exposureOf('funding-platform', G)).issuedThisMonthMicros;
+    await setMeter({ rolloutBudgetMicros: issuedSoFar + 10 * M, renewMinutes: 10 });
+    const prog = await rules.saveException({ categoryId: 'computers', amount: 5 * M, schedule: 'monthly', recipients: { kind: 'people', userIds: ['bud1', 'bud2'] } }, root, G);
+    await Promise.all([issue.ensureIssued('bud1', G), issue.ensureIssued('bud2', G)]);
+    const roomLeft = (await funding.exposureOf('funding-platform', G)).issuedThisMonthMicros;
+    const again = await refuses(() => rules.saveException({ programId: prog.programId, categoryId: 'computers', amount: 5 * M, schedule: 'monthly', claimEndsAt: at('2027-06-01T00:00:00Z'), recipients: { kind: 'people', userIds: ['bud1', 'bud2'] } }, root, G));
+    check('saving a program again with the month’s budget already used by its own lots is not over budget', roomLeft === issuedSoFar + 10 * M && again === null, { roomLeft, issuedSoFar, again });
+    const more = await refuses(() => rules.saveException({ programId: prog.programId, categoryId: 'computers', amount: 5 * M, schedule: 'monthly', claimEndsAt: at('2027-06-01T00:00:00Z'), recipients: { kind: 'people', userIds: ['bud1', 'bud2', 'bud3'] } }, root, G));
+    check('adding one more person counts only that person: $5 needed, $0 left', more?.code === 'over_budget' && (more.error as { mostIssuedMicros: number }).mostIssuedMicros === 5 * M, more);
+    await setMeter({ rolloutBudgetMicros: 10_000 * M, renewMinutes: 10 });
+  }
+
+  // ---------- A refund after the sponsor's account closed is made whole by the platform ----------
+  {
+    await user('cl', '2027-02-11T00:00:00Z');
+    const sponsor = await funding.ensureFundingAccount({ kind: 'universe', ownerKey: 'u-closing', name: 'Closing', adminIds: ['admin'], budgetMicros: 10 * M });
+    await prisma.creditLot.create({ data: { slotKey: 'gift:cl', subjectKey: 'person:cl', periodKey: 'gift', personId: 'cl', source: 'gift', amountMicros: BigInt(2) * BigInt(M), covers: ['instant_apps'], fundingAccountId: sponsor.id, startsAt: G, issuedAt: G } });
+    await spend.holdCredit({ holdKey: 'cl-1', personId: 'cl', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, G);
+    await spend.settleHold({ holdKey: 'cl-1', customerMicros: 1 * M }, G);
+    await funding.setAccountStatus(sponsor.id, 'closed');
+    const refunded = await spend.refundHold({ holdKey: 'cl-1', refundKey: 'cl-ref', amountMicros: 1 * M, reason: 'platform_failure' }, G);
+    const repl = await prisma.creditLot.findFirst({ where: { personId: 'cl', source: 'replacement' } });
+    const spendable = await spend.availableCredit('cl', 'instant_apps', G);
+    check('a failure found after the sponsor’s account closed is made whole by the platform, in credit the person can spend', refunded.ok && repl?.fundingAccountId === 'funding-platform' && spendable.availableMicros === 1 * M, { refunded, repl, spendable });
+  }
+
+  // ---------- "Ask for more" only when nothing at all is left ----------
+  {
+    await user('ask1', '2027-02-11T00:00:00Z');
+    await rules.saveException({ categoryId: 'instant_apps', amount: 1 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['ask1'] } }, root, G);
+    // Covers both, so it is spent after the line (which covers one): the order does not depend on a random id
+    await rules.createGift({ categoryId: 'instant_apps', amount: 2 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['ask1'] }, covers: ['instant_apps', 'computers'] }, root, G);
+    await issue.ensureIssued('ask1', G);
+    await spend.holdCredit({ holdKey: 'ask1-a', personId: 'ask1', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, G);
+    await spend.settleHold({ holdKey: 'ask1-a', customerMicros: 1 * M }, G);
+    const line = (await usage.moneyLine('ask1', 'instant_apps', G)) as { availableMicros: number; canAskForMore: boolean };
+    check('the line is used up but a gift still covers Apps: not out, so no "Ask for more"', line.availableMicros === 0 && line.canAskForMore === false, line);
+    await spend.holdCredit({ holdKey: 'ask1-b', personId: 'ask1', category: 'instant_apps', amountMicros: 2 * M, chargeClass: 'instant_run' }, G);
+    await spend.settleHold({ holdKey: 'ask1-b', customerMicros: 2 * M }, G);
+    const out = (await usage.moneyLine('ask1', 'instant_apps', G)) as { canAskForMore: boolean };
+    check('with the gift used up too, "Ask for more" is offered', out.canAskForMore === true, out);
+    await prisma.creditLot.create({ data: { slotKey: 'gift:ask1-comp', subjectKey: 'person:ask1', periodKey: 'gift', personId: 'ask1', source: 'gift', amountMicros: BigInt(5) * BigInt(M), covers: ['computers'], fundingAccountId: 'funding-platform', startsAt: G, issuedAt: G } });
+    const stillOut = (await usage.moneyLine('ask1', 'instant_apps', G)) as { canAskForMore: boolean };
+    check('a gift that covers only computers does not block an Instant Apps ask', stillOut.canAskForMore === true, stillOut);
   }
 
   // ---------- The Instant executor's contract ----------
@@ -500,6 +564,12 @@ async function main() {
     const r2 = await funds.refund({ key: 'run-1:1', refundKey: 'run-1:refund', amountMicros: 900_000, reason: 'platform_failure' });
     const left = await spend.availableCredit('inst', 'instant_apps', G);
     check('settle charges less than reserved, refund goes back to the lot once, and the books end whole at $2', s.ok && r.ok && r.refundedMicros === 900_000 && r2.ok && r2.refundedMicros === 900_000 && left.availableMicros === 2 * M, { s, r, r2, left });
+    const afterSettle = await funds.release({ key: 'run-1:1' });
+    check('releasing a step that was already charged is not ok: nothing was given back', afterSettle.ok === false, afterSettle);
+    await funds.reserve({ ...run, key: 'run-3:1', runId: 'run-3', amountMicros: 300_000 });
+    await funds.release({ key: 'run-3:1' });
+    const settleReleased = await funds.settle({ key: 'run-3:1', chargeMicros: 300_000 });
+    check('settling a step that was released is not ok: nothing was charged', settleReleased.ok === false, settleReleased);
     const none = await funds.release({ key: 'nothing-here' });
     check('releasing a hold that does not exist is not ok, not a throw', none.ok === false);
   }

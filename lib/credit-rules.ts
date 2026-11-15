@@ -5,6 +5,7 @@ import { envelopeIn } from '@/lib/meter-allowance';
 import {
   CreditRefused,
   isCreditRefused,
+  monthKey,
   findClashes,
   isCategory,
   isMoneyCategory,
@@ -423,8 +424,20 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
     const preview = await previewIn(tx, checked, ids, now, { forProgramId: programId });
     const budget = preview.budget;
     // A rule that reaches a fixed set of people must fit in what the account has left this month: it is refused now, not half-issued later
-    if (budget.budgetMicros !== null && preview.mostIssued.firstPeriodMicros !== null && !preview.mostIssued.unbounded && preview.mostIssued.firstPeriodMicros > budget.roomMicros) {
-      throw new OverBudget(preview.mostIssued.firstPeriodMicros, budget.roomMicros);
+    if (budget.budgetMicros !== null && preview.mostIssued.firstPeriodMicros !== null && !preview.mostIssued.unbounded) {
+      // Saving a program again (a new end date, one more person) only adds what it has not issued yet: whoever already holds this period's
+      // lot from it is already in the month's issued figure and is not issued a second time, so they are not counted twice against the room
+      let covered = 0;
+      if (existing) {
+        const held = await tx.creditLot.findMany({
+          where: { programId, ...(checked.schedule === 'monthly' ? { periodKey: monthKey(now) } : {}) },
+          select: { personId: true },
+        });
+        if (checked.share === 'shared') covered = held.length > 0 ? preview.mostIssued.firstPeriodMicros : 0;
+        else covered = checked.amount * new Set(held.map((lot) => lot.personId).filter((id): id is string => !!id && ids.includes(id))).size;
+      }
+      const needed = Math.max(0, preview.mostIssued.firstPeriodMicros - covered);
+      if (needed > budget.roomMicros) throw new OverBudget(needed, budget.roomMicros);
     }
     if (existing) {
       await tx.grantRule.updateMany({ where: { programId, state: 'current' }, data: { state: 'superseded', supersededAt: now } });

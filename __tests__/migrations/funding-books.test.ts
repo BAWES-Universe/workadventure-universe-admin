@@ -56,8 +56,8 @@ describe('the funding books: what the database keeps', () => {
     expect(result.checks).toMatchObject({ lotOk: true, sameLotTwice: false, zeroLot: false, negativeLot: false, lotWithoutPerson: false, poolWithPerson: false, lotOtherSource: false, lotNoCovers: false, lotEndsBeforeStart: false, billedFreeLot: false });
   });
 
-  it('keeps a hold to one per key and one per execution, for money only, never charged over what was held or refunded over what was charged', () => {
-    expect(result.checks).toMatchObject({ holdOk: true, holdKeyTwice: false, holdForReplies: false, holdOfNothing: false, chargedMoreThanHeld: false, settledWithoutCharge: false, refundedMoreThanCharged: false, effectKeyOnce: false });
+  it('keeps a hold to one per key and one live hold per execution (a released one took nothing), for money only, never charged over what was held or refunded over what was charged', () => {
+    expect(result.checks).toMatchObject({ holdOk: true, holdKeyTwice: false, holdForReplies: false, holdOfNothing: false, chargedMoreThanHeld: false, settledWithoutCharge: false, refundedMoreThanCharged: false, effectKeyOnce: false, effectKeyAfterRelease: true, effectKeyReleasedTwice: true });
   });
 
   it('knows only its own funding account kinds, one platform account, and no negative budget', () => {

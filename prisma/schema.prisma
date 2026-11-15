@@ -2042,8 +2042,8 @@ model CreditHold {
   // The job this belongs to, and the hold of the job that contains it (nested work is charged once)
   jobKey             String?   @map("job_key") @db.VarChar(255)
   parentHoldKey      String?   @map("parent_hold_key") @db.VarChar(255)
-  // What happened in the world: the same execution is never charged twice
-  effectKey          String?   @unique @map("effect_key") @db.VarChar(255)
+  // What happened in the world: the same execution is never charged twice. The migration makes a partial unique index (effect_key WHERE state <> 'released'), because a released hold took nothing and the execution may be asked for again
+  effectKey          String?   @map("effect_key") @db.VarChar(255)
   // held, settled or released
   state              String    @db.VarChar(10)
   amountMicros       BigInt    @map("amount_micros")
