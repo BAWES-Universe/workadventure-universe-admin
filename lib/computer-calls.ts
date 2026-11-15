@@ -88,8 +88,9 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
   if (!reservation && facts.payer.kind === 'universe') return { ok: false, reason: 'unknown_call' };
   const cost = facts.costMicros === null ? null : Math.max(0, Math.min(MAX_MICROS, Math.round(facts.costMicros)));
   const paidByOther = facts.payer.kind === 'person';
-  await recordMeterEvent({
-    eventId: `computer:${job.id}:call:${callId}`,
+  const eventId = `computer:${job.id}:call:${callId}`;
+  const written = await recordMeterEvent({
+    eventId,
     kind: 'model_call',
     pool: 'computer',
     occurredAt: now,
@@ -108,6 +109,14 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
     sourceRef: `computer_jobs:${job.id}`,
     detail: { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}) },
   });
+  // The sweep writes a call that never reported as unknown. A report that comes after it carries the real figure, which replaces the
+  // unknown one (only an unknown figure is ever replaced: a figure that was written stays as it was)
+  if (!written.recorded && cost !== null) {
+    await prisma.meterEvent.updateMany({
+      where: { eventId, costMicros: null },
+      data: { costMicros: BigInt(cost), basis: paidByOther ? 'paid_by_other' : facts.basis, route: facts.route, detail: { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}) } },
+    });
+  }
   // A price that is not known settles at the room that was held (never 0); one that is settles at what it was, at least 1
   if (reservation) await settleRoom({ key: reservation.reservationKey, settledMicros: Math.max(1, cost ?? Number(reservation.amountMicros)) }, now);
   return { ok: true };

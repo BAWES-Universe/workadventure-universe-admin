@@ -288,6 +288,20 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect(event).toMatchObject({ basis: 'unknown', costMicros: null });
     });
 
+    it('a report that comes after the sweep wrote the call as unknown replaces the unknown figure, and never a figure that was written', async () => {
+      const { jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await call(token, 'late', 9_000);
+      await sweepComputers(minutes(30));
+      const facts = { costMicros: 4_000, basis: 'measured' as const, payer: { kind: 'universe' as const }, route: 'universe-ai' as const };
+      expect(await settleModelCall(jobId, 'late', facts, minutes(31))).toEqual({ ok: true });
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:late` } })).toMatchObject({ basis: 'measured', costMicros: BigInt(4_000) });
+      // A second report, even with another figure, leaves what was written
+      expect(await settleModelCall(jobId, 'late', { ...facts, costMicros: 7_000 }, minutes(32))).toEqual({ ok: true });
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:late` } })).toMatchObject({ costMicros: BigInt(4_000) });
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${jobId}:call:late` } })).toBe(1);
+    });
+
     it('the sweep gives back room held for a call whose job is gone, instead of finding it again on every sweep', async () => {
       const { jobId } = await running();
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
