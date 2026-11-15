@@ -514,6 +514,14 @@ export async function extendReview(
   });
 }
 
+/** Whether a card that belongs to a goal or task (`task:{itemId}`) may still start something: a card of a chat always may. */
+async function taskIsGoing(db: Db, row: { botId: string; conversationKey: string }): Promise<boolean> {
+  const itemId = TASK_KEY.exec(row.conversationKey)?.[1];
+  if (!itemId) return true;
+  const item = await db.brickItem.findFirst({ where: { id: itemId, botId: row.botId }, select: { state: true, bot: { select: { enabled: true, deletedAt: true } } } });
+  return !!item && item.state === 'on' && !!item.bot?.enabled && !item.bot.deletedAt;
+}
+
 /**
  * The goal or task ended (done, or deleted): its cards that wait for a tap, or were approved and not yet started, end with it, so
  * nobody can say yes to a step for something that is over. Safe to call twice. Pass the transaction the item changed in.
@@ -549,6 +557,12 @@ export async function claim(
     const row = await load(tx, botId, id);
     if (await closeIfLapsed(tx, row, now)) return { claimed: false as const, reason: 'stale' as const, action: toView(await load(tx, botId, id)) };
     if (row.status !== 'approved') return { claimed: false as const, reason: row.status as ActionStatus, action: toView(row) };
+    // A step of a goal or task starts only while that goal or task is going: paused, done or deleted (or its Brick switched off) since the
+    // tap, nothing is sent. The card ends as cancelled, and the next check, once it is going again, asks afresh.
+    if (!(await taskIsGoing(tx, row))) {
+      await move(tx, row, ['approved'], { status: 'closed', closedReason: 'cancelled', finishedAt: now }, 'cancel', null);
+      return { claimed: false as const, reason: 'stale' as const, action: toView(await load(tx, botId, id)) };
+    }
 
     const attemptNo = row.attempts.length + 1;
     const won = await move(tx, row, ['approved'], { status: 'running' }, 'claim', null, { startBy: { gt: now } });

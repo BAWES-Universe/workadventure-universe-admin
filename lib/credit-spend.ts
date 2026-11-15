@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { prisma } from '@/lib/db';
 import { PLATFORM_ACCOUNT_ID } from '@/lib/credit-funding';
 import { getMeterSettings } from '@/lib/meter';
-import { ensureIssued } from '@/lib/credit-issue';
+import { ensureIssued, type IssueResult } from '@/lib/credit-issue';
+import type { MeterSettings } from '@/lib/meter-values';
 import { allocate, asNumber, categoryFor, monthEnd, monthStart, wholeMicros, type ChargeClass, type MoneyCategory } from '@/lib/credit-values';
 import { lockAll, lockOfEffect, lockOfPerson, lockOfPool, lotBalances, usableLots, type Tx } from '@/lib/credit-store';
 
@@ -137,9 +138,20 @@ export async function holdCredit(input: HoldInput, now: Date = new Date()): Prom
 
   const settings = await getMeterSettings();
   const issued = await ensureIssued(input.personId, now, settings);
-  return prisma.$transaction(async (tx): Promise<Held> => {
+  // The pools a person can draw on can change between reading them and holding their locks (a person is added to or leaves a pool); when the
+  // lots counted under the locks include a pool that was not locked, nothing is taken and the whole thing is tried again with the full set
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const held = await holdOnce(input, now, settings, issued);
+    if (held !== 'again') return held;
+  }
+  throw new Error('Could not hold credit: the shared pools kept changing');
+}
+
+async function holdOnce(input: HoldInput, now: Date, settings: MeterSettings, issued: IssueResult): Promise<Held | 'again'> {
+  return prisma.$transaction(async (tx): Promise<Held | 'again'> => {
     // The execution's own lock too: two asks for one execution under different keys (even for different people) meet here, not at the unique index
-    await lockAll(tx, [lockOfPerson(input.personId), ...(input.effectKey ? [lockOfEffect(input.effectKey)] : []), ...(await poolNames(tx, input.personId, input.category, now, input.onlyAccountId))]);
+    const locked = [lockOfPerson(input.personId), ...(input.effectKey ? [lockOfEffect(input.effectKey)] : []), ...(await poolNames(tx, input.personId, input.category, now, input.onlyAccountId))];
+    await lockAll(tx, locked);
     const again = await loadHold(tx, input.holdKey);
     if (again) return alreadyHeld(again, input, now);
     if (input.effectKey) {
@@ -147,6 +159,9 @@ export async function holdCredit(input: HoldInput, now: Date = new Date()): Prom
       if (charged && charged.holdKey !== input.holdKey) return { ok: false, reason: 'effect_charged' };
     }
     const lots = await usableLots(tx, input.personId, input.category, now, { onlyAccountId: input.onlyAccountId });
+    const lockedSet = new Set(locked);
+    const unlocked = lots.some((lot) => lot.lot.subjectKey.startsWith('pool:') && !lockedSet.has(lockOfPool(lot.lot.programId ?? lot.lot.subjectKey)));
+    if (unlocked) return 'again';
     const takes = allocate(lots, input.amountMicros);
     if (!takes) {
       const available = lots.reduce((sum, lot) => sum + lot.availableMicros, 0);
@@ -180,7 +195,8 @@ export async function holdCredit(input: HoldInput, now: Date = new Date()): Prom
 }
 
 function alreadyHeld(row: FullHold, input: HoldInput, now: Date): Held {
-  if (row.personId !== input.personId) return { ok: false, reason: 'key_reused' };
+  // A key belongs to one step: the same person, the same category, the same kind of work (a computers hold never stands for an Instant Apps step)
+  if (row.personId !== input.personId || row.category !== input.category || row.chargeClass !== input.chargeClass) return { ok: false, reason: 'key_reused' };
   // Asking again for room that is still held is the same room. Room that settled, was released or lapsed is not a place to start a paid step from
   if (row.state === 'held' && row.expiresAt > now) return { ok: true, hold: holdView(row), created: false };
   return { ok: false, reason: 'closed', hold: holdView(row) };
@@ -282,7 +298,8 @@ export async function refundHold(input: { holdKey: string; refundKey: string; am
   const limits = input.limits ?? {};
   return prisma.$transaction(async (tx): Promise<Refunded> => {
     await lockAll(tx, [...(await holdLocks(tx, head.id, head.personId)), 'credit:refunds']);
-    const prior = await tx.creditRefund.findMany({ where: { refundKey: { startsWith: `${input.refundKey}#` } } });
+    // This key's own refunds only: `key#0`, `key#1`, never the refunds of another key that begins with this one (`key#1`'s `key#1#0`)
+    const prior = (await tx.creditRefund.findMany({ where: { refundKey: { startsWith: `${input.refundKey}#` } } })).filter((r) => /^\d+$/.test(r.refundKey.slice(input.refundKey.length + 1)));
     if (prior.length > 0) {
       const total = prior.reduce((sum, r) => sum + asNumber(r.amountMicros), 0);
       if (prior[0].holdId !== head.id) return { ok: false, reason: 'key_reused' };

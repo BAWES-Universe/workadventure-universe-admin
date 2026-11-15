@@ -16,9 +16,26 @@ const T0 = new Date('2026-11-15T10:00:00Z');
 const at = (iso: string) => new Date(iso);
 const M = 1_000_000;
 
+// Money is whole micros in BigInt on the way out of the database: a result that holds one must still print
+const printable = (value: unknown): string => JSON.stringify(value, (_key, item) => (typeof item === 'bigint' ? item.toString() : item));
+
 async function main() {
   const database = await startTestDatabase();
+  let close: (() => Promise<void>) | null = null;
+  try {
+    await run(database, (fn) => {
+      close = fn;
+    });
+  } finally {
+    // Whatever happened, the client (if it was made) is closed and the throwaway database is taken down
+    if (close) await (close as () => Promise<void>)().catch(() => undefined);
+    await database.stop().catch(() => undefined);
+  }
+}
+
+async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onClose: (fn: () => Promise<void>) => void) {
   const { prisma, close } = await connect(database);
+  onClose(close);
   (globalThis as unknown as { prisma: unknown }).prisma = prisma;
   process.env.DATABASE_URL = database.url;
 
@@ -574,18 +591,90 @@ async function main() {
     check('releasing a hold that does not exist is not ok, not a throw', none.ok === false);
   }
 
+  // ---------- Review round: keys, refunds, asks, standing, budgets, held room ----------
+  {
+    const requests = await import('@/lib/meter-requests');
+    for (const id of ['cr1', 'cr2', 'cr3', 'cr4']) await user(id, '2027-02-11T00:00:00Z');
+    await setMeter({ rolloutBudgetMicros: 10_000 * M, renewMinutes: 10 });
+    await rules.createGift({ categoryId: 'instant_apps', amount: 5 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['cr1'] }, covers: ['instant_apps', 'computers'] }, root, G);
+    await issue.ensureIssued('cr1', G);
+
+    const k1 = await spend.holdCredit({ holdKey: 'cr-k', personId: 'cr1', category: 'computers', amountMicros: 1 * M, chargeClass: 'computer_job' }, G);
+    const k2 = await spend.holdCredit({ holdKey: 'cr-k', personId: 'cr1', category: 'computers', amountMicros: 1 * M, chargeClass: 'computer_model' }, G);
+    check('a hold key is for one kind of step: the same key for another charge class is refused', k1.ok && !k2.ok && k2.reason === 'key_reused', { k1, k2 });
+
+    const rf = await spend.holdCredit({ holdKey: 'cr-rf', personId: 'cr1', category: 'instant_apps', amountMicros: 2 * M, chargeClass: 'instant_run' }, G);
+    await spend.settleHold({ holdKey: 'cr-rf', customerMicros: 2 * M }, G);
+    const r1 = await spend.refundHold({ holdKey: 'cr-rf', refundKey: 'x#0', amountMicros: 100_000, reason: 'goodwill' }, G);
+    const r2 = await spend.refundHold({ holdKey: 'cr-rf', refundKey: 'x', amountMicros: 100_000, reason: 'goodwill' }, G);
+    check('a refund key is its own: another key that begins with it is not a replay of it', rf.ok && r1.ok && r2.ok && r1.created && r2.created && r2.refundedMicros === 100_000, { r1, r2 });
+
+    const ask = await requests.askForMore('cr2', T0, 'apps');
+    await rules.createGift({ categoryId: 'instant_apps', amount: 2 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['cr2'] } }, root, G);
+    await issue.ensureIssued('cr2', G);
+    const answered = await prisma.meterRequest.findUniqueOrThrow({ where: { id: ask.request.id } });
+    const askAgain = await requests.askForMore('cr2', at('2027-03-01T00:00:00Z'), 'apps');
+    check('Instant Apps credit arriving answers the ask that came before it, so asking again is a new ask', ask.created && answered.answeredAt !== null && askAgain.created && askAgain.request.id !== ask.request.id, { answered, askAgain });
+
+    const uni = await funding.ensureFundingAccount({ kind: 'universe', ownerKey: 'u-review', name: 'Review', adminIds: ['cr3'], budgetMicros: 10 * M });
+    const replies = await refuses(() => rules.saveException({ categoryId: 'universe_ai', amount: 50, schedule: 'once', recipients: { kind: 'people', userIds: ['cr1'] }, fundingAccountId: uni.id }, { userId: 'cr3', superAdmin: false }, G));
+    check('a sponsor’s account (money) cannot give Universe AI replies', replies?.code === 'forbidden', replies);
+
+    const mine = await funding.ensureFundingAccount({ kind: 'person', ownerKey: 'cr4', name: 'Cr four', adminIds: ['cr4'], budgetMicros: 10 * M });
+    const program = await rules.saveException({ categoryId: 'computers', amount: 1 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['cr1'] }, fundingAccountId: uni.id }, { userId: 'cr3', superAdmin: false }, G);
+    const takeover = await refuses(() => rules.saveException({ programId: program.programId, categoryId: 'computers', amount: 1 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['cr1'] }, fundingAccountId: mine.id }, { userId: 'cr4', superAdmin: false }, G));
+    check('a program funded from one account is not changed by an administrator of another', takeover?.code === 'forbidden', takeover);
+
+    const room = at('2030-01-01T00:00:00Z');
+    await setMeter({ rolloutBudgetMicros: 1 * M, renewMinutes: 10 });
+    const noEnd = await refuses(() => rules.saveException({ categoryId: 'computers', amount: 3 * M, schedule: 'monthly', recipients: { kind: 'people', userIds: ['cr1', 'cr2'] } }, root, room));
+    check('a monthly rule with no end date is held to the month’s budget for its first period too', noEnd?.code === 'over_budget', noEnd);
+    await setMeter({ rolloutBudgetMicros: 10_000 * M, renewMinutes: 10 });
+
+    const capped = await rules.previewGrant('gift', { categoryId: 'instant_apps', amount: 5 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['cr1', 'cr2', 'cr3'] }, totalCapMicros: 8 * M }, G);
+    check('the first period in the preview is bounded by the total cap', capped.mostIssued.firstPeriodMicros === 8 * M && capped.cost.atMostAtProviderPricesMicros === 8 * M, capped.mostIssued);
+
+    const duo = await funding.ensureFundingAccount({ kind: 'universe', ownerKey: 'u-duo', name: 'Duo', adminIds: ['cr1', 'cr2'] });
+    const both = await Promise.all([funding.removeAdmin(duo.id, 'cr1'), funding.removeAdmin(duo.id, 'cr2')]);
+    check('two removals at once never leave an account without an administrator', both.filter((r) => r === 'removed').length === 1 && both.filter((r) => r === 'last_admin').length === 1 && (await prisma.fundingAccountAdmin.count({ where: { accountId: duo.id } })) === 1, both);
+
+    // Several first saves of a default at the same moment make one default with versions, never a second default or a thrown unique error
+    const nowDefaults = await rules.listPrograms(undefined, { kind: 'default' });
+    await Promise.all(nowDefaults.filter((p) => p.status === 'active').map((p) => rules.endProgram(p.programId, root, at('2027-02-12T00:00:00Z'))));
+    const firsts = await Promise.all([1, 2, 3, 4].map(() => rules.saveDefault({ categoryId: 'computers', amount: 5 * M, schedule: 'monthly', recipients: { kind: 'all' } }, root, at('2027-02-12T00:00:00Z')).then(() => 'saved', (e: unknown) => `threw: ${e instanceof Error ? e.message.slice(0, 80) : 'unknown'}`)));
+    const activeDefaults = await prisma.grantProgram.findMany({ where: { categoryId: 'computers', kind: 'default', status: 'active' }, include: { rules: true } });
+    check('four first saves of a default at once make one default with four versions, none throws', firsts.every((r) => r === 'saved') && activeDefaults.length === 1 && activeDefaults[0].rules.length === 4, { firsts, programs: activeDefaults.length });
+
+    // A preview whose computer figures cannot be read still previews (the failed read must not abort the transaction around it)
+    await prisma.$executeRawUnsafe('ALTER TABLE meter_reservations RENAME TO meter_reservations_away');
+    const blind = await rules.previewGrant('gift', { categoryId: 'instant_apps', amount: 2 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['cr1'] } }, G).catch((e: unknown) => e);
+    const savedBlind = await rules.createGift({ categoryId: 'instant_apps', amount: 1 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['cr1'] }, label: 'blind save' }, root, at('2027-02-12T00:00:00Z')).catch((e: unknown) => e);
+    await prisma.$executeRawUnsafe('ALTER TABLE meter_reservations_away RENAME TO meter_reservations');
+    check('a save whose preview figures cannot be read still ends whole: one program with one rule, nothing half-written', !(savedBlind instanceof Error) && (await prisma.grantProgram.count({ where: { label: 'blind save' } })) === 1 && (await prisma.grantRule.count({ where: { program: { label: 'blind save' } } })) === 1, savedBlind instanceof Error ? savedBlind.message : savedBlind);
+    check('a preview still works when the computer figures cannot be read, with those figures at nothing', !(blind instanceof Error) && (blind as { cost?: { reservedMicros?: number } }).cost?.reservedMicros === 0, blind instanceof Error ? blind.message : blind);
+
+    // Room held against a lot that ended since still counts as held while the step runs
+    await user('cr5', '2027-02-11T00:00:00Z');
+    await rules.createGift({ categoryId: 'instant_apps', amount: 3 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['cr5'] }, lotExpiresAt: at('2027-03-01T00:00:00Z') }, root, at('2027-02-28T23:00:00Z'));
+    const heldAt = at('2027-02-28T23:55:00Z');
+    const cr5 = await spend.holdCredit({ holdKey: 'cr5-1', personId: 'cr5', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, heldAt);
+    const before = await funding.exposureOf('funding-platform', at('2027-02-28T23:56:00Z'));
+    const lotEnded = await funding.exposureOf('funding-platform', at('2027-03-01T00:01:00Z'));
+    const lapsed = await funding.exposureOf('funding-platform', at('2027-03-01T00:06:00Z'));
+    check('held room is still counted after the lot it came from has ended, while the hold itself is in time; once it runs out it is unresolved', cr5.ok && before.heldMicros >= 1 * M && lotEnded.heldMicros === before.heldMicros && lapsed.heldMicros === 0 && lapsed.unresolvedMicros >= 1 * M, { before, lotEnded, lapsed });
+  }
+
   // The result goes out first: nothing that happens while the database is taken down can lose it
-  console.log(JSON.stringify({ kind: database.kind, checks }));
-  await close();
-  await database.stop().catch(() => undefined);
-  process.exit(0);
+  console.log(printable({ kind: database.kind, checks }));
 }
 
 function classifyTool(values: typeof import('@/lib/credit-values')) {
   return values.classifyCharge({ work: 'instant', inComputerJob: true });
 }
 
-main().catch((error) => {
-  console.log(JSON.stringify({ kind: 'crashed', error: error instanceof Error ? `${error.message}\n${error.stack}` : String(error), checks }));
-  process.exit(1);
-});
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.log(printable({ kind: 'crashed', error: error instanceof Error ? `${error.message}\n${error.stack}` : String(error), checks }));
+    process.exit(1);
+  });

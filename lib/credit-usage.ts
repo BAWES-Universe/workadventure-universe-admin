@@ -115,11 +115,15 @@ export interface CreditUsage {
 
 /** Issues what is due (once per program and period) and reads the money lines. Never throws: a failed read says `unavailable`. */
 export async function creditUsage(personId: string, now: Date): Promise<CreditUsage> {
+  let issueFailed = false;
   try {
     await ensureIssued(personId, now);
   } catch (error) {
+    issueFailed = true;
     console.error('[Usage] Could not issue credit:', error instanceof Error ? error.message : 'unknown');
   }
   const [apps, credit] = await Promise.all([moneyLine(personId, 'instant_apps', now), extraCredit(personId, now)]);
+  // Credit that failed to issue is not "no credit": a read that found nothing after a failed issuing says it cannot tell
+  if (issueFailed) return { apps: apps ?? { unavailable: true }, credit: Array.isArray(credit) && credit.length === 0 ? { unavailable: true } : credit };
   return { apps, credit };
 }

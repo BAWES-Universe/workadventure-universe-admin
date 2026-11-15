@@ -81,7 +81,10 @@ export async function ensureIssued(personId: string, now: Date = new Date(), set
     // Every name this person's issuing touches, locked in one order: two calls at the same moment go one after the other
     await lockAll(tx, [lockOfPerson(personId), ...plans.map((plan) => lockOfAccount(plan.rule.fundingAccountId)), ...plans.filter((plan) => plan.rule.share === 'shared').map((plan) => lockOfPool(plan.rule.programId))]);
     const out: IssuedLot[] = [];
+    // The rules may have changed (a program ended, a rule edited) between reading them and getting the locks: only what is still current issues
+    const stillCurrent = new Set((await currentRules(tx, { now })).map((rule) => rule.id));
     for (const { rule } of plans) {
+      if (!stillCurrent.has(rule.id)) continue;
       const result = await issueOne(tx, rule, personId, now, settings);
       if (result.lot) out.push(result.lot);
       else if (result.skipped) skipped.push({ programId: rule.programId, reason: result.skipped });
@@ -138,16 +141,20 @@ async function issueOne(tx: Tx, rule: RuleFacts, personId: string, now: Date, se
   });
   if (count === 0) return { skipped: null };
   const lot = await tx.creditLot.findUniqueOrThrow({ where: { slotKey_subjectKey_periodKey: { slotKey: plan.slotKey, subjectKey, periodKey: plan.periodKey } }, select: { id: true } });
+  // Credit for Instant Apps arrived (a gift or a renewal): what the person asked for before now is answered, so a later ask is a new one
+  if (rule.covers.includes('instant_apps') && rule.share === 'each') {
+    await tx.meterRequest.updateMany({ where: { personId, what: 'apps', answeredAt: null, createdAt: { lte: now } }, data: { answeredAt: now, grantKey: `lot:${lot.id}` } });
+  }
   return { lot: { lotId: lot.id, programId: rule.programId, periodKey: plan.periodKey, subjectKey, amountMicros: plan.amountMicros } };
 }
 
 /** Issues for several people (a rollout, a migration run, a gift to people you pick): each one the same exactly-once way. */
 export async function ensureIssuedFor(personIds: readonly string[], now: Date = new Date()): Promise<{ issued: number; skipped: number }> {
-  const settings = await getMeterSettings();
   let issued = 0;
   let skipped = 0;
   for (const id of personIds) {
-    const result = await ensureIssued(id, now, settings);
+    // Each person reads the settings fresh: a rollout budget changed during a long run applies to the people after it
+    const result = await ensureIssued(id, now);
     issued += result.issued.length;
     skipped += result.skipped.length;
   }

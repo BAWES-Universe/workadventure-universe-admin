@@ -13,6 +13,10 @@ let report: Report;
 beforeAll(() => {
   const run = spawnSync(path.join(process.cwd(), 'node_modules/.bin/tsx'), [path.join(__dirname, '../helpers/run-credit-books.ts')], { encoding: 'utf8', timeout: 540_000, maxBuffer: 64 * 1024 * 1024 });
   const last = (run.stdout ?? '').trim().split('\n').pop() ?? '';
+  // A scenario process that did not start, timed out or exited badly is a failure with its own words, never a report to be parsed
+  if (run.error || run.status !== 0) {
+    throw new Error(`The credit books scenarios did not finish cleanly (status ${run.status}, signal ${run.signal}${run.error ? `, ${run.error.message}` : ''}).\n${run.stderr?.slice(-2000) ?? ''}\n${last.slice(0, 800)}`);
+  }
   try {
     report = JSON.parse(last) as Report;
   } catch {

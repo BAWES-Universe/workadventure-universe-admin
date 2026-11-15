@@ -242,6 +242,13 @@ export function pickBase(rules: readonly RuleFacts[]): BaseWinner {
   return { winner: null, clash: top };
 }
 
+/** Whether two rules can be claimed at the same moment. An open end runs on forever; an end is exclusive. */
+export function claimsOverlap(a: Pick<RuleFacts, 'claimStartsAt' | 'claimEndsAt'>, b: Pick<RuleFacts, 'claimStartsAt' | 'claimEndsAt'>): boolean {
+  const aEnds = a.claimEndsAt ? a.claimEndsAt.getTime() : Infinity;
+  const bEnds = b.claimEndsAt ? b.claimEndsAt.getTime() : Infinity;
+  return a.claimStartsAt.getTime() < bEnds && b.claimStartsAt.getTime() < aEnds;
+}
+
 export interface ClashFinding {
   /** The program already saved that disagrees. */
   programId: string;
@@ -262,6 +269,8 @@ export function findClashes(candidate: RuleFacts, saved: readonly RuleFacts[], i
   for (const other of saved) {
     if (other.programKind === 'gift' || other.programId === candidate.programId) continue;
     if (baseRank(other) !== rank) continue;
+    // Rules whose claim periods do not overlap never reach anyone at the same moment (an end is exclusive: one that ends where another starts is apart)
+    if (!claimsOverlap(candidate, other)) continue;
     // Two defaults for one category are one too many; they reach everyone, so the clash is "everyone"
     if (rank === 3) {
       findings.push({ programId: other.programId, userIds: [] });

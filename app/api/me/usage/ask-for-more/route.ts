@@ -24,9 +24,20 @@ export async function POST(request: NextRequest) {
   const user = await getSessionUser(request);
   if (!user) return respond(request, { error: 'Unauthorized' }, 401);
   try {
-    const body = (await request.json().catch(() => null)) as { category?: unknown } | null;
-    const what: AskedFor = body?.category === 'apps' ? 'apps' : 'computer';
-    if (body?.category !== undefined && body.category !== 'apps' && body.category !== 'computer') return respond(request, { error: 'category must be apps or computer' }, 400);
+    // No body at all (nothing sent) is the old call (computer time); a body that was sent, even blank, must be a JSON object, with an optional category of apps or computer
+    const text = await request.text();
+    let body: unknown = {};
+    if (text.length > 0) {
+      try {
+        body = JSON.parse(text);
+      } catch {
+        return respond(request, { error: 'The body must be JSON' }, 400);
+      }
+    }
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) return respond(request, { error: 'The body must be a JSON object' }, 400);
+    const category = (body as { category?: unknown }).category;
+    if (category !== undefined && category !== 'apps' && category !== 'computer') return respond(request, { error: 'category must be apps or computer' }, 400);
+    const what: AskedFor = category === 'apps' ? 'apps' : 'computer';
     const canAsk = (usage: Awaited<ReturnType<typeof memberUsage>>) => (what === 'apps' ? !!usage.apps && !('unavailable' in usage.apps && usage.apps.unavailable) && (usage.apps as { canAskForMore?: boolean }).canAskForMore === true : usage.computer?.canAskForMore === true);
     const used = what === 'apps' ? 'Instant Apps credit is not used up' : 'Computer time is not used up';
     const usage = await memberUsage(user.id);

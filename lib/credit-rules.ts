@@ -23,7 +23,7 @@ import {
   type Settlement,
   type Share,
 } from '@/lib/credit-values';
-import { currentRules, idsReached, lockAll, personFacts, ruleFacts, type Tx } from '@/lib/credit-store';
+import { currentRules, idsReached, lockAll, lockOfAccount, personFacts, ruleFacts, type Tx } from '@/lib/credit-store';
 import { PLATFORM_ACCOUNT_ID, budgetOf, getFundingAccount, isFundingAdmin, issuedInMonth } from '@/lib/credit-funding';
 
 /**
@@ -117,6 +117,9 @@ export class ClashRefused extends CreditRefused {
     super('Two rules disagree for the same people. Choose which one applies to them, then save again.', 'clash');
   }
 }
+
+/** A default was made by someone else between looking for it and taking the category's lock: look again and save over it. */
+class DefaultAppeared extends Error {}
 
 export class OverBudget extends CreditRefused {
   constructor(
@@ -223,6 +226,13 @@ export function checkGrant(kind: ProgramKind, input: GrantInput, now: Date): Che
   };
 }
 
+/** Whether this issuer has standing over an account (the platform's: a super admin; any other: its administrators). */
+async function checkMayFundFrom(db: Tx, accountId: string, issuer: Issuer, message: string): Promise<void> {
+  const account = await getFundingAccount(accountId, db);
+  const allowed = account?.kind === 'platform' ? issuer.superAdmin : await isFundingAdmin(accountId, issuer.userId, db);
+  if (!allowed) throw new CreditRefused(message, 'forbidden');
+}
+
 /** Who may fund from an account. The platform's is for super admins only; any other account's administrators may, and never to everyone. */
 async function checkIssuer(db: Tx, checked: Checked, issuer: Issuer): Promise<void> {
   const account = await getFundingAccount(checked.fundingAccountId, db);
@@ -232,6 +242,8 @@ async function checkIssuer(db: Tx, checked: Checked, issuer: Issuer): Promise<vo
     if (!issuer.superAdmin) throw new CreditRefused('Only a super admin can give credit from Universe’s own account', 'forbidden');
     return;
   }
+  // Replies are a platform entitlement, not money: a person's or universe's account (which is money) cannot give them
+  if (checked.categoryId === 'universe_ai') throw new CreditRefused('Only Universe’s own account can give Universe AI replies', 'forbidden');
   // A universe owner can never mint platform credit through a universe they control: a person's or universe's account funds only its own money
   if (!(await isFundingAdmin(account.id, issuer.userId, db))) throw new CreditRefused('Only an administrator of that funding account can give credit from it', 'forbidden');
   if (account.budgetMicros === null) throw new CreditRefused('That funding account has no budget set, so it cannot fund anything yet', 'account');
@@ -378,8 +390,13 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
   if (input.requestKey !== undefined && (!input.requestKey || input.requestKey.length > 255)) throw new CreditRefused('requestKey must be 1 to 255 characters', 'request_key');
   const view = await prisma.$transaction(async (tx) => {
     // One save of a category's rules at a time, so two admins at the same moment cannot both save a clashing rule
-    await lockAll(tx, [`credit:rules:${checked.categoryId}`, ...(input.requestKey ? [`credit:request:${input.requestKey}`] : [])]);
+    // and the accounts it touches, so issuing under the old rule and saving the new one never interleave
+    const currentAccountId = input.programId ? (await tx.grantRule.findFirst({ where: { programId: input.programId, state: 'current' }, select: { fundingAccountId: true } }))?.fundingAccountId : undefined;
+    await lockAll(tx, [`credit:rules:${checked.categoryId}`, lockOfAccount(checked.fundingAccountId), ...(currentAccountId ? [lockOfAccount(currentAccountId)] : []), ...(input.requestKey ? [`credit:request:${input.requestKey}`] : [])]);
     await checkIssuer(tx, checked, issuer);
+    // The default is looked for before the lock is held, so two first saves at the same moment can both find none: the second, now holding
+    // the lock, finds the first's and starts over from it as a new version, not as a second default
+    if (kind === 'default' && !input.programId && (await tx.grantProgram.findFirst({ where: { categoryId: checked.categoryId, kind: 'default', status: 'active' }, select: { id: true } }))) throw new DefaultAppeared();
     if (input.requestKey && !input.programId) {
       const made = await loadProgramByKey(tx, input.requestKey);
       if (made) {
@@ -393,6 +410,9 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
     if (existing) {
       if (existing.status !== 'active') throw new CreditRefused('That program has ended. Make a new one instead.', 'ended');
       if (existing.kind !== kind || existing.categoryId !== checked.categoryId) throw new CreditRefused('A program keeps its kind and category', 'kind');
+      // Replacing a rule needs the same standing as ending it: the account it is funded from now, not only the one it moves to
+      const funding = existing.rules[0]?.fundingAccountId;
+      if (funding && funding !== checked.fundingAccountId) await checkMayFundFrom(tx, funding, issuer, 'You cannot change a program that is funded from another account');
     }
     const candidate: RuleFacts = {
       id: 'candidate',
@@ -424,7 +444,8 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
     const preview = await previewIn(tx, checked, ids, now, { forProgramId: programId });
     const budget = preview.budget;
     // A rule that reaches a fixed set of people must fit in what the account has left this month: it is refused now, not half-issued later
-    if (budget.budgetMicros !== null && preview.mostIssued.firstPeriodMicros !== null && !preview.mostIssued.unbounded) {
+    // (a rule that renews with no end date is checked too: the first period is real money whatever comes after it)
+    if (budget.budgetMicros !== null && preview.mostIssued.firstPeriodMicros !== null) {
       // Saving a program again (a new end date, one more person) only adds what it has not issued yet: whoever already holds this period's
       // lot from it is already in the month's issued figure and is not issued a second time, so they are not counted twice against the room
       let covered = 0;
@@ -480,8 +501,16 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
 
 /** The category's default: how much, how often, and who gets it. Saving again makes a new version of the same program. */
 export async function saveDefault(input: GrantInput, issuer: Issuer, now: Date = new Date()): Promise<ProgramView> {
-  const current = await prisma.grantProgram.findFirst({ where: { categoryId: input.categoryId, kind: 'default', status: 'active' }, select: { id: true } });
-  return save('default', { ...input, programId: current?.id }, issuer, now);
+  for (let attempt = 0; ; attempt += 1) {
+    const current = await prisma.grantProgram.findFirst({ where: { categoryId: input.categoryId, kind: 'default', status: 'active' }, select: { id: true } });
+    try {
+      return await save('default', { ...input, programId: current?.id }, issuer, now);
+    } catch (error) {
+      // A unique-key refusal on the default's index means someone else just made it too (a writer that did not take the lock): look again
+      const raced = error instanceof DefaultAppeared || (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'P2002');
+      if (!raced || attempt >= 3) throw error;
+    }
+  }
 }
 
 /** An exception for a person, people you pick, or a universe's members: a different amount or how often, or no grant at all. */
@@ -497,13 +526,15 @@ export async function createGift(input: GrantInput, issuer: Issuer, now: Date = 
 /** Ends a program: nothing new is issued under it, the credit already given stays until it ends, and its history stays. */
 export async function endProgram(programId: string, issuer: Issuer, now: Date = new Date()): Promise<'ended' | 'already_ended' | 'not_found'> {
   return prisma.$transaction(async (tx) => {
+    // Under the funding account's lock: an issuing that read the rule before this ends it sees it ended and gives nothing
+    const peek = await tx.grantRule.findFirst({ where: { programId, state: 'current' }, select: { fundingAccountId: true } });
+    if (peek) await lockAll(tx, [lockOfAccount(peek.fundingAccountId)]);
     const program = await tx.grantProgram.findUnique({ where: { id: programId }, include: { rules: { where: { state: 'current' }, take: 1 } } });
     if (!program) return 'not_found';
     if (program.status === 'ended') return 'already_ended';
     const rule = program.rules[0];
     if (rule) {
-      const account = await getFundingAccount(rule.fundingAccountId, tx);
-      if (account?.kind === 'platform' ? !issuer.superAdmin : !(await isFundingAdmin(rule.fundingAccountId, issuer.userId, tx))) throw new CreditRefused('You cannot end this one', 'forbidden');
+      await checkMayFundFrom(tx, rule.fundingAccountId, issuer, 'You cannot end this one');
     }
     await tx.grantProgram.update({ where: { id: programId }, data: { status: 'ended', endedAt: now } });
     await tx.grantRule.updateMany({ where: { programId, state: 'current' }, data: { state: 'ended', supersededAt: now } });
@@ -577,7 +608,10 @@ async function previewIn(db: Tx, checked: Checked, ids: readonly string[], now: 
   }
   const eachMicros = checked.amount;
   const people = countNow ?? 0;
-  const first = checked.share === 'shared' ? eachMicros : eachMicros * people;
+  // The first period is bounded by the cap on people and by the total cap, the same way the lifetime figure is
+  const firstPeople = checked.share === 'each' && checked.joinerCap !== null ? Math.min(people, checked.joinerCap) : people;
+  const firstWhole = checked.share === 'shared' ? eachMicros : eachMicros * firstPeople;
+  const first = checked.totalCapMicros !== null ? Math.min(firstWhole, checked.totalCapMicros) : firstWhole;
   const months = checked.schedule === 'monthly' ? (checked.claimEndsAt ? Math.max(0, monthsBetween(checked.claimStartsAt > now ? checked.claimStartsAt : now, new Date(checked.claimEndsAt.getTime() - 1))) : null) : checked.schedule === 'once' ? 1 : 0;
   const renewals = checked.schedule === 'monthly' ? (months === null ? null : Math.max(0, months - 1)) : 0;
   // A cap on how many can join and a total cap bound a group that grows; with neither, a growing group has no lifetime maximum
@@ -597,7 +631,16 @@ async function previewIn(db: Tx, checked: Checked, ids: readonly string[], now: 
   if (checked.schedule === 'none') sentence = 'Gives nothing: those people get no grant.';
   else if (unbounded) sentence = growing && !capped ? `Issues ${amountWords} to each person who qualifies, including people who join or sign up later. It has no lifetime maximum.` : `Renews every month with no end date, so it has no lifetime maximum.`;
   else sentence = `Issues at most ${universeAi ? `${lifetime} ${unit}` : dollars(lifetime ?? 0)} in all${checked.schedule === 'monthly' ? ` over ${months} month${months === 1 ? '' : 's'}` : ''}.`;
-  const envelope = await envelopeIn(db, now, settings).catch(() => null);
+  // The envelope is only a figure beside the preview: if it cannot be read, the preview goes on without it. It is read inside a savepoint,
+  // because a failed query otherwise leaves the whole transaction aborted and every read after it fails too
+  let envelope: Awaited<ReturnType<typeof envelopeIn>> | null = null;
+  await db.$executeRaw`SAVEPOINT preview_envelope`;
+  try {
+    envelope = await envelopeIn(db, now, settings);
+    await db.$executeRaw`RELEASE SAVEPOINT preview_envelope`;
+  } catch {
+    await db.$executeRaw`ROLLBACK TO SAVEPOINT preview_envelope`;
+  }
   const account = await getFundingAccount(checked.fundingAccountId, db);
   const budget = account ? budgetOf(account, settings) : null;
   const issued = account ? await issuedInMonth(db, account.id, now) : 0;

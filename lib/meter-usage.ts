@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
-import { memberAllowance } from '@/lib/meter-allowance';
+import { heldRoom, memberAllowance } from '@/lib/meter-allowance';
 import { runningExtra, type RunningExtra } from '@/lib/meter-grants';
 import { openRequestFor } from '@/lib/meter-requests';
 import { getUniverseAiReplyLimits } from '@/lib/bot-limits';
@@ -137,7 +137,10 @@ export async function memberUsage(personId: string, now: Date = new Date()): Pro
     if (allowance && settings.memberAllowanceMicros) {
       // Against what they have now: the usual, or the raised one while extra usage runs, so the bar is never more than full
       const total = settings.memberAllowanceMicros * (extra?.multiplier ?? 1);
-      const left = allowance.unlimited ? 1 : Math.min(1, Math.max(0, (allowance.leftMicros ?? 0) / total));
+      // What is left is what new work can take: the allowance less everything held, as admission counts it (a hold that ran out and is not yet settled still counts)
+      const held = allowance.unlimited ? 0 : await heldRoom(personId, now);
+      const available = allowance.unlimited ? 0 : Math.max(0, (allowance.leftMicros ?? 0) - held);
+      const left = allowance.unlimited ? 1 : Math.min(1, Math.max(0, available / total));
       const words = allowance.unlimited ? 'plenty' : usageWords(left);
       const inProgress = await prisma.meterReservation.aggregate({ where: { personKey: `person:${personId}`, state: 'held', expiresAt: { gt: now } }, _sum: { amountMicros: true } });
       computer = {
@@ -147,7 +150,7 @@ export async function memberUsage(personId: string, now: Date = new Date()): Pro
         unlimited: allowance.unlimited,
         asked,
         canAskForMore: words === 'out',
-        ...(allowance.unlimited ? {} : { kind: 'monthly' as const, availableMicros: Math.max(0, allowance.leftMicros ?? 0), totalMicros: total, inProgressMicros: Number(inProgress._sum.amountMicros ?? 0), renewsAt: nextMonthStart(now).toISOString(), unavailable: false as const }),
+        ...(allowance.unlimited ? {} : { kind: 'monthly' as const, availableMicros: available, totalMicros: total, inProgressMicros: Number(inProgress._sum.amountMicros ?? 0), renewsAt: nextMonthStart(now).toISOString(), unavailable: false as const }),
       };
     }
     storage = { bytes: await storedBytes(personId) };
