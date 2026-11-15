@@ -122,6 +122,39 @@ describe("Composio's log is read by the run's own id", () => {
   });
 });
 
+// The shapes below were recorded from one real Instant run (EXA_SEARCH, 15 Nov 2026) once Instant was switched on for the project.
+describe('the real answer and the real log of an Instant run are read as they come', () => {
+  const realAnswer = { data: { requestId: 'e1', resolvedSearchType: '', results: [{ id: 'https://composio.dev/', title: 'Composio', url: 'https://composio.dev/' }], searchTime: 960.3 }, successful: true, error: null, log_id: 'log_pyJaRBT1OADr' };
+  const realLog = {
+    id: 'log_pyJaRBT1OADr',
+    timestamp: '2026-11-15T05:45:48.854Z',
+    status: 'success',
+    metadata: { user_id: 'universe-instant-probe-1', connected_account_id: '', credential_source: 'instant_account', instant_charge: '0', toolkit: { slug: 'exa' }, tool: { slug: 'EXA_SEARCH', version: '20261112_00' } },
+    data: { success: true, response: { status_code: null, body: { successfull: true, error: null, data: realAnswer.data, successful: true } } },
+  };
+
+  it('the answer carries no charge: the run is done with the log id, and the charge is asked of the log', async () => {
+    const { instant } = make([answer(realAnswer)]);
+    expect(await instant.run({ runUserId: 'universe-instant-probe-1', tool: 'EXA_SEARCH', arguments: { query: 'composio' } })).toEqual({ kind: 'done', successful: true, data: realAnswer.data, error: null, logId: 'log_pyJaRBT1OADr', chargeMicros: null });
+  });
+
+  it('the log says the charge as text ("0"), the credential source, the run id, and keeps the saved answer under data.response.body', async () => {
+    const { instant } = make([answer(realLog)]);
+    const found = await instant.log('log_pyJaRBT1OADr');
+    expect(found?.log).toMatchObject({ id: 'log_pyJaRBT1OADr', status: 'success', chargeMicros: 0, credentialSource: 'instant_account', tool: 'EXA_SEARCH', userId: 'universe-instant-probe-1' });
+    expect((found?.response as { data: unknown }).data).toEqual(realAnswer.data);
+  });
+
+  it('the search by run id finds the same line (the list shape has no data block)', async () => {
+    const { data: _unused, ...listed } = realLog;
+    void _unused;
+    const { instant } = make([answer({ logs: [listed], next_cursor: 'abc' })]);
+    const lines = await instant.findLogs({ userId: 'universe-instant-probe-1', fromMs: 1, toMs: 2 });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ id: 'log_pyJaRBT1OADr', chargeMicros: 0, userId: 'universe-instant-probe-1' });
+  });
+});
+
 describe('sessions are read back before they count as denied', () => {
   it('reads a session that says nothing as allowing Instant, and only an explicit false as denied', async () => {
     const { instant } = make([answer({ config: { instant: { return_instant_charge: false } } }), answer({ config: { instant: false } }), answer({}, 404)]);
