@@ -318,7 +318,7 @@ run('rules said in chat and task receipts, in a real database', () => {
   describe('one rule over both kinds of credit', () => {
     it('a computer step and an Instant step asked at the same moment meet at one lock: a cap with room for one lets exactly one through', async () => {
       const funds = createInstantFunds(() => NOW);
-      for (let round = 0; round < 6; round++) {
+      for (let round = 0; round < 20; round++) {
         const sara = await person(`sara${round}`);
         await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000, covers: 'all' });
         const account = await prisma.fundingAccount.create({ data: { kind: 'person', ownerKey: sara.id, name: 'Sara', budgetMicros: BigInt(100_000_000) } });
@@ -329,6 +329,8 @@ run('rules said in chat and task receipts, in a real database', () => {
         const instant = funds.reserve({ key: `mix-i-${round}-${tag}`, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, runId: null, charge: { class: 'instant', route: 'instant', provider: 'composio' } });
         const [a, b] = await Promise.all([computer, instant]);
         expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
+        // The one that did not get through was stopped by the rule, not by anything else
+        expect([a, b].filter((one) => !one.ok)).toEqual([expect.objectContaining({ reason: 'rule' })]);
       }
     });
   });
