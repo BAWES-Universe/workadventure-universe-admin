@@ -506,7 +506,9 @@ export async function saveDefault(input: GrantInput, issuer: Issuer, now: Date =
     try {
       return await save('default', { ...input, programId: current?.id }, issuer, now);
     } catch (error) {
-      if (!(error instanceof DefaultAppeared) || attempt >= 3) throw error;
+      // A unique-key refusal on the default's index means someone else just made it too (a writer that did not take the lock): look again
+      const raced = error instanceof DefaultAppeared || (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'P2002');
+      if (!raced || attempt >= 3) throw error;
     }
   }
 }
