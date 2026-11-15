@@ -354,7 +354,7 @@ export async function startJob(input: { botId: string; personId: string; title: 
   const outcome = await tryStart(created.id, now);
   if (typeof outcome === 'object') {
     // Refused by a rule the person said in chat: no job was ever going to run, so none is left behind, and the answer carries the rule's words
-    await prisma.computerJob.deleteMany({ where: { id: created.id } });
+    await prisma.computerJob.deleteMany({ where: { id: created.id, status: 'stopped', endedBy: 'rule' } });
     return { ok: false, reason: 'rule', words: outcome.rule };
   }
   if (outcome === 'not_set') {
@@ -383,7 +383,7 @@ async function reuseRunJob(botId: string, runId: string, now: Date): Promise<Sta
     const tried = await tryStart(found.id, now);
     if (typeof tried === 'object') {
       // A rule the person said stops it on this try: nothing ran, so none is left behind, the same answer as the first ask
-      await prisma.computerJob.deleteMany({ where: { id: found.id } });
+      await prisma.computerJob.deleteMany({ where: { id: found.id, status: 'stopped', endedBy: 'rule' } });
       return { ok: false, reason: 'rule', words: tried.rule };
     }
     if (tried === 'not_set') {
@@ -446,8 +446,11 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     // A rule the person said is not a wait in line: waiting would not change it, and a job that keeps being retried would hold up the Brick. It ends,
     // saying why, and the jobs behind it meet the same rule when their turn comes
     if (room.reason === 'rule') {
-      await endJob(job.id, 'stopped', 'rule', now, false);
-      return { rule: room.words };
+      await endJob(job.id, 'stopped', 'rule', now, false, 'queued');
+      // Another try may have claimed the job while this one was refused: that one runs and is left alone, only a job this try ended is a refusal
+      const after = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { status: true, endedBy: true } });
+      if (after?.status === 'stopped' && after.endedBy === 'rule') return { rule: room.words };
+      return after && !isOver(after.status) ? 'running' : 'gone';
     }
     const reason = queueReasonOf(room);
     if (reason) {
@@ -740,9 +743,11 @@ async function untilCleaned(botId: string): Promise<void> {
  * one event under the job's id, and its reserved room is settled to that. Then the machine rests if no other job holds it, and
  * the next job in line is tried. A job that is already over is left exactly as it ended.
  */
-async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true): Promise<void> {
+async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string): Promise<void> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (!job || isOver(job.status)) return;
+  // A caller that saw the job in line ends it only while it still is: another try may have put it on the machine in between
+  if (only !== undefined && job.status !== only) return;
   const held = job.status === 'running' || job.status === 'waiting';
   const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
   const seconds = job.secondsRun + stretch;

@@ -30,6 +30,12 @@ import { mintJobToken } from '@/lib/computer-token';
 import { authorizeModelCall } from '@/lib/computer-calls';
 import { PATCH as patchRule, DELETE as deleteRule } from '@/app/api/me/spend-rules/[ruleId]/route';
 
+// Delegates to the real room-taking; one test makes it hold up a moment to let another try claim the job (see "a try refused by a rule")
+jest.mock('@/lib/meter-allowance', () => {
+  const actual = jest.requireActual('@/lib/meter-allowance');
+  return { ...actual, reserveRoom: jest.fn(actual.reserveRoom) };
+});
+
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
 const tag = randomUUID().slice(0, 8);
@@ -356,6 +362,22 @@ run('rules said in chat and task receipts, in a real database', () => {
       // Nothing was held for it, and a call that fits is let through
       expect(await prisma.meterReservation.count({ where: { jobId: started.job.id, reservationKey: { contains: 'call' } } })).toBe(0);
       expect(await authorizeModelCall({ token: minted.token, callId: 'call-2', estimateMicros: 30_000, payer: 'universe' }, NOW)).toMatchObject({ ok: true, reservedMicros: 30_000 });
+    });
+
+    it('a try refused by a rule leaves alone a job another try put on the machine at the same moment', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 10_000 });
+      // The other try claims the job just before this one hears the rule's refusal
+      const reserve = reserveRoom as jest.MockedFunction<typeof reserveRoom>;
+      const real = jest.requireActual('@/lib/meter-allowance').reserveRoom as typeof reserveRoom;
+      reserve.mockImplementationOnce(async (input, at) => {
+        await prisma.computerJob.updateMany({ where: { botId: sara.brickId, status: 'queued' }, data: { status: 'running', reservationKey: 'other-try', startedAt: NOW, stretchStarted: NOW } });
+        return real(input, at);
+      });
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+      expect(started).toMatchObject({ ok: true, job: { status: 'running' } });
+      expect(await prisma.computerJob.findMany({ where: { botId: sara.brickId }, select: { status: true, endedBy: true } })).toEqual([{ status: 'running', endedBy: null }]);
     });
 
     it('a job that is running when a rule stops more room ends as "rule", saying so, not as "our room is used up"', async () => {
