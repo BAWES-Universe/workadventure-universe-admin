@@ -89,6 +89,9 @@ export async function removeAdmin(accountId: string, userId: string): Promise<'r
   // One removal per account at a time, and the check and the delete in one transaction: two removals at once cannot both see "one is left"
   return prisma.$transaction(async (tx) => {
     await lockAll(tx, [lockOfAccount(accountId)]);
+    // The account's own row too, locked for the rest of the transaction: whatever else writes to the account waits here as well, not only
+    // the code that takes the named lock
+    await tx.$queryRaw`SELECT id FROM funding_accounts WHERE id = ${accountId} FOR UPDATE`;
     const admins = await tx.fundingAccountAdmin.findMany({ where: { accountId }, select: { userId: true } });
     if (!admins.some((admin) => admin.userId === userId)) return 'not_found';
     const account = await tx.fundingAccount.findUnique({ where: { id: accountId }, select: { kind: true } });

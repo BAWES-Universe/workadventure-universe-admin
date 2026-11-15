@@ -23,7 +23,7 @@ import {
   type Settlement,
   type Share,
 } from '@/lib/credit-values';
-import { currentRules, idsReached, lockAll, lockOfAccount, personFacts, ruleFacts, type Tx } from '@/lib/credit-store';
+import { currentRules, idsReached, lockAll, lockOfAccount, lockOfRules, personFacts, ruleFacts, type Tx } from '@/lib/credit-store';
 import { PLATFORM_ACCOUNT_ID, budgetOf, getFundingAccount, isFundingAdmin, issuedInMonth } from '@/lib/credit-funding';
 
 /**
@@ -112,7 +112,8 @@ export interface ProgramView extends RuleView {
 
 export class ClashRefused extends CreditRefused {
   constructor(
-    readonly clashes: { programId: string; label: string; people: { userId: string; name: string | null }[] }[],
+    /** `userIds` is everyone the two rules both reach, so a screen can clear all of them in one choice; `people` names the first few to show. */
+    readonly clashes: { programId: string; label: string; userIds: string[]; people: { userId: string; name: string | null }[]; totalPeople: number }[],
   ) {
     super('Two rules disagree for the same people. Choose which one applies to them, then save again.', 'clash');
   }
@@ -368,6 +369,7 @@ export async function getProgram(programId: string): Promise<{ program: ProgramV
   return { program, versions: row.rules.map((rule) => viewOf(row, rule, row.rules.length)) };
 }
 
+/** The names of the first 50 people to show beside a clash. Only what is displayed is limited: the clash itself carries every id. */
 async function chooseNames(userIds: string[]): Promise<{ userId: string; name: string | null }[]> {
   if (userIds.length === 0) return [];
   const users = await prisma.user.findMany({ where: { id: { in: userIds.slice(0, 50) } }, select: { id: true, name: true } });
@@ -375,9 +377,9 @@ async function chooseNames(userIds: string[]): Promise<{ userId: string; name: s
 }
 
 /** Whether a rule about to be saved clashes with those already saved for its category; names the people when it does. */
-async function clashesOf(db: Tx, candidate: RuleFacts, programIds?: { exclude: string }): Promise<ClashFinding[]> {
+async function clashesOf(db: Tx, candidate: RuleFacts, now: Date, programIds?: { exclude: string }): Promise<ClashFinding[]> {
   if (candidate.programKind === 'gift') return [];
-  const saved = (await currentRules(db, { categoryId: candidate.categoryId })).filter((rule) => rule.programKind !== 'gift' && rule.programId !== programIds?.exclude);
+  const saved = (await currentRules(db, { categoryId: candidate.categoryId, waitingAfter: now })).filter((rule) => rule.programKind !== 'gift' && rule.programId !== programIds?.exclude);
   const ids = new Map<string, Set<string>>();
   for (const rule of [candidate, ...saved]) ids.set(rule.id, await idsReached(db, rule));
   return findClashes(candidate, saved, (rule) => ids.get(rule.id) ?? new Set());
@@ -392,7 +394,7 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
     // One save of a category's rules at a time, so two admins at the same moment cannot both save a clashing rule
     // and the accounts it touches, so issuing under the old rule and saving the new one never interleave
     const currentAccountId = input.programId ? (await tx.grantRule.findFirst({ where: { programId: input.programId, state: 'current' }, select: { fundingAccountId: true } }))?.fundingAccountId : undefined;
-    await lockAll(tx, [`credit:rules:${checked.categoryId}`, lockOfAccount(checked.fundingAccountId), ...(currentAccountId ? [lockOfAccount(currentAccountId)] : []), ...(input.requestKey ? [`credit:request:${input.requestKey}`] : [])]);
+    await lockAll(tx, [lockOfRules(checked.categoryId), lockOfAccount(checked.fundingAccountId), ...(currentAccountId ? [lockOfAccount(currentAccountId)] : []), ...(input.requestKey ? [`credit:request:${input.requestKey}`] : [])]);
     await checkIssuer(tx, checked, issuer);
     // The default is looked for before the lock is held, so two first saves at the same moment can both find none: the second, now holding
     // the lock, finds the first's and starts over from it as a new version, not as a second default
@@ -436,10 +438,10 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
       lotExpiresInDays: checked.lotExpiresInDays,
       settlement: checked.settlement,
     };
-    const clashes = await clashesOf(tx, candidate, { exclude: programId });
+    const clashes = await clashesOf(tx, candidate, now, { exclude: programId });
     if (clashes.length > 0) {
       const labels = await tx.grantProgram.findMany({ where: { id: { in: clashes.map((c) => c.programId) } }, select: { id: true, label: true } });
-      throw new ClashRefused(await Promise.all(clashes.map(async (c) => ({ programId: c.programId, label: labels.find((l) => l.id === c.programId)?.label ?? c.programId, people: await chooseNames(c.userIds) }))));
+      throw new ClashRefused(await Promise.all(clashes.map(async (c) => ({ programId: c.programId, label: labels.find((l) => l.id === c.programId)?.label ?? c.programId, userIds: c.userIds, people: await chooseNames(c.userIds), totalPeople: c.userIds.length }))));
     }
     const preview = await previewIn(tx, checked, ids, now, { forProgramId: programId });
     const budget = preview.budget;
@@ -461,7 +463,12 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
       if (needed > budget.roomMicros) throw new OverBudget(needed, budget.roomMicros);
     }
     if (existing) {
-      await tx.grantRule.updateMany({ where: { programId, state: 'current' }, data: { state: 'superseded', supersededAt: now } });
+      // A new version that starts later does not take over now: the version people are issued under goes on until the new one starts, so
+      // nobody who has not claimed yet is left with nothing in between. A version that was already waiting to be replaced is cut to the
+      // same moment, so two versions of one program are never open together
+      const takesOverAt = checked.claimStartsAt > now ? checked.claimStartsAt : now;
+      await tx.grantRule.updateMany({ where: { programId, state: 'current' }, data: { state: 'superseded', supersededAt: takesOverAt } });
+      await tx.grantRule.updateMany({ where: { programId, state: 'superseded', supersededAt: { gt: takesOverAt } }, data: { supersededAt: takesOverAt } });
     } else {
       await tx.grantProgram.create({ data: { id: programId, categoryId: checked.categoryId, kind, label: checked.label, createdById: issuer.userId, requestKey: input.requestKey ?? null } });
     }
@@ -526,9 +533,10 @@ export async function createGift(input: GrantInput, issuer: Issuer, now: Date = 
 /** Ends a program: nothing new is issued under it, the credit already given stays until it ends, and its history stays. */
 export async function endProgram(programId: string, issuer: Issuer, now: Date = new Date()): Promise<'ended' | 'already_ended' | 'not_found'> {
   return prisma.$transaction(async (tx) => {
-    // Under the funding account's lock: an issuing that read the rule before this ends it sees it ended and gives nothing
-    const peek = await tx.grantRule.findFirst({ where: { programId, state: 'current' }, select: { fundingAccountId: true } });
-    if (peek) await lockAll(tx, [lockOfAccount(peek.fundingAccountId)]);
+    // Under the funding account's lock and the category's rules lock (issuing holds the rules lock shared, and may still be issuing from a
+    // version waiting to be replaced that another account funds): an issuing that read the rule before this ends it sees it ended and gives nothing
+    const peek = await tx.grantRule.findFirst({ where: { programId, state: 'current' }, select: { fundingAccountId: true, program: { select: { categoryId: true } } } });
+    if (peek) await lockAll(tx, [lockOfAccount(peek.fundingAccountId), lockOfRules(peek.program.categoryId)]);
     const program = await tx.grantProgram.findUnique({ where: { id: programId }, include: { rules: { where: { state: 'current' }, take: 1 } } });
     if (!program) return 'not_found';
     if (program.status === 'ended') return 'already_ended';
@@ -644,7 +652,7 @@ async function previewIn(db: Tx, checked: Checked, ids: readonly string[], now: 
   const account = await getFundingAccount(checked.fundingAccountId, db);
   const budget = account ? budgetOf(account, settings) : null;
   const issued = account ? await issuedInMonth(db, account.id, now) : 0;
-  const overlaps = await overlapsOf(db, checked, ids, opts.forProgramId);
+  const overlaps = await overlapsOf(db, checked, ids, opts.forProgramId, now);
   return {
     recipients: { countNow, growing, share: checked.share, eachMicros, schedule: checked.schedule, unit: universeAi ? 'reply' : 'usd_micros' },
     mostIssued: {
@@ -670,14 +678,24 @@ async function previewIn(db: Tx, checked: Checked, ids: readonly string[], now: 
   };
 }
 
-async function overlapsOf(db: Tx, checked: Checked, ids: readonly string[], forProgramId: string | undefined): Promise<Preview['overlaps']> {
-  const others = (await currentRules(db, {})).filter((rule) => rule.programId !== forProgramId && (rule.categoryId === checked.categoryId || rule.covers.some((c) => checked.covers.includes(c))));
+async function overlapsOf(db: Tx, checked: Checked, ids: readonly string[], forProgramId: string | undefined, now: Date): Promise<Preview['overlaps']> {
+  const others = (await currentRules(db, { waitingAfter: now })).filter((rule) => rule.programId !== forProgramId && (rule.categoryId === checked.categoryId || rule.covers.some((c) => checked.covers.includes(c))));
   const mine = new Set(ids);
   const out: Preview['overlaps'] = [];
   const labels = await db.grantProgram.findMany({ where: { id: { in: others.map((rule) => rule.programId) } }, select: { id: true, label: true } });
-  for (const other of others) {
-    const theirs = await idsReached(db, other);
-    const wide = other.recipient.kind === 'all' || other.recipient.kind === 'new_from';
+  // A program saved twice at once (its version issuing now and the one waiting to replace it) is one overlap, with everyone either reaches
+  const grouped = new Map<string, { other: RuleFacts; theirs: Set<string>; wide: boolean }>();
+  for (const rule of others) {
+    const reached = await idsReached(db, rule);
+    const wideRule = rule.recipient.kind === 'all' || rule.recipient.kind === 'new_from';
+    const found = grouped.get(rule.programId);
+    if (!found) grouped.set(rule.programId, { other: rule, theirs: new Set(reached), wide: wideRule });
+    else {
+      for (const id of reached) found.theirs.add(id);
+      found.wide = found.wide || wideRule;
+    }
+  }
+  for (const { other, theirs, wide } of grouped.values()) {
     const shared = wide ? mine.size : [...theirs].filter((id) => mine.has(id)).length;
     // A rule that reaches by date or everyone overlaps with any group; a changing group counts only members now
     if (shared === 0 && !(checked.recipient.kind === 'all' || checked.recipient.kind === 'new_from')) continue;

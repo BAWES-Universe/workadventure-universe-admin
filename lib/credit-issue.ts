@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
-import { asNumber, isMoneyCategory, pickBase, planLot, reaches, subjectKeyFor, type RuleFacts } from '@/lib/credit-values';
-import { currentRules, lockAll, lockOfAccount, lockOfPerson, lockOfPool, personFacts, type Tx } from '@/lib/credit-store';
+import { asNumber, isMoneyCategory, pickBase, planLot, reaches, subjectKeyFor, type PersonFacts, type RuleFacts } from '@/lib/credit-values';
+import { currentRules, usableLots, lockAll, lockOfAccount, lockOfPerson, lockOfPool, lockOfRules, LOCK_METER_SETTINGS, personFacts, type Tx } from '@/lib/credit-store';
 import { budgetOf, issuedInMonth, platformAccount, getFundingAccount } from '@/lib/credit-funding';
 import type { MeterSettings } from '@/lib/meter-values';
 
@@ -63,35 +63,79 @@ function plansFor(rules: readonly RuleFacts[], person: Parameters<typeof reaches
   return plans;
 }
 
+/** The names a set of plans must lock: the person's own, each account they draw on, and each shared pool. */
+function locksFor(personId: string, plans: readonly Plan[]): string[] {
+  return [lockOfPerson(personId), ...plans.map((plan) => lockOfAccount(plan.rule.fundingAccountId)), ...plans.filter((plan) => plan.rule.share === 'shared').map((plan) => lockOfPool(plan.rule.programId))];
+}
+
+/** The rules locks of the categories a set of plans comes from. */
+const rulesLocksFor = (plans: readonly Plan[]): string[] => [...new Set(plans.map((plan) => lockOfRules(plan.rule.categoryId)))];
+
+/** Waiting for a save of rules or of Limits (a moment) counts against the transaction's time, so it gets more than the default five seconds. */
+const TRANSACTION = { maxWait: 10_000, timeout: 20_000 };
+
 /**
  * Gives a person the credit they are due now, once per program and period. Safe to call any number of times, from anywhere, at once.
  * Returns what this call issued and what it could not. A guest, or someone who does not exist, is due nothing.
+ *
+ * What is due is worked out twice: once to know which locks to take, and again under them. Under the locks the rules, the person's
+ * groups and the rollout budget are read fresh, so a program that ended, a rule that was edited or a budget that was lowered while this
+ * call waited is what counts, never what was read before. If the fresh read needs a lock that was not taken (a rule now reaches this
+ * person through another account or pool), nothing is issued and the whole thing starts again with the full set.
  */
-export async function ensureIssued(personId: string, now: Date = new Date(), settingsIn?: MeterSettings): Promise<IssueResult> {
-  const empty: IssueResult = { issued: [], skipped: [] };
-  const person = await personFacts(prisma, personId);
-  if (!person) return empty;
-  const rules = await currentRules(prisma, { now });
-  const skipped: IssueResult['skipped'] = [];
-  const plans = plansFor(rules, person, skipped);
-  if (plans.length === 0) return { issued: [], skipped };
-  const settings = settingsIn ?? (await getMeterSettings());
+export async function ensureIssued(personId: string, now: Date = new Date()): Promise<IssueResult> {
   await platformAccount();
-  const issued = await prisma.$transaction(async (tx) => {
-    // Every name this person's issuing touches, locked in one order: two calls at the same moment go one after the other
-    await lockAll(tx, [lockOfPerson(personId), ...plans.map((plan) => lockOfAccount(plan.rule.fundingAccountId)), ...plans.filter((plan) => plan.rule.share === 'shared').map((plan) => lockOfPool(plan.rule.programId))]);
-    const out: IssuedLot[] = [];
-    // The rules may have changed (a program ended, a rule edited) between reading them and getting the locks: only what is still current issues
-    const stillCurrent = new Set((await currentRules(tx, { now })).map((rule) => rule.id));
-    for (const { rule } of plans) {
-      if (!stillCurrent.has(rule.id)) continue;
-      const result = await issueOne(tx, rule, personId, now, settings);
-      if (result.lot) out.push(result.lot);
-      else if (result.skipped) skipped.push({ programId: rule.programId, reason: result.skipped });
-    }
-    return out;
-  });
-  return { issued, skipped };
+  for (let attempt = 0; attempt < 4; attempt++) {
+    // Read again on every attempt: a start over is because the person's facts or the rules moved, so the locks are worked out from what is true now
+    const first = await personFacts(prisma, personId);
+    if (!first) return { issued: [], skipped: [] };
+    // Nothing reaches this person: say why when two rules clash for them, so a caller can tell "nothing due" from "waiting for a choice"
+    const early: IssueResult['skipped'] = [];
+    const planned = plansFor(await currentRules(prisma, { now }), first, early);
+    if (planned.length === 0) return { issued: [], skipped: early };
+    const result = await prisma.$transaction(async (tx): Promise<IssueResult | 'again'> => {
+      // The rollout budget is read under a shared lock that a super admin's save of Limits waits for, so a lowered budget is never missed; and
+      // the rules of each category this person is due something from under a shared lock that a save of that category's rules waits for, so a
+      // rule is never read half-saved. Only those categories, so a save in one never holds up issuing in another. Shared, so people being
+      // issued to at the same moment do not wait for each other
+      const names = locksFor(personId, planned);
+      const categories = rulesLocksFor(planned);
+      await lockAll(tx, names, [LOCK_METER_SETTINGS, ...categories]);
+      const person = await personFacts(tx, personId);
+      if (!person) return { issued: [], skipped: [] };
+      const skipped: IssueResult['skipped'] = [];
+      const plans = plansFor(await currentRules(tx, { now }), person, skipped);
+      const held = new Set(names);
+      const heldRules = new Set(categories);
+      if (locksFor(personId, plans).some((name) => !held.has(name)) || rulesLocksFor(plans).some((name) => !heldRules.has(name))) return 'again';
+      if (plans.length === 0) return { issued: [], skipped };
+      const settings = await getMeterSettings(tx);
+      const out: IssuedLot[] = [];
+      for (const { rule } of plans) {
+        const done = await issueOne(tx, rule, personId, now, settings);
+        if (done.lot) out.push(done.lot);
+        else if (done.skipped) skipped.push({ programId: rule.programId, reason: done.skipped });
+      }
+      await answerAsksFromPools(tx, person, now);
+      return { issued: out, skipped };
+    }, TRANSACTION);
+    if (result !== 'again') return result;
+  }
+  throw new Error('Could not issue credit: the rules kept changing');
+}
+
+/**
+ * A shared amount for Instant Apps is credit this person can now draw on, whether this call made the pool or it was made when the first of the
+ * others arrived: what they asked for before the pool began is answered. An ask made after the pool began is a new one, and an ask for
+ * computer time is left alone. What counts as credit they can draw on is decided where spending decides it (`usableLots`): the pool's account
+ * must be active, the person must be reached by the version the pool was issued under, and there must be room left.
+ */
+async function answerAsksFromPools(tx: Tx, person: PersonFacts, now: Date): Promise<void> {
+  const usable = await usableLots(tx, person.id, 'instant_apps', now, { person });
+  for (const { lot, availableMicros } of usable) {
+    if (!lot.subjectKey.startsWith('pool:') || availableMicros <= 0) continue;
+    await tx.meterRequest.updateMany({ where: { personId: person.id, what: 'apps', answeredAt: null, createdAt: { lte: lot.issuedAt } }, data: { answeredAt: now, grantKey: `lot:${lot.id}` } });
+  }
 }
 
 type Issued = { lot: IssuedLot; skipped?: undefined } | { lot?: undefined; skipped: SkipReason | null };

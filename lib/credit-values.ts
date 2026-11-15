@@ -265,7 +265,17 @@ export function findClashes(candidate: RuleFacts, saved: readonly RuleFacts[], i
   if (candidate.programKind === 'gift') return [];
   const rank = baseRank(candidate);
   const mine = idsOf(candidate);
+  // A program can be saved twice at once (its version issuing now and the one waiting to replace it): one finding per program, with everyone either reaches
+  const byProgram = new Map<string, ClashFinding>();
   const findings: ClashFinding[] = [];
+  const add = (programId: string, userIds: string[]) => {
+    const found = byProgram.get(programId);
+    if (!found) {
+      const finding = { programId, userIds };
+      byProgram.set(programId, finding);
+      findings.push(finding);
+    } else found.userIds = [...new Set([...found.userIds, ...userIds])].sort();
+  };
   for (const other of saved) {
     if (other.programKind === 'gift' || other.programId === candidate.programId) continue;
     if (baseRank(other) !== rank) continue;
@@ -273,12 +283,12 @@ export function findClashes(candidate: RuleFacts, saved: readonly RuleFacts[], i
     if (!claimsOverlap(candidate, other)) continue;
     // Two defaults for one category are one too many; they reach everyone, so the clash is "everyone"
     if (rank === 3) {
-      findings.push({ programId: other.programId, userIds: [] });
+      add(other.programId, []);
       continue;
     }
     if (sameGiving(candidate, other)) continue;
     const shared = [...idsOf(other)].filter((id) => mine.has(id)).sort();
-    if (shared.length > 0) findings.push({ programId: other.programId, userIds: shared });
+    if (shared.length > 0) add(other.programId, shared);
   }
   return findings;
 }
