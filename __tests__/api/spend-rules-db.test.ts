@@ -319,6 +319,27 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
     });
 
+    it('through the route: what is left is above the first millionth but under a stretch of room, so the pre-check passes and the start itself is refused, still with the rule’s words', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 10_000 });
+      const body = await (await postJob(json('/x', 'POST', { userId: sara.uuid, title: 'Make the report' }), ctx(sara.brickId))).json();
+      expect(body).toEqual({ ok: false, reason: 'rule', rule: { id: null, why: null, leftMicros: null, words: expect.stringContaining('No more than $0.01 a month') } });
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
+    });
+
+    it('through the route: a replayed start for a run whose job is still queued gets the same refusal with the words, and no job is left', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 10_000 });
+      const item = await prisma.brickItem.create({ data: { ownerId: sara.id, botId: sara.brickId, kind: 'goal', words: 'Make the report', outcome: 'Done', cadence: { type: 'none' }, timeZone: 'Asia/Kuwait' } as never });
+      const run = await prisma.brickItemRun.create({ data: { itemId: item.id, dueAt: NOW, revision: 1, leaseUntil: new Date(NOW.getTime() + 600_000) } });
+      await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Report', status: 'queued', runId: run.id } });
+      const body = await (await postJob(json('/x', 'POST', { userId: sara.uuid, title: 'Report', runId: run.id }), ctx(sara.brickId))).json();
+      expect(body).toEqual({ ok: false, reason: 'rule', rule: { id: null, why: null, leftMicros: null, words: expect.stringContaining('No more than $0.01 a month') } });
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
+    });
+
     it('a job that is running when a rule stops more room ends as "rule", saying so, not as "our room is used up"', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
