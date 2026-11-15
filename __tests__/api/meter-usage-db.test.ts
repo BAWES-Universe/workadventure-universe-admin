@@ -121,7 +121,16 @@ run('usage for people, and cost for us, in a real database', () => {
   describe('the Usage page: one bar and plain words', () => {
     it('is a full bar of plenty for someone who has not used anything, with no computer or storage shown', async () => {
       const sara = await person('sara');
-      expect(await memberUsage(sara.id, NOW)).toEqual({ chat: { left: 1, words: 'plenty', fullAgainAt: null }, computer: null, storage: null, extra: null });
+      // The words and bar as before; the real reply counts (no window started by looking), no Instant Apps section and no extra credit
+      expect(await memberUsage(sara.id, NOW)).toEqual({
+        version: expect.any(Number),
+        chat: { left: 1, words: 'plenty', fullAgainAt: null, replies: { available: 30, total: 30, running: false, windowHours: 5 } },
+        computer: null,
+        storage: null,
+        extra: null,
+        apps: null,
+        credit: [],
+      });
     });
 
     it('counts only what Universe AI paid for: a Brick on their own key uses none of the bar', async () => {
@@ -134,9 +143,11 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(bar.left).toBeCloseTo(1 - 10 / 30, 5);
       expect(bar.words).toBe('plenty');
       expect(bar.fullAgainAt).toBe(hours(3).toISOString());
-      // Spend the rest on Universe AI and it is out, in words, with no count anywhere
+      // The real count agrees with the bar: 10 of 30 used on Universe AI, the 29 on their own key not counted
+      expect(bar.replies).toEqual({ available: 20, total: 30, running: true, windowHours: 5 });
+      // Spend the rest on Universe AI and it is out, in words and in the count
       await addUsage(sara, 20);
-      expect((await memberUsage(sara.id, NOW)).chat).toEqual({ left: 0, words: 'out', fullAgainAt: hours(3).toISOString() });
+      expect((await memberUsage(sara.id, NOW)).chat).toEqual({ left: 0, words: 'out', fullAgainAt: hours(3).toISOString(), replies: { available: 0, total: 30, running: true, windowHours: 5 } });
     });
 
     it('is full again once the window has ended, and a greeting or a failed reply never used any of it', async () => {
@@ -186,9 +197,9 @@ run('usage for people, and cost for us, in a real database', () => {
       const response = await usageGet(adminCall('/api/me/usage'));
       expect(response.status).toBe(200);
       const json = await response.json();
-      expect(Object.keys(json).sort()).toEqual(['chat', 'computer', 'extra', 'storage']);
-      // Never a count of replies and never a price
-      expect(JSON.stringify(json)).not.toMatch(/cost|price|micros|replies|\$/i);
+      expect(Object.keys(json).sort()).toEqual(['apps', 'chat', 'computer', 'credit', 'extra', 'storage', 'version']);
+      // Real reply counts and the person's own credit are theirs to see; never what a provider charged us, and never a price
+      expect(JSON.stringify(json)).not.toMatch(/cost|price|provider|\$/i);
     });
   });
 
