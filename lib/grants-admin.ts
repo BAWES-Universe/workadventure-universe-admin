@@ -130,6 +130,9 @@ async function giftFigures(programIds: string[]): Promise<Map<string, { used: nu
   return out;
 }
 
+/** How many ended gifts stay listed under the running ones. */
+const RECENTLY_ENDED_GIFTS = 30;
+
 export async function overview(now: Date = new Date()): Promise<GrantsOverview> {
   const [programs, limits, settings, people, exposure] = await Promise.all([
     listPrograms(undefined, { includeEnded: true }),
@@ -164,8 +167,11 @@ export async function overview(now: Date = new Date()): Promise<GrantsOverview> 
   }
   const exceptions: ExceptionView[] = [...groups.values()].map((group) => ({ id: exceptionId(group.apps?.programId, group.computers?.programId), audience: group.audience, instant_apps: settingOf(group.apps), computers: settingOf(group.computers) }));
 
-  // Gifts: those running or recently ended
-  const gifts = money.filter((program) => program.kind === 'gift').slice(-50);
+  // Gifts: every one still running, and the ones that ended most recently (so a long history never hides a running gift)
+  const endedAt = (program: ProgramView) => (program.lotExpiresAt ?? program.claimEndsAt ?? now).getTime();
+  const isEnded = (program: ProgramView) => program.status === 'ended' || endedAt(program) <= now.getTime();
+  const allGifts = money.filter((program) => program.kind === 'gift');
+  const gifts = [...allGifts.filter((program) => !isEnded(program)), ...allGifts.filter(isEnded).sort((a, b) => endedAt(b) - endedAt(a)).slice(0, RECENTLY_ENDED_GIFTS)];
   const figures = await giftFigures(gifts.map((gift) => gift.programId));
   const giftViews: GiftView[] = gifts
     .map((gift): GiftView => {

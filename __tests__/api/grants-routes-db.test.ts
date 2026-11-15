@@ -193,6 +193,21 @@ run('the grants routes, on the real books', () => {
     expect((await call(patchGift, '/x', { method: 'PATCH', body: { action: 'billed' } }, ctx({ id: randomUUID() }))).status).toBe(404);
   });
 
+  it('lists every running gift however many have ended before it', async () => {
+    await saveMeterSettings({ rolloutBudgetMicros: 1_000_000 * MILLION }, admin.id);
+    const omar = await person('Omar');
+    const ends = () => new Date(Date.now() + 20 * 86_400_000).toISOString();
+    const give = (amount: number) => call<any>(postGift, '/x', { method: 'POST', body: { grantKey: randomUUID(), audience: { kind: 'people', userIds: [omar] }, scope: 'both', amountMicros: amount, shared: false, endsAt: ends(), settlement: 'gift' } });
+    const first = await (await give(1 * MILLION)).json();
+    for (let i = 0; i < 35; i++) {
+      const gift = await (await give((i + 2) * MILLION)).json();
+      await call(patchGift, '/x', { method: 'PATCH', body: { action: 'end' } }, ctx({ id: gift.id }));
+    }
+    const { gifts } = await overview();
+    expect(gifts.some((gift: any) => gift.id === first.id && !gift.ended)).toBe(true);
+    expect(gifts.filter((gift: any) => gift.ended)).toHaveLength(30);
+  });
+
   it('ends a gift now: it stays listed as ended', async () => {
     const omar = await person('Omar');
     const made_ = await call<any>(postGift, '/x', { method: 'POST', body: { grantKey: randomUUID(), audience: { kind: 'people', userIds: [omar] }, scope: 'both', amountMicros: 5 * MILLION, shared: false, endsAt: new Date(Date.now() + 20 * 86_400_000).toISOString(), settlement: 'gift' } });
