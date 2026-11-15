@@ -1118,16 +1118,22 @@ run('the bounded Instant executor, in a real database', () => {
       // (and the unlocked same-ask checks miss too), so the run is first seen under the lock
       const early = jest.spyOn(prisma.instantRun, 'findUnique').mockResolvedValueOnce(null as never);
       const twins = jest.spyOn(prisma.instantRun, 'findFirst').mockResolvedValueOnce(null as never).mockResolvedValueOnce(null as never);
+      p.instant.findLogs.mockClear();
       const asking = runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      const other = await Promise.race([runInstant(ask({ arguments: { query: 'something else' } }), { adapter: p.adapter, funds: f.funds }), new Promise<'stuck'>((resolve) => setTimeout(() => resolve('stuck'), 5_000))]);
-      expect(early).toHaveBeenCalled();
-      expect(other).not.toBe('stuck');
-      expect(other).toMatchObject({ status: 'done' });
-      letGo();
-      await asking;
-      early.mockRestore();
-      twins.mockRestore();
+      try {
+        // Wait for the look-up itself to start (not a guessed delay): only then is the overlap the test is about really there
+        for (let i = 0; i < 200 && p.instant.findLogs.mock.calls.length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+        expect(p.instant.findLogs).toHaveBeenCalled();
+        const other = await Promise.race([runInstant(ask({ arguments: { query: 'something else' } }), { adapter: p.adapter, funds: f.funds }), new Promise<'stuck'>((resolve) => setTimeout(() => resolve('stuck'), 5_000))]);
+        expect(early).toHaveBeenCalled();
+        expect(other).not.toBe('stuck');
+        expect(other).toMatchObject({ status: 'done' });
+      } finally {
+        letGo();
+        await asking;
+        early.mockRestore();
+        twins.mockRestore();
+      }
     });
 
     it('a reservation that comes back after the clean-up closed the run is never sent, and its hold is given back', async () => {
