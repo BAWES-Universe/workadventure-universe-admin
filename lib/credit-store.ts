@@ -18,14 +18,24 @@ export async function lockName(tx: Pick<Tx, '$executeRaw'>, name: string): Promi
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${name}))`;
 }
 
-export async function lockAll(tx: Pick<Tx, '$executeRaw'>, names: Iterable<string>): Promise<void> {
-  for (const name of [...new Set(names)].sort()) await lockName(tx, name);
+export async function lockAll(tx: Pick<Tx, '$executeRaw'>, names: Iterable<string>, shared: Iterable<string> = []): Promise<void> {
+  // `shared` names are read-locked: many holders at once, but a writer of the name (which takes it as above) waits for all of them and
+  // they wait for it. Both kinds are taken in one sorted order, so mixing them cannot make two transactions wait on each other
+  const readers = new Set(shared);
+  for (const name of [...new Set([...names, ...readers])].sort()) {
+    if (readers.has(name) && ![...names].includes(name)) await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtext(${name}))`;
+    else await lockName(tx, name);
+  }
 }
 
 export const lockOfPerson = (personId: string): string => `credit:person:${personId}`;
 export const lockOfPool = (programId: string): string => `credit:pool:${programId}`;
 export const lockOfEffect = (effectKey: string): string => `credit:effect:${effectKey}`;
 export const lockOfAccount = (accountId: string): string => `credit:account:${accountId}`;
+/** What a save of a category's rules holds while it checks and writes them: issuing holds it shared, so it reads rules that are not half-saved. */
+export const lockOfRules = (categoryId: string): string => `credit:rules:${categoryId}`;
+/** The meter's settings (Limits): a save holds it exclusive, issuing holds it shared while it reads the rollout budget. */
+export const LOCK_METER_SETTINGS = 'meter:settings';
 
 type RuleRow = Prisma.GrantRuleGetPayload<{ include: { program: true; recipients: { select: { userId: true } } } }>;
 

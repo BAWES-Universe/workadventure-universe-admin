@@ -23,7 +23,7 @@ import {
   type Settlement,
   type Share,
 } from '@/lib/credit-values';
-import { currentRules, idsReached, lockAll, lockOfAccount, personFacts, ruleFacts, type Tx } from '@/lib/credit-store';
+import { currentRules, idsReached, lockAll, lockOfAccount, lockOfRules, personFacts, ruleFacts, type Tx } from '@/lib/credit-store';
 import { PLATFORM_ACCOUNT_ID, budgetOf, getFundingAccount, isFundingAdmin, issuedInMonth } from '@/lib/credit-funding';
 
 /**
@@ -394,7 +394,7 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
     // One save of a category's rules at a time, so two admins at the same moment cannot both save a clashing rule
     // and the accounts it touches, so issuing under the old rule and saving the new one never interleave
     const currentAccountId = input.programId ? (await tx.grantRule.findFirst({ where: { programId: input.programId, state: 'current' }, select: { fundingAccountId: true } }))?.fundingAccountId : undefined;
-    await lockAll(tx, [`credit:rules:${checked.categoryId}`, lockOfAccount(checked.fundingAccountId), ...(currentAccountId ? [lockOfAccount(currentAccountId)] : []), ...(input.requestKey ? [`credit:request:${input.requestKey}`] : [])]);
+    await lockAll(tx, [lockOfRules(checked.categoryId), lockOfAccount(checked.fundingAccountId), ...(currentAccountId ? [lockOfAccount(currentAccountId)] : []), ...(input.requestKey ? [`credit:request:${input.requestKey}`] : [])]);
     await checkIssuer(tx, checked, issuer);
     // The default is looked for before the lock is held, so two first saves at the same moment can both find none: the second, now holding
     // the lock, finds the first's and starts over from it as a new version, not as a second default

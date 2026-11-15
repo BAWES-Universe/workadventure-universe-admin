@@ -722,6 +722,22 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     const duringWait = await refuses(() => rules.saveException({ categoryId: 'computers', amount: 3 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-c1', 'fu-c2'] }, claimEndsAt: at('2027-04-15T00:00:00Z') }, root, FU));
     check('a rule saved for a period that ends before a waiting version takes over still clashes with the version issuing until then', duringWait?.code === 'clash', duringWait?.code);
 
+    // A shared Instant Apps amount answers the earlier asks of everyone it reaches, also when the pool was made by the first of the others
+    {
+      const requests = await import('@/lib/meter-requests');
+      for (const id of ['fu-s1', 'fu-s2', 'fu-s3']) await user(id, '2027-02-11T00:00:00Z');
+      const morning = at('2027-02-13T09:00:00Z');
+      for (const id of ['fu-s1', 'fu-s2', 'fu-s3']) await requests.askForMore(id, morning, 'apps');
+      await requests.askForMore('fu-s2', morning, 'computer');
+      await rules.createGift({ categoryId: 'instant_apps', amount: 5 * M, schedule: 'once', share: 'shared', recipients: { kind: 'people', userIds: ['fu-s1', 'fu-s2'] } }, root, at('2027-02-13T09:30:00Z'));
+      await issue.ensureIssued('fu-s1', at('2027-02-13T12:00:00Z'));
+      await issue.ensureIssued('fu-s2', at('2027-02-13T12:30:00Z'));
+      await requests.askForMore('fu-s2', at('2027-02-13T13:00:00Z'), 'apps');
+      await issue.ensureIssued('fu-s2', at('2027-02-13T13:30:00Z'));
+      const open = async (id: string, what: string) => prisma.meterRequest.count({ where: { personId: id, what, answeredAt: null } });
+      check('a shared Instant Apps amount answers the earlier asks of everyone it reaches, leaves computer asks, later asks and other people alone', (await open('fu-s1', 'apps')) === 0 && (await open('fu-s2', 'computer')) === 1 && (await open('fu-s2', 'apps')) === 1 && (await open('fu-s3', 'apps')) === 1, { s1: await open('fu-s1', 'apps'), s2computer: await open('fu-s2', 'computer'), s2apps: await open('fu-s2', 'apps'), s3: await open('fu-s3', 'apps') });
+    }
+
     // A group that can change can clash later, when someone joins both: nobody gets a number by guesswork
     await prisma.$executeRawUnsafe(`INSERT INTO universes (id, slug, name, owner_id, updated_at) VALUES ('u2', 'later', 'Later', 'admin', now())`);
     for (const id of ['fu-rx', 'fu-ry']) await user(id, '2027-02-11T00:00:00Z');

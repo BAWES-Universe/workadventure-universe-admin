@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
 import { asNumber, isMoneyCategory, pickBase, planLot, reaches, subjectKeyFor, type RuleFacts } from '@/lib/credit-values';
-import { currentRules, lockAll, lockOfAccount, lockOfPerson, lockOfPool, personFacts, type Tx } from '@/lib/credit-store';
+import { currentRules, lotBalances, lockAll, lockOfAccount, lockOfPerson, lockOfPool, lockOfRules, LOCK_METER_SETTINGS, personFacts, type Tx } from '@/lib/credit-store';
 import { budgetOf, issuedInMonth, platformAccount, getFundingAccount } from '@/lib/credit-funding';
 import type { MeterSettings } from '@/lib/meter-values';
 
@@ -87,11 +87,11 @@ export async function ensureIssued(personId: string, now: Date = new Date()): Pr
     const planned = plansFor(await currentRules(prisma, { now }), first, early);
     if (planned.length === 0) return { issued: [], skipped: early };
     const result = await prisma.$transaction(async (tx): Promise<IssueResult | 'again'> => {
-      // The rollout budget is read under a shared lock that a super admin's save of Limits waits for, so a lowered budget is never missed;
-      // shared, so people being issued to at the same moment do not wait for each other
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtext('meter:settings'))`;
+      // The rollout budget is read under a shared lock that a super admin's save of Limits waits for, so a lowered budget is never missed; and
+      // the rules under a shared lock that a save of a category's rules waits for, so a rule is never read half-saved. Shared, so people
+      // being issued to at the same moment do not wait for each other
       const names = locksFor(personId, planned);
-      await lockAll(tx, names);
+      await lockAll(tx, names, [LOCK_METER_SETTINGS, ...CATEGORIES.map(lockOfRules)]);
       const person = await personFacts(tx, personId);
       if (!person) return { issued: [], skipped: [] };
       const skipped: IssueResult['skipped'] = [];
@@ -106,12 +106,33 @@ export async function ensureIssued(personId: string, now: Date = new Date()): Pr
         if (done.lot) out.push(done.lot);
         else if (done.skipped) skipped.push({ programId: rule.programId, reason: done.skipped });
       }
+      await answerAsksFromPools(tx, plans, personId, now);
       return { issued: out, skipped };
     });
     if (result !== 'again') return result;
   }
   throw new Error('Could not issue credit: the rules kept changing');
 }
+
+/**
+ * A shared amount for Instant Apps is credit this person can now draw on, whether this call made the pool or it was made when the first of the
+ * others arrived: what they asked for before the pool began is answered. An ask made after the pool began is a new one, and an ask for
+ * computer time is left alone.
+ */
+async function answerAsksFromPools(tx: Tx, plans: readonly Plan[], personId: string, now: Date): Promise<void> {
+  for (const { rule } of plans) {
+    if (rule.share !== 'shared' || !rule.covers.includes('instant_apps')) continue;
+    const plan = planLot(rule, now);
+    if (!plan) continue;
+    const pool = await tx.creditLot.findUnique({ where: { slotKey_subjectKey_periodKey: { slotKey: plan.slotKey, subjectKey: subjectKeyFor(rule, personId), periodKey: plan.periodKey } }, select: { id: true, issuedAt: true, startsAt: true, expiresAt: true } });
+    if (!pool || pool.startsAt > now || (pool.expiresAt && pool.expiresAt <= now)) continue;
+    const left = (await lotBalances(tx, [pool.id])).get(pool.id)?.availableMicros ?? 0;
+    if (left <= 0) continue;
+    await tx.meterRequest.updateMany({ where: { personId, what: 'apps', answeredAt: null, createdAt: { lte: pool.issuedAt } }, data: { answeredAt: now, grantKey: `lot:${pool.id}` } });
+  }
+}
+
+const CATEGORIES = ['instant_apps', 'computers', 'universe_ai'] as const;
 
 type Issued = { lot: IssuedLot; skipped?: undefined } | { lot?: undefined; skipped: SkipReason | null };
 
