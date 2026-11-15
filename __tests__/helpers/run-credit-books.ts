@@ -246,6 +246,14 @@ async function main() {
     const eff1 = await spend.holdCredit({ ...input, holdKey: 'e1', amountMicros: 1, effectKey: 'exec-1' }, G);
     const eff2 = await spend.holdCredit({ ...input, holdKey: 'e2', amountMicros: 1, effectKey: 'exec-1' }, G);
     check('the same execution is never charged under two keys', eff1.ok && !eff2.ok && eff2.reason === 'effect_charged', eff2);
+    // Nothing was taken by a released hold, so the same execution can be asked for again under a new key; while a hold is held or settled it cannot
+    await spend.releaseHold({ holdKey: 'e1' }, G);
+    const effRetry = await spend.holdCredit({ ...input, holdKey: 'e3', amountMicros: 1, effectKey: 'exec-1' }, G);
+    const effBlockedHeld = await spend.holdCredit({ ...input, holdKey: 'e4', amountMicros: 1, effectKey: 'exec-1' }, G);
+    check('a released hold does not block asking again for the same execution, but a live one still does', eff2.ok === false && effRetry.ok && !effBlockedHeld.ok && effBlockedHeld.reason === 'effect_charged', { effRetry, effBlockedHeld });
+    await spend.settleHold({ holdKey: 'e3', customerMicros: 1 }, G);
+    const effBlockedSettled = await spend.holdCredit({ ...input, holdKey: 'e5', amountMicros: 1, effectKey: 'exec-1' }, G);
+    check('a settled hold keeps its execution to one charge', !effBlockedSettled.ok && effBlockedSettled.reason === 'effect_charged', effBlockedSettled);
     const race = await Promise.all([1, 2, 3, 4].map((n) => spend.holdCredit({ ...input, holdKey: `er-${n}`, amountMicros: 1, effectKey: 'exec-race' }, G).catch((error: unknown) => ({ ok: false as const, reason: `threw: ${error instanceof Error ? error.message.slice(0, 80) : 'unknown'}` }))));
     check('one execution asked for under four keys at once is held once, and the others are told it is already charged, never a throw', race.filter((r) => r.ok).length === 1 && race.filter((r) => !r.ok && r.reason === 'effect_charged').length === 3, race);
   }

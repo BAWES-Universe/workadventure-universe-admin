@@ -109,6 +109,14 @@ const checks = {
     await accepted(hold('h7', { effect_key: 'e1' }));
     return accepted(hold('h8', { effect_key: 'e1' }));
   })(),
+  effectKeyAfterRelease: await (async () => {
+    await accepted(hold('h9', { effect_key: 'e2', state: 'released' }));
+    return accepted(hold('h10', { effect_key: 'e2' }));
+  })(),
+  effectKeyReleasedTwice: await (async () => {
+    await accepted(hold('h11', { effect_key: 'e3', state: 'released' }));
+    return accepted(hold('h12', { effect_key: 'e3', state: 'released' }));
+  })(),
   accountOwnerForPlatform: await accepted(insert('funding_accounts', { id: 'fa1', kind: 'platform', owner_key: 'someone', name: 'x' })),
   personAccountOk: await accepted(insert('funding_accounts', { id: 'fa2', kind: 'person', owner_key: 'sara', name: 'Sara' })),
   accountOtherKind: await accepted(insert('funding_accounts', { id: 'fa3', kind: 'company', owner_key: 'x', name: 'x' })),

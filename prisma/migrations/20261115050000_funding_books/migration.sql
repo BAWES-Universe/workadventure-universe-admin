@@ -227,7 +227,8 @@ CREATE UNIQUE INDEX "credit_lots_slot_key_subject_key_period_key_key" ON "credit
 CREATE UNIQUE INDEX "credit_holds_hold_key_key" ON "credit_holds"("hold_key");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "credit_holds_effect_key_key" ON "credit_holds"("effect_key");
+-- A released hold took nothing, so the same execution may be asked for again; a held or settled hold keeps it to one
+CREATE UNIQUE INDEX "credit_holds_effect_key_key" ON "credit_holds"("effect_key") WHERE "effect_key" IS NOT NULL AND "state" <> 'released';
 
 -- CreateIndex
 CREATE INDEX "credit_holds_person_id_state_idx" ON "credit_holds"("person_id", "state");

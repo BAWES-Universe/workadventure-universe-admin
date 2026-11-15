@@ -125,7 +125,7 @@ export async function holdCredit(input: HoldInput, now: Date = new Date()): Prom
   const existing = await loadHold(prisma, input.holdKey);
   if (existing) return alreadyHeld(existing, input, now);
   if (input.effectKey) {
-    const charged = await prisma.creditHold.findUnique({ where: { effectKey: input.effectKey }, select: { holdKey: true } });
+    const charged = await prisma.creditHold.findFirst({ where: { effectKey: input.effectKey, state: { not: 'released' } }, select: { holdKey: true } });
     if (charged && charged.holdKey !== input.holdKey) return { ok: false, reason: 'effect_charged' };
   }
   if (input.parentHoldKey) {
@@ -143,7 +143,7 @@ export async function holdCredit(input: HoldInput, now: Date = new Date()): Prom
     const again = await loadHold(tx, input.holdKey);
     if (again) return alreadyHeld(again, input, now);
     if (input.effectKey) {
-      const charged = await tx.creditHold.findUnique({ where: { effectKey: input.effectKey }, select: { holdKey: true } });
+      const charged = await tx.creditHold.findFirst({ where: { effectKey: input.effectKey, state: { not: 'released' } }, select: { holdKey: true } });
       if (charged && charged.holdKey !== input.holdKey) return { ok: false, reason: 'effect_charged' };
     }
     const lots = await usableLots(tx, input.personId, input.category, now, { onlyAccountId: input.onlyAccountId });
