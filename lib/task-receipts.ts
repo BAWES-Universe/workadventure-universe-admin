@@ -306,3 +306,48 @@ export async function reportProblem(personId: string, activityId: string, now: D
   if (marked.count > 0) tellOperators(job.botId, jobActivityIdOf(job.id));
   return { ok: true, outcome: 'sent' };
 }
+
+export interface ProblemReport {
+  /** The Activity id the person reported. */
+  id: string;
+  title: string;
+  state: ReceiptState;
+  botId: string;
+  botName: string | null;
+  personId: string;
+  payer: PaidBy['payer'];
+  payerName: string | null;
+  /** When the person said it did not work. */
+  reportedAt: string;
+  /** When the task ended (or began, while it has not). */
+  at: string;
+}
+
+/** How many reports one operator list holds, newest first. */
+export const PROBLEM_REPORTS_LISTED = 100;
+
+/**
+ * What people said did not work, for the people who run Universe: newest report first. Only what was stored (the task, the Brick, who
+ * asked and who paid, and when); the person's own words are never kept. Reads only.
+ */
+export async function problemReports(limit: number = PROBLEM_REPORTS_LISTED): Promise<ProblemReport[]> {
+  const rows = await prisma.taskReceipt.findMany({ where: { problemAt: { not: null } }, orderBy: [{ problemAt: 'desc' }, { id: 'desc' }], take: limit });
+  if (rows.length === 0) return [];
+  const bots = await prisma.bot.findMany({ where: { id: { in: [...new Set(rows.map((row) => row.botId))] } }, select: { id: true, name: true } });
+  const names = new Map(bots.map((bot) => [bot.id, bot.name]));
+  return rows.map((row) => {
+    const who = paidBy(payerFromRow(row), row.personId);
+    return {
+      id: activityIdOf(row.id),
+      title: row.title,
+      state: row.state as ReceiptState,
+      botId: row.botId,
+      botName: names.get(row.botId) ?? null,
+      personId: row.personId,
+      payer: who.payer,
+      payerName: who.payerName,
+      reportedAt: (row.problemAt as Date).toISOString(),
+      at: (row.endedAt ?? row.startedAt).toISOString(),
+    };
+  });
+}

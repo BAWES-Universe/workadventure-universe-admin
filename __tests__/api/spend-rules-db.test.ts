@@ -26,6 +26,7 @@ import { POST as postReceipt } from '@/app/api/bots/[id]/task-receipts/route';
 import { GET as getPaidBy } from '@/app/api/bots/[id]/paid-by/route';
 import { POST as postJob } from '@/app/api/bots/[id]/computer-jobs/route';
 import { POST as postDidntWork } from '@/app/api/me/usage/activity/[id]/didnt-work/route';
+import { GET as getTaskReports } from '@/app/api/admin/task-reports/route';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { giveComputer, renewJob, startJob } from '@/lib/computer';
 import { mintJobToken } from '@/lib/computer-token';
@@ -873,6 +874,32 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await reportProblem(sara.id, `act_job_${job.id}`)).toEqual({ ok: true, outcome: 'sent' });
       expect(await reportProblem(omar.id, `act_job_${job.id}`)).toEqual({ ok: false, reason: 'not_found' });
       expect((await activityFor(sara.id)).filter((one) => one.title === 'Weekly sales report')).toHaveLength(1);
+    });
+
+    it('what people reported is readable by the team, newest report first, with the task, the Brick and who paid, and by no one else', async () => {
+      const sara = await person('sara');
+      const first = await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'rep-1', title: 'First', category: 'apps' }, NOW);
+      const second = await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'rep-2', title: 'Second', category: 'apps', payer: { kind: 'sponsor', name: 'BAWES Universe' } }, NOW);
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'rep-3', title: 'Never reported', category: 'apps' }, NOW);
+      for (const key of ['rep-1', 'rep-2', 'rep-3']) await closeReceipt({ botId: sara.brickId, taskKey: key, personId: sara.id, state: 'done' }, NOW);
+      await reportProblem(sara.id, first.id, new Date(NOW.getTime() + 1000));
+      await reportProblem(sara.id, second.id, new Date(NOW.getTime() + 2000));
+      const before = process.env.SUPER_ADMINS;
+      process.env.SUPER_ADMINS = `team-${tag}@example.test`;
+      const session = getSessionUser as jest.Mock;
+      try {
+        session.mockResolvedValueOnce({ id: sara.id, email: `sara-${tag}@example.test` });
+        expect((await getTaskReports(new NextRequest('http://localhost/api/admin/task-reports'))).status).toBe(403);
+        session.mockResolvedValueOnce({ id: 'team', email: `team-${tag}@example.test` });
+        const body = await (await getTaskReports(new NextRequest('http://localhost/api/admin/task-reports'))).json();
+        const mine = body.reports.filter((one: { botId: string }) => one.botId === sara.brickId);
+        expect(mine.map((one: { title: string }) => one.title)).toEqual(['Second', 'First']);
+        expect(mine[0]).toMatchObject({ id: second.id, botName: expect.any(String), personId: sara.id, payer: 'sponsor', payerName: 'BAWES Universe', state: 'done' });
+        expect(Object.keys(mine[0]).sort()).toEqual(['at', 'botId', 'botName', 'id', 'payer', 'payerName', 'personId', 'reportedAt', 'state', 'title']);
+      } finally {
+        if (before === undefined) delete process.env.SUPER_ADMINS;
+        else process.env.SUPER_ADMINS = before;
+      }
     });
 
     it('through the routes: open, close and the Usage page’s Activity, and the words for who pays', async () => {
