@@ -76,7 +76,7 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
       OR: [
         { state: { in: ['reserving', 'held', 'sent', 'ambiguous'] } },
         { providerState: 'pending' },
-        { state: { in: ['succeeded', 'failed'] }, customerState: 'held' },
+        { state: { in: ['succeeded', 'failed', 'refused'] }, customerState: 'held' },
       ],
     },
     // The oldest attempt first (never tried first): runs that cannot be settled yet never keep the later ones from being tried

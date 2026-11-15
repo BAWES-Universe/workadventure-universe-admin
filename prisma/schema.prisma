@@ -2837,6 +2837,9 @@ model InstantRefund {
   personId     String   @map("person_id")
   kind         String   @db.VarChar(20)
   amountMicros BigInt   @map("amount_micros")
+  // Null while only the intent is saved (written before the books are asked, so a give-back the books made and we never recorded is
+  // found again and finished by the retry); set once the books confirmed it. Both count against the limits.
+  confirmedAt  DateTime? @map("confirmed_at")
   createdAt    DateTime @default(now()) @map("created_at")
 
   @@index([runId])

@@ -242,20 +242,34 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
   return finishCall(run.id, call, { funds, adapter, now: new Date() });
 }
 
-/** One run's own move from one state to the next, only if it is still in the state it was left in; null when something else (the clean-up) got there first. */
-async function moveRun(runId: string, from: string, data: Prisma.InstantRunUpdateManyMutationInput): Promise<Row | null> {
-  const { count } = await prisma.instantRun.updateMany({ where: { id: runId, state: from }, data });
-  if (count !== 1) return null;
-  return prisma.instantRun.findUnique({ where: { id: runId } });
+/**
+ * One run's own move from one state to the next, only if it is still in the state it was left in; null when something else (the
+ * clean-up) got there first. Done under the run's own lock, the one the clean-up holds while it works, so a move and a clean-up never
+ * interleave: the move waits for a clean-up that has begun, and then finds the run closed.
+ */
+async function moveRun(runId: string, from: string, data: Prisma.InstantRunUncheckedUpdateInput): Promise<Row | null> {
+  try {
+    return await withRun(runId, async (row, tx) => (row.state === from ? tx.instantRun.update({ where: { id: runId }, data }) : null));
+  } catch (error) {
+    // Not moved is the safe answer: the run is not sent, and the clean-up closes it
+    console.error('[Instant] Could not move a run on:', error instanceof Error ? error.message : 'unknown');
+    return null;
+  }
 }
 
-/** A run that was taken over while its request was still on its way: the hold goes back (said again, it is idempotent) and the run is answered as it now stands. */
+/**
+ * A run that was taken over while its request was still on its way: the hold goes back (said again, it is idempotent) and the run is
+ * answered as it now stands. When the books do not confirm the release, the closed run is marked as still holding, which the sweep
+ * keeps saying again until the books answer: a hold that reached the books after the run was closed is never left behind.
+ */
 async function standDown(runId: string, ctx: Ctx): Promise<InstantOutcome> {
+  let gone = false;
   try {
-    await ctx.funds.release({ key: fundsKey(runId) });
+    gone = holdIsGone(await ctx.funds.release({ key: fundsKey(runId) }));
   } catch (error) {
     console.error('[Instant] The credit books could not release:', error instanceof Error ? error.message : 'unknown');
   }
+  if (!gone) await prisma.instantRun.updateMany({ where: { id: runId, state: 'refused', customerState: 'none' }, data: { customerState: 'held' } });
   const row = await prisma.instantRun.findUnique({ where: { id: runId } });
   return row ? outcomeOf(row) : refuse('unclear', { runId });
 }
@@ -462,16 +476,21 @@ async function settleSuccess(run: Row, tx: Prisma.TransactionClient, providerMic
   // The markup the hold was made with, never today's: a settlement said again after a markup change asks the books for the same amount
   const charged = customerChargeFor(providerMicros, asNumber(run.holdMicros), run.markupBps ?? limits.markupBps);
   let customerDone = run.customerState !== 'held';
+  let chargedNow = charged;
   if (run.customerState === 'held') {
     try {
-      customerDone = (await ctx.funds.settle({ key: fundsKey(run.id), chargeMicros: charged, providerCostMicros: providerMicros })).ok;
+      const answer = await ctx.funds.settle({ key: fundsKey(run.id), chargeMicros: charged, providerCostMicros: providerMicros });
+      customerDone = answer.ok;
+      // A settlement the books took before (and this side never recorded) answers with its FIRST amount: that is what the person was
+      // charged, so that is what is recorded, whatever today's figures work out to
+      if (answer.ok && typeof answer.chargedMicros === 'number' && Number.isSafeInteger(answer.chargedMicros) && answer.chargedMicros >= 0) chargedNow = answer.chargedMicros;
     } catch (error) {
       console.error('[Instant] The credit books could not settle:', error instanceof Error ? error.message : 'unknown');
     }
-    if (customerDone) await tx.instantRun.update({ where: { id: run.id }, data: { customerState: 'charged', customerMicros: BigInt(charged) } });
+    if (customerDone) await tx.instantRun.update({ where: { id: run.id }, data: { customerState: 'charged', customerMicros: BigInt(chargedNow) } });
   }
-  await settleProvider({ ...run, customerMicros: customerDone ? BigInt(charged) : run.customerMicros }, tx, providerMicros, basis, ctx.now);
-  return { charged, customerDone };
+  await settleProvider({ ...run, customerMicros: customerDone ? BigInt(chargedNow) : run.customerMicros }, tx, providerMicros, basis, ctx.now);
+  return { charged: chargedNow, customerDone };
 }
 
 /** What a run already on the books says to a caller who asks again. Unclear runs are looked up first. */
@@ -588,7 +607,7 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
     }
 
     // Finished, but the books did not take the customer's side the first time: said again now
-    if (run.state === 'failed' && run.customerState === 'held') {
+    if ((run.state === 'failed' || run.state === 'refused') && run.customerState === 'held') {
       if (!(await releaseCustomer(run, tx, ctx))) return;
     }
     if (run.state === 'succeeded' && run.customerState === 'held' && run.providerState === 'settled' && run.providerMicros !== null) {
@@ -696,39 +715,58 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
     return { status: 'refused', reason: 'not_set' };
   }
   const month = monthOf(now);
-  const outcome = await prisma.$transaction(
-    async (tx): Promise<GiveBackOutcome> => {
+  const refundKey = `goodwill:${input.runId}`;
+  // Step 1, under the give-back lock: the checks, and the INTENT saved (committed) before the books are asked. A give-back the books made
+  // and this side never recorded is then found again by the retry, which finishes it at the amount the books confirm, never refusing it
+  // on a limit that moved in between.
+  const planned = await prisma.$transaction(
+    async (tx): Promise<{ go: { amount: number; runId: string; personId: string } } | { done: GiveBackOutcome }> => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('instant:goodwill'))`;
       const run = await tx.instantRun.findUnique({ where: { id: input.runId } });
-      if (!run || run.personId !== input.personId) return { status: 'refused', reason: 'not_found' };
-      if (run.state !== 'succeeded' || run.customerState !== 'charged' || asNumber(run.customerMicros) <= 0) return { status: 'refused', reason: 'not_charged' };
-      const refundKey = `goodwill:${run.id}`;
-      if (await tx.instantRefund.findUnique({ where: { refundKey } })) return { status: 'refused', reason: 'already_given' };
+      if (!run || run.personId !== input.personId) return { done: { status: 'refused', reason: 'not_found' } };
+      if (run.state !== 'succeeded' || run.customerState !== 'charged' || asNumber(run.customerMicros) <= 0) return { done: { status: 'refused', reason: 'not_charged' } };
+      const earlier = await tx.instantRefund.findUnique({ where: { refundKey } });
+      if (earlier?.confirmedAt) return { done: { status: 'refused', reason: 'already_given' } };
+      // An intent the books may already have acted on: finished at its own amount, before any limit is applied to a new give-back
+      if (earlier) return { go: { amount: asNumber(earlier.amountMicros), runId: run.id, personId: run.personId } };
       const [person, everyone] = await Promise.all([
         tx.instantRefund.count({ where: { personId: input.personId, kind: 'goodwill', createdAt: { gte: month.start, lt: month.end } } }),
         tx.instantRefund.aggregate({ where: { kind: 'goodwill', createdAt: { gte: month.start, lt: month.end } }, _sum: { amountMicros: true } }),
       ]);
-      if (person >= limits.goodwillPerPersonPerMonth!) return { status: 'refused', reason: 'person_limit' };
+      if (person >= limits.goodwillPerPersonPerMonth!) return { done: { status: 'refused', reason: 'person_limit' } };
       const amount = Math.min(asNumber(run.customerMicros) - asNumber(run.refundedMicros), limits.goodwillMaxMicros!);
-      if (amount < 1) return { status: 'refused', reason: 'not_charged' };
-      if (asNumber(everyone._sum.amountMicros) + amount > limits.goodwillBudgetMicros!) return { status: 'refused', reason: 'budget' };
-      let done: { ok: boolean; refundedMicros?: number };
-      try {
-        done = await funds.refund({ key: fundsKey(run.id), refundKey, amountMicros: amount, reason: 'goodwill', limits: { giveBackMaxMicros: limits.goodwillMaxMicros, goodwillBudgetMicros: limits.goodwillBudgetMicros } });
-      } catch (error) {
-        console.error('[Instant] The credit books could not give back:', error instanceof Error ? error.message : 'unknown');
-        return { status: 'refused', reason: 'unavailable' };
-      }
-      if (!done.ok) return { status: 'refused', reason: 'unavailable' };
-      // What the books say they gave back is what is recorded: a give-back that was made before and said again returns its first amount,
-      // which may differ from today's figure after a Limits change
-      const given = typeof done.refundedMicros === 'number' && Number.isSafeInteger(done.refundedMicros) && done.refundedMicros > 0 ? done.refundedMicros : amount;
-      await tx.instantRefund.create({ data: { refundKey, runId: run.id, personId: run.personId, kind: 'goodwill', amountMicros: BigInt(given) } });
-      await tx.instantRun.update({ where: { id: run.id }, data: { refundedMicros: { increment: BigInt(given) } } });
-      return { status: 'given', amountMicros: given };
+      if (amount < 1) return { done: { status: 'refused', reason: 'not_charged' } };
+      if (asNumber(everyone._sum.amountMicros) + amount > limits.goodwillBudgetMicros!) return { done: { status: 'refused', reason: 'budget' } };
+      await tx.instantRefund.create({ data: { refundKey, runId: run.id, personId: run.personId, kind: 'goodwill', amountMicros: BigInt(amount) } });
+      return { go: { amount, runId: run.id, personId: run.personId } };
     },
     { maxWait: 15_000, timeout: 30_000 },
   );
+  if ('done' in planned) return planned.done;
+
+  // Step 2: the books, outside any transaction
+  let answer: { ok: boolean; refundedMicros?: number; reason?: string };
+  try {
+    answer = await funds.refund({ key: fundsKey(planned.go.runId), refundKey, amountMicros: planned.go.amount, reason: 'goodwill', limits: { giveBackMaxMicros: limits.goodwillMaxMicros, goodwillBudgetMicros: limits.goodwillBudgetMicros } });
+  } catch (error) {
+    console.error('[Instant] The credit books could not give back:', error instanceof Error ? error.message : 'unknown');
+    // Not known whether they gave it: the intent stays, and asking again finishes it
+    return { status: 'refused', reason: 'unavailable' };
+  }
+  if (!answer.ok) {
+    // "Unavailable" may be the books failing after they acted: the intent stays and a later ask finishes it. Any other no is a decision:
+    // nothing was given, so the intent goes
+    if (answer.reason !== 'unavailable') await prisma.instantRefund.deleteMany({ where: { refundKey, confirmedAt: null } });
+    return { status: 'refused', reason: 'unavailable' };
+  }
+
+  // Step 3: recorded at what the books confirm (a give-back made before and said again answers with its first amount)
+  const given = typeof answer.refundedMicros === 'number' && Number.isSafeInteger(answer.refundedMicros) && answer.refundedMicros > 0 ? answer.refundedMicros : planned.go.amount;
+  const outcome = await prisma.$transaction(async (tx): Promise<GiveBackOutcome> => {
+    const { count } = await tx.instantRefund.updateMany({ where: { refundKey, confirmedAt: null }, data: { confirmedAt: now, amountMicros: BigInt(given) } });
+    if (count === 1) await tx.instantRun.update({ where: { id: planned.go.runId }, data: { refundedMicros: { increment: BigInt(given) } } });
+    return { status: 'given', amountMicros: given };
+  });
   if (outcome.status === 'given') await evaluatePause(now).catch(() => undefined);
   return outcome;
 }

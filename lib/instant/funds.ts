@@ -39,8 +39,12 @@ export interface InstantFunds {
    * (replies and computer money never pay for it), earliest expiry first. A hold already made under the key is returned as it was.
    */
   reserve(input: { key: string; personId: string; amountMicros: number; botId?: string | null; runId?: string | null; charge: ChargeClass }): Promise<Hold>;
-  /** The run happened: charges `chargeMicros` (never more than was held) and gives back the rest of the hold. `ok: false` means the books did not take it: nothing is decided, and it is said again later. */
-  settle(input: { key: string; chargeMicros: number; providerCostMicros?: number | null }): Promise<{ ok: boolean }>;
+  /**
+   * The run happened: charges `chargeMicros` (never more than was held) and gives back the rest of the hold. `ok: false` means the books
+   * did not take it: nothing is decided, and it is said again later. `chargedMicros` is what the key was charged at: when it was settled
+   * before (a settlement the books took and this side never recorded), the FIRST amount, which is the one recorded here too.
+   */
+  settle(input: { key: string; chargeMicros: number; providerCostMicros?: number | null }): Promise<{ ok: boolean; chargedMicros?: number }>;
   /**
    * The run did not happen or did not work: gives back the whole hold. `ok: false` means it may still be held and is said again later.
    * `none: true` means the books CONFIRM nothing is held under the key (it never was): the only way a run whose reservation was never

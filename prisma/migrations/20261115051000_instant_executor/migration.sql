@@ -52,6 +52,7 @@ CREATE TABLE "instant_refunds" (
     "person_id" TEXT NOT NULL,
     "kind" VARCHAR(20) NOT NULL,
     "amount_micros" BIGINT NOT NULL,
+    "confirmed_at" TIMESTAMP(3),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "instant_refunds_pkey" PRIMARY KEY ("id")
