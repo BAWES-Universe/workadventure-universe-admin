@@ -68,6 +68,12 @@ function locksFor(personId: string, plans: readonly Plan[]): string[] {
   return [lockOfPerson(personId), ...plans.map((plan) => lockOfAccount(plan.rule.fundingAccountId)), ...plans.filter((plan) => plan.rule.share === 'shared').map((plan) => lockOfPool(plan.rule.programId))];
 }
 
+/** The rules locks of the categories a set of plans comes from. */
+const rulesLocksFor = (plans: readonly Plan[]): string[] => [...new Set(plans.map((plan) => lockOfRules(plan.rule.categoryId)))];
+
+/** Waiting for a save of rules or of Limits (a moment) counts against the transaction's time, so it gets more than the default five seconds. */
+const TRANSACTION = { maxWait: 10_000, timeout: 20_000 };
+
 /**
  * Gives a person the credit they are due now, once per program and period. Safe to call any number of times, from anywhere, at once.
  * Returns what this call issued and what it could not. A guest, or someone who does not exist, is due nothing.
@@ -88,16 +94,19 @@ export async function ensureIssued(personId: string, now: Date = new Date()): Pr
     if (planned.length === 0) return { issued: [], skipped: early };
     const result = await prisma.$transaction(async (tx): Promise<IssueResult | 'again'> => {
       // The rollout budget is read under a shared lock that a super admin's save of Limits waits for, so a lowered budget is never missed; and
-      // the rules under a shared lock that a save of a category's rules waits for, so a rule is never read half-saved. Shared, so people
-      // being issued to at the same moment do not wait for each other
+      // the rules of each category this person is due something from under a shared lock that a save of that category's rules waits for, so a
+      // rule is never read half-saved. Only those categories, so a save in one never holds up issuing in another. Shared, so people being
+      // issued to at the same moment do not wait for each other
       const names = locksFor(personId, planned);
-      await lockAll(tx, names, [LOCK_METER_SETTINGS, ...CATEGORIES.map(lockOfRules)]);
+      const categories = rulesLocksFor(planned);
+      await lockAll(tx, names, [LOCK_METER_SETTINGS, ...categories]);
       const person = await personFacts(tx, personId);
       if (!person) return { issued: [], skipped: [] };
       const skipped: IssueResult['skipped'] = [];
       const plans = plansFor(await currentRules(tx, { now }), person, skipped);
       const held = new Set(names);
-      if (locksFor(personId, plans).some((name) => !held.has(name))) return 'again';
+      const heldRules = new Set(categories);
+      if (locksFor(personId, plans).some((name) => !held.has(name)) || rulesLocksFor(plans).some((name) => !heldRules.has(name))) return 'again';
       if (plans.length === 0) return { issued: [], skipped };
       const settings = await getMeterSettings(tx);
       const out: IssuedLot[] = [];
@@ -108,7 +117,7 @@ export async function ensureIssued(personId: string, now: Date = new Date()): Pr
       }
       await answerAsksFromPools(tx, plans, personId, now);
       return { issued: out, skipped };
-    });
+    }, TRANSACTION);
     if (result !== 'again') return result;
   }
   throw new Error('Could not issue credit: the rules kept changing');
@@ -131,8 +140,6 @@ async function answerAsksFromPools(tx: Tx, plans: readonly Plan[], personId: str
     await tx.meterRequest.updateMany({ where: { personId, what: 'apps', answeredAt: null, createdAt: { lte: pool.issuedAt } }, data: { answeredAt: now, grantKey: `lot:${pool.id}` } });
   }
 }
-
-const CATEGORIES = ['instant_apps', 'computers', 'universe_ai'] as const;
 
 type Issued = { lot: IssuedLot; skipped?: undefined } | { lot?: undefined; skipped: SkipReason | null };
 

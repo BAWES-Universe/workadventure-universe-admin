@@ -798,6 +798,21 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
       const lowered = await pendingBudget;
       await setMeter({ rolloutBudgetMicros: 10_000 * M, renewMinutes: 10 });
       check('the rollout budget is read again under the locks: one lowered while issuing waited stops it', waitedBudget && lowered.issued.length === 0 && lowered.skipped.some((s) => s.reason === 'over_budget'), { waitedBudget, lowered });
+      // A save of one category's rules holds up issuing only for people due something from that category
+      await user('fu-late3', '2027-02-11T00:00:00Z');
+      await user('fu-late4', '2027-02-11T00:00:00Z');
+      await writer.query('BEGIN');
+      await writer.query(`SELECT pg_advisory_xact_lock(hashtext('credit:rules:universe_ai'))`);
+      const apart = await Promise.race([issue.ensureIssued('fu-late3', at('2027-02-23T00:00:00Z')).then(() => 'done'), new Promise((resolve) => setTimeout(() => resolve('held up'), 5000))]);
+      await writer.query('COMMIT');
+      await writer.query('BEGIN');
+      await writer.query(`SELECT pg_advisory_xact_lock(hashtext('credit:rules:computers'))`);
+      const pendingRules = issue.ensureIssued('fu-late4', at('2027-02-23T00:00:00Z'));
+      pendingRules.catch(() => undefined);
+      const waitedRules = await waitForWaiter();
+      await writer.query('COMMIT');
+      const afterRules = await pendingRules;
+      check('a save of the rules of a category nobody here is due from does not hold issuing up; a save of one they are due from does, and issuing goes on once it lets go', apart === 'done' && waitedRules && afterRules.issued.length === 1, { apart, waitedRules, afterRules });
       await writer.end();
     }
   }
