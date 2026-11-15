@@ -809,6 +809,31 @@ export function computerAllowanceLimit(micros: number | null): Limit {
   };
 }
 
+/**
+ * What Universe is ready to fund from grants (spec v3 section 16, O3): kept in the meter's settings, in millionths of a dollar. It
+ * has no suggested value: until a super admin sets it, the row says "Not set" and nothing is assumed.
+ */
+export const ROLLOUT_BUDGET_ID = 'rolloutBudget';
+export type MoneyLimitSettings = { rolloutBudgetMicros?: number | null };
+
+export function moneyLimits(settings: MoneyLimitSettings): Limit[] {
+  const micros = settings.rolloutBudgetMicros ?? null;
+  return [
+    {
+      id: ROLLOUT_BUDGET_ID,
+      label: 'Rollout budget for grants',
+      hint: 'The most credit Universe is ready to fund from defaults and gifts. A default stops reaching new people when it would go past this.',
+      unit: 'dollars',
+      value: micros === null ? 0 : micros / 1_000_000,
+      recommended: -1,
+      unset: micros === null,
+      options: [],
+      note: micros === null ? 'Not set yet. Nothing is assumed: set it before the first default reaches anyone.' : undefined,
+      range: { min: 0.01, max: 1_000_000 },
+    },
+  ];
+}
+
 /** The id without its maker's prefix: "openai/gpt-4o-mini" is "gpt-4o-mini". */
 const shortModel = (id: string) => (id.includes('/') ? id.slice(id.indexOf('/') + 1) : id);
 const listOf = (names: string[]) => new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(names);
@@ -1154,6 +1179,8 @@ export function UniverseAiLimits() {
   const [savingGuard, setSavingGuard] = useState(false);
   // The meter's computer allowance for each member (game #1999): null until a super admin sets it
   const [allowance, setAllowance] = useState<{ micros: number | null } | null>(null);
+  // The money limits live in the same settings (spec v3 O3): what is given back, and how much Universe funds
+  const [money, setMoney] = useState<MoneyLimitSettings>({});
   const [allowanceFailed, setAllowanceFailed] = useState(false);
 
   async function load() {
@@ -1187,7 +1214,9 @@ export function UniverseAiLimits() {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch('/api/admin/meter-settings');
       if (!response.ok) throw new Error('load');
-      setAllowance({ micros: ((await response.json()) as { settings: { memberAllowanceMicros: number | null } }).settings.memberAllowanceMicros });
+      const { settings } = (await response.json()) as { settings: { memberAllowanceMicros: number | null } & MoneyLimitSettings };
+      setAllowance({ micros: settings.memberAllowanceMicros });
+      setMoney(settings);
     } catch {
       setAllowanceFailed(true);
     }
@@ -1206,6 +1235,18 @@ export function UniverseAiLimits() {
       return false;
     }
     setAllowance({ micros: (result.data as { settings: { memberAllowanceMicros: number | null } }).settings.memberAllowanceMicros });
+    addToast({ description: 'Saved', variant: 'success', duration: 2000 });
+    return true;
+  }
+
+  async function saveMoney(id: string, dollars: number): Promise<boolean> {
+    if (id !== ROLLOUT_BUDGET_ID) return false;
+    const result = await sendLimits('/api/admin/meter-settings', { rolloutBudgetMicros: dollarsToMicros(dollars) });
+    if (!result.ok) {
+      addToast({ description: result.error, variant: 'error' });
+      return false;
+    }
+    setMoney((result.data as { settings: MoneyLimitSettings }).settings);
     addToast({ description: 'Saved', variant: 'success', duration: 2000 });
     return true;
   }
@@ -1272,6 +1313,7 @@ export function UniverseAiLimits() {
             limits={[...(allowance ? [computerAllowanceLimit(allowance.micros)] : []), ...brickLimits(limits.bricks)]}
             onChange={(id, value) => (id === COMPUTER_ALLOWANCE_ID ? saveAllowance(value) : save({ bricks: { [id]: value } }))}
           />
+          {allowance && <LimitGroup title="Credit and give-backs" note="What Universe funds and returns. None of these has a built-in value: set each one yourself." limits={moneyLimits(money)} onChange={saveMoney} />}
           {voiceFailed ? (
             <LoadError label="the voice limits" retry={loadVoice} />
           ) : !voice ? (

@@ -14,6 +14,12 @@ import { wokaLayersForMany } from '@/lib/woka-avatar';
  * no feed of a provider's bill itself, so that is the honest thing to put beside our count.
  */
 
+/**
+ * The route an Instant App run is written under in the books (O2 writes it): that is what tells Instant credit apart from the
+ * small overhead of ordinary connected-app use, so the Costs page can show them as two lines and nothing is counted twice.
+ */
+export const INSTANT_ROUTE = 'instant';
+
 export type Sure = 'Measured' | 'Estimated' | 'Paid by someone else' | 'Unknown';
 
 const toNumber = (value: bigint | number | null | undefined): number => (value === null || value === undefined ? 0 : Number(value));
@@ -28,7 +34,7 @@ export function sureOf(counts: { measured: number; estimated: number; unpriced: 
 }
 
 export interface GoesRow {
-  key: 'models' | 'voice' | 'computers' | 'apps' | 'files';
+  key: 'models' | 'voice' | 'computers' | 'instant' | 'apps' | 'files';
   title: string;
   /** Our count, in millionths of a dollar; null when the price is not known. */
   ourMicros: number | null;
@@ -187,7 +193,7 @@ function aboveUsual(base: number | null, grants: GrantRow[], events: { occurredA
   return totals;
 }
 
-type Group = { kind: string; ours: bigint; settled: bigint; uses: bigint; measured: number; estimated: number; unpriced: number; others: number };
+type Group = { kind: string; instant: boolean; ours: bigint; settled: bigint; uses: bigint; measured: number; estimated: number; unpriced: number; others: number };
 
 /** The costs page's figures for a range of days (both ends included, UTC). */
 export async function costsReport(from: Date, to: Date, now: Date = new Date()): Promise<CostsReport> {
@@ -196,7 +202,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
 
   const [groups, headline, peopleRows, brickRows, ways, guestRows, dayRows, guestDays, kept, settings] = await Promise.all([
     prisma.$queryRaw<Group[]>(Prisma.sql`
-      SELECT kind,
+      SELECT kind, (kind = 'app_use' AND COALESCE(route, '') = ${INSTANT_ROUTE}) AS instant,
         COALESCE(SUM(cost_micros) FILTER (WHERE payer_kind = 'universe'), 0)::bigint AS ours,
         COALESCE(SUM(cost_micros) FILTER (WHERE payer_kind = 'universe' AND settled_at IS NOT NULL), 0)::bigint AS settled,
         COALESCE(SUM(quantity) FILTER (WHERE kind = 'app_use'), 0)::bigint AS uses,
@@ -204,7 +210,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
         (COUNT(*) FILTER (WHERE payer_kind = 'universe' AND basis = 'estimated'))::int AS estimated,
         (COUNT(*) FILTER (WHERE payer_kind = 'universe' AND cost_micros IS NULL))::int AS unpriced,
         (COUNT(*) FILTER (WHERE payer_kind <> 'universe'))::int AS others
-      FROM meter_events WHERE ${inRange} GROUP BY kind`),
+      FROM meter_events WHERE ${inRange} GROUP BY kind, instant`),
     prisma.$queryRaw<{ people: number; guests: number; bricks: number; computers: number }[]>(Prisma.sql`
       SELECT
         (COUNT(DISTINCT person_key) FILTER (WHERE person_key LIKE 'person:%'))::int AS people,
@@ -263,12 +269,13 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     getMeterSettings(),
   ]);
 
-  const byKind = new Map(groups.map((group) => [group.kind, group]));
+  // Instant runs are their own line: "app_use" is ordinary connected-app use, "app_use:instant" is an Instant run
+  const byKind = new Map(groups.map((group) => [group.instant ? `${group.kind}:instant` : group.kind, group]));
   const sumKinds = (kinds: string[]): Group => {
     const rows = kinds.map((kind) => byKind.get(kind)).filter((row): row is Group => !!row);
     return rows.reduce<Group>(
-      (all, row) => ({ kind: 'sum', ours: all.ours + row.ours, settled: all.settled + row.settled, uses: all.uses + row.uses, measured: all.measured + row.measured, estimated: all.estimated + row.estimated, unpriced: all.unpriced + row.unpriced, others: all.others + row.others }),
-      { kind: 'sum', ours: BigInt(0), settled: BigInt(0), uses: BigInt(0), measured: 0, estimated: 0, unpriced: 0, others: 0 },
+      (all, row) => ({ kind: 'sum', instant: false, ours: all.ours + row.ours, settled: all.settled + row.settled, uses: all.uses + row.uses, measured: all.measured + row.measured, estimated: all.estimated + row.estimated, unpriced: all.unpriced + row.unpriced, others: all.others + row.others }),
+      { kind: 'sum', instant: false, ours: BigInt(0), settled: BigInt(0), uses: BigInt(0), measured: 0, estimated: 0, unpriced: 0, others: 0 },
     );
   };
   const row = (key: GoesRow['key'], title: string, kinds: string[]): GoesRow => {
@@ -280,7 +287,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
       // Nothing priced: our count is not known, which is not the same as nothing
       ourMicros: known || (sum.unpriced === 0 && sum.others === 0) ? toNumber(sum.ours) : null,
       settledMicros: known ? toNumber(sum.settled) : null,
-      uses: key === 'apps' ? toNumber(sum.uses) : null,
+      uses: key === 'apps' || key === 'instant' ? toNumber(sum.uses) : null,
       bytes: null,
       unpriced: sum.unpriced,
       sure: sureOf(sum),
@@ -298,7 +305,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
     unpriced: 0,
     sure: perGb === null ? 'Unknown' : 'Estimated',
   };
-  const goes: GoesRow[] = [row('models', 'AI models', ['model_call']), row('voice', 'Voice', ['speech']), row('computers', 'Computers', ['computer_time', 'size_change']), row('apps', 'Apps', ['app_use']), files];
+  const goes: GoesRow[] = [row('models', 'AI models', ['model_call']), row('voice', 'Voice', ['speech']), row('computers', 'Computers', ['computer_time', 'size_change']), row('instant', 'Instant Apps', ['app_use:instant']), row('apps', 'Apps overhead', ['app_use']), files];
 
   // Guests of a Brick are paid for from their own table, so their cost is added to the headline as well
   const costMicros = [...byKind.values()].reduce((sum, group) => sum + toNumber(group.ours), 0) + guestRows.reduce((sum, guest) => sum + toNumber(guest.cost), 0);
