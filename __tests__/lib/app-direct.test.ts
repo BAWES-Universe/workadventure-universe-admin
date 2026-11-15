@@ -2,6 +2,8 @@
  * Key apps (game #2044): the service definition, the request built from it, what comes back, the key's scrubbing and the strict
  * outgoing guard. No database and no network: the guard is given a fake resolver and a fake sender.
  */
+import https from 'node:https';
+import { EventEmitter } from 'node:events';
 import { definitionSchema, hashDefinition, keyMode, normalizeOrigin, siteOf } from '@/lib/app-direct/definition';
 import { catalogDefinition, listCatalog } from '@/lib/app-direct/catalog';
 import { buildRequest, pickFields, RequestError } from '@/lib/app-direct/request';
@@ -338,6 +340,37 @@ describe('the strict outgoing guard', () => {
       expect(String(error.message)).not.toContain('example.com');
     }
     expect(targetOf(url).path).toContain('SECRETSECRET');
+  });
+
+  it('sends a body with its exact length, so a service that wants one is never sent chunks', async () => {
+    const seen: { headers?: Record<string, string>; written: string[] } = { written: [] };
+    const spy = jest.spyOn(https, 'request').mockImplementation(((options: { headers: Record<string, string> }, onResponse: (response: EventEmitter & { statusCode: number; headers: Record<string, string> }) => void) => {
+      seen.headers = options.headers;
+      const fake = Object.assign(new EventEmitter(), {
+        write: (chunk: string) => seen.written.push(chunk),
+        destroy: () => undefined,
+        end: () => {
+          const response = Object.assign(new EventEmitter(), { statusCode: 200, headers: { 'content-type': 'application/json' }, destroy: () => undefined });
+          onResponse(response);
+          response.emit('data', Buffer.from('{}'));
+          response.emit('end');
+        },
+      });
+      return fake;
+    }) as never);
+    try {
+      const body = JSON.stringify({ note: 'Café ☕ 😀' });
+      await guardedRequest({ ...request('https://api.example.com/v1/a'), method: 'POST', body, maxBytes: 1000 }, { resolve: async () => [{ address: '93.184.216.34', family: 4 }] });
+      // Counted in bytes, not characters
+      expect(Buffer.byteLength(body)).toBeGreaterThan(body.length);
+      expect(seen.headers?.['content-length']).toBe(String(Buffer.byteLength(body)));
+      expect(seen.written).toEqual([body]);
+      // No body, no length
+      await guardedRequest({ ...request('https://api.example.com/v1/a'), maxBytes: 1000 }, { resolve: async () => [{ address: '93.184.216.34', family: 4 }] });
+      expect(seen.headers).not.toHaveProperty('content-length');
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('hands a redirect back as an answer, never follows it', async () => {

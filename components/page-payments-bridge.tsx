@@ -33,6 +33,8 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
   /** The order the buyer is looking at now. Earlier orders keep being looked at, but only to hear that one of them was paid. */
   const primary = useRef<string | null>(null);
   const watchers = useRef(new Map<string, () => void>());
+  /** Orders whose watch ran out while they were still unpaid: a payment at the service can still arrive for them, so they are looked at again with "Check again". */
+  const expired = useRef(new Set<string>());
 
   const tell = useCallback((status: Status) => {
     const frame = document.querySelector<HTMLIFrameElement>('iframe[data-artifact-frame]');
@@ -43,13 +45,15 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
   const stopAll = useCallback(() => {
     watchers.current.forEach((stop) => stop());
     watchers.current.clear();
+    expired.current.clear();
   }, []);
 
   const watch = useCallback(
-    (orderId: string) => {
+    (orderId: string, asPrimary = true) => {
       watchers.current.get(orderId)?.();
+      expired.current.delete(orderId);
       // A new checkout takes over the screen, but an earlier one is not dropped: a buyer who paid it late must still be heard
-      primary.current = orderId;
+      if (asPrimary) primary.current = orderId;
       const page = current.current;
       const until = Date.now() + POLL_FOR_MS;
       let toldNotPaid = false;
@@ -89,7 +93,8 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
             if (!mine) return;
             busy.current = false;
             setResume(null);
-            setRecheck(null);
+            // Older orders that ran out are still worth asking about
+            setRecheck(expired.current.size > 0 ? orderId : null);
             setLine(WORDS.cant_confirm);
             tell('cant_confirm');
             return;
@@ -111,6 +116,8 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
           return;
         }
         finish();
+        // The look ran out with the order unpaid: "Check again" can ask about it once more
+        expired.current.add(orderId);
         // An older order's look ends without a word: the buyer is on a newer one
         if (primary.current !== orderId) return;
         if (toldNotPaid) {
@@ -139,6 +146,14 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
       if (!data || data.universe !== 'use-app' || typeof data.app !== 'string' || busy.current) return;
       busy.current = true;
       setRecheck(null);
+      // The earlier order stops being what the screen is about the moment a new checkout begins, not when its answer comes: from here it
+      // can only report that it was paid
+      const before = primary.current;
+      primary.current = null;
+      // A checkout that never started leaves the screen about the order it was about
+      const restore = () => {
+        if (primary.current === null) primary.current = before;
+      };
       const generation = current.current;
       // Open the window now, in the tap's own moment, so a blocked pop-up is the only thing left that can go wrong
       const popup = window.open('about:blank', '_blank');
@@ -154,6 +169,7 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
         if (!response.ok || !body?.orderId || !body.checkoutUrl) {
           popup?.close();
           busy.current = false;
+          restore();
           const status: Status = body?.code === 'limit' ? 'limit' : 'unavailable';
           setLine(WORDS[status]);
           tell(status);
@@ -169,6 +185,7 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
         popup?.close();
         if (generation !== current.current) return;
         busy.current = false;
+        restore();
         setLine(WORDS.unavailable);
         tell('unavailable');
       }
@@ -202,6 +219,8 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
           onClick={() => {
             setRecheck(null);
             setLine(null);
+            // Every order that ran out is asked about again; the one the buyer was on stays the one the screen is about
+            for (const older of Array.from(expired.current)) if (older !== recheck) watch(older, false);
             watch(recheck);
           }}
           className="rounded-full bg-[#f3f1fa] px-4 py-2 font-semibold text-[#0A0814]"

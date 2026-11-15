@@ -121,7 +121,8 @@ const defaultSend: Send = (target) =>
         port: 443,
         method: target.method,
         path: target.path,
-        headers: { ...target.headers, host: target.host },
+        // A body goes with its exact length: without it Node sends it in chunks, and some services answer that with 411 or 400
+        headers: { ...target.headers, host: target.host, ...(target.body !== undefined ? { 'content-length': String(Buffer.byteLength(target.body)) } : {}) },
         servername: target.host,
         // Node may ask for one address or for all of them; either way the answer is the one that was checked
         lookup: ((_name: string, options: { all?: boolean }, callback: (...args: unknown[]) => void) => {

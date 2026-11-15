@@ -391,7 +391,8 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
   // was lost): the buyer was never given a link for it, so nothing can have been paid against it. It ends as "could not confirm" and
   // stays that way, instead of being "checking" for ever.
   if (order.status === 'creating') {
-    if (now.getTime() - order.createdAt.getTime() <= limits.keyCallSeconds * 3 * 1000) return view('creating');
+    // A notice that comes while the start is still being made is asked to come back: it can be the only one the service sends
+    if (now.getTime() - order.createdAt.getTime() <= limits.keyCallSeconds * 3 * 1000) return later(view('creating'));
     const ended = await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'creating' }, data: { status: 'cant_confirm' } });
     return view(ended.count === 1 ? 'cant_confirm' : order.status);
   }
@@ -469,6 +470,8 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
   }
 
   const status = valueAt(record, lookup.statusPath);
+  // An answer that names no state at all is not an answer: asked again, never read as "still open" and left
+  if (typeof status !== 'string' || !status) return later(view(order.status));
   const expired = now.getTime() - order.createdAt.getTime() > limits.checkoutOpenHours * HOUR;
   if (typeof status === 'string' && lookup.successStates.includes(status)) {
     const amount = valueAt(record, lookup.amountPath);

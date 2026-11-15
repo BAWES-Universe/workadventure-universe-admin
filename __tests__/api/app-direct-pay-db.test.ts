@@ -791,27 +791,65 @@ run('payments for pages, in a real database', () => {
       expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('paid');
     });
 
+    it('asks the service to come back for a notice it could not use: an order still being made, a database error, an answer with no state', async () => {
+      const { artifactId } = await pending();
+      gateway();
+      const { orderId } = await checkout(artifactId, '198.51.100.68');
+      const ask = (id = orderId) => notice(request(`/api/app-pay/notice/${id}`, { method: 'POST', body: { status: 'CAPTURED' } }), params({ orderId: id }));
+      const old = () => prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 60_000) } });
+      // An answer that names no state is not an answer
+      mockSend.current = () => ({ status: 200, body: { id: 'chg_TS01' } });
+      await old();
+      const nothing = await ask();
+      expect(nothing.status).toBe(429);
+      expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('pending');
+      // Our own failure is not "handled" either
+      const failing = jest.spyOn(prisma.appPageOrder, 'findUnique').mockRejectedValueOnce(new Error('database is down'));
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const broken = await ask();
+        expect(broken.status).toBe(503);
+        expect(Number(broken.headers.get('retry-after'))).toBeGreaterThan(0);
+      } finally {
+        failing.mockRestore();
+        quiet.mockRestore();
+      }
+      // An order whose start is not finished: the notice may be the only one the service sends
+      const jobRow = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
+      const starting = await prisma.appPageOrder.create({
+        data: { jobId: jobRow.id, ownerId: sara, connectionId: jobRow.connectionId, artifactId, definitionHash: jobRow.definitionHash, amountMinor: jobRow.amountMinor, currency: jobRow.currency, status: 'creating', visitorHash: 'v3' },
+      });
+      expect((await ask(starting.id)).status).toBe(429);
+      // A notice for an order that is not there is nothing to come back for
+      expect((await ask('00000000-0000-4000-8000-000000000000')).status).toBe(200);
+    });
+
     it('takes the app the page is on when the lock is taken, not the one read before it', async () => {
       const { id: firstId, serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       expect((await job(serverId, artifactId)).status).toBe(200);
+      // A second app that can take the same payments, as when the owner moves the page onto another connection
+      const original = await prisma.appConnection.findUniqueOrThrow({ where: { id: firstId } });
+      const { id: _id, createdAt: _created, updatedAt: _updated, ...scalars } = original;
+      void _id;
+      void _created;
+      void _updated;
+      const second = await prisma.appConnection.create({ data: { ...scalars, name: 'Second account', catalogKey: `direct:second-${tag}` } as never });
       gateway();
-      // Between the first read and the lock the owner connects the service again
       const real = prisma.$transaction.bind(prisma);
-      let second = '';
       const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((fn: unknown, ...rest: unknown[]) => {
         return (async () => {
-          second = (await connectGateway()).id;
+          // Between the first read and the lock the page moves to the second app
+          await prisma.appPageJob.update({ where: { artifactId }, data: { connectionId: second.id } });
           return (real as (...args: unknown[]) => Promise<unknown>)(fn, ...rest);
         })();
       }) as never);
       try {
         const { orderId } = await checkout(artifactId, '198.51.100.58');
         const order = await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } });
-        const held = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
-        // Whichever app the page ended up on, the order is on that one and nothing else
-        expect(order.connectionId).toBe(held.connectionId);
-        expect([firstId, second]).toContain(order.connectionId);
+        // The order is on the app the locked job pointed to, and the request went out with that app's key mode
+        expect(order.connectionId).toBe(second.id);
+        expect(order.mode).toBe(second.keyMode);
       } finally {
         spy.mockRestore();
       }
