@@ -199,7 +199,8 @@ function alreadyHeld(row: FullHold, input: HoldInput, now: Date): Held {
   // A key belongs to one step: the same person, the same category, the same kind of work (a computers hold never stands for an Instant Apps step),
   // the same amount, and the same named payer (work one account alone funds never stands for work anyone's credit may pay)
   if (row.personId !== input.personId || row.category !== input.category || row.chargeClass !== input.chargeClass) return { ok: false, reason: 'key_reused' };
-  if (asNumber(row.amountMicros) !== input.amountMicros || (row.onlyAccountId ?? null) !== (input.onlyAccountId ?? null)) return { ok: false, reason: 'key_reused' };
+  // A hold made before its payer was stored (`payerKnown` false) is the same step for any payer: it was already taken, so it is found, never taken twice
+  if (asNumber(row.amountMicros) !== input.amountMicros || (row.payerKnown && (row.onlyAccountId ?? null) !== (input.onlyAccountId ?? null))) return { ok: false, reason: 'key_reused' };
   // Asking again for room that is still held is the same room. Room that settled, was released or lapsed is not a place to start a paid step from
   if (row.state === 'held' && row.expiresAt > now) return { ok: true, hold: holdView(row), created: false };
   return { ok: false, reason: 'closed', hold: holdView(row) };
@@ -307,6 +308,14 @@ export async function refundHold(input: { holdKey: string; refundKey: string; am
     if (prior) {
       if (prior.holdId !== head.id || asNumber(prior.requestedMicros) !== input.amountMicros || prior.reason !== input.reason) return { ok: false, reason: 'key_reused' };
       return { ok: true, created: false, refundedMicros: asNumber(prior.refundedMicros), restoredMicros: asNumber(prior.restoredMicros), replacementMicros: asNumber(prior.replacementMicros) };
+    }
+    // A refund made before request rows existed lives only in `credit_refunds`, as `<key>#0`, `<key>#1`, ...: asking again returns what it gave,
+    // for the same step and the same reason (the amount asked for was not stored, so it cannot be compared)
+    const earlier = (await tx.creditRefund.findMany({ where: { refundKey: { startsWith: `${input.refundKey}#` } } })).filter((row) => /^\d+$/.test(row.refundKey.slice(input.refundKey.length + 1)));
+    if (earlier.length > 0) {
+      if (earlier.some((row) => row.holdId !== head.id || row.reason !== input.reason)) return { ok: false, reason: 'key_reused' };
+      const sum = (mode: string) => earlier.filter((row) => row.mode === mode).reduce((total, row) => total + asNumber(row.amountMicros), 0);
+      return { ok: true, created: false, refundedMicros: sum('restored') + sum('replacement'), restoredMicros: sum('restored'), replacementMicros: sum('replacement') };
     }
     const hold = await loadHold(tx, input.holdKey);
     if (!hold) return { ok: false, reason: 'not_found' };

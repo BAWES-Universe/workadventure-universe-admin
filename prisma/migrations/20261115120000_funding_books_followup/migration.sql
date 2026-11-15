@@ -1,6 +1,11 @@
 -- A hold remembers which account alone paid for it (work a named payer funds), so a replay of its key can be checked
 ALTER TABLE "credit_holds" ADD COLUMN "only_account_id" TEXT;
 
+-- Holds made before this column existed never stored their payer, and it cannot be recovered. They are marked, so a replay of one of them
+-- is not refused for a payer nobody recorded; every hold made from now on records its payer (or none) and is checked against it
+ALTER TABLE "credit_holds" ADD COLUMN "payer_known" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "credit_holds" ALTER COLUMN "payer_known" SET DEFAULT true;
+
 -- One row per refund request, by its exact key (even a refund that gave nothing back), so asking again answers the same way
 CREATE TABLE "credit_refund_requests" (
     "id" TEXT NOT NULL,

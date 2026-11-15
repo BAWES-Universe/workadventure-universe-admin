@@ -2115,6 +2115,8 @@ model CreditHold {
   effectKey          String?   @map("effect_key") @db.VarChar(255)
   // For work a named payer funds: the only account whose lots paid. A replay of the key must name the same one
   onlyAccountId      String?   @map("only_account_id")
+  // False for a hold made before the payer was stored (its payer is unknown, so a replay does not compare it)
+  payerKnown         Boolean   @default(true) @map("payer_known")
   // held, settled or released
   state              String    @db.VarChar(10)
   amountMicros       BigInt    @map("amount_micros")

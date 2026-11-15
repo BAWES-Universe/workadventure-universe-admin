@@ -690,6 +690,24 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     const sameKey = await spend.refundHold({ holdKey: 'fu-r-1', refundKey: 'fu-z#0', amountMicros: 100_000, reason: 'goodwill' }, lateAt);
     check('a key that only begins like another refund’s key is its own refund', sameKey.ok && sameKey.created, sameKey);
 
+    // Rows from before the payer and the refund requests were stored are still replays of what they were
+    await user('fu-lg', '2027-02-11T00:00:00Z');
+    await rules.createGift({ categoryId: 'instant_apps', amount: 3 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-lg'] } }, root, at('2027-02-13T00:00:00Z'));
+    await spend.holdCredit({ holdKey: 'fu-lg-1', personId: 'fu-lg', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, at('2027-02-13T00:05:00Z'));
+    await spend.settleHold({ holdKey: 'fu-lg-1', customerMicros: 1 * M }, at('2027-02-13T00:06:00Z'));
+    const lgFirst = await spend.refundHold({ holdKey: 'fu-lg-1', refundKey: 'fu-lg-r', amountMicros: 400_000, reason: 'goodwill' }, at('2027-02-13T00:07:00Z'));
+    const lgRows = await prisma.creditRefund.count({ where: { holdId: (await prisma.creditHold.findUniqueOrThrow({ where: { holdKey: 'fu-lg-1' } })).id } });
+    await prisma.creditRefundRequest.deleteMany({ where: { requestKey: 'fu-lg-r' } });
+    const lgAgain = await spend.refundHold({ holdKey: 'fu-lg-1', refundKey: 'fu-lg-r', amountMicros: 400_000, reason: 'goodwill' }, at('2027-02-13T00:08:00Z'));
+    const lgOther = await spend.refundHold({ holdKey: 'fu-lg-1', refundKey: 'fu-lg-r', amountMicros: 400_000, reason: 'platform_failure' }, at('2027-02-13T00:08:30Z'));
+    const lgRowsAfter = await prisma.creditRefund.count({ where: { holdId: (await prisma.creditHold.findUniqueOrThrow({ where: { holdKey: 'fu-lg-1' } })).id } });
+    check('a refund made before request rows existed is replayed from its refund rows: same totals, nothing written, another reason refused', lgFirst.ok && lgAgain.ok && !lgAgain.created && lgAgain.refundedMicros === 400_000 && lgAgain.restoredMicros === 400_000 && !lgOther.ok && lgOther.reason === 'key_reused' && lgRowsAfter === lgRows, { lgFirst, lgAgain, lgOther, lgRows, lgRowsAfter });
+    await spend.holdCredit({ holdKey: 'fu-lg-2', personId: 'fu-lg', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, at('2027-02-13T00:10:00Z'));
+    await prisma.$executeRawUnsafe(`UPDATE credit_holds SET payer_known = false WHERE hold_key = 'fu-lg-2'`);
+    const lgHold = await spend.holdCredit({ holdKey: 'fu-lg-2', personId: 'fu-lg', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run', onlyAccountId: 'funding-platform' }, at('2027-02-13T00:11:00Z'));
+    const lgHoldAmount = await spend.holdCredit({ holdKey: 'fu-lg-2', personId: 'fu-lg', category: 'instant_apps', amountMicros: 2 * M, chargeClass: 'instant_run', onlyAccountId: 'funding-platform' }, at('2027-02-13T00:11:30Z'));
+    check('a live hold made before its payer was stored is found again whatever payer the retry names (never taken twice); another amount is still refused', lgHold.ok && !lgHold.created && !lgHoldAmount.ok && lgHoldAmount.reason === 'key_reused', { lgHold, lgHoldAmount });
+
     // A replayed hold must be the same step: the same amount, and the same named payer
     await user('fu-h', '2027-02-11T00:00:00Z');
     await rules.createGift({ categoryId: 'instant_apps', amount: 5 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-h'] } }, root, FU);
@@ -769,10 +787,13 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
       await funding.setAccountStatus(sponsor.id, 'paused');
       await issue.ensureIssued('fu-pz2', at('2027-02-14T11:00:00Z'));
       const stillAsking = await prisma.meterRequest.count({ where: { personId: 'fu-pz2', what: 'apps', answeredAt: null } });
+      await funding.setAccountStatus(sponsor.id, 'closed');
+      await issue.ensureIssued('fu-pz2', at('2027-02-14T11:30:00Z'));
+      const stillAskingClosed = await prisma.meterRequest.count({ where: { personId: 'fu-pz2', what: 'apps', answeredAt: null } });
       await funding.setAccountStatus(sponsor.id, 'active');
       await issue.ensureIssued('fu-pz2', at('2027-02-14T12:00:00Z'));
       const answeredAfter = await prisma.meterRequest.count({ where: { personId: 'fu-pz2', what: 'apps', answeredAt: { not: null } } });
-      check('a pool whose account was paused answers no ask (nothing there can be spent); once the account is active again it does', stillAsking === 1 && answeredAfter === 1, { stillAsking, answeredAfter });
+      check('a pool whose account was paused or closed answers no ask (nothing there can be spent); once the account is active again it does', stillAsking === 1 && stillAskingClosed === 1 && answeredAfter === 1, { stillAsking, stillAskingClosed, answeredAfter });
     }
 
     if (database.kind === 'postgres') {
