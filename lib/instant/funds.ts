@@ -41,8 +41,9 @@ export interface InstantFunds {
   reserve(input: { key: string; personId: string; amountMicros: number; botId?: string | null; runId?: string | null; charge: ChargeClass }): Promise<Hold>;
   /**
    * The run happened: charges `chargeMicros` (never more than was held) and gives back the rest of the hold. `ok: false` means the books
-   * did not take it: nothing is decided, and it is said again later. `chargedMicros` is what the key was charged at: when it was settled
-   * before (a settlement the books took and this side never recorded), the FIRST amount, which is the one recorded here too.
+   * did not take it: nothing is decided, and it is said again later. `chargedMicros` is REQUIRED on `ok: true`: what the key was charged at,
+   * and when it was settled before (a settlement the books took and this side never recorded) the FIRST amount, which is the one recorded
+   * here. A yes without it is not taken as done: the run stays held and the settlement is asked again.
    */
   settle(input: { key: string; chargeMicros: number; providerCostMicros?: number | null }): Promise<{ ok: boolean; chargedMicros?: number }>;
   /**

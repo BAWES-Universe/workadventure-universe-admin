@@ -493,10 +493,11 @@ async function settleSuccess(run: Row, tx: Prisma.TransactionClient, providerMic
   if (run.customerState === 'held') {
     try {
       const answer = await ctx.funds.settle({ key: fundsKey(run.id), chargeMicros: charged, providerCostMicros: providerMicros });
-      customerDone = answer.ok;
       // A settlement the books took before (and this side never recorded) answers with its FIRST amount: that is what the person was
-      // charged, so that is what is recorded, whatever today's figures work out to
-      if (answer.ok && typeof answer.chargedMicros === 'number' && Number.isSafeInteger(answer.chargedMicros) && answer.chargedMicros >= 0) chargedNow = answer.chargedMicros;
+      // charged, so that is what is recorded, whatever today's figures work out to. A yes without a readable amount is not taken as
+      // done: the run stays held and the question is asked again, never recorded at a figure the books did not confirm.
+      customerDone = answer.ok && typeof answer.chargedMicros === 'number' && Number.isSafeInteger(answer.chargedMicros) && answer.chargedMicros >= 0;
+      if (customerDone) chargedNow = answer.chargedMicros as number;
     } catch (error) {
       console.error('[Instant] The credit books could not settle:', error instanceof Error ? error.message : 'unknown');
     }
@@ -600,22 +601,18 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
   // Tried now: the sweep goes oldest attempt first, so runs that cannot be settled never keep the rest from being tried
   await prisma.instantRun.updateMany({ where: { id: runId }, data: { checkedAt: new Date() } });
   const looked = instant && needsLookup(seen, ctx.now, limits) ? await lookUp(seen, instant, ctx.now) : null;
+  let claimed: { before: string } | null = null;
   await withRun(runId, async (run, tx) => {
     const now = ctx.now;
     const waitedPast = (from: Date | null, minutes: number) => !from || now.getTime() - from.getTime() >= minutes * MINUTE;
 
     // Crashed between its steps: it never went out, so it never cost anything
     if ((run.state === 'reserving' || run.state === 'held') && waitedPast(run.createdAt, limits.sentWaitMinutes)) {
-      // The run is closed only when the books say the hold is gone: given back just now, or confirmed not to exist. A plain "no" does
-      // not say that (a reservation that was made but never answered may exist), so the run stays open and the sweep asks again.
-      let released = false;
-      try {
-        released = holdIsGone(await ctx.funds.release({ key: fundsKey(run.id) }));
-      } catch (error) {
-        console.error('[Instant] The credit books could not release:', error instanceof Error ? error.message : 'unknown');
-      }
-      if (!released) return;
-      await tx.instantRun.update({ where: { id: run.id }, data: { state: 'refused', reason: 'unclear', customerState: run.customerState === 'none' ? 'none' : 'released', customerMicros: run.customerState === 'none' ? null : BigInt(0), providerState: 'none', finishedAt: now } });
+      // The run is CLOSED first (committed before the books are asked), marked as possibly still holding: from then on nothing can send
+      // it, whatever happens to the release or to this transaction. The hold is then given back, and the mark cleared only when the
+      // books say it is gone (given back just now, or confirmed not to exist); a plain "no" leaves the mark, and the sweep asks again.
+      claimed = { before: run.customerState };
+      await tx.instantRun.update({ where: { id: run.id }, data: { state: 'refused', reason: 'unclear', customerState: 'held', providerState: 'none', finishedAt: now } });
       return;
     }
 
@@ -679,6 +676,19 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
       else await settleProvider(run, tx, topMicros, 'estimated', now);
     }
   });
+  if (claimed) {
+    // The run is closed and committed as possibly holding; now the books are asked, outside any transaction and any lock
+    let gone = false;
+    try {
+      gone = holdIsGone(await ctx.funds.release({ key: fundsKey(runId) }));
+    } catch (error) {
+      console.error('[Instant] The credit books could not release:', error instanceof Error ? error.message : 'unknown');
+    }
+    if (gone) {
+      const never = (claimed as { before: string }).before === 'none';
+      await prisma.instantRun.updateMany({ where: { id: runId, state: 'refused', customerState: 'held' }, data: never ? { customerState: 'none' } : { customerState: 'released', customerMicros: BigInt(0) } });
+    }
+  }
   await evaluatePause(ctx.now).catch((error) => console.error('[Instant] The pause check failed:', error instanceof Error ? error.message : 'unknown'));
 }
 
@@ -724,9 +734,8 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
   const funds = deps.funds ?? getInstantFunds();
   const now = deps.now ?? new Date();
   const limits = await getInstantLimits();
-  if (limits.goodwillMaxMicros === null || limits.goodwillMaxMicros < 1 || limits.goodwillBudgetMicros === null || limits.goodwillPerPersonPerMonth === null || limits.goodwillPerPersonPerMonth < 1) {
-    return { status: 'refused', reason: 'not_set' };
-  }
+  // Not set stops a NEW give-back only: one the books may already have made is finished first, whatever the limits are now
+  const limitsSet = !(limits.goodwillMaxMicros === null || limits.goodwillMaxMicros < 1 || limits.goodwillBudgetMicros === null || limits.goodwillPerPersonPerMonth === null || limits.goodwillPerPersonPerMonth < 1);
   const month = monthOf(now);
   const refundKey = `goodwill:${input.runId}`;
   // Step 1, under the give-back lock: the checks, and the INTENT saved (committed) before the books are asked. A give-back the books made
@@ -742,6 +751,7 @@ export async function giveBack(input: { personId: string; runId: string }, deps:
       if (earlier?.confirmedAt) return { done: { status: 'refused', reason: 'already_given' } };
       // An intent the books may already have acted on: finished at its own amount, before any limit is applied to a new give-back
       if (earlier) return { go: { amount: asNumber(earlier.amountMicros), runId: run.id, personId: run.personId } };
+      if (!limitsSet) return { done: { status: 'refused', reason: 'not_set' } };
       const [person, everyone] = await Promise.all([
         tx.instantRefund.count({ where: { personId: input.personId, kind: 'goodwill', createdAt: { gte: month.start, lt: month.end } } }),
         tx.instantRefund.aggregate({ where: { kind: 'goodwill', createdAt: { gte: month.start, lt: month.end } }, _sum: { amountMicros: true } }),

@@ -250,7 +250,7 @@ run('the bounded Instant executor, in a real database', () => {
         const hold = f.holds.get(input.key)!;
         hold.state = 'charged';
         hold.charged = input.chargeMicros;
-        return { ok: true };
+        return { ok: true, chargedMicros: input.chargeMicros };
       });
       const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
       expect(outcome).toMatchObject({ status: 'done', ok: true, chargedMicros: 7_000, pending: false, data: { hits: 1 } });
@@ -675,7 +675,9 @@ run('the bounded Instant executor, in a real database', () => {
       f.holds.set(`instant:${stuck.id}`, { amount: TOP, state: 'held', charged: 0 });
       f.state.releaseOk = false;
       await reconcileRun(stuck.id, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 6 * MIN) });
-      expect(await runOf(stuck.id)).toMatchObject({ state: 'held', customerState: 'held' });
+      // Closed (nothing can send it) but marked as still holding: the books did not say the hold is gone
+      expect(await runOf(stuck.id)).toMatchObject({ state: 'refused', customerState: 'held' });
+      expect(f.holds.get(`instant:${stuck.id}`)?.state).toBe('held');
       f.state.releaseOk = true;
       await reconcileRun(stuck.id, { funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 7 * MIN) });
       expect(await runOf(stuck.id)).toMatchObject({ state: 'refused', customerState: 'released' });
@@ -1130,9 +1132,12 @@ run('the bounded Instant executor, in a real database', () => {
         expect(other).toMatchObject({ status: 'done' });
       } finally {
         letGo();
-        await asking;
-        early.mockRestore();
-        twins.mockRestore();
+        try {
+          await asking;
+        } finally {
+          early.mockRestore();
+          twins.mockRestore();
+        }
       }
     });
 
@@ -1266,6 +1271,68 @@ run('the bounded Instant executor, in a real database', () => {
       expect(f.left()).toBe(1_000_000);
     });
 
+    it('the clean-up closes the run for good BEFORE it asks the books to release: nothing can send it while, or after, a release goes through', async () => {
+      await setLimits({ sentWaitMinutes: 5 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const stuck = await stuckRow({ state: 'held', customerState: 'held', createdAt: new Date(Date.now() - 100 * MIN) });
+      f.holds.set(`instant:${stuck.id}`, { amount: TOP, state: 'held', charged: 0 });
+      let openRelease!: () => void;
+      const releaseGate = new Promise<void>((resolve) => (openRelease = resolve));
+      const real = f.funds.release.getMockImplementation()!;
+      f.funds.release.mockImplementation((async (input: { key: string }) => {
+        // In the middle of the release the run is already closed, and committed as such: a rollback later cannot reopen it
+        expect(await runOf(stuck.id)).toMatchObject({ state: 'refused', customerState: 'held' });
+        await releaseGate;
+        return real(input);
+      }) as never);
+      const cleaning = reconcileRun(stuck.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      for (let i = 0; i < 200 && f.funds.release.mock.calls.length === 0; i += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(f.funds.release).toHaveBeenCalled();
+      // Nothing can move it on any more, even though the hold is still in the books
+      expect(await prisma.instantRun.updateMany({ where: { id: stuck.id, state: 'held' }, data: { state: 'sent' } })).toMatchObject({ count: 0 });
+      openRelease();
+      await cleaning;
+      expect(await runOf(stuck.id)).toMatchObject({ state: 'refused', customerState: 'released' });
+      expect(f.holds.get(`instant:${stuck.id}`)?.state).toBe('released');
+    });
+
+    it('a yes from the books without the amount charged is not taken as done: the run stays held and is asked again', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.funds.settle.mockResolvedValueOnce({ ok: true });
+      await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      expect(row.customerState).toBe('held');
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(await runOf(row.id)).toMatchObject({ customerState: 'charged' });
+      expect(Number((await runOf(row.id)).customerMicros)).toBe(7_000);
+    });
+
+    it('a give-back the books already made is finished even when the goodwill limits were cleared afterwards', async () => {
+      await setLimits({ goodwillMaxMicros: 5_000, goodwillBudgetMicros: 100_000, goodwillPerPersonPerMonth: 3 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const runId = await runIdOf(id);
+      const real = f.funds.refund.getMockImplementation()!;
+      f.funds.refund.mockImplementationOnce((async (input: never) => {
+        await real(input);
+        throw new Error('connection reset');
+      }) as never);
+      expect(await giveBack({ personId: sara, runId }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'unavailable' });
+      await setLimits({ goodwillMaxMicros: 0, goodwillBudgetMicros: 0, goodwillPerPersonPerMonth: 0 });
+      expect(await giveBack({ personId: sara, runId }, { funds: f.funds })).toEqual({ status: 'given', amountMicros: 5_000 });
+      expect(Number((await runOf(runId)).refundedMicros)).toBe(5_000);
+      // A NEW give-back is still stopped by the cleared limits
+      const other = callId();
+      p.script.runs.push({ kind: 'done', successful: true, data: { hits: 1 }, error: null, logId: 'log-x', chargeMicros: 7_000 });
+      await runInstant(ask({ callId: other, arguments: { query: 'another' } }), { adapter: p.adapter, funds: f.funds });
+      expect(await giveBack({ personId: sara, runId: await runIdOf(other) }, { funds: f.funds })).toEqual({ status: 'refused', reason: 'not_set' });
+    });
+
     it('a settlement the books took before, and this side never recorded, is recorded at the books first amount, not at today\'s figure', async () => {
       await setLimits({ markupBps: 1_000 });
       const p = fakeProvider();
@@ -1339,17 +1406,17 @@ run('the bounded Instant executor, in a real database', () => {
       expect(Number((await runOf(row.id)).customerMicros)).toBe(7_700);
     });
 
-    it('a run whose reservation was never answered is not closed on a plain "no" from the books, only when they confirm nothing is held', async () => {
+    it('a run whose reservation was never answered is closed but kept marked as holding on a plain "no", and cleared only when the books confirm nothing is held', async () => {
       await setLimits({ sentWaitMinutes: 5, unclearWaitMinutes: 10 });
       const p = fakeProvider();
       const f = fakeFunds(1_000_000);
       const stuck = await stuckRow({ state: 'reserving', customerState: 'none', createdAt: new Date(Date.now() - 1_000 * MIN) });
       f.funds.release.mockImplementation((async () => ({ ok: false })) as never);
       await reconcileRun(stuck.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
-      expect(await runOf(stuck.id)).toMatchObject({ state: 'reserving' });
+      expect(await runOf(stuck.id)).toMatchObject({ state: 'refused', customerState: 'held' });
       f.funds.release.mockImplementation((async () => ({ ok: false, none: true })) as never);
       await reconcileRun(stuck.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
-      expect(await runOf(stuck.id)).toMatchObject({ state: 'refused', customerState: 'none' });
+      expect(await runOf(stuck.id)).toMatchObject({ state: 'refused', customerState: 'released' });
     });
 
     it('a give-back the books made before and say again is recorded at the amount they say, not at today\'s limit', async () => {
