@@ -17,6 +17,7 @@ jest.mock('@/lib/db', () => ({
     botsAiUsage: { count: jest.fn() },
     botReplyLimitHit: { createMany: jest.fn() },
     meterGrant: { findMany: jest.fn() },
+    grantRule: { findMany: jest.fn().mockResolvedValue([]) },
   },
 }));
 

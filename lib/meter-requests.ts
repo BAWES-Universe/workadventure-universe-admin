@@ -8,6 +8,9 @@ import { prisma } from '@/lib/db';
  * it. Nothing the person said is kept, only that they asked and when.
  */
 
+/** What a person can ask for more of: computer time, or Instant Apps credit. Chat and voice keep their own fair usage. */
+export type AskedFor = 'computer' | 'apps';
+
 export interface OpenRequest {
   id: string;
   personId: string;
@@ -16,22 +19,22 @@ export interface OpenRequest {
 }
 
 /** Asks for more. Returns the open request and whether this call made it (a second ask while one waits makes nothing new). */
-export async function askForMore(personId: string, now: Date = new Date()): Promise<{ request: OpenRequest; created: boolean }> {
+export async function askForMore(personId: string, now: Date = new Date(), what: AskedFor = 'computer'): Promise<{ request: OpenRequest; created: boolean }> {
   // One request is open per person. Asks from the same person take turns (a lock held for the length of this one write), so two
   // taps at the same moment make one request on any database, also one built from the schema alone, where the partial unique
   // index (made by the migration) does not exist. If an admin answers the open one between the insert finding it and our read of
   // it, the next round simply asks again.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const result = await prisma.$transaction(async (tx) => {
-      await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${`meter_request:${personId}`}))`);
+      await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${`meter_request:${personId}:${what}`}))`);
       const made = await tx.$queryRaw<{ id: string; person_id: string; what: string; created_at: Date }[]>(Prisma.sql`
         INSERT INTO "meter_requests" ("id", "person_id", "what", "created_at")
-        SELECT ${randomUUID()}::text, ${personId}::text, 'computer', ${now}::timestamp
-        WHERE NOT EXISTS (SELECT 1 FROM "meter_requests" WHERE "person_id" = ${personId} AND "what" = 'computer' AND "answered_at" IS NULL)
+        SELECT ${randomUUID()}::text, ${personId}::text, ${what}::text, ${now}::timestamp
+        WHERE NOT EXISTS (SELECT 1 FROM "meter_requests" WHERE "person_id" = ${personId} AND "what" = ${what} AND "answered_at" IS NULL)
         ON CONFLICT DO NOTHING
         RETURNING "id", "person_id", "what", "created_at"`);
       if (made[0]) return { request: { id: made[0].id, personId: made[0].person_id, what: made[0].what, createdAt: made[0].created_at }, created: true };
-      const open = await tx.meterRequest.findFirst({ where: { personId, what: 'computer', answeredAt: null } });
+      const open = await tx.meterRequest.findFirst({ where: { personId, what, answeredAt: null } });
       return open ? { request: { id: open.id, personId: open.personId, what: open.what, createdAt: open.createdAt }, created: false } : null;
     });
     if (result) return result;
@@ -40,8 +43,8 @@ export async function askForMore(personId: string, now: Date = new Date()): Prom
 }
 
 /** The request a person has open, if any. */
-export async function openRequestFor(personId: string): Promise<OpenRequest | null> {
-  const open = await prisma.meterRequest.findFirst({ where: { personId, answeredAt: null }, orderBy: { createdAt: 'desc' } });
+export async function openRequestFor(personId: string, what?: AskedFor): Promise<OpenRequest | null> {
+  const open = await prisma.meterRequest.findFirst({ where: { personId, answeredAt: null, ...(what ? { what } : {}) }, orderBy: { createdAt: 'desc' } });
   return open ? { id: open.id, personId: open.personId, what: open.what, createdAt: open.createdAt } : null;
 }
 

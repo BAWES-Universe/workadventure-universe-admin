@@ -50,6 +50,7 @@ CREATE TABLE "grant_programs" (
     "label" VARCHAR(120) NOT NULL,
     "created_by_id" TEXT NOT NULL,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "request_key" VARCHAR(255),
     "status" VARCHAR(10) NOT NULL DEFAULT 'active',
     "ended_at" TIMESTAMP(3),
 
@@ -191,6 +192,9 @@ CREATE INDEX "funding_account_admins_user_id_idx" ON "funding_account_admins"("u
 
 -- CreateIndex
 CREATE UNIQUE INDEX "funding_account_admins_account_id_user_id_key" ON "funding_account_admins"("account_id", "user_id");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "grant_programs_request_key_key" ON "grant_programs"("request_key");
 
 -- CreateIndex
 CREATE INDEX "grant_programs_category_id_kind_status_idx" ON "grant_programs"("category_id", "kind", "status");
