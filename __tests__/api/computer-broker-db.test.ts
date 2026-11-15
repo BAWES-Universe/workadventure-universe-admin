@@ -275,6 +275,13 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).agentResponseId).toBe('resp-1');
     });
 
+    it('sends the caller to reconnect when a turn is kept but its conversation is not known, and clears it once it is gone', async () => {
+      const { jobId } = await running();
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentSessionId: null, agentResponseId: 'resp-x' } });
+      expect(await startTurn(jobId, 'go')).toEqual({ ok: false, reason: 'busy', responseId: 'resp-x' });
+      expect(fake.openedTurns).toHaveLength(0);
+    });
+
     it('starts nothing when the runner is already gone', async () => {
       const { jobId } = await running();
       const runner = new AbortController();

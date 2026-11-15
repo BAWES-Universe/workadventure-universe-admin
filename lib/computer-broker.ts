@@ -107,6 +107,9 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
   const live = await liveJob(jobId);
   if (!live.ok) return live;
   const { job, provider } = live;
+  // A turn is kept but its conversation is not known (the agent did not say it): whether it still runs cannot be asked, so the caller is
+  // sent to reconnect to it; a turn that is gone says so there and its id is cleared
+  if (job.responseId && !job.sessionId) return { ok: false, reason: 'busy', responseId: job.responseId };
   if (job.responseId && job.sessionId) {
     // A check that could not be made is not an answer: the turn may still be running, so its id stays and this one is tried again later
     let unsure = false;
