@@ -2,7 +2,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
 import { allowanceNow, missingSettings, monthOf, type AllowanceState, type MeterSettings } from '@/lib/meter-values';
-import { checkSpend, INSTANT_ROOM_PREFIX } from '@/lib/spend-rules';
+import { checkSpend } from '@/lib/spend-rules';
 import type { ChargeClass } from '@/lib/spend-rules-values';
 
 /**
@@ -264,7 +264,7 @@ export async function renewRoom(input: { key: string; moreMicros?: number }, now
     if (more > 0) {
       // More room for a job that runs is a new step for the rules too: the same ones that let it start decide whether it may take more
       const ruled = await checkSpend(
-        { payerPersonId: row.personId ?? '', botId: row.botId, taskKey: row.jobId, chargeClass: row.reservationKey.startsWith(INSTANT_ROOM_PREFIX) ? 'apps' : 'computer', amountMicros: more },
+        { payerPersonId: row.personId ?? '', botId: row.botId, taskKey: row.jobId, chargeClass: 'computer', amountMicros: more },
         now,
         tx,
       );

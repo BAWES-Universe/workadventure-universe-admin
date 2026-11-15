@@ -27,7 +27,8 @@ import { POST as postDidntWork } from '@/app/api/me/usage/activity/[id]/didnt-wo
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { giveComputer, renewJob, startJob } from '@/lib/computer';
 import { mintJobToken } from '@/lib/computer-token';
-import { authorizeModelCall } from '@/lib/computer-calls';
+import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
+import { createInstantFunds } from '@/lib/funding/instant-funds';
 import { PATCH as patchRule, DELETE as deleteRule } from '@/app/api/me/spend-rules/[ruleId]/route';
 
 // Delegates to the real room-taking; one test makes it hold up a moment to let another try claim the job (see "a try refused by a rule")
@@ -63,8 +64,27 @@ async function roomBot(ownerId: string): Promise<string> {
 }
 
 let eventNo = 0;
-/** A paid step in the books: a computer's time, or an Instant run. */
+/** A paid step in the books: a computer's time (the meter's books), or an Instant run (the funding books: a settled hold that took the credit). */
 async function spend(personId: string, botId: string, micros: number, over: { jobId?: string | null; at?: Date; instant?: boolean } = {}) {
+  if (over.instant) {
+    await prisma.creditHold.create({
+      data: {
+        holdKey: `rules-${tag}-${++eventNo}`,
+        personId,
+        botId,
+        category: 'instant_apps',
+        chargeClass: 'instant',
+        jobKey: over.jobId ?? null,
+        state: 'settled',
+        amountMicros: BigInt(micros),
+        customerMicros: BigInt(micros),
+        expiresAt: new Date((over.at ?? NOW).getTime() + 600_000),
+        createdAt: over.at ?? NOW,
+        closedAt: over.at ?? NOW,
+      },
+    });
+  }
+  // The meter's own record of the step (what a receipt is made from): an Instant use, or a computer's time
   await prisma.meterEvent.create({
     data: {
       eventId: `rules-${tag}-${++eventNo}`,
@@ -96,6 +116,7 @@ const wipe = async () => {
   await prisma.computerJob.deleteMany({ where: { personId: { in: ids } } });
   await prisma.meterEvent.deleteMany({ where: { personKey: { in: ids.map((id) => `person:${id}`) } } });
   await prisma.meterReservation.deleteMany({ where: { personKey: { in: ids.map((id) => `person:${id}`) } } });
+  await prisma.creditHold.deleteMany({ where: { personId: { in: ids } } });
 };
 
 run('rules said in chat and task receipts, in a real database', () => {
@@ -239,6 +260,43 @@ run('rules said in chat and task receipts, in a real database', () => {
     });
   });
 
+  describe('Instant Apps credit and calls with no price', () => {
+    const appsStep = (personId: string, botId: string, taskKey: string | null, micros: number) => checkSpend({ payerPersonId: personId, botId, taskKey, chargeClass: 'apps', amountMicros: micros }, NOW);
+    const hold = (personId: string, botId: string, key: string, over: { state: 'held' | 'settled'; amount: number; took?: number; refunded?: number }) =>
+      prisma.creditHold.create({
+        data: { holdKey: `${key}-${tag}`, personId, botId, category: 'instant_apps', chargeClass: 'instant', state: over.state, amountMicros: BigInt(over.amount), customerMicros: over.took === undefined ? null : BigInt(over.took), refundedMicros: BigInt(over.refunded ?? 0), expiresAt: new Date(NOW.getTime() + 600_000), createdAt: NOW },
+      });
+
+    it('counts Instant credit from the funding books: held room, and what settled holds took less what was given back', async () => {
+      const sara = await person('sara');
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 10_000, covers: 'apps' });
+      await hold(sara.id, sara.brickId, 'held-1', { state: 'held', amount: 6_000 });
+      await hold(sara.id, sara.brickId, 'done-1', { state: 'settled', amount: 5_000, took: 2_000 });
+      expect(await appsStep(sara.id, sara.brickId, null, 2_000)).toEqual({ ok: true });
+      expect(await appsStep(sara.id, sara.brickId, null, 2_001)).toMatchObject({ ok: false, why: 'cap', leftMicros: 2_000 });
+      // What was given back is not counted any more
+      await hold(sara.id, sara.brickId, 'done-2', { state: 'settled', amount: 9_000, took: 9_000, refunded: 9_000 });
+      expect(await appsStep(sara.id, sara.brickId, null, 2_000)).toEqual({ ok: true });
+      // A computer's time is a different class of credit
+      expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer', amountMicros: 10_000 }, NOW)).toEqual({ ok: true });
+    });
+
+    it('holds an Instant step to a rule before any credit is held, with the rule’s words, and leaves a hold that already exists alone', async () => {
+      const sara = await person('sara');
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 10_000, covers: 'apps' });
+      const funds = createInstantFunds(() => NOW);
+      const step = (key: string, micros: number) => funds.reserve({ key, personId: sara.id, amountMicros: micros, botId: sara.brickId, runId: 'run-1', charge: { class: 'instant', route: 'instant', provider: 'composio' } });
+      const refused = await step(`instant-a-${tag}`, 50_000);
+      expect(refused).toEqual({ ok: false, reason: 'rule', ruleId: expect.any(String), why: 'cap', leftMicros: 10_000, words: expect.stringContaining('No more than $0.01 a month') });
+      expect(await prisma.creditHold.count({ where: { personId: sara.id } })).toBe(0);
+      // Within the rule it goes on to the books (here nothing is funded, so the books answer, not the rule)
+      expect(await step(`instant-b-${tag}`, 5_000)).not.toMatchObject({ reason: 'rule' });
+      // A hold that is already there is asked about again: it is that hold, not a new step
+      await hold(sara.id, sara.brickId, 'instant-c', { state: 'held', amount: 10_000 });
+      expect(await step(`instant-c-${tag}`, 10_000)).not.toMatchObject({ reason: 'rule' });
+    });
+  });
+
   describe('where room is taken', () => {
     it('refuses room a rule does not allow, takes nothing, and says it is the rule: never "your allowance", so more credit is not offered', async () => {
       const sara = await person('sara');
@@ -378,6 +436,23 @@ run('rules said in chat and task receipts, in a real database', () => {
       const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
       expect(started).toMatchObject({ ok: true, job: { status: 'running' } });
       expect(await prisma.computerJob.findMany({ where: { botId: sara.brickId }, select: { status: true, endedBy: true } })).toEqual([{ status: 'running', endedBy: null }]);
+    });
+
+    it('counts a model call with no price at the room it held, never as nothing', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 100_000 });
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Long job' }, NOW);
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      const minted = await mintJobToken(started.job.id, 'model', NOW);
+      if (!minted.ok) throw new Error('no key');
+      const call = await authorizeModelCall({ token: minted.token, callId: 'unknown-1', estimateMicros: 30_000, payer: 'universe' }, NOW);
+      expect(call).toMatchObject({ ok: true, reservedMicros: 30_000 });
+      // The call ran and its price is not known: its room settles, and its event has no cost
+      expect(await settleModelCall(started.job.id, 'unknown-1', { costMicros: null, basis: 'unknown', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW)).toEqual({ ok: true });
+      // The job holds 60,000 and the call took 30,000: 10,000 is left, not 40,000
+      expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer', amountMicros: 10_001 }, NOW)).toMatchObject({ ok: false, leftMicros: 10_000 });
+      expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer', amountMicros: 10_000 }, NOW)).toEqual({ ok: true });
     });
 
     it('a job that is running when a rule stops more room ends as "rule", saying so, not as "our room is used up"', async () => {

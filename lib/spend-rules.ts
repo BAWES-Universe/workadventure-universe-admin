@@ -29,7 +29,7 @@ import {
  * falls back to somebody else's credit and never lifts a limit: it only ever makes the allowed amount smaller.
  */
 
-type Db = Pick<typeof prisma, 'spendRule' | 'meterEvent' | 'meterReservation'>;
+type Db = Pick<typeof prisma, 'spendRule' | 'meterEvent' | 'meterReservation' | 'creditHold'>;
 
 const toNumber = (value: bigint | number | null): number => (value === null ? 0 : Number(value));
 
@@ -211,50 +211,79 @@ export async function endRule(ruleId: string, ownerId: string, now: Date = new D
   return { ok: true };
 }
 
-/** What the meter's books show for the class a rule covers: Instant runs are charged as apps, a computer's time as computer. */
-const spentWhere = (covers: RuleCovers): Prisma.MeterEventWhereInput =>
-  covers === 'apps'
-    ? { kind: 'app_use', route: 'instant' }
-    : covers === 'computer'
-      ? { pool: 'computer' }
-      : { OR: [{ kind: 'app_use', route: 'instant' }, { pool: 'computer' }] };
+/**
+ * What a rule counts, by the class of credit it covers. A computer's time is in the meter's books (events and reservations); Instant
+ * Apps credit is in the funding books (credit holds: held room, and what a settled hold really took from credit, less what was given
+ * back). Each class is counted from the books that charge it, so the rule sees exactly what the person's credit paid.
+ */
+const wantsComputer = (covers: RuleCovers): boolean => covers === 'computer' || covers === 'all';
+const wantsApps = (covers: RuleCovers): boolean => covers === 'apps' || covers === 'all';
 
-/** Room held for Instant runs has a key that starts "instant:"; everything else held is a computer's. */
-const INSTANT_ROOM_PREFIX = 'instant:';
-
-const heldWhere = (covers: RuleCovers): Prisma.MeterReservationWhereInput =>
-  covers === 'apps' ? { reservationKey: { startsWith: INSTANT_ROOM_PREFIX } } : covers === 'computer' ? { NOT: { reservationKey: { startsWith: INSTANT_ROOM_PREFIX } } } : {};
+/**
+ * A model call whose price was not known settled the room it held and wrote its event with no cost: it still took that room, so a rule
+ * counts the room, never 0. The reservation of a call is named from its event (see lib/computer-calls.ts).
+ */
+async function unpricedCallRoom(db: Db, events: Prisma.MeterEventWhereInput[]): Promise<number> {
+  const unpriced = await db.meterEvent.findMany({ where: { AND: [...events, { kind: 'model_call', costMicros: null }] }, select: { eventId: true } });
+  const keys = unpriced
+    .map((row) => /^computer:(.+):call:(.+)$/.exec(row.eventId))
+    .filter((found): found is RegExpExecArray => found !== null)
+    .map((found) => `computer:call:${found[1]}:${found[2]}`);
+  if (keys.length === 0) return 0;
+  const rooms = await db.meterReservation.aggregate({ where: { reservationKey: { in: keys }, state: 'settled' }, _sum: { settledMicros: true } });
+  return toNumber(rooms._sum.settledMicros);
+}
 
 /** What a rule counts for a step: taken (in the books) and held (room not yet settled), for the rule's own scope and period. */
 async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Date): Promise<SpentSoFar> {
   const personKey = `person:${rule.ownerPersonId}`;
-  const events: Prisma.MeterEventWhereInput[] = [{ personKey }, spentWhere(rule.covers)];
-  const holds: Prisma.MeterReservationWhereInput[] = [{ personKey, state: 'held' }, heldWhere(rule.covers)];
+  const events: Prisma.MeterEventWhereInput[] = [{ personKey }, { pool: 'computer' }];
+  const holds: Prisma.MeterReservationWhereInput[] = [{ personKey, state: 'held' }];
+  const credit: Prisma.CreditHoldWhereInput[] = [{ personId: rule.ownerPersonId, category: 'instant_apps' }];
   if (rule.scope === 'bot' && rule.botId) {
     events.push({ botId: rule.botId });
     holds.push({ botId: rule.botId });
+    credit.push({ botId: rule.botId });
   }
   if (rule.scope === 'task') {
     events.push({ jobId: rule.taskKey });
     holds.push({ jobId: rule.taskKey });
+    credit.push({ jobKey: rule.taskKey });
   }
   if (rule.period === 'task' && rule.scope !== 'task') {
     // "For each task": this step's own task. A step that belongs to no task has only itself to count
     if (!attempt.taskKey) return { spentMicros: 0, heldMicros: 0 };
     events.push({ jobId: attempt.taskKey });
     holds.push({ jobId: attempt.taskKey });
+    credit.push({ jobKey: attempt.taskKey });
   }
   const start = rule.period ? periodStart(rule.period, now) : null;
   if (start) {
     events.push({ occurredAt: { gte: start } });
     // Room that lapsed without being settled still counts, in the period it was taken in
     holds.push({ createdAt: { gte: start } });
+    credit.push({ createdAt: { gte: start } });
   }
-  const [taken, held] = await Promise.all([
-    db.meterEvent.aggregate({ where: { AND: events }, _sum: { costMicros: true } }),
-    db.meterReservation.aggregate({ where: { AND: holds }, _sum: { amountMicros: true } }),
-  ]);
-  return { spentMicros: toNumber(taken._sum.costMicros), heldMicros: toNumber(held._sum.amountMicros) };
+  let spentMicros = 0;
+  let heldMicros = 0;
+  if (wantsComputer(rule.covers)) {
+    const [taken, held, unpriced] = await Promise.all([
+      db.meterEvent.aggregate({ where: { AND: events }, _sum: { costMicros: true } }),
+      db.meterReservation.aggregate({ where: { AND: holds }, _sum: { amountMicros: true } }),
+      unpricedCallRoom(db, events),
+    ]);
+    spentMicros += toNumber(taken._sum.costMicros) + unpriced;
+    heldMicros += toNumber(held._sum.amountMicros);
+  }
+  if (wantsApps(rule.covers)) {
+    const [settled, held] = await Promise.all([
+      db.creditHold.aggregate({ where: { AND: [...credit, { state: 'settled' }] }, _sum: { customerMicros: true, refundedMicros: true } }),
+      db.creditHold.aggregate({ where: { AND: [...credit, { state: 'held' }] }, _sum: { amountMicros: true } }),
+    ]);
+    spentMicros += Math.max(0, toNumber(settled._sum.customerMicros) - toNumber(settled._sum.refundedMicros));
+    heldMicros += toNumber(held._sum.amountMicros);
+  }
+  return { spentMicros, heldMicros };
 }
 
 /**
@@ -291,5 +320,4 @@ export async function ownerSpendAllowed(botId: string, personId: string, chargeC
   return checkSpend({ payerPersonId: personId, botId, taskKey: null, chargeClass, amountMicros: 1 }, now);
 }
 
-export { INSTANT_ROOM_PREFIX };
 export type { ChargeClass };

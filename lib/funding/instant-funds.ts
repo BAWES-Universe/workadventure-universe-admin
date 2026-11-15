@@ -1,5 +1,7 @@
 import { classifyCharge } from '@/lib/credit-values';
 import { holdCredit, refundHold, releaseHold, settleHold, type GiveBackLimits } from '@/lib/credit-spend';
+import { prisma } from '@/lib/db';
+import { checkSpend } from '@/lib/spend-rules';
 
 /**
  * What the Instant executor (O2) needs from the funding books, as one small contract. Amounts are whole micros of a dollar and every call
@@ -17,7 +19,11 @@ export interface InstantReserve {
   charge: { class: 'instant'; route: string; provider: string; priceVersion?: string | null };
 }
 
-export type InstantReserved = { ok: true; created: boolean } | { ok: false; reason: 'credit_used_up' | 'not_set' | 'unavailable' };
+export type InstantReserved =
+  | { ok: true; created: boolean }
+  | { ok: false; reason: 'credit_used_up' | 'not_set' | 'unavailable' }
+  /** A rule the person said in chat ("no more than $1 a month", "only my own accounts") does not let this step take that much: the rule's own words, and nothing to ask more credit for. */
+  | { ok: false; reason: 'rule'; ruleId: string; why: 'own_accounts' | 'cap'; leftMicros: number | null; words: string };
 
 export interface InstantFunds {
   reserve(input: InstantReserve): Promise<InstantReserved>;
@@ -34,6 +40,13 @@ export function createInstantFunds(clock: () => Date = () => new Date()): Instan
   return {
     async reserve(input) {
       try {
+        // What the person said in chat comes first, before any credit is held. A step asked again for a hold that already exists is that same hold:
+        // its own room is already counted, so it is not held to the rules a second time
+        const existing = await prisma.creditHold.findUnique({ where: { holdKey: input.key }, select: { id: true } });
+        if (!existing) {
+          const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.runId ?? null, chargeClass: 'apps', amountMicros: input.amountMicros }, clock());
+          if (!ruled.ok) return { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
+        }
         const held = await holdCredit({
           holdKey: input.key,
           personId: input.personId,
