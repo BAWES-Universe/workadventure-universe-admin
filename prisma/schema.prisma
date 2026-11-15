@@ -1469,6 +1469,56 @@ model AppUse {
   @@map("app_uses")
 }
 
+// Where one App runs (spec "Paying for Apps" section 21): on Composio, or on Universe's own version of it. One row per App key; an
+// App with no row runs on Composio. People see no change either way (same name, price, credit, receipt, permissions): only what
+// the run costs us moves. `version` counts the changes, so two super admins saving over each other is refused, not overwritten.
+model AppRoute {
+  appKey      String   @id @map("app_key") @db.VarChar(60)
+  // composio | universe
+  route       String   @db.VarChar(10)
+  version     Int      @default(1)
+  changedAt   DateTime @default(now()) @map("changed_at")
+  changedById String?  @map("changed_by_id")
+
+  @@map("app_routes")
+}
+
+// How one App run ended, written once beside its meter event (the books are never edited): `ok`, or `failed` (the provider said
+// no, or could not be reached). `provider` is the route the run really took. `refundedMicros` stays empty until a refund of the
+// person's credit is recorded for it; it is never guessed.
+model AppUseOutcome {
+  eventId        String   @id @map("event_id") @db.VarChar(255)
+  appKey         String   @map("app_key") @db.VarChar(60)
+  // composio | universe
+  provider       String   @db.VarChar(10)
+  // ok | failed
+  outcome        String   @db.VarChar(10)
+  refundedMicros BigInt?  @map("refunded_micros")
+  recordedAt     DateTime @default(now()) @map("recorded_at")
+
+  @@index([appKey, recordedAt])
+  @@index([recordedAt])
+  @@map("app_use_outcomes")
+}
+
+// "Asked for, not available yet": an App name a Brick looked for and did not find, counted per day and per person. ONLY the name
+// is kept (short, and cleaned of anything that reads like a sentence), never what a person wrote. `personKey` is a one-way hash,
+// kept only so "by 41 people" can count different people; nothing per person is ever shown.
+model AppAsk {
+  id        String   @id @default(uuid())
+  // The day (UTC) of the ask
+  day       DateTime @db.Date
+  nameKey   String   @map("name_key") @db.VarChar(60)
+  // The name as first written, for showing
+  name      String   @db.VarChar(60)
+  personKey String   @map("person_key") @db.VarChar(64)
+  times     Int      @default(1)
+
+  @@unique([day, nameKey, personKey])
+  @@index([day])
+  @@map("app_asks")
+}
+
 // A person letting other people ask one of their Bricks for a job from an app of theirs (#2006, mock Part 17). It sits on the
 // grant (a Brick's use of the app), never on the app: the same app used by another Brick stays "only you". Deleting the grant, the
 // app, or this row stops everyone at once. What can be asked for is the jobs below, nothing else of the app.
