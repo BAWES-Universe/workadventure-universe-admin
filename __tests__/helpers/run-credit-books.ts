@@ -525,7 +525,8 @@ async function main() {
   {
     await user('ask1', '2027-02-11T00:00:00Z');
     await rules.saveException({ categoryId: 'instant_apps', amount: 1 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['ask1'] } }, root, G);
-    await rules.createGift({ categoryId: 'instant_apps', amount: 2 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['ask1'] } }, root, G);
+    // Covers both, so it is spent after the line (which covers one): the order does not depend on a random id
+    await rules.createGift({ categoryId: 'instant_apps', amount: 2 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['ask1'] }, covers: ['instant_apps', 'computers'] }, root, G);
     await issue.ensureIssued('ask1', G);
     await spend.holdCredit({ holdKey: 'ask1-a', personId: 'ask1', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, G);
     await spend.settleHold({ holdKey: 'ask1-a', customerMicros: 1 * M }, G);
