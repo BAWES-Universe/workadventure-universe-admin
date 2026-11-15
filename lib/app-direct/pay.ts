@@ -398,7 +398,7 @@ const stateOf = (status: string): OrderState => (status === 'paid' ? 'paid' : st
 
 /**
  * Asks the service about one order and moves it on. Safe to call as often as anyone likes (the visitor's page, the return page, the
- * service's notice): the service itself is asked at most once in `paymentCheckSeconds` for an order, and "paid" is written once.
+ * service's notice): the service itself is asked at most once in `paymentCheckSeconds` (more for an order that has waited long) for an order, and "paid" is written once.
  */
 export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promise<OrderView | null> {
   const order = await prisma.appPageOrder.findUnique({ where: { id: orderId }, include: { connection: true, job: { select: { artifact: { select: { title: true } } } } } });
@@ -435,9 +435,22 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
     await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'pending' }, data: { status: 'cant_confirm' } });
     return view('cant_confirm');
   }
-  // One look per order in a few seconds, whoever is asking
+  // A look the service never answered in a way we can read (an error, a refusal, an answer with no state) is asked again, as before. But an
+  // order that has been open longer than its time allows, and still cannot be read, is closed like any other that ran out of time: the buyer's
+  // page stops waiting, and a payment that turns out to be real is still found by the later looks (a closed order is asked about for a while).
+  const unreadable = async (): Promise<OrderView> => {
+    if (!wasClosed && now.getTime() - order.createdAt.getTime() > limits.checkoutOpenHours * HOUR) {
+      const closed = await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'pending' }, data: { status: 'not_paid', closedAt: now } });
+      if (closed.count === 1) return view('not_paid');
+    }
+    return later(view(order.status));
+  };
+  // One look per order in a few seconds, whoever is asking. The longer an order has been waiting the further apart its looks are (a minute
+  // more adds one more `paymentCheckSeconds`, up to sixty of them): a buyer who pays is seen at once, while tabs left open on an order nobody
+  // is paying cost an owner a small and shrinking share of their looks instead of the same share for the whole open time.
+  const spacing = limits.paymentCheckSeconds * Math.min(60, 1 + Math.floor((now.getTime() - order.createdAt.getTime()) / 60_000));
   const taken = await prisma.appPageOrder.updateMany({
-    where: { id: order.id, status: open, OR: [{ checkedAt: null }, { checkedAt: { lt: new Date(now.getTime() - limits.paymentCheckSeconds * 1000) } }] },
+    where: { id: order.id, status: open, OR: [{ checkedAt: null }, { checkedAt: { lt: new Date(now.getTime() - spacing * 1000) } }] },
     data: { checkedAt: now, checks: { increment: 1 } },
   });
   if (taken.count === 0) return later(view(order.status));
@@ -468,17 +481,8 @@ export async function verifyOrder(orderId: string, deps: GuardDeps = {}): Promis
       return true;
     })
     .catch(() => false);
-  if (!budget) return later(view(order.status));
-  // A look the service never answered in a way we can read (an error, a refusal, an answer with no state) is asked again, as before. But an
-  // order that has been open longer than its time allows, and still cannot be read, is closed like any other that ran out of time: the buyer's
-  // page stops waiting, and a payment that turns out to be real is still found by the later looks (a closed order is asked about for a while).
-  const unreadable = async (): Promise<OrderView> => {
-    if (!wasClosed && now.getTime() - order.createdAt.getTime() > limits.checkoutOpenHours * HOUR) {
-      const closed = await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'pending' }, data: { status: 'not_paid', closedAt: now } });
-      if (closed.count === 1) return view('not_paid');
-    }
-    return later(view(order.status));
-  };
+  // No room for looks: it waits, but an order past its open time still ends (it is not left "checking" because looks ran short)
+  if (!budget) return unreadable();
   const startedAt = new Date();
   let answer;
   try {

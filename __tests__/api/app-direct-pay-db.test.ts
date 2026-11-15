@@ -116,8 +116,8 @@ async function pending(): Promise<{ artifactId: string; connectionId: string }> 
   return { artifactId, connectionId: id };
 }
 const settle = async (orderId: string) => {
-  // The check is rate limited per order: let the last look be old enough
-  await prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 60_000) } });
+  // The check is rate limited per order, and further apart the longer the order has waited: let the last look be old enough for any age
+  await prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 24 * 3_600_000) } });
   return verifyOrder(orderId);
 };
 const notices = () => prisma.userNotice.findMany({ where: { userId: sara, kind: 'page_payment' } });
@@ -568,7 +568,7 @@ run('payments for pages, in a real database', () => {
         const before = (await notices()).length;
         const orderId = await closeByExpiry(artifactId, '198.51.100.31');
         gateway({ record: (order) => paidRecord(order) });
-        await prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 60_000) } });
+        await prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 24 * 3_600_000) } });
         await Promise.all([verifyOrder(orderId), notice(request(`/api/app-pay/notice/${orderId}`, { method: 'POST', body: { status: 'CAPTURED' } }), params({ orderId }))]);
         expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('paid');
         expect((await notices()).slice(before)).toHaveLength(1);
@@ -793,7 +793,7 @@ run('payments for pages, in a real database', () => {
       gateway();
       const { orderId } = await checkout(artifactId, '198.51.100.57');
       const ask = () => notice(request(`/api/app-pay/notice/${orderId}`, { method: 'POST', body: { status: 'CAPTURED' } }), params({ orderId }));
-      const old = () => prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 60_000) } });
+      const old = () => prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 24 * 3_600_000) } });
       // The service is down
       mockSend.current = () => ({ status: 503, body: {} });
       await old();
@@ -817,7 +817,7 @@ run('payments for pages, in a real database', () => {
       gateway();
       const { orderId } = await checkout(artifactId, '198.51.100.68');
       const ask = (id = orderId) => notice(request(`/api/app-pay/notice/${id}`, { method: 'POST', body: { status: 'CAPTURED' } }), params({ orderId: id }));
-      const old = () => prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 60_000) } });
+      const old = () => prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 24 * 3_600_000) } });
       // An answer that names no state is not an answer
       mockSend.current = () => ({ status: 200, body: { id: 'chg_TS01' } });
       await old();
@@ -1065,6 +1065,42 @@ run('payments for pages, in a real database', () => {
       expect(body.currency).toBe('usd');
     });
 
+    it('spaces the looks at an order further apart the longer it has waited, up to sixty times the check time', async () => {
+      await saveServerLimits({ bricks: { paymentCheckSeconds: 5, checkoutOpenHours: 24 } }, sara);
+      const { artifactId } = await pending();
+      const sent = gateway({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
+      const { orderId } = await checkout(artifactId, '198.51.100.40');
+      const looks = () => sent.filter((entry) => entry.method === 'GET').length;
+      const lookedAgo = async (seconds: number, ageMinutes: number) => {
+        await prisma.appPageOrder.update({ where: { id: orderId }, data: { createdAt: new Date(Date.now() - ageMinutes * 60_000), checkedAt: new Date(Date.now() - seconds * 1000) } });
+        const before = looks();
+        await verifyOrder(orderId);
+        return looks() - before;
+      };
+      // A new order: one look every five seconds
+      expect(await lookedAgo(6, 0)).toBe(1);
+      expect(await lookedAgo(3, 0)).toBe(0);
+      // Ten minutes in, a look every 55 seconds: thirty seconds ago is too soon, a minute ago is not
+      expect(await lookedAgo(30, 10)).toBe(0);
+      expect(await lookedAgo(60, 10)).toBe(1);
+      // Hours in, never further apart than sixty times the check time (five minutes)
+      expect(await lookedAgo(200, 600)).toBe(0);
+      expect(await lookedAgo(310, 600)).toBe(1);
+    });
+
+    it('ends an order past its open time even when the owner has no room left for looks', async () => {
+      await saveServerLimits({ bricks: { paymentLooksPerOwner: 1, checkoutOpenHours: 1 } }, sara);
+      const { artifactId } = await pending();
+      gateway({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
+      const first = await checkout(artifactId, '198.51.100.41');
+      await settle(first.orderId);
+      const second = await checkout(artifactId, '198.51.100.42');
+      // This owner's room for looks is spent: a new order's look waits, an old one's still ends
+      expect(await settle(second.orderId)).toMatchObject({ status: 'checking' });
+      await prisma.appPageOrder.update({ where: { id: second.orderId }, data: { createdAt: new Date(Date.now() - 2 * 3_600_000) } });
+      expect(await settle(second.orderId)).toMatchObject({ status: 'not_paid' });
+    });
+
     it('counts looks at payments for each owner, and waits when that is spent', async () => {
       await saveServerLimits({ bricks: { paymentLooksPerOwner: 1 } }, sara);
       const { artifactId } = await pending();
@@ -1136,7 +1172,7 @@ run('payments for pages, in a real database', () => {
       expect(waited.status).toBe(429);
       expect(Number(waited.headers.get('retry-after'))).toBeGreaterThan(0);
       // After the wait it asks, and is done
-      await prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 60_000) } });
+      await prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 24 * 3_600_000) } });
       gateway({ record: (order) => paidRecord(order) });
       const done = await notice(request(`/api/app-pay/notice/${orderId}`, { method: 'POST', body: { status: 'CAPTURED' } }), params({ orderId }));
       expect(done.status).toBe(200);
