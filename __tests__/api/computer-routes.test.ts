@@ -202,7 +202,7 @@ describe('the bot server’s calls', () => {
       reason: 'rule',
       rule: { id: 'r1', why: 'cap', leftMicros: 0, words: 'No more than $1.00 a month from your credit for Brick' },
     });
-    expect(rules.ownerSpendAllowed).toHaveBeenCalledWith(BRICK, 'u-sara', 'computer');
+    expect(rules.ownerSpendAllowed).toHaveBeenCalledWith(BRICK, 'u-sara', 'computer', expect.any(Date), null);
     expect(lib.startJob).not.toHaveBeenCalled();
   });
 

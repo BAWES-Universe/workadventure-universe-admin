@@ -17,7 +17,7 @@ import { getSessionUser } from '@/lib/auth-session';
 import { saveMeterSettings } from '@/lib/meter';
 import { releaseRoom, renewRoom, reserveRoom } from '@/lib/meter-allowance';
 import { memberUsage } from '@/lib/meter-usage';
-import { changeRule, checkSpend, endRule, listRules, proposeRule } from '@/lib/spend-rules';
+import { changeRule, checkSpend, endRule, listRules, ownerSpendAllowed, proposeRule } from '@/lib/spend-rules';
 import { activityFor, closeReceipt, openReceipt, reportProblem } from '@/lib/task-receipts';
 import { POST as postRule, GET as getRules } from '@/app/api/bots/[id]/spend-rules/route';
 import { POST as postReceipt } from '@/app/api/bots/[id]/task-receipts/route';
@@ -287,6 +287,18 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(started).toEqual({ ok: false, reason: 'rule', words: expect.stringContaining('No more than $0.01 a month') });
       expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
       expect(await prisma.meterReservation.count({ where: { personKey: `person:${sara.id}` } })).toBe(0);
+    });
+
+    it('a start asked again for a run that already has its job finds that job, even when its own held room used the cap up exactly', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 60_000 });
+      const job = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Report', status: 'running', runId: 'run-x', startedAt: NOW } });
+      await prisma.meterReservation.create({ data: { reservationKey: `own-${tag}`, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, jobId: job.id, amountMicros: BigInt(60_000), state: 'held', expiresAt: new Date(NOW.getTime() + 600_000), createdAt: NOW } });
+      // The job's own room is the whole cap: asked again for the same run it is that job, not a refusal; for anything else nothing is left
+      expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', NOW, 'run-x')).toEqual({ ok: true });
+      expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', NOW, 'run-other')).toMatchObject({ ok: false, why: 'cap' });
+      expect(await ownerSpendAllowed(sara.brickId, sara.id, 'computer', NOW, null)).toMatchObject({ ok: false, why: 'cap' });
     });
 
     it('a job that is running when a rule stops more room ends as "rule", saying so, not as "our room is used up"', async () => {
