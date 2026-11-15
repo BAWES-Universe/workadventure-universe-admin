@@ -220,6 +220,15 @@ export const definitionSchema = z
       takesText(create.customerName, 8, 'customerName');
       // The currency may be limited to the ones the service takes: a page that asks for another one is refused when it is set up
       takesText(create.currency, 3, 'currency', true);
+      // The checkout and the look-up fill only the fields named above (and the description): a parameter that is required but not one of
+      // them could never be filled, so every checkout would fail with nobody told. Optional extras are fine (they are left out).
+      const filled = new Set([create.amount, create.currency, create.orderRef, create.idempotentKey, create.returnUrl, create.notifyUrl, create.customerName, 'description']);
+      for (const param of made?.params ?? []) {
+        if (param.required && !filled.has(param.name)) ctx.addIssue({ code: 'custom', path: ['payment', 'create'], message: `${param.name} is required by ${made?.id} but a checkout cannot fill it: make it optional or remove it` });
+      }
+      for (const param of asked?.params ?? []) {
+        if (param.required && param.name !== lookup.idParam) ctx.addIssue({ code: 'custom', path: ['payment', 'lookup'], message: `${param.name} is required by ${asked?.id} but a look-up at a payment cannot fill it: make it optional or remove it` });
+      }
       // A currency listed twice (in any case) leaves "the service's own spelling" ambiguous: refused, so the checkout sends one spelling
       const currencyList = made?.params.find((param) => param.name === create.currency)?.oneOf;
       if (currencyList && new Set(currencyList.map((code) => code.trim().toUpperCase())).size !== currencyList.length) ctx.addIssue({ code: 'custom', path: ['payment', 'create', 'currency'], message: `${create.currency} lists the same currency more than once` });

@@ -140,6 +140,21 @@ describe('a definition is data with hard edges', () => {
     expect(JSON.stringify(result.success ? '' : result.error.issues)).toContain('must be a number');
   });
 
+  it('refuses a payment whose operations need a field the checkout cannot fill, and allows optional extras', () => {
+    const extra = (operationOf: 'create' | 'lookup', required: boolean) => {
+      const copy = JSON.parse(JSON.stringify(EXAMPLE_GATEWAY));
+      const operation = copy.operations.find((candidate: { id: string }) => candidate.id === copy.payment[operationOf].operation);
+      operation.params.push({ name: 'customerEmail', type: 'string', in: operationOf === 'create' ? 'body' : 'query', required });
+      if (operationOf === 'create') operation.body.customerEmail = { $param: 'customerEmail' };
+      return definitionSchema.safeParse(copy);
+    };
+    const refused = (result: ReturnType<typeof definitionSchema.safeParse>) => JSON.stringify(result.success ? '' : result.error.issues);
+    expect(refused(extra('create', true))).toContain('customerEmail is required');
+    expect(refused(extra('lookup', true))).toContain('customerEmail is required');
+    expect(extra('create', false).success).toBe(true);
+    expect(extra('lookup', false).success).toBe(true);
+  });
+
   it('refuses a payment whose checkout fields could not take what the checkout sends', () => {
     const base = JSON.parse(JSON.stringify(EXAMPLE_GATEWAY));
     const change = (name: string, edit: (param: Record<string, unknown>) => void) => {
