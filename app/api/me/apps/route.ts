@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { z } from 'zod';
 import { unsendableIssueMessage } from '@/lib/mcp/server-input';
-import { addConnectionSchema, createConnection, listConnections, ownBricks, NOT_FOUND } from '@/lib/app-connections';
+import { addLinkSchema, connectByLink, listConnections, ownBricks, NOT_FOUND } from '@/lib/app-connections';
 import { connectFromCatalog } from '@/lib/app-catalog';
 import { appsRoute, preflight } from '@/lib/me-apps-route';
 
@@ -25,9 +25,13 @@ export async function GET(request: NextRequest) {
 }
 
 /**
- * POST /api/me/apps { name, serverUrl, authType, authConfig?, headers? } - connect an app by its link, or { catalogKey } for one of the
- * list a super admin keeps. Takes exactly what a bot's
- * own app takes, with the same checks. No Brick uses it until the person lets one (POST /api/me/apps/:id/bricks).
+ * POST /api/me/apps { name, serverUrl, authType, authConfig?, headers?, requestKey? } - connect an app by its link, or { catalogKey } for
+ * one of the list a super admin keeps. Takes exactly what a bot's own app takes, with the same checks. No Brick uses it until the
+ * person lets one (POST /api/me/apps/:id/bricks).
+ *
+ * `requestKey` (optional, up to 200 characters) makes a repeat safe: the game sends one key per attempt, and the same key from the
+ * same person answers the app it first made with 200 instead of making another (201 is the first time). A key that comes back with a
+ * different link, name or sign-in kind is refused with 409. Without a key every request makes an app, as before.
  */
 export async function POST(request: NextRequest) {
   return appsRoute(request, METHODS, 'adding an app', async (user, respond) => {
@@ -40,9 +44,10 @@ export async function POST(request: NextRequest) {
       if (!made) return respond({ error: NOT_FOUND }, 404);
       return respond({ id: made.id }, made.created ? 201 : 200);
     }
-    const parsed = addConnectionSchema.safeParse(body);
+    const parsed = addLinkSchema.safeParse(body);
     if (!parsed.success) return respond({ error: unsendableIssueMessage(parsed.error.issues) ?? 'Invalid input data', details: z.treeifyError(parsed.error) }, 400);
-    const connection = await createConnection(user.id, { ...parsed.data, source: 'link' });
-    return respond({ id: connection.id, name: connection.name }, 201);
+    const { requestKey, ...input } = parsed.data;
+    const made = await connectByLink(user.id, input, requestKey);
+    return respond({ id: made.id, name: made.name }, made.created ? 201 : 200);
   });
 }

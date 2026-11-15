@@ -1380,6 +1380,9 @@ model AppConnection {
   source      String   @default("link") @db.VarChar(20)
   // The entry of the super admin's list it was made from (source = listed), so the list can say "Connected" and a person has one
   catalogKey  String?  @map("catalog_key") @db.VarChar(60)
+  // The key the game sent with an app added by its link (POST /api/me/apps { requestKey }): the same key from the same person is the
+  // same request, so a retry answers the first app instead of making a second. Optional; an app made without one has none.
+  requestKey  String?  @map("request_key") @db.VarChar(200)
   // A ready-made app made through the adapter (source = ready_made, OFF until Khalid says): which app, and the adapter's id for this person's sign-in
   providerToolkit    String? @map("provider_toolkit") @db.VarChar(60)
   providerAccountId  String? @map("provider_account_id") @db.VarChar(255)
@@ -1425,6 +1428,7 @@ model AppConnection {
 
   @@unique([ownerId, catalogKey])
   @@unique([ownerId, providerToolkit])
+  @@unique([ownerId, requestKey])
   @@index([ownerId])
   @@index([universeId])
   @@map("app_connections")
