@@ -22,7 +22,13 @@ export default function AppsDemandPage() {
   const [days, setDays] = useState(30);
   const [report, setReport] = useState<DemandReport | null>(null);
   const [failed, setFailed] = useState(false);
-  const [open, setOpen] = useState<string | null>(null);
+  const [open, setOpenKey] = useState<string | null>(null);
+  // What a refused save said. It lives here, not in the sheet: reading the page again after a stale save makes a new sheet (it is keyed by the App's version), which would clear it before it is read
+  const [note, setNote] = useState<string | null>(null);
+  const setOpen = (key: string | null) => {
+    setNote(null);
+    setOpenKey(key);
+  };
   // Only the latest read may show: a slower read of other days must not land on top of the days now showing
   const latest = useRef(0);
 
@@ -133,7 +139,7 @@ export default function AppsDemandPage() {
 
       <Sheet open={app !== null} onOpenChange={(next) => !next && setOpen(null)}>
         <SheetContent side="bottom" data-testid="apps-sheet">
-          {app && report && <RouteSheet key={`${app.key}:${app.routeVersion}`} app={app} days={report.days} onClose={() => setOpen(null)} onSaved={load} />}
+          {app && report && <RouteSheet key={`${app.key}:${app.routeVersion}`} app={app} days={report.days} note={note} onNote={setNote} onClose={() => setOpen(null)} onSaved={load} />}
         </SheetContent>
       </Sheet>
     </div>
@@ -141,15 +147,17 @@ export default function AppsDemandPage() {
 }
 
 /** One App: its numbers, and "Runs on" with the note that people see no change. */
-function RouteSheet({ app, days, onClose, onSaved }: { app: AppRow; days: number; onClose: () => void; onSaved: () => Promise<void> }) {
+function RouteSheet({ app, days, note, onNote, onClose, onSaved }: { app: AppRow; days: number; note: string | null; onNote: (words: string | null) => void; onClose: () => void; onSaved: () => Promise<void> }) {
   const [route, setRoute] = useState<AppRouteName>(app.route);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const split = byRouteLine(app);
+  const shown = error ?? note;
 
   const save = async () => {
     setSaving(true);
     setError(null);
+    onNote(null);
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/admin/app-routes/${encodeURIComponent(app.key)}`, {
@@ -159,8 +167,13 @@ function RouteSheet({ app, days, onClose, onSaved }: { app: AppRow; days: number
       });
       if (response.status === 409) {
         const body = (await response.json().catch(() => null)) as { code?: string; why?: string[] } | null;
-        setError(body?.code === 'stale' ? 'Someone moved this App since you opened it. It is reloaded: look again and save.' : (body?.why?.join(' ') ?? 'Our own version is not ready to run this App yet.'));
-        if (body?.code === 'stale') await onSaved();
+        if (body?.code === 'stale') {
+          // Said once, kept by the page, then the page is read again: the sheet that opens next shows the newer state with this note
+          onNote('Someone moved this App since you opened it. It is reloaded: look again and save.');
+          await onSaved();
+          return;
+        }
+        setError(body?.why?.join(' ') ?? 'Our own version is not ready to run this App yet.');
         return;
       }
       if (!response.ok) throw new Error('save');
@@ -208,9 +221,9 @@ function RouteSheet({ app, days, onClose, onSaved }: { app: AppRow; days: number
         {app.onOwnVersionAtMostMicros !== null && app.byRoute.composio.uses > 0 && <> The same {app.byRoute.composio.uses.toLocaleString('en')} uses would cost us at most {dollars(app.onOwnVersionAtMostMicros)} on our own version.</>} Runs already going finish where they started. You can move it back any time.
       </p>
 
-      {error && (
+      {shown && (
         <p role="alert" className="text-sm text-destructive" data-testid="apps-sheet-error">
-          {error}
+          {shown}
         </p>
       )}
       <div className="flex justify-end gap-2">

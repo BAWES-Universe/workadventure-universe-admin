@@ -146,6 +146,33 @@ describe('Apps: use and demand', () => {
     expect(await within(sheet).findByTestId('apps-sheet-error')).toHaveTextContent('Someone moved this App since you opened it');
   });
 
+  it('keeps the stale-save note when reading the page again shows the newer version of the App', async () => {
+    let version = 0;
+    const read = () => report({ apps: [app({ routeVersion: version, route: version > 0 ? 'universe' : 'composio', own: { ready: true, why: [], passedChecksOn: null, topPriceMicros: 100 } })] });
+    fetchMock.mockImplementation((url: string, init?: { method?: string }) => {
+      if (init?.method === 'PUT') {
+        version = 1;
+        return Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve({ code: 'stale', route: 'universe', version: 1 }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(read()) });
+    });
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    let sheet = await screen.findByTestId('apps-sheet');
+    fireEvent.click(within(sheet).getByTestId('apps-route-universe'));
+    fireEvent.click(within(sheet).getByTestId('apps-route-save'));
+    // The sheet is made again for the newer version, and the note is still there to read
+    await waitFor(() => expect(screen.getByTestId('apps-runs-on-video')).toHaveTextContent('Runs on Universe'));
+    sheet = screen.getByTestId('apps-sheet');
+    expect(within(sheet).getByTestId('apps-sheet-error')).toHaveTextContent('Someone moved this App since you opened it');
+    // Opening it again later starts clean
+    fireEvent.keyDown(sheet, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByTestId('apps-sheet')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    expect(within(await screen.findByTestId('apps-sheet')).queryByTestId('apps-sheet-error')).not.toBeInTheDocument();
+  });
+
   it('goes back to Orbit home for anyone who is not a super admin, and offers a retry when the read fails', async () => {
     answer(403);
     const { unmount } = render(<AppsDemandPage />);
