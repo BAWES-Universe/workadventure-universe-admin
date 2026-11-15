@@ -124,7 +124,10 @@ export function draftRule(input: DraftInput): Drafted {
   const taskKey = input.taskKey ? String(input.taskKey) : null;
   const given: RuleScope | null = isOne(RULE_SCOPES, input.scope) ? input.scope : null;
 
-  const scope: RuleScope | null = given ?? (taskKey ? 'task' : null);
+  // Said during a task, "this task" is the plain reading, unless the person also named a recurring period ("$5 a month"): that is not
+  // about one task, so it is asked where it applies, and the period they said is kept
+  const recurring = input.period === 'day' || input.period === 'month';
+  const scope: RuleScope | null = given ?? (taskKey && !recurring ? 'task' : null);
   if (scope === null) {
     const brick = input.botName?.trim() || 'this Brick';
     return {

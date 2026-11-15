@@ -34,6 +34,15 @@ describe('what a rule said in chat means', () => {
     expect(drafted).toMatchObject({ ok: true, draft: { scope: 'task', taskKey: 'job1', botId: 'brick1', period: 'task', capMicros: 1_000_000 } });
   });
 
+  it('said during a task with a day or a month, it is not "this task": where it applies is asked, and the period said is kept', () => {
+    const asked = draftRule({ botId: 'brick1', botName: 'Scout', taskKey: 'job1', capMicros: 5_000_000, period: 'month' });
+    expect(asked).toMatchObject({ ok: false, reason: 'needs_answer', ask: { about: 'scope' } });
+    // Once it is said where, the month stands, and it is not turned into a rule for one task
+    expect(draftRule({ botId: 'brick1', taskKey: 'job1', scope: 'bot', capMicros: 5_000_000, period: 'month' })).toMatchObject({ ok: true, draft: { scope: 'bot', taskKey: null, period: 'month' } });
+    // "For each task" said during a task is still this task
+    expect(draftRule({ botId: 'brick1', taskKey: 'job1', capMicros: 5_000_000, period: 'task' })).toMatchObject({ ok: true, draft: { scope: 'task', period: 'task' } });
+  });
+
   it('"only use my accounts" needs no period and no amount', () => {
     const drafted = draftRule({ botId: 'brick1', scope: 'person', onlyOwnAccounts: true });
     expect(drafted).toMatchObject({ ok: true, draft: { scope: 'person', botId: null, taskKey: null, period: null, capMicros: null, onlyOwnAccounts: true, covers: 'all' } });
