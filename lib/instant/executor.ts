@@ -5,6 +5,7 @@ import { getAdapter } from '@/lib/app-adapter';
 import type { InstantAdapter, InstantCall, InstantLog, ReadyMadeAdapter } from '@/lib/app-adapter/types';
 import { recordMeterEvent } from '@/lib/meter';
 import { monthOf } from '@/lib/meter-values';
+import { brickHasApp } from '@/lib/instant/asker';
 import { getInstantFunds, type InstantFunds } from '@/lib/instant/funds';
 import { getInstantLimits, getInstantPause, pauseInstant } from '@/lib/instant/state';
 import {
@@ -134,6 +135,8 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
 
   const admitted = admitInstantTool(input.tool, input.arguments);
   if (!admitted.ok) return refuse(admitted.reason);
+  // Nothing is on for a Brick by default: only an App its owner switched on for this Brick can run
+  if (!(await brickHasApp(input.botId, admitted.toolkit))) return refuse('not_offered');
   if (admitted.topMicros > (limits.maxRunMicros ?? 0)) return refuse('too_costly');
 
   // A rule the owner said in chat that says no is final, and nothing is held or sent

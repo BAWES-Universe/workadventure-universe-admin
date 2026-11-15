@@ -14,6 +14,7 @@ import { checkPriceDrift, forgetDriftClock, sweepInstant } from '@/lib/instant/s
 import { denyInstantOnSessions } from '@/lib/instant/sessions';
 import { admitInstantTool } from '@/lib/instant/values';
 import { POST as runRoute } from '@/app/api/instant/run/route';
+import { GET as toolsRoute } from '@/app/api/instant/tools/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const tag = randomUUID().slice(0, 8);
@@ -103,6 +104,12 @@ const callId = () => `call-${randomUUID()}`;
 const ask = (over: Record<string, unknown> = {}) => ({ botId: brick, personId: sara, tool: 'EXA_SEARCH', arguments: { query: 'weather' }, callId: callId(), ...over });
 const setLimits = (over: Record<string, number | null> = {}) =>
   saveInstantLimits({ maxRunMicros: 50_000, exposureCeilingMicros: 1_000_000, pauseFailureRateBps: 5_000, pauseMinRuns: 10, ...over }, sara);
+/** The owner switches an App on for a Brick: a ready-made App of theirs, granted to that Brick (nothing is on by default). */
+async function giveApp(botId: string, ownerId: string, toolkit: string, enabled = true) {
+  const connection = await prisma.appConnection.create({ data: { ownerId, name: `${toolkit}-${tag}`, serverUrl: `https://backend.composio.dev/tool_router/trs_${toolkit}_${randomUUID().slice(0, 6)}/mcp`, authType: 'none', source: 'ready_made', providerToolkit: toolkit } as never });
+  await prisma.botMcpServer.create({ data: { botId, name: toolkit, serverUrl: connection.serverUrl, connectionId: connection.id, enabled } as never });
+  return connection;
+}
 const runOf = (id: string) => prisma.instantRun.findUniqueOrThrow({ where: { id } });
 const runIdOf = async (key: string) => (await prisma.instantRun.findUniqueOrThrow({ where: { runKey: instantRunKey(brick, key) } })).id;
 
@@ -121,6 +128,7 @@ run('the bounded Instant executor, in a real database', () => {
     forgetDriftClock();
     await resumeInstant(sara);
     await prisma.appSetting.deleteMany({ where: { key: { in: ['instant-limits'] } } });
+    await giveApp(brick, sara, 'exa');
   });
   afterEach(async () => {
     setAdapterForTests(undefined);
@@ -657,6 +665,61 @@ run('the bounded Instant executor, in a real database', () => {
     });
   });
 
+  describe('nothing is on for a Brick unless its owner switched that App on for it', () => {
+    const toolNames = async () => ((await (await toolsRoute(new NextRequest(`http://localhost/api/instant/tools?botId=${brick}`, { headers: { authorization: `Bearer ${SERVICE_TOKEN}` } }))).json()) as { tools: { name: string }[] }).tools.map((tool) => tool.name).sort();
+
+    it('a Brick with no App on is offered nothing and refused anything, and the provider and the credit books are never touched', async () => {
+      await setLimits();
+      await prisma.appConnection.deleteMany({ where: { ownerId: sara } });
+      setInstantFunds(fakeFunds(1_000_000).funds);
+      const p = fakeProvider();
+      p.instant.tool.mockImplementation((async (slug: string) => ({ slug, toolkit: 'x', description: null, inputSchema: {}, instantSupported: true, priceWords: null })) as never);
+      setAdapterForTests(p.adapter);
+      expect(await toolNames()).toEqual([]);
+      const f = fakeFunds(1_000_000);
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'not_offered' });
+      expect(p.instant.run).not.toHaveBeenCalled();
+      expect(f.funds.reserve).not.toHaveBeenCalled();
+    });
+
+    it('only the Apps the owner switched on are offered and run: one App, not all of them', async () => {
+      await setLimits();
+      setInstantFunds(fakeFunds(1_000_000).funds);
+      const p = fakeProvider();
+      p.instant.tool.mockImplementation((async (slug: string) => ({ slug, toolkit: 'x', description: null, inputSchema: {}, instantSupported: true, priceWords: null })) as never);
+      setAdapterForTests(p.adapter);
+      const names = await toolNames();
+      expect(names).toEqual(['EXA_ANSWER', 'EXA_GET_CONTENTS_ACTION', 'EXA_SEARCH']);
+      const f = fakeFunds(1_000_000);
+      // Exa is on: it runs. Tavily is not on: it is refused without a hold.
+      expect(await runInstant(ask({ tool: 'TAVILY_SEARCH' }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'not_offered' });
+      expect(f.funds.reserve).not.toHaveBeenCalled();
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
+    });
+
+    it('an App the owner switched off for the Brick, or only has on another Brick, is not on for this one', async () => {
+      await setLimits();
+      await prisma.appConnection.deleteMany({ where: { ownerId: sara } });
+      await giveApp(brick, sara, 'tavily', false);
+      const other = (await prisma.bot.create({ data: { name: `Other ${tag}`, ownerId: sara, roomId: null } as never })).id;
+      await giveApp(other, sara, 'exa');
+      const f = fakeFunds(1_000_000);
+      const p = fakeProvider();
+      expect(await runInstant(ask({ tool: 'TAVILY_SEARCH' }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ reason: 'not_offered' });
+      expect(await runInstant(ask(), { adapter: p.adapter, funds: f.funds })).toMatchObject({ reason: 'not_offered' });
+      expect(f.funds.reserve).not.toHaveBeenCalled();
+      await prisma.bot.delete({ where: { id: other } });
+    });
+
+    it("google_maps matches the provider's googlemaps name", async () => {
+      await setLimits();
+      await giveApp(brick, sara, 'googlemaps');
+      const f = fakeFunds(1_000_000);
+      const p = fakeProvider();
+      expect(await runInstant(ask({ tool: 'GOOGLE_MAPS_GEOCODE_LOCATION', arguments: { latitude: 1, longitude: 2 } }), { adapter: p.adapter, funds: f.funds })).not.toMatchObject({ reason: 'not_offered' });
+    });
+  });
+
   describe('the same call never runs or pays twice', () => {
     it('a retry with the same call id gets the same run back and the provider is called once', async () => {
       await setLimits();
@@ -821,6 +884,10 @@ run('the bounded Instant executor, in a real database', () => {
   });
 
   describe('existing sessions are read back before Instant can be switched on (test 9)', () => {
+    // Only the connections these tests make count
+    beforeEach(async () => {
+      await prisma.appConnection.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
+    });
     const connection = (name: string, url: string) =>
       prisma.appConnection.create({ data: { ownerId: sara, name, serverUrl: url, authType: 'none', source: 'ready_made', providerToolkit: name } as never });
 

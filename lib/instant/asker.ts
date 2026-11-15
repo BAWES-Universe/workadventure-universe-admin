@@ -15,3 +15,25 @@ export async function ownerAsker(botId: string, input: { forOwner?: boolean; req
   const asker = await findUserByIdentifier(input.requesterKey);
   return asker && !asker.isGuest && asker.id === bot.ownerId ? bot.ownerId : null;
 }
+
+/** An App's name compared loosely, so "google_maps" and "googlemaps" are the same App. */
+export const appKeyOf = (toolkit: string): string => toolkit.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+/**
+ * The Apps this Brick's owner has switched on for THIS Brick: an enabled grant of one of the owner's own ready-made Apps. Nothing is on
+ * for a Brick by default, so a Brick can rely on the model alone or use just the Apps its owner gave it. An Instant tool is offered and
+ * run only for an App in this list.
+ */
+export async function brickApps(botId: string): Promise<Set<string>> {
+  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { ownerId: true } });
+  if (!bot?.ownerId) return new Set();
+  const grants = await prisma.botMcpServer.findMany({
+    where: { botId, enabled: true, connection: { ownerId: bot.ownerId, providerToolkit: { not: null } } },
+    select: { connection: { select: { providerToolkit: true } } },
+  });
+  return new Set(grants.map((grant) => appKeyOf(grant.connection?.providerToolkit ?? '')).filter(Boolean));
+}
+
+export async function brickHasApp(botId: string, toolkit: string): Promise<boolean> {
+  return (await brickApps(botId)).has(appKeyOf(toolkit));
+}
