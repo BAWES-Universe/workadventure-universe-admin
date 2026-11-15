@@ -682,9 +682,19 @@ async function overlapsOf(db: Tx, checked: Checked, ids: readonly string[], forP
   const mine = new Set(ids);
   const out: Preview['overlaps'] = [];
   const labels = await db.grantProgram.findMany({ where: { id: { in: others.map((rule) => rule.programId) } }, select: { id: true, label: true } });
-  for (const other of others) {
-    const theirs = await idsReached(db, other);
-    const wide = other.recipient.kind === 'all' || other.recipient.kind === 'new_from';
+  // A program saved twice at once (its version issuing now and the one waiting to replace it) is one overlap, with everyone either reaches
+  const grouped = new Map<string, { other: RuleFacts; theirs: Set<string>; wide: boolean }>();
+  for (const rule of others) {
+    const reached = await idsReached(db, rule);
+    const wideRule = rule.recipient.kind === 'all' || rule.recipient.kind === 'new_from';
+    const found = grouped.get(rule.programId);
+    if (!found) grouped.set(rule.programId, { other: rule, theirs: new Set(reached), wide: wideRule });
+    else {
+      for (const id of reached) found.theirs.add(id);
+      found.wide = found.wide || wideRule;
+    }
+  }
+  for (const { other, theirs, wide } of grouped.values()) {
     const shared = wide ? mine.size : [...theirs].filter((id) => mine.has(id)).length;
     // A rule that reaches by date or everyone overlaps with any group; a changing group counts only members now
     if (shared === 0 && !(checked.recipient.kind === 'all' || checked.recipient.kind === 'new_from')) continue;

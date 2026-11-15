@@ -722,6 +722,15 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     const duringWait = await refuses(() => rules.saveException({ categoryId: 'computers', amount: 3 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-c1', 'fu-c2'] }, claimEndsAt: at('2027-04-15T00:00:00Z') }, root, FU));
     check('a rule saved for a period that ends before a waiting version takes over still clashes with the version issuing until then', duringWait?.code === 'clash', duringWait?.code);
 
+    // A program with a version issuing and one waiting is still one program: a rule spanning both is one clash and one overlap, with everyone
+    const spanning = { categoryId: 'computers' as const, amount: 3 * M, schedule: 'once' as const, recipients: { kind: 'people' as const, userIds: ['fu-c1', 'fu-c2'] } };
+    const spanClash = await refuses(() => rules.saveException(spanning, root, FU));
+    const spanFindings = (spanClash?.error as { clashes?: { programId: string; userIds: string[] }[] } | undefined)?.clashes ?? [];
+    check('a rule that spans a program’s issuing version and its waiting one is one clash for that program, naming each person once', spanClash?.code === 'clash' && spanFindings.filter((f) => f.programId === waitingGroup.programId).length === 1 && spanFindings.find((f) => f.programId === waitingGroup.programId)?.userIds.length === 2, spanFindings);
+    const spanPreview = await rules.previewGrant('exception', spanning, FU);
+    const spanOverlaps = spanPreview.overlaps.filter((o) => o.programId === waitingGroup.programId);
+    check('and one overlap line for it, counting each person once', spanOverlaps.length === 1 && spanOverlaps[0].people === 2, spanOverlaps);
+
     // A shared Instant Apps amount answers the earlier asks of everyone it reaches, also when the pool was made by the first of the others
     {
       const requests = await import('@/lib/meter-requests');
