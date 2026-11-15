@@ -222,8 +222,15 @@ export const addConnectionSchema = createMcpServerSchema
   .safeExtend({ source: z.enum(['link', 'listed']).default('link') })
   .omit({ enabled: true });
 
+/**
+ * Adding an app by its link (POST /api/me/apps): the same input as any link, and an optional `requestKey` the game makes once per
+ * attempt. The same key from the same person is the same request, so a repeat (the sheet retries after its wait) answers the
+ * first app and never makes a second. Left out, every request makes an app, as before.
+ */
+export const addLinkSchema = addConnectionSchema.safeExtend({ requestKey: z.string().trim().min(1, 'requestKey must not be empty').max(200, 'requestKey must be at most 200 characters').nullish() });
+
 /** A connection made from a person's own input is "link"; the list (lib/app-catalog.ts) adds `catalogKey` for its own. */
-type NewConnection = Omit<z.infer<typeof addConnectionSchema>, 'source'> & { source: 'link' | 'listed' | 'ready_made' | 'github'; catalogKey?: string | null; providerToolkit?: string | null; providerAccountId?: string | null };
+type NewConnection = Omit<z.infer<typeof addConnectionSchema>, 'source'> & { source: 'link' | 'listed' | 'ready_made' | 'github'; catalogKey?: string | null; requestKey?: string | null; providerToolkit?: string | null; providerAccountId?: string | null };
 
 /** The person connects an app. The way in is stored encrypted and never read back by a screen. */
 export async function createConnection(ownerId: string, input: NewConnection, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<AppConnection> {
@@ -238,10 +245,45 @@ export async function createConnection(ownerId: string, input: NewConnection, db
       headers: input.headers ?? undefined,
       source: input.source,
       catalogKey: input.catalogKey ?? null,
+      requestKey: input.requestKey ?? null,
       providerToolkit: input.providerToolkit ?? null,
       providerAccountId: input.providerAccountId ?? null,
     },
   });
+}
+
+/**
+ * The person adds an app by its link. With a `requestKey`, a repeat of the same request answers the app it first made (`created`
+ * false) instead of making another: also two at once, since the database allows one app per person and key and the one that loses
+ * answers the winner's. A key that comes back with a different app (another link, name or sign-in kind) is refused, never
+ * answered with the first app, so a person who changed the link is not told it was added. Without a key, it always makes one.
+ */
+export async function connectByLink(ownerId: string, input: Omit<NewConnection, 'source' | 'requestKey'>, requestKey?: string | null): Promise<{ id: string; name: string; created: boolean }> {
+  if (!requestKey) {
+    const made = await createConnection(ownerId, { ...input, source: 'link' });
+    return { id: made.id, name: made.name, created: true };
+  }
+  const repeat = async () => {
+    const first = await prisma.appConnection.findFirst({ where: { ownerId, requestKey }, select: { id: true, name: true, serverUrl: true, authType: true } });
+    if (!first) return null;
+    if (first.name !== input.name || first.serverUrl !== input.serverUrl || first.authType !== input.authType) {
+      throw new AppConnectionError(409, 'That requestKey was already used for a different app. Send a new requestKey for a new request.');
+    }
+    return { id: first.id, name: first.name, created: false };
+  };
+  const earlier = await repeat();
+  if (earlier) return earlier;
+  try {
+    const made = await createConnection(ownerId, { ...input, source: 'link', requestKey });
+    return { id: made.id, name: made.name, created: true };
+  } catch (error) {
+    // Two requests with one key at once: the database let one in, the other answers it
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      const winner = await repeat();
+      if (winner) return winner;
+    }
+    throw error;
+  }
 }
 
 /** What a screen may know about a connection: never the way in itself, only whether it still works. */
