@@ -493,6 +493,46 @@ run('the bounded Instant executor, in a real database', () => {
       expect(f.left()).toBe(1_000_000);
     });
 
+    it('a log line that does not name the run id is still ours when the search by id found it, but another id never is', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'network', status: null });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const row = await runOf(await runIdOf(id));
+      // A line of somebody else's id is not this run's
+      p.script.byUser.set(row.providerUserId, [{ ...p.line('someone-else', 'failed', null), userId: 'someone-else' }]);
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect((await runOf(row.id)).state).toBe('ambiguous');
+      // A line with no id on it, found by the search for this id, is
+      p.script.byUser.set(row.providerUserId, [{ ...p.line('x', 'failed', null), userId: null }]);
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(await runOf(row.id)).toMatchObject({ state: 'failed', customerState: 'released' });
+    });
+
+    it('Composio is asked outside the database transaction: no lock is held while it is', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'timeout', status: null });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const row = await runOf(await runIdOf(id));
+      const held: number[] = [];
+      const asking = async () => {
+        const rows = await prisma.$queryRaw<{ n: bigint }[]>`SELECT count(*)::bigint AS n FROM pg_locks WHERE locktype = 'advisory' AND granted`;
+        held.push(Number(rows[0].n));
+      };
+      p.instant.findLogs.mockImplementation((async () => {
+        await asking();
+        return [p.line(row.providerUserId, 'failed', null)];
+      }) as never);
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(held.length).toBeGreaterThan(0);
+      expect(held.every((n) => n === 0)).toBe(true);
+    });
+
     it('no log yet is not a decision: the run stays unclear and the hold stays until the wait is over', async () => {
       await setLimits({ unclearWaitMinutes: 30 });
       const p = fakeProvider();

@@ -277,6 +277,8 @@ const reasonOfRejection = (code: string | null, status: number): InstantReason =
 /** What came back from Composio, settled into the run. */
 async function finishCall(runId: string, call: InstantCall, ctx: Ctx): Promise<InstantOutcome> {
   const limits = await getInstantLimits();
+  // Composio's log is read before the transaction opens, never inside it: a slow Composio must not hold a connection or a lock
+  const loggedCharge = call.kind === 'done' && call.successful && call.chargeMicros === null && call.logId ? await chargeFromLog(ctx.adapter, call.logId) : null;
   const outcome = await withRun(runId, async (run, tx): Promise<InstantOutcome> => {
     // Settled already (a sweep got there first): that is the answer
     if (run.state !== 'sent' && run.state !== 'ambiguous') return outcomeOf(run);
@@ -313,8 +315,7 @@ async function finishCall(runId: string, call: InstantCall, ctx: Ctx): Promise<I
           return { status: 'failed', runId: run.id, reason: 'provider_failed', message: REASON_WORDS.provider_failed };
         }
         // It worked: Composio's own charge, from the answer or from its log, else the top price waits (never read as free)
-        let charge = call.chargeMicros;
-        if (charge === null && call.logId) charge = await chargeFromLog(ctx.adapter, call.logId);
+        const charge = call.chargeMicros ?? loggedCharge;
         const saved = await tx.instantRun.update({
           where: { id: run.id },
           data: { state: 'succeeded', reason: null, finishedAt: ctx.now, providerLogId: call.logId, providerState: 'pending', checkAfter: new Date(ctx.now.getTime() + limits.chargeWaitMinutes * MINUTE) },
@@ -453,6 +454,35 @@ async function recoverOutput(adapter: ReadyMadeAdapter | null, logId: string): P
 
 // ---------- Looking an unfinished run up ----------
 
+/** Whether a run still has to be looked up at Composio: one still "sent" past its wait, one with no answer, a finished one whose charge is not known. */
+function needsLookup(run: Row, now: Date, limits: InstantLimits): boolean {
+  const waitedPast = (from: Date | null, minutes: number) => !from || now.getTime() - from.getTime() >= minutes * MINUTE;
+  const finishedOpen = (run.state === 'succeeded' || run.state === 'failed') && run.providerState === 'pending';
+  return run.state === 'ambiguous' || (run.state === 'sent' && waitedPast(run.sentAt, limits.sentWaitMinutes)) || finishedOpen;
+}
+
+/**
+ * Composio's log line of a run, found BY THE RUN'S OWN ID (or the line the answer named). Done before any database transaction opens,
+ * so a slow or rate-limited Composio never holds a connection or a lock. Null when Composio cannot be asked: nothing is decided on a
+ * guess, and the run stays as it is until it can be. `line: null` means Composio answered and has no line of it.
+ */
+async function lookUp(run: Row, instant: InstantAdapter, now: Date): Promise<{ line: InstantLog | null } | null> {
+  try {
+    let line: InstantLog | null = null;
+    if (run.providerLogId) line = (await instant.log(run.providerLogId))?.log ?? null;
+    if (!line) {
+      const found = await instant.findLogs({ userId: run.providerUserId, fromMs: (run.sentAt ?? run.createdAt).getTime() - 60 * 1000, toMs: now.getTime() + 60 * 1000 });
+      // The search already asked for this run's id. A line that names the id must name this one; a line that names none is taken on
+      // that search, and only when it is the same tool, so a log shape without the id never turns a real run into "no log".
+      line = found.find((entry) => entry.userId === run.providerUserId) ?? found.find((entry) => entry.userId === null && (entry.tool === null || entry.tool === run.toolSlug)) ?? null;
+    }
+    return { line };
+  } catch (error) {
+    console.error('[Instant] Could not look the run up:', error instanceof Error ? error.message : 'unknown');
+    return null;
+  }
+}
+
 /**
  * Settles what can be settled on a run that has not finished honestly: one still "sent" past its wait, one with no answer, a worked
  * run whose charge is not known, a failed one whose charge is not known. Looks Composio's log up BY THE RUN'S OWN ID.
@@ -466,6 +496,10 @@ async function recoverOutput(adapter: ReadyMadeAdapter | null, logId: string): P
 export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
   const limits = await getInstantLimits();
   const instant = instantAdapter(ctx.adapter);
+  // Ask Composio first, outside the transaction; the locked read below decides what the answer means for the run as it is by then
+  const seen = await prisma.instantRun.findUnique({ where: { id: runId } });
+  if (!seen) return;
+  const looked = instant && needsLookup(seen, ctx.now, limits) ? await lookUp(seen, instant, ctx.now) : null;
   await withRun(runId, async (run, tx) => {
     const now = ctx.now;
     const waitedPast = (from: Date | null, minutes: number) => !from || now.getTime() - from.getTime() >= minutes * MINUTE;
@@ -495,25 +529,9 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
     }
 
     // A run that just went out is still in flight: it is not looked up (and never called unclear) until its wait is over
-    const finishedOpen = (run.state === 'succeeded' || run.state === 'failed') && run.providerState === 'pending';
-    const needsLookup = run.state === 'ambiguous' || (run.state === 'sent' && waitedPast(run.sentAt, limits.sentWaitMinutes)) || finishedOpen;
-    if (!needsLookup) return;
-
-    if (!instant) return;
-
-    // Which log line is ours: the one the run's own id produced (or the line the answer named)
-    let line: InstantLog | null = null;
-    try {
-      if (run.providerLogId) line = (await instant.log(run.providerLogId))?.log ?? null;
-      if (!line) {
-        const found = await instant.findLogs({ userId: run.providerUserId, fromMs: (run.sentAt ?? run.createdAt).getTime() - 60 * 1000, toMs: now.getTime() + 60 * 1000 });
-        line = found.find((entry) => entry.userId === run.providerUserId) ?? null;
-      }
-    } catch (error) {
-      // Composio cannot be asked: nothing is decided on a guess, and the run stays as it is until it can be
-      console.error('[Instant] Could not look the run up:', error instanceof Error ? error.message : 'unknown');
-      return;
-    }
+    if (!needsLookup(run, now, limits)) return;
+    if (!looked) return;
+    const line = looked.line;
 
     const topMicros = asNumber(run.topMicros);
     const deadline = run.checkAfter ?? new Date((run.sentAt ?? run.createdAt).getTime() + limits.unclearWaitMinutes * MINUTE);
