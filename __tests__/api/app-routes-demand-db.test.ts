@@ -281,6 +281,22 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
     });
   });
 
+  it('records a failed run when a progress message comes before the error in a stream, for a text request id', async () => {
+    const { adapter, serverId } = await connectedAndGranted();
+    adapter.callLink.mockImplementationOnce(async () => ({
+      status: 200,
+      contentType: 'text/event-stream',
+      sessionId: 'mcp-1',
+      body: ['data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1}}', 'data: {"jsonrpc":"2.0","id":"mail-1","error":{"code":-32000,"message":"refused"}}', ''].join('\n'),
+    }));
+    mockUser.current = { id: sara, email: `sara-${tag}@example.test` };
+    const response = await linkApp(
+      request('/api/ready-made/link', { method: 'POST', token: SERVICE_TOKEN, body: { botId: saraBrick, serverId, requesterKey: `sara-${tag}`, callId: 'link-text-id', message: { jsonrpc: '2.0', id: 'mail-1', method: 'tools/call', params: { name: 'GMAIL_FETCH_EMAILS', arguments: {} } } } }),
+    );
+    expect(response.status).toBe(200);
+    expect(await prisma.appUseOutcome.findUniqueOrThrow({ where: { eventId: `app:${saraBrick}:link-text-id` } })).toMatchObject({ outcome: 'failed' });
+  });
+
   describe('Apps: use and demand (test 16)', () => {
     const event = (id: string, who: string, over: { quantity?: number; cost?: number | null; toolkit?: string; at?: Date; provider?: string } = {}) =>
       recordMeterEvent({
@@ -323,7 +339,7 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
       const after = await demand();
       const gmail = after.apps.find((app) => app.key === KEY)!;
       expect(gmail).toMatchObject({ name: 'Gmail', uses: 4, people: 2, costMicros: 1500, unpriced: 1, ended: 2, failed: 1, kind: 'own', route: 'composio' });
-      expect(gmail.byRoute.composio).toEqual({ uses: 4, costMicros: 1500 });
+      expect(gmail.byRoute.composio).toEqual({ uses: 4, costMicros: 1500, unpriced: 1 });
       const notion = after.apps.find((app) => app.key === OTHER)!;
       expect(notion).toMatchObject({ name: 'Notion', uses: 1, people: 1, costMicros: 2000 });
       // Sorted by what it costs us
@@ -412,6 +428,16 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
       const row = (await demand()).asked.find((item) => item.name.toLowerCase().includes(`caf`) && item.name.includes(tag));
       expect(row).toMatchObject({ times: 3, people: 2 });
       expect(await prisma.appAsk.count({ where: { nameKey: `cafe ${tag}` } })).toBe(2);
+    });
+
+    it('does not count an App that is on the list under an accented name', async () => {
+      const entry = await prisma.appCatalogEntry.create({ data: { key: `coffee-shop-${tag}`, name: `Café Shop ${tag}`, blurb: 'Coffee', serverUrl: 'https://mcp.example/coffee', enabled: true } });
+      try {
+        expect(await (await ask(`Cafe Shop ${tag}`, sara)).json()).toEqual({ counted: false, reason: 'exists' });
+        expect(await (await ask(`CAFÉ SHOP ${tag}`, sara)).json()).toEqual({ counted: false, reason: 'exists' });
+      } finally {
+        await prisma.appCatalogEntry.delete({ where: { id: entry.id } });
+      }
     });
 
     it('does not count an App that is already there', async () => {

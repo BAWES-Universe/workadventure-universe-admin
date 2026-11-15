@@ -238,7 +238,7 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
       route.provider === 'universe' && route.own
         ? await answerFromOwnVersion(route.own, input.message, callParams, { person: input.ownerId, providerAccountId: connection.providerAccountId, callId: input.callId ?? '' })
         : await adapter.callLink({ url: connection.serverUrl, message: input.message, sessionId: input.sessionId });
-    if (written) await recordOutcome(written.eventId, toolkit, written.provider, answer.status < 400 && !rpcError(answer.body, typeof input.message.id === 'number' ? input.message.id : undefined) && !/"isError"\s*:\s*true/.test(answer.body));
+    if (written) await recordOutcome(written.eventId, toolkit, written.provider, answer.status < 400 && !rpcError(answer.body, typeof input.message.id === 'number' || typeof input.message.id === 'string' ? input.message.id : undefined) && !/"isError"\s*:\s*true/.test(answer.body));
     return { status: 'done', answer };
   } catch (error) {
     console.error('[ReadyMade] Link failed:', error instanceof AdapterError ? error.message : error instanceof Error ? error.message : 'unknown');
@@ -332,7 +332,7 @@ export interface ReadyMadeTestResult {
 }
 
 /** The JSON of a link's answer, which may be plain JSON or an event stream holding it. */
-function linkJson(body: string, id?: number): Record<string, unknown> | null {
+function linkJson(body: string, id?: number | string): Record<string, unknown> | null {
   const attempt = (text: string) => {
     try {
       const value = JSON.parse(text);
@@ -356,7 +356,7 @@ function linkJson(body: string, id?: number): Record<string, unknown> | null {
 }
 
 /** The text of a JSON-RPC error carried in an answer that came with a 2xx status, or null when there is none. */
-function rpcError(body: string, id?: number): string | null {
+function rpcError(body: string, id?: number | string): string | null {
   const error = linkJson(body, id)?.error;
   if (error === undefined || error === null) return null;
   const message = typeof error === 'object' ? (error as { message?: unknown }).message : error;

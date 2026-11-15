@@ -26,7 +26,7 @@ const app = (over: Partial<AppRow> = {}): AppRow => ({
   failed: 4,
   refundedMicros: 3_000_000,
   allFailedRefunded: true,
-  byRoute: { composio: { uses: 412, costMicros: 118_400_000 }, universe: { uses: 0, costMicros: 0 } },
+  byRoute: { composio: { uses: 412, costMicros: 118_400_000, unpriced: 0 }, universe: { uses: 0, costMicros: null, unpriced: 0 } },
   route: 'composio',
   routeVersion: 0,
   routeChangedAt: null,

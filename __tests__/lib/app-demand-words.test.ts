@@ -30,9 +30,12 @@ describe('the words of Apps: use and demand', () => {
   });
 
   it('splits the cost by route and lists the asked-for counts', () => {
-    const app = { byRoute: { composio: { uses: 400, costMicros: 118_400_000 }, universe: { uses: 12, costMicros: 1_200_000 } } } as AppRow;
+    const app = { byRoute: { composio: { uses: 400, costMicros: 118_400_000, unpriced: 0 }, universe: { uses: 12, costMicros: 1_200_000, unpriced: 0 } } } as AppRow;
     expect(byRouteLine(app)).toBe('$118.40 on Composio (400 uses) · $1.20 on Universe (12 uses)');
-    expect(byRouteLine({ byRoute: { composio: { uses: 0, costMicros: 0 }, universe: { uses: 0, costMicros: 0 } } } as AppRow)).toBeNull();
+    expect(byRouteLine({ byRoute: { composio: { uses: 0, costMicros: null, unpriced: 0 }, universe: { uses: 0, costMicros: null, unpriced: 0 } } } as AppRow)).toBeNull();
+    // An unknown cost is never shown as free, and a partly known one says so
+    expect(byRouteLine({ byRoute: { composio: { uses: 3, costMicros: null, unpriced: 3 }, universe: { uses: 0, costMicros: null, unpriced: 0 } } } as AppRow)).toBe('No price yet on Composio (3 uses)');
+    expect(byRouteLine({ byRoute: { composio: { uses: 3, costMicros: 1_500_000, unpriced: 1 }, universe: { uses: 0, costMicros: null, unpriced: 0 } } } as AppRow)).toBe('$1.50 so far, 1 run has no price yet on Composio (3 uses)');
     expect(askedLine({ times: 64, people: 41 })).toBe('64 times · by 41 people');
   });
 });

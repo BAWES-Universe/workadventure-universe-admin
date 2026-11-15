@@ -25,8 +25,12 @@ export default function AppsDemandPage() {
   const [open, setOpenKey] = useState<string | null>(null);
   // What a refused save said. It lives here, not in the sheet: reading the page again after a stale save makes a new sheet (it is keyed by the App's version), which would clear it before it is read
   const [note, setNote] = useState<string | null>(null);
+  // Which App's sheet is open right now: a save that finishes late must only touch its own sheet
+  const openRef = useRef<string | null>(null);
+  openRef.current = open;
   const setOpen = (key: string | null) => {
     setNote(null);
+    openRef.current = key;
     setOpenKey(key);
   };
   // Only the latest read may show: a slower read of other days must not land on top of the days now showing
@@ -55,6 +59,10 @@ export default function AppsDemandPage() {
     setReport(null);
     load();
   }, [load]);
+
+  // A save can finish after the days were changed: it must read the days now shown, not the days it started with
+  const loadRef = useRef(load);
+  loadRef.current = load;
 
   const app = report?.apps.find((row) => row.key === open) ?? null;
 
@@ -139,7 +147,7 @@ export default function AppsDemandPage() {
 
       <Sheet open={app !== null} onOpenChange={(next) => !next && setOpen(null)}>
         <SheetContent side="bottom" data-testid="apps-sheet">
-          {app && report && <RouteSheet key={`${app.key}:${app.routeVersion}`} app={app} days={report.days} note={note} onNote={setNote} onClose={() => setOpen(null)} onSaved={load} />}
+          {app && report && <RouteSheet key={`${app.key}:${app.routeVersion}`} app={app} days={report.days} note={note} onNote={(words) => openRef.current === app.key && setNote(words)} onClose={() => openRef.current === app.key && setOpen(null)} onSaved={() => loadRef.current()} />}
         </SheetContent>
       </Sheet>
     </div>

@@ -41,7 +41,11 @@ export function setOwnVersionsForTests(versions: Record<string, OwnAppVersion> |
   override = versions;
 }
 
-export const ownVersionFor = (key: string): OwnAppVersion | null => (override ?? OWN_VERSIONS)[key] ?? null;
+export function ownVersionFor(key: string): OwnAppVersion | null {
+  const registry = override ?? OWN_VERSIONS;
+  // Own entries only: a key like "constructor" must not find something inherited from Object
+  return Object.prototype.hasOwnProperty.call(registry, key) ? (registry[key] ?? null) : null;
+}
 
 export const CHECK_WORDS: Record<keyof OwnAppVersion['checks'], string> = {
   sameInputsAndOutputs: 'the same inputs and outputs',

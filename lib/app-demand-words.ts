@@ -35,11 +35,19 @@ export function sheetLine(app: AppRow): string {
   return [plural(app.uses, 'use', 'uses'), plural(app.people, 'person', 'people'), failed && (refunded ? `${failed}, ${refunded}` : failed)].filter((part): part is string => !!part).join(' · ');
 }
 
+/** A route's cost: unknown is never shown as $0.00, and a partly known cost says so. */
+function routeCost(side: { costMicros: number | null; unpriced: number }): string {
+  if (side.costMicros === null) return 'No price yet';
+  return side.unpriced > 0 ? `${dollars(side.costMicros)} so far, ${plural(side.unpriced, 'run has', 'runs have')} no price yet` : dollars(side.costMicros);
+}
+
 /** What the last days cost us on each route, for the sheet. */
 export function byRouteLine(app: AppRow): string | null {
   const parts: string[] = [];
-  if (app.byRoute.composio.uses > 0) parts.push(`${dollars(app.byRoute.composio.costMicros)} on Composio (${plural(app.byRoute.composio.uses, 'use', 'uses')})`);
-  if (app.byRoute.universe.uses > 0) parts.push(`${dollars(app.byRoute.universe.costMicros)} on Universe (${plural(app.byRoute.universe.uses, 'use', 'uses')})`);
+  for (const [route, label] of [['composio', 'Composio'], ['universe', 'Universe']] as const) {
+    const side = app.byRoute[route];
+    if (side.uses > 0) parts.push(`${routeCost(side)} on ${label} (${plural(side.uses, 'use', 'uses')})`);
+  }
   return parts.length > 0 ? parts.join(' · ') : null;
 }
 

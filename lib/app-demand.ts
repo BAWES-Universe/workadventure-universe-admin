@@ -39,7 +39,8 @@ export interface AppRow {
   refundedMicros: number | null;
   allFailedRefunded: boolean;
   /** Uses and cost by the route the run took. */
-  byRoute: Record<AppRouteName, { uses: number; costMicros: number }>;
+  /** Uses and cost per route. `costMicros` is null when none of that route's runs has a price; `unpriced` counts the runs with none, so a partly known cost is never shown as the whole. */
+  byRoute: Record<AppRouteName, { uses: number; costMicros: number | null; unpriced: number }>;
   route: AppRouteName;
   routeVersion: number;
   routeChangedAt: string | null;
@@ -79,9 +80,11 @@ type Group = {
   refunded: bigint | null;
   failed_refunded: number;
   composio_uses: bigint;
-  composio_cost: bigint;
+  composio_cost: bigint | null;
   universe_uses: bigint;
-  universe_cost: bigint;
+  universe_cost: bigint | null;
+  composio_unpriced: number;
+  universe_unpriced: number;
 };
 
 /** The report for the last `days` whole UTC days up to now (today counts). */
@@ -106,9 +109,11 @@ export async function demandReport(days: number = DEMAND_DEFAULT_DAYS, now: Date
         SUM(o.refunded_micros) FILTER (WHERE o.outcome = 'failed')::bigint AS refunded,
         (COUNT(o.event_id) FILTER (WHERE o.outcome = 'failed' AND o.refunded_micros IS NOT NULL))::int AS failed_refunded,
         COALESCE(SUM(e.quantity) FILTER (WHERE COALESCE(e.detail->>'provider', 'composio') = 'composio'), 0)::bigint AS composio_uses,
-        COALESCE(SUM(e.cost_micros) FILTER (WHERE COALESCE(e.detail->>'provider', 'composio') = 'composio'), 0)::bigint AS composio_cost,
+        SUM(e.cost_micros) FILTER (WHERE COALESCE(e.detail->>'provider', 'composio') = 'composio')::bigint AS composio_cost,
+        (COUNT(*) FILTER (WHERE COALESCE(e.detail->>'provider', 'composio') = 'composio' AND e.cost_micros IS NULL))::int AS composio_unpriced,
         COALESCE(SUM(e.quantity) FILTER (WHERE e.detail->>'provider' = 'universe'), 0)::bigint AS universe_uses,
-        COALESCE(SUM(e.cost_micros) FILTER (WHERE e.detail->>'provider' = 'universe'), 0)::bigint AS universe_cost
+        SUM(e.cost_micros) FILTER (WHERE e.detail->>'provider' = 'universe')::bigint AS universe_cost,
+        (COUNT(*) FILTER (WHERE e.detail->>'provider' = 'universe' AND e.cost_micros IS NULL))::int AS universe_unpriced
       FROM meter_events e LEFT JOIN app_use_outcomes o ON o.event_id = e.event_id
       WHERE e.kind = 'app_use' AND e.quantity > 0 AND e.detail->>'toolkit' IS NOT NULL AND ${inRange}
       GROUP BY e.detail->>'toolkit'`),
@@ -148,8 +153,8 @@ export async function demandReport(days: number = DEMAND_DEFAULT_DAYS, now: Date
       refundedMicros: group && group.failed > 0 && group.failed_refunded === group.failed ? toNumber(group.refunded) : null,
       allFailedRefunded: !!group && group.failed > 0 && group.failed_refunded === group.failed,
       byRoute: {
-        composio: { uses: composioUses, costMicros: toNumber(group?.composio_cost) },
-        universe: { uses: toNumber(group?.universe_uses), costMicros: toNumber(group?.universe_cost) },
+        composio: { uses: composioUses, costMicros: group?.composio_cost == null ? null : toNumber(group.composio_cost), unpriced: group?.composio_unpriced ?? 0 },
+        universe: { uses: toNumber(group?.universe_uses), costMicros: group?.universe_cost == null ? null : toNumber(group.universe_cost), unpriced: group?.universe_unpriced ?? 0 },
       },
       route: state.route,
       routeVersion: state.version,
@@ -196,8 +201,12 @@ export function cleanAskName(raw: unknown): { name: string; key: string } | null
   // The key is what asks are grouped by: lower case, and without accents or other marks, so "Café", "CAFÉ" and "cafe" are one App.
   // Lowercasing can make a name longer (İ becomes two characters before its mark is dropped), so the key is also cut to the width
   // of its column, counted in characters (code points), never in the middle of one.
-  const key = Array.from(name.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '').normalize('NFC')).slice(0, ASK_NAME_MAX).join('');
-  return { name, key };
+  return { name, key: askKey(name) };
+}
+
+/** The grouping key of an App name: lower case, no accents or marks, cut to the column width in whole characters. */
+function askKey(name: string): string {
+  return Array.from(name.normalize('NFKC').toLowerCase().normalize('NFD').replace(/\p{M}/gu, '').normalize('NFC')).slice(0, ASK_NAME_MAX).join('');
 }
 
 const hashOf = (personKey: string) => createHash('sha256').update(`app-ask:${personKey}`).digest('hex').slice(0, 32);
@@ -232,8 +241,8 @@ export async function recordAppAsk(input: { name: unknown; personKey: string }, 
 /** Whether an App of that name or key is already on a list a person can use (a ready-made App that is on, or an entry of the super admin's list that is on). */
 async function appExists(key: string): Promise<boolean> {
   const slug = key.replace(/[^a-z0-9]+/g, '');
-  const ready = (await readReadyMadeApps()).some((app) => app.enabled && (app.name.toLowerCase() === key || app.key.replace(/[^a-z0-9]+/g, '') === slug));
+  const ready = (await readReadyMadeApps()).some((app) => app.enabled && (askKey(app.name) === key || app.key.replace(/[^a-z0-9]+/g, '') === slug));
   if (ready) return true;
   const entries = await prisma.appCatalogEntry.findMany({ where: { enabled: true }, select: { key: true, name: true } });
-  return entries.some((entry) => entry.name.toLowerCase() === key || entry.key.replace(/[^a-z0-9]+/g, '') === slug);
+  return entries.some((entry) => askKey(entry.name) === key || entry.key.replace(/[^a-z0-9]+/g, '') === slug);
 }
