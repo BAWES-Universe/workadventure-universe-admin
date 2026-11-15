@@ -17,7 +17,7 @@ import { ensureDefaultBrick } from '@/lib/brick-default';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { makeBrick } from '@/lib/brick-make';
 import { saveServerLimits } from '@/lib/bot-limits';
-import { changeItem, checkRun, claimDueRuns, createItem, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, markHeldTold, markTold, claimWork, goalsRoom, markAsked, readItem, runReportSchema, type NewItemInput } from '@/lib/brick-items';
+import { changeItem, checkRun, claimDueRuns, createItem, deliveredSchema, finishRun, itemSettings, keepWorkweek, listItems, markDelivered, markHeldTold, markTold, claimWork, goalsRoom, markAsked, readItem, runReportSchema, type NewItemInput } from '@/lib/brick-items';
 import { recordGrant } from '@/lib/meter-grants';
 import { checkReplyAllowance, windowStart } from '@/lib/reply-limits';
 
@@ -406,6 +406,33 @@ run('goals and tasks, in a real database', () => {
     const again = (await claimDueRuns(at(HOUR + 20 * MIN))).filter((one) => one.runId === first.runId);
     expect(again).toMatchObject([{ attempt: 2, deliveredEventId: '$event-1', marker: first.marker }]);
     expect((await runsOf(item.id)).map((one) => one.deliveredEventId)).toEqual(['$event-1']);
+  });
+
+  it('keeps how a run was to be reported with where it went, and gives it back to a run handed out again', async () => {
+    const wael = await person('wael-report');
+    const item = await set(wael);
+    const [first] = (await claimDueRuns(at(HOUR + MIN))).filter((one) => one.itemId === item.id);
+    expect(first).toMatchObject({ deliveredReport: null });
+    const report = { outcome: 'spoke' as const, result: 'The site shows Issued', reached: true, progress: { statusLine: 'Done' } };
+    expect(await markDelivered(first.runId, '$event-9', at(HOUR + 2 * MIN), report)).toEqual({ ok: true, eventId: '$event-9', first: true });
+    // The first one stands: the same id again, with another report, changes nothing
+    expect(await markDelivered(first.runId, '$event-9', undefined, { outcome: 'waiting', result: 'Other' })).toEqual({ ok: true, eventId: '$event-9', first: false });
+    const again = (await claimDueRuns(at(HOUR + 20 * MIN))).filter((one) => one.runId === first.runId);
+    expect(again).toMatchObject([{ attempt: 2, deliveredEventId: '$event-9', deliveredReport: report }]);
+    // A delivery kept without one (a reminder) hands back none
+    const plain = await set(await person('noura-report'));
+    const [second] = (await claimDueRuns(at(HOUR + 21 * MIN))).filter((one) => one.itemId === plain.id);
+    await markDelivered(second.runId, '$event-10');
+    const back = (await claimDueRuns(at(HOUR + 45 * MIN))).filter((one) => one.runId === second.runId);
+    expect(back).toMatchObject([{ deliveredEventId: '$event-10', deliveredReport: null }]);
+  });
+
+  it('refuses a kept report that is not well formed', () => {
+    expect(deliveredSchema.safeParse({ eventId: '$e', report: { outcome: 'spoke', result: 'ok' } }).success).toBe(true);
+    expect(deliveredSchema.safeParse({ eventId: '$e', report: { outcome: 'quiet', result: 'ok' } }).success).toBe(false);
+    expect(deliveredSchema.safeParse({ eventId: '$e', report: { outcome: 'spoke' } }).success).toBe(false);
+    expect(deliveredSchema.safeParse({ eventId: '$e', report: { outcome: 'spoke', result: 'ok', extra: 1 } }).success).toBe(false);
+    expect(deliveredSchema.safeParse({ eventId: '$e' }).success).toBe(true);
   });
 
   it('two tries of one run both reaching the destination leave one delivery: they share one marker and one event id', async () => {

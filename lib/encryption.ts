@@ -14,6 +14,8 @@ function getEncryptionKey(): Buffer {
 
   // If key is hex string, convert to buffer
   if (key.length === 64) {
+    // Hex that is not hex decodes to less than it says, and a key made from that is not a key
+    if (!/^[0-9a-fA-F]{64}$/.test(key)) throw new Error('ENCRYPTION_KEY must be 32 bytes (64 hex characters)');
     return Buffer.from(key, 'hex');
   }
 
@@ -24,6 +26,11 @@ function getEncryptionKey(): Buffer {
   }
 
   return Buffer.from(key, 'utf8');
+}
+
+/** A key of its own for one purpose, made from the server's key, so a copy encrypted for one use is never readable with another's. */
+export function derivedKey(purpose: string): Buffer {
+  return Buffer.from(crypto.hkdfSync('sha256', getEncryptionKey(), Buffer.alloc(0), purpose, 32));
 }
 
 /**
