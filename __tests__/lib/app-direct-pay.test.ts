@@ -1,6 +1,7 @@
 import { amountToMinor, minorToText, currencyExponent, safeCheckoutUrl } from '@/lib/app-direct/pay';
 import { catalogDefinition } from '@/lib/app-direct/catalog';
 import { definitionSchema, hashDefinition } from '@/lib/app-direct/definition';
+jest.mock('@/lib/app-direct/catalog', () => require('../helpers/example-gateway').catalogWithExample());
 
 /** Payments for pages (game #2044, step 3): the exact amounts, where a buyer may be sent, and the payment contract of a definition. */
 
@@ -47,21 +48,21 @@ describe('amounts', () => {
 });
 
 describe('where a buyer may be sent', () => {
-  const hosts = ['tap.company'];
+  const hosts = ['examplepay.com'];
   it('takes the named host and anything under it', () => {
-    expect(safeCheckoutUrl('https://checkout.tap.company/?mode=page&token=abc', hosts)).toBe('https://checkout.tap.company/?mode=page&token=abc');
-    expect(safeCheckoutUrl('https://tap.company/pay', hosts)).toBe('https://tap.company/pay');
+    expect(safeCheckoutUrl('https://checkout.examplepay.com/?mode=page&token=abc', hosts)).toBe('https://checkout.examplepay.com/?mode=page&token=abc');
+    expect(safeCheckoutUrl('https://examplepay.com/pay', hosts)).toBe('https://examplepay.com/pay');
   });
   it('refuses everything else', () => {
     for (const url of [
-      'http://tap.company/pay',
-      'https://eviltap.company/pay',
-      'https://tap.company.evil.test/pay',
-      'https://user:pass@tap.company/pay',
-      'https://tap.company:8443/pay',
-      'https://api.tap.company@evil.test/pay',
+      'http://examplepay.com/pay',
+      'https://evilexamplepay.com/pay',
+      'https://examplepay.com.evil.test/pay',
+      'https://user:pass@examplepay.com/pay',
+      'https://examplepay.com:8443/pay',
+      'https://api.examplepay.com@evil.test/pay',
       'javascript:alert(1)',
-      '//tap.company/pay',
+      '//examplepay.com/pay',
       'not a url',
       '',
     ]) {
@@ -71,29 +72,29 @@ describe('where a buyer may be sent', () => {
 });
 
 describe('the payment contract of a definition', () => {
-  const tap = () => catalogDefinition('tap')!;
+  const gateway = () => catalogDefinition('examplepay')!;
 
   it('is part of the shipped Tap definition and changes its version hash', () => {
-    const withPayment = tap();
-    const without = { ...tap(), payment: undefined };
+    const withPayment = gateway();
+    const without = { ...gateway(), payment: undefined };
     expect(withPayment.payment?.lookup.successStates).toEqual(['CAPTURED']);
     expect(hashDefinition(withPayment)).not.toBe(hashDefinition(definitionSchema.parse(without)));
   });
 
   it('only lets a POST that makes something create the checkout', () => {
-    const draft = tap();
+    const draft = gateway();
     draft.operations[1] = { ...draft.operations[1], method: 'GET', body: undefined } as never;
     expect(definitionSchema.safeParse(draft).success).toBe(false);
   });
 
   it('only lets a GET look-up read the payment', () => {
-    const draft = tap();
+    const draft = gateway();
     draft.payment!.lookup.operation = 'makePaymentLink';
     expect(definitionSchema.safeParse(draft).success).toBe(false);
   });
 
   it('needs the look-up to show the mode of a payment when the app has test and live keys', () => {
-    const draft = tap();
+    const draft = gateway();
     expect(draft.modes).toBeDefined();
     delete draft.payment!.lookup.livePath;
     expect(definitionSchema.safeParse(draft).success).toBe(false);
@@ -103,7 +104,7 @@ describe('the payment contract of a definition', () => {
   });
 
   it('refuses two operations that would become the same tool name', () => {
-    const draft = tap();
+    const draft = gateway();
     expect(definitionSchema.safeParse(draft).success).toBe(true);
     draft.operations.push({ ...draft.operations[0], id: draft.operations[0].id.toUpperCase() } as never);
     const refused = definitionSchema.safeParse(draft);
@@ -112,27 +113,27 @@ describe('the payment contract of a definition', () => {
   });
 
   it('refuses a path the operation does not return', () => {
-    const draft = tap();
+    const draft = gateway();
     draft.payment!.lookup.statusPath = 'something.else';
     expect(definitionSchema.safeParse(draft).success).toBe(false);
   });
 
   it('refuses a parameter the operation does not have', () => {
-    const draft = tap();
+    const draft = gateway();
     draft.payment!.create.amount = 'nope';
     expect(definitionSchema.safeParse(draft).success).toBe(false);
   });
 
   it('refuses a checkout host that is not a public name', () => {
     for (const host of ['localhost.localdomain', 'internal', '10.0.0.1', 'a_b.test']) {
-      const draft = tap();
+      const draft = gateway();
       draft.payment!.checkoutHosts = [host];
       expect(definitionSchema.safeParse(draft).success).toBe(false);
     }
   });
 
   it('never counts a start of the payment as complete', () => {
-    const { lookup } = tap().payment!;
+    const { lookup } = gateway().payment!;
     for (const state of ['AUTHORIZED', 'INITIATED', 'IN_PROGRESS', 'DECLINED', 'CANCELLED', 'REFUNDED', 'FAILED']) expect(lookup.successStates).not.toContain(state);
   });
 });

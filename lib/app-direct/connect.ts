@@ -36,7 +36,7 @@ export interface KeyFormView {
   mode: 'prefilled' | 'custom';
   name: string;
   short: string;
-  /** The label of the one field: "Tap key". */
+  /** The label of the one field: "Example key". */
   keyLabel: string;
   keyHint: string | null;
   helpUrl: string | null;

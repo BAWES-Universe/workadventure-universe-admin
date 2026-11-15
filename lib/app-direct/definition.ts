@@ -134,7 +134,7 @@ export const paymentSchema = z
 export const definitionSchema = z
   .object({
     version: z.literal(1),
-    /** The shipped list's key ("tap"), or "custom" for a draft. */
+    /** The shipped list's key, or "custom" for a draft. */
     service: z.string().regex(/^[a-z][a-z0-9-]{0,30}$/),
     name: PLAIN.pipe(z.string().max(60)),
     /** The short name used in "Add your {short} key". */

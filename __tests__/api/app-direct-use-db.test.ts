@@ -43,6 +43,7 @@ import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { GET as readTools } from '@/app/api/bots/[id]/mcp-servers/[serverId]/tools/route';
 import { confirmTools } from '@/lib/mcp-tool-policy';
 import { saveServerLimits } from '@/lib/bot-limits';
+jest.mock('@/lib/app-direct/catalog', () => require('../helpers/example-gateway').catalogWithExample());
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -71,8 +72,8 @@ const params = <T extends Record<string, string>>(value: T) => ({ params: Promis
 
 const okCheck = { resolve: async () => [{ address: '93.184.216.34', family: 4 }], send: async () => ({ status: 404, redirected: false, body: '{}', truncated: false, contentType: null }) };
 
-async function connectTap(ownerId = sara): Promise<string> {
-  const form = await openKeyForm({ ownerId, service: 'tap' });
+async function connectGateway(ownerId = sara): Promise<string> {
+  const form = await openKeyForm({ ownerId, service: 'examplepay' });
   return (await submitKey({ requestId: form.id, ownerId, key: KEY }, okCheck)).id;
 }
 const grantOf = (botId: string, connectionId: string) => prisma.botMcpServer.findFirst({ where: { botId, connectionId } });
@@ -126,7 +127,7 @@ run('using a key app, in a real database', () => {
   /* ------------------------- default access ------------------------- */
 
   it('is available to all the owner’s Bricks the moment it is connected, and to no one else’s and no room bot', async () => {
-    const id = await connectTap();
+    const id = await connectGateway();
     expect(await grantOf(saraBrick, id)).not.toBeNull();
     expect(await grantOf(saraStudio, id)).not.toBeNull();
     expect(await grantOf(omarBrick, id)).toBeNull();
@@ -136,7 +137,7 @@ run('using a key app, in a real database', () => {
   });
 
   it('gives a Brick made later every key app its owner has, and a Brick of someone else none', async () => {
-    const id = await connectTap();
+    const id = await connectGateway();
     const later = await createBrick({ ownerId: sara, name: 'Later Brick' });
     expect(await grantOf(later.id, id)).not.toBeNull();
     const omars = await createBrick({ ownerId: omar, name: 'Omar again' });
@@ -145,10 +146,10 @@ run('using a key app, in a real database', () => {
   });
 
   it('keeps an explicit Off and a removed grant through a replaced key, and lets a removed one be given back', async () => {
-    const id = await connectTap();
+    const id = await connectGateway();
     await prisma.botMcpServer.updateMany({ where: { botId: saraBrick, connectionId: id }, data: { enabled: false } });
     expect(await removeGrant(sara, id, saraStudio)).toBe(true);
-    const replace = await openKeyForm({ ownerId: sara, service: 'tap' });
+    const replace = await openKeyForm({ ownerId: sara, service: 'examplepay' });
     await submitKey({ requestId: replace.id, ownerId: sara, key: `sk_test_${randomUUID().replace(/-/g, '')}` }, okCheck);
     expect((await grantOf(saraBrick, id))?.enabled).toBe(false);
     expect(await grantOf(saraStudio, id)).toBeNull();
@@ -161,7 +162,7 @@ run('using a key app, in a real database', () => {
     await saveServerLimits({ bricks: { appsPerBot: 1 } }, sara);
     const other = await prisma.appConnection.create({ data: { ownerId: sara, name: 'Other', serverUrl: 'https://mcp.example.com/mcp', authType: 'none', source: 'link' } });
     await prisma.botMcpServer.create({ data: { botId: saraStudio, connectionId: other.id, name: 'Other', serverUrl: '', authType: 'none', connectedById: sara } });
-    const id = await connectTap();
+    const id = await connectGateway();
     expect(await grantOf(saraBrick, id)).not.toBeNull();
     expect(await grantOf(saraStudio, id)).toBeNull();
     expect(await prisma.botMcpServer.count({ where: { botId: saraStudio } })).toBe(1);
@@ -170,14 +171,14 @@ run('using a key app, in a real database', () => {
   /* ------------------------- what the bot server is told ------------------------- */
 
   it('lists a Brick’s key apps with operations and headings, and never the key, its end or an address', async () => {
-    const id = await connectTap();
+    const id = await connectGateway();
     const response = await listKeyApps(request(`/api/bots/${saraBrick}/key-apps`, { token: SERVICE_TOKEN }), params({ id: saraBrick }));
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.apps).toHaveLength(1);
     const [app] = body.apps;
-    expect(body.services).toEqual([{ service: 'tap', name: 'Tap Payments', short: 'Tap' }]);
-    expect(app).toMatchObject({ connectionId: id, name: 'Tap Payments', short: 'Tap', enabled: true, payments: true, working: true, settings: { looksUp: 'rightAway', makesNew: 'rightAway', changesThings: 'asksFirst', deletesOrSends: 'asksFirst' } });
+    expect(body.services).toEqual([{ service: 'examplepay', name: 'Example Pay', short: 'Example' }]);
+    expect(app).toMatchObject({ connectionId: id, name: 'Example Pay', short: 'Example', enabled: true, payments: true, working: true, settings: { looksUp: 'rightAway', makesNew: 'rightAway', changesThings: 'asksFirst', deletesOrSends: 'asksFirst' } });
     expect(app.definitionHash).toHaveLength(64);
     expect(app.operations.map((operation: { id: string; heading: string; verified: boolean }) => [operation.id, operation.heading, operation.verified])).toEqual([
       ['lookUpPayment', 'looksUp', true],
@@ -187,7 +188,7 @@ run('using a key app, in a real database', () => {
     const text = JSON.stringify(body);
     expect(text).not.toContain(KEY);
     expect(text).not.toContain(KEY.slice(-4));
-    expect(text).not.toContain('api.tap.company');
+    expect(text).not.toContain('api.examplepay.com');
     expect(text).not.toContain('keyCipher');
     expect(await keyAppsOf(omarBrick)).toEqual([]);
     expect((await listKeyApps(request(`/api/bots/${saraBrick}/key-apps`), params({ id: saraBrick }))).status).toBe(401);
@@ -198,32 +199,32 @@ run('using a key app, in a real database', () => {
   const toolsOf = async (botId: string, serverId: string) => (await (await readTools(request(`/api/bots/${botId}/mcp-servers/${serverId}/tools`, { token: ADMIN_TOKEN }), params({ id: botId, serverId }))).json()) as { state: string; policyRevision: number; settings: Record<string, string>; tools: { name: string; fingerprint: string; heading: string | null; state: string }[] };
 
   it('gives a tested app’s operations as confirmed tools under their headings, with the names and fingerprints the list carries', async () => {
-    const id = await connectTap();
+    const id = await connectGateway();
     const grant = (await grantOf(saraBrick, id))!;
     const policy = await toolsOf(saraBrick, grant.id);
     expect(policy.state).toBe('confirmed');
     expect(policy.settings).toMatchObject({ looksUp: 'rightAway', makesNew: 'rightAway', changesThings: 'asksFirst', deletesOrSends: 'asksFirst' });
     expect(policy.tools.map((tool) => [tool.name, tool.heading, tool.state])).toEqual([
-      ['tap_lookuppayment', 'looksUp', 'confirmed'],
-      ['tap_makepaymentlink', 'makesNew', 'confirmed'],
+      ['example_lookuppayment', 'looksUp', 'confirmed'],
+      ['example_makepaymentlink', 'makesNew', 'confirmed'],
     ]);
     const [app] = await keyAppsOf(saraBrick);
     expect(app.operations.map((operation) => [operation.tool, operation.fingerprint])).toEqual(policy.tools.map((tool) => [tool.name, tool.fingerprint]));
     // Reading again, and replacing the key, change nothing
     const again = await toolsOf(saraBrick, grant.id);
     expect(again.policyRevision).toBe(policy.policyRevision);
-    const replace = await openKeyForm({ ownerId: sara, service: 'tap' });
+    const replace = await openKeyForm({ ownerId: sara, service: 'examplepay' });
     await submitKey({ requestId: replace.id, ownerId: sara, key: `sk_test_${randomUUID().replace(/-/g, '')}` }, okCheck);
     expect((await toolsOf(saraBrick, grant.id)).policyRevision).toBe(policy.policyRevision);
   });
 
   it('makes the tools once when two calls ask at the same moment, and neither fails', async () => {
-    const id = await connectTap();
+    const id = await connectGateway();
     const grant = (await grantOf(saraBrick, id))!;
     await prisma.botMcpTool.deleteMany({ where: { serverId: grant.id } });
     const [first, second, third] = await Promise.all([ensureKeyAppTools(grant.id), ensureKeyAppTools(grant.id), ensureKeyAppTools(grant.id)]);
     expect([first, second, third].some(Boolean)).toBe(true);
-    expect((await prisma.botMcpTool.findMany({ where: { serverId: grant.id } })).map((tool) => tool.name).sort()).toEqual(['tap_lookuppayment', 'tap_makepaymentlink']);
+    expect((await prisma.botMcpTool.findMany({ where: { serverId: grant.id } })).map((tool) => tool.name).sort()).toEqual(['example_lookuppayment', 'example_makepaymentlink']);
   });
 
   it('keeps a custom app’s operations waiting to be confirmed, and forgets a confirmation when the definition changes', async () => {
@@ -256,7 +257,7 @@ run('using a key app, in a real database', () => {
   });
 
   it('does not list a key app among the servers the bot server connects to', async () => {
-    await connectTap();
+    await connectGateway();
     const response = await listServers(request(`/api/bots/${saraBrick}/mcp-servers`, { token: ADMIN_TOKEN }), params({ id: saraBrick }));
     const body = await response.json();
     expect({ status: response.status, servers: body }).toEqual({ status: 200, servers: [] });
@@ -289,28 +290,28 @@ run('using a key app, in a real database', () => {
 
   it('opens a form for a Brick’s owner only, for a service or a draft with its source, and for nobody else', async () => {
     const ask = (botId: string, body: Record<string, unknown>) => askForKey(request(`/api/bots/${botId}/app-key-forms`, { method: 'POST', token: SERVICE_TOKEN, body }), params({ id: botId }));
-    expect((await ask(saraBrick, { requesterKey: `sara-${tag}`, service: 'tap' })).status).toBe(201);
+    expect((await ask(saraBrick, { requesterKey: `sara-${tag}`, service: 'examplepay' })).status).toBe(201);
     // Someone who is not the Brick's owner, a Brick of someone else, a room bot, and a person who is not there: the same answer
-    expect((await ask(saraBrick, { requesterKey: `omar-${tag}`, service: 'tap' })).status).toBe(404);
-    expect((await ask(omarBrick, { requesterKey: `sara-${tag}`, service: 'tap' })).status).toBe(404);
-    expect((await ask(roomBot, { requesterKey: `sara-${tag}`, service: 'tap' })).status).toBe(404);
-    expect((await ask(saraBrick, { requesterKey: `nobody-${tag}`, service: 'tap' })).status).toBe(404);
+    expect((await ask(saraBrick, { requesterKey: `omar-${tag}`, service: 'examplepay' })).status).toBe(404);
+    expect((await ask(omarBrick, { requesterKey: `sara-${tag}`, service: 'examplepay' })).status).toBe(404);
+    expect((await ask(roomBot, { requesterKey: `sara-${tag}`, service: 'examplepay' })).status).toBe(404);
+    expect((await ask(saraBrick, { requesterKey: `nobody-${tag}`, service: 'examplepay' })).status).toBe(404);
     await prisma.user.update({ where: { id: sara }, data: { isGuest: true } });
-    expect((await ask(saraBrick, { requesterKey: `sara-${tag}`, service: 'tap' })).status).toBe(404);
+    expect((await ask(saraBrick, { requesterKey: `sara-${tag}`, service: 'examplepay' })).status).toBe(404);
     await prisma.user.update({ where: { id: sara }, data: { isGuest: false } });
     // The shape: a service or a draft with where it came from, nothing else
     expect((await ask(saraBrick, { requesterKey: `sara-${tag}` })).status).toBe(400);
     expect((await ask(saraBrick, { requesterKey: `sara-${tag}`, draft: { nonsense: true } })).status).toBe(400);
     expect((await ask(saraBrick, { requesterKey: `sara-${tag}`, draft: { nonsense: true }, source: 'https://docs.example.com' })).status).toBe(400);
-    expect((await ask(saraBrick, { requesterKey: `sara-${tag}`, service: 'tap', origin: 'https://evil.example' })).status).toBe(400);
-    expect((await ask(saraBrick, { service: 'tap' })).status).toBe(400);
-    expect((await askForKey(request(`/api/bots/${saraBrick}/app-key-forms`, { method: 'POST', body: { requesterKey: `sara-${tag}`, service: 'tap' } }), params({ id: saraBrick }))).status).toBe(401);
+    expect((await ask(saraBrick, { requesterKey: `sara-${tag}`, service: 'examplepay', origin: 'https://evil.example' })).status).toBe(400);
+    expect((await ask(saraBrick, { service: 'examplepay' })).status).toBe(400);
+    expect((await askForKey(request(`/api/bots/${saraBrick}/app-key-forms`, { method: 'POST', body: { requesterKey: `sara-${tag}`, service: 'examplepay' } }), params({ id: saraBrick }))).status).toBe(401);
   });
 
   /* ------------------------- the call ------------------------- */
 
   it('runs one operation for the owner: the key only in the header, to the origin, and only the listed fields come back', async () => {
-    const id = await connectTap();
+    const id = await connectGateway();
     const [app] = await keyAppsOf(saraBrick);
     const seen: { host: string; path: string; method: string; headers: Record<string, string> }[] = [];
     mockSend.current = (target) => {
@@ -323,13 +324,13 @@ run('using a key app, in a real database', () => {
     expect(body).toEqual({ ok: true, httpStatus: 200, data: { id: 'chg_1', status: 'CAPTURED', amount: 4.5, currency: 'KWD', reference: { order: 'o-1' } }, truncated: false });
     expect(JSON.stringify(body)).not.toContain(KEY);
     expect(seen).toHaveLength(1);
-    expect(seen[0]).toMatchObject({ host: 'api.tap.company', path: '/v2/charges/chg_1', method: 'GET' });
+    expect(seen[0]).toMatchObject({ host: 'api.examplepay.com', path: '/v2/charges/chg_1', method: 'GET' });
     expect(seen[0].headers.authorization).toBe(`Bearer ${KEY}`);
     expect(id).toBe(app.connectionId);
   });
 
   it('writes the use to the books once, paid by the person, with no arguments in it', async () => {
-    await connectTap();
+    await connectGateway();
     const [app] = await keyAppsOf(saraBrick);
     mockSend.current = () => ({ status: 200, body: '{"id":"chg_1"}' });
     const callId = `books-${tag}`;
@@ -340,11 +341,11 @@ run('using a key app, in a real database', () => {
     expect(Number(events[0].quantity)).toBe(1);
     expect(events[0].costMicros).toBeNull();
     expect(JSON.stringify(events[0].detail)).not.toContain('chg_1');
-    expect(events[0].detail).toMatchObject({ app: 'Tap Payments', operation: 'lookUpPayment', heading: 'looksUp', verified: true });
+    expect(events[0].detail).toMatchObject({ app: 'Example Pay', operation: 'lookUpPayment', heading: 'looksUp', verified: true });
   });
 
   it('is only ever for the owner: not another person asking, not another Brick, not a Brick that is switched off', async () => {
-    await connectTap();
+    await connectGateway();
     const [app] = await keyAppsOf(saraBrick);
     mockSend.current = () => ({ status: 200 });
     const other = await call(saraBrick, app.serverId, app.definitionHash, { requesterKey: `omar-${tag}` });
@@ -363,7 +364,7 @@ run('using a key app, in a real database', () => {
   });
 
   it('refuses a definition that is not the version approved, an unknown operation, and arguments that are not the operation’s', async () => {
-    await connectTap();
+    await connectGateway();
     const [app] = await keyAppsOf(saraBrick);
     let sent = 0;
     mockSend.current = () => ((sent += 1), { status: 200 });
@@ -382,7 +383,7 @@ run('using a key app, in a real database', () => {
   });
 
   it('sends one call id once: a retry is refused before anything is sent', async () => {
-    await connectTap();
+    await connectGateway();
     const [app] = await keyAppsOf(saraBrick);
     let sent = 0;
     mockSend.current = () => ((sent += 1), { status: 200, body: '{"id":"a"}' });
@@ -398,7 +399,7 @@ run('using a key app, in a real database', () => {
 
   it('holds requests an hour for a person and for everyone, both from Limits, and counts only what it took', async () => {
     await saveServerLimits({ bricks: { keyCallsPerPerson: 2 } }, sara);
-    await connectTap();
+    await connectGateway();
     const [app] = await keyAppsOf(saraBrick);
     let sent = 0;
     mockSend.current = () => ((sent += 1), { status: 200 });
@@ -417,7 +418,7 @@ run('using a key app, in a real database', () => {
   });
 
   it('never hands the model a raw error answer, a redirect, or a service that is down', async () => {
-    await connectTap();
+    await connectGateway();
     const [app] = await keyAppsOf(saraBrick);
     mockSend.current = () => ({ status: 422, body: JSON.stringify({ errors: [{ code: 1, description: `bad request with ${KEY} in it` }] }) });
     const failed = await call(saraBrick, app.serverId, app.definitionHash);
@@ -434,7 +435,7 @@ run('using a key app, in a real database', () => {
   });
 
   it('cuts a long answer and gives back nothing from it, rather than half of it', async () => {
-    await connectTap();
+    await connectGateway();
     const [app] = await keyAppsOf(saraBrick);
     mockSend.current = () => ({ status: 200, body: '{"id":"cut', truncated: true });
     const response = await call(saraBrick, app.serverId, app.definitionHash);
@@ -442,7 +443,7 @@ run('using a key app, in a real database', () => {
   });
 
   it('marks the key stopped working when the service refuses it, for every Brick at once, tells the owner once, and a good call or a new key ends it', async () => {
-    const id = await connectTap();
+    const id = await connectGateway();
     const [app] = await keyAppsOf(saraBrick);
     mockSend.current = () => ({ status: 401 });
     const refused = await call(saraBrick, app.serverId, app.definitionHash);
@@ -472,7 +473,7 @@ run('using a key app, in a real database', () => {
   });
 
   it('stops at once when it is taken away or disconnected, also for a chat that is already open', async () => {
-    const id = await connectTap();
+    const id = await connectGateway();
     const [app] = await keyAppsOf(saraBrick);
     mockSend.current = () => ({ status: 200 });
     expect((await call(saraBrick, app.serverId, app.definitionHash)).status).toBe(200);
@@ -486,13 +487,13 @@ run('using a key app, in a real database', () => {
   });
 
   it('is never written to a room bot, even by a direct write', async () => {
-    const id = await connectTap();
+    const id = await connectGateway();
     await expect(prisma.botMcpServer.create({ data: { botId: roomBot, connectionId: id, name: 'Tap', serverUrl: '', authType: 'none', connectedById: sara } })).rejects.toThrow();
     await expect(prisma.botMcpServer.create({ data: { botId: omarBrick, connectionId: id, name: 'Tap', serverUrl: '', authType: 'none', connectedById: sara } })).rejects.toThrow();
   });
 
   it('calls straight through the library the same way, with no network in the check', async () => {
-    await connectTap();
+    await connectGateway();
     const [app] = await keyAppsOf(saraBrick);
     const outcome = await runKeyApp({ botId: saraBrick, serverId: app.serverId, requesterKey: `sara-${tag}`, callId: `lib-${tag}`, operation: 'lookUpPayment', arguments: { chargeId: 'chg_9' }, definitionHash: app.definitionHash }, { resolve: async () => [{ address: '93.184.216.34', family: 4 }], send: async () => ({ status: 200, redirected: false, body: '{"id":"chg_9","status":"INITIATED"}', truncated: false, contentType: null }) });
     expect(outcome).toEqual({ status: 'done', ok: true, httpStatus: 200, data: { id: 'chg_9', status: 'INITIATED' }, truncated: false });

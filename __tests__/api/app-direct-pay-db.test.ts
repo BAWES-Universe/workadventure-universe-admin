@@ -42,6 +42,7 @@ import { DELETE as stopPage } from '@/app/api/me/apps/pages/[jobId]/route';
 import { GET as publicGet, POST as publicStart } from '@/app/api/pay/[artifactId]/route';
 import { POST as gamePay } from '@/app/api/artifacts/[id]/pay/route';
 import { POST as notice } from '@/app/api/app-pay/notice/[orderId]/route';
+jest.mock('@/lib/app-direct/catalog', () => require('../helpers/example-gateway').catalogWithExample());
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -66,8 +67,8 @@ const request = (path: string, init: { method?: string; body?: unknown; token?: 
 const params = <T extends Record<string, string>>(value: T) => ({ params: Promise.resolve(value) });
 const okCheck = { resolve: async () => [{ address: '93.184.216.34', family: 4 }], send: async () => ({ status: 404, redirected: false, body: '{}', truncated: false, contentType: null }) };
 
-async function connectTap(ownerId = sara): Promise<{ id: string; serverId: string }> {
-  const form = await openKeyForm({ ownerId, service: 'tap' });
+async function connectGateway(ownerId = sara): Promise<{ id: string; serverId: string }> {
+  const form = await openKeyForm({ ownerId, service: 'examplepay' });
   const { id } = await submitKey({ requestId: form.id, ownerId, key: KEY }, okCheck);
   const grant = await prisma.botMcpServer.findFirstOrThrow({ where: { botId: brick, connectionId: id } });
   return { id, serverId: grant.id };
@@ -86,15 +87,15 @@ const job = (serverId: string, artifactId: string, body: Record<string, unknown>
 
 const start = (artifactId: string, address = '203.0.113.7') => publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', headers: { 'x-forwarded-for': address } }), params({ artifactId }));
 
-/** What Tap answers: a charge made, then its record. */
+/** What the gateway answers: a charge made, then its record. */
 let lastOrder = '';
-function tap(over: { create?: Record<string, unknown>; record?: (order: string) => Record<string, unknown>; createStatus?: number } = {}) {
+function gateway(over: { create?: Record<string, unknown>; record?: (order: string) => Record<string, unknown>; createStatus?: number } = {}) {
   const sent: Sent[] = [];
   mockSend.current = (target) => {
     sent.push(target);
     if (target.method === 'POST') {
       lastOrder = JSON.parse(target.body ?? '{}').reference?.order ?? lastOrder;
-      return { status: over.createStatus ?? 200, body: { id: 'chg_TS01', status: 'INITIATED', amount: 4.5, currency: 'KWD', transaction: { url: 'https://checkout.tap.company/?mode=page&token=abc' }, reference: { order: JSON.parse(target.body ?? '{}').reference?.order }, ...over.create } };
+      return { status: over.createStatus ?? 200, body: { id: 'chg_TS01', status: 'INITIATED', amount: 4.5, currency: 'KWD', transaction: { url: 'https://checkout.examplepay.com/?mode=page&token=abc' }, reference: { order: JSON.parse(target.body ?? '{}').reference?.order }, ...over.create } };
     }
     const order = lastOrder;
     return { status: 200, body: over.record ? over.record(order) : { id: 'chg_TS01', status: 'INITIATED', amount: 4.5, currency: 'KWD', live_mode: false, reference: { order } } };
@@ -156,21 +157,21 @@ run('payments for pages, in a real database', () => {
 
   describe('asking a Brick to make a page take a payment', () => {
     it('freezes the amount exactly, and the visitor can change nothing', async () => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       const response = await job(serverId, artifactId);
       expect(response.status).toBe(200);
       const body = await response.json();
-      expect(body.job).toMatchObject({ artifactId, amount: '4.500', currency: 'KWD', app: 'Tap Payments', status: 'active' });
+      expect(body.job).toMatchObject({ artifactId, amount: '4.500', currency: 'KWD', app: 'Example Pay', status: 'active' });
       const row = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
       expect(row).toMatchObject({ amountMinor: 4500, currency: 'KWD', ownerId: sara });
     });
 
     it('replaces the terms for new checkouts only when asked again', async () => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       await job(serverId, artifactId);
-      tap();
+      gateway();
       const before = await checkout(artifactId);
       const again = await job(serverId, artifactId, { amount: '6', currency: 'KWD' });
       expect((await again.json()).replaced).toBe(true);
@@ -187,7 +188,7 @@ run('payments for pages, in a real database', () => {
       ['an exponent', { amount: '1e3' }],
       ['a currency it does not know', { currency: 'XXX' }],
     ])('turns down %s', async (_name, change) => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       const response = await job(serverId, artifactId, change);
       expect(response.status).toBe(400);
@@ -196,7 +197,7 @@ run('payments for pages, in a real database', () => {
     });
 
     it('is only for the owner’s own page, and a document cannot take a payment', async () => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const others = await makeArtifact({ ownerId: omar });
       expect((await job(serverId, others)).status).toBe(404);
       expect((await job(serverId, randomUUID())).status).toBe(404);
@@ -206,7 +207,7 @@ run('payments for pages, in a real database', () => {
     });
 
     it('is only for the owner asking', async () => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       expect((await job(serverId, artifactId, { requesterKey: `omar-${tag}` })).status).toBe(403);
       expect((await job(serverId, artifactId, { requesterKey: undefined })).status).toBe(403);
@@ -214,7 +215,7 @@ run('payments for pages, in a real database', () => {
     });
 
     it('needs the service token', async () => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       const response = await makeJob(request(`/api/bots/${brick}/key-apps/${serverId}/page-jobs`, { method: 'POST', body: { requesterKey: `sara-${tag}`, artifactId, amount: '1', currency: 'KWD' } }), params({ id: brick, serverId }));
       expect(response.status).toBe(401);
@@ -234,43 +235,43 @@ run('payments for pages, in a real database', () => {
 
   describe('a visitor starting a checkout', () => {
     it('makes the order first and sends only the owner’s terms, with the order as the idempotency key', async () => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       await job(serverId, artifactId);
-      const sent = tap();
+      const sent = gateway();
       const body = await checkout(artifactId);
-      expect(body.checkoutUrl).toBe('https://checkout.tap.company/?mode=page&token=abc');
+      expect(body.checkoutUrl).toBe('https://checkout.examplepay.com/?mode=page&token=abc');
       const order = await prisma.appPageOrder.findUniqueOrThrow({ where: { id: body.orderId } });
       expect(order).toMatchObject({ status: 'pending', amountMinor: 4500, currency: 'KWD', mode: 'test', providerRef: 'chg_TS01', ownerId: sara });
       expect(sent).toHaveLength(1);
-      expect(sent[0]).toMatchObject({ host: 'api.tap.company', path: '/v2/charges', method: 'POST' });
+      expect(sent[0]).toMatchObject({ host: 'api.examplepay.com', path: '/v2/charges', method: 'POST' });
       expect(sent[0].headers.authorization).toBe(`Bearer ${KEY}`);
       const payload = JSON.parse(sent[0].body as string);
       expect(payload).toMatchObject({ amount: 4.5, currency: 'KWD', description: 'A mug', reference: { order: order.id, idempotent: order.id }, post: { url: `https://orbit.example.org/api/app-pay/notice/${order.id}` }, redirect: { url: `https://orbit.example.org/pay/done?o=${order.id}` }, customer: { first_name: 'Customer' } });
     });
 
     it('takes no amount from the visitor', async () => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       await job(serverId, artifactId);
-      const sent = tap();
+      const sent = gateway();
       const response = await publicStart(request(`/api/pay/${artifactId}`, { method: 'POST', body: { amount: 0.001, currency: 'USD' } }), params({ artifactId }));
       expect(response.status).toBe(200);
       expect(JSON.parse(sent[0].body as string)).toMatchObject({ amount: 4.5, currency: 'KWD' });
     });
 
     it('is only for a page anyone with the link may open', async () => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact({ openScope: 'chat' });
       await job(serverId, artifactId);
-      tap();
+      gateway();
       expect((await start(artifactId)).status).toBe(404);
       expect((await publicGet(request(`/api/pay/${artifactId}`), params({ artifactId }))).status).toBe(404);
       expect(await prisma.appPageOrder.count({ where: { ownerId: sara } })).toBe(0);
     });
 
     it('says whether a page takes payments, and nothing more', async () => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       expect(await (await publicGet(request(`/api/pay/${artifactId}`), params({ artifactId }))).json()).toEqual({ enabled: false });
       await job(serverId, artifactId);
@@ -278,35 +279,35 @@ run('payments for pages, in a real database', () => {
     });
 
     it('does not send a buyer to a host the definition does not name', async () => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       await job(serverId, artifactId);
-      tap({ create: { transaction: { url: 'https://checkout.evil.test/pay' } } });
+      gateway({ create: { transaction: { url: 'https://checkout.evil.test/pay' } } });
       const response = await start(artifactId);
       expect(response.status).toBe(409);
       expect(await prisma.appPageOrder.findFirst({ where: { ownerId: sara } })).toMatchObject({ status: 'cant_confirm', checkoutUrl: null });
     });
 
     it('closes the order when the service does not answer well, and marks a refused key as stopped', async () => {
-      const { id, serverId } = await connectTap();
+      const { id, serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       await job(serverId, artifactId);
-      tap({ createStatus: 401 });
+      gateway({ createStatus: 401 });
       expect((await start(artifactId)).status).toBe(409);
       expect(await prisma.appPageOrder.findFirst({ where: { ownerId: sara } })).toMatchObject({ status: 'not_paid' });
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).not.toBeNull();
       // A mark never blocks the next visitor: the service is asked again, and a good answer clears the mark
-      const sent = tap();
+      const sent = gateway();
       expect((await start(artifactId, '203.0.113.8')).status).toBe(200);
       expect(sent.length).toBeGreaterThan(0);
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
     });
 
     it('closes the order, never leaves it open, when the key cannot be read', async () => {
-      const { id, serverId } = await connectTap();
+      const { id, serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       await job(serverId, artifactId);
-      const sent = tap();
+      const sent = gateway();
       await prisma.appConnection.update({ where: { id }, data: { keyCipher: 'not-a-real-cipher' } });
       expect((await start(artifactId)).status).toBe(409);
       expect(sent).toHaveLength(0);
@@ -314,10 +315,10 @@ run('payments for pages, in a real database', () => {
     });
 
     it('takes no payment with a key whose mode the app could not tell, and counts none for an order that has no mode', async () => {
-      const { id, serverId } = await connectTap();
+      const { id, serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       await job(serverId, artifactId);
-      const sent = tap({ record: (order) => paidRecord(order) });
+      const sent = gateway({ record: (order) => paidRecord(order) });
       const { orderId } = await checkout(artifactId);
       await prisma.appPageOrder.update({ where: { id: orderId }, data: { mode: null } });
       expect(await settle(orderId)).toMatchObject({ status: 'cant_confirm' });
@@ -329,40 +330,40 @@ run('payments for pages, in a real database', () => {
     });
 
     it('clears the stopped mark when a lookup is answered well', async () => {
-      const { id, serverId } = await connectTap();
+      const { id, serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       await job(serverId, artifactId);
-      tap();
+      gateway();
       const { orderId } = await checkout(artifactId);
       await prisma.appConnection.update({ where: { id }, data: { signInLostAt: new Date() } });
-      tap({ record: (order) => paidRecord(order) });
+      gateway({ record: (order) => paidRecord(order) });
       expect((await settle(orderId))?.status).toBe('paid');
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
     });
 
     it('a refused lookup for one order does not stop other pages from taking payments', async () => {
-      const { id, serverId } = await connectTap();
+      const { id, serverId } = await connectGateway();
       const first = await makeArtifact();
       const second = await makeArtifact();
       await job(serverId, first);
       await job(serverId, second);
-      tap();
+      gateway();
       const { orderId } = await checkout(first);
       // The service refuses this one lookup (for example a charge it no longer shows this key)
       mockSend.current = () => ({ status: 403 });
       await settle(orderId);
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).not.toBeNull();
       // Another page still gets its checkout, which clears the mark
-      tap();
+      gateway();
       expect((await start(second, '203.0.113.9')).status).toBe(200);
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
     });
 
     it('stops when the owner stops it, at once', async () => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       const made = await (await job(serverId, artifactId)).json();
-      tap();
+      gateway();
       mockUser.current = { id: sara };
       const stopped = await stopPage(request(`/api/me/apps/pages/${made.job.id}`, { method: 'DELETE' }), params({ jobId: made.job.id }));
       expect(stopped.status).toBe(200);
@@ -371,7 +372,7 @@ run('payments for pages, in a real database', () => {
     });
 
     it('lets only the owner stop it', async () => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       const made = await (await job(serverId, artifactId)).json();
       mockUser.current = { id: omar };
@@ -380,20 +381,20 @@ run('payments for pages, in a real database', () => {
     });
 
     it('does not use a definition that changed since the owner asked', async () => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       await job(serverId, artifactId);
       await prisma.appPageJob.update({ where: { artifactId }, data: { definitionHash: 'f'.repeat(64) } });
-      tap();
+      gateway();
       expect((await start(artifactId)).status).toBe(409);
     });
 
     it('counts tries per visitor, per page and per person, all from Limits', async () => {
       await saveServerLimits({ bricks: { checkoutsPerVisitor: 2, checkoutsPerPage: 3, checkoutsPerOwner: 100 } }, sara);
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       await job(serverId, artifactId);
-      tap();
+      gateway();
       expect((await start(artifactId, '198.51.100.1')).status).toBe(200);
       expect((await start(artifactId, '198.51.100.1')).status).toBe(200);
       expect((await start(artifactId, '198.51.100.1')).status).toBe(429);
@@ -404,10 +405,10 @@ run('payments for pages, in a real database', () => {
     });
 
     it('never keeps who the visitor was, only a hash', async () => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       await job(serverId, artifactId);
-      tap();
+      gateway();
       const { orderId } = await checkout(artifactId, '203.0.113.99');
       const order = await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } });
       expect(JSON.stringify(order)).not.toContain('203.0.113.99');
@@ -415,10 +416,10 @@ run('payments for pages, in a real database', () => {
     });
 
     it('lets the game’s server start one for someone who may open the page, and no one else', async () => {
-      const { serverId } = await connectTap();
+      const { serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       await job(serverId, artifactId);
-      tap();
+      gateway();
       const viewer = { person: { signedIn: true, identifier: `sara-${tag}` }, inChat: true, chat: { kind: 'dm', ref: `chat-${tag}` } };
       const call = (body: unknown, token: string | null = ADMIN_TOKEN) => gamePay(request(`/api/artifacts/${artifactId}/pay`, { method: 'POST', token: token ?? undefined, body }), params({ id: artifactId }));
       expect((await call({ viewer }, null)).status).toBe(401);
@@ -439,7 +440,7 @@ run('payments for pages, in a real database', () => {
 
   describe('deciding that it is paid', () => {
     async function pending(): Promise<{ artifactId: string; connectionId: string }> {
-      const { id, serverId } = await connectTap();
+      const { id, serverId } = await connectGateway();
       const artifactId = await makeArtifact();
       await job(serverId, artifactId);
       return { artifactId, connectionId: id };
@@ -447,7 +448,7 @@ run('payments for pages, in a real database', () => {
 
     it('writes paid only when the service’s own record says completed for this order, amount, currency and mode, and tells the owner once', async () => {
       const { artifactId } = await pending();
-      tap({ record: (order) => paidRecord(order) });
+      gateway({ record: (order) => paidRecord(order) });
       const { orderId } = await checkout(artifactId);
       expect(await settle(orderId)).toMatchObject({ status: 'paid', testPayment: true, checkoutUrl: null });
       expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ status: 'paid' });
@@ -457,17 +458,17 @@ run('payments for pages, in a real database', () => {
       expect(found).toHaveLength(1);
       expect(found[0]).toMatchObject({ title: 'Test payment on Shop', badge: 'Test' });
       expect(found[0].body).toContain('4.500 KWD');
-      expect(found[0].body).toContain('Tap Payments confirmed it.');
+      expect(found[0].body).toContain('Example Pay confirmed it.');
       expect(found[0].body).toContain('The first one today.');
     });
 
     it('asks the service with the key, for that one payment, and nothing about it comes from the visitor', async () => {
       const { artifactId } = await pending();
-      const sent = tap({ record: (order) => paidRecord(order) });
+      const sent = gateway({ record: (order) => paidRecord(order) });
       const { orderId } = await checkout(artifactId);
       await settle(orderId);
       const look = sent[sent.length - 1];
-      expect(look).toMatchObject({ method: 'GET', host: 'api.tap.company', path: '/v2/charges/chg_TS01' });
+      expect(look).toMatchObject({ method: 'GET', host: 'api.examplepay.com', path: '/v2/charges/chg_TS01' });
       expect(look.headers.authorization).toBe(`Bearer ${KEY}`);
     });
 
@@ -480,7 +481,7 @@ run('payments for pages, in a real database', () => {
       ['no order reference', { reference: {} }],
     ])('does not count %s', async (_name, change) => {
       const { artifactId } = await pending();
-      tap({ record: (order) => paidRecord(order, change) });
+      gateway({ record: (order) => paidRecord(order, change) });
       const { orderId } = await checkout(artifactId);
       expect(await settle(orderId)).toMatchObject({ status: 'cant_confirm' });
       expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ status: 'cant_confirm', paidAt: null });
@@ -489,16 +490,16 @@ run('payments for pages, in a real database', () => {
 
     it.each(['AUTHORIZED', 'INITIATED', 'IN_PROGRESS', 'SOMETHING_NEW'])('does not count %s, and keeps the order open', async (state) => {
       const { artifactId } = await pending();
-      tap({ record: (order) => paidRecord(order, { status: state }) });
+      gateway({ record: (order) => paidRecord(order, { status: state }) });
       const { orderId } = await checkout(artifactId);
-      expect(await settle(orderId)).toMatchObject({ status: 'checking', checkoutUrl: 'https://checkout.tap.company/?mode=page&token=abc' });
+      expect(await settle(orderId)).toMatchObject({ status: 'checking', checkoutUrl: 'https://checkout.examplepay.com/?mode=page&token=abc' });
       expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('pending');
       expect(await notices()).toHaveLength(0);
     });
 
     it.each(['DECLINED', 'CANCELLED', 'FAILED', 'ABANDONED', 'TIMEDOUT'])('closes the order at %s, and counts nothing', async (state) => {
       const { artifactId } = await pending();
-      tap({ record: (order) => paidRecord(order, { status: state }) });
+      gateway({ record: (order) => paidRecord(order, { status: state }) });
       const { orderId } = await checkout(artifactId);
       expect(await settle(orderId)).toMatchObject({ status: 'not_paid' });
       expect(await notices()).toHaveLength(0);
@@ -507,12 +508,12 @@ run('payments for pages, in a real database', () => {
     it('closes an order nobody paid after the open hours from Limits, but still counts a payment that completes late', async () => {
       await saveServerLimits({ bricks: { checkoutOpenHours: 1 } }, sara);
       const { artifactId } = await pending();
-      tap({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
+      gateway({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
       const unpaid = await checkout(artifactId, '198.51.100.20');
       await prisma.appPageOrder.update({ where: { id: unpaid.orderId }, data: { createdAt: new Date(Date.now() - 2 * 3_600_000) } });
       expect(await settle(unpaid.orderId)).toMatchObject({ status: 'not_paid' });
       const late = await checkout(artifactId, '198.51.100.21');
-      tap({ record: (order) => paidRecord(order) });
+      gateway({ record: (order) => paidRecord(order) });
       await prisma.appPageOrder.update({ where: { id: late.orderId }, data: { createdAt: new Date(Date.now() - 2 * 3_600_000) } });
       expect(await settle(late.orderId)).toMatchObject({ status: 'paid' });
     });
@@ -520,7 +521,7 @@ run('payments for pages, in a real database', () => {
     describe('a payment that completes after the order was closed as not paid', () => {
       const closeByExpiry = async (artifactId: string, address: string) => {
         await saveServerLimits({ bricks: { checkoutOpenHours: 1, latePaymentHours: 48 } }, sara);
-        tap({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
+        gateway({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
         const order = await checkout(artifactId, address);
         await prisma.appPageOrder.update({ where: { id: order.orderId }, data: { createdAt: new Date(Date.now() - 2 * 3_600_000) } });
         expect(await settle(order.orderId)).toMatchObject({ status: 'not_paid' });
@@ -531,7 +532,7 @@ run('payments for pages, in a real database', () => {
         const { artifactId } = await pending();
         const before = (await notices()).length;
         const orderId = await closeByExpiry(artifactId, '198.51.100.30');
-        tap({ record: (order) => paidRecord(order) });
+        gateway({ record: (order) => paidRecord(order) });
         expect(await settle(orderId)).toMatchObject({ status: 'paid' });
         expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ status: 'paid' });
         await settle(orderId);
@@ -544,7 +545,7 @@ run('payments for pages, in a real database', () => {
         const { artifactId } = await pending();
         const before = (await notices()).length;
         const orderId = await closeByExpiry(artifactId, '198.51.100.31');
-        tap({ record: (order) => paidRecord(order) });
+        gateway({ record: (order) => paidRecord(order) });
         await prisma.appPageOrder.update({ where: { id: orderId }, data: { checkedAt: new Date(Date.now() - 60_000) } });
         await Promise.all([verifyOrder(orderId), notice(request(`/api/app-pay/notice/${orderId}`, { method: 'POST', body: { status: 'CAPTURED' } }), params({ orderId }))]);
         expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('paid');
@@ -555,7 +556,7 @@ run('payments for pages, in a real database', () => {
         const { artifactId } = await pending();
         const before = (await notices()).length;
         const orderId = await closeByExpiry(artifactId, '198.51.100.32');
-        tap({ record: (order) => paidRecord(order, { amount: 1 }) });
+        gateway({ record: (order) => paidRecord(order, { amount: 1 }) });
         expect(await settle(orderId)).toMatchObject({ status: 'cant_confirm' });
         expect(await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).toMatchObject({ status: 'cant_confirm', paidAt: null });
         expect((await notices()).slice(before)).toHaveLength(0);
@@ -564,9 +565,9 @@ run('payments for pages, in a real database', () => {
       it('stays closed while the service still does not call it completed', async () => {
         const { artifactId } = await pending();
         const orderId = await closeByExpiry(artifactId, '198.51.100.33');
-        tap({ record: (order) => paidRecord(order, { status: 'FAILED' }) });
+        gateway({ record: (order) => paidRecord(order, { status: 'FAILED' }) });
         expect(await settle(orderId)).toMatchObject({ status: 'not_paid', checkoutUrl: null });
-        tap({ record: (order) => paidRecord(order, { status: 'SOMETHING_NEW' }) });
+        gateway({ record: (order) => paidRecord(order, { status: 'SOMETHING_NEW' }) });
         expect(await settle(orderId)).toMatchObject({ status: 'not_paid' });
       });
 
@@ -574,7 +575,7 @@ run('payments for pages, in a real database', () => {
         const { artifactId } = await pending();
         const orderId = await closeByExpiry(artifactId, '198.51.100.34');
         await prisma.appPageOrder.update({ where: { id: orderId }, data: { createdAt: new Date(Date.now() - 60 * 3_600_000) } });
-        const sent = tap({ record: (order) => paidRecord(order) });
+        const sent = gateway({ record: (order) => paidRecord(order) });
         expect(await settle(orderId)).toMatchObject({ status: 'not_paid' });
         expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(0);
         expect((await prisma.appPageOrder.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('not_paid');
@@ -583,7 +584,7 @@ run('payments for pages, in a real database', () => {
 
     it('asks the service at most once in the seconds from Limits, however often it is asked', async () => {
       const { artifactId } = await pending();
-      const sent = tap({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
+      const sent = gateway({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
       const { orderId } = await checkout(artifactId);
       await Promise.all(Array.from({ length: 8 }, () => verifyOrder(orderId)));
       expect(sent.filter((entry) => entry.method === 'GET')).toHaveLength(1);
@@ -591,7 +592,7 @@ run('payments for pages, in a real database', () => {
 
     it('marks it paid once and tells once when the notice and the page both ask at the same moment', async () => {
       const { artifactId } = await pending();
-      tap({ record: (order) => paidRecord(order) });
+      gateway({ record: (order) => paidRecord(order) });
       const { orderId } = await checkout(artifactId);
       await Promise.all([verifyOrder(orderId), notice(request(`/api/app-pay/notice/${orderId}`, { method: 'POST', body: { status: 'CAPTURED' } }), params({ orderId })), orderForArtifact(orderId, artifactId)]);
       await settle(orderId);
@@ -600,7 +601,7 @@ run('payments for pages, in a real database', () => {
 
     it('believes nothing in a notice: it only asks the service, and always answers 200', async () => {
       const { artifactId } = await pending();
-      const sent = tap({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
+      const sent = gateway({ record: (order) => paidRecord(order, { status: 'INITIATED' }) });
       const { orderId } = await checkout(artifactId);
       const response = await notice(request(`/api/app-pay/notice/${orderId}`, { method: 'POST', body: { id: 'chg_TS01', status: 'CAPTURED', amount: 4.5, currency: 'KWD' } }), params({ orderId }));
       expect(response.status).toBe(200);
@@ -613,22 +614,22 @@ run('payments for pages, in a real database', () => {
 
     it('does not answer an order on a page it was not made for', async () => {
       const { artifactId } = await pending();
-      tap();
+      gateway();
       const { orderId } = await checkout(artifactId);
       const other = await makeArtifact();
       expect((await publicGet(request(`/api/pay/${other}?order=${orderId}`), params({ artifactId: other }))).status).toBe(404);
       const own = await publicGet(request(`/api/pay/${artifactId}?order=${orderId}`), params({ artifactId }));
-      expect(await own.json()).toEqual({ status: 'checking', checkoutUrl: 'https://checkout.tap.company/?mode=page&token=abc', testPayment: true });
+      expect(await own.json()).toEqual({ status: 'checking', checkoutUrl: 'https://checkout.examplepay.com/?mode=page&token=abc', testPayment: true });
     });
 
     it('tells a real payment from a test one in what the owner reads', async () => {
-      const form = await openKeyForm({ ownerId: sara, service: 'tap' });
+      const form = await openKeyForm({ ownerId: sara, service: 'examplepay' });
       const live = `sk_live_${randomUUID().replace(/-/g, '')}`;
       const { id } = await submitKey({ requestId: form.id, ownerId: sara, key: live }, okCheck);
       const grant = await prisma.botMcpServer.findFirstOrThrow({ where: { botId: brick, connectionId: id } });
       const artifactId = await makeArtifact();
       await job(grant.id, artifactId);
-      tap({ record: (order) => paidRecord(order, { live_mode: true }) });
+      gateway({ record: (order) => paidRecord(order, { live_mode: true }) });
       const { orderId } = await checkout(artifactId);
       expect(await settle(orderId)).toMatchObject({ status: 'paid', testPayment: false });
       const [found] = await notices();
@@ -638,7 +639,7 @@ run('payments for pages, in a real database', () => {
 
     it('does not trust a payment whose app was disconnected: the order can no longer be confirmed', async () => {
       const { artifactId, connectionId } = await pending();
-      tap({ record: (order) => paidRecord(order) });
+      gateway({ record: (order) => paidRecord(order) });
       const { orderId } = await checkout(artifactId);
       expect(await disconnect(sara, connectionId)).toBe(true);
       // The job goes with the app; the order stays, with nothing left to ask
@@ -650,7 +651,7 @@ run('payments for pages, in a real database', () => {
 
     it('still counts a payment for an order begun before the app definition changed (a new key after a deploy)', async () => {
       const { artifactId, connectionId } = await pending();
-      tap({ record: (order) => paidRecord(order) });
+      gateway({ record: (order) => paidRecord(order) });
       const { orderId } = await checkout(artifactId);
       // A new catalog entry after a deploy: a valid definition with a new hash
       const before = await prisma.appConnection.findUniqueOrThrow({ where: { id: connectionId } });
@@ -663,7 +664,7 @@ run('payments for pages, in a real database', () => {
 
     it('still checks an order that was open when the owner stopped payments', async () => {
       const { artifactId } = await pending();
-      tap({ record: (order) => paidRecord(order) });
+      gateway({ record: (order) => paidRecord(order) });
       const { orderId } = await checkout(artifactId);
       const row = await prisma.appPageJob.findUniqueOrThrow({ where: { artifactId } });
       mockUser.current = { id: sara };
@@ -673,7 +674,7 @@ run('payments for pages, in a real database', () => {
 
     it('treats a key the service refuses as "still checking", never as paid or unpaid', async () => {
       const { artifactId, connectionId } = await pending();
-      tap();
+      gateway();
       const { orderId } = await checkout(artifactId);
       mockSend.current = () => ({ status: 401, body: { errors: [{ code: '1103' }] } });
       expect(await settle(orderId)).toMatchObject({ status: 'checking' });
@@ -683,7 +684,7 @@ run('payments for pages, in a real database', () => {
 
     it('never puts the key in anything kept about the order', async () => {
       const { artifactId } = await pending();
-      tap({ record: (order) => paidRecord(order) });
+      gateway({ record: (order) => paidRecord(order) });
       const { orderId } = await checkout(artifactId);
       await settle(orderId);
       const everything = JSON.stringify([await prisma.appPageOrder.findMany({ where: { ownerId: sara } }), await prisma.appPageJob.findMany({ where: { ownerId: sara } }), await notices()]);
@@ -692,7 +693,7 @@ run('payments for pages, in a real database', () => {
 
     it('lists the owner’s pages with what each has taken, and only theirs', async () => {
       const { artifactId } = await pending();
-      tap({ record: (order) => paidRecord(order) });
+      gateway({ record: (order) => paidRecord(order) });
       const first = await checkout(artifactId, '198.51.100.30');
       await settle(first.orderId);
       await checkout(artifactId, '198.51.100.31');
@@ -707,7 +708,7 @@ run('payments for pages, in a real database', () => {
     it('is rate-limited per platform together with the other uses of keys', async () => {
       await saveServerLimits({ bricks: { keyCallsPlatform: 1 } }, sara);
       const { artifactId } = await pending();
-      tap();
+      gateway();
       expect((await startCheckout({ artifactId, visitor: 'one' })).status).toBe('ok');
       expect((await startCheckout({ artifactId, visitor: 'two' })).status).toBe('limit');
     });

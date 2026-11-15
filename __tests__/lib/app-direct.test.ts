@@ -9,6 +9,7 @@ import { lastFour, scrubDeep, scrubSecret, secretForms } from '@/lib/app-direct/
 import { GuardError, guardedRequest, isPublicAddress, targetOf } from '@/lib/app-direct/guard';
 import { looksLikeAKey, parseDraft, KeyFormError } from '@/lib/app-direct/connect';
 import { scrubKeyRequest } from '@/lib/sentry-private';
+jest.mock('@/lib/app-direct/catalog', () => require('../helpers/example-gateway').catalogWithExample());
 
 const KEY = 'sk_test_4f9a8c1d2e3b7a60';
 
@@ -28,25 +29,25 @@ const draft = () => ({
 
 describe('the shipped list', () => {
   it('has Tap, valid, with a look-up that proves a key and operations we classified', () => {
-    const tap = catalogDefinition('tap');
-    expect(tap).not.toBeNull();
-    expect(definitionSchema.safeParse(tap).success).toBe(true);
-    expect(tap?.origin).toBe('https://api.tap.company');
-    expect(tap?.operations.every((operation) => operation.verified)).toBe(true);
-    expect(listCatalog()).toEqual([{ service: 'tap', name: 'Tap Payments', short: 'Tap', origin: 'https://api.tap.company' }]);
+    const gateway = catalogDefinition('examplepay');
+    expect(gateway).not.toBeNull();
+    expect(definitionSchema.safeParse(gateway).success).toBe(true);
+    expect(gateway?.origin).toBe('https://api.examplepay.com');
+    expect(gateway?.operations.every((operation) => operation.verified)).toBe(true);
+    expect(listCatalog()).toEqual([{ service: 'examplepay', name: 'Example Pay', short: 'Example', origin: 'https://api.examplepay.com' }]);
   });
 
   it('gives a copy: changing it never changes the list', () => {
-    const copy = catalogDefinition('tap')!;
+    const copy = catalogDefinition('examplepay')!;
     copy.origin = 'https://evil.example';
-    expect(catalogDefinition('tap')!.origin).toBe('https://api.tap.company');
+    expect(catalogDefinition('examplepay')!.origin).toBe('https://api.examplepay.com');
   });
 
   it('tells a test key from a real one', () => {
-    const tap = catalogDefinition('tap')!;
-    expect(keyMode(tap, 'sk_test_abc')).toBe('test');
-    expect(keyMode(tap, 'sk_live_abc')).toBe('live');
-    expect(keyMode(tap, 'other')).toBeNull();
+    const gateway = catalogDefinition('examplepay')!;
+    expect(keyMode(gateway, 'sk_test_abc')).toBe('test');
+    expect(keyMode(gateway, 'sk_live_abc')).toBe('live');
+    expect(keyMode(gateway, 'other')).toBeNull();
   });
 });
 
@@ -107,7 +108,7 @@ describe('a definition is data with hard edges', () => {
   });
 
   it('a draft from a Brick is forced to be custom and unverified, whatever it claims', () => {
-    const claim = { ...draft(), service: 'tap' };
+    const claim = { ...draft(), service: 'examplepay' };
     (claim.operations[1] as { verified?: boolean }).verified = true;
     const parsed = parseDraft(claim);
     expect(parsed.service).toBe('custom');
@@ -133,12 +134,12 @@ describe('a definition is data with hard edges', () => {
 });
 
 describe('the request built from a definition', () => {
-  const tap = () => catalogDefinition('tap')!;
+  const gateway = () => catalogDefinition('examplepay')!;
 
   it('puts the key in the header the definition says, and nowhere else', () => {
-    const request = buildRequest(tap(), 'lookUpPayment', { chargeId: 'chg_1' }, KEY);
+    const request = buildRequest(gateway(), 'lookUpPayment', { chargeId: 'chg_1' }, KEY);
     expect(request.method).toBe('GET');
-    expect(request.url).toBe('https://api.tap.company/v2/charges/chg_1');
+    expect(request.url).toBe('https://api.examplepay.com/v2/charges/chg_1');
     expect(request.headers.authorization).toBe(`Bearer ${KEY}`);
     expect(request.url).not.toContain(KEY);
     expect(request.body).toBeUndefined();
@@ -180,9 +181,9 @@ describe('the request built from a definition', () => {
   });
 
   it('fills a body template with typed values and leaves out what was not given', () => {
-    const request = buildRequest(tap(), 'makePaymentLink', { amount: 4.5, currency: 'KWD', customerName: 'Sara', returnUrl: 'https://shop.example/thanks' }, KEY);
+    const request = buildRequest(gateway(), 'makePaymentLink', { amount: 4.5, currency: 'KWD', customerName: 'Sara', returnUrl: 'https://shop.example/thanks' }, KEY);
     expect(request.method).toBe('POST');
-    expect(request.url).toBe('https://api.tap.company/v2/charges');
+    expect(request.url).toBe('https://api.examplepay.com/v2/charges');
     expect(request.headers['content-type']).toBe('application/json');
     expect(JSON.parse(request.body!)).toEqual({
       amount: 4.5,
@@ -195,7 +196,7 @@ describe('the request built from a definition', () => {
   });
 
   it('keeps an optional value that was given', () => {
-    const request = buildRequest(tap(), 'makePaymentLink', { amount: 1, currency: 'KWD', customerName: 'S', returnUrl: 'https://a.example/b', description: 'Cookie box', orderRef: 'o-1' }, KEY);
+    const request = buildRequest(gateway(), 'makePaymentLink', { amount: 1, currency: 'KWD', customerName: 'S', returnUrl: 'https://a.example/b', description: 'Cookie box', orderRef: 'o-1' }, KEY);
     expect(JSON.parse(request.body!)).toMatchObject({ description: 'Cookie box', reference: { order: 'o-1' } });
   });
 });

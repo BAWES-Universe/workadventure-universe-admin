@@ -14,7 +14,7 @@ import { scrubDeep } from '@/lib/app-direct/scrub';
 
 /**
  * Payments for pages (game #2044, step 3). A page the owner asked a Brick to make can ask for one fixed amount, through an app of theirs
- * whose definition has a payment contract (Tap). What holds on every path:
+ * whose definition has a payment contract. What holds on every path:
  *  - the amount and currency are the JOB's, frozen when the owner asked for it; the page and the visitor send neither;
  *  - the order is written on our side BEFORE the service is asked, and its id is the service's idempotency key and order reference, so a
  *    retry or a lost answer reconciles instead of making a second payment;

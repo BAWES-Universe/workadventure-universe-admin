@@ -22,6 +22,7 @@ import { GET as readForm } from '@/app/api/me/apps/key-forms/[formId]/route';
 import { POST as sendKey } from '@/app/api/me/apps/key-forms/[formId]/key/route';
 import { GET as listApps } from '@/app/api/me/apps/route';
 import { saveServerLimits } from '@/lib/bot-limits';
+jest.mock('@/lib/app-direct/catalog', () => require('../helpers/example-gateway').catalogWithExample());
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -79,12 +80,12 @@ run('key apps, in a real database', () => {
     await prisma.$disconnect();
   });
 
-  const open = async (ownerId = sara) => (await openKeyForm({ ownerId, service: 'tap' })).id;
+  const open = async (ownerId = sara) => (await openKeyForm({ ownerId, service: 'examplepay' })).id;
 
   it('shows the form for this person only, with where the key goes and what is checked, and nothing else', async () => {
     const id = await open();
     const view = await readKeyForm(id, sara);
-    expect(view).toMatchObject({ mode: 'prefilled', name: 'Tap Payments', short: 'Tap', keyLabel: 'Tap key', host: 'api.tap.company', hostReadable: null, source: null, differentSite: false, check: 'Look up a payment', replacing: null, triesLeft: 5 });
+    expect(view).toMatchObject({ mode: 'prefilled', name: 'Example Pay', short: 'Example', keyLabel: 'Example key', host: 'api.examplepay.com', hostReadable: null, source: null, differentSite: false, check: 'Look up a payment', replacing: null, triesLeft: 5 });
     expect(view.keyHint).toContain('sk_test_');
     // Someone else's form looks exactly like one that does not exist
     await expect(readKeyForm(id, omar)).rejects.toMatchObject({ status: 404, code: 'not_found' });
@@ -96,16 +97,16 @@ run('key apps, in a real database', () => {
     const id = await open();
     const fake = service(404);
     const done = await submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, fake.deps);
-    expect(done).toMatchObject({ name: 'Tap Payments', created: true });
+    expect(done).toMatchObject({ name: 'Example Pay', created: true });
 
     // One request, a GET look-up, to the shipped origin, at the checked address, with the key only in the header
     expect(fake.seen).toHaveLength(1);
-    expect(fake.seen[0]).toMatchObject({ host: 'api.tap.company', address: '93.184.216.34', method: 'GET', path: '/v2/charges/chg_universe_key_check' });
+    expect(fake.seen[0]).toMatchObject({ host: 'api.examplepay.com', address: '93.184.216.34', method: 'GET', path: '/v2/charges/chg_universe_key_check' });
     expect(fake.seen[0].headers.authorization).toBe(`Bearer ${TEST_KEY}`);
     expect(fake.seen[0].path).not.toContain(TEST_KEY);
 
     const row = await prisma.appConnection.findUniqueOrThrow({ where: { id: done.id } });
-    expect(row).toMatchObject({ kind: 'direct', source: 'direct', authType: 'none', authConfig: null, catalogKey: 'direct:tap', keyLast4: TEST_KEY.slice(-4), keyMode: 'test', serverUrl: 'https://api.tap.company', ownerId: sara, universeId: null });
+    expect(row).toMatchObject({ kind: 'direct', source: 'direct', authType: 'none', authConfig: null, catalogKey: 'direct:examplepay', keyLast4: TEST_KEY.slice(-4), keyMode: 'test', serverUrl: 'https://api.examplepay.com', ownerId: sara, universeId: null });
     expect(row.keyCipher).not.toContain(TEST_KEY);
     expect(decryptApiKey(row.keyCipher!)).toBe(TEST_KEY);
     expect(readKey(row)).toBe(TEST_KEY);
@@ -182,7 +183,7 @@ run('key apps, in a real database', () => {
     const again = `sk_test_${randomUUID().replace(/-/g, '')}`;
 
     // A form for the same service replaces that app's key; it says whose key it replaces
-    const replace = await openKeyForm({ ownerId: sara, service: 'tap' });
+    const replace = await openKeyForm({ ownerId: sara, service: 'examplepay' });
     expect(replace.replacing).toBe(true);
     expect(await readKeyForm(replace.id, sara)).toMatchObject({ replacing: { keyLast4: TEST_KEY.slice(-4), mode: 'test' } });
 
@@ -215,7 +216,7 @@ run('key apps, in a real database', () => {
   it("never lets one person replace another's key, or open a form on another's app", async () => {
     const mine = await submitKey({ requestId: await open(), ownerId: sara, key: TEST_KEY }, service(404).deps);
     await expect(openKeyForm({ ownerId: omar, connectionId: mine.id })).rejects.toMatchObject({ status: 404 });
-    // Omar's own Tap is his own app, not Sara's
+    // Omar's own Example Pay is his own app, not Sara's
     const omars = await submitKey({ requestId: await open(omar), ownerId: omar, key: LIVE_KEY }, service(404).deps);
     expect(omars.id).not.toBe(mine.id);
     expect(await prisma.appConnection.count({ where: { ownerId: { in: [sara, omar] } } })).toBe(2);
@@ -266,7 +267,7 @@ run('key apps, in a real database', () => {
   it('writes the key nowhere readable: not in any row of any table, in any of the forms it travels in', async () => {
     const id = await open();
     const made = await submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(404).deps);
-    await prisma.appConnection.update({ where: { id: made.id }, data: { name: 'Tap Payments' } });
+    await prisma.appConnection.update({ where: { id: made.id }, data: { name: 'Example Pay' } });
     const tables = await prisma.$queryRaw<{ tablename: string }[]>`SELECT tablename FROM pg_tables WHERE schemaname = 'public'`;
     const forms = [TEST_KEY, Buffer.from(TEST_KEY).toString('base64'), encodeURIComponent(TEST_KEY)];
     for (const { tablename } of tables) {
@@ -282,18 +283,18 @@ run('key apps, in a real database', () => {
       const spec = await listServices(request('/api/me/apps/key-services'));
       expect(spec.status).toBe(401);
       mockUser.current = { id: sara, isGuest: true };
-      expect((await openForm(request('/api/me/apps/key-forms', { service: 'tap' }))).status).toBe(403);
+      expect((await openForm(request('/api/me/apps/key-forms', { service: 'examplepay' }))).status).toBe(403);
 
       mockUser.current = { id: sara };
-      expect((await (await listServices(request('/api/me/apps/key-services'))).json()).services.map((entry: { service: string }) => entry.service)).toEqual(['tap']);
-      expect((await openForm(request('/api/me/apps/key-forms', { service: 'tap', origin: 'https://evil.example' }))).status).toBe(400);
+      expect((await (await listServices(request('/api/me/apps/key-services'))).json()).services.map((entry: { service: string }) => entry.service)).toEqual(['examplepay']);
+      expect((await openForm(request('/api/me/apps/key-forms', { service: 'examplepay', origin: 'https://evil.example' }))).status).toBe(400);
       expect((await openForm(request('/api/me/apps/key-forms', { service: 'nothing' }))).status).toBe(404);
-      const opened = await openForm(request('/api/me/apps/key-forms', { service: 'tap' }));
+      const opened = await openForm(request('/api/me/apps/key-forms', { service: 'examplepay' }));
       expect(opened.status).toBe(201);
       const { id } = await opened.json();
 
       const shown = await (await readForm(request(`/api/me/apps/key-forms/${id}`), params({ formId: id }))).json();
-      expect(shown.form).toMatchObject({ id, host: 'api.tap.company', keyLabel: 'Tap key' });
+      expect(shown.form).toMatchObject({ id, host: 'api.examplepay.com', keyLabel: 'Example key' });
 
       mockUser.current = { id: omar };
       expect((await readForm(request(`/api/me/apps/key-forms/${id}`), params({ formId: id }))).status).toBe(404);
