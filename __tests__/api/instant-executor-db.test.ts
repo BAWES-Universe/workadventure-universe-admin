@@ -97,7 +97,6 @@ function fakeProvider() {
 let sara = '';
 let omar = '';
 let brick = '';
-let roomBot = '';
 let omarBrick = '';
 const envBefore = { service: process.env.BOT_SERVICE_TOKEN };
 const callId = () => `call-${randomUUID()}`;
