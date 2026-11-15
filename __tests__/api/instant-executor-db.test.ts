@@ -1195,32 +1195,44 @@ run('the bounded Instant executor, in a real database', () => {
       await setLimits({ sentWaitMinutes: 5 });
       const p = fakeProvider();
       const f = fakeFunds(1_000_000);
-      const open = gatedReserve(f);
+      // The books take the reservation (the hold exists) but its answer is slow to come back
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => (open = resolve));
+      const real = f.funds.reserve.getMockImplementation()!;
+      f.funds.reserve.mockImplementation((async (input: { key: string; amountMicros: number }) => {
+        const answer = await real(input);
+        await gate;
+        return answer;
+      }) as never);
       const pending = runInstant(ask(), { adapter: p.adapter, funds: f.funds });
       await waitForRuns(1);
       const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      for (let i = 0; i < 200 && !f.holds.has(`instant:${row.id}`); i += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(f.holds.get(`instant:${row.id}`)?.state).toBe('held');
       await prisma.instantRun.update({ where: { id: row.id }, data: { createdAt: new Date(Date.now() - 100 * MIN) } });
-      // The books give the hold back (it never existed: nothing to release), then writing that down here fails
-      f.funds.release.mockImplementation((async () => ({ ok: true, none: true })) as never);
-      const real = prisma.instantRun.updateMany.bind(prisma.instantRun);
-      const lost = jest.spyOn(prisma.instantRun, 'updateMany').mockImplementation(((args: { data?: { customerState?: string } }) => {
+      // The clean-up closes the run and the books really give the hold back; then writing that down here fails
+      const realUpdateMany = prisma.instantRun.updateMany.bind(prisma.instantRun);
+      const failing = jest.spyOn(prisma.instantRun, 'updateMany').mockImplementation(((args: { data?: { customerState?: string } }) => {
         if (args?.data?.customerState === 'released') {
-          lost.mockRestore();
+          failing.mockRestore();
           throw new Error('database went away');
         }
-        return real(args as never);
+        return realUpdateMany(args as never);
       }) as never);
       try {
         await expect(reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date() })).rejects.toThrow();
       } finally {
-        lost.mockRestore();
+        failing.mockRestore();
       }
-      // The run was closed before the books were asked, so the failure did not reopen it
+      // The hold is given back in the books, and the run was closed before they were asked, so the failure did not reopen it
+      expect(f.holds.get(`instant:${row.id}`)?.state).toBe('released');
       expect(await runOf(row.id)).toMatchObject({ state: 'refused' });
+      // The delayed reservation answer now arrives: the run is closed, so nothing goes out
       open();
       expect(await pending).toMatchObject({ status: 'refused' });
       expect(p.instant.run).not.toHaveBeenCalled();
-      expect(await runOf(row.id)).toMatchObject({ state: 'refused' });
+      expect(f.holds.get(`instant:${row.id}`)?.state).toBe('released');
+      expect(f.left()).toBe(1_000_000);
     });
 
     it('a hold that reached the books after the run was closed, and cannot be released at once, is kept marked and given back by the sweep', async () => {
