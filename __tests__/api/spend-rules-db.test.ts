@@ -120,6 +120,12 @@ run('rules said in chat and task receipts, in a real database', () => {
       const sara = await person('sara');
       const asked = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'm2', scope: 'bot', capMicros: 1_000_000 });
       expect(asked).toMatchObject({ ok: false, reason: 'needs_answer', ask: { about: 'period' } });
+      // The question about where it applies names the Brick
+      expect(await proposeRule({ botId: sara.brickId, speakerId: sara.id, capMicros: 500_000, period: 'month' })).toMatchObject({
+        ok: false,
+        reason: 'needs_answer',
+        ask: { about: 'scope', question: "Is that just for sara's Brick, or for all your Bricks?" },
+      });
       expect(await prisma.spendRule.count({ where: { ownerPersonId: sara.id } })).toBe(0);
       const answered = await proposeRule({ botId: sara.brickId, speakerId: sara.id, sayingKey: 'm2', scope: 'bot', capMicros: 1_000_000, period: 'task' });
       expect(answered).toMatchObject({ ok: true, created: true, rule: { period: 'task' } });

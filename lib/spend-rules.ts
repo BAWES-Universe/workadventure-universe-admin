@@ -109,7 +109,9 @@ export type Proposed =
  * server's own id for the message (or any id that stays the same when the same message is sent twice).
  */
 export async function proposeRule(input: DraftInput & { speakerId: string; sayingKey?: string | null }): Promise<Proposed> {
-  const drafted = draftRule(input);
+  // The question names the Brick it is about ("just for Scout, or all your Bricks?"), so the bot's name is read before the rule is
+  const named = await prisma.bot.findUnique({ where: { id: input.botId }, select: { name: true } });
+  const drafted = draftRule({ ...input, botName: input.botName ?? named?.name ?? null });
   if (!drafted.ok) return drafted;
   const draft = drafted.draft;
   const owner = await ruleOwnerFor(input.botId, input.speakerId, draft.scope);
