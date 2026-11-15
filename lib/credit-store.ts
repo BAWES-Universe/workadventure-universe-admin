@@ -71,17 +71,22 @@ const ruleInclude = { program: true, recipients: { select: { userId: true } } } 
  * version that a later one will replace only when that one starts (a default replaced by one that begins next month): until then it is
  * the rule people are issued under, so nobody is left with nothing in between.
  */
-export async function currentRules(db: Pick<Db, 'grantRule'>, filter: { categoryId?: CategoryId; programId?: string; now?: Date } = {}): Promise<RuleFacts[]> {
+export async function currentRules(db: Pick<Db, 'grantRule'>, filter: { categoryId?: CategoryId; programId?: string; now?: Date; waitingAfter?: Date } = {}): Promise<RuleFacts[]> {
   const rows = await db.grantRule.findMany({
     where: {
-      ...(filter.now ? { OR: [{ state: 'current' }, { state: 'superseded', supersededAt: { gt: filter.now } }] } : { state: 'current' }),
+      ...(filter.now || filter.waitingAfter ? { OR: [{ state: 'current' }, { state: 'superseded', supersededAt: { gt: (filter.now ?? filter.waitingAfter) as Date } }] } : { state: 'current' }),
       program: { status: 'active', ...(filter.categoryId ? { categoryId: filter.categoryId } : {}) },
       ...(filter.programId ? { programId: filter.programId } : {}),
     },
     include: ruleInclude,
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
-  const facts = rows.map(ruleFacts);
+  // `waitingAfter` is for checks between rules (a clash, an overlap): a version that a later one will replace counts until then, so its claim
+  // period ends where the replacement starts
+  const facts = rows.map((row) => {
+    const rule = ruleFacts(row);
+    return filter.waitingAfter && row.state === 'superseded' && row.supersededAt && (!rule.claimEndsAt || row.supersededAt < rule.claimEndsAt) ? { ...rule, claimEndsAt: row.supersededAt } : rule;
+  });
   return filter.now ? facts.filter((rule) => claimOpen(rule, filter.now as Date)) : facts;
 }
 

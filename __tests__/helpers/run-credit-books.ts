@@ -715,6 +715,13 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     const stillWaiting = await prisma.grantRule.count({ where: { state: 'superseded', supersededAt: { gt: at('2027-02-21T00:00:00Z') }, program: { kind: 'default', categoryId: 'computers' } } });
     check('an edit that starts at once cuts a version that was waiting to be replaced, so two versions are never open together', waiting === 1 && stillWaiting === 0, { waiting, stillWaiting });
 
+    // A version that is waiting to be replaced still counts when another rule is saved: it is the rule people are issued under until then
+    for (const id of ['fu-c1', 'fu-c2']) await user(id, '2027-02-11T00:00:00Z');
+    const waitingGroup = await rules.saveException({ categoryId: 'computers', amount: 1 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-c1', 'fu-c2'] } }, root, FU);
+    await rules.saveException({ programId: waitingGroup.programId, categoryId: 'computers', amount: 2 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-c1', 'fu-c2'] }, claimStartsAt: at('2027-05-01T00:00:00Z') }, root, FU);
+    const duringWait = await refuses(() => rules.saveException({ categoryId: 'computers', amount: 3 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-c1', 'fu-c2'] }, claimEndsAt: at('2027-04-15T00:00:00Z') }, root, FU));
+    check('a rule saved for a period that ends before a waiting version takes over still clashes with the version issuing until then', duringWait?.code === 'clash', duringWait?.code);
+
     // A group that can change can clash later, when someone joins both: nobody gets a number by guesswork
     await prisma.$executeRawUnsafe(`INSERT INTO universes (id, slug, name, owner_id, updated_at) VALUES ('u2', 'later', 'Later', 'admin', now())`);
     for (const id of ['fu-rx', 'fu-ry']) await user(id, '2027-02-11T00:00:00Z');

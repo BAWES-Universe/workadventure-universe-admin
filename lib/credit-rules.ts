@@ -377,9 +377,9 @@ async function chooseNames(userIds: string[]): Promise<{ userId: string; name: s
 }
 
 /** Whether a rule about to be saved clashes with those already saved for its category; names the people when it does. */
-async function clashesOf(db: Tx, candidate: RuleFacts, programIds?: { exclude: string }): Promise<ClashFinding[]> {
+async function clashesOf(db: Tx, candidate: RuleFacts, now: Date, programIds?: { exclude: string }): Promise<ClashFinding[]> {
   if (candidate.programKind === 'gift') return [];
-  const saved = (await currentRules(db, { categoryId: candidate.categoryId })).filter((rule) => rule.programKind !== 'gift' && rule.programId !== programIds?.exclude);
+  const saved = (await currentRules(db, { categoryId: candidate.categoryId, waitingAfter: now })).filter((rule) => rule.programKind !== 'gift' && rule.programId !== programIds?.exclude);
   const ids = new Map<string, Set<string>>();
   for (const rule of [candidate, ...saved]) ids.set(rule.id, await idsReached(db, rule));
   return findClashes(candidate, saved, (rule) => ids.get(rule.id) ?? new Set());
@@ -438,7 +438,7 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
       lotExpiresInDays: checked.lotExpiresInDays,
       settlement: checked.settlement,
     };
-    const clashes = await clashesOf(tx, candidate, { exclude: programId });
+    const clashes = await clashesOf(tx, candidate, now, { exclude: programId });
     if (clashes.length > 0) {
       const labels = await tx.grantProgram.findMany({ where: { id: { in: clashes.map((c) => c.programId) } }, select: { id: true, label: true } });
       throw new ClashRefused(await Promise.all(clashes.map(async (c) => ({ programId: c.programId, label: labels.find((l) => l.id === c.programId)?.label ?? c.programId, userIds: c.userIds, people: await chooseNames(c.userIds), totalPeople: c.userIds.length }))));
@@ -651,7 +651,7 @@ async function previewIn(db: Tx, checked: Checked, ids: readonly string[], now: 
   const account = await getFundingAccount(checked.fundingAccountId, db);
   const budget = account ? budgetOf(account, settings) : null;
   const issued = account ? await issuedInMonth(db, account.id, now) : 0;
-  const overlaps = await overlapsOf(db, checked, ids, opts.forProgramId);
+  const overlaps = await overlapsOf(db, checked, ids, opts.forProgramId, now);
   return {
     recipients: { countNow, growing, share: checked.share, eachMicros, schedule: checked.schedule, unit: universeAi ? 'reply' : 'usd_micros' },
     mostIssued: {
@@ -677,8 +677,8 @@ async function previewIn(db: Tx, checked: Checked, ids: readonly string[], now: 
   };
 }
 
-async function overlapsOf(db: Tx, checked: Checked, ids: readonly string[], forProgramId: string | undefined): Promise<Preview['overlaps']> {
-  const others = (await currentRules(db, {})).filter((rule) => rule.programId !== forProgramId && (rule.categoryId === checked.categoryId || rule.covers.some((c) => checked.covers.includes(c))));
+async function overlapsOf(db: Tx, checked: Checked, ids: readonly string[], forProgramId: string | undefined, now: Date): Promise<Preview['overlaps']> {
+  const others = (await currentRules(db, { waitingAfter: now })).filter((rule) => rule.programId !== forProgramId && (rule.categoryId === checked.categoryId || rule.covers.some((c) => checked.covers.includes(c))));
   const mine = new Set(ids);
   const out: Preview['overlaps'] = [];
   const labels = await db.grantProgram.findMany({ where: { id: { in: others.map((rule) => rule.programId) } }, select: { id: true, label: true } });
