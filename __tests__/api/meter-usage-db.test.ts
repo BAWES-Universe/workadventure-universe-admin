@@ -121,13 +121,14 @@ run('usage for people, and cost for us, in a real database', () => {
   describe('the Usage page: one bar and plain words', () => {
     it('is a full bar of plenty for someone who has not used anything, with no computer or storage shown', async () => {
       const sara = await person('sara');
-      // The words and bar as before; the real reply counts (no window started by looking), no Instant Apps section and no extra credit
+      // The words and bar as before; the real reply counts (no window started by looking), no Instant Apps section, no extra credit and no finished tasks
       expect(await memberUsage(sara.id, NOW)).toEqual({
         version: expect.any(Number),
         chat: { left: 1, words: 'plenty', fullAgainAt: null, replies: { available: 30, total: 30, running: false, windowHours: 5 } },
         computer: null,
         storage: null,
         extra: null,
+        activity: [],
         apps: null,
         credit: [],
       });
@@ -207,7 +208,7 @@ run('usage for people, and cost for us, in a real database', () => {
       const response = await usageGet(adminCall('/api/me/usage'));
       expect(response.status).toBe(200);
       const json = await response.json();
-      expect(Object.keys(json).sort()).toEqual(['apps', 'chat', 'computer', 'credit', 'extra', 'storage', 'version']);
+      expect(Object.keys(json).sort()).toEqual(['activity', 'apps', 'chat', 'computer', 'credit', 'extra', 'storage', 'version']);
       // Real reply counts and the person's own credit are theirs to see; never what a provider charged us, and never a price
       expect(JSON.stringify(json)).not.toMatch(/cost|price|provider|\$/i);
     });

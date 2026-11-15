@@ -6,6 +6,7 @@ import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { getBrickLimits } from '@/lib/bot-limits';
 import { memberAllowance, releaseRoom, renewRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
 import { monthOf } from '@/lib/meter-values';
+import { checkSpend } from '@/lib/spend-rules';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
@@ -306,7 +307,9 @@ export type Started =
   /** Not the owner's Brick, or not theirs to ask: only the owner starts computer work on their Brick. */
   | { ok: false; reason: 'not_owner' | 'off' | 'not_open' | 'broken_start' | 'no_run' }
   /** The meter's controls are not set up yet: a computer does not open before they do. */
-  | { ok: false; reason: 'not_set' };
+  | { ok: false; reason: 'not_set' }
+  /** A rule the person said in chat does not let this job take room: nothing is left behind, and the rule's own words come with it. */
+  | { ok: false; reason: 'rule'; words: string };
 
 /** Room is asked for once for each try to run a job: room that was released stays closed, so a later try asks under a new key. */
 const roomKey = (jobId: string, now: Date) => `computer:job:${jobId}:${now.getTime()}`;
@@ -343,24 +346,51 @@ export async function startJob(input: { botId: string; personId: string; title: 
     if (input.runId && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
       const winner = await reuseRunJob(input.botId, input.runId, now);
       if (winner) return winner;
-      // The first ask made the job and took it away again before this one could look (the only thing that takes a run's job away is
-      // "controls not set up"): the same answer, not an error
-      return { ok: false, reason: 'not_set' };
+      // The first ask made the job and took it away again before this one could look: that is "controls not set up" or a rule the person
+      // said (both leave no job behind). Whichever it was, this ask gets the same answer, not an error
+      const words = await ruleWordsOf(input.botId, input.personId, now);
+      return words !== null ? { ok: false, reason: 'rule', words } : { ok: false, reason: 'not_set' };
     }
     throw error;
   }
   const outcome = await tryStart(created.id, now);
+  if (typeof outcome === 'object') {
+    // Refused by a rule the person said in chat: no job was ever going to run, so none is left behind, and the answer carries the rule's words
+    await prisma.computerJob.deleteMany({ where: { id: created.id, status: 'stopped', endedBy: 'rule', startedAt: null } });
+    return { ok: false, reason: 'rule', words: outcome.rule };
+  }
   if (outcome === 'not_set') {
     // Controls that are not set up: no job was ever going to run, so none is left behind (a second ask for the same run may have taken it away already)
     await prisma.computerJob.deleteMany({ where: { id: created.id } });
     return { ok: false, reason: 'not_set' };
   }
   const job = await prisma.computerJob.findUnique({ where: { id: created.id }, include: JOB_INCLUDE });
-  // A second ask for the same run found this job while it waited for its first try, saw the controls not set up and took it away
-  if (!job) return { ok: false, reason: 'not_set' };
+  // A second ask for the same run found this job while it waited for its first try, saw the controls not set up (or a rule the person said
+  // stop it) and took it away: this ask gets the same answer
+  if (!job) {
+    const words = await ruleWordsOf(input.botId, input.personId, now, created.id);
+    return words !== null ? { ok: false, reason: 'rule', words } : { ok: false, reason: 'not_set' };
+  }
+  // The same, seen after that ask stopped the job and before it took it away
+  if (job.status === 'stopped' && job.endedBy === 'rule' && job.startedAt === null) {
+    await prisma.computerJob.deleteMany({ where: { id: job.id, status: 'stopped', endedBy: 'rule', startedAt: null } });
+    return { ok: false, reason: 'rule', words: (await ruleWordsOf(input.botId, input.personId, now, job.id)) ?? 'A rule you said stopped this job' };
+  }
   if (job.status === 'failed') return { ok: false, reason: 'broken_start' };
   const after = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
   return { ok: true, job: jobView(job), restoredFrom: job.status === 'running' ? (after?.restoredFrom ?? null) : null };
+}
+
+/**
+ * The rule's own words when the rules the person said stop a first stretch of room for this Brick's computer now, or null when none does:
+ * asked the way the start asks it (a whole stretch), so it gives the same words the refused ask gave.
+ */
+async function ruleWordsOf(botId: string, personId: string, now: Date, taskKey: string | null = null): Promise<string | null> {
+  const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId } }));
+  if (!provider) return null;
+  const settings = await getMeterSettings();
+  const ruled = await checkSpend({ payerPersonId: personId, botId, taskKey, chargeClass: 'computer', amountMicros: roomFor(settings.renewMinutes, provider.microsPerMinute()) }, now);
+  return ruled.ok ? null : ruled.words;
 }
 
 /**
@@ -372,14 +402,31 @@ async function reuseRunJob(botId: string, runId: string, now: Date): Promise<Sta
   const where = { botId_runId: { botId, runId } };
   let found = await prisma.computerJob.findUnique({ where, include: JOB_INCLUDE });
   if (!found) return null;
+  const owner = found.personId;
+  const jobId = found.id;
   if (found.status === 'queued') {
-    if ((await tryStart(found.id, now)) === 'not_set') {
+    const tried = await tryStart(found.id, now);
+    if (typeof tried === 'object') {
+      // A rule the person said stops it on this try: nothing ran, so none is left behind, the same answer as the first ask
+      await prisma.computerJob.deleteMany({ where: { id: found.id, status: 'stopped', endedBy: 'rule', startedAt: null } });
+      return { ok: false, reason: 'rule', words: tried.rule };
+    }
+    if (tried === 'not_set') {
       await prisma.computerJob.deleteMany({ where: { id: found.id, status: 'queued' } });
       return { ok: false, reason: 'not_set' };
     }
     found = await prisma.computerJob.findUnique({ where, include: JOB_INCLUDE });
-    // The first ask took it away while this one looked again: the controls are not set up
-    if (!found) return { ok: false, reason: 'not_set' };
+    // The first ask took it away while this one looked again: the controls are not set up, or a rule the person said stopped it
+    if (!found) {
+      const words = await ruleWordsOf(botId, owner, now, jobId);
+      return words !== null ? { ok: false, reason: 'rule', words } : { ok: false, reason: 'not_set' };
+    }
+  }
+  // A job a rule the person said has just stopped at the start (it never ran), seen before the ask that stopped it took it away: the same
+  // answer as that ask. A job that ran and was stopped later by a rule is over like any other and is returned as it stands, never removed
+  if (found.status === 'stopped' && found.endedBy === 'rule' && found.startedAt === null) {
+    await prisma.computerJob.deleteMany({ where: { id: found.id, status: 'stopped', endedBy: 'rule', startedAt: null } });
+    return { ok: false, reason: 'rule', words: (await ruleWordsOf(botId, found.personId, now, found.id)) ?? 'A rule you said stopped this job' };
   }
   if (found.status === 'failed') return { ok: false, reason: 'broken_start' };
   return { ok: true, job: jobView(found), restoredFrom: null };
@@ -391,7 +438,7 @@ async function runIsTheirs(botId: string, personId: string, runId: string): Prom
   return !!run && run.item.botId === botId && run.item.ownerId === personId;
 }
 
-type Tried = 'running' | 'queued' | 'failed' | 'not_set' | 'gone';
+type Tried = 'running' | 'queued' | 'failed' | 'not_set' | 'gone' | { rule: string };
 
 /** One try to put a queued job on the machine. Safe to ask again: a job that is no longer queued is left as it is. */
 async function tryStart(jobId: string, now: Date): Promise<Tried> {
@@ -430,6 +477,15 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
   const room = await reserveRoom({ key, personId: job.personId, amountMicros: roomFor(settings.renewMinutes, provider.microsPerMinute()), botId: job.botId, jobId: job.id }, now);
   if (!room.ok) {
     if (room.reason === 'not_set') return 'not_set';
+    // A rule the person said is not a wait in line: waiting would not change it, and a job that keeps being retried would hold up the Brick. It ends,
+    // saying why, and the jobs behind it meet the same rule when their turn comes
+    if (room.reason === 'rule') {
+      await endJob(job.id, 'stopped', 'rule', now, false, 'queued');
+      // Another try may have claimed the job while this one was refused: that one runs and is left alone, only a job this try ended is a refusal
+      const after = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { status: true, endedBy: true } });
+      if (after?.status === 'stopped' && after.endedBy === 'rule') return { rule: room.words };
+      return after && !isOver(after.status) ? 'running' : 'gone';
+    }
     const reason = queueReasonOf(room);
     if (reason) {
       await queue(reason);
@@ -608,7 +664,10 @@ export async function reportProgress(jobId: string, progress: { stepDone: number
  * A job that keeps running renews its room each stretch. If the allowance or our room is used up, or the room is gone, it saves
  * and stops safely: what it did stays, nothing new starts and no step is cut in half by this call.
  */
-export async function renewJob(jobId: string, now: Date = new Date()): Promise<{ ok: true; renewInSeconds: number } | { ok: false; reason: 'allowance' | 'pool' | 'closed' | 'over' | 'unanswered' }> {
+export async function renewJob(
+  jobId: string,
+  now: Date = new Date(),
+): Promise<{ ok: true; renewInSeconds: number } | { ok: false; reason: 'allowance' | 'pool' | 'closed' | 'over' | 'unanswered' } | { ok: false; reason: 'rule'; words: string }> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (job && isOver(job.status) && job.endedBy === 'unanswered') return { ok: false, reason: 'unanswered' };
   if (!job || isOver(job.status)) return { ok: false, reason: 'over' };
@@ -624,6 +683,11 @@ export async function renewJob(jobId: string, now: Date = new Date()): Promise<{
     await renewJobTokens(jobId, now);
     // Each renewal holds more room, so the runner is told how often to ask: well inside the time the room is held, never so often it over-holds
     return { ok: true, renewInSeconds: Math.max(30, Math.min(Math.floor(settings.renewMinutes * 60 * 0.4), TOKEN_RENEW_EVERY_SECONDS)) };
+  }
+  if (room.reason === 'rule') {
+    // A rule the person said in chat stops it here, saying so: not "our room is used up", and nothing to ask more credit for
+    await endJob(jobId, 'stopped', 'rule', now);
+    return { ok: false, reason: 'rule', words: room.words };
   }
   const reason = room.reason === 'allowance' ? 'allowance' : room.reason === 'closed' ? 'closed' : 'pool';
   await endJob(jobId, 'stopped', reason === 'allowance' ? 'allowance' : reason === 'closed' ? 'error' : 'pool', now);
@@ -713,9 +777,11 @@ async function untilCleaned(botId: string): Promise<void> {
  * one event under the job's id, and its reserved room is settled to that. Then the machine rests if no other job holds it, and
  * the next job in line is tried. A job that is already over is left exactly as it ended.
  */
-async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true): Promise<void> {
+async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string): Promise<void> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (!job || isOver(job.status)) return;
+  // A caller that saw the job in line ends it only while it still is: another try may have put it on the machine in between
+  if (only !== undefined && job.status !== only) return;
   const held = job.status === 'running' || job.status === 'waiting';
   const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
   const seconds = job.secondsRun + stretch;

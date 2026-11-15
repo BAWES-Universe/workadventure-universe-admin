@@ -10,6 +10,8 @@ import { priceCall } from '@/lib/composio-rates';
 import { readComposioBilling } from '@/lib/composio-billing';
 import { truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
 import { getGitHubApp } from '@/lib/github/app';
+import { routeForRun, type RunRoute } from '@/lib/app-routes';
+import type { OwnAppVersion } from '@/lib/app-routes/own-versions';
 
 /**
  * Ready-made apps through the adapter (game #2001, step 8). Everything here answers "not there" while the adapter is off, which
@@ -123,14 +125,19 @@ async function restartIfNotSignedIn(
  * month's free calls and the plan's credit are taken off at the account level (lib/composio-billing.ts), not here. A price a super
  * admin saved (`appUseMicros`) replaces the list price of each paid step.
  */
-async function meterUse(input: { botId: string; ownerId: string; toolkit: string; tool: string; arguments?: unknown; callId: string; direct?: boolean }) {
+async function meterUse(input: { botId: string; ownerId: string; toolkit: string; tool: string; arguments?: unknown; callId: string; direct?: boolean; route?: RunRoute }) {
   const [settings, app, billing] = await Promise.all([getMeterSettings(), readyMadeApp(input.toolkit), readComposioBilling()]);
   const priced = priceCall({ toolkit: input.toolkit, tool: input.tool, arguments: input.arguments, ownAuth: !!app?.authConfigId, zdrOn: billing.zdrOn, direct: input.direct === true });
   const steps = priced.executions + priced.sandboxRuns;
-  const cost = settings.appUseMicros === null ? priced.listMicros : steps * settings.appUseMicros;
-  return recordMeterEvent({
+  // Which route this run takes (spec section 21), written on its line. What a PERSON is priced is never read from here: `listMicros`
+  // is the same figure on either route, so a move changes only what the run costs us.
+  const provider = input.route?.provider === 'universe' ? 'universe' : 'composio';
+  const ownTop = input.route?.provider === 'universe' ? input.route.own?.topPriceMicros ?? null : null;
+  const cost = provider === 'universe' ? (ownTop === null ? null : steps * ownTop) : settings.appUseMicros === null ? priced.listMicros : steps * settings.appUseMicros;
+  const eventId = `app:${input.botId}:${input.callId}`;
+  const recorded = await recordMeterEvent({
     // Per Brick: a call id is only known to be unique for the one that made it, so two Bricks never count as one call
-    eventId: `app:${input.botId}:${input.callId}`,
+    eventId,
     kind: 'app_use',
     pool: 'chat',
     occurredAt: new Date(),
@@ -153,6 +160,8 @@ async function meterUse(input: { botId: string; ownerId: string; toolkit: string
       toolkit: input.toolkit,
       tool: input.tool,
       kind: priced.kind,
+      provider,
+      listMicros: priced.listMicros,
       tier: priced.tier,
       tierVerified: priced.tierVerified,
       ownAuth: !!app?.authConfigId,
@@ -163,6 +172,19 @@ async function meterUse(input: { botId: string; ownerId: string; toolkit: string
       ...(Object.keys(priced.inner).length > 0 ? { inner: priced.inner } : {}),
     },
   });
+  return { ...recorded, eventId, provider: provider as 'composio' | 'universe', steps };
+}
+
+/**
+ * How a run ended, written once beside its meter line (the books are never edited). Never a reason a run fails: if it cannot be
+ * written the run's answer still goes back, and the demand page simply has no outcome for it.
+ */
+async function recordOutcome(eventId: string, appKey: string, provider: 'composio' | 'universe', ok: boolean): Promise<void> {
+  try {
+    await prisma.appUseOutcome.createMany({ data: [{ eventId, appKey, provider, outcome: ok ? 'ok' : 'failed' }], skipDuplicates: true });
+  } catch (error) {
+    console.error('[ReadyMade] Could not write how a run ended:', error instanceof Error ? error.message : 'unknown');
+  }
 }
 
 /** The app as listed, or null when it is not on the list. */
@@ -198,17 +220,57 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
   if (!(await confirmReadyMade(connection))) return { status: 'unavailable' };
   const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true } });
   if (!bot || bot.roomId !== null || bot.ownerId !== input.ownerId) return { status: 'not_owner' };
+  // One route for the whole message, read once (see useReadyMade); our own version answers the link itself, never a mix of the two
+  const toolkit = connection.providerToolkit;
+  const route = await routeForRun(toolkit);
+  if (route.provider === 'universe' && !route.own) return { status: 'unavailable' };
+  let written: Awaited<ReturnType<typeof meterUse>> | null = null;
+  let callParams: { name: string; arguments: Record<string, unknown> } | null = null;
   if (method === 'tools/call') {
     const params = input.message.params && typeof input.message.params === 'object' ? (input.message.params as Record<string, unknown>) : {};
     if (typeof params.name !== 'string' || !params.name || !input.callId) return { status: 'refused' };
-    const written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit: connection.providerToolkit, tool: params.name, arguments: params.arguments, callId: input.callId });
+    callParams = { name: params.name, arguments: params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments) ? (params.arguments as Record<string, unknown>) : {} };
+    written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit, tool: params.name, arguments: params.arguments, callId: input.callId, route });
     if (!written.recorded) return { status: 'already_asked' };
   }
   try {
-    return { status: 'done', answer: await adapter.callLink({ url: connection.serverUrl, message: input.message, sessionId: input.sessionId }) };
+    const answer =
+      route.provider === 'universe' && route.own
+        ? await answerFromOwnVersion(route.own, input.message, callParams, { person: input.ownerId, providerAccountId: connection.providerAccountId, callId: input.callId ?? '' })
+        : await adapter.callLink({ url: connection.serverUrl, message: input.message, sessionId: input.sessionId });
+    if (written) await recordOutcome(written.eventId, toolkit, written.provider, answer.status < 400 && !rpcError(answer.body, typeof input.message.id === 'number' || typeof input.message.id === 'string' ? input.message.id : undefined) && !/"isError"\s*:\s*true/.test(answer.body));
+    return { status: 'done', answer };
   } catch (error) {
     console.error('[ReadyMade] Link failed:', error instanceof AdapterError ? error.message : error instanceof Error ? error.message : 'unknown');
+    if (written) await recordOutcome(written.eventId, toolkit, written.provider, false);
     return { status: 'unavailable' };
+  }
+}
+
+/**
+ * The link's own protocol, answered by Universe's own version of the App: the same four messages the Composio link takes, and nothing more.
+ * Our own version keeps no session, so it never gives a session id: one made up here could be sent back later to Composio's link, which
+ * would refuse it.
+ */
+async function answerFromOwnVersion(
+  own: OwnAppVersion,
+  message: Record<string, unknown>,
+  call: { name: string; arguments: Record<string, unknown> } | null,
+  who: { person: string; providerAccountId: string | null; callId: string },
+): Promise<LinkAnswer> {
+  const reply = (body: Record<string, unknown> | null): LinkAnswer => ({ status: body ? 200 : 202, contentType: body ? 'application/json' : null, sessionId: null, body: body ? JSON.stringify({ jsonrpc: '2.0', id: message.id ?? null, ...body }) : '' });
+  switch (message.method) {
+    case 'initialize':
+      return reply({ result: { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: `universe-${own.key}`, version: '1' } } });
+    case 'tools/list':
+      return reply({ result: { tools: own.tools().map((tool) => ({ name: tool.name, description: tool.description ?? '', inputSchema: { type: 'object' } })) } });
+    case 'tools/call': {
+      if (!call) return reply({ error: { code: -32602, message: 'No tool named' } });
+      const result = await own.use({ person: who.person, tool: call.name, arguments: call.arguments, providerAccountId: who.providerAccountId, callId: who.callId });
+      return reply({ result: { content: [{ type: 'text', text: JSON.stringify(result.data ?? null) }], isError: !result.ok } });
+    }
+    default:
+      return reply(null);
   }
 }
 
@@ -233,22 +295,24 @@ export async function useReadyMade(input: { botId: string; connectionId: string;
   const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true } });
   if (!bot || bot.roomId !== null || bot.ownerId !== input.ownerId) return { status: 'not_owner' };
 
-  const written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit: connection.providerToolkit, tool: input.tool, arguments: input.arguments, callId: input.callId, direct: true });
+  // The route is read once, here, and this run keeps it to the end (a move made meanwhile applies to the next run). Our own version
+  // that is not there or not ready is a refusal, never a quiet run on Composio, which could bill a second time.
+  const toolkit = connection.providerToolkit;
+  const route = await routeForRun(toolkit);
+  if (route.provider === 'universe' && !route.own) return { status: 'unavailable' };
+
+  const written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit, tool: input.tool, arguments: input.arguments, callId: input.callId, direct: true, route });
   if (!written.recorded) return { status: 'already_asked' };
 
   try {
-    const result = await adapter.use({
-      person: input.ownerId,
-      toolkit: connection.providerToolkit,
-      tool: input.tool,
-      arguments: input.arguments,
-      providerAccountId: connection.providerAccountId,
-      callId: input.callId,
-    });
+    const request = { person: input.ownerId, tool: input.tool, arguments: input.arguments, providerAccountId: connection.providerAccountId, callId: input.callId };
+    const result = route.provider === 'universe' && route.own ? await route.own.use(request) : await adapter.use({ ...request, toolkit });
+    await recordOutcome(written.eventId, toolkit, written.provider, result.ok);
     return { status: 'done', ok: result.ok, data: result.data };
   } catch (error) {
     if (error instanceof AdapterError) console.error('[ReadyMade] Provider failed:', error.message);
     else console.error('[ReadyMade] Could not use:', error instanceof Error ? error.message : 'unknown');
+    await recordOutcome(written.eventId, toolkit, written.provider, false);
     return { status: 'unavailable' };
   }
 }
@@ -268,7 +332,7 @@ export interface ReadyMadeTestResult {
 }
 
 /** The JSON of a link's answer, which may be plain JSON or an event stream holding it. */
-function linkJson(body: string, id?: number): Record<string, unknown> | null {
+function linkJson(body: string, id?: number | string): Record<string, unknown> | null {
   const attempt = (text: string) => {
     try {
       const value = JSON.parse(text);
@@ -292,7 +356,7 @@ function linkJson(body: string, id?: number): Record<string, unknown> | null {
 }
 
 /** The text of a JSON-RPC error carried in an answer that came with a 2xx status, or null when there is none. */
-function rpcError(body: string, id?: number): string | null {
+function rpcError(body: string, id?: number | string): string | null {
   const error = linkJson(body, id)?.error;
   if (error === undefined || error === null) return null;
   const message = typeof error === 'object' ? (error as { message?: unknown }).message : error;

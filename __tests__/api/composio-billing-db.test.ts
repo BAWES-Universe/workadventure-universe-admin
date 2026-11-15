@@ -98,6 +98,17 @@ run('the Composio bill report', () => {
     expect(body.reconciliation).toMatchObject({ composio: null, oursTopLevel: 3, invoice: null });
   });
 
+  it('leaves runs on Universe’s own version out of what Composio bills (and out of the check against Composio’s numbers)', async () => {
+    asBoss();
+    await step(2, 'a', { ...ownRun('GMAIL_FETCH_EMAILS'), provider: 'composio' }, 300, 1);
+    await step(3, 'b', { ...ownRun('GMAIL_FETCH_EMAILS'), provider: 'universe' }, 120, 1);
+    // An event written before routes existed has no provider and is Composio's
+    await step(4, 'c', ownRun('GMAIL_SEND_EMAIL'), 300, 1);
+    const body = await (await get()).json();
+    expect(body.billed).toMatchObject({ events: 2, executions: 2, recordedMicros: 600 });
+    expect(body.reconciliation).toMatchObject({ oursTopLevel: 2 });
+  });
+
   it('keeps events of other months out of the month', async () => {
     asBoss();
     await step(2, 'a', ownRun('GMAIL_FETCH_EMAILS'), 300, 1);

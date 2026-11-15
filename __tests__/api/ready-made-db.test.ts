@@ -363,8 +363,8 @@ run('ready-made apps through the adapter, in a real database', () => {
     const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, payerKind: 'universe', route: 'app', unit: 'use', basis: 'estimated', costMicros: BigInt(400), quantity: BigInt(1), botId: saraBrick });
-    // The app here has a sign-in setup a super admin chose, so it is priced as our own sign-in: $0.0003, plus $0.0001 for a run outside a session. How it was priced is written, never what was asked.
-    expect(events[0].detail).toEqual({ toolkit: KEY, tool: 'GMAIL_FETCH_EMAILS', kind: 'execution', tier: 'own', tierVerified: true, ownAuth: true, executions: 1, sandboxRuns: 0, zdrCalls: 0, directCalls: 1 });
+    // The app here has a sign-in setup a super admin chose, so it is priced as our own sign-in: $0.0003, plus $0.0001 for a run outside a session. How it was priced, and which route it took (provider), is written, never what was asked.
+    expect(events[0].detail).toEqual({ toolkit: KEY, tool: 'GMAIL_FETCH_EMAILS', kind: 'execution', provider: 'composio', listMicros: 400, tier: 'own', tierVerified: true, ownAuth: true, executions: 1, sandboxRuns: 0, zdrCalls: 0, directCalls: 1 });
   });
 
   it('writes an estimate from the super admin’s own price once there is one', async () => {

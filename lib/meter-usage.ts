@@ -5,6 +5,7 @@ import { runningExtra, type RunningExtra } from '@/lib/meter-grants';
 import { openRequestFor } from '@/lib/meter-requests';
 import { getUniverseAiReplyLimits } from '@/lib/bot-limits';
 import { nextMonthStart, usageWords, type UsageWords } from '@/lib/meter-values';
+import { activityFor, type ActivityItem } from '@/lib/task-receipts';
 import { repliesPerWindowFor } from '@/lib/credit-replies';
 import { creditUsage, type CreditEntry, type MoneyLine, type Unavailable } from '@/lib/credit-usage';
 
@@ -63,6 +64,8 @@ export interface MemberUsage {
   computer: ComputerBar | null;
   storage: { bytes: number } | null;
   extra: { until: string } | null;
+  /** One line for each finished task, newest first (paying spec 3, part O4): what it used and who paid. Empty when none, or when it could not be read. */
+  activity: ActivityItem[];
   /** Instant Apps credit, in dollars. Missing (null) when nobody has been given any: no section. */
   apps?: MoneyLine | Unavailable | null;
   /** Extra credit someone has now, one amount for everything it covers. */
@@ -155,5 +158,10 @@ export async function memberUsage(personId: string, now: Date = new Date()): Pro
     }
     storage = { bytes: await storedBytes(personId) };
   }
-  return { version: now.getTime(), chat, computer, storage, extra: extra ? { until: extra.endsAt.toISOString() } : null, apps: money.apps, credit: money.credit };
+  // A receipt that cannot be read leaves the list empty, never the whole page: the bars above are what the person came for
+  const activity = await activityFor(personId).catch((error) => {
+    console.error('[Usage] Could not read Activity:', error instanceof Error ? error.message : 'unknown');
+    return [];
+  });
+  return { version: now.getTime(), chat, computer, storage, extra: extra ? { until: extra.endsAt.toISOString() } : null, apps: money.apps, credit: money.credit, activity };
 }

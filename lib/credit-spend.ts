@@ -29,7 +29,11 @@ export type NoCredit =
   /** The hold is not one that is held and in time any more. */
   | { ok: false; reason: 'closed'; hold?: HoldView }
   /** The same execution was already charged under another key. */
-  | { ok: false; reason: 'effect_charged' };
+  | { ok: false; reason: 'effect_charged' }
+  /** A rule the person said in chat does not let this step take that much (see `HoldInput.guard`): the rule's own words, and nothing to ask more credit for. */
+  | NoCreditRule;
+
+export type NoCreditRule = { ok: false; reason: 'rule'; ruleId: string; why: 'own_accounts' | 'cap'; leftMicros: number | null; words: string };
 
 export interface HoldAllocation {
   lotId: string;
@@ -78,6 +82,12 @@ export interface HoldInput {
   effectKey?: string | null;
   /** For work a named payer funds (a universe-paid service): only that account's lots count, and nothing falls back to anyone else's. */
   onlyAccountId?: string | null;
+  /**
+   * Asked inside the hold's own transaction, after the person's lock is taken and before anything is held: whatever it reads (what the
+   * person has already spent or holds) cannot change under it, so two steps asked at the same moment meet here one after the other.
+   * Answers the refusal, or null to go on. Not asked for a hold that already exists: that is the same step.
+   */
+  guard?: (tx: Tx) => Promise<NoCreditRule | null>;
 }
 
 type HoldRow = Awaited<ReturnType<typeof loadHold>>;
@@ -157,6 +167,10 @@ async function holdOnce(input: HoldInput, now: Date, settings: MeterSettings, is
     if (input.effectKey) {
       const charged = await tx.creditHold.findFirst({ where: { effectKey: input.effectKey, state: { not: 'released' } }, select: { holdKey: true } });
       if (charged && charged.holdKey !== input.holdKey) return { ok: false, reason: 'effect_charged' };
+    }
+    if (input.guard) {
+      const stopped = await input.guard(tx);
+      if (stopped) return stopped;
     }
     const lots = await usableLots(tx, input.personId, input.category, now, { onlyAccountId: input.onlyAccountId });
     const lockedSet = new Set(locked);
