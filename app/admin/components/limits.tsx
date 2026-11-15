@@ -65,7 +65,11 @@ export interface ModelCap {
 export function shown(limit: Limit, value = limit.value): string {
   if (limit.unset && value === limit.value) return 'Not set';
   const option = limit.options.find((entry) => entry.value === value);
-  return option ? option.label : `${value.toLocaleString('en')} ${limit.unit}`;
+  if (option) return option.label;
+  // Money reads as dollars and a share as a percent, not as "0.5 dollars"
+  if (limit.unit === 'dollars') return `$${value.toLocaleString('en', { maximumFractionDigits: 6 })}`;
+  if (limit.unit === 'percent') return `${value.toLocaleString('en', { maximumFractionDigits: 2 })}%`;
+  return `${value.toLocaleString('en')} ${limit.unit}`;
 }
 
 /** The neutral pill that marks the recommended value: a fact, so it is neither violet nor gradient. */
@@ -1058,6 +1062,78 @@ export function computerAllowanceLimit(micros: number | null): Limit {
   };
 }
 
+/**
+ * What Universe is ready to fund from grants (spec v3 section 16, O3): kept in the meter's settings, in millionths of a dollar. It
+ * has no suggested value: until a super admin sets it, the row says "Not set" and nothing is assumed.
+ */
+export const ROLLOUT_BUDGET_ID = 'rolloutBudget';
+export type MoneyLimitSettings = { rolloutBudgetMicros?: number | null };
+
+export function moneyLimits(settings: MoneyLimitSettings): Limit[] {
+  const micros = settings.rolloutBudgetMicros ?? null;
+  return [
+    {
+      id: ROLLOUT_BUDGET_ID,
+      label: 'Rollout budget for grants',
+      hint: 'The most credit Universe is ready to fund from defaults and gifts. A default stops reaching new people when it would go past this.',
+      unit: 'dollars',
+      value: micros === null ? 0 : micros / 1_000_000,
+      recommended: -1,
+      unset: micros === null,
+      options: [],
+      note: micros === null ? 'Not set yet. Nothing is assumed: set it before the first default reaches anyone.' : undefined,
+      range: { min: 0.01, max: 1_000_000 },
+    },
+  ];
+}
+
+/**
+ * The Instant Apps limits (spec v3 O2/O3): read from /api/admin/instant, which says each limit's words, range and value. Money is held in
+ * millionths of a dollar and shown in dollars; shares are held in hundredths of a percent and shown as a percent. Nothing is built in here.
+ */
+export type InstantLimitView = {
+  value: number | null;
+  range: { min: number; max: number };
+  recommended: number | null;
+  label: string;
+  hint: string;
+  unit: 'micros' | 'bps' | 'count' | 'minutes';
+  required: boolean;
+};
+export type InstantLimitViews = Record<string, InstantLimitView>;
+
+const INSTANT_COUNT_WORDS: Record<string, string> = { pauseMinRuns: 'runs', goodwillPerPersonPerMonth: 'give-backs' };
+const instantScale = (unit: InstantLimitView['unit']) => (unit === 'micros' ? 1_000_000 : unit === 'bps' ? 100 : 1);
+const instantUnit = (key: string, unit: InstantLimitView['unit']) => (unit === 'micros' ? 'dollars' : unit === 'bps' ? 'percent' : unit === 'minutes' ? 'minutes' : (INSTANT_COUNT_WORDS[key] ?? 'times'));
+
+/** The limits of an answer from /api/admin/instant, or null when it is not that answer (each one needs its words and range). */
+export function readInstantLimits(answer: unknown): InstantLimitViews | null {
+  const limits = (answer as { limits?: unknown } | null)?.limits;
+  if (!limits || typeof limits !== 'object') return null;
+  const entries = Object.entries(limits as Record<string, Partial<InstantLimitView>>);
+  const valid = entries.length > 0 && entries.every(([, view]) => view && typeof view.label === 'string' && typeof view.hint === 'string' && view.range && typeof view.range.min === 'number' && typeof view.range.max === 'number' && ['micros', 'bps', 'count', 'minutes'].includes(view.unit as string));
+  return valid ? (limits as InstantLimitViews) : null;
+}
+
+export function instantLimits(views: InstantLimitViews): Limit[] {
+  return Object.entries(views).map(([key, view]) => {
+    const scale = instantScale(view.unit);
+    const unset = view.value === null;
+    return {
+      id: key,
+      label: view.label,
+      hint: view.hint,
+      unit: instantUnit(key, view.unit),
+      value: unset ? 0 : (view.value as number) / scale,
+      recommended: view.recommended === null ? -1 : view.recommended / scale,
+      unset,
+      options: [],
+      note: unset ? (view.required ? 'Not set yet. Instant Apps do not run until you set it.' : 'Not set yet.') : undefined,
+      range: { min: view.range.min / scale, max: view.range.max / scale },
+    };
+  });
+}
+
 /** The id without its maker's prefix: "openai/gpt-4o-mini" is "gpt-4o-mini". */
 const shortModel = (id: string) => (id.includes('/') ? id.slice(id.indexOf('/') + 1) : id);
 const listOf = (names: string[]) => new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(names);
@@ -1403,7 +1479,11 @@ export function UniverseAiLimits() {
   const [savingGuard, setSavingGuard] = useState(false);
   // The meter's computer allowance for each member (game #1999): null until a super admin sets it
   const [allowance, setAllowance] = useState<{ micros: number | null } | null>(null);
+  // The money limits live in the same settings (spec v3 O3): what is given back, and how much Universe funds
+  const [money, setMoney] = useState<MoneyLimitSettings>({});
   const [allowanceFailed, setAllowanceFailed] = useState(false);
+  // Instant Apps' own limits come from their own route; when it is not there (or not readable) the group is simply not shown
+  const [instant, setInstant] = useState<InstantLimitViews | null>(null);
 
   async function load() {
     setFailed(false);
@@ -1436,9 +1516,23 @@ export function UniverseAiLimits() {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch('/api/admin/meter-settings');
       if (!response.ok) throw new Error('load');
-      setAllowance({ micros: ((await response.json()) as { settings: { memberAllowanceMicros: number | null } }).settings.memberAllowanceMicros });
+      const { settings } = (await response.json()) as { settings: { memberAllowanceMicros: number | null } & MoneyLimitSettings };
+      setAllowance({ micros: settings.memberAllowanceMicros });
+      setMoney(settings);
     } catch {
       setAllowanceFailed(true);
+    }
+  }
+
+  async function loadInstant() {
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/instant');
+      if (!response.ok) return;
+      const views = readInstantLimits(await response.json());
+      if (views) setInstant(views);
+    } catch {
+      // Not shown until it can be read
     }
   }
 
@@ -1446,6 +1540,7 @@ export function UniverseAiLimits() {
     load();
     loadVoice();
     loadAllowance();
+    loadInstant();
   }, []);
 
   async function saveAllowance(dollars: number): Promise<boolean> {
@@ -1455,6 +1550,32 @@ export function UniverseAiLimits() {
       return false;
     }
     setAllowance({ micros: (result.data as { settings: { memberAllowanceMicros: number | null } }).settings.memberAllowanceMicros });
+    addToast({ description: 'Saved', variant: 'success', duration: 2000 });
+    return true;
+  }
+
+  async function saveMoney(id: string, dollars: number): Promise<boolean> {
+    if (id !== ROLLOUT_BUDGET_ID) return false;
+    const result = await sendLimits('/api/admin/meter-settings', { rolloutBudgetMicros: dollarsToMicros(dollars) });
+    if (!result.ok) {
+      addToast({ description: result.error, variant: 'error' });
+      return false;
+    }
+    setMoney((result.data as { settings: MoneyLimitSettings }).settings);
+    addToast({ description: 'Saved', variant: 'success', duration: 2000 });
+    return true;
+  }
+
+  async function saveInstant(id: string, value: number): Promise<boolean> {
+    const view = instant?.[id];
+    if (!view) return false;
+    const result = await sendLimits('/api/admin/instant', { [id]: Math.round(value * instantScale(view.unit)) });
+    if (!result.ok) {
+      addToast({ description: result.error, variant: 'error' });
+      return false;
+    }
+    const views = readInstantLimits(result.data);
+    if (views) setInstant(views);
     addToast({ description: 'Saved', variant: 'success', duration: 2000 });
     return true;
   }
@@ -1521,6 +1642,8 @@ export function UniverseAiLimits() {
             limits={[...(allowance ? [computerAllowanceLimit(allowance.micros)] : []), ...brickLimits(limits.bricks)]}
             onChange={(id, value) => (id === COMPUTER_ALLOWANCE_ID ? saveAllowance(value) : save({ bricks: { [id]: value } }))}
           />
+          {instant && <LimitGroup title="Instant Apps" note="Apps that work without connecting anything. Universe pays for each run, so each limit is yours to set. Instant Apps do not run until the required ones have a number." limits={instantLimits(instant)} onChange={saveInstant} />}
+          {allowance && <LimitGroup title="Credit and give-backs" note="What Universe funds and returns. None of these has a built-in value: set each one yourself." limits={moneyLimits(money)} onChange={saveMoney} />}
           {voiceFailed ? (
             <LoadError label="the voice limits" retry={loadVoice} />
           ) : !voice ? (

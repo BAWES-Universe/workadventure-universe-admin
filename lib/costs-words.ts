@@ -52,7 +52,7 @@ export function goesLines(row: CostsReport['goes'][number]): string[] {
     const size = gb >= 0.1 ? `${gb.toFixed(1)} GB kept` : (row.bytes ?? 0) > 0 ? 'Under 0.1 GB kept' : 'Nothing kept yet';
     return [size, row.ourMicros === null ? 'no price set yet' : `Our count ${dollars(row.ourMicros)} a month`];
   }
-  if (row.key === 'apps') {
+  if (row.key === 'apps' || row.key === 'instant') {
     const uses = plural(row.uses ?? 0, 'use', 'uses');
     return [uses, row.ourMicros === null ? 'no price known yet' : `Our count ${dollars(row.ourMicros)}`];
   }

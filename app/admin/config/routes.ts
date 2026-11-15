@@ -93,6 +93,7 @@ export const ROUTES: RouteDefinition[] = [
   { pattern: '/admin/github-app', title: 'GitHub for Universe', parent: '/admin' },
   { pattern: '/admin/ai-providers/new', title: 'New provider', parent: '/admin/ai-providers' },
   { pattern: '/admin/ai-providers/usage', title: 'AI usage', parent: '/admin/ai-providers' },
+  { pattern: '/admin/ai-providers/grants', title: 'Grants', parent: '/admin/ai-providers' },
   { pattern: '/admin/ai-providers/voice/new', title: 'New voice provider', parent: '/admin/ai-providers' },
   { pattern: '/admin/ai-providers/voice/[id]', title: 'Voice provider', parent: '/admin/ai-providers' },
   { pattern: '/admin/ai-providers/[id]', title: 'Provider', parent: '/admin/ai-providers' },
