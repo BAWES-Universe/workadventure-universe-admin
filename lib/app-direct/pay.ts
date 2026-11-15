@@ -269,7 +269,10 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
   };
   // The service insists on a customer: a plain placeholder, never the buyer's name, which nobody gave us
   if (create.customerName) args[create.customerName] = 'Customer';
-  if (job.description && operation.params.some((param) => param.name === 'description')) args.description = job.description;
+  // The owner's words go in only as the service's own description field allows: a short limit cuts them, a field that is not plain text
+  // or only takes set values is left out, so a service's own limits never end a checkout
+  const wording = operation.params.find((param) => param.name === 'description');
+  if (job.description && wording && wording.type === 'string' && !wording.oneOf) args.description = wording.maxLength ? job.description.slice(0, wording.maxLength) : job.description;
 
   const startedAt = new Date();
   let answer;

@@ -817,6 +817,23 @@ run('payments for pages, in a real database', () => {
       }
     });
 
+    it('fits the owner’s words to the description field of the service instead of failing the checkout', async () => {
+      const { id: connectionId, serverId } = await connectGateway();
+      const artifactId = await makeArtifact();
+      expect((await job(serverId, artifactId, { description: 'A mug with a very long name' })).status).toBe(200);
+      // A service whose description field is short
+      const before = await prisma.appConnection.findUniqueOrThrow({ where: { id: connectionId } });
+      const definition = JSON.parse(JSON.stringify(before.definition)) as { operations: { id: string; params: { name: string; maxLength?: number }[] }[] };
+      definition.operations.find((operation) => operation.id === 'makePaymentLink')!.params.find((param) => param.name === 'description')!.maxLength = 5;
+      const hash = hashDefinition(definitionSchema.parse(definition));
+      await prisma.appConnection.update({ where: { id: connectionId }, data: { definition: definition as never, definitionHash: hash } });
+      await prisma.appPageJob.update({ where: { artifactId }, data: { definitionHash: hash } });
+      const sent = gateway();
+      const { orderId } = await checkout(artifactId, '198.51.100.59');
+      expect(orderId).toBeTruthy();
+      expect(JSON.parse(sent.find((entry) => entry.method === 'POST')!.body ?? '{}')).toMatchObject({ description: 'A mug' });
+    });
+
     it('counts a look at a payment against what everyone may send an hour, and waits when that is spent', async () => {
       await saveServerLimits({ bricks: { keyCallsPlatform: 2 } }, sara);
       const { artifactId } = await pending();
