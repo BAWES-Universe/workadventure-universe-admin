@@ -5,6 +5,7 @@ import { runningExtra, type RunningExtra } from '@/lib/meter-grants';
 import { openRequestFor } from '@/lib/meter-requests';
 import { getUniverseAiReplyLimits } from '@/lib/bot-limits';
 import { nextMonthStart, usageWords, type UsageWords } from '@/lib/meter-values';
+import { activityFor, type ActivityItem } from '@/lib/task-receipts';
 
 /**
  * What a person sees about their usage (game #1999): one bar and plain words, never a count of replies and never a price.
@@ -42,6 +43,8 @@ export interface MemberUsage {
   computer: ComputerBar | null;
   storage: { bytes: number } | null;
   extra: { until: string } | null;
+  /** One line for each finished task, newest first (paying spec 3, part O4): what it used and who paid. Empty when none, or when it could not be read. */
+  activity: ActivityItem[];
 }
 
 /**
@@ -104,5 +107,10 @@ export async function memberUsage(personId: string, now: Date = new Date()): Pro
     }
     storage = { bytes: await storedBytes(personId) };
   }
-  return { chat, computer, storage, extra: extra ? { until: extra.endsAt.toISOString() } : null };
+  // A receipt that cannot be read leaves the list empty, never the whole page: the bars above are what the person came for
+  const activity = await activityFor(personId).catch((error) => {
+    console.error('[Usage] Could not read Activity:', error instanceof Error ? error.message : 'unknown');
+    return [];
+  });
+  return { chat, computer, storage, extra: extra ? { until: extra.endsAt.toISOString() } : null, activity };
 }

@@ -18,17 +18,20 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import * as computer from '@/lib/computer';
+import * as spend from '@/lib/spend-rules';
 
 jest.mock('@/lib/db', () => ({ prisma: { user: { findUnique: jest.fn() } } }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/usage-person', () => ({ resolveUsagePerson: jest.fn() }));
 jest.mock('@/lib/computer');
+jest.mock('@/lib/spend-rules');
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 
 const db = prisma as unknown as { user: { findUnique: jest.Mock } };
 const session = getSessionUser as jest.Mock;
 const resolve = resolveUsagePerson as jest.Mock;
 const lib = computer as jest.Mocked<typeof computer>;
+const rules = spend as jest.Mocked<typeof spend>;
 
 const SERVICE_TOKEN = 'bot-server-secret';
 const BRICK = 'brick-1';
@@ -49,6 +52,7 @@ beforeEach(() => {
   process.env.BOT_SERVICE_TOKEN = SERVICE_TOKEN;
   session.mockResolvedValue({ id: 'u-sara' });
   db.user.findUnique.mockResolvedValue({ isGuest: false });
+  rules.ownerSpendAllowed.mockResolvedValue({ ok: true });
 });
 afterAll(() => {
   if (tokenBefore === undefined) delete process.env.BOT_SERVICE_TOKEN;
@@ -188,6 +192,18 @@ describe('the bot server’s calls', () => {
     resolve.mockResolvedValue({ personId: null, guest: true });
     expect(await (await startRoute(asBot('/x', { body: { userId: 'wa-guest', isGuest: true, title: 'x' } }), params)).json()).toEqual({ ok: false, reason: 'not_owner' });
     expect(lib.startJob).toHaveBeenCalledTimes(1);
+  });
+
+  it('says a rule the person said in chat stops it, with the rule’s own words, before any job is started', async () => {
+    resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+    rules.ownerSpendAllowed.mockResolvedValue({ ok: false, ruleId: 'r1', why: 'cap', leftMicros: 0, words: 'No more than $1.00 a month from your credit for Brick' });
+    expect(await (await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' } }), params)).json()).toEqual({
+      ok: false,
+      reason: 'rule',
+      rule: { id: 'r1', why: 'cap', leftMicros: 0, words: 'No more than $1.00 a month from your credit for Brick' },
+    });
+    expect(rules.ownerSpendAllowed).toHaveBeenCalledWith(BRICK, 'u-sara', 'computer');
+    expect(lib.startJob).not.toHaveBeenCalled();
   });
 
   it('says whether the computer is on for its owner, read only, and "off" for anyone else', async () => {

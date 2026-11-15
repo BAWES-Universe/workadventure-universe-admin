@@ -2,6 +2,8 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
 import { allowanceNow, missingSettings, monthOf, type AllowanceState, type MeterSettings } from '@/lib/meter-values';
+import { checkSpend, INSTANT_ROOM_PREFIX } from '@/lib/spend-rules';
+import type { ChargeClass } from '@/lib/spend-rules-values';
 
 /**
  * One allowance per member, shared by all their Bricks, and the envelope around everything we pay for (game #1998, Brick 7).
@@ -30,7 +32,9 @@ export type NoRoom =
   /** The reservation is not one that is held and in time any more: stop safely. */
   | { ok: false; reason: 'closed' }
   /** The key was used before for someone else: the first stands, and whoever asked has a bug to find. */
-  | { ok: false; reason: 'key_reused' };
+  | { ok: false; reason: 'key_reused' }
+  /** A rule the person said in chat (lib/spend-rules.ts) does not let this step take that much. Not an allowance that ran out: more credit would not help, changing the rule would. */
+  | { ok: false; reason: 'rule'; ruleId: string; why: 'own_accounts' | 'cap'; leftMicros: number | null; words: string };
 
 export interface Reservation {
   key: string;
@@ -201,7 +205,7 @@ const wholeMicros = (value: number, what: string): void => {
  * the envelope keeps counting until it is settled or released. Never throws for "no room": that is an answer.
  */
 export async function reserveRoom(
-  input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null },
+  input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass },
   now: Date = new Date(),
 ): Promise<Room> {
   wholeMicros(input.amountMicros, 'amountMicros');
@@ -214,6 +218,9 @@ export async function reserveRoom(
       // Asking again for room that is still held is the same room. Room that was settled, released or lapsed is not a place to start a paid step from
       return already.state === 'held' && already.expiresAt > now ? { ok: true, reservation: viewOf(already), created: false } : { ok: false, reason: 'closed' };
     }
+    // What the person said in chat comes first: a rule that does not let this step take that much stops it, whatever the allowance holds
+    const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.jobId ?? null, chargeClass: input.chargeClass ?? 'computer', amountMicros: input.amountMicros }, now, tx);
+    if (!ruled.ok) return { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
     const settings = await getMeterSettings(tx);
     const no = await fits(tx, input.personId, input.amountMicros, now, settings, { newJob: true });
     if (no) return no;
@@ -247,6 +254,13 @@ export async function renewRoom(input: { key: string; moreMicros?: number }, now
     if (!row || row.state !== 'held' || row.expiresAt <= now) return { ok: false, reason: 'closed' };
     const settings = await getMeterSettings(tx);
     if (more > 0) {
+      // More room for a job that runs is a new step for the rules too: the same ones that let it start decide whether it may take more
+      const ruled = await checkSpend(
+        { payerPersonId: row.personId ?? '', botId: row.botId, taskKey: row.jobId, chargeClass: row.reservationKey.startsWith(INSTANT_ROOM_PREFIX) ? 'apps' : 'computer', amountMicros: more },
+        now,
+        tx,
+      );
+      if (!ruled.ok) return { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
       const no = await fits(tx, row.personId ?? '', more, now, settings, { newJob: false });
       if (no) return no;
     }

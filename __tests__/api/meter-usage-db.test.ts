@@ -121,7 +121,7 @@ run('usage for people, and cost for us, in a real database', () => {
   describe('the Usage page: one bar and plain words', () => {
     it('is a full bar of plenty for someone who has not used anything, with no computer or storage shown', async () => {
       const sara = await person('sara');
-      expect(await memberUsage(sara.id, NOW)).toEqual({ chat: { left: 1, words: 'plenty', fullAgainAt: null }, computer: null, storage: null, extra: null });
+      expect(await memberUsage(sara.id, NOW)).toEqual({ chat: { left: 1, words: 'plenty', fullAgainAt: null }, computer: null, storage: null, extra: null, activity: [] });
     });
 
     it('counts only what Universe AI paid for: a Brick on their own key uses none of the bar', async () => {
@@ -186,7 +186,7 @@ run('usage for people, and cost for us, in a real database', () => {
       const response = await usageGet(adminCall('/api/me/usage'));
       expect(response.status).toBe(200);
       const json = await response.json();
-      expect(Object.keys(json).sort()).toEqual(['chat', 'computer', 'extra', 'storage']);
+      expect(Object.keys(json).sort()).toEqual(['activity', 'chat', 'computer', 'extra', 'storage']);
       // Never a count of replies and never a price
       expect(JSON.stringify(json)).not.toMatch(/cost|price|micros|replies|\$/i);
     });

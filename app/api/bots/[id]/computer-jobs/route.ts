@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import { computerView, startJob } from '@/lib/computer';
+import { ownerSpendAllowed } from '@/lib/spend-rules';
 
 export const runtime = 'nodejs';
 
@@ -50,7 +51,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
  * less wakes no computer: that choice is made before this call, and this call is the only thing that can make or wake a machine).
  * Only the Brick's owner starts work on it: whoever else is talking to the Brick gets `not_owner`. Answers with the job and why
  * it waits if it does: `turn` (another job is writing), `allowance` (the person's own is used up: "Ask for more"), `busy` or
- * `pool` (wait in line, nothing to ask for), or `{ ok: false, reason }` when it cannot start at all. With a `runId` (a run of the
+ * `pool` (wait in line, nothing to ask for), or `{ ok: false, reason }` when it cannot start at all (`rule`: a rule the person said in chat does not let it spend, with the rule's own words). With a `runId` (a run of the
  * person's goal or task on this Brick) the run starts one job, ever: asked again it answers with that job; another's run is `no_run`.
  *
  * Auth: service token only.
@@ -68,6 +69,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const person = await resolveUsagePerson(parsed.data.userId, parsed.data.isGuest);
     // A guest never has a Brick computer: a Brick belongs to an account
     if (!person.personId) return NextResponse.json({ ok: false, reason: 'not_owner' });
+    // A rule the person said in chat ("no more than $1 a month", "only my own accounts") is held before a job exists, so Brick can say so at once
+    const ruled = await ownerSpendAllowed(id, person.personId, 'computer');
+    if (!ruled.ok) return NextResponse.json({ ok: false, reason: 'rule', rule: { id: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words } });
     const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, writes: parsed.data.writes, runId: parsed.data.runId });
     return NextResponse.json(started.ok ? { ok: true, job: started.job, restoredFrom: started.restoredFrom } : { ok: false, reason: started.reason });
   } catch (error) {
