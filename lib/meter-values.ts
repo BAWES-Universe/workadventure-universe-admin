@@ -176,6 +176,12 @@ export interface MeterSettings {
   atOnceAll: number | null;
   /** One price for every paid step of a ready-made app, replacing the provider's list prices (lib/composio-rates.ts). Empty means those list prices are used, which is the usual case. Not needed to open anything. */
   appUseMicros: number | null;
+  /**
+   * What the platform's funding account may issue in credit in one calendar month (UTC), in millionths of a dollar: the funded rollout
+   * budget. Empty means no default grant, gift or renewal issues anything yet: nothing is assumed (paying spec v3, sections 16 and 19).
+   * Not needed for computers or chat, so it is not among the settings room is refused without.
+   */
+  rolloutBudgetMicros: number | null;
   /** How long room is held before a job must renew it, in minutes. */
   renewMinutes: number;
 }
@@ -190,6 +196,7 @@ export const METER_SETTINGS_EMPTY: MeterSettings = {
   atOnceMember: null,
   atOnceAll: null,
   appUseMicros: null,
+  rolloutBudgetMicros: null,
   renewMinutes: METER_RENEW_MINUTES_RECOMMENDED,
 };
 
@@ -207,10 +214,14 @@ export const METER_RANGES: Record<keyof MeterSettings, MeterRange> = {
   atOnceMember: { min: 1, max: 100_000 },
   atOnceAll: { min: 1, max: 1_000_000 },
   appUseMicros: { min: 0, max: 1_000_000_000 },
+  rolloutBudgetMicros: { min: 0, max: 1_000_000_000_000_000 },
   renewMinutes: { min: 1, max: 1_440 },
 };
 
 const NEEDED: (keyof MeterSettings)[] = ['memberAllowanceMicros', 'poolCeilingMicros', 'reserveMicros', 'storageMicrosPerGbMonth', 'atOnceMember', 'atOnceAll'];
+
+/** Settings that may be emptied again but that nothing is refused without (see `missingSettings`). */
+const OPTIONAL_MONEY: (keyof MeterSettings)[] = ['appUseMicros', 'rolloutBudgetMicros'];
 
 const fits = (value: unknown, range: MeterRange): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= range.min && value <= range.max;
 
@@ -231,7 +242,7 @@ export function checkMeterSettings(input: unknown): Checked<Partial<MeterSetting
   for (const [key, value] of Object.entries(input)) {
     const range = Object.prototype.hasOwnProperty.call(METER_RANGES, key) ? METER_RANGES[key as keyof MeterSettings] : undefined;
     if (!range) return { ok: false, error: `Unknown setting: ${key}` };
-    if (value === null && (NEEDED.includes(key as keyof MeterSettings) || key === 'appUseMicros')) {
+    if (value === null && (NEEDED.includes(key as keyof MeterSettings) || OPTIONAL_MONEY.includes(key as keyof MeterSettings))) {
       (out as Record<string, null>)[key] = null;
       continue;
     }
