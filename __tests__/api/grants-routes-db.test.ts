@@ -215,6 +215,15 @@ run('the grants routes, on the real books', () => {
     expect((await call(deleteException, '/x', { method: 'DELETE' }, ctx({ id: 'nope' }))).status).toBe(404);
   });
 
+  it('never half-saves an exception: if the second category is refused, the first is put back', async () => {
+    await saveMeterSettings({ rolloutBudgetMicros: 5 * MILLION }, admin.id);
+    const [omar, noor] = [await person('Omar'), await person('Noor')];
+    const refused = await call<any>(postException, '/x', { method: 'POST', body: { audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'own', amountMicros: 1 * MILLION, interval: 'once' }, computers: { mode: 'own', amountMicros: 3 * MILLION, interval: 'once' } } });
+    expect(refused.status).toBe(400);
+    expect((await refused.json()).code).toBe('over_budget');
+    expect((await overview()).exceptions).toHaveLength(0);
+  });
+
   it('saves a changed exception for the same people as a change, never a second rule', async () => {
     const [omar, noor] = [await person('Omar'), await person('Noor')];
     const body = (amount: number) => ({ audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'own', amountMicros: amount * MILLION, interval: 'monthly' }, computers: { mode: 'same' } });

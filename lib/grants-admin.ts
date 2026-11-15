@@ -371,6 +371,18 @@ async function takeOut(programId: string, people: string[], issuer: Issuer, now:
   else await saveException({ ...inputOfProgram(other), recipients: { kind: 'people', userIds: left }, programId }, issuer, now);
 }
 
+/** Puts back what a refused save had already changed: a new rule ends, a changed one goes back to what it was. */
+async function undo(done: { before: ProgramView | undefined; after: ProgramView }[], issuer: Issuer, now: Date): Promise<void> {
+  for (const { before, after } of done.reverse()) {
+    try {
+      if (before) await saveException({ ...inputOfProgram(before), programId: before.programId }, issuer, now);
+      else await endProgram(after.programId, issuer, now);
+    } catch (error) {
+      console.error('[Grants] Could not put back a rule after a refused save:', error instanceof Error ? error.message : 'unknown');
+    }
+  }
+}
+
 /**
  * Saves an exception: one rule for each money category it sets, over the same people. A category set to "As everyone" has no rule (an
  * existing one ends). A clash is refused with the people named; with `clashChoice` the admin says which rule applies to them: "this"
@@ -380,25 +392,33 @@ export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 
   let recipients = recipientOf(request.audience);
   const existing = request.replaceId ? readExceptionId(request.replaceId) : null;
   if (request.replaceId && !existing) throw new GrantsRefused('That exception was not found', 404);
-  const active = await listPrograms(undefined, { kind: 'exception' });
   // The same people already have a rule for this category: this is a change to it, never a second one
-  const sameAudience = (programId: string | null) => (programId ? active.find((program) => program.programId === programId) : undefined);
-  const findExisting = (category: MoneyCategory): ProgramView | undefined => sameAudience(existing?.[category] ?? null) ?? active.find((program) => program.categoryId === category && recipientKey(program.recipients) === recipientKey(recipients));
+  let active = await listPrograms(undefined, { kind: 'exception' });
+  const findExisting = (category: MoneyCategory): ProgramView | undefined => {
+    const named = existing?.[category] ? active.find((program) => program.programId === existing[category]) : undefined;
+    return named ?? active.find((program) => program.categoryId === category && recipientKey(program.recipients) === recipientKey(recipients));
+  };
 
   for (let attempt = 0; attempt < 2; attempt++) {
+    // What this attempt changed, so a refusal part-way puts it back: one rule for each category is saved on its own, never half-saved
+    const done: { before: ProgramView | undefined; after: ProgramView }[] = [];
     try {
+      const toEnd: ProgramView[] = [];
       for (const category of MONEY_CATEGORIES) {
-        const setting = request[category];
         const current = findExisting(category);
-        const input = settingInput(category, setting, recipients, now);
+        const input = settingInput(category, request[category], recipients, now);
         if (!input) {
-          if (current) await endProgram(current.programId, issuer, now);
+          if (current) toEnd.push(current);
           continue;
         }
-        await saveException({ ...input, programId: current?.programId }, issuer, now);
+        done.push({ before: current, after: await saveException({ ...input, programId: current?.programId }, issuer, now) });
       }
+      // Ending comes last: it is the one step that cannot be put back
+      for (const program of toEnd) await endProgram(program.programId, issuer, now);
       return;
     } catch (error) {
+      await undo(done, issuer, now);
+      active = await listPrograms(undefined, { kind: 'exception' });
       if (!(error instanceof ClashRefused) || !request.clashChoice || attempt > 0) throw error;
       // The admin chose which rule applies to the people the two disagree about
       const clashing = new Set(error.clashes.flatMap((clash) => clash.people.map((person) => person.userId)));
@@ -410,6 +430,7 @@ export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 
         if (left.length === 0) throw new GrantsRefused('Nobody would be left in this rule. Pick “This one”, or change the people.', 400, 'clash');
         recipients = { kind: 'people', userIds: left };
       }
+      active = await listPrograms(undefined, { kind: 'exception' });
     }
   }
 }
