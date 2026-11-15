@@ -31,6 +31,8 @@ export async function lockAll(tx: Pick<Tx, '$executeRaw'>, names: Iterable<strin
 export const lockOfPerson = (personId: string): string => `credit:person:${personId}`;
 export const lockOfPool = (programId: string): string => `credit:pool:${programId}`;
 export const lockOfEffect = (effectKey: string): string => `credit:effect:${effectKey}`;
+/** One hold key: a hold being made under it and the closing of that key (see `releaseKeyIfNothingHeld`) meet here, one after the other. */
+export const lockOfHoldKey = (holdKey: string): string => `credit:holdkey:${holdKey}`;
 export const lockOfAccount = (accountId: string): string => `credit:account:${accountId}`;
 /** What a save of a category's rules holds while it checks and writes them: issuing holds it shared, so it reads rules that are not half-saved. */
 export const lockOfRules = (categoryId: string): string => `credit:rules:${categoryId}`;

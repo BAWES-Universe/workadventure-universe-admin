@@ -17,7 +17,11 @@ export type HoldRefusal =
   /** The books could not be read or written: nothing was held. */
   | 'unavailable';
 
-export type Hold = { ok: true; created: boolean } | { ok: false; reason: HoldRefusal };
+export type Hold =
+  | { ok: true; created: boolean }
+  | { ok: false; reason: HoldRefusal }
+  /** A rule the person said in chat ("no more than $1 a month") does not let this step take that much: the rule's own words, and nothing to ask more credit for. */
+  | { ok: false; reason: 'rule'; ruleId: string; why: 'own_accounts' | 'cap'; leftMicros: number | null; words: string };
 
 /** How a charge is classed in the books, so nested work is charged once and the provider is on every line. */
 export interface ChargeClass {
@@ -75,17 +79,20 @@ export const shutFunds: InstantFunds = {
   },
 };
 
-let current: InstantFunds = shutFunds;
+// Kept on `globalThis`: the server starts (and wires this in) from instrumentation, and each route bundle may carry its own copy of this
+// module, so a plain module variable would stay shut in the routes that run Instant steps.
+const SLOT = Symbol.for('universe.instant.funds');
+const slot = globalThis as unknown as Record<symbol, InstantFunds | undefined>;
 
 /** The credit source the executor uses. */
 export function getInstantFunds(): InstantFunds {
-  return current;
+  return slot[SLOT] ?? shutFunds;
 }
 
 /** Wires in the funding books (or, in tests, a fake). Call with undefined to shut the door again. */
 export function setInstantFunds(funds: InstantFunds | undefined): void {
-  current = funds ?? shutFunds;
+  slot[SLOT] = funds;
 }
 
 /** Whether a credit source is wired in. A shut door means no Instant run can start. */
-export const instantFundsAreWired = (): boolean => current !== shutFunds;
+export const instantFundsAreWired = (): boolean => getInstantFunds() !== shutFunds;

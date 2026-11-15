@@ -201,6 +201,17 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await prisma.instantRun.findFirst({ where: { personId: sara }, select: { state: true, reason: true } })).toEqual({ state: 'refused', reason: 'credit_used_up' });
     });
 
+    it('a rule the person said in chat that the books apply at the hold ends the run in the rule\'s own words: nothing sent, nothing to ask more credit for', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.funds.reserve.mockResolvedValueOnce({ ok: false as const, reason: 'rule' as const, ruleId: 'r1', why: 'cap' as const, leftMicros: 5, words: 'No more than $1 a month' });
+      const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      expect(outcome).toMatchObject({ status: 'refused', reason: 'rule', words: 'No more than $1 a month', leftMicros: 5 });
+      expect(p.instant.run).not.toHaveBeenCalled();
+      expect(await prisma.instantRun.findFirst({ where: { personId: sara }, select: { state: true, reason: true } })).toEqual({ state: 'refused', reason: 'rule' });
+    });
+
     it("says the books cannot be read as that, never as the person's credit being used up", async () => {
       await setLimits();
       const p = fakeProvider();

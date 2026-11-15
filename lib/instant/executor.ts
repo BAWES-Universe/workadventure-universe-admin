@@ -223,7 +223,8 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
     // "Unavailable" is the books being unreachable: said as that, never as the person's credit being used up
     const reason: InstantReason = held.reason === 'unavailable' ? 'credit_unavailable' : held.reason;
     await moveRun(run.id, 'reserving', { state: 'refused', reason, finishedAt: now, customerState: 'none', providerState: 'none' });
-    return refuse(reason, { runId: run.id });
+    // A rule the person said in chat that stopped the hold says so in its own words (nothing is held, and there is nothing to ask more credit for)
+    return refuse(reason, held.reason === 'rule' ? { runId: run.id, words: held.words, leftMicros: held.leftMicros } : { runId: run.id });
   }
   // Each step only moves the run from the step before it. A reservation that came back after the clean-up wait found the run closed
   // and its hold given back: that run never goes out, and a hold that reached the books late is given back again.
