@@ -382,8 +382,8 @@ export function GiftSheet({ open, onClose, onSaved }: { open: boolean; onClose: 
     const result = await sendJson('/api/admin/grants/gifts', 'POST', { ...body, grantKey: pending.current.key, settlement, note: settlement === 'to_bill' && note.trim() ? note.trim() : null });
     setSaving(false);
     // The key lasts while the books may have saved it without our hearing (no answer, or a server error);
-    // a clear answer, saved or refused, ends it. Saving again with the same key never gives twice.
-    if (result.status !== 0 && result.status < 500) pending.current = null;
+    // a clear answer (saved, or refused with a 4xx), ends it. Saving again with the same key never gives twice.
+    if (result.ok || (result.status >= 400 && result.status < 500)) pending.current = null;
     if (!result.ok) {
       addToast({ description: result.error ?? 'That didn’t save.', variant: 'error' });
       return;

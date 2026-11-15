@@ -205,7 +205,7 @@ describe('gifts', () => {
     expect(body(calls('POST', '/gifts')[0]).grantKey).toBe(body(calls('POST', '/gifts')[1]).grantKey);
   });
 
-  it('keeps the key after a server error (it may have saved) and drops it after a clear refusal', async () => {
+  it('keeps the key after a server error or any answer that is not a clear success or 4xx (it may have saved), and drops it after a clear refusal', async () => {
     render(<GrantsPage />);
     await pickOmar();
     fireEvent.change(await screen.findByLabelText('Gift amount'), { target: { value: '5' } });
@@ -222,15 +222,22 @@ describe('gifts', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Give $5 each' }));
     await waitFor(() => expect(calls('POST', '/gifts')).toHaveLength(2));
     expect(body(calls('POST', '/gifts')[0]).grantKey).toBe(body(calls('POST', '/gifts')[1]).grantKey);
+    // An answer that is neither a success nor a 4xx (a redirect, say) proves nothing about the books: the key stays
+    status = 300;
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Give $5 each' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Give $5 each' }));
+    await waitFor(() => expect(calls('POST', '/gifts')).toHaveLength(3));
+    expect(body(calls('POST', '/gifts')[2]).grantKey).toBe(body(calls('POST', '/gifts')[0]).grantKey);
     // A clear refusal ends the key: the next try is a new one
     status = 400;
     await waitFor(() => expect(screen.getByRole('button', { name: 'Give $5 each' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Give $5 each' }));
-    await waitFor(() => expect(calls('POST', '/gifts')).toHaveLength(3));
+    await waitFor(() => expect(calls('POST', '/gifts')).toHaveLength(4));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Give $5 each' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: 'Give $5 each' }));
-    await waitFor(() => expect(calls('POST', '/gifts')).toHaveLength(4));
-    expect(body(calls('POST', '/gifts')[3]).grantKey).not.toBe(body(calls('POST', '/gifts')[2]).grantKey);
+    await waitFor(() => expect(calls('POST', '/gifts')).toHaveLength(5));
+    expect(body(calls('POST', '/gifts')[3]).grantKey).toBe(body(calls('POST', '/gifts')[0]).grantKey);
+    expect(body(calls('POST', '/gifts')[4]).grantKey).not.toBe(body(calls('POST', '/gifts')[3]).grantKey);
   });
 
   it('records what was agreed only for extra usage that will be billed', async () => {

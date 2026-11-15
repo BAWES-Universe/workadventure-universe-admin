@@ -411,13 +411,17 @@ async function takeOut(programId: string, people: string[], issuer: Issuer, now:
  * end can't be reopened, so it is made again with the same figures and people (its old id is gone, its people have it again).
  */
 async function putBack(taken: TakenOut[], issuer: Issuer, now: Date): Promise<void> {
+  let failed = 0;
   for (const { before, ended } of [...taken].reverse()) {
     try {
       await saveException({ ...inputOfProgram(before), programId: ended ? undefined : before.programId }, issuer, now);
     } catch (error) {
+      failed += 1;
       console.error('[Grants] Could not give a rule back its people after a refused save:', error instanceof Error ? error.message : 'unknown');
     }
   }
+  // Never let the screen say "nothing changed" when another rule could not be put back
+  if (failed > 0) throw new GrantsRefused('That didn’t save, and another rule could not be fully put back. Check the exceptions list before trying again.', 500);
 }
 
 /** Puts back what a refused save had already changed: a new rule ends, a changed one goes back to what it was. */
@@ -484,11 +488,11 @@ export async function saveExceptionFor(request: Extract<PreviewRequest, { what: 
           if (left.length === 0) throw new GrantsRefused('Nobody would be left in this rule. Pick “This one”, or change the people.', 400, 'clash');
           recipients = { kind: 'people', userIds: left };
         }
+        active = await listPrograms(undefined, { kind: 'exception' });
       } catch (settling) {
         await putBack(taken, issuer, now);
         throw settling;
       }
-      active = await listPrograms(undefined, { kind: 'exception' });
     }
   }
 }
