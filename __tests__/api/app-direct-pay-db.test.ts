@@ -1024,6 +1024,26 @@ run('payments for pages, in a real database', () => {
       });
     });
 
+    it('sends the currency the way the service lists it when the service lists its currencies in lower case', async () => {
+      const body = await (async () => {
+        const { id: connectionId, serverId } = await connectGateway();
+        const artifactId = await makeArtifact();
+        expect((await job(serverId, artifactId, { currency: 'USD', amount: '4.50' })).status).toBe(200);
+        const before = await prisma.appConnection.findUniqueOrThrow({ where: { id: connectionId } });
+        const definition = JSON.parse(JSON.stringify(before.definition)) as { operations: { id: string; params: { name: string; oneOf?: string[] }[] }[] };
+        definition.operations.find((operation) => operation.id === 'makePaymentLink')!.params.find((param) => param.name === 'currency')!.oneOf = ['usd', 'kwd'];
+        const hash = hashDefinition(definitionSchema.parse(definition));
+        await prisma.appConnection.update({ where: { id: connectionId }, data: { definition: definition as never, definitionHash: hash } });
+        await prisma.appPageJob.update({ where: { artifactId }, data: { definitionHash: hash } });
+        const sent = gateway();
+        const started = await checkout(artifactId, '198.51.100.68');
+        expect(started.orderId).toBeTruthy();
+        return JSON.parse(sent.find((entry) => entry.method === 'POST')!.body ?? '{}');
+      })();
+      // The job keeps USD; the service is sent usd, so its own list accepts it and the checkout does not fail
+      expect(body.currency).toBe('usd');
+    });
+
     it('counts looks at payments for each owner, and waits when that is spent', async () => {
       await saveServerLimits({ bricks: { paymentLooksPerOwner: 1 } }, sara);
       const { artifactId } = await pending();

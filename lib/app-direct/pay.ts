@@ -295,7 +295,8 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
   }
   const args: Record<string, unknown> = {
     [create.amount]: Number(minorToText(job.amountMinor, job.currency)),
-    [create.currency]: job.currency,
+    // The service's own spelling of the currency when it lists the ones it takes (a service may list "usd"; the job keeps "USD")
+    [create.currency]: operation.params.find((param) => param.name === create.currency)?.oneOf?.find((allowed) => allowed.toUpperCase() === job.currency) ?? job.currency,
     [create.orderRef]: order.id,
     [create.idempotentKey]: order.id,
     [create.returnUrl]: `${origin}/pay/done?o=${order.id}`,
