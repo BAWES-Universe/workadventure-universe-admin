@@ -50,6 +50,15 @@ describe('a tool is offered only when its arguments can be held to a top price',
     expect(admitInstantTool('EXA_GET_CONTENTS_ACTION', {})).toEqual({ ok: false, reason: 'unbounded' });
   });
 
+  it('counts pages from urls and ids together, and refuses a list that is not a list', () => {
+    const both = admitInstantTool('EXA_GET_CONTENTS_ACTION', { urls: ['https://a.example'], ids: ['b', 'c'] });
+    const idsOnly = admitInstantTool('EXA_GET_CONTENTS_ACTION', { ids: ['b', 'c'] });
+    expect(both.ok && both.units).toBe(3);
+    expect(idsOnly.ok && idsOnly.units).toBe(2);
+    expect(admitInstantTool('EXA_GET_CONTENTS_ACTION', { urls: ['https://a.example'], ids: 'b' })).toEqual({ ok: false, reason: 'unbounded' });
+    expect(admitInstantTool('EXA_GET_CONTENTS_ACTION', { urls: Array.from({ length: 12 }, (_, i) => `https://x${i}.example`), ids: Array.from({ length: 12 }, (_, i) => `i${i}`) })).toEqual({ ok: false, reason: 'unbounded' });
+  });
+
   it('holds Google Maps at its rate card floor for the call fee', () => {
     const admitted = admitInstantTool('GOOGLE_MAPS_GEOCODE_PLACE', { place_id: 'ChIJj61dQgK6j4AR4GeTYWZsKWw' });
     expect(admitted.ok && admitted.topMicros).toBe(5_000 + RATE_MICROS.managed_maps + DIRECT_EXECUTION_MICROS);

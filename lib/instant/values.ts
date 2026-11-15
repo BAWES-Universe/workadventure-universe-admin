@@ -142,8 +142,11 @@ const EXA_CONTENTS_KEYS = new Set(['urls', 'ids', 'text', 'highlights', 'summary
  */
 function exaContentsBound(args: Record<string, unknown>): number | null {
   if (Object.keys(args).some((key) => !EXA_CONTENTS_KEYS.has(key))) return null;
-  const urls = Array.isArray(args.urls) ? args.urls : Array.isArray(args.ids) ? args.ids : null;
-  if (!urls || urls.length < 1 || urls.length > MAX_URLS || urls.some((url) => typeof url !== 'string' || !url || url.length > MAX_TEXT)) return null;
+  // Pages are counted from BOTH lists: a call naming urls and ids may be charged for each, so the bound is their sum
+  const lists = [args.urls, args.ids].filter((list) => list !== undefined);
+  if (lists.some((list) => !Array.isArray(list))) return null;
+  const urls = (lists as unknown[][]).flat();
+  if (urls.length < 1 || urls.length > MAX_URLS || urls.some((url) => typeof url !== 'string' || !url || url.length > MAX_TEXT)) return null;
   const kinds = ['text', 'highlights', 'summary'].filter((key) => args[key] !== undefined && args[key] !== false && args[key] !== null).length;
   return urls.length * Math.max(1, kinds);
 }
