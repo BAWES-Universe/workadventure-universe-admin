@@ -758,9 +758,28 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     const other = await replies.repliesPerWindowFor('fu-ry', 30, FU);
     check('someone who joins a group that disagrees with another group they are in keeps the base number (no winner by guesswork); the other person keeps theirs', beforeJoin === 20 && afterJoin === 30 && other === 20, { beforeJoin, afterJoin, other });
 
+    // A pool only answers an ask when the person can really spend from it: one whose account was paused after the pool was made does not
+    {
+      const requests = await import('@/lib/meter-requests');
+      for (const id of ['fu-pz1', 'fu-pz2']) await user(id, '2027-02-11T00:00:00Z');
+      const sponsor = await funding.ensureFundingAccount({ kind: 'universe', ownerKey: 'u1', name: 'Acme', adminIds: ['owner'] });
+      await requests.askForMore('fu-pz2', at('2027-02-14T09:00:00Z'), 'apps');
+      await rules.createGift({ categoryId: 'instant_apps', amount: 1 * M, schedule: 'once', share: 'shared', recipients: { kind: 'people', userIds: ['fu-pz1', 'fu-pz2'] }, fundingAccountId: sponsor.id }, { userId: 'owner', superAdmin: false }, at('2027-02-14T09:30:00Z'));
+      await issue.ensureIssued('fu-pz1', at('2027-02-14T10:00:00Z'));
+      await funding.setAccountStatus(sponsor.id, 'paused');
+      await issue.ensureIssued('fu-pz2', at('2027-02-14T11:00:00Z'));
+      const stillAsking = await prisma.meterRequest.count({ where: { personId: 'fu-pz2', what: 'apps', answeredAt: null } });
+      await funding.setAccountStatus(sponsor.id, 'active');
+      await issue.ensureIssued('fu-pz2', at('2027-02-14T12:00:00Z'));
+      const answeredAfter = await prisma.meterRequest.count({ where: { personId: 'fu-pz2', what: 'apps', answeredAt: { not: null } } });
+      check('a pool whose account was paused answers no ask (nothing there can be spent); once the account is active again it does', stillAsking === 1 && answeredAfter === 1, { stillAsking, answeredAfter });
+    }
+
     if (database.kind === 'postgres') {
       // A second connection holds the names a writer holds, changes the books, and lets go while the issuing is waiting for them
       const writer = new Client({ connectionString: database.url });
+      // A database dropped at the end closes this connection: that is the end of the run, not an error
+      writer.on('error', () => undefined);
       await writer.connect();
       const waitForWaiter = async () => {
         for (let i = 0; i < 100; i++) {
@@ -811,6 +830,16 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
       await writer.query('COMMIT');
       const joined = await pendingJoin.catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }));
       check('joining a group while issuing waited does not stop the issuing: the start over reads the person again, and the group’s gift is issued from', waitedJoin && !('error' in joined) && joined.issued.some((lot) => lot.subjectKey === 'person:fu-late5' && lot.amountMicros === 1 * M), { waitedJoin, joined });
+
+      // Ending a program waits for issuing in the category it reads (issuing holds the category's rules lock shared)
+      const toEnd = await rules.createGift({ categoryId: 'instant_apps', amount: 1 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-late1'] } }, root, FU);
+      await writer.query('BEGIN');
+      await writer.query(`SELECT pg_advisory_xact_lock_shared(hashtext('credit:rules:instant_apps'))`);
+      const pendingEnd = rules.endProgram(toEnd.programId, root, FU);
+      pendingEnd.catch(() => undefined);
+      const waitedEnd = await waitForWaiter();
+      await writer.query('COMMIT');
+      check('ending a program waits for issuing that reads the category’s rules, then ends it', waitedEnd && (await pendingEnd) === 'ended', { waitedEnd });
 
       // A save of one category's rules holds up issuing only for people due something from that category
       await user('fu-late3', '2027-02-11T00:00:00Z');

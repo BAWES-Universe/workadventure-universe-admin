@@ -533,9 +533,10 @@ export async function createGift(input: GrantInput, issuer: Issuer, now: Date = 
 /** Ends a program: nothing new is issued under it, the credit already given stays until it ends, and its history stays. */
 export async function endProgram(programId: string, issuer: Issuer, now: Date = new Date()): Promise<'ended' | 'already_ended' | 'not_found'> {
   return prisma.$transaction(async (tx) => {
-    // Under the funding account's lock: an issuing that read the rule before this ends it sees it ended and gives nothing
-    const peek = await tx.grantRule.findFirst({ where: { programId, state: 'current' }, select: { fundingAccountId: true } });
-    if (peek) await lockAll(tx, [lockOfAccount(peek.fundingAccountId)]);
+    // Under the funding account's lock and the category's rules lock (issuing holds the rules lock shared, and may still be issuing from a
+    // version waiting to be replaced that another account funds): an issuing that read the rule before this ends it sees it ended and gives nothing
+    const peek = await tx.grantRule.findFirst({ where: { programId, state: 'current' }, select: { fundingAccountId: true, program: { select: { categoryId: true } } } });
+    if (peek) await lockAll(tx, [lockOfAccount(peek.fundingAccountId), lockOfRules(peek.program.categoryId)]);
     const program = await tx.grantProgram.findUnique({ where: { id: programId }, include: { rules: { where: { state: 'current' }, take: 1 } } });
     if (!program) return 'not_found';
     if (program.status === 'ended') return 'already_ended';
