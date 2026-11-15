@@ -45,7 +45,7 @@ export interface InstantFunds {
    * and when it was settled before (a settlement the books took and this side never recorded) the FIRST amount, which is the one recorded
    * here. A yes without it is not taken as done: the run stays held and the settlement is asked again.
    */
-  settle(input: { key: string; chargeMicros: number; providerCostMicros?: number | null }): Promise<{ ok: boolean; chargedMicros?: number }>;
+  settle(input: { key: string; chargeMicros: number; providerCostMicros?: number | null }): Promise<{ ok: true; chargedMicros: number } | { ok: false }>;
   /**
    * The run did not happen or did not work: gives back the whole hold. `ok: false` means it may still be held and is said again later.
    * `none: true` means the books CONFIRM nothing is held under the key (it never was): the only way a run whose reservation was never

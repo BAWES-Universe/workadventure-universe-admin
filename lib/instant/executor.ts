@@ -492,12 +492,14 @@ async function settleSuccess(run: Row, tx: Prisma.TransactionClient, providerMic
   let chargedNow = charged;
   if (run.customerState === 'held') {
     try {
-      const answer = await ctx.funds.settle({ key: fundsKey(run.id), chargeMicros: charged, providerCostMicros: providerMicros });
+      // Read as what a books adapter may actually send: the amount is checked at run time, whatever the type promises
+      const answer: { ok: boolean; chargedMicros?: unknown } = await ctx.funds.settle({ key: fundsKey(run.id), chargeMicros: charged, providerCostMicros: providerMicros });
       // A settlement the books took before (and this side never recorded) answers with its FIRST amount: that is what the person was
       // charged, so that is what is recorded, whatever today's figures work out to. A yes without a readable amount is not taken as
       // done: the run stays held and the question is asked again, never recorded at a figure the books did not confirm.
-      customerDone = answer.ok && typeof answer.chargedMicros === 'number' && Number.isSafeInteger(answer.chargedMicros) && answer.chargedMicros >= 0;
-      if (customerDone) chargedNow = answer.chargedMicros as number;
+      const confirmed = answer.chargedMicros;
+      customerDone = answer.ok && typeof confirmed === 'number' && Number.isSafeInteger(confirmed) && confirmed >= 0;
+      if (customerDone) chargedNow = confirmed as number;
     } catch (error) {
       console.error('[Instant] The credit books could not settle:', error instanceof Error ? error.message : 'unknown');
     }

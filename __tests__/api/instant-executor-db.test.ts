@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
 
 import { prisma } from '@/lib/db';
+import { recordMeterEvent } from '@/lib/meter';
 import { setAdapterForTests, type InstantAdapter, type InstantCall, type InstantLog, type ReadyMadeAdapter } from '@/lib/app-adapter';
 import { evaluatePause, exposureIn, giveBack, instantRunKey, reconcileRun, runInstant, setInstantHooks } from '@/lib/instant/executor';
 import { setInstantFunds, shutFunds, type InstantFunds } from '@/lib/instant/funds';
@@ -15,6 +16,12 @@ import { denyInstantOnSessions } from '@/lib/instant/sessions';
 import { admitInstantTool } from '@/lib/instant/values';
 import { POST as runRoute } from '@/app/api/instant/run/route';
 import { GET as toolsRoute } from '@/app/api/instant/tools/route';
+
+// The meter's write is wrapped so one test can make it fail once, inside a settlement's transaction, after the books took the charge
+jest.mock('@/lib/meter', () => {
+  const actual = jest.requireActual('@/lib/meter');
+  return { ...actual, recordMeterEvent: jest.fn(actual.recordMeterEvent) };
+});
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const tag = randomUUID().slice(0, 8);
@@ -37,7 +44,7 @@ function fakeFunds(balance: number) {
       holds.set(input.key, { amount: input.amountMicros, state: 'held', charged: 0 });
       return { ok: true as const, created: true };
     }),
-    settle: jest.fn(async (input: { key: string; chargeMicros: number }): Promise<{ ok: boolean; chargedMicros?: number }> => {
+    settle: jest.fn(async (input: { key: string; chargeMicros: number }): Promise<{ ok: true; chargedMicros: number } | { ok: false }> => {
       if (!state.settleOk) return { ok: false };
       const hold = holds.get(input.key);
       if (!hold) return { ok: false };
@@ -1297,11 +1304,42 @@ run('the bounded Instant executor, in a real database', () => {
       expect(f.holds.get(`instant:${stuck.id}`)?.state).toBe('released');
     });
 
+    it('a settlement the books took, whose transaction then rolled back, is recorded at the books first amount when a later log says another charge', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'timeout', status: null });
+      await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      const row = await runOf(await runIdOf(id));
+      await prisma.instantRun.update({ where: { id: row.id }, data: { sentAt: new Date(Date.now() - 600 * MIN) } });
+      const setLog = (charge: number) => {
+        p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', charge, 'log-roll')]);
+        p.script.logs.set('log-roll', p.line(row.providerUserId, 'success', charge, 'log-roll'));
+      };
+      // First time: the log says 7,000, the books take the charge, and the database then fails inside the same transaction
+      setLog(7_000);
+      // (thrown at once, not rejected: the settlement code swallows a failed meter write, and a throw is what a lost connection looks like)
+      (recordMeterEvent as jest.Mock).mockImplementationOnce(() => {
+        throw new Error('database went away');
+      });
+      await expect(reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date() })).rejects.toThrow();
+      expect(f.holds.get(`instant:${row.id}`)).toMatchObject({ state: 'charged', charged: 7_000 });
+      expect(await runOf(row.id)).toMatchObject({ customerState: 'held' });
+      // Later the log says another charge: the person was charged 7,000, so 7,000 is what is recorded
+      setLog(7_500);
+      await reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      const after = await runOf(row.id);
+      expect(after).toMatchObject({ state: 'succeeded', customerState: 'charged' });
+      expect(Number(after.customerMicros)).toBe(7_000);
+      expect(f.holds.get(`instant:${row.id}`)).toMatchObject({ state: 'charged', charged: 7_000 });
+    });
+
     it('a yes from the books without the amount charged is not taken as done: the run stays held and is asked again', async () => {
       await setLimits();
       const p = fakeProvider();
       const f = fakeFunds(1_000_000);
-      f.funds.settle.mockResolvedValueOnce({ ok: true });
+      f.funds.settle.mockResolvedValueOnce({ ok: true } as never);
       await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
       const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
       expect(row.customerState).toBe('held');
