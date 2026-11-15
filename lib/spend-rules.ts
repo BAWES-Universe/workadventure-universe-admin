@@ -237,7 +237,8 @@ async function unpricedCallRoom(db: Db, events: Prisma.MeterEventWhereInput[]): 
 /** What a rule counts for a step: taken (in the books) and held (room not yet settled), for the rule's own scope and period. */
 async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Date): Promise<SpentSoFar> {
   const personKey = `person:${rule.ownerPersonId}`;
-  const events: Prisma.MeterEventWhereInput[] = [{ personKey }, { pool: 'computer' }];
+  // Only what the platform's credit paid: a call on someone's own key (or paid by another person) took none of this person's credit
+  const events: Prisma.MeterEventWhereInput[] = [{ personKey }, { pool: 'computer' }, { payerKind: 'universe' }];
   const holds: Prisma.MeterReservationWhereInput[] = [{ personKey, state: 'held' }];
   const credit: Prisma.CreditHoldWhereInput[] = [{ personId: rule.ownerPersonId, category: 'instant_apps' }];
   if (rule.scope === 'bot' && rule.botId) {

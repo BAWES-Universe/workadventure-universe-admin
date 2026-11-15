@@ -473,6 +473,22 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer', amountMicros: 10_000 }, NOW)).toEqual({ ok: true });
     });
 
+    it('does not count a model call on the owner\'s own key against a cap on the platform credit', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 100_000 });
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Long job' }, NOW);
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      const minted = await mintJobToken(started.job.id, 'model', NOW);
+      if (!minted.ok) throw new Error('no key');
+      // The call ran on her own key and cost $0.50: no room was taken, and her credit paid none of it
+      expect(await authorizeModelCall({ token: minted.token, callId: 'own-1', estimateMicros: 500_000, payer: 'own-key' }, NOW)).toMatchObject({ ok: true, reservedMicros: null });
+      expect(await settleModelCall(started.job.id, 'own-1', { costMicros: 500_000, basis: 'measured', payer: { kind: 'person', personId: sara.id }, route: 'own-key' }, NOW)).toEqual({ ok: true });
+      // Only the job's own held room (60,000) counts: 40,000 is left under 100,000
+      expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer', amountMicros: 40_000 }, NOW)).toEqual({ ok: true });
+      expect(await checkSpend({ payerPersonId: sara.id, botId: sara.brickId, taskKey: null, chargeClass: 'computer', amountMicros: 40_001 }, NOW)).toMatchObject({ ok: false, leftMicros: 40_000 });
+    });
+
     it('a job that is running when a rule stops more room ends as "rule", saying so, not as "our room is used up"', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
