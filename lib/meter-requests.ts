@@ -58,7 +58,8 @@ export async function openRequests(): Promise<OpenRequest[]> {
  * Extra usage was given: what the person asked for before it began is answered. Safe to say twice, and a replay of an old grant
  * (`askedUntil` is when that grant began) leaves a newer ask open, since that grant never answered it.
  */
-export async function answerRequests(personId: string, grantKey: string, now: Date = new Date(), askedUntil: Date = now): Promise<number> {
-  const { count } = await prisma.meterRequest.updateMany({ where: { personId, answeredAt: null, createdAt: { lte: askedUntil } }, data: { answeredAt: now, grantKey } });
+export async function answerRequests(personId: string, grantKey: string, now: Date = new Date(), askedUntil: Date = now, what: AskedFor = 'computer'): Promise<number> {
+  // Only what this grant is for: extra computer usage never closes an ask for Instant Apps credit, which it did not give
+  const { count } = await prisma.meterRequest.updateMany({ where: { personId, what, answeredAt: null, createdAt: { lte: askedUntil } }, data: { answeredAt: now, grantKey } });
   return count;
 }

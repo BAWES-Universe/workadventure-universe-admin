@@ -311,6 +311,9 @@ export function planLot(rule: RuleFacts, now: Date): LotPlan | null {
   }
   const days = rule.lotExpiresInDays;
   const expiresAt = rule.lotExpiresAt ?? (days ? new Date(now.getTime() + days * 86_400_000) : null);
+  // A fixed end that has already passed: the credit ended before this person could claim it, so there is nothing to issue (and a lot that
+  // ends before it starts is refused by the database, which would lose the person's other lots too)
+  if (expiresAt && expiresAt.getTime() <= now.getTime()) return null;
   return { slotKey, subjectKey: '', periodKey: rule.programKind === 'gift' ? 'gift' : 'once', amountMicros: rule.amount, startsAt: now, expiresAt, source };
 }
 

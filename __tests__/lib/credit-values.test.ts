@@ -185,6 +185,12 @@ describe('what a lot issues, once per period', () => {
     expect(planLot(rule({ lotExpiresInDays: 30 }), now)?.expiresAt).toEqual(D('2026-12-15T10:00:00Z'));
   });
 
+  it('a one-off whose fixed end has already passed issues nothing: it ended before this person could claim it', () => {
+    const now = D('2026-11-15T10:00:00Z');
+    expect(planLot(rule({ lotExpiresAt: D('2026-11-15T10:00:00Z') }), now)).toBeNull();
+    expect(planLot(rule({ lotExpiresAt: D('2026-11-01T00:00:00Z') }), now)).toBeNull();
+  });
+
   it('a monthly lot is one a UTC month and ends with the month: nothing rolls over', () => {
     const plan = planLot(rule({ schedule: 'monthly' }), D('2026-11-15T10:00:00Z'));
     expect(plan).toMatchObject({ periodKey: '2026-11', startsAt: D('2026-11-01T00:00:00Z'), expiresAt: D('2026-12-01T00:00:00Z') });

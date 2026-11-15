@@ -454,6 +454,21 @@ async function main() {
     check('a job’s hold belongs to its person', !stranger.ok && stranger.reason === 'key_reused', stranger);
   }
 
+  // ---------- Late claims and the two kinds of ask ----------
+  {
+    await user('tardy', '2027-02-11T00:00:00Z');
+    const early = await rules.createGift({ categoryId: 'instant_apps', amount: 2 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['tardy'] }, lotExpiresAt: at('2027-02-13T00:00:00Z') }, root, G);
+    await rules.createGift({ categoryId: 'instant_apps', amount: 1 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['tardy'] } }, root, G);
+    const lateDay = at('2027-02-20T00:00:00Z');
+    const out = await issue.ensureIssued('tardy', lateDay).catch((error: unknown) => error);
+    const lots = await prisma.creditLot.findMany({ where: { personId: 'tardy' } });
+    check('a gift that ended before it was claimed issues nothing, and the person’s other gift still comes', !(out instanceof Error) && lots.length === 1 && Number(lots[0].amountMicros) === 1 * M && !lots.some((lot) => lot.programId === early.programId), { out: out instanceof Error ? out.message : out, lots });
+    const requests = await import('@/lib/meter-requests');
+    await requests.askForMore('tardy', lateDay, 'apps');
+    await requests.answerRequests('tardy', 'grant-x', lateDay, lateDay, 'computer');
+    check('extra computer usage does not close an ask for Instant Apps credit', (await requests.openRequestFor('tardy', 'apps')) !== null);
+  }
+
   // ---------- The Instant executor's contract ----------
   {
     await user('inst', '2027-02-11T00:00:00Z');
