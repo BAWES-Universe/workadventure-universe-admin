@@ -175,6 +175,16 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(await memberUsage(omar.id, NOW)).toMatchObject({ computer: null, storage: null });
     });
 
+    it('counts room held for steps in progress, as admission does, in what is left (a hold that ran out and is not settled still counts)', async () => {
+      await setUp();
+      const sara = await person('sara');
+      await spendComputer(sara, 300);
+      await prisma.meterReservation.create({ data: { reservationKey: `live-${tag}`, personKey: `person:${sara.id}`, personId: sara.id, amountMicros: BigInt(400), state: 'held', expiresAt: hours(0.1), createdAt: hours(-0.02) } });
+      await prisma.meterReservation.create({ data: { reservationKey: `lapsed-${tag}`, personKey: `person:${sara.id}`, personId: sara.id, amountMicros: BigInt(200), state: 'held', expiresAt: hours(-0.5), createdAt: hours(-1) } });
+      const computer = (await memberUsage(sara.id, NOW)).computer;
+      expect(computer).toMatchObject({ availableMicros: 100, inProgressMicros: 400, left: 0.1, words: 'low' });
+    });
+
     it('says low, then out, and only offers "Ask for more" when it is out', async () => {
       await setUp();
       const sara = await person('sara');

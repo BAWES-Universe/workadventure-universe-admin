@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
 import { asNumber, CreditRefused, monthEnd, monthStart } from '@/lib/credit-values';
-import { lotBalances, type Db } from '@/lib/credit-store';
+import { lockAll, lockOfAccount, lotBalances, type Db } from '@/lib/credit-store';
 import type { MeterSettings } from '@/lib/meter-values';
 
 /**
@@ -86,12 +86,16 @@ export async function addAdmin(accountId: string, userId: string, addedById: str
 
 /** Takes an administrator off. The last one stays: an account nobody can administer is never left behind (paused is the way to stop one). */
 export async function removeAdmin(accountId: string, userId: string): Promise<'removed' | 'last_admin' | 'not_found'> {
-  const admins = await prisma.fundingAccountAdmin.findMany({ where: { accountId }, select: { userId: true } });
-  if (!admins.some((admin) => admin.userId === userId)) return 'not_found';
-  const account = await prisma.fundingAccount.findUnique({ where: { id: accountId }, select: { kind: true } });
-  if (account?.kind !== 'platform' && admins.length <= 1) return 'last_admin';
-  await prisma.fundingAccountAdmin.deleteMany({ where: { accountId, userId } });
-  return 'removed';
+  // One removal per account at a time, and the check and the delete in one transaction: two removals at once cannot both see "one is left"
+  return prisma.$transaction(async (tx) => {
+    await lockAll(tx, [lockOfAccount(accountId)]);
+    const admins = await tx.fundingAccountAdmin.findMany({ where: { accountId }, select: { userId: true } });
+    if (!admins.some((admin) => admin.userId === userId)) return 'not_found';
+    const account = await tx.fundingAccount.findUnique({ where: { id: accountId }, select: { kind: true } });
+    if (account?.kind !== 'platform' && admins.length <= 1) return 'last_admin';
+    await tx.fundingAccountAdmin.deleteMany({ where: { accountId, userId } });
+    return 'removed';
+  });
 }
 
 export async function isFundingAdmin(accountId: string, userId: string, db: Pick<Db, 'fundingAccountAdmin'> = prisma): Promise<boolean> {
@@ -144,11 +148,13 @@ export async function exposureOf(accountId: string, now: Date = new Date(), sett
   const live = await prisma.creditLot.findMany({ where: { fundingAccountId: accountId, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] }, select: { id: true } });
   const balances = await lotBalances(prisma, live.map((lot) => lot.id));
   let outstanding = 0;
-  let held = 0;
-  for (const balance of balances.values()) {
-    outstanding += balance.availableMicros;
-    held += balance.heldMicros;
-  }
+  for (const balance of balances.values()) outstanding += balance.availableMicros;
+  // Room held for steps in progress counts even when the lot it came from has ended since: the step may still settle against it
+  const heldNow = await prisma.$queryRaw<{ micros: bigint | null }[]>`
+    SELECT COALESCE(SUM(a.amount_micros), 0)::bigint AS micros
+    FROM credit_allocations a JOIN credit_holds h ON h.id = a.hold_id JOIN credit_lots l ON l.id = a.lot_id
+    WHERE a.state = 'held' AND h.expires_at > ${now} AND l.funding_account_id = ${accountId}`;
+  const held = asNumber(heldNow[0]?.micros);
   const lapsed = await prisma.$queryRaw<{ micros: bigint | null }[]>`
     SELECT COALESCE(SUM(a.amount_micros), 0)::bigint AS micros
     FROM credit_allocations a JOIN credit_holds h ON h.id = a.hold_id JOIN credit_lots l ON l.id = a.lot_id

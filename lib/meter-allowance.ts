@@ -173,13 +173,18 @@ async function lockPool(tx: Tx): Promise<void> {
 }
 
 /** Whether `extra` more fits for this member and the pool; the reason it does not, or null. The member's own allowance comes first: a member who used theirs up asks for more, whatever the pool holds. */
+/** Room held for a person's steps that still counts against what they can start: held and in time, or ran out and not yet settled or released. */
+export async function heldRoom(personId: string, now: Date, db: Pick<Tx, 'meterReservation'> = prisma): Promise<number> {
+  const held = await db.meterReservation.aggregate({ where: { personKey: `person:${personId}`, ...stillCounts(now) }, _sum: { amountMicros: true } });
+  return asNumber(held._sum.amountMicros);
+}
+
 async function fits(tx: Tx, personId: string, extraMicros: number, now: Date, settings: MeterSettings, opts: { newJob: boolean }): Promise<NoRoom | null> {
   const missing = missingSettings(settings);
   if (missing.length > 0) return { ok: false, reason: 'not_set', missing };
   const allowance = await memberAllowance(personId, now, settings, tx);
   if (allowance && !allowance.unlimited) {
-    const held = await tx.meterReservation.aggregate({ where: { personKey: `person:${personId}`, ...stillCounts(now) }, _sum: { amountMicros: true } });
-    const left = (allowance.leftMicros ?? 0) - asNumber(held._sum.amountMicros);
+    const left = (allowance.leftMicros ?? 0) - (await heldRoom(personId, now, tx));
     if (left < extraMicros) return { ok: false, reason: 'allowance', leftMicros: Math.max(0, left) };
   }
   const envelope = await envelopeIn(tx, now, settings);

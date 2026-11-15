@@ -35,13 +35,29 @@ export async function startTestDatabase(): Promise<TestDatabase> {
     const admin = new Client({ connectionString: real });
     await admin.connect();
     const name = `credit_books_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-    await admin.query(`CREATE DATABASE ${name}`);
     const url = new URL(real);
     url.pathname = `/${name}`;
+    let created = false;
     const client = new Client({ connectionString: url.toString() });
-    await client.connect();
-    for (const migration of migrationFiles()) await client.query(migration.sql);
-    await client.end();
+    let connected = false;
+    const cleanUp = async () => {
+      if (connected) await client.end().catch(() => undefined);
+      if (created) await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`).catch(() => undefined);
+      await admin.end().catch(() => undefined);
+    };
+    try {
+      await admin.query(`CREATE DATABASE ${name}`);
+      created = true;
+      await client.connect();
+      connected = true;
+      for (const migration of migrationFiles()) await client.query(migration.sql);
+      connected = false;
+      await client.end();
+    } catch (error) {
+      // A setup that fails leaves nothing behind: the database made so far is dropped and every connection closed, then the real error goes on
+      await cleanUp();
+      throw error;
+    }
     return {
       kind: 'postgres',
       url: url.toString(),
@@ -54,7 +70,12 @@ export async function startTestDatabase(): Promise<TestDatabase> {
   const { PGlite } = await import('@electric-sql/pglite');
   const { PGLiteSocketServer } = await import('@electric-sql/pglite-socket');
   const db = await PGlite.create();
-  for (const migration of migrationFiles()) await db.exec(migration.sql);
+  try {
+    for (const migration of migrationFiles()) await db.exec(migration.sql);
+  } catch (error) {
+    await db.close().catch(() => undefined);
+    throw error;
+  }
   const port = 20000 + Math.floor(Math.random() * 20000);
   const server = new PGLiteSocketServer({ db, port, host: '127.0.0.1' });
   await server.start();

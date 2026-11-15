@@ -166,6 +166,19 @@ describe('which rule wins (2a): never "the bigger one"', () => {
     expect(findClashes(group({ programId: 'pa', amount: 9_000_000 }), saved, () => new Set(['sara', 'omar']))).toEqual([]);
   });
 
+  it('rules whose claim periods do not overlap never clash, and an end that meets a start is apart', () => {
+    const idsAll = () => new Set(['sara', 'omar']);
+    const june = new Date('2026-06-01T00:00:00Z');
+    const july = new Date('2026-07-01T00:00:00Z');
+    const august = new Date('2026-08-01T00:00:00Z');
+    const saved = [group({ programId: 'pa', amount: 1_000_000, claimStartsAt: june, claimEndsAt: july })];
+    expect(findClashes(group({ programId: 'pb', amount: 9_000_000, claimStartsAt: july, claimEndsAt: august }), saved, idsAll)).toEqual([]);
+    expect(findClashes(group({ programId: 'pb', amount: 9_000_000, claimStartsAt: new Date('2026-06-15T00:00:00Z'), claimEndsAt: august }), saved, idsAll)).toEqual([{ programId: 'pa', userIds: ['omar', 'sara'] }]);
+    // No end runs on for ever: it overlaps anything that starts later
+    expect(findClashes(group({ programId: 'pb', amount: 9_000_000, claimStartsAt: august, claimEndsAt: null }), saved, idsAll)).toEqual([]);
+    expect(findClashes(group({ programId: 'pb', amount: 9_000_000, claimStartsAt: new Date('2026-01-01T00:00:00Z'), claimEndsAt: null }), saved, idsAll)).toHaveLength(1);
+  });
+
   it('two single-person exceptions for the same person that disagree clash', () => {
     const saved = [own({ programId: 'pa', amount: 1_000_000 })];
     expect(findClashes(own({ programId: 'pb', amount: 2_000_000 }), saved, () => new Set(['sara']))).toEqual([{ programId: 'pa', userIds: ['sara'] }]);
