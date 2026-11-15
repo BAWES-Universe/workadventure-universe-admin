@@ -55,10 +55,11 @@ export async function moneyLine(personId: string, category: MoneyCategory, now: 
     const lots = await usableLots(prisma, personId, category, now);
     const base = lots.filter((lot) => lot.lot.slotKey === `base:${category}`);
     if (base.length === 0) return null;
-    // Newest period first: a monthly line is this month's lot; a one-off is the one lot
-    const sorted = [...base].sort((a, b) => b.lot.startsAt.getTime() - a.lot.startsAt.getTime());
+    // The most recently issued lot is the line. Credit left from a schedule it replaced (a one-off before it turned monthly, or the month's lot
+    // before it turned one-off) is still spendable, so it counts too; an old lot that is used up does not pad the total.
+    const sorted = [...base].sort((a, b) => b.lot.issuedAt.getTime() - a.lot.issuedAt.getTime() || b.lot.startsAt.getTime() - a.lot.startsAt.getTime());
     const monthly = sorted[0].lot.periodKey !== 'once';
-    const lines = monthly ? [sorted[0]] : sorted.filter((lot) => lot.lot.periodKey === 'once');
+    const lines = [sorted[0], ...sorted.slice(1).filter((lot) => lot.availableMicros + lot.balance.heldMicros > 0)];
     const available = lines.reduce((sum, lot) => sum + lot.availableMicros, 0);
     const total = lines.reduce((sum, lot) => sum + lot.balance.amountMicros, 0);
     const inProgress = lines.reduce((sum, lot) => sum + lot.balance.heldMicros, 0);

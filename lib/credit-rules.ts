@@ -4,6 +4,7 @@ import { getMeterSettings } from '@/lib/meter';
 import { envelopeIn } from '@/lib/meter-allowance';
 import {
   CreditRefused,
+  isCreditRefused,
   findClashes,
   isCategory,
   isMoneyCategory,
@@ -564,7 +565,7 @@ async function previewIn(db: Tx, checked: Checked, ids: readonly string[], now: 
   const eachMicros = checked.amount;
   const people = countNow ?? 0;
   const first = checked.share === 'shared' ? eachMicros : eachMicros * people;
-  const months = checked.schedule === 'monthly' ? (checked.claimEndsAt ? monthsBetween(checked.claimStartsAt > now ? checked.claimStartsAt : now, checked.claimEndsAt) : null) : checked.schedule === 'once' ? 1 : 0;
+  const months = checked.schedule === 'monthly' ? (checked.claimEndsAt ? Math.max(0, monthsBetween(checked.claimStartsAt > now ? checked.claimStartsAt : now, new Date(checked.claimEndsAt.getTime() - 1))) : null) : checked.schedule === 'once' ? 1 : 0;
   const renewals = checked.schedule === 'monthly' ? (months === null ? null : Math.max(0, months - 1)) : 0;
   // A cap on how many can join and a total cap bound a group that grows; with neither, a growing group has no lifetime maximum
   const capped = checked.totalCapMicros !== null || (checked.joinerCap !== null && checked.share === 'each');
@@ -647,7 +648,7 @@ export async function previewGrant(kind: ProgramKind, input: GrantInput, now: Da
       ids = await snapshotIds(tx, checked.recipient);
     } catch (error) {
       // A preview of an empty universe says so rather than failing: the screen shows "nobody yet"
-      if (!(error instanceof CreditRefused && error.message.startsWith('Nobody has joined'))) throw error;
+      if (!(isCreditRefused(error) && error.message.startsWith('Nobody has joined'))) throw error;
     }
     return previewIn(tx, checked, ids, now);
   });

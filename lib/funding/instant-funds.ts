@@ -29,7 +29,8 @@ export interface InstantFunds {
   refund(input: { key: string; refundKey: string; amountMicros: number; reason: 'platform_failure' | 'goodwill'; limits?: GiveBackLimits }): Promise<{ ok: boolean; refundedMicros: number; reason?: string }>;
 }
 
-export function createInstantFunds(): InstantFunds {
+/** `clock` is for tests only; the executor never passes it. */
+export function createInstantFunds(clock: () => Date = () => new Date()): InstantFunds {
   return {
     async reserve(input) {
       try {
@@ -44,7 +45,7 @@ export function createInstantFunds(): InstantFunds {
           provider: input.charge.provider,
           priceVersion: input.charge.priceVersion ?? null,
           jobKey: input.runId ?? null,
-        });
+        }, clock());
         if (held.ok) return { ok: true, created: held.created };
         return { ok: false, reason: held.reason === 'credit_used_up' || held.reason === 'not_set' ? held.reason : 'unavailable' };
       } catch (error) {
@@ -54,7 +55,7 @@ export function createInstantFunds(): InstantFunds {
     },
     async settle(input) {
       try {
-        const hold = await settleHold({ holdKey: input.key, customerMicros: input.chargeMicros, provider: input.providerCostMicros === undefined ? undefined : { costMicros: input.providerCostMicros, basis: input.providerCostMicros === null ? 'unknown' : 'measured' } });
+        const hold = await settleHold({ holdKey: input.key, customerMicros: input.chargeMicros, provider: input.providerCostMicros === undefined ? undefined : { costMicros: input.providerCostMicros, basis: input.providerCostMicros === null ? 'unknown' : 'measured' } }, clock());
         return { ok: hold !== null };
       } catch (error) {
         console.error('[Funding] Could not settle Instant credit:', error instanceof Error ? error.message : 'unknown');
@@ -63,7 +64,7 @@ export function createInstantFunds(): InstantFunds {
     },
     async release(input) {
       try {
-        return { ok: (await releaseHold({ holdKey: input.key })) !== null };
+        return { ok: (await releaseHold({ holdKey: input.key }, clock())) !== null };
       } catch (error) {
         console.error('[Funding] Could not release Instant credit:', error instanceof Error ? error.message : 'unknown');
         return { ok: false };
@@ -71,7 +72,7 @@ export function createInstantFunds(): InstantFunds {
     },
     async refund(input) {
       try {
-        const done = await refundHold({ holdKey: input.key, refundKey: input.refundKey, amountMicros: input.amountMicros, reason: input.reason, limits: input.limits });
+        const done = await refundHold({ holdKey: input.key, refundKey: input.refundKey, amountMicros: input.amountMicros, reason: input.reason, limits: input.limits }, clock());
         return done.ok ? { ok: true, refundedMicros: done.refundedMicros } : { ok: false, refundedMicros: 0, reason: done.reason };
       } catch (error) {
         console.error('[Funding] Could not refund Instant credit:', error instanceof Error ? error.message : 'unknown');

@@ -112,7 +112,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // A new grant answers every ask made up to now, including one made while it was being recorded. A replay answers only what was
     // asked before that grant began, never a newer ask.
     const answeredAt = new Date();
-    await answerRequests(id, key, answeredAt, recorded ? answeredAt : grant.startsAt);
+    await answerRequests(id, key, answeredAt, recorded ? answeredAt : grant.startsAt, 'computer');
     return NextResponse.json({ recorded, usage: await personUsage(id, new Date(), admin.id) }, { status: recorded ? 201 : 200 });
   } catch (error) {
     // Something is saved under this key, with other figures than these (changed since, most likely): not a refusal, so the sheet

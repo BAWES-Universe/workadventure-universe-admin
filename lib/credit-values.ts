@@ -94,8 +94,12 @@ export class CreditRefused extends Error {
     readonly code: string = 'refused',
   ) {
     super(message);
+    this.name = 'CreditRefused';
   }
 }
+
+/** A refusal from these rules, by what it says it is: two copies of this module (a test runner loads one per path) still agree. */
+export const isCreditRefused = (error: unknown): error is CreditRefused => error instanceof CreditRefused || (error instanceof Error && error.name === 'CreditRefused' && typeof (error as { code?: unknown }).code === 'string');
 
 const isDate = (value: unknown): value is Date => value instanceof Date && !Number.isNaN(value.getTime());
 
@@ -311,6 +315,9 @@ export function planLot(rule: RuleFacts, now: Date): LotPlan | null {
   }
   const days = rule.lotExpiresInDays;
   const expiresAt = rule.lotExpiresAt ?? (days ? new Date(now.getTime() + days * 86_400_000) : null);
+  // A fixed end that has already passed: the credit ended before this person could claim it, so there is nothing to issue (and a lot that
+  // ends before it starts is refused by the database, which would lose the person's other lots too)
+  if (expiresAt && expiresAt.getTime() <= now.getTime()) return null;
   return { slotKey, subjectKey: '', periodKey: rule.programKind === 'gift' ? 'gift' : 'once', amountMicros: rule.amount, startsAt: now, expiresAt, source };
 }
 
