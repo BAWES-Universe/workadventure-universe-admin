@@ -373,7 +373,6 @@ async function finishCall(runId: string, call: InstantCall, ctx: Ctx): Promise<I
       case 'rejected': {
         // Refused before anything ran: nothing is charged to anyone
         const reason = reasonOfRejection(call.code, call.status);
-        await releaseCustomer(run, tx, ctx);
         await settleProvider(run, tx, 0, 'measured', ctx.now);
         await tx.instantRun.update({ where: { id: run.id }, data: { state: 'failed', reason, finishedAt: ctx.now, detail: { status: call.status, code: call.code } } });
         // Composio's balance is empty: every run would fail the same way, so Instant stops until a super admin has looked
@@ -382,7 +381,6 @@ async function finishCall(runId: string, call: InstantCall, ctx: Ctx): Promise<I
       }
       case 'invalid': {
         // It did not run, but Composio logs a refusal like this, so its charge is decided from the log, never assumed
-        await releaseCustomer(run, tx, ctx);
         // Its own reason, so details Composio would not take never count toward the failure rate that pauses Instant, and a short wait
         // (the sent wait): one person's bad details can hold the exposure for minutes, not an hour, and only one at a time
         await tx.instantRun.update({
@@ -398,8 +396,7 @@ async function finishCall(runId: string, call: InstantCall, ctx: Ctx): Promise<I
       }
       case 'done': {
         if (!call.successful) {
-          // It ran and did not work: the person is never charged for that. Our own charge, if any, is read from the log.
-          await releaseCustomer(run, tx, ctx);
+          // It ran and did not work: the person is never charged for that (the hold goes back right after this). Our own charge, if any, is read from the log.
           await tx.instantRun.update({ where: { id: run.id }, data: { state: 'failed', reason: 'provider_failed', finishedAt: ctx.now, providerLogId: call.logId, providerState: 'pending' } });
           // A charge the answer (or its log) reports is ours and is written now; only a charge nobody has reported waits for the log
           const failedCharge = call.chargeMicros ?? loggedCharge;
@@ -413,14 +410,20 @@ async function finishCall(runId: string, call: InstantCall, ctx: Ctx): Promise<I
           data: { state: 'succeeded', reason: null, finishedAt: ctx.now, providerLogId: call.logId, providerState: 'pending', checkAfter: new Date(ctx.now.getTime() + limits.chargeWaitMinutes * MINUTE) },
         });
         if (charge !== null) {
-          const { charged, customerDone } = await settleSuccess(saved, tx, charge, 'measured', limits, ctx);
-          return { status: 'done', runId: run.id, ok: true, data: call.data, chargedMicros: charged, pending: !customerDone };
+          const charged = await settleSuccess(saved, tx, charge, 'measured', limits, ctx);
+          return { status: 'done', runId: run.id, ok: true, data: call.data, chargedMicros: charged, pending: true };
         }
         return { status: 'done', runId: run.id, ok: true, data: call.data, chargedMicros: 0, pending: true };
       }
     }
   });
+  // The person's side, said to the books now that the transaction is over
+  const settled = outcome ? await finishCustomer(runId, ctx) : null;
   await evaluatePause(ctx.now).catch((error) => console.error('[Instant] The pause check failed:', error instanceof Error ? error.message : 'unknown'));
+  if (outcome && outcome.status === 'done' && outcome.ok && settled) {
+    // What the books confirmed is what is answered; until they do, the answer says the charge is still pending
+    return settled.customerState === 'charged' ? { ...outcome, chargedMicros: asNumber(settled.customerMicros), pending: false } : { ...outcome, pending: true };
+  }
   return outcome ?? refuse('unclear', { runId });
 }
 
@@ -435,17 +438,49 @@ async function chargeFromLog(adapter: ReadyMadeAdapter | null, logId: string): P
   }
 }
 
-/** Gives the person's hold back (a failure never costs them). Idempotent. True once the books have it; false leaves the hold as it is, and a later look says it again. */
-async function releaseCustomer(run: Row, tx: Prisma.TransactionClient, ctx: Pick<Ctx, 'funds'>): Promise<boolean> {
-  if (run.customerState !== 'held') return true;
-  let done = false;
-  try {
-    done = holdIsGone(await ctx.funds.release({ key: fundsKey(run.id) }));
-  } catch (error) {
-    console.error('[Instant] The credit books could not release:', error instanceof Error ? error.message : 'unknown');
+/**
+ * The person's side of a run that is over, said to the credit books OUTSIDE any database transaction and lock (the books use their own
+ * connection, so a transaction waiting on them could starve the pool): a run that worked and whose charge is known is charged, a run
+ * that failed or was closed gets its hold back. Both are idempotent in the books (a second ask answers as the first did), so it never
+ * matters if two of these run at once. Only a confirmed answer is recorded; anything else leaves the run held and the sweep says it again.
+ * Returns the run as it now stands.
+ */
+async function finishCustomer(runId: string, ctx: Pick<Ctx, 'funds'>): Promise<Row | null> {
+  const run = await prisma.instantRun.findUnique({ where: { id: runId } });
+  if (!run || run.customerState !== 'held') return run;
+  if (run.state === 'succeeded') {
+    if (run.providerState !== 'settled' || run.providerMicros === null) return run;
+    const limits = await getInstantLimits();
+    const providerMicros = asNumber(run.providerMicros);
+    // The markup the hold was made with, never today's: a settlement said again after a markup change asks the books for the same amount
+    const charge = customerChargeFor(providerMicros, asNumber(run.holdMicros), run.markupBps ?? limits.markupBps);
+    let confirmed: number | null = null;
+    try {
+      // Read as what a books adapter may actually send: the amount is checked at run time, whatever the type promises
+      const answer: { ok: boolean; chargedMicros?: unknown } = await ctx.funds.settle({ key: fundsKey(run.id), chargeMicros: charge, providerCostMicros: providerMicros });
+      // A settlement the books took before (and this side never recorded) answers with its FIRST amount: that is what the person was
+      // charged, so that is what is recorded, whatever today's figures work out to. A yes without a readable amount is not taken as done.
+      const amount = answer.chargedMicros;
+      if (answer.ok && typeof amount === 'number' && Number.isSafeInteger(amount) && amount >= 0) confirmed = amount;
+    } catch (error) {
+      console.error('[Instant] The credit books could not settle:', error instanceof Error ? error.message : 'unknown');
+    }
+    if (confirmed === null) return run;
+    await prisma.instantRun.updateMany({ where: { id: runId, customerState: 'held' }, data: { customerState: 'charged', customerMicros: BigInt(confirmed) } });
+  } else if (run.state === 'failed' || run.state === 'refused') {
+    let gone = false;
+    try {
+      gone = holdIsGone(await ctx.funds.release({ key: fundsKey(run.id) }));
+    } catch (error) {
+      console.error('[Instant] The credit books could not release:', error instanceof Error ? error.message : 'unknown');
+    }
+    if (!gone) return run;
+    await prisma.instantRun.updateMany({ where: { id: runId, customerState: 'held' }, data: { customerState: 'released', customerMicros: BigInt(0) } });
+  } else {
+    // Still going: nothing is decided on the person's side yet
+    return run;
   }
-  if (done) await tx.instantRun.update({ where: { id: run.id }, data: { customerState: 'released', customerMicros: 0 } });
-  return done;
+  return prisma.instantRun.findUnique({ where: { id: runId } });
 }
 
 /**
@@ -482,31 +517,13 @@ async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: nu
 }
 
 /**
- * A run that worked and whose charge is known: the provider side is settled and the person is charged, never past the hold.
- * Returns what the person was charged, and whether the books took it (when they did not, the hold stays and is said again later).
+ * A run that worked and whose charge is known: the provider side is settled (inside the caller's transaction). What the person is
+ * charged is said to the credit books afterwards, outside it (`finishCustomer`); the amount returned is what that will ask for.
  */
-async function settleSuccess(run: Row, tx: Prisma.TransactionClient, providerMicros: number, basis: 'measured' | 'estimated', limits: InstantLimits, ctx: Ctx): Promise<{ charged: number; customerDone: boolean }> {
-  // The markup the hold was made with, never today's: a settlement said again after a markup change asks the books for the same amount
+async function settleSuccess(run: Row, tx: Prisma.TransactionClient, providerMicros: number, basis: 'measured' | 'estimated', limits: InstantLimits, ctx: Ctx): Promise<number> {
   const charged = customerChargeFor(providerMicros, asNumber(run.holdMicros), run.markupBps ?? limits.markupBps);
-  let customerDone = run.customerState !== 'held';
-  let chargedNow = charged;
-  if (run.customerState === 'held') {
-    try {
-      // Read as what a books adapter may actually send: the amount is checked at run time, whatever the type promises
-      const answer: { ok: boolean; chargedMicros?: unknown } = await ctx.funds.settle({ key: fundsKey(run.id), chargeMicros: charged, providerCostMicros: providerMicros });
-      // A settlement the books took before (and this side never recorded) answers with its FIRST amount: that is what the person was
-      // charged, so that is what is recorded, whatever today's figures work out to. A yes without a readable amount is not taken as
-      // done: the run stays held and the question is asked again, never recorded at a figure the books did not confirm.
-      const confirmed = answer.chargedMicros;
-      customerDone = answer.ok && typeof confirmed === 'number' && Number.isSafeInteger(confirmed) && confirmed >= 0;
-      if (customerDone) chargedNow = confirmed as number;
-    } catch (error) {
-      console.error('[Instant] The credit books could not settle:', error instanceof Error ? error.message : 'unknown');
-    }
-    if (customerDone) await tx.instantRun.update({ where: { id: run.id }, data: { customerState: 'charged', customerMicros: BigInt(chargedNow) } });
-  }
-  await settleProvider({ ...run, customerMicros: customerDone ? BigInt(chargedNow) : run.customerMicros }, tx, providerMicros, basis, ctx.now);
-  return { charged: chargedNow, customerDone };
+  await settleProvider({ ...run, customerMicros: run.customerMicros ?? BigInt(charged) }, tx, providerMicros, basis, ctx.now);
+  return charged;
 }
 
 /** What a run already on the books says to a caller who asks again. Unclear runs are looked up first. */
@@ -603,7 +620,6 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
   // Tried now: the sweep goes oldest attempt first, so runs that cannot be settled never keep the rest from being tried
   await prisma.instantRun.updateMany({ where: { id: runId }, data: { checkedAt: new Date() } });
   const looked = instant && needsLookup(seen, ctx.now, limits) ? await lookUp(seen, instant, ctx.now) : null;
-  let claimed: { before: string } | null = null;
   await withRun(runId, async (run, tx) => {
     const now = ctx.now;
     const waitedPast = (from: Date | null, minutes: number) => !from || now.getTime() - from.getTime() >= minutes * MINUTE;
@@ -613,17 +629,7 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
       // The run is CLOSED first (committed before the books are asked), marked as possibly still holding: from then on nothing can send
       // it, whatever happens to the release or to this transaction. The hold is then given back, and the mark cleared only when the
       // books say it is gone (given back just now, or confirmed not to exist); a plain "no" leaves the mark, and the sweep asks again.
-      claimed = { before: run.customerState };
       await tx.instantRun.update({ where: { id: run.id }, data: { state: 'refused', reason: 'unclear', customerState: 'held', providerState: 'none', finishedAt: now } });
-      return;
-    }
-
-    // Finished, but the books did not take the customer's side the first time: said again now
-    if ((run.state === 'failed' || run.state === 'refused') && run.customerState === 'held') {
-      if (!(await releaseCustomer(run, tx, ctx))) return;
-    }
-    if (run.state === 'succeeded' && run.customerState === 'held' && run.providerState === 'settled' && run.providerMicros !== null) {
-      await settleSuccess(run, tx, asNumber(run.providerMicros), run.providerBasis === 'measured' ? 'measured' : 'estimated', limits, ctx);
       return;
     }
 
@@ -645,7 +651,6 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
         return;
       }
       if (line && line.status === 'failed') {
-        await releaseCustomer(run, tx, ctx);
         await tx.instantRun.update({ where: { id: run.id }, data: { state: 'failed', reason: 'provider_failed', finishedAt: now, providerLogId: line.id, providerState: 'pending', checkAfter: new Date(now.getTime() + limits.chargeWaitMinutes * MINUTE) } });
         if (line.chargeMicros !== null) await settleProvider({ ...run, state: 'failed' }, tx, line.chargeMicros, 'measured', now);
         return;
@@ -659,7 +664,6 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
       }
       // Nothing readable of it by the end of the wait: nothing is known to have worked. The person is not charged for what nobody can
       // vouch for, so the hold goes back, and our own exposure is closed at the top price as an estimate until the monthly check.
-      await releaseCustomer(run, tx, ctx);
       await tx.instantRun.update({ where: { id: run.id }, data: { state: 'failed', reason: 'unclear', finishedAt: now, providerLogId: line?.id ?? run.providerLogId, detail: line ? { unreadableLog: true } : { noLog: true } } });
       await settleProvider({ ...run, state: 'failed' }, tx, topMicros, 'estimated', now);
       return;
@@ -678,19 +682,8 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
       else await settleProvider(run, tx, topMicros, 'estimated', now);
     }
   });
-  if (claimed) {
-    // The run is closed and committed as possibly holding; now the books are asked, outside any transaction and any lock
-    let gone = false;
-    try {
-      gone = holdIsGone(await ctx.funds.release({ key: fundsKey(runId) }));
-    } catch (error) {
-      console.error('[Instant] The credit books could not release:', error instanceof Error ? error.message : 'unknown');
-    }
-    if (gone) {
-      const never = (claimed as { before: string }).before === 'none';
-      await prisma.instantRun.updateMany({ where: { id: runId, state: 'refused', customerState: 'held' }, data: never ? { customerState: 'none' } : { customerState: 'released', customerMicros: BigInt(0) } });
-    }
-  }
+  // The person's side of whatever is over, said to the books now that the transaction is done (never inside it)
+  await finishCustomer(runId, ctx);
   await evaluatePause(ctx.now).catch((error) => console.error('[Instant] The pause check failed:', error instanceof Error ? error.message : 'unknown'));
 }
 

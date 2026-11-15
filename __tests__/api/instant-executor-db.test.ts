@@ -6,7 +6,6 @@ import { randomUUID } from 'node:crypto';
 import { NextRequest } from 'next/server';
 
 import { prisma } from '@/lib/db';
-import { recordMeterEvent } from '@/lib/meter';
 import { setAdapterForTests, type InstantAdapter, type InstantCall, type InstantLog, type ReadyMadeAdapter } from '@/lib/app-adapter';
 import { evaluatePause, exposureIn, giveBack, instantRunKey, reconcileRun, runInstant, setInstantHooks } from '@/lib/instant/executor';
 import { setInstantFunds, shutFunds, type InstantFunds } from '@/lib/instant/funds';
@@ -16,12 +15,6 @@ import { denyInstantOnSessions } from '@/lib/instant/sessions';
 import { admitInstantTool } from '@/lib/instant/values';
 import { POST as runRoute } from '@/app/api/instant/run/route';
 import { GET as toolsRoute } from '@/app/api/instant/tools/route';
-
-// The meter's write is wrapped so one test can make it fail once, inside a settlement's transaction, after the books took the charge
-jest.mock('@/lib/meter', () => {
-  const actual = jest.requireActual('@/lib/meter');
-  return { ...actual, recordMeterEvent: jest.fn(actual.recordMeterEvent) };
-});
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const tag = randomUUID().slice(0, 8);
@@ -1198,6 +1191,38 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await runOf(row.id)).toMatchObject({ state: 'refused' });
     });
 
+    it('even when the clean-up fails right after the books released the hold, a delayed reservation finds the run closed and Composio is never called', async () => {
+      await setLimits({ sentWaitMinutes: 5 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const open = gatedReserve(f);
+      const pending = runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      await waitForRuns(1);
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      await prisma.instantRun.update({ where: { id: row.id }, data: { createdAt: new Date(Date.now() - 100 * MIN) } });
+      // The books give the hold back (it never existed: nothing to release), then writing that down here fails
+      f.funds.release.mockImplementation((async () => ({ ok: true, none: true })) as never);
+      const real = prisma.instantRun.updateMany.bind(prisma.instantRun);
+      const lost = jest.spyOn(prisma.instantRun, 'updateMany').mockImplementation(((args: { data?: { customerState?: string } }) => {
+        if (args?.data?.customerState === 'released') {
+          lost.mockRestore();
+          throw new Error('database went away');
+        }
+        return real(args as never);
+      }) as never);
+      try {
+        await expect(reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date() })).rejects.toThrow();
+      } finally {
+        lost.mockRestore();
+      }
+      // The run was closed before the books were asked, so the failure did not reopen it
+      expect(await runOf(row.id)).toMatchObject({ state: 'refused' });
+      open();
+      expect(await pending).toMatchObject({ status: 'refused' });
+      expect(p.instant.run).not.toHaveBeenCalled();
+      expect(await runOf(row.id)).toMatchObject({ state: 'refused' });
+    });
+
     it('a hold that reached the books after the run was closed, and cannot be released at once, is kept marked and given back by the sweep', async () => {
       await setLimits();
       const p = fakeProvider();
@@ -1304,7 +1329,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(f.holds.get(`instant:${stuck.id}`)?.state).toBe('released');
     });
 
-    it('a settlement the books took, whose transaction then rolled back, is recorded at the books first amount when a later log says another charge', async () => {
+    it('a settlement the books took, whose confirmation was then lost, is recorded on the retry at the books amount, and the person is charged once', async () => {
       await setLimits();
       const p = fakeProvider();
       const f = fakeFunds(1_000_000);
@@ -1313,26 +1338,67 @@ run('the bounded Instant executor, in a real database', () => {
       await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
       const row = await runOf(await runIdOf(id));
       await prisma.instantRun.update({ where: { id: row.id }, data: { sentAt: new Date(Date.now() - 600 * MIN) } });
-      const setLog = (charge: number) => {
-        p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', charge, 'log-roll')]);
-        p.script.logs.set('log-roll', p.line(row.providerUserId, 'success', charge, 'log-roll'));
-      };
-      // First time: the log says 7,000, the books take the charge, and the database then fails inside the same transaction
-      setLog(7_000);
-      // (thrown at once, not rejected: the settlement code swallows a failed meter write, and a throw is what a lost connection looks like)
-      (recordMeterEvent as jest.Mock).mockImplementationOnce(() => {
-        throw new Error('database went away');
-      });
-      await expect(reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date() })).rejects.toThrow();
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', 7_000, 'log-roll')]);
+      p.script.logs.set('log-roll', p.line(row.providerUserId, 'success', 7_000, 'log-roll'));
+      // The books take the charge, and writing it down here fails once (a lost connection)
+      const real = prisma.instantRun.updateMany.bind(prisma.instantRun);
+      const lost = jest.spyOn(prisma.instantRun, 'updateMany').mockImplementation(((args: { data?: { customerState?: string } }) => {
+        if (args?.data?.customerState === 'charged') {
+          lost.mockRestore();
+          throw new Error('database went away');
+        }
+        return real(args as never);
+      }) as never);
+      try {
+        await expect(reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date() })).rejects.toThrow();
+      } finally {
+        lost.mockRestore();
+      }
       expect(f.holds.get(`instant:${row.id}`)).toMatchObject({ state: 'charged', charged: 7_000 });
-      expect(await runOf(row.id)).toMatchObject({ customerState: 'held' });
-      // Later the log says another charge: the person was charged 7,000, so 7,000 is what is recorded
-      setLog(7_500);
-      await reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      expect(await runOf(row.id)).toMatchObject({ state: 'succeeded', providerState: 'settled', customerState: 'held' });
+      // The retry asks again, the books answer with the first amount, and that is what is recorded
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
       const after = await runOf(row.id);
-      expect(after).toMatchObject({ state: 'succeeded', customerState: 'charged' });
+      expect(after).toMatchObject({ customerState: 'charged' });
       expect(Number(after.customerMicros)).toBe(7_000);
       expect(f.holds.get(`instant:${row.id}`)).toMatchObject({ state: 'charged', charged: 7_000 });
+    });
+
+    it('the credit books are never asked from inside a database transaction', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      // A transaction that is open holds a connection; the books (which use their own) must never be waited on while one is
+      let open = 0;
+      const realTx = prisma.$transaction.bind(prisma) as (...args: unknown[]) => Promise<unknown>;
+      const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, ...rest: unknown[]) => {
+        if (typeof fn !== 'function') return realTx(fn, ...rest);
+        return realTx(async (...inner: unknown[]) => {
+          open += 1;
+          try {
+            return await (fn as (...a: unknown[]) => Promise<unknown>)(...inner);
+          } finally {
+            open -= 1;
+          }
+        }, ...rest);
+      }) as never);
+      const seen: number[] = [];
+      for (const name of ['reserve', 'settle', 'release'] as const) {
+        const impl = f.funds[name].getMockImplementation()!;
+        f.funds[name].mockImplementation((async (input: never) => {
+          seen.push(open);
+          return impl(input);
+        }) as never);
+      }
+      try {
+        await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+        p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'x', logId: 'l', chargeMicros: null });
+        await runInstant(ask({ arguments: { query: 'second' } }), { adapter: p.adapter, funds: f.funds });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(seen.length).toBeGreaterThanOrEqual(4);
+      expect(seen.every((n) => n === 0)).toBe(true);
     });
 
     it('a yes from the books without the amount charged is not taken as done: the run stays held and is asked again', async () => {
