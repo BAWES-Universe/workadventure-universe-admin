@@ -608,7 +608,10 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
 export async function evaluatePause(now: Date = new Date()): Promise<boolean> {
   const limits = await getInstantLimits();
   if (limits.pauseFailureRateBps === null || limits.pauseMinRuns === null) return false;
-  const since = new Date(now.getTime() - limits.pauseWindowMinutes * MINUTE);
+  // Runs that finished before a super admin last turned Instant back on are the ones they already looked at: they never pause it again
+  const resumedAt = (await getInstantPause()).resumedAt;
+  const windowStart = now.getTime() - limits.pauseWindowMinutes * MINUTE;
+  const since = new Date(Math.max(windowStart, resumedAt ? Date.parse(resumedAt) || 0 : 0));
   // Details Composio would not take are the caller's, not the provider's: they are not runs the failure rate is about
   const notInvalid = { OR: [{ reason: null }, { reason: { not: 'invalid_request' } }] };
   const [done, failed, givenBack] = await Promise.all([

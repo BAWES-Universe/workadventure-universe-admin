@@ -47,13 +47,15 @@ export interface InstantPause {
   /** A fixed word for why: failure_rate, price_over_top, price_drift, provider_empty, or manual. */
   reason: string | null;
   at: string | null;
+  /** When a super admin last turned it back on: the failure rate only counts runs that finished after this. */
+  resumedAt?: string | null;
 }
 
 export async function getInstantPause(db: SettingsDb = prisma): Promise<InstantPause> {
   try {
     const row = await db.appSetting.findUnique({ where: { key: STATE_KEY } });
     const value = isRecord(row?.value) ? row.value : {};
-    if (value.paused !== true) return { paused: false, reason: null, at: null };
+    if (value.paused !== true) return { paused: false, reason: null, at: null, resumedAt: typeof value.resumedAt === 'string' ? value.resumedAt : null };
     return { paused: true, reason: typeof value.reason === 'string' ? value.reason : 'manual', at: typeof value.at === 'string' ? value.at : null };
   } catch (error) {
     // A pause that cannot be read is a pause: nothing runs on a guess
@@ -84,6 +86,6 @@ export async function resumeInstant(userId: string): Promise<InstantPause> {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('instant:state'))`;
     const value = { paused: false, resumedAt: new Date().toISOString() } as Prisma.InputJsonValue;
     await tx.appSetting.upsert({ where: { key: STATE_KEY }, create: { key: STATE_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });
-    return { paused: false, reason: null, at: null };
+    return { paused: false, reason: null, at: null, resumedAt: (value as { resumedAt: string }).resumedAt };
   });
 }

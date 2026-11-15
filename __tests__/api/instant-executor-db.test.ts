@@ -785,6 +785,29 @@ run('the bounded Instant executor, in a real database', () => {
       // And only a super admin turns it back on
       await resumeInstant(sara);
       expect((await getInstantPause()).paused).toBe(false);
+      // The runs they already looked at never pause it again, however often it is checked
+      expect(await evaluatePause()).toBe(false);
+      expect(await evaluatePause()).toBe(false);
+      expect((await getInstantPause()).paused).toBe(false);
+    });
+
+    it('after a resume, only runs that finish after it count toward the next pause', async () => {
+      await setLimits({ pauseFailureRateBps: 5_000, pauseMinRuns: 2 });
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      for (const n of [1, 2]) {
+        p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'x', logId: `r${n}`, chargeMicros: null });
+        await runInstant(ask({ arguments: { query: `r${n}` } }), { adapter: p.adapter, funds: f.funds });
+      }
+      expect(await getInstantPause()).toMatchObject({ paused: true, reason: 'failure_rate' });
+      await resumeInstant(sara);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      for (const n of [3, 4]) {
+        p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'x', logId: `r${n}`, chargeMicros: null });
+        await runInstant(ask({ arguments: { query: `r${n}` } }), { adapter: p.adapter, funds: f.funds });
+      }
+      // New failures after the resume are a new alarm
+      expect(await getInstantPause()).toMatchObject({ paused: true, reason: 'failure_rate' });
     });
 
     it('does not pause on a healthy run history', async () => {
