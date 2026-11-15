@@ -55,8 +55,10 @@ export type SaveRouteOutcome =
  */
 export async function saveRoute(input: { appKey: string; route: AppRouteName; expectedVersion: number; userId: string }): Promise<SaveRouteOutcome> {
   if (!KEY.test(input.appKey)) return { status: 'unknown_app' };
+  // An App must be on the list to be moved to our own version. Moving one BACK to Composio is always allowed when it has a route of
+  // its own, even if the App has since left the list: otherwise a route left on `universe` could never be undone.
   const known = (await readReadyMadeApps()).some((app) => app.key === input.appKey);
-  if (!known) return { status: 'unknown_app' };
+  if (!known && (input.route === 'universe' || (await readRoute(input.appKey)).version === 0)) return { status: 'unknown_app' };
   if (input.route === 'universe') {
     const why = whyNotReady(input.appKey);
     if (why.length > 0) return { status: 'not_ready', why };

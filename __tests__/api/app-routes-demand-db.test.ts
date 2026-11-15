@@ -215,6 +215,20 @@ run('where an App runs, and Apps: use and demand, in a real database', () => {
       expect((await prisma.appRoute.findUniqueOrThrow({ where: { appKey: KEY } })).version).toBe(1);
     });
 
+    it('lets an App that has left the list be moved back to Composio, but not moved onto our own version', async () => {
+      setOwnVersionsForTests({ [KEY]: ownVersion() });
+      await list();
+      asBoss();
+      expect((await move('universe', 0)).status).toBe(200);
+      // The App leaves the list
+      await prisma.appSetting.upsert({ where: { key: 'ready-made-apps' }, create: { key: 'ready-made-apps', value: { apps: { [KEY]: null } }, updatedById: boss }, update: { value: { apps: { [KEY]: null } }, updatedById: boss } });
+      expect((await move('universe', 1)).status).toBe(404);
+      expect((await move('composio', 1)).status).toBe(200);
+      expect((await prisma.appRoute.findUniqueOrThrow({ where: { appKey: KEY } })).route).toBe('composio');
+      // An App that was never moved and is not on the list is still not found
+      expect((await move('composio', 0, `nothing-${tag}`)).status).toBe(404);
+    });
+
     it('never runs on Composio when our own version is gone: the run is refused, nothing is called and nothing is written', async () => {
       const { adapter, serverId } = await connectedAndGranted();
       setOwnVersionsForTests({ [KEY]: ownVersion() });
