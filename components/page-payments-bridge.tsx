@@ -107,6 +107,8 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
             toldNotPaid = true;
             busy.current = false;
             setResume(null);
+            // Older orders that ran out while this checkout was being looked at can be asked about again now
+            setRecheck((now) => now ?? firstExpired());
             setLine(WORDS.not_paid);
             tell('not_paid');
           }
