@@ -24,6 +24,8 @@ import { POST as postReceipt } from '@/app/api/bots/[id]/task-receipts/route';
 import { GET as getPaidBy } from '@/app/api/bots/[id]/paid-by/route';
 import { POST as postJob } from '@/app/api/bots/[id]/computer-jobs/route';
 import { POST as postDidntWork } from '@/app/api/me/usage/activity/[id]/didnt-work/route';
+import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
+import { giveComputer, renewJob, startJob } from '@/lib/computer';
 import { PATCH as patchRule, DELETE as deleteRule } from '@/app/api/me/spend-rules/[ruleId]/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -262,6 +264,44 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await reserveRoom({ key: `k-${tag}-6`, personId: sara.id, amountMicros: 1, botId: sara.brickId, jobId: 'j6', chargeClass: 'apps' }, NOW)).toMatchObject({ ok: false, reason: 'rule' });
       // Omar's credit and Omar's Brick are not touched by Sara's rule, and nothing falls back to anyone's account
       expect(await reserveRoom({ key: `k-${tag}-7`, personId: omar.id, amountMicros: 10_000, botId: omar.brickId, jobId: 'j7' }, NOW)).toMatchObject({ ok: true });
+    });
+  });
+
+  describe('a computer job under a rule', () => {
+    const env = process.env.COMPUTER_PROVIDER;
+    beforeAll(() => {
+      process.env.COMPUTER_PROVIDER = 'fake';
+      setComputerProviderForTests(new FakeComputerProvider());
+    });
+    afterAll(() => {
+      setComputerProviderForTests(null);
+      process.env.COMPUTER_PROVIDER = env;
+    });
+
+    it('is refused at the start with the rule’s words, leaves no job behind, and is not a wait in line that would be retried', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      // Under the cap for a first step of 1 millionth, over it for a stretch of room (60,000)
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 10_000 });
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Make the report' }, NOW);
+      expect(started).toEqual({ ok: false, reason: 'rule', words: expect.stringContaining('No more than $0.01 a month') });
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
+      expect(await prisma.meterReservation.count({ where: { personKey: `person:${sara.id}` } })).toBe(0);
+    });
+
+    it('a job that is running when a rule stops more room ends as "rule", saying so, not as "our room is used up"', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 100_000 });
+      if (!made.ok) throw new Error('not made');
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Long job' }, NOW);
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      expect(started.job.status).toBe('running');
+      // 60,000 is held; another stretch of 60,000 does not fit under 100,000
+      const renewed = await renewJob(started.job.id, new Date(NOW.getTime() + 60_000));
+      expect(renewed).toEqual({ ok: false, reason: 'rule', words: expect.stringContaining('No more than $0.10 a month') });
+      const ended = await prisma.computerJob.findUnique({ where: { id: started.job.id } });
+      expect(ended).toMatchObject({ status: 'stopped', endedBy: 'rule' });
     });
   });
 

@@ -285,7 +285,9 @@ export type Started =
   /** Not the owner's Brick, or not theirs to ask: only the owner starts computer work on their Brick. */
   | { ok: false; reason: 'not_owner' | 'off' | 'not_open' | 'broken_start' | 'no_run' }
   /** The meter's controls are not set up yet: a computer does not open before they do. */
-  | { ok: false; reason: 'not_set' };
+  | { ok: false; reason: 'not_set' }
+  /** A rule the person said in chat does not let this job take room: nothing is left behind, and the rule's own words come with it. */
+  | { ok: false; reason: 'rule'; words: string };
 
 /** Room is asked for once for each try to run a job: room that was released stays closed, so a later try asks under a new key. */
 const roomKey = (jobId: string, now: Date) => `computer:job:${jobId}:${now.getTime()}`;
@@ -327,6 +329,11 @@ export async function startJob(input: { botId: string; personId: string; title: 
     throw error;
   }
   const outcome = await tryStart(created.id, now);
+  if (typeof outcome === 'object') {
+    // Refused by a rule the person said in chat: no job was ever going to run, so none is left behind, and the answer carries the rule's words
+    await prisma.computerJob.deleteMany({ where: { id: created.id } });
+    return { ok: false, reason: 'rule', words: outcome.rule };
+  }
   if (outcome === 'not_set') {
     // Controls that are not set up: no job was ever going to run, so none is left behind (a second ask for the same run may have taken it away already)
     await prisma.computerJob.deleteMany({ where: { id: created.id } });
@@ -368,7 +375,7 @@ async function runIsTheirs(botId: string, personId: string, runId: string): Prom
   return !!run && run.item.botId === botId && run.item.ownerId === personId;
 }
 
-type Tried = 'running' | 'queued' | 'failed' | 'not_set' | 'gone';
+type Tried = 'running' | 'queued' | 'failed' | 'not_set' | 'gone' | { rule: string };
 
 /** One try to put a queued job on the machine. Safe to ask again: a job that is no longer queued is left as it is. */
 async function tryStart(jobId: string, now: Date): Promise<Tried> {
@@ -402,6 +409,12 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
   const room = await reserveRoom({ key, personId: job.personId, amountMicros: roomFor(settings.renewMinutes, provider.microsPerMinute()), botId: job.botId, jobId: job.id }, now);
   if (!room.ok) {
     if (room.reason === 'not_set') return 'not_set';
+    // A rule the person said is not a wait in line: waiting would not change it, and a job that keeps being retried would hold up the Brick. It ends,
+    // saying why, and the jobs behind it meet the same rule when their turn comes
+    if (room.reason === 'rule') {
+      await endJob(job.id, 'stopped', 'rule', now, false);
+      return { rule: room.words };
+    }
     const reason = queueReasonOf(room);
     if (reason) {
       await queue(reason);
@@ -566,7 +579,7 @@ export async function reportProgress(jobId: string, progress: { stepDone: number
  * A job that keeps running renews its room each stretch. If the allowance or our room is used up, or the room is gone, it saves
  * and stops safely: what it did stays, nothing new starts and no step is cut in half by this call.
  */
-export async function renewJob(jobId: string, now: Date = new Date()): Promise<{ ok: true } | { ok: false; reason: 'allowance' | 'pool' | 'closed' | 'over' | 'unanswered' }> {
+export async function renewJob(jobId: string, now: Date = new Date()): Promise<{ ok: true } | { ok: false; reason: 'allowance' | 'pool' | 'closed' | 'over' | 'unanswered' } | { ok: false; reason: 'rule'; words: string }> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (job && isOver(job.status) && job.endedBy === 'unanswered') return { ok: false, reason: 'unanswered' };
   if (!job || isOver(job.status)) return { ok: false, reason: 'over' };
@@ -578,6 +591,11 @@ export async function renewJob(jobId: string, now: Date = new Date()): Promise<{
   const settings = await getMeterSettings();
   const room = await renewRoom({ key: job.reservationKey, moreMicros: roomFor(settings.renewMinutes, provider ? provider.microsPerMinute() : null) }, now);
   if (room.ok) return { ok: true };
+  if (room.reason === 'rule') {
+    // A rule the person said in chat stops it here, saying so: not "our room is used up", and nothing to ask more credit for
+    await endJob(jobId, 'stopped', 'rule', now);
+    return { ok: false, reason: 'rule', words: room.words };
+  }
   const reason = room.reason === 'allowance' ? 'allowance' : room.reason === 'closed' ? 'closed' : 'pool';
   await endJob(jobId, 'stopped', reason === 'allowance' ? 'allowance' : reason === 'closed' ? 'error' : 'pool', now);
   return { ok: false, reason };
