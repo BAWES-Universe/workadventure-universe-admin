@@ -1209,6 +1209,63 @@ run('the bounded Instant executor, in a real database', () => {
       expect(f.left()).toBe(1_000_000);
     });
 
+    it('a reservation that commits in the books and then fails, with the release failing too, still leaves the closed run marked as holding for the sweep', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => (open = resolve));
+      const real = f.funds.reserve.getMockImplementation()!;
+      f.funds.reserve.mockImplementation((async (input: { key: string; amountMicros: number }) => {
+        await gate;
+        await real(input);
+        throw new Error('connection reset');
+      }) as never);
+      const pending = runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      await waitForRuns(1);
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      await prisma.instantRun.update({ where: { id: row.id }, data: { state: 'refused', reason: 'unclear', finishedAt: new Date(), customerState: 'none', providerState: 'none' } });
+      f.state.releaseOk = false;
+      open();
+      expect(await pending).toMatchObject({ status: 'refused' });
+      expect(f.holds.get(`instant:${row.id}`)?.state).toBe('held');
+      expect(await runOf(row.id)).toMatchObject({ state: 'refused', customerState: 'held' });
+      f.state.releaseOk = true;
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(f.holds.get(`instant:${row.id}`)?.state).toBe('released');
+      expect(f.left()).toBe(1_000_000);
+    });
+
+    it('books that close a key on "nothing held" refuse the late reservation, so no hold is ever created after the clean-up closed the run', async () => {
+      await setLimits({ sentWaitMinutes: 5 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const closed = new Set<string>();
+      const realReserve = f.funds.reserve.getMockImplementation()!;
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => (open = resolve));
+      f.funds.reserve.mockImplementation((async (input: { key: string; amountMicros: number }) => {
+        await gate;
+        if (closed.has(input.key)) return { ok: false, reason: 'unavailable' };
+        return realReserve(input);
+      }) as never);
+      f.funds.release.mockImplementation((async (input: { key: string }) => {
+        closed.add(input.key);
+        return { ok: true, none: true };
+      }) as never);
+      const pending = runInstant(ask(), { adapter: p.adapter, funds: f.funds });
+      await waitForRuns(1);
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      await prisma.instantRun.update({ where: { id: row.id }, data: { createdAt: new Date(Date.now() - 100 * MIN) } });
+      await reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      expect(await runOf(row.id)).toMatchObject({ state: 'refused' });
+      open();
+      expect(await pending).toMatchObject({ status: 'refused' });
+      expect(p.instant.run).not.toHaveBeenCalled();
+      expect(f.holds.has(`instant:${row.id}`)).toBe(false);
+      expect(f.left()).toBe(1_000_000);
+    });
+
     it('a settlement the books took before, and this side never recorded, is recorded at the books first amount, not at today\'s figure', async () => {
       await setLimits({ markupBps: 1_000 });
       const p = fakeProvider();

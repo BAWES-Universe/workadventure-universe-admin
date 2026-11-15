@@ -213,7 +213,11 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
     } catch {
       gone = false;
     }
-    if (!gone) return refuse('credit_unavailable', { runId: run.id });
+    if (!gone) {
+      // A run the clean-up closed meanwhile is marked as still holding, so the sweep keeps saying the release
+      await keepHolding(run.id);
+      return refuse('credit_unavailable', { runId: run.id });
+    }
   }
   if (!held.ok) {
     // "Unavailable" is the books being unreachable: said as that, never as the person's credit being used up
@@ -257,6 +261,15 @@ async function moveRun(runId: string, from: string, data: Prisma.InstantRunUnche
   }
 }
 
+/** A closed run whose hold may still be in the books: marked as holding, which the sweep keeps releasing until the books answer. */
+async function keepHolding(runId: string): Promise<void> {
+  try {
+    await prisma.instantRun.updateMany({ where: { id: runId, state: 'refused', customerState: 'none' }, data: { customerState: 'held' } });
+  } catch (error) {
+    console.error('[Instant] Could not mark the run as holding:', error instanceof Error ? error.message : 'unknown');
+  }
+}
+
 /**
  * A run that was taken over while its request was still on its way: the hold goes back (said again, it is idempotent) and the run is
  * answered as it now stands. When the books do not confirm the release, the closed run is marked as still holding, which the sweep
@@ -269,7 +282,7 @@ async function standDown(runId: string, ctx: Ctx): Promise<InstantOutcome> {
   } catch (error) {
     console.error('[Instant] The credit books could not release:', error instanceof Error ? error.message : 'unknown');
   }
-  if (!gone) await prisma.instantRun.updateMany({ where: { id: runId, state: 'refused', customerState: 'none' }, data: { customerState: 'held' } });
+  if (!gone) await keepHolding(runId);
   const row = await prisma.instantRun.findUnique({ where: { id: runId } });
   return row ? outcomeOf(row) : refuse('unclear', { runId });
 }

@@ -49,6 +49,9 @@ export interface InstantFunds {
    * The run did not happen or did not work: gives back the whole hold. `ok: false` means it may still be held and is said again later.
    * `none: true` means the books CONFIRM nothing is held under the key (it never was): the only way a run whose reservation was never
    * answered may be closed without a release. A plain `ok: false` never closes it.
+   * A `none: true` answer also CLOSES the key in the books: a reservation under it that arrives later (one that was still on its way)
+   * is refused (`reason: 'unavailable'`) and holds nothing. That keeps a late hold from ever existing, even if this side stops
+   * before it can give the hold back.
    */
   release(input: { key: string }): Promise<{ ok: boolean; none?: boolean }>;
   /** After a charge: gives `amountMicros` back to the lots it came from, once per `refundKey`. Free credit never becomes cash. */
