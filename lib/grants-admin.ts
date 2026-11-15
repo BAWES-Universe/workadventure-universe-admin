@@ -250,9 +250,10 @@ export async function giftInput(request: Extract<PreviewRequest, { what: 'gift' 
     const cap = request.joinerCap;
     if (!cap || !Number.isInteger(cap) || cap < 1) throw new GrantsRefused('Say the most people who can join');
     const members = await prisma.universeMember.count({ where: { universeId: recipients.universeId, user: { isGuest: false } } });
-    // A changing group is capped by what it can reach at most: the people there now and those who may join, each at the amount
-    input.joinerCap = cap;
-    input.totalCapMicros = request.amountMicros * (members + cap);
+    // The books cap how many people can ever hold the gift (members now included): the people there now and those who may join.
+    // What the admin types is how many MORE may join, so the members now are added here. The money is capped by the same people
+    input.joinerCap = members + cap;
+    input.totalCapMicros = request.shared ? request.amountMicros : request.amountMicros * (members + cap);
   }
   return input;
 }

@@ -13,7 +13,7 @@ const session = { user: null as { id: string; email: string | null } | null };
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => session.user) }));
 
 import { prisma } from '@/lib/db';
-import { saveMeterSettings } from '@/lib/meter';
+import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { GET as getOverview } from '@/app/api/admin/grants/route';
 import { POST as postPreview } from '@/app/api/admin/grants/preview/route';
 import { PUT as putDefault } from '@/app/api/admin/grants/defaults/[category]/route';
@@ -130,12 +130,16 @@ run('the grants routes, on the real books', () => {
   });
 
   it('refuses a computers default that the monthly allowance could not follow, rather than saving one that does nothing', async () => {
+    await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 4 * MILLION, interval: 'monthly', recipients: { kind: 'all' } } }, ctx({ category: 'computers' }));
+    expect((await getMeterSettings()).memberAllowanceMicros).toBe(4 * MILLION);
     const once = await call<any>(putDefault, '/x', { method: 'PUT', body: { amountMicros: 5 * MILLION, interval: 'once', recipients: { kind: 'all' } } }, ctx({ category: 'computers' }));
     expect(once.status).toBe(400);
     expect((await once.json()).error).toMatch(/every month to everyone/);
     const fromDate = await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 5 * MILLION, interval: 'monthly', recipients: { kind: 'new_from', from: new Date().toISOString() } } }, ctx({ category: 'computers' }));
     expect(fromDate.status).toBe(400);
-    expect((await overview()).money.computers.set).toBe(false);
+    // The refused saves changed nothing: the default and the allowance the meter follows still agree
+    expect((await overview()).money.computers).toMatchObject({ amountMicros: 4 * MILLION, interval: 'monthly' });
+    expect((await getMeterSettings()).memberAllowanceMicros).toBe(4 * MILLION);
   });
 
   it('refuses things the books refuse, with the books’ own line and the right status', async () => {
@@ -366,6 +370,48 @@ run('the grants routes, on the real books', () => {
     expect((await open.json()).problem).toMatch(/Say the most people who can join/);
     const capped = await (await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'gift', ...base, joinerCap: 3 } })).json();
     expect(capped.numbers).toMatchObject({ people: 1, laterToo: true, noLifetimeMax: false });
+  });
+
+  it('keeps a changing universe gift to its members now plus the joiners the admin allowed', async () => {
+    const own = await prisma.universe.create({ data: { slug: `cap-${tag}`, name: `Cap Club ${tag}`, ownerId: admin.id } });
+    const joined: string[] = [];
+    try {
+      const members = [await person('M1'), await person('M2'), await person('M3')];
+      await prisma.universeMember.createMany({ data: members.map((userId) => ({ universeId: own.id, userId })) });
+      const made = await call<any>(postGift, '/x', { method: 'POST', body: { grantKey: randomUUID(), audience: { kind: 'universe', universeId: own.id, mode: 'changing' }, scope: 'both', amountMicros: 1 * MILLION, shared: false, endsAt: new Date(Date.now() + 20 * 86_400_000).toISOString(), settlement: 'gift', joinerCap: 2 } });
+      expect(made.status).toBe(201);
+      const giftId = (await made.json()).id;
+      const got = async (userId: string) => {
+        await ensureIssued(userId);
+        return (await prisma.creditLot.count({ where: { personId: userId, programId: giftId } })) > 0;
+      };
+      // The members who were there come first and still leave room for the two joiners the admin allowed
+      for (const member of members) expect(await got(member)).toBe(true);
+      const joiners = [await person('J1'), await person('J2'), await person('J3')];
+      for (const joiner of joiners) {
+        await prisma.universeMember.create({ data: { universeId: own.id, userId: joiner } });
+        joined.push(joiner);
+      }
+      expect([await got(joiners[0]), await got(joiners[1]), await got(joiners[2])]).toEqual([true, true, false]);
+    } finally {
+      await prisma.universeMember.deleteMany({ where: { universeId: own.id } });
+      await prisma.universe.delete({ where: { id: own.id } });
+    }
+  });
+
+  it('lets an already-issued fixed rule be saved again, or one person be added, when little of the budget is left', async () => {
+    await saveMeterSettings({ rolloutBudgetMicros: 10 * MILLION }, admin.id);
+    const [omar, noor, pam] = [await person('Omar'), await person('Noor'), await person('Pam')];
+    const body = (ids: string[]) => ({ audience: { kind: 'people', userIds: ids }, instant_apps: { mode: 'own', amountMicros: 3 * MILLION, interval: 'once' }, computers: { mode: 'same' } });
+    expect((await call(postException, '/x', { method: 'POST', body: body([omar, noor]) })).status).toBe(201);
+    await ensureIssued(omar);
+    await ensureIssued(noor);
+    // $6 of the $10 is issued; saving the same rule again is no new spending
+    expect((await call(postException, '/x', { method: 'POST', body: body([omar, noor]) })).status).toBe(201);
+    const [existing] = (await overview()).exceptions;
+    const added = await call<any>(postException, '/x', { method: 'POST', body: { ...body([omar, noor, pam]), replaceId: existing.id } });
+    expect(added.status).toBe(201);
+    expect((await overview()).exceptions).toHaveLength(1);
   });
 
   it('says a default for everyone has no lifetime maximum, and counts the people who have their own rules', async () => {
