@@ -122,6 +122,42 @@ describe('what is in the image', () => {
   });
 });
 
+describe('what the scripts the fence keeps may run', () => {
+  const script = (name: string) => imageFiles().find((file) => file.name === name)!.text;
+
+  it('start from a fixed PATH, so a program the agent put first in its own PATH is never one the supervisor runs', () => {
+    for (const name of ['universe-supervise', 'universe-up', 'universe-clean']) {
+      const text = script(name);
+      const line = text.split('\n').find((one) => one.startsWith('PATH='));
+      expect(line).toBeDefined();
+      // Whatever PATH the agent starts it with, `sleep` is the system's
+      const run = spawnSync('sh', ['-c', `${line}; export PATH; command -v sleep`], { env: { ...process.env, PATH: `${folder}:/bin:/usr/bin`, HOME: folder }, encoding: 'utf8' });
+      expect(run.stdout.trim()).toMatch(/^\/(usr\/)?bin\/sleep$/);
+      // and it is set before the first program is run
+      const first = Math.min(...['mkdir', 'sleep', 'pkill'].map((word) => text.indexOf(word)).filter((at) => at >= 0));
+      expect(text.indexOf(line!)).toBeLessThan(first);
+    }
+  });
+
+  it('keeps the restart pending when the machine’s first process cannot be read, until one can be told', () => {
+    const up = script('universe-up');
+    expect(up).toMatch(/if \[ -z "\$INIT" \]; then restart=1\n/);
+    expect(up).not.toMatch(/-z "\$INIT" \]; then restart=1; rm -f/);
+  });
+
+  it('marks the profile before it is removed, unmarks it only when it is proved gone, and removes it before any job when the mark is left', () => {
+    const clean = script('universe-clean');
+    expect(clean.indexOf('profile.dirty')).toBeLessThan(clean.indexOf('pkill -x chromium'));
+    expect(clean).toContain('reason=profile_not_removed');
+    expect(clean.indexOf('reason=profile_not_removed')).toBeLessThan(clean.indexOf('rm -f "$STATE/profile.dirty"'));
+    expect(clean.indexOf('rm -f "$STATE/profile.dirty"')).toBeLessThan(clean.indexOf('universe-up --child'));
+    const up = script('universe-up');
+    expect(up).toContain('reason=profile_not_cleared');
+    // done before the browser is started
+    expect(up.indexOf('profile.dirty')).toBeLessThan(up.indexOf('nohup setsid chromium'));
+  });
+});
+
 describe('the local model address', () => {
   let relay: Server;
   let relayBase: string;

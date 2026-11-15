@@ -78,12 +78,20 @@ export async function* readTurn(body: ReadableStream<Uint8Array>): AsyncGenerato
   let pending = '';
   let name = '';
   let data: string[] = [];
+  // What the open frame holds: each data line counts its characters and its line break, so a frame of empty lines still fills up
+  let held = 0;
   let ended = false;
   const frame = (): TurnEvent | null => {
     const event = name ? turnEventOf(name, data.join('\n')) : null;
     name = '';
     data = [];
+    held = 0;
     return event;
+  };
+  const addData = (text: string) => {
+    held += text.length + 1;
+    if (held > FRAME_MAX) throw new Error('A frame of the turn was too long');
+    data.push(text);
   };
   try {
     for (;;) {
@@ -93,6 +101,8 @@ export async function* readTurn(body: ReadableStream<Uint8Array>): AsyncGenerato
       if (pending.length > LINE_MAX && pending.indexOf('\n') < 0) throw new Error('A line of the turn was too long');
       let at: number;
       while ((at = pending.indexOf('\n')) >= 0) {
+        // Every line is measured, whatever ends it: a long line that arrives together with its line break is no shorter
+        if (at > LINE_MAX) throw new Error('A line of the turn was too long');
         const line = pending.slice(0, at).replace(/\r$/, '');
         pending = pending.slice(at + 1);
         if (line === '') {
@@ -109,15 +119,14 @@ export async function* readTurn(body: ReadableStream<Uint8Array>): AsyncGenerato
         } else if (line.startsWith('event:')) {
           name = line.slice(6).trim();
         } else if (line.startsWith('data:')) {
-          data.push(line.slice(5).replace(/^ /, ''));
-          if (data.reduce((total, one) => total + one.length, 0) > FRAME_MAX) throw new Error('A frame of the turn was too long');
+          addData(line.slice(5).replace(/^ /, ''));
         }
       }
     }
     // The stream closed in the middle of a frame: the last line is read, and the frame counts if it was whole
     const rest = pending.replace(/\r$/, '');
     if (rest.startsWith('event:')) name = rest.slice(6).trim();
-    else if (rest.startsWith('data:')) data.push(rest.slice(5).replace(/^ /, ''));
+    else if (rest.startsWith('data:')) addData(rest.slice(5).replace(/^ /, ''));
     const last = frame();
     if (last) {
       yield last;

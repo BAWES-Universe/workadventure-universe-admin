@@ -5,6 +5,10 @@
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/computer-broker-db.test.ts --runInBand
  */
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
@@ -92,6 +96,44 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       // written whole and moved into place, readable by the machine's own user only
       expect(command).toMatch(/umask 077/);
       expect(command).toMatch(/mv .*relay\.json\.new.*relay\.json/);
+    });
+
+    it('leaves a newer key of the same job alone when a delayed write of an older one arrives, and never blocks another job’s', async () => {
+      const { jobId } = await running();
+      await prepareJob(jobId, RELAY, NOW);
+      const command = fake.commands.at(-1)?.command ?? '';
+      const home = mkdtempSync(join(tmpdir(), 'universe-relay-'));
+      const runIt = (text: string) => spawnSync('sh', ['-c', text], { env: { ...process.env, HOME: home }, encoding: 'utf8' });
+      try {
+        expect(runIt(command).status).toBe(0);
+        const written = readFileSync(join(home, '.universe', 'relay.json'), 'utf8');
+        expect(written).toContain(RELAY);
+        // A write of an older control number of the same job finds the newer one there and changes nothing
+        const newer = command.replace(/ (\d+) > "\$d\/relay\.gen"/, ' 5 > "$d/relay.gen"').replace(/-gt (\d+) \]/, '-gt 5 ]');
+        expect(runIt(newer).status).toBe(0);
+        const older = command.replace('"url":"' + RELAY + '"', '"url":"https://older.example.test"').replace(/-gt \d+ \]/, '-gt 0 ]').replace(/ \d+ > "\$d\/relay\.gen"/, ' 0 > "$d/relay.gen"');
+        expect(runIt(older).status).toBe(0);
+        expect(readFileSync(join(home, '.universe', 'relay.json'), 'utf8')).not.toContain('older.example.test');
+        // Another job's write is never held back by this job's number
+        const other = command.replace(jobId, 'another-job').replace('"url":"' + RELAY + '"', '"url":"https://other.example.test"');
+        expect(runIt(other).status).toBe(0);
+        expect(readFileSync(join(home, '.universe', 'relay.json'), 'utf8')).toContain('other.example.test');
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it('says the job is not the runner’s to act on when the person took over while the key was being written', async () => {
+      const { sara, jobId } = await running();
+      fake.execAnswer = async () => {
+        await takeOver(sara.brickId, sara.id, NOW);
+        return {};
+      };
+      const done = await prepareJob(jobId, RELAY, NOW);
+      expect(done).toMatchObject({ ok: false });
+      const token = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(fake.commands.at(-1)?.command ?? '')?.[1] ?? '';
+      // and the key it wrote is refused: it is of the control number before the take-over
+      expect((await verifyJobToken(token, 'model', NOW)).ok).toBe(false);
     });
 
     it('ends the job’s earlier key when it makes a new one, so one is good at a time', async () => {
@@ -270,6 +312,38 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       expect(seen).toEqual([{ type: 'failed', code: 'fenced', message: expect.any(String) }]);
       expect(fake.cancelledTurns).toContain('resp-late');
       expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).agentResponseId).toBeNull();
+    });
+
+    it('keeps the turn id even when a keep-alive comes first and the reader leaves at once', async () => {
+      const { jobId } = await running();
+      fake.turns = [[{ type: 'keepalive' }, { type: 'keepalive' }, { type: 'created', id: 'resp-ka', sessionId: 'sess-1' }, { type: 'completed', outputText: '', usage: null }]];
+      const started = await startTurn(jobId, 'go');
+      if (!started.ok) throw new Error('no turn');
+      // The first thing the reader is given is the id, never a keep-alive it could leave on
+      const first = await started.events.next();
+      expect(first.value).toMatchObject({ type: 'created', id: 'resp-ka' });
+      await started.events.return(undefined);
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ agentResponseId: 'resp-ka', agentSessionId: 'sess-1' });
+    });
+
+    it('stops what the agent started when a turn that must not run cannot be cancelled', async () => {
+      const { sara, jobId } = await running();
+      fake.turns = [[{ type: 'created', id: 'resp-late', sessionId: 'sess-1' }, { type: 'completed', outputText: '', usage: null }]];
+      const commands: string[] = [];
+      fake.execAnswer = (command) => {
+        commands.push(command);
+        return command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {};
+      };
+      const started = await startTurn(jobId, 'go');
+      if (!started.ok) throw new Error('no turn');
+      await takeOver(sara.brickId, sara.id, NOW);
+      commands.length = 0;
+      fake.failCancel = true;
+      const seen = await drain(started.events);
+      expect(seen).toEqual([{ type: 'failed', code: 'fenced', message: expect.any(String) }]);
+      // Three tries to cancel it, then the machine's own fence
+      expect(fake.calls.filter((call) => call.name === 'cancelTurn').length).toBeGreaterThanOrEqual(3);
+      expect(commands).toContain('universe-fence');
     });
 
     it('is cancelled by the job’s own record, never by an id the caller gives', async () => {

@@ -686,7 +686,9 @@ async function closeOutIfUnheld(botId: string): Promise<void> {
       console.error('[Computer] Could not list the files after a job:', error instanceof Error ? error.message : 'unknown');
     }
     if ((await holders()) > 0) return;
-    await provider.exec(row.providerRef, 'universe-clean', { timeoutMs: 20_000 });
+    const cleaned = await provider.exec(row.providerRef, 'universe-clean', { timeoutMs: 20_000 });
+    // A profile that could not be removed stays marked on the machine, and the next start-up removes it before any job can use it
+    if (cleaned.exitCode !== 0 || !/(^|\n)cleaned=1\s*$/.test(cleaned.stdout)) console.error('[Computer] The browser could not be cleared after a job; it is cleared before the next one');
   } catch (error) {
     console.error('[Computer] Could not clear the browser after a job:', error instanceof Error ? error.message : 'unknown');
   } finally {

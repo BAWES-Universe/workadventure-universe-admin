@@ -53,6 +53,8 @@ GEOMETRY="$AGENT37_SCREEN_GEOMETRY"
 [ -n "$GEOMETRY" ] || GEOMETRY=1440x900
 WIDTH="$(echo "$GEOMETRY" | cut -dx -f1)"
 HEIGHT="$(echo "$GEOMETRY" | cut -dx -f2)"
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 export DISPLAY=:99
 CHILD=0
 [ "$1" = "--child" ] && CHILD=1
@@ -98,9 +100,28 @@ CONFIGEND
 fi
 restart=0
 if [ -f "$STATE/restart.pending" ]; then
-  if [ -z "$INIT" ]; then restart=1; rm -f "$STATE/restart.pending"
+  # Without the machine's first process there is no proof of a restart: the marker is kept, and the restart is asked for until one can be told
+  if [ -z "$INIT" ]; then restart=1
   elif [ "$(cat "$STATE/restart.pending" 2>/dev/null)" = "$INIT" ]; then restart=1
   else rm -f "$STATE/restart.pending"; fi
+fi
+
+# A cleanup that could not remove the browser's profile left a mark: no job may use that profile. It is removed here, before the browser
+# runs, and a profile that still cannot be removed means the machine is not ready.
+PROFILE_DIR="$HOME_DIR/.config/universe-chromium"
+if [ -f "$STATE/profile.dirty" ]; then
+  pkill -x chromium 2>/dev/null
+  pkill -x chrome 2>/dev/null
+  i=0
+  while pgrep -x chromium >/dev/null 2>&1 || pgrep -x chrome >/dev/null 2>&1; do
+    i=$((i+1))
+    if [ "$i" -eq 20 ]; then pkill -9 -x chromium 2>/dev/null; pkill -9 -x chrome 2>/dev/null; fi
+    [ "$i" -gt 50 ] && { echo "ready=0 reason=profile_not_cleared"; exit 1; }
+    sleep 0.2
+  done
+  rm -rf "$PROFILE_DIR" "$HOME_DIR/.cache/chromium" 2>/dev/null
+  if [ -e "$PROFILE_DIR" ] || [ -e "$HOME_DIR/.cache/chromium" ]; then echo "ready=0 reason=profile_not_cleared"; exit 1; fi
+  rm -f "$STATE/profile.dirty"
 fi
 
 # Starts a part unless it is running. Each is its own session, so it outlives the command that started it.
@@ -264,6 +285,10 @@ if __name__ == "__main__":
 
 export const UNIVERSE_SUPERVISE = String.raw`#!/bin/sh
 # Brings a part back that stopped (the browser crashing): runs universe-up again every few seconds.
+# Every program it runs is the system's own, whatever PATH it was started with: the fence keeps what this script starts, so a program the
+# agent put first in PATH must never be one of them.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 while :; do
   sleep 5
   /usr/local/bin/universe-up --child >/dev/null 2>&1
@@ -457,6 +482,8 @@ export const UNIVERSE_CLEAN = String.raw`#!/bin/sh
 # tab left open on a job that is over shows nothing and a new link is needed.
 # It holds the same lock as universe-up, so the supervisor cannot start the browser again between the stop and the removal; the browser is
 # proved gone before the profile is deleted, and the parts come back only after the lock is let go.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 HOME_DIR="$HOME"
 [ -n "$HOME_DIR" ] || HOME_DIR=/home/node
 STATE="$HOME_DIR/.universe"
@@ -470,6 +497,8 @@ until mkdir "$LOCK" 2>/dev/null; do
   sleep 0.2
 done
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+# Marked first, unmarked only when the profile is proved gone: until then the next start-up removes it before any job can use it
+: > "$STATE/profile.dirty" 2>/dev/null || { echo "cleaned=0 reason=mark"; exit 1; }
 pkill -x websockify 2>/dev/null
 pkill -x chromium 2>/dev/null
 pkill -x chrome 2>/dev/null
@@ -481,6 +510,8 @@ while pgrep -x chromium >/dev/null 2>&1 || pgrep -x chrome >/dev/null 2>&1; do
   sleep 0.2
 done
 rm -rf "$HOME_DIR/.config/universe-chromium" "$HOME_DIR/.cache/chromium" 2>/dev/null
+if [ -e "$HOME_DIR/.config/universe-chromium" ] || [ -e "$HOME_DIR/.cache/chromium" ]; then echo "cleaned=0 reason=profile_not_removed"; exit 1; fi
+rm -f "$STATE/profile.dirty"
 rmdir "$LOCK" 2>/dev/null
 trap - EXIT
 /usr/local/bin/universe-up --child >/dev/null 2>&1

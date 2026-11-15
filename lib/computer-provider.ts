@@ -124,6 +124,8 @@ export class FakeComputerProvider implements ComputerProvider {
   /** What was asked of the pretend agent, and what was cancelled. */
   openedTurns: { ref: string; input: TurnInput; signal?: AbortSignal }[] = [];
   cancelledTurns: string[] = [];
+  /** Every cancel is refused (the machine does not answer) while this is on. */
+  failCancel = false;
   /** A turn the pretend agent is running in a session: set by a test, read back by `activeTurn`. */
   running = new Map<string, string>();
   filesBytes = 1_288_490_188;
@@ -241,6 +243,7 @@ export class FakeComputerProvider implements ComputerProvider {
 
   async cancelTurn(ref: string, responseId: string): Promise<void> {
     this.note('cancelTurn', ref);
+    if (this.failCancel) throw new Error('The machine did not answer');
     this.cancelledTurns.push(responseId);
   }
 

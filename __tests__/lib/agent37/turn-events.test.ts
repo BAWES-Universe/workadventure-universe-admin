@@ -75,6 +75,18 @@ describe('what the agent says while it works', () => {
     expect(seen).toEqual([{ type: 'completed', outputText: 'end', usage: null }]);
   });
 
+  it('refuses a line that is too long even when its line break arrives with it', async () => {
+    const line = `data: ${'x'.repeat(1024 * 1024 + 10)}\n\n`;
+    await expect(all(bodyOf('event: response.output_text.delta\n', line))).rejects.toThrow('too long');
+  });
+
+  it('refuses a frame of endless empty data lines', async () => {
+    const lines = 'data:\n'.repeat(1024 * 1024);
+    const parts: string[] = ['event: response.output_text.delta\n'];
+    for (let i = 0; i < 5; i += 1) parts.push(lines);
+    await expect(all(bodyOf(...parts))).rejects.toThrow('too long');
+  });
+
   it('cuts words that come back, and takes a number only when it is one', () => {
     const long = 'x'.repeat(500);
     expect(turnEventOf('response.tool_call.started', JSON.stringify({ tool: 'b', label: long }))).toMatchObject({ label: 'x'.repeat(200) });

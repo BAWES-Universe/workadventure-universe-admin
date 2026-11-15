@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db';
-import { providerFor } from '@/lib/computer';
+import { providerFor, fenceMachine } from '@/lib/computer';
 import { mintJobToken, revokeJobTokens } from '@/lib/computer-token';
 import { Agent37Error } from '@/lib/agent37/client';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
@@ -63,7 +63,14 @@ export async function prepareJob(jobId: string, relay: unknown, now: Date = new 
   if (!minted.ok) return { ok: false, reason: minted.reason };
   const file = JSON.stringify({ url: address, token: minted.token });
   // Written whole to a new file and moved over the old one, so a call never reads half of it. Only the machine's own user can read it.
-  const command = `umask 077 && d="$HOME/.universe" && mkdir -p "$d" && printf '%s' '${file}' > "$d/relay.json.new" && mv "$d/relay.json.new" "$d/relay.json"`;
+  // Under a lock, and only over a key of an older or the same control number: a write that was delayed past a take-over and a hand-back
+  // finds a newer key there and leaves it alone.
+  const generation = live.job.generation;
+  // What was last written is noted as "job number" (one job's later write is not stopped by another job's number)
+  const command =
+    `umask 077 && d="$HOME/.universe" && mkdir -p "$d" && ( flock 9 || exit 1; read -r who cur < "$d/relay.gen" 2>/dev/null; ` +
+    `if [ "$who" = '${jobId}' ] && [ -n "$cur" ] && [ "$cur" -gt ${generation} ] 2>/dev/null; then exit 0; fi; ` +
+    `printf '%s' '${file}' > "$d/relay.json.new" && mv "$d/relay.json.new" "$d/relay.json" && printf '%s %s' '${jobId}' ${generation} > "$d/relay.gen" ) 9>"$d/relay.lock"`;
   try {
     const done = await live.provider.exec(live.job.ref, command, { timeoutMs: 30_000 });
     if (done.exitCode !== 0) {
@@ -75,6 +82,11 @@ export async function prepareJob(jobId: string, relay: unknown, now: Date = new 
     await revokeJobTokens(jobId, now);
     return { ok: false, reason: 'failed' };
   }
+  // The person may have taken over while the key was being written: the key is then of an older control number (it is refused), and the
+  // runner is told the job is not its to act on
+  const after = await liveJob(jobId);
+  if (!after.ok) return after;
+  if (after.job.generation !== generation) return { ok: false, reason: 'not_running' };
   return { ok: true, expiresAt: minted.expiresAt };
 }
 
@@ -119,6 +131,8 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
       return { ok: false, reason: 'failed' };
     }
     events = await provider.openTurn(job.ref, { text, sessionId: job.sessionId }, own.signal);
+    // The agent has answered, so the turn is accepted: the limit was for that answer. Its id follows on the stream, however long that takes.
+    clearTimeout(timer);
   } catch (error) {
     clearTimeout(timer);
     if (error instanceof Agent37Error && error.code === 'session_busy') return { ok: false, reason: 'busy', responseId: error.runningResponseId };
@@ -150,6 +164,9 @@ async function* keeping(
       const next = await events.next();
       if (next.done) return;
       const event = next.value;
+      // Until the turn's id is kept, nothing is passed on (a keep-alive included): the reader is only heard at a hand-over, and a reader that
+      // went away at one would end this before the id was stored
+      if (start && !responseId && event.type !== 'created' && event.type !== 'completed' && event.type !== 'failed') continue;
       if (event.type === 'created') {
         if (start) clearTimeout(start.timer);
         responseId = event.id;
@@ -167,7 +184,7 @@ async function* keeping(
         });
         if (kept.count === 0) {
           // The person took over (or the job ended) between asking and the agent starting, or another turn holds the job: this turn must not run
-          await provider.cancelTurn(job.ref, event.id).catch(() => undefined);
+          await cancelOrFence(job, provider, event.id);
           responseId = null;
           over = true;
           yield { type: 'failed', code: 'fenced', message: 'The turn was stopped because the person took over' };
@@ -185,6 +202,24 @@ async function* keeping(
     if (responseId && over) await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: responseId }, data: { agentResponseId: null } }).catch(() => undefined);
   }
 }
+
+/**
+ * Cancels a turn that must not run. A cancel that cannot be made is tried again; if it still cannot, the turn would run untracked (its id is
+ * not the job's), so the machine's own fence stops what the agent started instead. Never throws.
+ */
+async function cancelOrFence(job: Live, provider: NonNullable<ReturnType<typeof providerFor>>, id: string): Promise<void> {
+  for (let attempt = 0; attempt < CANCEL_TRIES; attempt++) {
+    try {
+      await provider.cancelTurn(job.ref, id);
+      return;
+    } catch (error) {
+      console.error('[Computer] Could not cancel a turn:', error instanceof Error ? error.message : 'unknown');
+    }
+  }
+  await fenceMachine(job.botId);
+}
+
+const CANCEL_TRIES = 3;
 
 export type Cancelled = { ok: true; cancelled: boolean } | NotLive | { ok: false; reason: 'failed' };
 
