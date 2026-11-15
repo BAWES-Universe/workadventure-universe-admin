@@ -66,11 +66,15 @@ export function ruleFacts(row: RuleRow): RuleFacts {
 
 const ruleInclude = { program: true, recipients: { select: { userId: true } } } as const;
 
-/** The rules in force: the current version of every active program. `now` keeps only those whose claim period is open. */
+/**
+ * The rules in force: the current version of every active program. `now` keeps only those whose claim period is open, and also keeps a
+ * version that a later one will replace only when that one starts (a default replaced by one that begins next month): until then it is
+ * the rule people are issued under, so nobody is left with nothing in between.
+ */
 export async function currentRules(db: Pick<Db, 'grantRule'>, filter: { categoryId?: CategoryId; programId?: string; now?: Date } = {}): Promise<RuleFacts[]> {
   const rows = await db.grantRule.findMany({
     where: {
-      state: 'current',
+      ...(filter.now ? { OR: [{ state: 'current' }, { state: 'superseded', supersededAt: { gt: filter.now } }] } : { state: 'current' }),
       program: { status: 'active', ...(filter.categoryId ? { categoryId: filter.categoryId } : {}) },
       ...(filter.programId ? { programId: filter.programId } : {}),
     },

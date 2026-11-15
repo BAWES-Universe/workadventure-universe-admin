@@ -2113,6 +2113,8 @@ model CreditHold {
   parentHoldKey      String?   @map("parent_hold_key") @db.VarChar(255)
   // What happened in the world: the same execution is never charged twice. The migration makes a partial unique index (effect_key WHERE state <> 'released'), because a released hold took nothing and the execution may be asked for again
   effectKey          String?   @map("effect_key") @db.VarChar(255)
+  // For work a named payer funds: the only account whose lots paid. A replay of the key must name the same one
+  onlyAccountId      String?   @map("only_account_id")
   // held, settled or released
   state              String    @db.VarChar(10)
   amountMicros       BigInt    @map("amount_micros")
@@ -2174,6 +2176,23 @@ model CreditRefund {
   @@index([holdId])
   @@index([lotId, mode])
   @@map("credit_refunds")
+}
+
+// One row per refund request, by its exact key, even when it gave nothing back: asking again with the same key finds this row and
+// answers the same way, and a key of another request that merely begins like it never does.
+model CreditRefundRequest {
+  id                String   @id @default(uuid())
+  requestKey        String   @unique @map("request_key") @db.VarChar(255)
+  holdId            String   @map("hold_id")
+  requestedMicros   BigInt   @map("requested_micros")
+  reason            String   @db.VarChar(20)
+  refundedMicros    BigInt   @map("refunded_micros")
+  restoredMicros    BigInt   @map("restored_micros")
+  replacementMicros BigInt   @map("replacement_micros")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@index([holdId])
+  @@map("credit_refund_requests")
 }
 
 // Bot Metrics

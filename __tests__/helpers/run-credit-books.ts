@@ -664,6 +664,112 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     check('held room is still counted after the lot it came from has ended, while the hold itself is in time; once it runs out it is unresolved', cr5.ok && before.heldMicros >= 1 * M && lotEnded.heldMicros === before.heldMicros && lapsed.heldMicros === 0 && lapsed.unresolvedMicros >= 1 * M, { before, lotEnded, lapsed });
   }
 
+  // ---------- Follow-up round: findings from the review of the work built on these books ----------
+  {
+    const FU = at('2027-02-13T10:00:00Z');
+    const { Client } = await import('pg');
+
+    // A clash over many people carries every id (only the names shown are limited)
+    const crowd = Array.from({ length: 60 }, (_, i) => `fu-crowd-${i}`);
+    for (const id of crowd) await user(id, '2027-02-11T00:00:00Z');
+    await rules.saveException({ categoryId: 'computers', amount: 1 * M, schedule: 'once', recipients: { kind: 'people', userIds: crowd } }, root, FU);
+    const crowdClash = await refuses(() => rules.saveException({ categoryId: 'computers', amount: 2 * M, schedule: 'once', recipients: { kind: 'people', userIds: crowd } }, root, FU));
+    const crowdFinding = (crowdClash?.error as { clashes?: { userIds: string[]; people: unknown[]; totalPeople: number }[] } | undefined)?.clashes?.[0];
+    check('a clash over 60 people carries all 60 ids, names only the first 50, and says how many there are', crowdClash?.code === 'clash' && crowdFinding?.userIds.length === 60 && crowdFinding.people.length === 50 && crowdFinding.totalPeople === 60, crowdFinding && { ids: crowdFinding.userIds.length, names: crowdFinding.people.length, total: crowdFinding.totalPeople });
+
+    // A refund asked for again is found by its exact key, also when it gave nothing back
+    await user('fu-r', '2027-02-11T00:00:00Z');
+    await rules.createGift({ categoryId: 'instant_apps', amount: 3 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-r'] }, lotExpiresAt: at('2027-03-01T00:00:00Z') }, root, at('2027-02-13T00:00:00Z'));
+    const heldR = await spend.holdCredit({ holdKey: 'fu-r-1', personId: 'fu-r', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, at('2027-02-13T00:05:00Z'));
+    await spend.settleHold({ holdKey: 'fu-r-1', customerMicros: 1 * M }, at('2027-02-13T00:06:00Z'));
+    const lateAt = at('2027-03-02T00:00:00Z');
+    const none1 = await spend.refundHold({ holdKey: 'fu-r-1', refundKey: 'fu-z', amountMicros: 1 * M, reason: 'goodwill', limits: { giveBackMaxMicros: 0 } }, lateAt);
+    const none2 = await spend.refundHold({ holdKey: 'fu-r-1', refundKey: 'fu-z', amountMicros: 1 * M, reason: 'goodwill', limits: { giveBackMaxMicros: 0 } }, lateAt);
+    const none3 = await spend.refundHold({ holdKey: 'fu-r-1', refundKey: 'fu-z', amountMicros: 500_000, reason: 'goodwill', limits: { giveBackMaxMicros: 0 } }, lateAt);
+    check('a refund that gave nothing back is remembered: asking again answers the same, another figure under the key is refused', heldR.ok && none1.ok && none1.created && none1.refundedMicros === 0 && none2.ok && !none2.created && none2.refundedMicros === 0 && !none3.ok && none3.reason === 'key_reused', { none1, none2, none3 });
+    const sameKey = await spend.refundHold({ holdKey: 'fu-r-1', refundKey: 'fu-z#0', amountMicros: 100_000, reason: 'goodwill' }, lateAt);
+    check('a key that only begins like another refund’s key is its own refund', sameKey.ok && sameKey.created, sameKey);
+
+    // A replayed hold must be the same step: the same amount, and the same named payer
+    await user('fu-h', '2027-02-11T00:00:00Z');
+    await rules.createGift({ categoryId: 'instant_apps', amount: 5 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-h'] } }, root, FU);
+    const h1 = await spend.holdCredit({ holdKey: 'fu-h-1', personId: 'fu-h', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, FU);
+    const h2 = await spend.holdCredit({ holdKey: 'fu-h-1', personId: 'fu-h', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run' }, FU);
+    const h3 = await spend.holdCredit({ holdKey: 'fu-h-1', personId: 'fu-h', category: 'instant_apps', amountMicros: 2 * M, chargeClass: 'instant_run' }, FU);
+    const h4 = await spend.holdCredit({ holdKey: 'fu-h-1', personId: 'fu-h', category: 'instant_apps', amountMicros: 1 * M, chargeClass: 'instant_run', onlyAccountId: 'funding-platform' }, FU);
+    check('the same hold key finds the same hold only for the same amount and payer; another amount or payer is key_reused', h1.ok && h2.ok && !h2.created && !h3.ok && h3.reason === 'key_reused' && !h4.ok && h4.reason === 'key_reused', { h2, h3, h4 });
+
+    // A default replaced by one that starts later keeps issuing under the old one until the new one starts
+    await user('fu-old', '2027-02-11T00:00:00Z');
+    await user('fu-new', '2027-02-11T00:00:00Z');
+    const before = await rules.getProgram((await rules.listPrograms('computers', { kind: 'default' }))[0].programId);
+    const oldAmount = before?.program.amount ?? 0;
+    await rules.saveDefault({ categoryId: 'computers', amount: 9 * M, schedule: 'monthly', recipients: { kind: 'all' }, claimStartsAt: at('2027-04-01T00:00:00Z') }, root, FU);
+    await issue.ensureIssued('fu-old', at('2027-02-14T00:00:00Z'));
+    await issue.ensureIssued('fu-new', at('2027-04-02T00:00:00Z'));
+    const [lotOld] = await lotsOf('fu-old');
+    const [lotNew] = await lotsOf('fu-new');
+    check('a default that starts next month does not take over now: someone who claims before it gets the old amount, after it the new', oldAmount > 0 && lotOld && Number(lotOld.amountMicros) === oldAmount && lotNew && Number(lotNew.amountMicros) === 9 * M, { oldAmount, old: lotOld && Number(lotOld.amountMicros), now: lotNew && Number(lotNew.amountMicros) });
+    const waiting = await prisma.grantRule.count({ where: { state: 'superseded', supersededAt: { gt: at('2027-03-01T00:00:00Z') }, program: { kind: 'default', categoryId: 'computers' } } });
+    await rules.saveDefault({ categoryId: 'computers', amount: 4 * M, schedule: 'monthly', recipients: { kind: 'all' } }, root, at('2027-02-20T00:00:00Z'));
+    const stillWaiting = await prisma.grantRule.count({ where: { state: 'superseded', supersededAt: { gt: at('2027-02-21T00:00:00Z') }, program: { kind: 'default', categoryId: 'computers' } } });
+    check('an edit that starts at once cuts a version that was waiting to be replaced, so two versions are never open together', waiting === 1 && stillWaiting === 0, { waiting, stillWaiting });
+
+    // A group that can change can clash later, when someone joins both: nobody gets a number by guesswork
+    await prisma.$executeRawUnsafe(`INSERT INTO universes (id, slug, name, owner_id, updated_at) VALUES ('u2', 'later', 'Later', 'admin', now())`);
+    for (const id of ['fu-rx', 'fu-ry']) await user(id, '2027-02-11T00:00:00Z');
+    await rules.saveException({ categoryId: 'universe_ai', amount: 10, schedule: 'once', recipients: { kind: 'universe', universeId: 'u2', mode: 'changing' }, claimEndsAt: at('2028-01-01T00:00:00Z'), joinerCap: 10, totalCapMicros: 100 }, root, FU);
+    await rules.saveException({ categoryId: 'universe_ai', amount: 20, schedule: 'once', recipients: { kind: 'people', userIds: ['fu-rx', 'fu-ry'] } }, root, FU);
+    const beforeJoin = await replies.repliesPerWindowFor('fu-rx', 30, FU);
+    await prisma.$executeRawUnsafe(`INSERT INTO universe_members (id, universe_id, user_id) VALUES ('fu-um1', 'u2', 'fu-rx')`);
+    const afterJoin = await replies.repliesPerWindowFor('fu-rx', 30, FU);
+    const other = await replies.repliesPerWindowFor('fu-ry', 30, FU);
+    check('someone who joins a group that disagrees with another group they are in keeps the base number (no winner by guesswork); the other person keeps theirs', beforeJoin === 20 && afterJoin === 30 && other === 20, { beforeJoin, afterJoin, other });
+
+    if (database.kind === 'postgres') {
+      // A second connection holds the names a writer holds, changes the books, and lets go while the issuing is waiting for them
+      const writer = new Client({ connectionString: database.url });
+      await writer.connect();
+      const waitForWaiter = async () => {
+        for (let i = 0; i < 100; i++) {
+          const { rows } = await writer.query(`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`);
+          if (rows[0].n > 0) return true;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        return false;
+      };
+      // The rules are read again under the locks: an edit that landed while issuing waited is what issues
+      await user('fu-late1', '2027-02-11T00:00:00Z');
+      await setMeter({ rolloutBudgetMicros: 10_000 * M, renewMinutes: 10 });
+      const current = await prisma.grantRule.findFirstOrThrow({ where: { state: 'current', program: { kind: 'default', categoryId: 'computers' } } });
+      await writer.query('BEGIN');
+      await writer.query(`SELECT pg_advisory_xact_lock(hashtext('credit:account:funding-platform'))`);
+      const pending = issue.ensureIssued('fu-late1', at('2027-02-21T00:00:00Z'));
+      pending.catch(() => undefined);
+      const waited = await waitForWaiter();
+      await writer.query(`UPDATE grant_rules SET amount = 8000000 WHERE id = $1`, [current.id]);
+      await writer.query('COMMIT');
+      const late = await pending;
+      const [lateLot] = await lotsOf('fu-late1');
+      check('what is due is read again under the locks: an edit made while issuing waited is the amount that issues', waited && late.issued.length === 1 && Number(lateLot.amountMicros) === 8 * M, { waited, late, amount: lateLot && Number(lateLot.amountMicros) });
+      await prisma.grantRule.update({ where: { id: current.id }, data: { amount: BigInt(4 * M) } });
+
+      // The rollout budget is read again under the locks: one lowered while issuing waited is the one that counts
+      await user('fu-late2', '2027-02-11T00:00:00Z');
+      await writer.query('BEGIN');
+      await writer.query(`SELECT pg_advisory_xact_lock(hashtext('meter:settings'))`);
+      const pendingBudget = issue.ensureIssued('fu-late2', at('2027-02-22T00:00:00Z'));
+      pendingBudget.catch(() => undefined);
+      const waitedBudget = await waitForWaiter();
+      await writer.query(`UPDATE app_settings SET value = jsonb_set(value, '{rolloutBudgetMicros}', '1') WHERE key = 'meter'`);
+      await writer.query('COMMIT');
+      const lowered = await pendingBudget;
+      await setMeter({ rolloutBudgetMicros: 10_000 * M, renewMinutes: 10 });
+      check('the rollout budget is read again under the locks: one lowered while issuing waited stops it', waitedBudget && lowered.issued.length === 0 && lowered.skipped.some((s) => s.reason === 'over_budget'), { waitedBudget, lowered });
+      await writer.end();
+    }
+  }
+
   // The result goes out first: nothing that happens while the database is taken down can lose it
   console.log(printable({ kind: database.kind, checks }));
 }

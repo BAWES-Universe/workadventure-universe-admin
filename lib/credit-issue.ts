@@ -63,35 +63,54 @@ function plansFor(rules: readonly RuleFacts[], person: Parameters<typeof reaches
   return plans;
 }
 
+/** The names a set of plans must lock: the person's own, each account they draw on, and each shared pool. */
+function locksFor(personId: string, plans: readonly Plan[]): string[] {
+  return [lockOfPerson(personId), ...plans.map((plan) => lockOfAccount(plan.rule.fundingAccountId)), ...plans.filter((plan) => plan.rule.share === 'shared').map((plan) => lockOfPool(plan.rule.programId))];
+}
+
 /**
  * Gives a person the credit they are due now, once per program and period. Safe to call any number of times, from anywhere, at once.
  * Returns what this call issued and what it could not. A guest, or someone who does not exist, is due nothing.
+ *
+ * What is due is worked out twice: once to know which locks to take, and again under them. Under the locks the rules, the person's
+ * groups and the rollout budget are read fresh, so a program that ended, a rule that was edited or a budget that was lowered while this
+ * call waited is what counts, never what was read before. If the fresh read needs a lock that was not taken (a rule now reaches this
+ * person through another account or pool), nothing is issued and the whole thing starts again with the full set.
  */
-export async function ensureIssued(personId: string, now: Date = new Date(), settingsIn?: MeterSettings): Promise<IssueResult> {
-  const empty: IssueResult = { issued: [], skipped: [] };
-  const person = await personFacts(prisma, personId);
-  if (!person) return empty;
-  const rules = await currentRules(prisma, { now });
-  const skipped: IssueResult['skipped'] = [];
-  const plans = plansFor(rules, person, skipped);
-  if (plans.length === 0) return { issued: [], skipped };
-  const settings = settingsIn ?? (await getMeterSettings());
+export async function ensureIssued(personId: string, now: Date = new Date()): Promise<IssueResult> {
+  const first = await personFacts(prisma, personId);
+  if (!first) return { issued: [], skipped: [] };
   await platformAccount();
-  const issued = await prisma.$transaction(async (tx) => {
-    // Every name this person's issuing touches, locked in one order: two calls at the same moment go one after the other
-    await lockAll(tx, [lockOfPerson(personId), ...plans.map((plan) => lockOfAccount(plan.rule.fundingAccountId)), ...plans.filter((plan) => plan.rule.share === 'shared').map((plan) => lockOfPool(plan.rule.programId))]);
-    const out: IssuedLot[] = [];
-    // The rules may have changed (a program ended, a rule edited) between reading them and getting the locks: only what is still current issues
-    const stillCurrent = new Set((await currentRules(tx, { now })).map((rule) => rule.id));
-    for (const { rule } of plans) {
-      if (!stillCurrent.has(rule.id)) continue;
-      const result = await issueOne(tx, rule, personId, now, settings);
-      if (result.lot) out.push(result.lot);
-      else if (result.skipped) skipped.push({ programId: rule.programId, reason: result.skipped });
-    }
-    return out;
-  });
-  return { issued, skipped };
+  for (let attempt = 0; attempt < 4; attempt++) {
+    // Nothing reaches this person: say why when two rules clash for them, so a caller can tell "nothing due" from "waiting for a choice"
+    const early: IssueResult['skipped'] = [];
+    const planned = plansFor(await currentRules(prisma, { now }), first, early);
+    if (planned.length === 0) return { issued: [], skipped: early };
+    const result = await prisma.$transaction(async (tx): Promise<IssueResult | 'again'> => {
+      // The rollout budget is read under a shared lock that a super admin's save of Limits waits for, so a lowered budget is never missed;
+      // shared, so people being issued to at the same moment do not wait for each other
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtext('meter:settings'))`;
+      const names = locksFor(personId, planned);
+      await lockAll(tx, names);
+      const person = await personFacts(tx, personId);
+      if (!person) return { issued: [], skipped: [] };
+      const skipped: IssueResult['skipped'] = [];
+      const plans = plansFor(await currentRules(tx, { now }), person, skipped);
+      const held = new Set(names);
+      if (locksFor(personId, plans).some((name) => !held.has(name))) return 'again';
+      if (plans.length === 0) return { issued: [], skipped };
+      const settings = await getMeterSettings(tx);
+      const out: IssuedLot[] = [];
+      for (const { rule } of plans) {
+        const done = await issueOne(tx, rule, personId, now, settings);
+        if (done.lot) out.push(done.lot);
+        else if (done.skipped) skipped.push({ programId: rule.programId, reason: done.skipped });
+      }
+      return { issued: out, skipped };
+    });
+    if (result !== 'again') return result;
+  }
+  throw new Error('Could not issue credit: the rules kept changing');
 }
 
 type Issued = { lot: IssuedLot; skipped?: undefined } | { lot?: undefined; skipped: SkipReason | null };

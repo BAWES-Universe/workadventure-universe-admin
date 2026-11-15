@@ -112,7 +112,8 @@ export interface ProgramView extends RuleView {
 
 export class ClashRefused extends CreditRefused {
   constructor(
-    readonly clashes: { programId: string; label: string; people: { userId: string; name: string | null }[] }[],
+    /** `userIds` is everyone the two rules both reach, so a screen can clear all of them in one choice; `people` names the first few to show. */
+    readonly clashes: { programId: string; label: string; userIds: string[]; people: { userId: string; name: string | null }[]; totalPeople: number }[],
   ) {
     super('Two rules disagree for the same people. Choose which one applies to them, then save again.', 'clash');
   }
@@ -368,6 +369,7 @@ export async function getProgram(programId: string): Promise<{ program: ProgramV
   return { program, versions: row.rules.map((rule) => viewOf(row, rule, row.rules.length)) };
 }
 
+/** The names of the first 50 people to show beside a clash. Only what is displayed is limited: the clash itself carries every id. */
 async function chooseNames(userIds: string[]): Promise<{ userId: string; name: string | null }[]> {
   if (userIds.length === 0) return [];
   const users = await prisma.user.findMany({ where: { id: { in: userIds.slice(0, 50) } }, select: { id: true, name: true } });
@@ -439,7 +441,7 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
     const clashes = await clashesOf(tx, candidate, { exclude: programId });
     if (clashes.length > 0) {
       const labels = await tx.grantProgram.findMany({ where: { id: { in: clashes.map((c) => c.programId) } }, select: { id: true, label: true } });
-      throw new ClashRefused(await Promise.all(clashes.map(async (c) => ({ programId: c.programId, label: labels.find((l) => l.id === c.programId)?.label ?? c.programId, people: await chooseNames(c.userIds) }))));
+      throw new ClashRefused(await Promise.all(clashes.map(async (c) => ({ programId: c.programId, label: labels.find((l) => l.id === c.programId)?.label ?? c.programId, userIds: c.userIds, people: await chooseNames(c.userIds), totalPeople: c.userIds.length }))));
     }
     const preview = await previewIn(tx, checked, ids, now, { forProgramId: programId });
     const budget = preview.budget;
@@ -461,7 +463,12 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
       if (needed > budget.roomMicros) throw new OverBudget(needed, budget.roomMicros);
     }
     if (existing) {
-      await tx.grantRule.updateMany({ where: { programId, state: 'current' }, data: { state: 'superseded', supersededAt: now } });
+      // A new version that starts later does not take over now: the version people are issued under goes on until the new one starts, so
+      // nobody who has not claimed yet is left with nothing in between. A version that was already waiting to be replaced is cut to the
+      // same moment, so two versions of one program are never open together
+      const takesOverAt = checked.claimStartsAt > now ? checked.claimStartsAt : now;
+      await tx.grantRule.updateMany({ where: { programId, state: 'current' }, data: { state: 'superseded', supersededAt: takesOverAt } });
+      await tx.grantRule.updateMany({ where: { programId, state: 'superseded', supersededAt: { gt: takesOverAt } }, data: { supersededAt: takesOverAt } });
     } else {
       await tx.grantProgram.create({ data: { id: programId, categoryId: checked.categoryId, kind, label: checked.label, createdById: issuer.userId, requestKey: input.requestKey ?? null } });
     }
