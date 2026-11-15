@@ -331,6 +331,21 @@ run('the grants routes, on the real books', () => {
       expect((await overview()).exceptions).toHaveLength(1);
     });
 
+    it('says the clash in the preview when the new rule is "No grant", so the choice can be made before saving', async () => {
+      const { omar, noor, faisal } = await twoRules();
+      const none = { audience: { kind: 'people', userIds: [omar, noor, faisal] }, instant_apps: { mode: 'same' }, computers: { mode: 'none' } };
+      const preview = await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'exception', ...none } });
+      const view = await preview.json();
+      expect(view.clash.people.sort()).toEqual(['Noor', 'Omar']);
+      expect(view.clash.thisText).toBe('no grant');
+      expect(view.clash.other.text).toBe('Computers $5 a month');
+      expect((await call<any>(postException, '/x', { method: 'POST', body: none })).status).toBe(409);
+      // The same "No grant" over people whose rule already says "No grant" is no clash
+      const same = { audience: { kind: 'people', userIds: [omar, noor] }, instant_apps: { mode: 'none' }, computers: { mode: 'same' } };
+      const again = await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'exception', ...same } });
+      expect((await again.json()).clash).toBeNull();
+    });
+
     it('"this one" takes those people out of the other rule', async () => {
       const { omar, noor, faisal } = await twoRules();
       const saved = await call(postException, '/x', { method: 'POST', body: { ...second([omar, noor, faisal]), clashChoice: 'this' } });

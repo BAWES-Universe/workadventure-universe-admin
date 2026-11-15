@@ -284,7 +284,7 @@ async function clashOf(category: MoneyCategory, recipients: Recipient, programId
     const universe = other.recipient.kind === 'universe' ? await prisma.universe.findUnique({ where: { id: other.recipient.universeId }, select: { name: true } }) : null;
     const label = universe?.name ?? (other.recipient.kind === 'people' ? 'another rule for people you picked' : 'another rule');
     const words = other.schedule === 'none' ? `${category === 'computers' ? 'Computers' : 'Instant Apps'}: no grant` : `${category === 'computers' ? 'Computers' : 'Instant Apps'} ${usdWords(other.amount)} ${other.schedule === 'monthly' ? 'a month' : 'once'}`;
-    return { people: shared.map((id) => names.get(id) ?? 'Someone'), other: { name: label, text: words }, thisText: `${usdWords(setting.amountMicros)} ${setting.interval === 'monthly' ? 'a month' : 'once'}` };
+    return { people: shared.map((id) => names.get(id) ?? 'Someone'), other: { name: label, text: words }, thisText: setting.interval === 'none' ? 'no grant' : `${usdWords(setting.amountMicros)} ${setting.interval === 'monthly' ? 'a month' : 'once'}` };
   }
   return null;
 }
@@ -357,7 +357,8 @@ export async function previewFor(request: PreviewRequest, now: Date = new Date()
         issuedNow += first.issuedNowMicros ?? 0;
       }
       numbers = numbers ?? first;
-      if (!clash && setting.mode === 'own') clash = await clashOf(category, recipients, request.replaceId ? (readExceptionId(request.replaceId)?.[category] ?? undefined) : undefined, { amountMicros: setting.amountMicros, interval: setting.interval });
+      // "No grant" is a figure like any other: the books refuse it too when another rule of the same rank says something else for the same people
+      if (!clash) clash = await clashOf(category, recipients, request.replaceId ? (readExceptionId(request.replaceId)?.[category] ?? undefined) : undefined, setting.mode === 'own' ? { amountMicros: setting.amountMicros, interval: setting.interval } : { amountMicros: 0, interval: 'none' });
     }
     return { numbers: numbers ? { ...numbers, mostNowMicros: most > 0 ? most : null, issuedNowMicros: issuedNow > 0 ? issuedNow : null } : null, clash };
   } catch (error) {
