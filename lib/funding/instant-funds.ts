@@ -1,38 +1,14 @@
 import { classifyCharge } from '@/lib/credit-values';
-import { holdCredit, refundHold, releaseHold, settleHold, type GiveBackLimits } from '@/lib/credit-spend';
+import { holdCredit, refundHold, releaseHold, releaseKeyIfNothingHeld, settleHold } from '@/lib/credit-spend';
 import { checkSpend } from '@/lib/spend-rules';
+import { setInstantFunds, type InstantFunds } from '@/lib/instant/funds';
 
 /**
- * What the Instant executor (O2) needs from the funding books, as one small contract. Amounts are whole micros of a dollar and every call
- * is idempotent per key. It takes from the Instant Apps category only, by earliest expiry first, all or nothing: replies and computer money
- * never pay for it, and it never falls back to anything else. Any failure to read or write the books answers "unavailable", so the
- * executor refuses rather than running an unfunded paid step.
+ * What the Instant executor (O2) needs from the funding books, as the contract in lib/instant/funds.ts. Amounts are whole micros of a
+ * dollar and every call is idempotent per key. It takes from the Instant Apps category only, by earliest expiry first, all or nothing:
+ * replies and computer money never pay for it, and it never falls back to anything else. Any failure to read or write the books answers
+ * "unavailable" (or a plain `ok: false`), so the executor refuses or says it again later, never running an unfunded paid step.
  */
-
-export interface InstantReserve {
-  key: string;
-  personId: string;
-  amountMicros: number;
-  botId?: string | null;
-  runId?: string | null;
-  charge: { class: 'instant'; route: string; provider: string; priceVersion?: string | null };
-}
-
-export type InstantReserved =
-  | { ok: true; created: boolean }
-  | { ok: false; reason: 'credit_used_up' | 'not_set' | 'unavailable' }
-  /** A rule the person said in chat ("no more than $1 a month", "only my own accounts") does not let this step take that much: the rule's own words, and nothing to ask more credit for. */
-  | { ok: false; reason: 'rule'; ruleId: string; why: 'own_accounts' | 'cap'; leftMicros: number | null; words: string };
-
-export interface InstantFunds {
-  reserve(input: InstantReserve): Promise<InstantReserved>;
-  /** Charges `chargeMicros` (at most what was reserved) and gives the rest back. Says twice, changes nothing. */
-  settle(input: { key: string; chargeMicros: number; providerCostMicros?: number | null }): Promise<{ ok: boolean }>;
-  /** Gives it all back: the step never ran, or a verified platform failure. */
-  release(input: { key: string }): Promise<{ ok: boolean }>;
-  /** After settle: back into the lots it came from, once per refundKey. Never turns free credit into cash. */
-  refund(input: { key: string; refundKey: string; amountMicros: number; reason: 'platform_failure' | 'goodwill'; limits?: GiveBackLimits }): Promise<{ ok: boolean; refundedMicros: number; reason?: string }>;
-}
 
 /** `clock` is for tests only; the executor never passes it. */
 export function createInstantFunds(clock: () => Date = () => new Date()): InstantFunds {
@@ -59,6 +35,7 @@ export function createInstantFunds(clock: () => Date = () => new Date()): Instan
         }, clock());
         if (held.ok) return { ok: true, created: held.created };
         if (held.reason === 'rule') return held;
+        // A key the books were told to give up (see `release`) holds nothing, said as "unavailable": the step is not run and credit is not blamed
         return { ok: false, reason: held.reason === 'credit_used_up' || held.reason === 'not_set' ? held.reason : 'unavailable' };
       } catch (error) {
         console.error('[Funding] Could not hold Instant credit:', error instanceof Error ? error.message : 'unknown');
@@ -68,8 +45,10 @@ export function createInstantFunds(clock: () => Date = () => new Date()): Instan
     async settle(input) {
       try {
         const hold = await settleHold({ holdKey: input.key, customerMicros: input.chargeMicros, provider: input.providerCostMicros === undefined ? undefined : { costMicros: input.providerCostMicros, basis: input.providerCostMicros === null ? 'unknown' : 'measured' } }, clock());
-        // Charged only if it is now settled: a hold that was released (or never existed) was not charged, whatever it answers
-        return { ok: hold?.state === 'settled' };
+        // Charged only if it is now settled: a hold that was released (or never existed) was not charged, whatever it answers. The amount is
+        // what the books recorded: when the key was settled before, that is the FIRST amount, whatever this call said
+        if (hold?.state === 'settled' && hold.customerMicros !== null) return { ok: true, chargedMicros: hold.customerMicros };
+        return { ok: false };
       } catch (error) {
         console.error('[Funding] Could not settle Instant credit:', error instanceof Error ? error.message : 'unknown');
         return { ok: false };
@@ -77,7 +56,14 @@ export function createInstantFunds(clock: () => Date = () => new Date()): Instan
     },
     async release(input) {
       try {
-        return { ok: (await releaseHold({ holdKey: input.key }, clock()))?.state === 'released' };
+        // A hold may land between "nothing is held" and closing the key: the key's lock decides, and a hold that won is released as any other
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const released = await releaseHold({ holdKey: input.key }, clock());
+          if (released) return { ok: released.state === 'released' };
+          // Never held: the key is closed too, so a reservation still on its way is refused when it arrives and holds nothing
+          if ((await releaseKeyIfNothingHeld({ holdKey: input.key }, clock())) === 'closed') return { ok: false, none: true };
+        }
+        return { ok: false };
       } catch (error) {
         console.error('[Funding] Could not release Instant credit:', error instanceof Error ? error.message : 'unknown');
         return { ok: false };
@@ -85,6 +71,7 @@ export function createInstantFunds(clock: () => Date = () => new Date()): Instan
     },
     async refund(input) {
       try {
+        // Asking again with the same refundKey answers what the first ask gave (even nothing), never a second give-back
         const done = await refundHold({ holdKey: input.key, refundKey: input.refundKey, amountMicros: input.amountMicros, reason: input.reason, limits: input.limits }, clock());
         return done.ok ? { ok: true, refundedMicros: done.refundedMicros } : { ok: false, refundedMicros: 0, reason: done.reason };
       } catch (error) {
@@ -93,4 +80,9 @@ export function createInstantFunds(clock: () => Date = () => new Date()): Instan
       }
     },
   };
+}
+
+/** Opens the Instant credit door on the funding books. Said again, it just wires them in again. */
+export function wireInstantFunds(): void {
+  setInstantFunds(createInstantFunds());
 }

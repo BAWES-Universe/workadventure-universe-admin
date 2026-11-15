@@ -5,7 +5,7 @@ import { getMeterSettings } from '@/lib/meter';
 import { ensureIssued, type IssueResult } from '@/lib/credit-issue';
 import type { MeterSettings } from '@/lib/meter-values';
 import { allocate, asNumber, categoryFor, monthEnd, monthStart, wholeMicros, type ChargeClass, type MoneyCategory } from '@/lib/credit-values';
-import { lockAll, lockOfEffect, lockOfPerson, lockOfPool, lotBalances, usableLots, type Tx } from '@/lib/credit-store';
+import { lockAll, lockOfEffect, lockOfHoldKey, lockOfPerson, lockOfPool, lotBalances, usableLots, type Tx } from '@/lib/credit-store';
 
 /**
  * Spending credit (paying spec v3, sections 4, 7 and 8): room is held before any paid effect, in one step under locks, from the lots
@@ -135,6 +135,8 @@ export async function holdCredit(input: HoldInput, now: Date = new Date()): Prom
 
   const existing = await loadHold(prisma, input.holdKey);
   if (existing) return alreadyHeld(existing, input, now);
+  // A key the books were told to give up before anything was held under it never holds anything (checked again under the key's lock below)
+  if (await prisma.creditClosedKey.findUnique({ where: { holdKey: input.holdKey }, select: { holdKey: true } })) return { ok: false, reason: 'closed' };
   if (input.effectKey) {
     const charged = await prisma.creditHold.findFirst({ where: { effectKey: input.effectKey, state: { not: 'released' } }, select: { holdKey: true } });
     if (charged && charged.holdKey !== input.holdKey) return { ok: false, reason: 'effect_charged' };
@@ -160,10 +162,11 @@ export async function holdCredit(input: HoldInput, now: Date = new Date()): Prom
 async function holdOnce(input: HoldInput, now: Date, settings: MeterSettings, issued: IssueResult): Promise<Held | 'again'> {
   return prisma.$transaction(async (tx): Promise<Held | 'again'> => {
     // The execution's own lock too: two asks for one execution under different keys (even for different people) meet here, not at the unique index
-    const locked = [lockOfPerson(input.personId), ...(input.effectKey ? [lockOfEffect(input.effectKey)] : []), ...(await poolNames(tx, input.personId, input.category, now, input.onlyAccountId))];
+    const locked = [lockOfPerson(input.personId), lockOfHoldKey(input.holdKey), ...(input.effectKey ? [lockOfEffect(input.effectKey)] : []), ...(await poolNames(tx, input.personId, input.category, now, input.onlyAccountId))];
     await lockAll(tx, locked);
     const again = await loadHold(tx, input.holdKey);
     if (again) return alreadyHeld(again, input, now);
+    if (await tx.creditClosedKey.findUnique({ where: { holdKey: input.holdKey }, select: { holdKey: true } })) return { ok: false, reason: 'closed' };
     if (input.effectKey) {
       const charged = await tx.creditHold.findFirst({ where: { effectKey: input.effectKey, state: { not: 'released' } }, select: { holdKey: true } });
       if (charged && charged.holdKey !== input.holdKey) return { ok: false, reason: 'effect_charged' };
@@ -278,6 +281,22 @@ export async function releaseHold(input: { holdKey: string }, now: Date = new Da
     await tx.creditAllocation.updateMany({ where: { holdId: row.id }, data: { state: 'released' } });
     await tx.creditHold.update({ where: { id: row.id }, data: { state: 'released', closedAt: now } });
     return holdView((await loadHold(tx, input.holdKey)) as FullHold);
+  });
+}
+
+/**
+ * For a step whose reservation was never answered: the books CONFIRM that nothing is held under the key, and close the key, so a hold that
+ * was still on its way is refused when it arrives (`closed`, holding nothing). `held` means a hold exists (the reservation did land), and the
+ * caller releases it as any other. Safe to say twice. Meets a hold being made under the same key at the key's own lock: one of the two wins,
+ * never both.
+ */
+export async function releaseKeyIfNothingHeld(input: { holdKey: string }, now: Date = new Date()): Promise<'closed' | 'held'> {
+  if (!input.holdKey || input.holdKey.length > 255) throw new RangeError('holdKey is required (up to 255 characters)');
+  return prisma.$transaction(async (tx) => {
+    await lockAll(tx, [lockOfHoldKey(input.holdKey)]);
+    if (await tx.creditHold.findUnique({ where: { holdKey: input.holdKey }, select: { id: true } })) return 'held';
+    await tx.creditClosedKey.upsert({ where: { holdKey: input.holdKey }, create: { holdKey: input.holdKey, closedAt: now }, update: {} });
+    return 'closed';
   });
 }
 

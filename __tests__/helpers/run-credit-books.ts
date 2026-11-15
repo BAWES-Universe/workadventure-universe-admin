@@ -588,7 +588,36 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     const settleReleased = await funds.settle({ key: 'run-3:1', chargeMicros: 300_000 });
     check('settling a step that was released is not ok: nothing was charged', settleReleased.ok === false, settleReleased);
     const none = await funds.release({ key: 'nothing-here' });
-    check('releasing a hold that does not exist is not ok, not a throw', none.ok === false);
+    check('releasing a hold that does not exist is not ok, says plainly nothing is held, and does not throw', none.ok === false && none.none === true, none);
+    const noneAgain = await funds.release({ key: 'nothing-here' });
+    check('saying it again says the same', noneAgain.ok === false && noneAgain.none === true, noneAgain);
+    const late = await funds.reserve({ ...run, key: 'nothing-here', runId: 'run-late', amountMicros: 100_000 });
+    const lateRow = await prisma.creditHold.count({ where: { holdKey: 'nothing-here' } });
+    const leftAfterLate = await spend.availableCredit('inst', 'instant_apps', G);
+    check('a reservation that arrives after its key was closed is refused and holds nothing', !late.ok && late.reason === 'unavailable' && lateRow === 0 && leftAfterLate.availableMicros === 2 * M, { late, lateRow, leftAfterLate });
+    // A key that was never closed is untouched by another key being closed
+    const other = await funds.reserve({ ...run, key: 'run-5:1', runId: 'run-5', amountMicros: 100_000 });
+    check('closing one key does not close another', other.ok === true, other);
+    await funds.release({ key: 'run-5:1' });
+
+    // settle says what the key was charged at, and the FIRST amount when it is said again
+    await funds.reserve({ ...run, key: 'run-6:1', runId: 'run-6', amountMicros: 500_000 });
+    const first = await funds.settle({ key: 'run-6:1', chargeMicros: 400_000, providerCostMicros: 100_000 });
+    const second = await funds.settle({ key: 'run-6:1', chargeMicros: 250_000 });
+    check('settle answers the amount charged, and again the first amount when asked with another', first.ok && first.chargedMicros === 400_000 && second.ok && second.chargedMicros === 400_000, { first, second });
+    const heldRow = await prisma.creditHold.findUniqueOrThrow({ where: { holdKey: 'run-6:1' } });
+    check('the books keep the first amount', Number(heldRow.customerMicros) === 400_000, heldRow);
+    const noSettle = await funds.settle({ key: 'never-held', chargeMicros: 1 });
+    check('settling a key that was never held is not ok and has no amount', noSettle.ok === false && !('chargedMicros' in noSettle), noSettle);
+
+    // A give-back asked again answers what the first ask gave, even when the lot could give less now
+    const g1 = await funds.refund({ key: 'run-6:1', refundKey: 'run-6:gb', amountMicros: 300_000, reason: 'goodwill', limits: { goodwillBudgetMicros: 1 * M } });
+    const g2 = await funds.refund({ key: 'run-6:1', refundKey: 'run-6:gb', amountMicros: 300_000, reason: 'goodwill', limits: { goodwillBudgetMicros: 1 * M } });
+    const g3 = await funds.refund({ key: 'run-6:1', refundKey: 'run-6:gb', amountMicros: 300_000, reason: 'goodwill', limits: { goodwillBudgetMicros: 0 } });
+    const refundedRow = await prisma.creditHold.findUniqueOrThrow({ where: { holdKey: 'run-6:1' } });
+    check('a repeated give-back returns its original amount and gives nothing more', g1.ok && g1.refundedMicros === 300_000 && g2.ok && g2.refundedMicros === 300_000 && g3.ok && g3.refundedMicros === 300_000 && Number(refundedRow.refundedMicros) === 300_000, { g1, g2, g3, refundedRow });
+    const g4 = await funds.refund({ key: 'run-6:1', refundKey: 'run-6:gb', amountMicros: 100_000, reason: 'goodwill' });
+    check('the same refund key with another amount is refused, not answered as the first', g4.ok === false && g4.refundedMicros === 0, g4);
   }
 
   // ---------- Review round: keys, refunds, asks, standing, budgets, held room ----------
@@ -878,6 +907,32 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
       const afterRules = await pendingRules;
       check('a save of the rules of a category nobody here is due from does not hold issuing up; a save of one they are due from does, and issuing goes on once it lets go', apart === 'done' && waitedRules && afterRules.issued.length === 1, { apart, waitedRules, afterRules });
       await writer.end();
+
+      // A reservation still on its way meets the closing of its key at the key's own lock: one of the two wins, never both
+      const racing = instant.createInstantFunds(() => G);
+      const keys = Array.from({ length: 24 }, (_, i) => `race-${i}:1`);
+      const pairs = await Promise.all(keys.map(async (key, i) => {
+        const [reserved, gone] = await Promise.all([
+          racing.reserve({ key, personId: 'inst', amountMicros: 10_000, botId: 'bot-1', runId: `race-${i}`, charge: { class: 'instant', route: 'composio', provider: 'composio' } }),
+          racing.release({ key }),
+        ]);
+        // Said again after both answered: what the books hold for the key must not change
+        const again = await racing.release({ key });
+        return { key, reserved, gone, again };
+      }));
+      const heldAfter = await prisma.creditHold.findMany({ where: { holdKey: { in: keys } }, select: { holdKey: true, state: true } });
+      const closedAfter = await prisma.creditClosedKey.findMany({ where: { holdKey: { in: keys } }, select: { holdKey: true } });
+      const heldKeys = new Map(heldAfter.map((h) => [h.holdKey, h.state]));
+      const closedKeys = new Set(closedAfter.map((c) => c.holdKey));
+      const bad = pairs.filter((p) => {
+        const state = heldKeys.get(p.key);
+        // Either the hold won (and is given back, and the key is not closed) or the closing won (nothing held, the reservation refused)
+        const holdWon = state === 'released' && !closedKeys.has(p.key) && p.reserved.ok && p.gone.ok === true;
+        const closeWon = state === undefined && closedKeys.has(p.key) && !p.reserved.ok && p.gone.none === true;
+        return !(holdWon || closeWon);
+      });
+      const stillHeld = await spend.availableCredit('inst', 'instant_apps', G);
+      check('24 reservations racing the closing of their keys: each key ends given back or closed, none is held for good, and no credit stays taken', bad.length === 0 && heldAfter.every((h) => h.state !== 'held') && stillHeld.heldMicros === 0, { bad, stillHeld, wins: { hold: heldAfter.length, closed: closedAfter.length } });
     }
   }
 
