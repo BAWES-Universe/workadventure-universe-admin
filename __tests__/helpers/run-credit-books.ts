@@ -798,6 +798,20 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
       const lowered = await pendingBudget;
       await setMeter({ rolloutBudgetMicros: 10_000 * M, renewMinutes: 10 });
       check('the rollout budget is read again under the locks: one lowered while issuing waited stops it', waitedBudget && lowered.issued.length === 0 && lowered.skipped.some((s) => s.reason === 'over_budget'), { waitedBudget, lowered });
+      // A start over works from the person's facts as they are now: joining a group while issuing waited brings that group's gift in, funded from another account, and issuing still ends whole
+      await user('fu-late5', '2027-02-11T00:00:00Z');
+      const acme = await funding.ensureFundingAccount({ kind: 'universe', ownerKey: 'u1', name: 'Acme', adminIds: ['owner'] });
+      await rules.createGift({ categoryId: 'instant_apps', amount: 1 * M, schedule: 'once', recipients: { kind: 'universe', universeId: 'u1', mode: 'changing' }, claimEndsAt: at('2027-04-01T00:00:00Z'), joinerCap: 5, totalCapMicros: 5 * M, fundingAccountId: acme.id }, { userId: 'owner', superAdmin: false }, FU);
+      await writer.query('BEGIN');
+      await writer.query(`SELECT pg_advisory_xact_lock(hashtext('credit:account:funding-platform'))`);
+      const pendingJoin = issue.ensureIssued('fu-late5', at('2027-02-24T00:00:00Z'));
+      pendingJoin.catch(() => undefined);
+      const waitedJoin = await waitForWaiter();
+      await writer.query(`INSERT INTO universe_members (id, universe_id, user_id) VALUES ('fu-um5', 'u1', 'fu-late5')`);
+      await writer.query('COMMIT');
+      const joined = await pendingJoin.catch((error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }));
+      check('joining a group while issuing waited does not stop the issuing: the start over reads the person again, and the group’s gift is issued from', waitedJoin && !('error' in joined) && joined.issued.some((lot) => lot.subjectKey === 'person:fu-late5' && lot.amountMicros === 1 * M), { waitedJoin, joined });
+
       // A save of one category's rules holds up issuing only for people due something from that category
       await user('fu-late3', '2027-02-11T00:00:00Z');
       await user('fu-late4', '2027-02-11T00:00:00Z');

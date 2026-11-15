@@ -84,10 +84,11 @@ const TRANSACTION = { maxWait: 10_000, timeout: 20_000 };
  * person through another account or pool), nothing is issued and the whole thing starts again with the full set.
  */
 export async function ensureIssued(personId: string, now: Date = new Date()): Promise<IssueResult> {
-  const first = await personFacts(prisma, personId);
-  if (!first) return { issued: [], skipped: [] };
   await platformAccount();
   for (let attempt = 0; attempt < 4; attempt++) {
+    // Read again on every attempt: a start over is because the person's facts or the rules moved, so the locks are worked out from what is true now
+    const first = await personFacts(prisma, personId);
+    if (!first) return { issued: [], skipped: [] };
     // Nothing reaches this person: say why when two rules clash for them, so a caller can tell "nothing due" from "waiting for a choice"
     const early: IssueResult['skipped'] = [];
     const planned = plansFor(await currentRules(prisma, { now }), first, early);
