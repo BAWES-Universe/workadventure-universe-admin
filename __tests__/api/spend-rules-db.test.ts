@@ -26,6 +26,8 @@ import { POST as postJob } from '@/app/api/bots/[id]/computer-jobs/route';
 import { POST as postDidntWork } from '@/app/api/me/usage/activity/[id]/didnt-work/route';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { giveComputer, renewJob, startJob } from '@/lib/computer';
+import { mintJobToken } from '@/lib/computer-token';
+import { authorizeModelCall } from '@/lib/computer-calls';
 import { PATCH as patchRule, DELETE as deleteRule } from '@/app/api/me/spend-rules/[ruleId]/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -338,6 +340,22 @@ run('rules said in chat and task receipts, in a real database', () => {
       const body = await (await postJob(json('/x', 'POST', { userId: sara.uuid, title: 'Report', runId: run.id }), ctx(sara.brickId))).json();
       expect(body).toEqual({ ok: false, reason: 'rule', rule: { id: null, why: null, leftMicros: null, words: expect.stringContaining('No more than $0.01 a month') } });
       expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
+    });
+
+    it('a model call inside a running job that a rule does not allow is refused as the rule, with its words, not as "pool"', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      // The job holds 60,000 of the 100,000; a call asking 50,000 more does not fit under the rule
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'bot', period: 'month', capMicros: 100_000 });
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Long job' }, NOW);
+      if (!started.ok) throw new Error(`not started: ${started.reason}`);
+      const minted = await mintJobToken(started.job.id, 'model', NOW);
+      if (!minted.ok) throw new Error('no key');
+      const refused = await authorizeModelCall({ token: minted.token, callId: 'call-1', estimateMicros: 50_000, payer: 'universe' }, NOW);
+      expect(refused).toEqual({ ok: false, reason: 'rule', ruleId: expect.any(String), why: 'cap', leftMicros: 40_000, words: expect.stringContaining('No more than $0.10 a month') });
+      // Nothing was held for it, and a call that fits is let through
+      expect(await prisma.meterReservation.count({ where: { jobId: started.job.id, reservationKey: { contains: 'call' } } })).toBe(0);
+      expect(await authorizeModelCall({ token: minted.token, callId: 'call-2', estimateMicros: 30_000, payer: 'universe' }, NOW)).toMatchObject({ ok: true, reservedMicros: 30_000 });
     });
 
     it('a job that is running when a rule stops more room ends as "rule", saying so, not as "our room is used up"', async () => {
