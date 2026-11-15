@@ -112,7 +112,7 @@ export class FakeComputerProvider implements ComputerProvider {
   readonly kind = 'fake' as const;
   readonly calls: { name: string; ref?: string }[] = [];
   /** A test sets these to make the next call fail, the way a real one can. */
-  failNext: Partial<Record<'create' | 'wake' | 'rest' | 'saveFiles', boolean>> = {};
+  failNext: Partial<Record<'create' | 'wake' | 'rest' | 'saveFiles' | 'stop' | 'ready', boolean>> = {};
   /** Every save fails until this is turned off. */
   failSaves = false;
   /** What a command run on the pretend machine answers with, by what it says; a test sets this. Without it every command succeeds with no output. */
@@ -122,7 +122,7 @@ export class FakeComputerProvider implements ComputerProvider {
   /** The turns the pretend agent will run, one list of events per turn, used in order. */
   turns: TurnEvent[][] = [];
   /** What was asked of the pretend agent, and what was cancelled. */
-  openedTurns: { ref: string; input: TurnInput }[] = [];
+  openedTurns: { ref: string; input: TurnInput; signal?: AbortSignal }[] = [];
   cancelledTurns: string[] = [];
   /** A turn the pretend agent is running in a session: set by a test, read back by `activeTurn`. */
   running = new Map<string, string>();
@@ -144,7 +144,7 @@ export class FakeComputerProvider implements ComputerProvider {
     this.calls.push({ name, ref });
   }
 
-  private fail(name: 'create' | 'wake' | 'rest' | 'saveFiles') {
+  private fail(name: 'create' | 'wake' | 'rest' | 'saveFiles' | 'stop' | 'ready') {
     if (this.failNext[name]) {
       this.failNext[name] = false;
       throw new Error(`The pretend provider failed on ${name}`);
@@ -158,6 +158,7 @@ export class FakeComputerProvider implements ComputerProvider {
   }
 
   async ready(ref: string): Promise<void> {
+    this.fail('ready');
     this.readied.push(ref);
   }
 
@@ -181,6 +182,7 @@ export class FakeComputerProvider implements ComputerProvider {
 
   async stop(ref: string): Promise<void> {
     this.note('stop', ref);
+    this.fail('stop');
     this.awake_.delete(ref);
   }
 
@@ -220,9 +222,9 @@ export class FakeComputerProvider implements ComputerProvider {
   /** The commands that were run, in order. */
   readonly commands: { ref: string; command: string }[] = [];
 
-  async openTurn(ref: string, input: TurnInput): Promise<AsyncGenerator<TurnEvent>> {
+  async openTurn(ref: string, input: TurnInput, signal?: AbortSignal): Promise<AsyncGenerator<TurnEvent>> {
     this.note('openTurn', ref);
-    this.openedTurns.push({ ref, input });
+    this.openedTurns.push({ ref, input, signal });
     const events = this.turns.shift() ?? [{ type: 'created', id: `resp-${this.openedTurns.length}`, sessionId: input.sessionId ?? 'session-1' }, { type: 'completed', outputText: 'done', usage: null }];
     return (async function* () {
       for (const event of events) yield event;

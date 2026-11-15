@@ -22,6 +22,9 @@ export type TurnEvent =
 
 const LABEL_MAX = 200;
 const ERROR_MAX = 300;
+/** The most one line, and one frame, may hold before it ends: a stream that never ends a line is cut, not buffered. */
+const LINE_MAX = 1024 * 1024;
+const FRAME_MAX = 4 * 1024 * 1024;
 const NAME_MAX = 80;
 const OUTPUT_MAX = 200_000;
 
@@ -87,6 +90,7 @@ export async function* readTurn(body: ReadableStream<Uint8Array>): AsyncGenerato
       const { value, done } = await reader.read();
       if (done) break;
       pending += decoder.decode(value, { stream: true });
+      if (pending.length > LINE_MAX && pending.indexOf('\n') < 0) throw new Error('A line of the turn was too long');
       let at: number;
       while ((at = pending.indexOf('\n')) >= 0) {
         const line = pending.slice(0, at).replace(/\r$/, '');
@@ -106,6 +110,7 @@ export async function* readTurn(body: ReadableStream<Uint8Array>): AsyncGenerato
           name = line.slice(6).trim();
         } else if (line.startsWith('data:')) {
           data.push(line.slice(5).replace(/^ /, ''));
+          if (data.reduce((total, one) => total + one.length, 0) > FRAME_MAX) throw new Error('A frame of the turn was too long');
         }
       }
     }

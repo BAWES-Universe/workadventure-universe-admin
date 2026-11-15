@@ -44,7 +44,7 @@ USER node
 
 export const UNIVERSE_UP = String.raw`#!/bin/sh
 # Brings this computer's parts up. Safe to run any number of times, and the supervisor at the end runs it again every few seconds.
-# Prints lines Orbit reads: ready=1 or ready=0 reason=..., and restart=1 when Hermes' config was just written.
+# Prints lines Orbit reads: ready=1 or ready=0 reason=..., and restart=1 while Hermes' newly written config still waits for a restart.
 HOME_DIR="$HOME"
 [ -n "$HOME_DIR" ] || HOME_DIR=/home/node
 STATE="$HOME_DIR/.universe"
@@ -74,7 +74,9 @@ until mkdir "$LOCK" 2>/dev/null; do
 done
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 
-restart=0
+# The agent reads its model config only when it starts. A config written here leaves a restart pending that stays until the machine has
+# really restarted (its first process is a new one), whatever else fails in between: a later run that succeeds still asks for it.
+INIT="$(sed 's/.*) //' /proc/1/stat 2>/dev/null | cut -d' ' -f20)"
 if [ "$(cat "$STATE/setup" 2>/dev/null)" != "$VERSION" ]; then
   CONFIG="$HOME_DIR/.hermes/config.yaml"
   if [ -f "$CONFIG" ] && [ ! -f "$CONFIG.stock" ]; then cp "$CONFIG" "$CONFIG.stock" 2>/dev/null; fi
@@ -91,8 +93,14 @@ custom_providers:
     api_mode: chat_completions
 CONFIGEND
   mv "$CONFIG.new" "$CONFIG" || { echo "ready=0 reason=config"; exit 1; }
+  printf '%s' "$INIT" > "$STATE/restart.pending" || { echo "ready=0 reason=config"; exit 1; }
   printf '%s' "$VERSION" > "$STATE/setup.new" && mv "$STATE/setup.new" "$STATE/setup"
-  restart=1
+fi
+restart=0
+if [ -f "$STATE/restart.pending" ]; then
+  if [ -z "$INIT" ]; then restart=1; rm -f "$STATE/restart.pending"
+  elif [ "$(cat "$STATE/restart.pending" 2>/dev/null)" = "$INIT" ]; then restart=1
+  else rm -f "$STATE/restart.pending"; fi
 fi
 
 # Starts a part unless it is running. Each is its own session, so it outlives the command that started it.
@@ -275,7 +283,18 @@ import signal
 import sys
 import time
 
-KEEP = re.compile(r"(^|/)(Xvfb|openbox|x11vnc|websockify|chromium|chrome|chrome_crashpad_handler|universe-proxy|universe-supervise|universe-up|universe-fence)(\s|$)")
+HOME = os.environ.get("HOME") or "/home/node"
+PROFILE = os.path.join(HOME, ".config", "universe-chromium")
+SCRIPTS_DIR = "/usr/local/bin"
+# The desktop's parts are known by what they ARE, never by the words on their command line (the agent can start anything under any
+# name): the program file must belong to root and be closed to everyone else (the agent cannot make one), and the arguments must be the ones
+# universe-up starts it with. The screen's own server and window manager are the base image's, so only the program is checked.
+DESKTOP_PROGRAMS = {"Xvfb", "openbox"}
+INTERPRETERS = re.compile(r"^(python3(\.\d+)?|sh|dash|bash)$")
+OWN_SCRIPTS = {os.path.join(SCRIPTS_DIR, name) for name in ("universe-proxy", "universe-supervise", "universe-up", "universe-fence")}
+X11VNC_ARGS = ["-display", ":99", "-rfbport", "5900", "-localhost", "-forever", "-shared", "-nopw", "-quiet"]
+WEBSOCKIFY_ARGS = ["--web", "/usr/share/novnc", "6901", "127.0.0.1:5900"]
+CHROMIUM_FLAGS = ["--user-data-dir=" + PROFILE, "--remote-debugging-port=9222", "--remote-debugging-address=127.0.0.1"]
 # The agent's gateway answers on these ports; whoever listens there stays, and so does everything above it
 GATEWAY_PORTS = {3737, 8642}
 
@@ -305,9 +324,47 @@ def parent(pid):
         return 0
 
 
-def command(pid):
-    text = read(pid, "cmdline").replace(b"\0", b" ").decode("utf-8", "replace").strip()
-    return text or read(pid, "comm").decode("utf-8", "replace").strip()
+def argv(pid):
+    return [part.decode("utf-8", "replace") for part in read(pid, "cmdline").split(b"\0") if part]
+
+
+def trusted(path):
+    # A program file that root owns and nobody else can write: the agent (which is not root) cannot have made it, copied it or changed it
+    try:
+        info = os.stat(path)
+    except Exception:
+        return False
+    return info.st_uid == 0 and not (info.st_mode & 0o022)
+
+
+def program(pid):
+    try:
+        path = os.path.realpath(os.readlink("/proc/%d/exe" % pid))
+    except Exception:
+        return None
+    return path if trusted(path) else None
+
+
+def desktop_part(pid):
+    path = program(pid)
+    if not path:
+        return False
+    name = os.path.basename(path)
+    args = argv(pid)
+    if name in DESKTOP_PROGRAMS:
+        return True
+    if name == "x11vnc":
+        return args[1:] == X11VNC_ARGS
+    if name in ("chromium", "chrome"):
+        # The browser the supervisor starts: on its own profile and its own debugging address. Its helper processes are kept as its children.
+        return all(flag in args for flag in CHROMIUM_FLAGS)
+    if INTERPRETERS.match(name) and len(args) >= 2 and os.path.isabs(args[1]):
+        script = os.path.realpath(args[1])
+        if script in OWN_SCRIPTS and trusted(script):
+            return True
+        if os.path.basename(script) == "websockify" and trusted(script):
+            return args[2:] == WEBSOCKIFY_ARGS
+    return False
 
 
 def listeners():
@@ -348,7 +405,7 @@ def protected(tree):
             keep.add(pid)
             pid = tree[pid]
     # The desktop's parts, and everything they started (the browser's own processes)
-    desktop = {pid for pid in tree if pid != os.getpid() and KEEP.search(command(pid))}
+    desktop = {pid for pid in tree if pid != os.getpid() and desktop_part(pid)}
     keep |= desktop
     below = {}
     for pid, up in tree.items():
@@ -396,15 +453,36 @@ print("killed=%d" % killed)
 
 export const UNIVERSE_CLEAN = String.raw`#!/bin/sh
 # Clears the browser's sign-in state between jobs: a signed-in page one job was handed never carries into the next. The browser is
-# stopped, its profile removed, and it comes back clean (the supervisor in universe-up starts it again). Every screen link still open
-# is closed too (the web screen is restarted), so a tab left open on a job that is over shows nothing and a new link is needed.
+# stopped, its profile removed, and it comes back clean. Every screen link still open is closed too (the web screen is restarted), so a
+# tab left open on a job that is over shows nothing and a new link is needed.
+# It holds the same lock as universe-up, so the supervisor cannot start the browser again between the stop and the removal; the browser is
+# proved gone before the profile is deleted, and the parts come back only after the lock is let go.
 HOME_DIR="$HOME"
 [ -n "$HOME_DIR" ] || HOME_DIR=/home/node
+STATE="$HOME_DIR/.universe"
+mkdir -p "$STATE" 2>/dev/null
+LOCK="$STATE/up.lock"
+if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then rmdir "$LOCK" 2>/dev/null; fi
+waited=0
+until mkdir "$LOCK" 2>/dev/null; do
+  waited=$((waited+1))
+  [ "$waited" -gt 150 ] && { echo "cleaned=0 reason=busy"; exit 1; }
+  sleep 0.2
+done
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 pkill -x websockify 2>/dev/null
 pkill -x chromium 2>/dev/null
 pkill -x chrome 2>/dev/null
-sleep 0.5
+i=0
+while pgrep -x chromium >/dev/null 2>&1 || pgrep -x chrome >/dev/null 2>&1; do
+  i=$((i+1))
+  if [ "$i" -eq 20 ]; then pkill -9 -x chromium 2>/dev/null; pkill -9 -x chrome 2>/dev/null; fi
+  [ "$i" -gt 50 ] && { echo "cleaned=0 reason=browser_running"; exit 1; }
+  sleep 0.2
+done
 rm -rf "$HOME_DIR/.config/universe-chromium" "$HOME_DIR/.cache/chromium" 2>/dev/null
+rmdir "$LOCK" 2>/dev/null
+trap - EXIT
 /usr/local/bin/universe-up --child >/dev/null 2>&1
 echo "cleaned=1"
 `;

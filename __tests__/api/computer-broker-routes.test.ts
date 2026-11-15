@@ -15,7 +15,7 @@ import type { TurnEvent } from '@/lib/agent37/turn-events';
 
 jest.mock('@/lib/db', () => ({ prisma: {} }));
 jest.mock('@/lib/computer-broker');
-jest.mock('@/lib/computer', () => ({ runnableJobs: jest.fn() }));
+jest.mock('@/lib/computer', () => ({ runnableJobsPage: jest.fn() }));
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 
 const SERVICE_TOKEN = 'bot-server-secret';
@@ -23,8 +23,8 @@ const before = process.env.BOT_SERVICE_TOKEN;
 const lib = broker as jest.Mocked<typeof broker>;
 const params = { params: Promise.resolve({ jobId: 'job-1' }) };
 
-const req = (method: string, body?: unknown, auth: string | null = SERVICE_TOKEN) =>
-  new NextRequest('http://localhost:3333/x', { method, headers: auth ? { Authorization: `Bearer ${auth}` } : {}, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+const req = (method: string, body?: unknown, auth: string | null = SERVICE_TOKEN, query = '') =>
+  new NextRequest(`http://localhost:3333/x${query}`, { method, headers: auth ? { Authorization: `Bearer ${auth}` } : {}, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 const events = (...list: TurnEvent[]) =>
   (async function* () {
     for (const event of list) yield event;
@@ -149,16 +149,27 @@ describe('cancel and stream', () => {
 });
 
 describe('the running jobs', () => {
-  it('are for the bot server only, and come with the words for the agent', async () => {
-    const list = computer.runnableJobs as jest.Mock;
+  it('are for the bot server only, and come with the words for the agent, a page at a time', async () => {
+    const list = computer.runnableJobsPage as jest.Mock;
     expect((await running(req('GET', undefined, null))).status).toBe(401);
     expect((await running(req('GET', undefined, 'nope'))).status).toBe(401);
     expect(list).not.toHaveBeenCalled();
-    list.mockResolvedValueOnce([{ jobId: 'j', botId: 'b', title: 'Visa', brief: 'Fill it', writes: true, hasTurn: false }]);
+    const job = { jobId: 'j', botId: 'b', title: 'Visa', brief: 'Fill it', writes: true, hasTurn: false };
+    list.mockResolvedValueOnce({ jobs: [job], nextCursor: 'next_j' });
     const answer = await running(req('GET'));
-    expect(await answer.json()).toEqual({ jobs: [{ jobId: 'j', botId: 'b', title: 'Visa', brief: 'Fill it', writes: true, hasTurn: false }] });
+    expect(await answer.json()).toEqual({ jobs: [job], nextCursor: 'next_j' });
     expect(answer.headers.get('Cache-Control')).toBe('no-store');
+    expect(list).toHaveBeenLastCalledWith(50, null);
     list.mockRejectedValueOnce(new Error('db'));
     expect((await running(req('GET'))).status).toBe(500);
+  });
+
+  it('hands the page’s cursor on, and ignores one that is far too long', async () => {
+    const list = computer.runnableJobsPage as jest.Mock;
+    list.mockResolvedValue({ jobs: [], nextCursor: null });
+    await running(req('GET', undefined, undefined, '?cursor=2026-01-01T00:00:00.000Z_abc'));
+    expect(list).toHaveBeenLastCalledWith(50, '2026-01-01T00:00:00.000Z_abc');
+    await running(req('GET', undefined, undefined, `?cursor=${'x'.repeat(500)}`));
+    expect(list).toHaveBeenLastCalledWith(50, null);
   });
 });

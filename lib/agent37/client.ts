@@ -153,7 +153,13 @@ export class Agent37Client {
     } catch (error) {
       throw new Agent37Unreached(error instanceof Error ? error.name : 'unknown');
     }
-    const text = await response.text().catch(() => '');
+    let unreadable = false;
+    const text = await response.text().catch(() => {
+      unreadable = true;
+      return '';
+    });
+    // An answer whose body could not be read says nothing: it is not read as an empty one (a check would take it for "idle")
+    if (unreadable && response.ok) throw new Agent37Unreached('body');
     let json: unknown = null;
     try {
       json = text ? JSON.parse(text) : null;

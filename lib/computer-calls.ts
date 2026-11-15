@@ -43,10 +43,22 @@ export async function authorizeModelCall(
   const verified = await verifyJobToken(input.token, 'model', now);
   if (!verified.ok) return { ok: false, reason: 'refused' };
   const base = { jobId: verified.jobId, botId: verified.botId, personId: verified.personId };
-  if (input.payer === 'own-key') return { ok: true, ...base, reservedMicros: null };
+  if (input.payer === 'own-key') {
+    // No room is taken, but a call after the fence is refused all the same
+    const still = await verifyJobToken(input.token, 'model', now);
+    return still.ok && still.generation === verified.generation ? { ok: true, ...base, reservedMicros: null } : { ok: false, reason: 'refused' };
+  }
   if (!Number.isSafeInteger(input.estimateMicros) || input.estimateMicros <= 0 || input.estimateMicros > MAX_MICROS) return { ok: false, reason: 'refused' };
   const room = await reserveRoom({ key: callRoomKey(base.jobId, input.callId), personId: base.personId, amountMicros: input.estimateMicros, botId: base.botId, jobId: base.jobId, newJob: false }, now);
-  if (room.ok) return { ok: true, ...base, reservedMicros: room.reservation.amountMicros };
+  if (room.ok) {
+    // The room may have waited for the pool's lock while the person took the machine: the key must still be good after it, or the room goes back
+    const still = await verifyJobToken(input.token, 'model', now);
+    if (!still.ok || still.generation !== verified.generation) {
+      await releaseRoom({ key: callRoomKey(base.jobId, input.callId) }, now);
+      return { ok: false, reason: 'refused' };
+    }
+    return { ok: true, ...base, reservedMicros: room.reservation.amountMicros };
+  }
   if (room.reason === 'allowance') return { ok: false, reason: 'allowance' };
   // Asked again for a call whose room was settled or lapsed: the first try is the call, and a second one is not another
   if (room.reason === 'closed' || room.reason === 'key_reused') return { ok: false, reason: 'refused' };

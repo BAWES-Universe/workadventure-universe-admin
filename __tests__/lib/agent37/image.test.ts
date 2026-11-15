@@ -105,6 +105,21 @@ describe('what is in the image', () => {
     expect(up).toContain('ready=1');
     expect(up).toMatch(/ready=0 reason=(browser|model_address|screen)/);
   });
+
+  it('keeps the restart pending until the machine has really restarted, whatever else fails in between', () => {
+    const up = imageFiles().find((file) => file.name === 'universe-up')!.text;
+    // The setup marker no longer stands for "restarted": the pending restart is its own marker, kept with the machine's first process
+    expect(up).toContain('restart.pending');
+    expect(up.indexOf('restart.pending')).toBeLessThan(up.indexOf('ready=0 reason=browser'));
+    expect(up).toMatch(/echo "ready=1 restart=\$restart"/);
+  });
+
+  it('clears the browser under the same lock as the supervisor and proves it gone before the profile is removed', () => {
+    const clean = imageFiles().find((file) => file.name === 'universe-clean')!.text;
+    expect(clean).toContain('up.lock');
+    expect(clean.indexOf('pgrep -x chromium')).toBeLessThan(clean.indexOf('rm -rf'));
+    expect(clean.indexOf('rm -rf')).toBeLessThan(clean.indexOf('universe-up --child'));
+  });
 });
 
 describe('the local model address', () => {
@@ -229,29 +244,48 @@ describe('the take-over fence', () => {
     const dir = write();
     mkdirSync(join(dir, 'bin'), { recursive: true });
     const scenario = `
-cp /usr/bin/sleep ${dir}/bin/chromium
+export HOME=${dir}/home
+mkdir -p $HOME ${dir}/agent
+cp /bin/sh ${dir}/bin/chromium
 python3 -c "
 import socket, subprocess, time
 s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('127.0.0.1', 3737)); s.listen()
 subprocess.Popen(['sleep', '300'])
 time.sleep(300)" &
 GW=$!
-${dir}/bin/chromium 300 &
+# the real browser: a program root owns, started with the supervisor's own profile and debugging address
+${dir}/bin/chromium -c 'sleep 300; true' --user-data-dir=$HOME/.config/universe-chromium --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 &
 BR=$!
+# what the agent can start: the same words from a program it owns, a script called chromium, a real program with other arguments
+cp /bin/sh ${dir}/agent/chromium && chown 65534:65534 ${dir}/agent/chromium
+${dir}/agent/chromium -c 'sleep 303; true' --user-data-dir=$HOME/.config/universe-chromium --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 &
+A1=$!
+printf 'import time\\ntime.sleep(304)\\n' > ${dir}/agent/chromium.py
+python3 ${dir}/agent/chromium.py /usr/local/bin/universe-proxy &
+A2=$!
+cp /bin/sh ${dir}/bin/x11vnc
+${dir}/bin/x11vnc -c 'sleep 305; true' -display :99 -rfbport 5901 &
+A3=$!
 setsid sleep 301 </dev/null >/dev/null 2>&1 &
 sh -c 'sleep 302' &
 sleep 1
+for p in $A1 $A2 $A3; do kill -0 $p 2>/dev/null && echo "agent-up"; done
 echo "before: $(python3 ${dir}/universe-fence --check)"
 python3 ${dir}/universe-fence
 echo "after: $(python3 ${dir}/universe-fence --check)"
 for p in $GW $BR; do kill -0 $p 2>/dev/null && echo "alive" || echo "dead"; done
+for p in $A1 $A2 $A3; do kill -0 $p 2>/dev/null && echo "agent-alive" || echo "agent-dead"; done
 `;
     const run = spawnSync('unshare', ['--pid', '--fork', '--mount-proc', 'sh', '-c', scenario], { encoding: 'utf8', timeout: 60_000 });
     expect(run.stdout).toMatch(/before: remaining=[1-9]/);
     expect(run.stdout).toMatch(/killed=[1-9]/);
     expect(run.stdout).toMatch(/after: remaining=0/);
-    expect(run.stdout.match(/alive/g)).toHaveLength(2);
-    expect(run.stdout).not.toContain('dead');
+    expect(run.stdout.match(/(^|\n)alive/g)).toHaveLength(2);
+    expect(run.stdout).not.toMatch(/(^|\n)dead/);
+    // Whatever wears the desktop's name or words is the agent's, and goes
+    expect(run.stdout.match(/agent-up/g)).toHaveLength(3);
+    expect(run.stdout.match(/agent-dead/g)).toHaveLength(3);
+    expect(run.stdout).not.toContain('agent-alive');
   });
 });
 

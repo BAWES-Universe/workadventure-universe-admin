@@ -28,14 +28,29 @@ const live = (status: string) => status === 'running' || status === 'waiting';
 
 export type Minted = { ok: true; token: string; expiresAt: Date } | { ok: false; reason: 'not_found' | 'not_running' };
 
-/** Makes a key for a running job. The key is shown once, here; only its digest is kept. */
-export async function mintJobToken(jobId: string, scope: TokenScope, now: Date = new Date()): Promise<Minted> {
-  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, controlGeneration: true } });
+/**
+ * Makes a key for a running job. The key is shown once, here; only its digest is kept. With `under`, the key is only made for the job as
+ * it stood when the caller looked (running, the same control generation): a job the person took over meanwhile gets none, and one that
+ * was made just before the take-over is ended again.
+ */
+export async function mintJobToken(jobId: string, scope: TokenScope, now: Date = new Date(), under?: { generation: number }): Promise<Minted> {
+  const read = () => prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, controlGeneration: true } });
+  const fits = (job: { status: string; controlGeneration: number }) => (under ? job.status === 'running' && job.controlGeneration === under.generation : live(job.status));
+  const job = await read();
   if (!job) return { ok: false, reason: 'not_found' };
-  if (!live(job.status)) return { ok: false, reason: 'not_running' };
+  if (!fits(job)) return { ok: false, reason: 'not_running' };
   const token = `${PREFIX}${randomBytes(32).toString('base64url')}`;
   const expiresAt = new Date(now.getTime() + TOKEN_LIFE_MS);
-  await prisma.computerJobToken.create({ data: { jobId, scope, generation: job.controlGeneration, digest: digestOf(token), expiresAt } });
+  const digest = digestOf(token);
+  await prisma.computerJobToken.create({ data: { jobId, scope, generation: job.controlGeneration, digest, expiresAt } });
+  if (under) {
+    // A take-over that came between the look and the key ends this key too: the fence only revokes the keys that existed when it ran
+    const again = await read();
+    if (!again || !fits(again)) {
+      await prisma.computerJobToken.updateMany({ where: { digest, revokedAt: null }, data: { revokedAt: now } });
+      return { ok: false, reason: 'not_running' };
+    }
+  }
   return { ok: true, token, expiresAt };
 }
 

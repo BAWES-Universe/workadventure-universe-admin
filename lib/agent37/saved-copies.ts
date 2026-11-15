@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'node:crypto';
 import { PassThrough, Readable, Transform, Writable, pipeline } from 'node:stream';
 import { promisify } from 'node:util';
 import { createGunzip } from 'node:zlib';
@@ -27,7 +27,8 @@ const PURPOSE = 'universe-computer-saved-copy';
 
 export const savedCopyKey = (botId: string) => `computer-saves/${botId}.ubc`;
 /** Where a copy is written first: it takes the place of the saved one only after the check of the whole stream has passed. */
-const stagingKey = (botId: string) => `computer-saves/${botId}.ubc.new`;
+/** Each save stages its own object, so two saves of one Brick never read or delete each other's bytes. */
+const stagingKey = (botId: string, attempt: string) => `computer-saves/${botId}.${attempt}.ubc.new`;
 
 export interface SavedCopyInfo {
   /** The size of the folder's tar.gz. */
@@ -74,6 +75,7 @@ export function openSavedCopy(file: Buffer): Buffer {
  */
 export async function storeSavedCopy(botId: string, archive: ReadableStream<Uint8Array>): Promise<SavedCopyInfo> {
   const { s3, bucket } = artifactBucket();
+  const staging = stagingKey(botId, randomUUID());
   const source = Readable.fromWeb(archive as never);
   const toBucket = new PassThrough();
   const toCheck = createGunzip();
@@ -91,7 +93,7 @@ export async function storeSavedCopy(botId: string, archive: ReadableStream<Uint
   });
   const upload = new Upload({
     client: s3,
-    params: { Bucket: bucket, Key: stagingKey(botId), Body: sealed, ContentType: 'application/octet-stream', CacheControl: 'private, no-store' },
+    params: { Bucket: bucket, Key: staging, Body: sealed, ContentType: 'application/octet-stream', CacheControl: 'private, no-store' },
   });
   const checked = run(toCheck, new Writable({ write: (_chunk, _encoding, done) => done() })).catch((error) => {
     stopAll(error);
@@ -107,12 +109,12 @@ export async function storeSavedCopy(botId: string, archive: ReadableStream<Uint
   if (failed) {
     await upload.abort().catch(() => undefined);
     // The upload may have finished a moment before the check failed: what it wrote is not a copy, and the saved one is untouched
-    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey(botId) })).catch(() => undefined);
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: staging })).catch(() => undefined);
     throw failed.reason && typeof failed.reason.message === 'string' ? failed.reason : new Error('The copy of the files could not be saved');
   }
   // The stream was whole and the upload finished: now, and only now, it replaces the saved copy (one copy inside the bucket)
-  await s3.send(new CopyObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId), CopySource: `${bucket}/${stagingKey(botId)}` }));
-  await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey(botId) })).catch(() => undefined);
+  await s3.send(new CopyObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId), CopySource: `${bucket}/${staging}` }));
+  await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: staging })).catch(() => undefined);
   const copy = await savedCopyOf(botId);
   if (!copy) throw new Error('The saved copy cannot be found after it was stored');
   return copy;

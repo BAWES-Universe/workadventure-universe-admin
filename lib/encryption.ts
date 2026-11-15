@@ -14,6 +14,8 @@ function getEncryptionKey(): Buffer {
 
   // If key is hex string, convert to buffer
   if (key.length === 64) {
+    // Hex that is not hex decodes to less than it says, and a key made from that is not a key
+    if (!/^[0-9a-fA-F]{64}$/.test(key)) throw new Error('ENCRYPTION_KEY must be 32 bytes (64 hex characters)');
     return Buffer.from(key, 'hex');
   }
 

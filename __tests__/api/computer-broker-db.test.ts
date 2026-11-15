@@ -14,7 +14,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests, type TurnEvent } from '@/lib/computer-provider';
 import { Agent37Error } from '@/lib/agent37/client';
-import { fenceMachine, giveComputer, handBack, runnableJobs, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
+import { fenceMachine, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
 import { verifyJobToken } from '@/lib/computer-token';
 import { cancelJobTurn, prepareJob, reattachJobTurn, startTurn } from '@/lib/computer-broker';
 
@@ -216,6 +216,49 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       expect(fake.openedTurns).toHaveLength(0);
     });
 
+    it('does not hand the runner’s own connection to the agent, so the turn’s id is kept even if the runner drops at once', async () => {
+      const { jobId } = await running();
+      const runner = new AbortController();
+      const started = await startTurn(jobId, 'go', runner.signal);
+      if (!started.ok) throw new Error('no turn');
+      expect(fake.openedTurns[0].signal).toBeDefined();
+      expect(fake.openedTurns[0].signal).not.toBe(runner.signal);
+      runner.abort();
+      expect(fake.openedTurns[0].signal?.aborted).toBe(false);
+      // The runner stops reading as soon as it can: the id is still kept, because the reader is only heard once the id is stored
+      const reading = started.events.next();
+      const returning = started.events.return(undefined);
+      await reading;
+      await returning;
+      expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).agentResponseId).toBe('resp-1');
+    });
+
+    it('starts nothing when the runner is already gone', async () => {
+      const { jobId } = await running();
+      const runner = new AbortController();
+      runner.abort();
+      expect(await startTurn(jobId, 'go', runner.signal)).toEqual({ ok: false, reason: 'failed' });
+      expect(fake.openedTurns).toHaveLength(0);
+    });
+
+    it('never replaces the id of a turn the job already holds: a second turn started at the same moment is cancelled', async () => {
+      const { jobId } = await running();
+      fake.turns = [
+        [{ type: 'created', id: 'resp-a', sessionId: 'sess-1' }, { type: 'completed', outputText: '', usage: null }],
+        [{ type: 'created', id: 'resp-b', sessionId: 'sess-2' }, { type: 'completed', outputText: '', usage: null }],
+      ];
+      const first = await startTurn(jobId, 'one');
+      const second = await startTurn(jobId, 'two');
+      if (!first.ok || !second.ok) throw new Error('no turn');
+      const firstEvent = await first.events.next();
+      expect(firstEvent.value).toMatchObject({ type: 'created', id: 'resp-a' });
+      const seen = await drain(second.events);
+      expect(seen).toEqual([{ type: 'failed', code: 'fenced', message: expect.any(String) }]);
+      expect(fake.cancelledTurns).toEqual(['resp-b']);
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ agentResponseId: 'resp-a', agentSessionId: 'sess-1' });
+      await first.events.return(undefined);
+    });
+
     it('is cancelled at once, and says it was fenced, when the person took over before the agent started it', async () => {
       const { sara, jobId } = await running();
       fake.turns = [[{ type: 'created', id: 'resp-late', sessionId: 'sess-1' }, { type: 'text', text: 'working' }, { type: 'completed', outputText: '', usage: null }]];
@@ -290,6 +333,19 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: other.sara.brickId } })).machine).toBe('stopped');
     });
 
+    it('does not call the machine stopped when the stop was refused: it is blocked and tried again until proved asleep', async () => {
+      const { sara } = await running();
+      fake.execAnswer = () => ({ stdout: 'remaining=3\n', exitCode: 1 });
+      const ref = `fake-${sara.brickId}`;
+      fake.stuckAwake.add(ref);
+      await takeOver(sara.brickId, sara.id, NOW);
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('stopping');
+      fake.stuckAwake.delete(ref);
+      fake.execAnswer = (command) => (command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {});
+      await sweepComputers(minutes(2));
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('stopped');
+    });
+
     it('wakes a machine that a failed fence stopped when the person hands the job back, so the job can go on', async () => {
       const { sara, jobId } = await running();
       fake.execAnswer = (command) => (command.endsWith('--check') ? { stdout: 'remaining=2\n' } : {});
@@ -362,6 +418,35 @@ run('the broker, the fence and keep-awake, in a real database', () => {
       };
       const started = await startJob({ botId: second.brickId, personId: second.id, title: 'Job' }, NOW);
       expect(started.ok).toBe(false);
+    });
+  });
+
+  describe('the running jobs, a page at a time', () => {
+    it('gives every running job across pages, oldest first, and says when it is the last page', async () => {
+      const ids: string[] = [];
+      for (const name of ['p1', 'p2', 'p3']) {
+        const { jobId } = await running(name);
+        ids.push(jobId);
+      }
+      const seen: string[] = [];
+      let cursor: string | null = null;
+      let pages = 0;
+      do {
+        const page: Awaited<ReturnType<typeof runnableJobsPage>> = await runnableJobsPage(2, cursor);
+        seen.push(...page.jobs.map((job) => job.jobId));
+        cursor = page.nextCursor;
+        pages += 1;
+      } while (cursor && pages < 10);
+      expect(seen.filter((id) => ids.includes(id)).sort()).toEqual([...ids].sort());
+      expect(new Set(seen).size).toBe(seen.length);
+      expect(cursor).toBeNull();
+      expect(pages).toBeGreaterThan(1);
+    });
+
+    it('starts from the beginning when the cursor is not understood', async () => {
+      const { jobId } = await running('p4');
+      const page = await runnableJobsPage(200, 'not a cursor');
+      expect(page.jobs.map((job) => job.jobId)).toContain(jobId);
     });
   });
 

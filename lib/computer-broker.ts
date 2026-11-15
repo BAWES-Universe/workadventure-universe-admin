@@ -58,7 +58,8 @@ export async function prepareJob(jobId: string, relay: unknown, now: Date = new 
   const live = await liveJob(jobId);
   if (!live.ok) return live;
   await revokeJobTokens(jobId, now);
-  const minted = await mintJobToken(jobId, 'model', now);
+  // Only for the job as it stands now: a take-over after the look above gets no key
+  const minted = await mintJobToken(jobId, 'model', now, { generation: live.job.generation });
   if (!minted.ok) return { ok: false, reason: minted.reason };
   const file = JSON.stringify({ url: address, token: minted.token });
   // Written whole to a new file and moved over the old one, so a call never reads half of it. Only the machine's own user can read it.
@@ -106,36 +107,68 @@ export async function startTurn(jobId: string, text: unknown, signal?: AbortSign
     // The turn we kept is over (the stream was lost before its end reached us): it is cleared and this one goes ahead
     await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: job.responseId }, data: { agentResponseId: null } });
   }
+  // The runner's connection must not cut the turn off before its id is kept: once the agent has accepted it, it runs on the machine, and
+  // an id that was never stored leaves nothing to cancel or reconnect to. So the request's own signal is not handed on; the start has its
+  // own limit instead, lifted when the id is known.
+  const own = new AbortController();
+  const timer = setTimeout(() => own.abort(), TURN_START_LIMIT_MS);
   let events: AsyncGenerator<TurnEvent>;
   try {
-    events = await provider.openTurn(job.ref, { text, sessionId: job.sessionId }, signal);
+    if (signal?.aborted) {
+      clearTimeout(timer);
+      return { ok: false, reason: 'failed' };
+    }
+    events = await provider.openTurn(job.ref, { text, sessionId: job.sessionId }, own.signal);
   } catch (error) {
+    clearTimeout(timer);
     if (error instanceof Agent37Error && error.code === 'session_busy') return { ok: false, reason: 'busy', responseId: error.runningResponseId };
     console.error('[Computer] Could not start a turn:', error instanceof Error ? error.message : 'unknown');
     return { ok: false, reason: 'failed' };
   }
-  return { ok: true, events: keeping(job, provider, events) };
+  return { ok: true, events: keeping(job, provider, events, { timer, controller: own }) };
 }
+
+/** How long the agent has to accept a turn and say its id. */
+const TURN_START_LIMIT_MS = 30_000;
 
 /**
  * Keeps a turn's ids on its job while the turn runs, and clears them only when the turn itself ends (completed or failed). If the reader goes
  * away first (the runner dropped, Orbit restarted) the turn is still running on the machine, so its id stays: the runner can reconnect to it,
  * and ending the job or the take-over fence can still cancel it. A turn begun under an older control number is cancelled.
  */
-async function* keeping(job: Live, provider: NonNullable<ReturnType<typeof providerFor>>, events: AsyncGenerator<TurnEvent>): AsyncGenerator<TurnEvent> {
+async function* keeping(
+  job: Live,
+  provider: NonNullable<ReturnType<typeof providerFor>>,
+  events: AsyncGenerator<TurnEvent>,
+  start?: { timer: ReturnType<typeof setTimeout>; controller: AbortController },
+): AsyncGenerator<TurnEvent> {
   let responseId: string | null = null;
   let over = false;
   try {
-    for await (const event of events) {
+    for (;;) {
+      // Read one event at a time: a reader that goes away while this waits for the id is only heard after the id is kept
+      const next = await events.next();
+      if (next.done) return;
+      const event = next.value;
       if (event.type === 'created') {
+        if (start) clearTimeout(start.timer);
         responseId = event.id;
+        // Only the first turn id to arrive is kept: a second turn that started at the same moment on this conversation is not the job's
+        // own, and a stored id is never replaced by another one
         const kept = await prisma.computerJob.updateMany({
-          where: { id: job.jobId, status: 'running', control: 'brick', controlGeneration: job.generation },
+          where: {
+            id: job.jobId,
+            status: 'running',
+            control: 'brick',
+            controlGeneration: job.generation,
+            OR: [{ agentResponseId: null }, { agentResponseId: event.id }],
+          },
           data: { agentSessionId: event.sessionId ?? job.sessionId, agentResponseId: event.id },
         });
         if (kept.count === 0) {
-          // The person took over (or the job ended) between asking and the agent starting: this turn must not run
+          // The person took over (or the job ended) between asking and the agent starting, or another turn holds the job: this turn must not run
           await provider.cancelTurn(job.ref, event.id).catch(() => undefined);
+          responseId = null;
           over = true;
           yield { type: 'failed', code: 'fenced', message: 'The turn was stopped because the person took over' };
           return;
@@ -146,6 +179,9 @@ async function* keeping(job: Live, provider: NonNullable<ReturnType<typeof provi
       if (over) return;
     }
   } finally {
+    if (start) clearTimeout(start.timer);
+    // The stream is let go of: the turn itself goes on on the machine unless it ended
+    await events.return(undefined).catch(() => undefined);
     if (responseId && over) await prisma.computerJob.updateMany({ where: { id: job.jobId, agentResponseId: responseId }, data: { agentResponseId: null } }).catch(() => undefined);
   }
 }
