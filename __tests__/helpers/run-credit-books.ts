@@ -246,6 +246,8 @@ async function main() {
     const eff1 = await spend.holdCredit({ ...input, holdKey: 'e1', amountMicros: 1, effectKey: 'exec-1' }, G);
     const eff2 = await spend.holdCredit({ ...input, holdKey: 'e2', amountMicros: 1, effectKey: 'exec-1' }, G);
     check('the same execution is never charged under two keys', eff1.ok && !eff2.ok && eff2.reason === 'effect_charged', eff2);
+    const race = await Promise.all([1, 2, 3, 4].map((n) => spend.holdCredit({ ...input, holdKey: `er-${n}`, amountMicros: 1, effectKey: 'exec-race' }, G).catch((error: unknown) => ({ ok: false as const, reason: `threw: ${error instanceof Error ? error.message.slice(0, 80) : 'unknown'}` }))));
+    check('one execution asked for under four keys at once is held once, and the others are told it is already charged, never a throw', race.filter((r) => r.ok).length === 1 && race.filter((r) => !r.ok && r.reason === 'effect_charged').length === 3, race);
   }
 
   // ---------- Spending order ----------

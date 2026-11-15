@@ -24,6 +24,7 @@ export async function lockAll(tx: Pick<Tx, '$executeRaw'>, names: Iterable<strin
 
 export const lockOfPerson = (personId: string): string => `credit:person:${personId}`;
 export const lockOfPool = (programId: string): string => `credit:pool:${programId}`;
+export const lockOfEffect = (effectKey: string): string => `credit:effect:${effectKey}`;
 export const lockOfAccount = (accountId: string): string => `credit:account:${accountId}`;
 
 type RuleRow = Prisma.GrantRuleGetPayload<{ include: { program: true; recipients: { select: { userId: true } } } }>;

@@ -4,7 +4,7 @@ import { PLATFORM_ACCOUNT_ID } from '@/lib/credit-funding';
 import { getMeterSettings } from '@/lib/meter';
 import { ensureIssued } from '@/lib/credit-issue';
 import { allocate, asNumber, categoryFor, monthEnd, monthStart, wholeMicros, type ChargeClass, type MoneyCategory } from '@/lib/credit-values';
-import { lockAll, lockOfPerson, lockOfPool, lotBalances, usableLots, type Tx } from '@/lib/credit-store';
+import { lockAll, lockOfEffect, lockOfPerson, lockOfPool, lotBalances, usableLots, type Tx } from '@/lib/credit-store';
 
 /**
  * Spending credit (paying spec v3, sections 4, 7 and 8): room is held before any paid effect, in one step under locks, from the lots
@@ -138,9 +138,14 @@ export async function holdCredit(input: HoldInput, now: Date = new Date()): Prom
   const settings = await getMeterSettings();
   const issued = await ensureIssued(input.personId, now, settings);
   return prisma.$transaction(async (tx): Promise<Held> => {
-    await lockAll(tx, [lockOfPerson(input.personId), ...(await poolNames(tx, input.personId, input.category, now, input.onlyAccountId))]);
+    // The execution's own lock too: two asks for one execution under different keys (even for different people) meet here, not at the unique index
+    await lockAll(tx, [lockOfPerson(input.personId), ...(input.effectKey ? [lockOfEffect(input.effectKey)] : []), ...(await poolNames(tx, input.personId, input.category, now, input.onlyAccountId))]);
     const again = await loadHold(tx, input.holdKey);
     if (again) return alreadyHeld(again, input, now);
+    if (input.effectKey) {
+      const charged = await tx.creditHold.findUnique({ where: { effectKey: input.effectKey }, select: { holdKey: true } });
+      if (charged && charged.holdKey !== input.holdKey) return { ok: false, reason: 'effect_charged' };
+    }
     const lots = await usableLots(tx, input.personId, input.category, now, { onlyAccountId: input.onlyAccountId });
     const takes = allocate(lots, input.amountMicros);
     if (!takes) {
