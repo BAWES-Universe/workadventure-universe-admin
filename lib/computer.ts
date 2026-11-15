@@ -357,7 +357,13 @@ async function reuseRunJob(botId: string, runId: string, now: Date): Promise<Sta
   let found = await prisma.computerJob.findUnique({ where, include: JOB_INCLUDE });
   if (!found) return null;
   if (found.status === 'queued') {
-    if ((await tryStart(found.id, now)) === 'not_set') {
+    const tried = await tryStart(found.id, now);
+    if (typeof tried === 'object') {
+      // A rule the person said stops it on this try: nothing ran, so none is left behind, the same answer as the first ask
+      await prisma.computerJob.deleteMany({ where: { id: found.id } });
+      return { ok: false, reason: 'rule', words: tried.rule };
+    }
+    if (tried === 'not_set') {
       await prisma.computerJob.deleteMany({ where: { id: found.id, status: 'queued' } });
       return { ok: false, reason: 'not_set' };
     }
