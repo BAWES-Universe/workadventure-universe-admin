@@ -1903,6 +1903,8 @@ model GrantProgram {
   label       String    @db.VarChar(120)
   createdById String    @map("created_by_id")
   createdAt   DateTime  @default(now()) @map("created_at")
+  // Makes a gift once: the same key again (a double tap, a retry after a lost answer) finds the program it made and gives nothing more
+  requestKey  String?   @unique @map("request_key") @db.VarChar(255)
   // active or ended. Ending stops new issuance; credit already given stays until it ends.
   status      String    @default("active") @db.VarChar(10)
   endedAt     DateTime? @map("ended_at")

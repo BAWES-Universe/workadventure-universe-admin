@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
-import { currentEnvelope } from '@/lib/meter-allowance';
+import { envelopeIn } from '@/lib/meter-allowance';
 import {
   CreditRefused,
   findClashes,
@@ -65,6 +65,11 @@ export interface GrantInput {
   agreementNote?: string | null;
   agreementRef?: string | null;
   label?: string;
+  /**
+   * Makes the program once: a double tap, or a retry after a lost answer, sends the same key and finds the program the first call made
+   * (`replayed: true`), so a gift is never given twice. The same key with other figures is refused (code `key_used`): the first stands.
+   */
+  requestKey?: string;
 }
 
 export interface RuleView {
@@ -99,6 +104,8 @@ export interface ProgramView extends RuleView {
   status: 'active' | 'ended';
   endedAt: Date | null;
   versions: number;
+  /** True when a request key found a program made earlier and nothing new was made. */
+  replayed?: true;
 }
 
 export class ClashRefused extends CreditRefused {
@@ -155,6 +162,7 @@ export function checkGrant(kind: ProgramKind, input: GrantInput, now: Date): Che
     throw new CreditRefused(kind === 'default' ? 'A default reaches all signed-in members or new people from a date. Use an exception for a person or a group.' : 'An exception is for a person, people you pick, or a universe’s members. Use the default for everyone.', 'recipients');
   }
   const universeAi = input.categoryId === 'universe_ai';
+  if (universeAi && kind === 'default') throw new CreditRefused('The Universe AI default is the replies-per-window number in Limits: change it there. Exceptions are saved here.', 'category');
   if (universeAi && kind === 'gift') throw new CreditRefused('Universe AI replies are not given as gifts here: use extra usage (2x, 5x, no limit)', 'category');
   const schedule = input.schedule;
   if (!['once', 'monthly', 'none'].includes(schedule)) throw new CreditRefused('How often must be once, monthly or none', 'schedule');
@@ -165,7 +173,7 @@ export function checkGrant(kind: ProgramKind, input: GrantInput, now: Date): Che
   let amount = input.amount ?? 0;
   if (schedule === 'none') amount = 0;
   else if (!Number.isSafeInteger(amount) || amount <= 0) throw new CreditRefused('The amount must be a whole number above 0', 'amount');
-  if (schedule === 'none' && kind !== 'exception') throw new CreditRefused('"None" is how an exception says a person or group gets nothing', 'schedule');
+  if (schedule === 'none' && kind === 'gift') throw new CreditRefused('A gift gives something. To give nothing, save an exception, or set the default to none.', 'schedule');
   const covers = universeAi ? ['universe_ai'] : kind === 'gift' ? [...new Set(input.covers ?? [input.categoryId])] : [input.categoryId];
   if (covers.length === 0 || !covers.every((id) => isMoneyCategory(id) || (universeAi && id === 'universe_ai'))) throw new CreditRefused('A gift covers Instant Apps, computers, or both', 'covers');
   if (kind !== 'gift' && covers[0] !== input.categoryId) throw new CreditRefused('A default or exception covers its own category', 'covers');
@@ -253,6 +261,40 @@ async function snapshotIds(db: Tx, recipient: Recipient): Promise<string[]> {
 
 type ProgramRow = NonNullable<Awaited<ReturnType<typeof loadProgramRow>>>;
 
+async function loadProgramByKey(db: Pick<Tx, 'grantProgram'>, requestKey: string) {
+  return db.grantProgram.findUnique({
+    where: { requestKey },
+    include: { rules: { orderBy: { version: 'desc' }, include: { program: true, recipients: { select: { userId: true } } } } },
+  });
+}
+
+/** Whether a saved program says what a new request says: the same figures, who it is for, and how it is paid. Times are not compared: a retry starts a moment later. */
+function sameFigures(made: ProgramRow, checked: Checked): boolean {
+  const rule = ruleFacts(made.rules[0]);
+  const a = rule.recipient;
+  const b = checked.recipient;
+  const sameRecipients =
+    a.kind === b.kind &&
+    (a.kind === 'people' && b.kind === 'people'
+      ? a.userIds.length === b.userIds.length && a.userIds.every((id, i) => id === b.userIds[i])
+      : a.kind === 'universe' && b.kind === 'universe'
+        ? a.universeId === b.universeId && (a.mode ?? 'snapshot') === (b.mode ?? 'snapshot')
+        : a.kind === 'new_from' && b.kind === 'new_from'
+          ? a.from.getTime() === b.from.getTime() && (a.to?.getTime() ?? null) === (b.to?.getTime() ?? null)
+          : true);
+  return (
+    made.kind === checked.kind &&
+    made.categoryId === checked.categoryId &&
+    rule.amount === checked.amount &&
+    rule.schedule === checked.schedule &&
+    rule.share === checked.share &&
+    rule.settlement === checked.settlement &&
+    rule.fundingAccountId === checked.fundingAccountId &&
+    [...rule.covers].sort().join() === [...checked.covers].sort().join() &&
+    sameRecipients
+  );
+}
+
 async function loadProgramRow(db: Pick<Tx, 'grantProgram'>, programId: string) {
   return db.grantProgram.findUnique({
     where: { id: programId },
@@ -331,10 +373,18 @@ async function clashesOf(db: Tx, candidate: RuleFacts, programIds?: { exclude: s
 async function save(kind: ProgramKind, input: GrantInput & { programId?: string }, issuer: Issuer, now: Date): Promise<ProgramView> {
   const checked = checkGrant(kind, input, now);
   const programId = input.programId ?? randomUUID();
+  if (input.requestKey !== undefined && (!input.requestKey || input.requestKey.length > 255)) throw new CreditRefused('requestKey must be 1 to 255 characters', 'request_key');
   const view = await prisma.$transaction(async (tx) => {
     // One save of a category's rules at a time, so two admins at the same moment cannot both save a clashing rule
-    await lockAll(tx, [`credit:rules:${checked.categoryId}`]);
+    await lockAll(tx, [`credit:rules:${checked.categoryId}`, ...(input.requestKey ? [`credit:request:${input.requestKey}`] : [])]);
     await checkIssuer(tx, checked, issuer);
+    if (input.requestKey && !input.programId) {
+      const made = await loadProgramByKey(tx, input.requestKey);
+      if (made) {
+        if (!sameFigures(made, checked)) throw new CreditRefused('That key was used for a different gift. The first one stands.', 'key_used');
+        return { ...viewOf(made, made.rules[0], made.rules.length), replayed: true as const };
+      }
+    }
     const ids = await snapshotIds(tx, checked.recipient);
     const existing = input.programId ? await loadProgramRow(tx, programId) : null;
     if (input.programId && !existing) throw new CreditRefused('That program does not exist', 'not_found');
@@ -378,7 +428,7 @@ async function save(kind: ProgramKind, input: GrantInput & { programId?: string 
     if (existing) {
       await tx.grantRule.updateMany({ where: { programId, state: 'current' }, data: { state: 'superseded', supersededAt: now } });
     } else {
-      await tx.grantProgram.create({ data: { id: programId, categoryId: checked.categoryId, kind, label: checked.label, createdById: issuer.userId } });
+      await tx.grantProgram.create({ data: { id: programId, categoryId: checked.categoryId, kind, label: checked.label, createdById: issuer.userId, requestKey: input.requestKey ?? null } });
     }
     const cols = recipientColumns(checked.recipient);
     await tx.grantRule.create({
@@ -493,7 +543,8 @@ export interface Preview {
 const monthsBetween = (from: Date, to: Date): number => (to.getUTCFullYear() - from.getUTCFullYear()) * 12 + (to.getUTCMonth() - from.getUTCMonth()) + 1;
 
 async function previewIn(db: Tx, checked: Checked, ids: readonly string[], now: Date, opts: { forProgramId?: string } = {}): Promise<Preview> {
-  const settings = await getMeterSettings();
+  // Everything inside the caller's transaction: nothing here asks for a second connection while it is held
+  const settings = await getMeterSettings(db);
   const universeAi = checked.categoryId === 'universe_ai';
   const recipient = checked.recipient;
   let countNow: number | null = null;
@@ -532,7 +583,7 @@ async function previewIn(db: Tx, checked: Checked, ids: readonly string[], now: 
   if (checked.schedule === 'none') sentence = 'Gives nothing: those people get no grant.';
   else if (unbounded) sentence = growing && !capped ? `Issues ${amountWords} to each person who qualifies, including people who join or sign up later. It has no lifetime maximum.` : `Renews every month with no end date, so it has no lifetime maximum.`;
   else sentence = `Issues at most ${universeAi ? `${lifetime} ${unit}` : dollars(lifetime ?? 0)} in all${checked.schedule === 'monthly' ? ` over ${months} month${months === 1 ? '' : 's'}` : ''}.`;
-  const envelope = await currentEnvelope(now).catch(() => null);
+  const envelope = await envelopeIn(db, now, settings).catch(() => null);
   const account = await getFundingAccount(checked.fundingAccountId, db);
   const budget = account ? budgetOf(account, settings) : null;
   const issued = account ? await issuedInMonth(db, account.id, now) : 0;
