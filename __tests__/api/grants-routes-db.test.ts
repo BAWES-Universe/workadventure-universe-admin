@@ -305,6 +305,18 @@ run('the grants routes, on the real books', () => {
       expect((await refused.json()).error).toMatch(/Nobody would be left/);
     });
 
+    it('names the clash for a universe’s members too, not only for people you picked', async () => {
+      const { omar, noor } = await twoRules();
+      await prisma.universeMember.createMany({ data: [omar, noor].map((userId) => ({ universeId, userId })) });
+      try {
+        const preview = await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'exception', audience: { kind: 'universe', universeId, mode: 'snapshot' }, instant_apps: { mode: 'same' }, computers: { mode: 'own', amountMicros: 25 * MILLION, interval: 'monthly' } } });
+        const view = await preview.json();
+        expect(view.clash?.people.sort()).toEqual(['Noor', 'Omar']);
+      } finally {
+        await prisma.universeMember.deleteMany({ where: { universeId, userId: { in: [omar, noor] } } });
+      }
+    });
+
     it('says a person’s own rule needs no choice: it comes first', async () => {
       const { omar } = await twoRules();
       const own = await call<any>(postPreview, '/x', { method: 'POST', body: { what: 'exception', ...second([omar]) } });

@@ -257,10 +257,16 @@ export async function giftInput(request: Extract<PreviewRequest, { what: 'gift' 
 
 const namesOfUsers = async (ids: string[]): Promise<Map<string, string>> => new Map((await prisma.user.findMany({ where: { id: { in: ids.slice(0, 50) } }, select: { id: true, name: true } })).map((user) => [user.id, user.name?.trim() || 'Someone']));
 
+/** The signed-in members of a universe now: who a rule for its members reaches, whether it is fixed at saving or changing (a saved rule that is not yet saved has no ids of its own to read). */
+async function membersOf(universeId: string): Promise<Set<string>> {
+  const members = await prisma.universeMember.findMany({ where: { universeId, user: { isGuest: false } }, select: { userId: true } });
+  return new Set(members.map((member) => member.userId));
+}
+
 /** The people two rules would both reach, named, from the saved rules and the ones asked about. */
 async function clashOf(category: MoneyCategory, recipients: Recipient, programId: string | undefined, setting: { amountMicros: number; interval: string }): Promise<ClashView | null> {
   const others = (await currentRules(prisma, { categoryId: category })).filter((rule) => rule.programKind === 'exception' && rule.programId !== programId);
-  const mine = recipients.kind === 'people' ? new Set(recipients.userIds) : recipients.kind === 'universe' ? await idsReached(prisma, { recipient: recipients, recipientIds: new Set() }) : new Set<string>();
+  const mine = recipients.kind === 'people' ? new Set(recipients.userIds) : recipients.kind === 'universe' ? await membersOf(recipients.universeId) : new Set<string>();
   const myRank = recipients.kind === 'people' && recipients.userIds.length === 1 ? 1 : 2;
   for (const other of others) {
     const theirRank = other.recipient.kind === 'people' && other.recipient.userIds.length === 1 ? 1 : 2;
