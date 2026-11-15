@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { paidBy, payerFromRow, payerOf, payerToRow, type PaidBy, type Payer } from '@/lib/paid-by';
 import {
@@ -64,7 +65,7 @@ export interface OpenInput {
  * Opens a task's receipt, once per Brick and task: opening it again finds it and changes nothing (the first title and payer stand).
  * Returns the id the game uses and the link a reply can carry.
  */
-export async function openReceipt(input: OpenInput, now: Date = new Date()): Promise<{ id: string; link: string; created: boolean }> {
+export async function openReceipt(input: OpenInput, now: Date = new Date()): Promise<{ id: string; link: string; created: boolean; payer: Payer }> {
   if (!input.taskKey || input.taskKey.length > 255) throw new RangeError('taskKey is required (up to 255 characters)');
   if (input.boundMicros !== undefined && input.boundMicros !== null && !wholeMicros(input.boundMicros)) throw new RangeError('boundMicros must be a whole number, 0 or more');
   const title = input.title.trim().slice(0, 120) || 'A task';
@@ -91,7 +92,8 @@ export async function openReceipt(input: OpenInput, now: Date = new Date()): Pro
   // One Brick's task is one person's: a key used for someone else is the first one's, and whoever asked has a bug to find
   if (found.personId !== input.personId) throw new RangeError('taskKey belongs to another person');
   const id = activityIdOf(found.id);
-  return { id, link: receiptLink(id), created: created.count > 0 };
+  // The payer is the one stored on the receipt: a replay after ownership changed still names who paid then
+  return { id, link: receiptLink(id), created: created.count > 0, payer: payerFromRow(found) };
 }
 
 export type Closed = { ok: true; id: string; state: ReceiptState } | { ok: false; reason: 'not_found' };
@@ -209,13 +211,26 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
   };
 }
 
+/** The person's finished receipts, newest by the time Activity shows (when it ended, else when it began), before the limit is applied. */
+async function receiptsNewest(personId: string, limit: number): Promise<ReceiptRow[]> {
+  const ids = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    SELECT "id" FROM task_receipts
+    WHERE "person_id" = ${personId} AND "state" <> 'running'
+    ORDER BY COALESCE("ended_at", "started_at") DESC, "id" DESC
+    LIMIT ${limit}`);
+  if (ids.length === 0) return [];
+  const rows = await prisma.taskReceipt.findMany({ where: { id: { in: ids.map((row) => row.id) } } });
+  const order = new Map(ids.map((row, index) => [row.id, index]));
+  return rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+}
+
 /**
  * The Activity list of a person: their finished tasks, newest first, at most `ACTIVITY_LISTED`. Tasks that are still running are not
  * listed (their status is in the chat). Reads only; it never starts or changes anything.
  */
 export async function activityFor(personId: string, limit: number = ACTIVITY_LISTED): Promise<ActivityItem[]> {
   const [rows, jobs] = await Promise.all([
-    prisma.taskReceipt.findMany({ where: { personId, state: { not: 'running' } }, orderBy: [{ startedAt: 'desc' }, { id: 'desc' }], take: limit }),
+    receiptsNewest(personId, limit),
     // A job a rule the person said refused before it ever ran took nothing and did nothing: it is not a task they had, so it is not listed
     prisma.computerJob.findMany({ where: { personId, status: { in: ['done', 'stopped', 'failed'] }, endedAt: { not: null }, OR: [{ endedBy: null }, { endedBy: { not: 'rule' } }, { startedAt: { not: null } }] }, orderBy: [{ endedAt: 'desc' }, { id: 'desc' }], take: limit }),
   ]);
@@ -245,12 +260,17 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
   const failedJobs = new Set(jobs.filter((job) => job.status === 'failed').map((job) => jobActivityIdOf(job.id)));
   const items = all.map((header) => {
     const forHeader = events.get(header.id) ?? [];
-    // A computer job that failed and took nothing is "refunded, nothing taken"
-    const took = forHeader.some((event) => event.kind === 'computer_time' && (event.costMicros ?? 0) > 0);
-    const state: ReceiptState = failedJobs.has(header.id) && !took ? 'refunded' : header.state;
+    // A computer job that failed is "refunded, nothing taken" only when the books show nothing was taken: a price not known yet is not "nothing"
+    const mayHaveTaken = forHeader.some((event) => event.kind === 'computer_time' && (event.costMicros === null || event.costMicros > 0));
+    const state: ReceiptState = failedJobs.has(header.id) && !mayHaveTaken ? 'refunded' : header.state;
     return itemOf({ ...header, state }, forHeader, names.get(header.botId) ?? 'Brick', personId);
   });
   return items.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : -1)).slice(0, limit);
+}
+
+/** A report reaches the people who run Universe the way their other warnings do (Sentry): the Brick and the task, never any words of the person's. Once per report. */
+function tellOperators(botId: string, activityId: string): void {
+  Sentry.captureMessage('A person reported that a task did not work', { level: 'warning', tags: { area: 'task-receipts' }, extra: { botId, activityId } });
 }
 
 export type Reported = { ok: true; outcome: 'sent' } | { ok: false; reason: 'not_found' };
@@ -267,18 +287,22 @@ export async function reportProblem(personId: string, activityId: string, now: D
   if (read.kind === 'receipt') {
     const row = await prisma.taskReceipt.findUnique({ where: { id: read.id } });
     if (!row || row.personId !== personId || row.state === 'running') return { ok: false, reason: 'not_found' };
-    if (row.problemAt === null) await prisma.taskReceipt.updateMany({ where: { id: row.id, problemAt: null }, data: { problemAt: now } });
+    if (row.problemAt === null) {
+      const marked = await prisma.taskReceipt.updateMany({ where: { id: row.id, problemAt: null }, data: { problemAt: now } });
+      if (marked.count > 0) tellOperators(row.botId, activityIdOf(row.id));
+    }
     return { ok: true, outcome: 'sent' };
   }
   const job = await prisma.computerJob.findUnique({ where: { id: read.id } });
   if (!job || job.personId !== personId || job.endedAt === null) return { ok: false, reason: 'not_found' };
   // The job has no receipt of its own yet: one is made now, so the report has somewhere to be kept
-  const took = await prisma.meterEvent.aggregate({ where: { jobId: job.id, kind: 'computer_time' }, _sum: { costMicros: true } });
-  const state: ReceiptState = job.status === 'failed' && Number(took._sum.costMicros ?? 0) === 0 ? 'refunded' : 'done';
+  const mayHaveTaken = await prisma.meterEvent.count({ where: { jobId: job.id, kind: 'computer_time', OR: [{ costMicros: null }, { costMicros: { gt: 0 } }] } });
+  const state: ReceiptState = job.status === 'failed' && mayHaveTaken === 0 ? 'refunded' : 'done';
   await prisma.taskReceipt.createMany({
     data: [{ botId: job.botId, personId, taskKey: job.id, runId: job.runId, title: job.title.slice(0, 120), category: 'computer', state, payerKind: 'person', payerPersonId: personId, startedAt: job.startedAt ?? job.createdAt, endedAt: job.endedAt }],
     skipDuplicates: true,
   });
-  await prisma.taskReceipt.updateMany({ where: { botId: job.botId, taskKey: job.id, personId, problemAt: null }, data: { problemAt: now } });
+  const marked = await prisma.taskReceipt.updateMany({ where: { botId: job.botId, taskKey: job.id, personId, problemAt: null }, data: { problemAt: now } });
+  if (marked.count > 0) tellOperators(job.botId, jobActivityIdOf(job.id));
   return { ok: true, outcome: 'sent' };
 }

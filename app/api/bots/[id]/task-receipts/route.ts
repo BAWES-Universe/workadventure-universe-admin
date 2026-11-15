@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import { closeReceipt, openReceipt } from '@/lib/task-receipts';
-import { paidBy, payerOf } from '@/lib/paid-by';
+import { paidBy } from '@/lib/paid-by';
 
 export const runtime = 'nodejs';
 
@@ -58,7 +58,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (body.action === 'open') {
       if (!body.title) return NextResponse.json({ error: 'A title is required to open a receipt' }, { status: 400 });
       const opened = await openReceipt({ botId: id, personId: person.personId, taskKey: body.taskKey, title: body.title, runId: body.runId, category: body.category, boundMicros: body.boundMicros });
-      return NextResponse.json({ ...opened, paidBy: paidBy(await payerOf(id), person.personId) }, { status: opened.created ? 201 : 200 });
+      const { payer, ...receipt } = opened;
+      return NextResponse.json({ ...receipt, paidBy: paidBy(payer, person.personId) }, { status: opened.created ? 201 : 200 });
     }
     if (!body.state) return NextResponse.json({ error: 'A state is required to close a receipt' }, { status: 400 });
     const closed = await closeReceipt({ botId: id, taskKey: body.taskKey, personId: person.personId, state: body.state, chargedMicros: body.chargedMicros });

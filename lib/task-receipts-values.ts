@@ -109,11 +109,15 @@ export function receiptLines(events: readonly LineEvent[], botName: string): Rec
  */
 export function spentOf(state: ReceiptState, chargedMicros: number | null, lines: readonly ReceiptLine[]): number | null {
   if (state === 'refunded') return null;
-  if (chargedMicros !== null) return chargedMicros > 0 ? chargedMicros : null;
+  // What the books recorded decides, so the total always agrees with the lines under it. A charge the caller sent only stands in when the
+  // books give no total (nothing recorded yet, or a price not known yet)
   const charged = lines.filter((line) => line.amountMicros !== undefined || line.note === 'Price not known yet');
-  if (charged.length === 0 || charged.some((line) => line.amountMicros === undefined)) return null;
-  const total = charged.reduce((sum, line) => sum + (line.amountMicros ?? 0), 0);
-  return total > 0 ? total : null;
+  if (charged.length > 0 && charged.every((line) => line.amountMicros !== undefined)) {
+    const total = charged.reduce((sum, line) => sum + (line.amountMicros ?? 0), 0);
+    return total > 0 ? total : null;
+  }
+  if (chargedMicros !== null) return chargedMicros > 0 ? chargedMicros : null;
+  return null;
 }
 
 /** The category a task is about: what it was opened as, else what it was charged as. */

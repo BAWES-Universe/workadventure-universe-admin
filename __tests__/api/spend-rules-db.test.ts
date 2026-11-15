@@ -10,6 +10,8 @@ import { NextRequest } from 'next/server';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
+jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn() }));
+import * as Sentry from '@sentry/nextjs';
 
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
@@ -420,6 +422,18 @@ run('rules said in chat and task receipts, in a real database', () => {
       await releaseRoom({ key }, NOW);
     });
 
+    it('a first stretch is not renewed when the lease it would add could take the job past the cap, though one more millionth would still fit', async () => {
+      const sara = await person('sara');
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 80_000 });
+      const key = `k-${tag}-9`;
+      expect((await reserveRoom({ key, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: 'j9' }, NOW)).ok).toBe(true);
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: NOW } });
+      // At the end of the first stretch, renewing would let the job use ten minutes more (120,000 in all): over 80,000, so it stops with what it holds
+      expect(await renewRoom({ key, moreMicros: 60_000 }, new Date(NOW.getTime() + 600_000 - 1000))).toMatchObject({ ok: false, reason: 'rule' });
+      expect((await prisma.meterReservation.findUnique({ where: { reservationKey: key } }))?.renewals).toBe(0);
+      await releaseRoom({ key }, NOW);
+    });
+
     it('"only my own accounts" refuses any paid step charged to credit, and being asked by someone else changes nothing for them', async () => {
       const sara = await person('sara');
       const omar = await person('omar');
@@ -494,6 +508,20 @@ run('rules said in chat and task receipts, in a real database', () => {
         const answers = await Promise.all([ask(), ask(), ask()]);
         for (const answer of answers) expect(answer).toEqual({ ok: false, reason: 'rule', words: expect.stringContaining('No more than $0.01 a month') });
       }
+      expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
+    });
+
+    it('a replay for a run whose job a task rule has just stopped gets that rule’s words, not the generic ones', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const item = await prisma.brickItem.create({ data: { ownerId: sara.id, botId: sara.brickId, kind: 'goal', words: 'Make the report', outcome: 'Done', cadence: { type: 'none' }, timeZone: 'Asia/Kuwait' } as never });
+      const run = await prisma.brickItemRun.create({ data: { itemId: item.id, dueAt: NOW, revision: 1, leaseUntil: new Date(NOW.getTime() + 600_000) } });
+      const stopped = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Report', status: 'stopped', endedBy: 'rule', endedAt: NOW, runId: run.id } });
+      const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'task', taskKey: stopped.id, period: 'task', capMicros: 10_000 });
+      expect(made.ok).toBe(true);
+      const again = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Report', runId: run.id }, NOW);
+      expect(again).toMatchObject({ ok: false, reason: 'rule' });
+      expect(again.ok === false && 'words' in again && again.words).not.toBe('A rule you said stopped this job');
       expect(await prisma.computerJob.count({ where: { botId: sara.brickId } })).toBe(0);
     });
 
@@ -747,6 +775,60 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await closeReceipt({ botId: sara.brickId, taskKey: 'nope', personId: sara.id, state: 'done' }, NOW)).toEqual({ ok: false, reason: 'not_found' });
     });
 
+    it('a replayed open answers with the payer stored on the receipt, not whoever pays now', async () => {
+      const sara = await person('sara');
+      const first = await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'pay-1', title: 'Flights', payer: { kind: 'sponsor', name: 'BAWES Universe' } }, NOW);
+      expect(first.payer).toEqual({ kind: 'sponsor', name: 'BAWES Universe' });
+      const again = await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'pay-1', title: 'Flights', payer: { kind: 'person', personId: sara.id, name: null } }, NOW);
+      expect(again).toMatchObject({ created: false, payer: { kind: 'sponsor', name: 'BAWES Universe' } });
+    });
+
+    it('a task’s total is what the books say, whatever charge came with the close, and the charge only stands in when the books have none', async () => {
+      const sara = await person('sara');
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'tot-1', title: 'Report', category: 'apps' }, NOW);
+      await spend(sara.id, sara.brickId, 500_000, { jobId: 'tot-1', instant: true });
+      await closeReceipt({ botId: sara.brickId, taskKey: 'tot-1', personId: sara.id, state: 'done', chargedMicros: 0 }, NOW);
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'tot-2', title: 'Other', category: 'apps' }, NOW);
+      await spend(sara.id, sara.brickId, 500_000, { jobId: 'tot-2', instant: true });
+      await closeReceipt({ botId: sara.brickId, taskKey: 'tot-2', personId: sara.id, state: 'done', chargedMicros: 900_000 }, NOW);
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'tot-3', title: 'Nothing recorded', category: 'apps' }, NOW);
+      await closeReceipt({ botId: sara.brickId, taskKey: 'tot-3', personId: sara.id, state: 'done', chargedMicros: 70_000 }, NOW);
+      const byTitle = new Map((await activityFor(sara.id)).map((item) => [item.title, item.spentMicros]));
+      expect(byTitle.get('Report')).toBe(500_000);
+      expect(byTitle.get('Other')).toBe(500_000);
+      expect(byTitle.get('Nothing recorded')).toBe(70_000);
+    });
+
+    it('the newest finished task is listed when there are more than the list holds, even if it began first', async () => {
+      const sara = await person('sara');
+      const at = (minutes: number) => new Date(NOW.getTime() + minutes * 60_000);
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'long', title: 'Began first, ended last', category: 'apps' }, at(0));
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'a', title: 'A', category: 'apps' }, at(1));
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'b', title: 'B', category: 'apps' }, at(2));
+      await closeReceipt({ botId: sara.brickId, taskKey: 'a', personId: sara.id, state: 'done' }, at(3));
+      await closeReceipt({ botId: sara.brickId, taskKey: 'b', personId: sara.id, state: 'done' }, at(4));
+      await closeReceipt({ botId: sara.brickId, taskKey: 'long', personId: sara.id, state: 'done' }, at(60));
+      expect((await activityFor(sara.id, 2)).map((item) => item.title)).toEqual(['Began first, ended last', 'B']);
+    });
+
+    it('a failed computer job is "refunded" only when the books show nothing was taken: a price not known yet is not nothing', async () => {
+      const sara = await person('sara');
+      await prisma.brickComputer.upsert({ where: { botId: sara.brickId }, create: { botId: sara.brickId, enabled: true, provider: 'fake' }, update: {} });
+      const unknown = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Price unknown', status: 'failed', endedBy: 'error', startedAt: NOW, endedAt: new Date(NOW.getTime() + 1000) } });
+      await prisma.meterEvent.create({
+        data: { eventId: `unk-${tag}`, kind: 'computer_time', pool: 'computer', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'computer', jobId: unknown.id, quantity: BigInt(60), unit: 'second', costMicros: null, basis: 'unknown' },
+      });
+      const free = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Took nothing', status: 'failed', endedBy: 'error', endedAt: new Date(NOW.getTime() + 2000) } });
+      const byTitle = new Map((await activityFor(sara.id)).map((item) => [item.title, item.state]));
+      expect(byTitle.get('Price unknown')).toBe('done');
+      expect(byTitle.get('Took nothing')).toBe('refunded');
+      // Reporting a job makes its receipt the same way
+      await reportProblem(sara.id, `act_job_${unknown.id}`);
+      await reportProblem(sara.id, `act_job_${free.id}`);
+      expect((await prisma.taskReceipt.findFirst({ where: { taskKey: unknown.id } }))?.state).toBe('done');
+      expect((await prisma.taskReceipt.findFirst({ where: { taskKey: free.id } }))?.state).toBe('refunded');
+    });
+
     it('names a sponsor that pays, to the person it paid for, with nothing taken from their credit', async () => {
       const sara = await person('sara');
       await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'flights', title: 'Flights to Doha', payer: { kind: 'sponsor', name: 'BAWES Universe' } }, NOW);
@@ -776,8 +858,13 @@ run('rules said in chat and task receipts, in a real database', () => {
       await closeReceipt({ botId: sara.brickId, taskKey: 'v2', personId: sara.id, state: 'done', chargedMicros: 100 }, NOW);
       const [item] = await activityFor(sara.id);
       expect(await reportProblem(omar.id, item.id)).toEqual({ ok: false, reason: 'not_found' });
+      const told = Sentry.captureMessage as jest.Mock;
+      told.mockClear();
       expect(await reportProblem(sara.id, item.id)).toEqual({ ok: true, outcome: 'sent' });
       expect(await reportProblem(sara.id, item.id)).toEqual({ ok: true, outcome: 'sent' });
+      // The people who run Universe are told once, with the Brick and the task and none of the person's words
+      expect(told).toHaveBeenCalledTimes(1);
+      expect(told).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ level: 'warning', extra: { botId: sara.brickId, activityId: item.id } }));
       expect((await activityFor(sara.id))[0].canReport).toBe(false);
       expect(await reportProblem(sara.id, 'act_nothing')).toEqual({ ok: false, reason: 'not_found' });
       expect(await reportProblem(sara.id, 'garbage')).toEqual({ ok: false, reason: 'not_found' });

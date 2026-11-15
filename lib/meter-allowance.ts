@@ -2,7 +2,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
 import { allowanceNow, missingSettings, monthOf, type AllowanceState, type MeterSettings } from '@/lib/meter-values';
-import { checkSpend } from '@/lib/spend-rules';
+import { checkSpend, exposureOf } from '@/lib/spend-rules';
 import type { ChargeClass } from '@/lib/spend-rules-values';
 
 /**
@@ -263,10 +263,13 @@ export async function renewRoom(input: { key: string; moreMicros?: number }, now
     const settings = await getMeterSettings(tx);
     if (more > 0) {
       // More room for a job that runs is a new step for the rules too: the same ones that let it start decide whether it may take more.
-      // The rules count what the job can still cost (the time used and the stretch its lease covers, see spend-rules), which already
-      // includes the stretch being renewed, so the question is whether anything more may be taken at all
+      // The rules count what the job can still cost (the time used and the stretch its lease covers, see spend-rules), so the question is
+      // what the renewal adds to that. What the renewal adds to what the job can still cost: its exposure through the new lease, less what it counts now (at minute five a
+      // first stretch counts whole; renewed, it counts the five minutes used and the stretch the new lease covers)
+      const before = exposureOf([row], settings.renewMinutes, now);
+      const after = exposureOf([{ amountMicros: row.amountMicros + BigInt(more), renewals: row.renewals + 1, createdAt: row.createdAt, expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE) }], settings.renewMinutes, now);
       const ruled = await checkSpend(
-        { payerPersonId: row.personId ?? '', botId: row.botId, taskKey: row.jobId, chargeClass: 'computer', amountMicros: 1 },
+        { payerPersonId: row.personId ?? '', botId: row.botId, taskKey: row.jobId, chargeClass: 'computer', amountMicros: Math.max(1, after - before) },
         now,
         tx,
       );

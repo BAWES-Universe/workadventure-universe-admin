@@ -264,7 +264,7 @@ async function unpricedCallRoom(db: Db, events: Prisma.MeterEventWhereInput[]): 
  * task can really cost, so it counts the time already used plus the one stretch the lease still covers, never the whole of what was
  * stacked up: a cap of $1 must not stop a job at $0.40. Room taken once (a model call, a first stretch) has no renewals and counts whole.
  */
-function exposureOf(rows: ReadonlyArray<{ amountMicros: bigint; renewals: number; createdAt: Date; expiresAt: Date }>, renewMinutes: number, now: Date): number {
+export function exposureOf(rows: ReadonlyArray<{ amountMicros: bigint; renewals: number; createdAt: Date; expiresAt: Date }>, renewMinutes: number, now: Date): number {
   const stretchMs = renewMinutes * 60_000;
   let total = 0;
   for (const row of rows) {

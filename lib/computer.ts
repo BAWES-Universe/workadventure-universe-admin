@@ -368,13 +368,13 @@ export async function startJob(input: { botId: string; personId: string; title: 
   // A second ask for the same run found this job while it waited for its first try, saw the controls not set up (or a rule the person said
   // stop it) and took it away: this ask gets the same answer
   if (!job) {
-    const words = await ruleWordsOf(input.botId, input.personId, now);
+    const words = await ruleWordsOf(input.botId, input.personId, now, created.id);
     return words !== null ? { ok: false, reason: 'rule', words } : { ok: false, reason: 'not_set' };
   }
   // The same, seen after that ask stopped the job and before it took it away
   if (job.status === 'stopped' && job.endedBy === 'rule' && job.startedAt === null) {
     await prisma.computerJob.deleteMany({ where: { id: job.id, status: 'stopped', endedBy: 'rule', startedAt: null } });
-    return { ok: false, reason: 'rule', words: (await ruleWordsOf(input.botId, input.personId, now)) ?? 'A rule you said stopped this job' };
+    return { ok: false, reason: 'rule', words: (await ruleWordsOf(input.botId, input.personId, now, job.id)) ?? 'A rule you said stopped this job' };
   }
   if (job.status === 'failed') return { ok: false, reason: 'broken_start' };
   const after = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
@@ -385,11 +385,11 @@ export async function startJob(input: { botId: string; personId: string; title: 
  * The rule's own words when the rules the person said stop a first stretch of room for this Brick's computer now, or null when none does:
  * asked the way the start asks it (a whole stretch), so it gives the same words the refused ask gave.
  */
-async function ruleWordsOf(botId: string, personId: string, now: Date): Promise<string | null> {
+async function ruleWordsOf(botId: string, personId: string, now: Date, taskKey: string | null = null): Promise<string | null> {
   const provider = providerFor(await prisma.brickComputer.findUnique({ where: { botId } }));
   if (!provider) return null;
   const settings = await getMeterSettings();
-  const ruled = await checkSpend({ payerPersonId: personId, botId, taskKey: null, chargeClass: 'computer', amountMicros: roomFor(settings.renewMinutes, provider.microsPerMinute()) }, now);
+  const ruled = await checkSpend({ payerPersonId: personId, botId, taskKey, chargeClass: 'computer', amountMicros: roomFor(settings.renewMinutes, provider.microsPerMinute()) }, now);
   return ruled.ok ? null : ruled.words;
 }
 
@@ -403,6 +403,7 @@ async function reuseRunJob(botId: string, runId: string, now: Date): Promise<Sta
   let found = await prisma.computerJob.findUnique({ where, include: JOB_INCLUDE });
   if (!found) return null;
   const owner = found.personId;
+  const jobId = found.id;
   if (found.status === 'queued') {
     const tried = await tryStart(found.id, now);
     if (typeof tried === 'object') {
@@ -417,7 +418,7 @@ async function reuseRunJob(botId: string, runId: string, now: Date): Promise<Sta
     found = await prisma.computerJob.findUnique({ where, include: JOB_INCLUDE });
     // The first ask took it away while this one looked again: the controls are not set up, or a rule the person said stopped it
     if (!found) {
-      const words = await ruleWordsOf(botId, owner, now);
+      const words = await ruleWordsOf(botId, owner, now, jobId);
       return words !== null ? { ok: false, reason: 'rule', words } : { ok: false, reason: 'not_set' };
     }
   }
@@ -425,7 +426,7 @@ async function reuseRunJob(botId: string, runId: string, now: Date): Promise<Sta
   // answer as that ask. A job that ran and was stopped later by a rule is over like any other and is returned as it stands, never removed
   if (found.status === 'stopped' && found.endedBy === 'rule' && found.startedAt === null) {
     await prisma.computerJob.deleteMany({ where: { id: found.id, status: 'stopped', endedBy: 'rule', startedAt: null } });
-    return { ok: false, reason: 'rule', words: (await ruleWordsOf(botId, found.personId, now)) ?? 'A rule you said stopped this job' };
+    return { ok: false, reason: 'rule', words: (await ruleWordsOf(botId, found.personId, now, found.id)) ?? 'A rule you said stopped this job' };
   }
   if (found.status === 'failed') return { ok: false, reason: 'broken_start' };
   return { ok: true, job: jobView(found), restoredFrom: null };
