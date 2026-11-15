@@ -351,19 +351,41 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await reserveRoom({ key: `k-${tag}-3`, personId: sara.id, amountMicros: 1, botId: sara.brickId, jobId: 'j3' }, NOW)).toMatchObject({ ok: false, reason: 'rule', leftMicros: 0 });
     });
 
-    it('a job that keeps running may not take more room than the rule allows, and a corrected rule lets it', async () => {
+    it('a job that keeps running may not go on past what the rule allows, and a corrected rule lets it', async () => {
       const sara = await person('sara');
       const made = await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 100_000 });
       if (!made.ok) throw new Error('not made');
-      const room = await reserveRoom({ key: `k-${tag}-4`, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: 'j4' }, NOW);
+      const key = `k-${tag}-4`;
+      const room = await reserveRoom({ key, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: 'j4' }, NOW);
       expect(room.ok).toBe(true);
-      expect(await renewRoom({ key: `k-${tag}-4`, moreMicros: 60_000 }, NOW)).toMatchObject({ ok: false, reason: 'rule', leftMicros: 40_000 });
-      // The room it holds is untouched: the job saves its work and stops safely
-      expect((await prisma.meterReservation.findUnique({ where: { reservationKey: `k-${tag}-4` } }))?.amountMicros).toBe(BigInt(60_000));
-      expect(await renewRoom({ key: `k-${tag}-4`, moreMicros: 40_000 }, NOW)).toMatchObject({ ok: true });
+      // The test clock is not the database's: the room starts when the test says it did
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: NOW } });
+      const at = (seconds: number) => new Date(NOW.getTime() + seconds * 1000);
+      // Five minutes in, the job has used half a stretch and still has one stretch of lease: 90,000 can still be spent, under 100,000
+      expect(await renewRoom({ key, moreMicros: 60_000 }, at(300))).toMatchObject({ ok: true });
+      // Ten minutes in the job could cost 120,000 by the end of its lease: that is over, so it stops safely with the room it holds
+      expect(await renewRoom({ key, moreMicros: 60_000 }, at(600))).toMatchObject({ ok: false, reason: 'rule', leftMicros: 0 });
+      expect((await prisma.meterReservation.findUnique({ where: { reservationKey: key } }))?.amountMicros).toBe(BigInt(120_000));
       await changeRule(made.rule.id, sara.id, { capMicros: 500_000 });
-      expect(await renewRoom({ key: `k-${tag}-4`, moreMicros: 60_000 }, NOW)).toMatchObject({ ok: true });
-      await releaseRoom({ key: `k-${tag}-4` }, NOW);
+      expect(await renewRoom({ key, moreMicros: 60_000 }, at(600))).toMatchObject({ ok: true });
+      await releaseRoom({ key }, NOW);
+    });
+
+    it('renewing often does not stop a job early: a rule counts what the job can really cost, not the room stacked up by every renewal', async () => {
+      const sara = await person('sara');
+      // $0.15 is 25 minutes of a computer at 6,000 a minute: with one stretch (10 minutes, 60,000) of lease on top, the job may use 15 minutes
+      await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 150_000 });
+      const key = `k-${tag}-8`;
+      expect((await reserveRoom({ key, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: 'j8' }, NOW)).ok).toBe(true);
+      await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: NOW } });
+      const at = (seconds: number) => new Date(NOW.getTime() + seconds * 1000);
+      // Asked every 4 minutes (0.4 of a stretch), each renewal holds a whole stretch more: the held room is 300,000 by the fourth renewal
+      for (const seconds of [240, 480, 720, 840]) {
+        expect(await renewRoom({ key, moreMicros: 60_000 }, at(seconds))).toMatchObject({ ok: true });
+      }
+      // Sixteen minutes in the job could cost 156,000: that is what the rule stops
+      expect(await renewRoom({ key, moreMicros: 60_000 }, at(960))).toMatchObject({ ok: false, reason: 'rule' });
+      await releaseRoom({ key }, NOW);
     });
 
     it('"only my own accounts" refuses any paid step charged to credit, and being asked by someone else changes nothing for them', async () => {
@@ -517,8 +539,11 @@ run('rules said in chat and task receipts, in a real database', () => {
       const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Long job' }, NOW);
       if (!started.ok) throw new Error(`not started: ${started.reason}`);
       expect(started.job.status).toBe('running');
-      // 60,000 is held; another stretch of 60,000 does not fit under 100,000
-      const renewed = await renewJob(started.job.id, new Date(NOW.getTime() + 60_000));
+      await prisma.meterReservation.updateMany({ where: { jobId: started.job.id }, data: { createdAt: NOW } });
+      // 60,000 is held. A minute in, the job can still cost 66,000 by the end of its lease: that fits
+      expect(await renewJob(started.job.id, new Date(NOW.getTime() + 60_000))).toMatchObject({ ok: true });
+      // Ten minutes in it could cost 120,000, which is over 100,000
+      const renewed = await renewJob(started.job.id, new Date(NOW.getTime() + 600_000));
       expect(renewed).toEqual({ ok: false, reason: 'rule', words: expect.stringContaining('No more than $0.10 a month') });
       const ended = await prisma.computerJob.findUnique({ where: { id: started.job.id } });
       expect(ended).toMatchObject({ status: 'stopped', endedBy: 'rule' });

@@ -262,9 +262,11 @@ export async function renewRoom(input: { key: string; moreMicros?: number }, now
     if (!row || row.state !== 'held' || row.expiresAt <= now) return { ok: false, reason: 'closed' };
     const settings = await getMeterSettings(tx);
     if (more > 0) {
-      // More room for a job that runs is a new step for the rules too: the same ones that let it start decide whether it may take more
+      // More room for a job that runs is a new step for the rules too: the same ones that let it start decide whether it may take more.
+      // The rules count what the job can still cost (the time used and the stretch its lease covers, see spend-rules), which already
+      // includes the stretch being renewed, so the question is whether anything more may be taken at all
       const ruled = await checkSpend(
-        { payerPersonId: row.personId ?? '', botId: row.botId, taskKey: row.jobId, chargeClass: 'computer', amountMicros: more },
+        { payerPersonId: row.personId ?? '', botId: row.botId, taskKey: row.jobId, chargeClass: 'computer', amountMicros: 1 },
         now,
         tx,
       );

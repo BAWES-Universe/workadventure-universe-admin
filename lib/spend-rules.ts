@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
+import { getMeterSettings } from '@/lib/meter';
 import { ownsBrick } from '@/lib/brick';
 import {
   draftRule,
@@ -29,7 +30,7 @@ import {
  * falls back to somebody else's credit and never lifts a limit: it only ever makes the allowed amount smaller.
  */
 
-type Db = Pick<typeof prisma, 'spendRule' | 'meterEvent' | 'meterReservation' | 'creditHold'> & Partial<Pick<Prisma.TransactionClient, '$executeRaw'>>;
+type Db = Pick<typeof prisma, 'spendRule' | 'meterEvent' | 'meterReservation' | 'creditHold' | 'appSetting'> & Partial<Pick<Prisma.TransactionClient, '$executeRaw'>>;
 
 const toNumber = (value: bigint | number | null): number => (value === null ? 0 : Number(value));
 
@@ -234,6 +235,28 @@ async function unpricedCallRoom(db: Db, events: Prisma.MeterEventWhereInput[]): 
   return toNumber(rooms._sum.settledMicros);
 }
 
+/**
+ * What held room can still cost, for a rule. A job that keeps running renews its room every part of a stretch and each renewal holds one
+ * more stretch (so the room held grows faster than the computer is used: that is how the allowance stays safe). A rule is about what a
+ * task can really cost, so it counts the time already used plus the one stretch the lease still covers, never the whole of what was
+ * stacked up: a cap of $1 must not stop a job at $0.40. Room taken once (a model call, a first stretch) has no renewals and counts whole.
+ */
+function exposureOf(rows: ReadonlyArray<{ amountMicros: bigint; renewals: number; createdAt: Date; expiresAt: Date }>, renewMinutes: number, now: Date): number {
+  const stretchMs = renewMinutes * 60_000;
+  let total = 0;
+  for (const row of rows) {
+    const amount = toNumber(row.amountMicros);
+    if (row.renewals <= 0 || !(stretchMs > 0)) {
+      total += amount;
+      continue;
+    }
+    const oneStretch = amount / (row.renewals + 1);
+    const usedMs = Math.max(0, Math.min(now.getTime(), row.expiresAt.getTime()) - row.createdAt.getTime());
+    total += Math.min(amount, Math.ceil(oneStretch * (1 + usedMs / stretchMs)));
+  }
+  return total;
+}
+
 /** What a rule counts for a step: taken (in the books) and held (room not yet settled), for the rule's own scope and period. */
 async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Date): Promise<SpentSoFar> {
   const personKey = `person:${rule.ownerPersonId}`;
@@ -268,13 +291,14 @@ async function spentFor(db: Db, rule: SpendRule, attempt: SpendAttempt, now: Dat
   let spentMicros = 0;
   let heldMicros = 0;
   if (wantsComputer(rule.covers)) {
-    const [taken, held, unpriced] = await Promise.all([
+    const [taken, held, unpriced, settings] = await Promise.all([
       db.meterEvent.aggregate({ where: { AND: events }, _sum: { costMicros: true } }),
-      db.meterReservation.aggregate({ where: { AND: holds }, _sum: { amountMicros: true } }),
+      db.meterReservation.findMany({ where: { AND: holds }, select: { amountMicros: true, renewals: true, createdAt: true, expiresAt: true } }),
       unpricedCallRoom(db, events),
+      getMeterSettings(db),
     ]);
     spentMicros += toNumber(taken._sum.costMicros) + unpriced;
-    heldMicros += toNumber(held._sum.amountMicros);
+    heldMicros += exposureOf(held, settings.renewMinutes, now);
   }
   if (wantsApps(rule.covers)) {
     const [settled, held] = await Promise.all([
