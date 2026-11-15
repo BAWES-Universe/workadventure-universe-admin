@@ -73,7 +73,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const ruled = await ownerSpendAllowed(id, person.personId, 'computer', new Date(), parsed.data.runId ?? null);
     if (!ruled.ok) return NextResponse.json({ ok: false, reason: 'rule', rule: { id: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words } });
     const started = await startJob({ botId: id, personId: person.personId, title: parsed.data.title, writes: parsed.data.writes, runId: parsed.data.runId });
-    return NextResponse.json(started.ok ? { ok: true, job: started.job, restoredFrom: started.restoredFrom } : { ok: false, reason: started.reason });
+    if (started.ok) return NextResponse.json({ ok: true, job: started.job, restoredFrom: started.restoredFrom });
+    // A rule that stopped it on the try itself (the pre-check only asks for a first millionth): the same shape as above, with the rule's words
+    if (started.reason === 'rule') return NextResponse.json({ ok: false, reason: 'rule', rule: { id: null, why: null, leftMicros: null, words: started.words } });
+    return NextResponse.json({ ok: false, reason: started.reason });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'computer' } });
     console.error('[Computer] Could not start a job:', error instanceof Error ? error.message : 'unknown');

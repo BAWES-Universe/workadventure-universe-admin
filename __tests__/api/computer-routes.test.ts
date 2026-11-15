@@ -206,6 +206,16 @@ describe('the bot server’s calls', () => {
     expect(lib.startJob).not.toHaveBeenCalled();
   });
 
+  it('keeps the rule’s words when a rule stops it on the try itself, after the first check let it through', async () => {
+    resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+    lib.startJob.mockResolvedValue({ ok: false, reason: 'rule', words: 'No more than $1.00 a month from your credit for Brick' } as never);
+    expect(await (await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' } }), params)).json()).toEqual({
+      ok: false,
+      reason: 'rule',
+      rule: { id: null, why: null, leftMicros: null, words: 'No more than $1.00 a month from your credit for Brick' },
+    });
+  });
+
   it('says whether the computer is on for its owner, read only, and "off" for anyone else', async () => {
     resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
     lib.computerView.mockResolvedValue({ available: true, on: true, job: null, queued: [] } as never);
