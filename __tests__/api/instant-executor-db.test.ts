@@ -1076,13 +1076,20 @@ run('the bounded Instant executor, in a real database', () => {
       const hang = new Promise<InstantLog[]>((resolve) => (letGo = () => resolve([])));
       p.instant.findLogs.mockImplementation((() => hang) as never);
       await prisma.instantRun.updateMany({ where: { personId: sara }, data: { state: 'ambiguous', sentAt: new Date(Date.now() - 600 * MIN) } });
+      // The race the lock-held look-up needs: the early lookup (no lock) misses, and only the locked lookup finds the run
+      // (and the unlocked same-ask checks miss too), so the run is first seen under the lock
+      const early = jest.spyOn(prisma.instantRun, 'findUnique').mockResolvedValueOnce(null as never);
+      const twins = jest.spyOn(prisma.instantRun, 'findFirst').mockResolvedValueOnce(null as never).mockResolvedValueOnce(null as never);
       const asking = runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
       await new Promise((resolve) => setTimeout(resolve, 150));
       const other = await Promise.race([runInstant(ask({ arguments: { query: 'something else' } }), { adapter: p.adapter, funds: f.funds }), new Promise<'stuck'>((resolve) => setTimeout(() => resolve('stuck'), 5_000))]);
+      expect(early).toHaveBeenCalled();
       expect(other).not.toBe('stuck');
       expect(other).toMatchObject({ status: 'done' });
       letGo();
       await asking;
+      early.mockRestore();
+      twins.mockRestore();
     });
 
     it('a reservation that comes back after the clean-up closed the run is never sent, and its hold is given back', async () => {
