@@ -63,6 +63,13 @@ export interface Billing {
   auto_top_up?: { enabled: boolean } | null;
 }
 
+/** What Agent37 billed for one UTC day (`GET /v1/usage`, docs agents-api/billing): whole micros, by instance. Managed spend is `totalMicros - computeMicros`. */
+export interface UsageDay {
+  day: string;
+  totalMicros: number;
+  instances: { id: string; totalMicros: number; computeMicros: number; awakeMinutes: number }[];
+}
+
 /** An answer that was not a success. `code` is Agent37's own word for it (`try_again`, `insufficient_balance`...), when it gave one. */
 export class Agent37Error extends Error {
   constructor(
@@ -234,6 +241,26 @@ export class Agent37Client {
   /** The wallet. `balance_usd` is dollars. */
   billing(): Promise<Billing> {
     return this.again(() => this.call('GET', `${this.api}/v1/billing`, this.account()));
+  }
+
+  /**
+   * One UTC day of Agent37's bill, by instance: what they charged and how many minutes each machine was awake. Read-only, so safe to ask
+   * again. A day that is not a date, or an answer with no total, is refused rather than read as "nothing was billed".
+   */
+  async usageForDay(day: string): Promise<UsageDay> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || Number.isNaN(Date.parse(`${day}T00:00:00Z`))) throw new Error('A usage day must be a date (YYYY-MM-DD)');
+    const answer = await this.again(() => this.call<Record<string, unknown>>('GET', `${this.api}/v1/usage?from=${day}&to=${day}`, this.account()));
+    const whole = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : null);
+    const total = whole(answer?.total_micros);
+    if (total === null || !Array.isArray(answer?.instances)) throw new Agent37Error(502, null, 'Agent37 answered usage with no total');
+    const instances: UsageDay['instances'] = [];
+    for (const raw of answer.instances as Array<Record<string, unknown>>) {
+      const id = typeof raw?.id === 'string' ? raw.id : null;
+      const entryTotal = whole(raw?.total_micros);
+      if (!id || entryTotal === null) continue;
+      instances.push({ id, totalMicros: entryTotal, computeMicros: whole(raw.compute_micros) ?? entryTotal, awakeMinutes: whole(raw.awake_minutes) ?? 0 });
+    }
+    return { day, totalMicros: total, instances };
   }
 
   /** The agent's own health. It answers 502 for a few seconds after a machine starts, so a caller asks again until `healthy` is true. */

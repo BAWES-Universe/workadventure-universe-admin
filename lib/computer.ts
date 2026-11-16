@@ -11,6 +11,7 @@ import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provi
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { recordKeptBytes } from '@/lib/computer-disk';
+import { reconcileComputers } from '@/lib/computer-reconcile';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
 import {
   AFTER_TAKE_OVER,
@@ -927,6 +928,8 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   await getComputerProvider()?.maintain().catch((error) => console.error('[Computer] The provider could not be kept up:', error instanceof Error ? error.message : 'unknown'));
   // A wind-down that is on goes on until every job is over and every machine is stopped and proven so
   await continueWindDown(now, batch).catch((error) => console.error('[Computer] The wind-down could not go on:', error instanceof Error ? error.message : 'unknown'));
+  // Once a day: our books against the provider's bill for the day before (it only reads and reports; a bill that cannot be read is tried again later)
+  await reconcileComputers(now).catch((error) => console.error('[Computer] The daily check of the books could not be made:', error instanceof Error ? error.message : 'unknown'));
   // A job that asked its person to take over and got no answer within the wait a super admin set ends, so it does not hold the
   // machine and the allowance for nobody. Read each sweep, so a changed setting counts at once, jobs already waiting included. Once the
   // person has taken over the job is theirs and is not ended here.

@@ -3193,6 +3193,29 @@ model BrickComputer {
   @@map("brick_computers")
 }
 
+// The daily check of our books against the computer provider's own bill (one row per UTC day, never changed once written): what the provider
+// charged, what we booked, and what does not match. Reading it never changes any money; the reserves are what stop overspend.
+model ComputerReconcile {
+  id               String   @id @default(uuid())
+  // The UTC day compared, as YYYY-MM-DD
+  day              String   @unique @db.VarChar(10)
+  checkedAt        DateTime @default(now()) @map("checked_at")
+  // What the provider billed that day in all, and how much of it was machines of ours
+  agentTotalMicros BigInt   @map("agent_total_micros")
+  agentBrickMicros BigInt   @map("agent_brick_micros")
+  // What our books say the same machines were awake, in minutes, and the provider's count
+  ourMinutes       Int      @map("our_minutes")
+  agentMinutes     Int      @map("agent_minutes")
+  // ok, or drift when something below did not match
+  status           String   @db.VarChar(5)
+  // What the findings add up to, in micros
+  gapMicros        BigInt   @map("gap_micros")
+  // [{ kind, ref, botId, detail... }], never a key or a person's words
+  findings         Json
+
+  @@map("computer_reconciles")
+}
+
 // One job on a Brick's computer (game #2000). Jobs for a Brick queue; the database holds at most one WRITING job running or
 // waiting for its person at a time (computer_jobs_one_writer), so two jobs started at the same moment can never both write.
 // Only work proven read-only (`writes` false) may overlap.

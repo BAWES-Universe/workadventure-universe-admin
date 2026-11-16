@@ -1,7 +1,7 @@
-import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
+import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, ProviderDay, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
 import { readTurn } from '@/lib/agent37/turn-events';
 import { Agent37Client, Agent37Error, Agent37Unreached, type Instance, type NetworkPolicy } from '@/lib/agent37/client';
-import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros } from '@/lib/agent37/rates';
+import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros, restingMicrosPerMinute } from '@/lib/agent37/rates';
 import { deleteSavedCopy, savedCopyOf, storeSavedCopy, type SavedCopyInfo } from '@/lib/agent37/saved-copies';
 import { ensureImage, imageReady, type ImageState } from '@/lib/agent37/image';
 
@@ -202,6 +202,31 @@ export class Agent37ComputerProvider implements ComputerProvider {
     this.remember(made, botId);
     await this.untilHealthy(made.id, made.url);
     return { ref: made.id, region: made.region ?? 'us' };
+  }
+
+  /**
+   * Agent37's bill for one UTC day, by machine. A machine is a Brick's when we wrote its Brick on it (`brick:<id>`), "other" when it is on the
+   * account but not made by us (the account also holds machines that are not Bricks), and "gone" when the bill has it and it no longer exists.
+   * `expectedMicros` is the bill the published rates make of its awake minutes (the rest of the day at the resting disk's rate); a machine made
+   * or removed that day was billed for less than a whole day of resting, so this is the most it can be.
+   */
+  async dayUsage(day: string): Promise<ProviderDay> {
+    const bill = await this.client.usageForDay(day);
+    const present = new Map((await this.client.listInstances()).map((instance) => [instance.id, instance]));
+    const awake = awakeMicrosPerMinute(BRICK_SHAPE);
+    const resting = restingMicrosPerMinute(BRICK_SHAPE);
+    return {
+      day: bill.day,
+      totalMicros: bill.totalMicros,
+      instances: bill.instances.map((entry) => {
+        const instance = present.get(entry.id);
+        const creation = typeof instance?.metadata?.creation_id === 'string' ? instance.metadata.creation_id : null;
+        const botId = creation && creation.startsWith('brick:') ? creation.slice('brick:'.length) : null;
+        const kind: 'brick' | 'other' | 'gone' = !instance ? 'gone' : botId ? 'brick' : 'other';
+        const minutes = Math.min(entry.awakeMinutes, 1440);
+        return { ref: entry.id, kind, botId, totalMicros: entry.totalMicros, computeMicros: entry.computeMicros, awakeMinutes: entry.awakeMinutes, expectedMicros: Math.round(minutes * awake + (1440 - minutes) * resting) };
+      }),
+    };
   }
 
   async maintain(): Promise<void> {

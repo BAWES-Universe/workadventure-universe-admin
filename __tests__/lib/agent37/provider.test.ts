@@ -112,6 +112,10 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       instances.get(id)!.network = network as Instance['network'];
       return instances.get(id)!;
     },
+    async usageForDay(day: string) {
+      calls.push(`usage:${day}`);
+      return usage;
+    },
     async archive(url: string) {
       calls.push(`archive:${url}`);
       return { body: new ReadableStream() } as unknown as Response;
@@ -119,7 +123,8 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   };
   const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }> = [];
   const networks: Array<{ id: string; network: unknown }> = [];
-  return { client: client as unknown as Agent37Client, instances, calls, execs, created, networks, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
+  const usage: { day: string; totalMicros: number; instances: Array<{ id: string; totalMicros: number; computeMicros: number; awakeMinutes: number }> } = { day: '2026-11-15', totalMicros: 0, instances: [] };
+  return { client: client as unknown as Agent37Client, instances, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
 }
 
 function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
@@ -450,6 +455,32 @@ describe('the Agent37 provider', () => {
       await expect(p.openTurn('m1', { text: 'x' })).rejects.toThrow('deleted');
       await expect(p.cancelTurn('m1', 'r')).rejects.toThrow('deleted');
     });
+  });
+});
+
+describe("Agent37's bill for a day", () => {
+  it('says which machine of Agent37 is a Brick of ours, one that is not ours, and one that is gone, and what its published rates make of the awake minutes', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.instances.set('other1', { id: 'other1', status: 'stopped', url: 'https://other1.agent37.app', metadata: null });
+    w.usage.totalMicros = 30_000;
+    w.usage.instances.push(
+      { id: 'm1', totalMicros: 12_000, computeMicros: 11_000, awakeMinutes: 60 },
+      { id: 'other1', totalMicros: 400, computeMicros: 400, awakeMinutes: 0 },
+      { id: 'removed1', totalMicros: 300, computeMicros: 300, awakeMinutes: 10 },
+    );
+    const day = await p.dayUsage('2026-11-15');
+    expect(w.calls).toContain('usage:2026-11-15');
+    expect(day.totalMicros).toBe(30_000);
+    const byRef = Object.fromEntries(day.instances.map((entry) => [entry.ref, entry]));
+    expect(byRef.m1).toMatchObject({ kind: 'brick', botId: 'bot-1', totalMicros: 12_000, computeMicros: 11_000, awakeMinutes: 60 });
+    expect(byRef.other1).toMatchObject({ kind: 'other', botId: null });
+    expect(byRef.removed1).toMatchObject({ kind: 'gone', botId: null });
+    // 60 awake minutes at the published awake rate, the other 1380 minutes of the day at the disk's rate
+    const awake = awakeMicrosPerMinute(BRICK_SHAPE);
+    const rest = (BRICK_SHAPE.disk * 90_000) / (730 * 60);
+    expect(byRef.m1.expectedMicros).toBeCloseTo(60 * awake + 1380 * rest, 0);
   });
 });
 

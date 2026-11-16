@@ -42,6 +42,11 @@ export function awakeMicrosPerMinute(shape: Shape = BRICK_SHAPE): number {
   return (compute + shape.disk * DISK_MONTH_MICROS) / MINUTES_PER_MONTH;
 }
 
+/** What one minute costs while the machine rests: only its disk (Agent37 bills a resting machine's disk alone), in micros. */
+export function restingMicrosPerMinute(shape: Shape = BRICK_SHAPE): number {
+  return (shape.disk * DISK_MONTH_MICROS) / MINUTES_PER_MONTH;
+}
+
 /** What keeping the disk costs for a month while the machine rests, in micros. */
 export function keptDiskMonthMicros(shape: Shape = BRICK_SHAPE): number {
   return shape.disk * DISK_MONTH_MICROS;

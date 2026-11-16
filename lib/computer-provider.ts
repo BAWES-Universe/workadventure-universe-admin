@@ -57,6 +57,26 @@ export interface Check {
   detail: string;
 }
 
+/** One machine in the provider's bill for a day. `ref` is the provider's own id; `kind` says whose machine it is (a Brick's, another one on the same account, or one that is gone). */
+export interface ProviderDayInstance {
+  ref: string;
+  kind: 'brick' | 'other' | 'gone';
+  /** The Brick it was made for, from what we wrote on it when we made it; null for `other` and `gone`. */
+  botId: string | null;
+  totalMicros: number;
+  computeMicros: number;
+  awakeMinutes: number;
+  /** What the provider's own published rates make of this machine's awake minutes and resting disk for the day; null when they cannot say. */
+  expectedMicros: number | null;
+}
+
+/** What the provider billed for one UTC day (`YYYY-MM-DD`). */
+export interface ProviderDay {
+  day: string;
+  totalMicros: number;
+  instances: ProviderDayInstance[];
+}
+
 export interface ComputerProvider {
   readonly kind: 'fake' | 'real';
   /** What an awake minute costs, in millionths of a dollar, as the provider says; null when it has not said. */
@@ -74,6 +94,8 @@ export interface ComputerProvider {
   ready(ref: string): Promise<void>;
   /** What a job needs from the provider right now (the key works, the wallet carries a job, the image is built). Reads only; never throws. */
   checkup(): Promise<Check[]>;
+  /** What the provider billed for a UTC day, by machine, for the daily check of our books against its bill. Reads only. Absent for a provider with no bill. */
+  dayUsage?(day: string): Promise<ProviderDay>;
   /** Whatever the provider keeps up between jobs (the real one builds its image). Asked by the sweep; never throws. */
   maintain(): Promise<void>;
   /** Lets it rest after a job: the disk is kept, nothing else is billed. */
