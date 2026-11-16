@@ -115,12 +115,33 @@ export const OWN_INITIATIVE_KEY = 'net.bawes.universe.alone';
 /** The news line that fills the title of the push: longer than this and the message is shown the ordinary way. */
 const HEADLINE_LENGTH = 70;
 
+/** Markdown read as plain words: only paired marks and a mark that opens a line, so `doc_id_42` and a bare `5 * 3` stay as written. */
 const plainWords = (value: string) =>
   value
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/[*_`#>]/g, '')
+    .replace(/^[ \t]*(?:#{1,6}|>)[ \t]+/gm, '')
+    // A link's address may hold one level of balanced parentheses: [page](https://x.test/a_(b))
+    .replace(/\[([^\]]*)\]\(((?:[^()\s]|\([^()\s]*\))*)\)/g, '$1')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, '$1')
+    .replace(/(?<![\p{L}\p{N}_])__(?=\S)(.+?)(?<=\S)__(?![\p{L}\p{N}_])/gu, '$1')
+    .replace(/\*(?=\S)(.+?)(?<=\S)\*/g, '$1')
+    .replace(/(?<![\p{L}\p{N}_])_(?=\S)(.+?)(?<=\S)_(?![\p{L}\p{N}_])/gu, '$1')
     .replace(/\s+/g, ' ')
     .trim();
+
+/** A sentence that stops at one of these is not over yet ("Dr. Lee approved it"). Sentence breaking alone does not know them. */
+const ABBREVIATION = /(?:^|[^\p{L}])(?:mr|mrs|ms|dr|prof|sr|jr|st|vs|e\.g|i\.e|no|inc|ltd|co)\.$|(?:^|[^\p{L}])\p{Lu}\.$/iu;
+
+/** The first sentence of some words, for any script ("؟" and "。" end one too); null when there is none. */
+function firstSentence(words: string): string | null {
+  let sentence = '';
+  for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'sentence' }).segment(words)) {
+    sentence += segment;
+    const done = sentence.trim();
+    if (!ABBREVIATION.test(done)) return /[.!?؟۔。！？…]$/u.test(done) ? done : null;
+  }
+  return null;
+}
 
 /**
  * What a locked phone shows. A message a Brick sent by itself opens with its news, so that is the title and the rest
@@ -139,9 +160,9 @@ export function pushText(
   if (!ourBot || !previews || notification.type !== 'm.room.message' || content?.msgtype === undefined || content[OWN_INITIATIVE_KEY] !== true) return ordinary;
   if (content.msgtype !== 'm.text' && content.msgtype !== 'm.notice') return ordinary;
   const words = plainWords(text(content.body) ?? '');
-  const first = /^(.+?[.!?])(?:\s+|$)/.exec(words)?.[1];
-  const title = first?.replace(/[.!?]+$/, '').trim();
-  if (!first || !title || title.length > HEADLINE_LENGTH) return ordinary;
+  const first = firstSentence(words);
+  const title = first?.replace(/[.!?؟۔。！？…]+$/u, '').trim();
+  if (!first || !title || title.length < 3 || title.length > HEADLINE_LENGTH) return ordinary;
   const rest = words.slice(first.length).trim();
   if (!rest) return { title, body: senderName };
   const line = `${senderName}: ${rest}`;

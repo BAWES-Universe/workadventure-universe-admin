@@ -205,6 +205,29 @@ describe('what a locked phone shows for a Brick that spoke by itself (game #2002
     expect(pushText(alone('Nothing scheduled today.'), true, 'Brick', true)).toEqual({ title: 'Nothing scheduled today', body: 'Brick' });
   });
 
+  it('does not cut the news at an abbreviation or an initial, and cuts at the end of a sentence in any script', () => {
+    expect(pushText(alone('Dr. Lee approved your visa. Goal done.'), true, 'Brick', true)).toEqual({ title: 'Dr. Lee approved your visa', body: 'Brick: Goal done.' });
+    expect(pushText(alone('J. Smith sent the form. Please check it.'), true, 'Brick', true).title).toBe('J. Smith sent the form');
+    // An Arabic question mark and a full stop in Chinese end one too
+    expect(pushText(alone('هل تمت الموافقة على التأشيرة؟ تم الأمر في المحادثة.'), true, 'Brick', true)).toEqual({
+      title: 'هل تمت الموافقة على التأشيرة',
+      body: 'Brick: تم الأمر في المحادثة.',
+    });
+    expect(pushText(alone('签证已批准。已保存在聊天中。'), true, 'Brick', true).title).toBe('签证已批准');
+    // Too short to be a title
+    expect(pushText(alone('Ok. Done and saved.'), true, 'Brick', true).title).toBe('Brick');
+  });
+
+  it('removes only paired formatting, so names and addresses stay as written', () => {
+    expect(pushText(alone('doc_id_42 is ready. Done.'), true, 'Brick', true).title).toBe('doc_id_42 is ready');
+    expect(pushText(alone('[page](https://x.test/a_(b)) is live. Ok.'), true, 'Brick', true).title).toBe('page is live');
+    expect(pushText(alone('## __Visa__ approved! *Goal* done in `the chat`.'), true, 'Brick', true)).toEqual({
+      title: 'Visa approved',
+      body: 'Brick: Goal done in the chat.',
+    });
+    expect(pushText(alone('Paid 5 * 3 in #42 today. Done.'), true, 'Brick', true).title).toBe('Paid 5 * 3 in #42 today');
+  });
+
   it('shows everything else the ordinary way', () => {
     const own = alone('Your visa is approved. Goal done.');
     // Not marked as its own doing: an answer in a chat
