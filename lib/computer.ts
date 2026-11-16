@@ -16,6 +16,7 @@ import {
   HOLDS_MACHINE,
   PERSON_ONLY,
   costOfSeconds,
+  givenBackJob,
   isOver,
   roomFor,
   type EffectKind,
@@ -830,7 +831,7 @@ async function recordComputerTime(job: { id: string; botId: string; personId: st
   // A job that failed on our side (the machine would not start or could not be reached, the agent's turn broke, the worker was lost) is not
   // the person's: what it ran stays in the books as our own cost (the provider still bills it), but is not written against them, so it
   // never draws from their month. A job that ran and ended any other way (done, stopped by them, out of room, nobody answered) is theirs.
-  const givenBack = why.status === 'failed' || (why.status === 'stopped' && why.endedBy === 'error');
+  const givenBack = givenBackJob(why.status, why.endedBy);
   await recordMeterEvent({
     eventId: `computer:${job.id}:time`,
     kind: 'computer_time',

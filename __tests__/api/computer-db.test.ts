@@ -436,6 +436,7 @@ run('a Brick’s computer, in a real database', () => {
       // Activity says the same for a job stopped by an error as for one that failed: refunded, nothing taken
       const [item] = await activityFor(sara.id);
       expect(item).toMatchObject({ title: 'A', state: 'refunded', spentMicros: null });
+      expect(item.lines).toEqual([{ label: 'Computer, 1 hour', note: 'Nothing' }]);
     });
 
     it('is written the same way when the sweep writes it later, and a job that ran fine or was stopped by the person is still theirs', async () => {
@@ -462,6 +463,11 @@ run('a Brick’s computer, in a real database', () => {
       expect((await timeOf(stopped.job.id)).personKey).toBe(`person:${sara.id}`);
       // Only the two the person had are taken: 5 and 3 minutes of 6,000 millionths
       expect((await computerView(sara.brickId, sara.id, minutes(20)))?.month?.leftFraction).toBeCloseTo(1 - 48_000 / 1_000_000, 3);
+      // And Activity agrees: the one that failed is refunded, the ones the person had are done, with what they took
+      const items = await activityFor(sara.id);
+      expect(items.find((item) => item.title === 'A')).toMatchObject({ state: 'refunded', spentMicros: null });
+      expect(items.find((item) => item.title === 'B')).toMatchObject({ state: 'done', spentMicros: 30_000 });
+      expect(items.find((item) => item.title === 'C')).toMatchObject({ state: 'done', spentMicros: 18_000 });
     });
   });
 

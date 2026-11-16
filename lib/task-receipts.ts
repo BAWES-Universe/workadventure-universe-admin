@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
+import { givenBackJob } from '@/lib/computer-values';
 import { paidBy, payerFromRow, payerOf, payerToRow, type PaidBy, type Payer } from '@/lib/paid-by';
 import {
   activityIdOf,
@@ -366,8 +367,8 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
   const all = [...headers, ...computerHeaders];
   const [events, bots] = await Promise.all([eventsFor(all), prisma.bot.findMany({ where: { id: { in: [...new Set(all.map((header) => header.botId))] } }, select: { id: true, name: true } })]);
   const names = new Map(bots.map((bot) => [bot.id, bot.name]));
-  // Failed on our side: ended failed, or stopped by an error (the same two endings `recordComputerTime` gives back)
-  const failedJobs = new Set(jobs.filter((job) => job.status === 'failed' || (job.status === 'stopped' && job.endedBy === 'error')).map((job) => jobActivityIdOf(job.id)));
+  // Failed on our side: the same endings `recordComputerTime` gives back
+  const failedJobs = new Set(jobs.filter((job) => givenBackJob(job.status, job.endedBy)).map((job) => jobActivityIdOf(job.id)));
   const items = all.map((header) => {
     const forHeader = events.get(header.id) ?? [];
     // A computer job that failed is "refunded, nothing taken" only when the books show nothing was taken: a price not known yet is not "nothing"
