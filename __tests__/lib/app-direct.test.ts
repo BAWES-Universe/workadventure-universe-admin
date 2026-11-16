@@ -451,6 +451,18 @@ describe('the strict outgoing guard', () => {
     }
   });
 
+  it('counts the time the name takes to resolve in the one deadline, and gives the request only what is left', async () => {
+    const slowName = () => new Promise<{ address: string; family: number }[]>((resolve) => setTimeout(() => resolve([{ address: '93.184.216.34', family: 4 }]), 200));
+    let sent = false;
+    await expect(guardedRequest({ ...request('https://api.example.com/'), timeoutMs: 100 }, { resolve: slowName, send: async () => ((sent = true), answer) })).rejects.toMatchObject({ code: 'timeout' });
+    expect(sent).toBe(false);
+    // A name that resolves in time leaves the request the rest of the time
+    let timeLeft = 0;
+    await guardedRequest({ ...request('https://api.example.com/'), timeoutMs: 1000 }, { resolve: async () => { await new Promise((resolve) => setTimeout(resolve, 150)); return [{ address: '93.184.216.34', family: 4 }]; }, send: async (target) => ((timeLeft = target.timeoutMs), answer) });
+    expect(timeLeft).toBeLessThanOrEqual(870);
+    expect(timeLeft).toBeGreaterThan(0);
+  });
+
   it('hands a redirect back as an answer, never follows it', async () => {
     const got = await guardedRequest(request('https://api.example.com/'), { resolve: async () => [{ address: '93.184.216.34', family: 4 }], send: async () => ({ ...answer, status: 302, redirected: true, body: '' }) });
     expect(got.redirected).toBe(true);
