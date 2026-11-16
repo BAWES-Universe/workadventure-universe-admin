@@ -213,6 +213,16 @@ export class Agent37ComputerProvider implements ComputerProvider {
   async dayUsage(day: string): Promise<ProviderDay> {
     const bill = await this.client.usageForDay(day);
     const present = new Map((await this.client.listInstances()).map((instance) => [instance.id, instance]));
+    // The list holds the newest machines and the docs say nothing of pages, so a billed machine that is not on it is looked up by its id:
+    // only an answer that it does not exist makes it gone. Any other answer (Agent37 down) stops the day's check, which is tried again later.
+    for (const entry of bill.instances) {
+      if (present.has(entry.id)) continue;
+      try {
+        present.set(entry.id, await this.client.getInstance(entry.id));
+      } catch (error) {
+        if (!(error instanceof Agent37Error && error.status === 404)) throw error;
+      }
+    }
     const awake = awakeMicrosPerMinute(BRICK_SHAPE);
     const resting = restingMicrosPerMinute(BRICK_SHAPE);
     return {

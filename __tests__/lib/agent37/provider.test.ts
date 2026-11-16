@@ -484,6 +484,34 @@ describe("Agent37's bill for a day", () => {
   });
 });
 
+describe("Agent37's bill for a day, when the list of machines does not hold them all", () => {
+  it('looks a billed machine up by its id before calling it gone, so a machine past the list is still a Brick of ours', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.usage.totalMicros = 1_300;
+    w.usage.instances.push({ id: 'm1', totalMicros: 1_000, computeMicros: 900, awakeMinutes: 10 }, { id: 'removed1', totalMicros: 300, computeMicros: 300, awakeMinutes: 10 });
+    // The list shows only the newest machines: m1 is not on it, although it exists
+    (w.client as unknown as { listInstances: () => Promise<Instance[]> }).listInstances = async () => [];
+    const day = await p.dayUsage('2026-11-15');
+    const byRef = Object.fromEntries(day.instances.map((entry) => [entry.ref, entry]));
+    expect(byRef.m1).toMatchObject({ kind: 'brick', botId: 'bot-1' });
+    expect(byRef.removed1).toMatchObject({ kind: 'gone' });
+  });
+
+  it('does not take a machine it could not look up for one that is gone: the day is not checked until Agent37 answers', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.usage.instances.push({ id: 'm1', totalMicros: 1_000, computeMicros: 900, awakeMinutes: 10 });
+    (w.client as unknown as { listInstances: () => Promise<Instance[]> }).listInstances = async () => [];
+    (w.client as unknown as { getInstance: (id: string) => Promise<Instance> }).getInstance = async () => {
+      throw new Agent37Error(503, 'unavailable', 'try later');
+    };
+    await expect(p.dayUsage('2026-11-15')).rejects.toBeInstanceOf(Agent37Error);
+  });
+});
+
 describe('getting a machine ready for a job', () => {
   const state = (over: Partial<ImageState> = {}): ImageState => ({ hash: 'h', state: 'ready', buildId: 'b', revision: 2, startedAt: new Date(0).toISOString(), failures: 0, error: null, ...over });
 
