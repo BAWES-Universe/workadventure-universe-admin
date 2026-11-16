@@ -3262,6 +3262,9 @@ model ComputerJob {
   agentResponseId   String? @map("agent_response_id") @db.VarChar(120)
   // What the person asked for in more words than the title, for the agent only: never shown, never sent anywhere else, and cleared when the job ends
   brief             String? @db.VarChar(4000)
+  // The way this job took and what the whole task was expected to cost when it was chosen, in micros (the real cost is on the books under the job's id)
+  route             String  @default("computer") @db.VarChar(10)
+  expectedMicros    BigInt? @map("expected_micros")
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]

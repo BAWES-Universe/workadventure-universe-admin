@@ -227,6 +227,17 @@ describe('the bot server’s calls', () => {
     expect((await startRoute(asBot('/x', { body: { title: 'x' } }), params)).status).toBe(400);
   });
 
+  it('passes the way the Brick proposes to the start, and says which app to use instead when one would do it for less', async () => {
+    resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+    lib.startJob.mockResolvedValue({ ok: false, reason: 'cheaper_route', app: 'Notion' });
+    const plan = { app: 'Notion', steps: 3, appCannot: null };
+    expect(await (await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x', plan } }), params)).json()).toEqual({ ok: false, reason: 'cheaper_route', app: 'Notion' });
+    expect(lib.startJob).toHaveBeenCalledWith(expect.objectContaining({ plan }));
+    // A plan with something else in it, or a step count that is not a number, is not accepted
+    expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x', plan: { app: 'Notion', steps: 'many' } } }), params)).status).toBe(400);
+    expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x', plan: { app: 'Notion', price: 1 } } }), params)).status).toBe(400);
+  });
+
   it('reaches a job only through its own Brick', async () => {
     lib.getJob.mockResolvedValue({ ...job, botId: 'another-brick' } as never);
     expect((await getJobRoute(asBot('/x', { method: 'GET' }), jobParams)).status).toBe(404);
