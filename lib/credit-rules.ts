@@ -305,6 +305,8 @@ function sameFigures(made: ProgramRow, checked: Checked): boolean {
     rule.share === checked.share &&
     rule.settlement === checked.settlement &&
     rule.fundingAccountId === checked.fundingAccountId &&
+    rule.joinerCap === checked.joinerCap &&
+    rule.totalCapMicros === checked.totalCapMicros &&
     [...rule.covers].sort().join() === [...checked.covers].sort().join() &&
     sameRecipients
   );
