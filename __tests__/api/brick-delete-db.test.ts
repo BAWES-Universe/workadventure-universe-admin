@@ -16,7 +16,7 @@ import { ensureDefaultBrick, listBricks, listDeletedBricks } from '@/lib/brick-d
 import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
 import { BRICK_LOOKS, makeBrick, makeBrickFromChat, bricksForChat } from '@/lib/brick-make';
 import { answerOffer, claimOffer, offersSoFar } from '@/lib/brick-offers';
-import { ENDED_BY_DELETE } from '@/lib/bot-actions';
+import { endAllApprovals, ENDED_BY_DELETE } from '@/lib/bot-actions';
 import { checkBotAccess } from '@/lib/bot-access';
 import { credentialsForBot } from '@/lib/bot-ai-credentials';
 
@@ -153,6 +153,25 @@ run('more Bricks, deleting one and Undo, in a real database', () => {
 
     // A second tap changes nothing: the same Brick, the same day
     expect(await deleteBrick(brick.id, maya.id, later(1))).toMatchObject({ deletedAt: NOW.toISOString(), goneAt: later(7).toISOString() });
+  });
+
+  it('closes a card that was tapped yes while the cards were being closed, so nothing approved can still start', async () => {
+    const tess = await person('tess');
+    const brick = await makeBrick(tess.id, { name: 'Tapped Brick' });
+    const waiting = await request(brick.id, 'waiting');
+    const read = prisma.botActionRequest.findMany.bind(prisma.botActionRequest);
+    const spy = jest.spyOn(prisma.botActionRequest, 'findMany').mockImplementationOnce(((...args: Parameters<typeof read>) =>
+      read(...args).then(async (rows) => {
+        // The person says yes right after the card was read as waiting: it is approved now, at a newer revision
+        await prisma.botActionRequest.update({ where: { id: waiting.id }, data: { status: 'approved', approvedAt: NOW, startBy: later(1), revision: { increment: 1 } } });
+        return rows;
+      })) as never);
+    try {
+      expect(await endAllApprovals(prisma, brick.id, NOW)).toMatchObject({ requests: 1 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await prisma.botActionRequest.findUnique({ where: { id: waiting.id } })).toMatchObject({ status: 'closed', closedReason: 'revoked' });
   });
 
   it('keeps a deleted Brick off whatever is saved: the database refuses to switch it on', async () => {
