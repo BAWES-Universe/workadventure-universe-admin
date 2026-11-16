@@ -941,7 +941,7 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
  * settled to what ran, never left holding the envelope), room that nobody holds a job for is given back, and jobs in line are tried
  * again (the person's month turned, extra usage was given, another job ended). Safe to run twice at once.
  */
-export async function sweepComputers(now: Date = new Date(), batch: number = SWEEP_BATCH, pages: number = SWEEP_PAGES): Promise<{ stopped: number; released: number; started: number }> {
+export async function sweepComputers(now: Date = new Date(), batch: number = SWEEP_BATCH, pages: number = SWEEP_PAGES, reconcileWaitMs: number = RECONCILE_WAIT_MS): Promise<{ stopped: number; released: number; started: number }> {
   let stopped = 0;
   let released = 0;
   let started = 0;
@@ -949,8 +949,6 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   await getComputerProvider()?.maintain().catch((error) => console.error('[Computer] The provider could not be kept up:', error instanceof Error ? error.message : 'unknown'));
   // A wind-down that is on goes on until every job is over and every machine is stopped and proven so
   await continueWindDown(now, batch).catch((error) => console.error('[Computer] The wind-down could not go on:', error instanceof Error ? error.message : 'unknown'));
-  // Once a day: our books against the provider's bill for the day before (it only reads and reports; a bill that cannot be read is tried again later)
-  await reconcileComputers(now).catch((error) => console.error('[Computer] The daily check of the books could not be made:', error instanceof Error ? error.message : 'unknown'));
   // A job that asked its person to take over and got no answer within the wait a super admin set ends, so it does not hold the
   // machine and the allowance for nobody. Read each sweep, so a changed setting counts at once, jobs already waiting included. Once the
   // person has taken over the job is theirs and is not ended here.
@@ -1049,7 +1047,27 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
     }
     if (lines.length < batch) break;
   }
+  // Last, because it talks to the provider and what is above cannot wait for that: once a day, our books against the provider's bill for the
+  // day before (it only reads and reports; a bill that cannot be read is tried again later). The sweep waits for it a short while at most.
+  await settleWithin(reconcileWaitMs, reconcileComputers(now)).catch((error) => console.error('[Computer] The daily check of the books could not be made:', error instanceof Error ? error.message : 'unknown'));
   return { stopped, released, started };
+}
+
+/** How long a sweep waits for the daily check of the books before it goes on without it (the check goes on by itself). */
+export const RECONCILE_WAIT_MS = 30_000;
+
+/** The work's own answer, or nothing once the wait is over: the work is not stopped, and an error it ends in is still read. */
+async function settleWithin<T>(ms: number, work: Promise<T>): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), ms);
+  });
+  work.catch(() => undefined);
+  try {
+    return await Promise.race([work, late]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // ---------- Wind-down (the team's command, never a setting) ----------

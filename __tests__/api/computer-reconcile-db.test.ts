@@ -188,6 +188,28 @@ run('the daily check of our books against the provider’s bill, in a real datab
     }
   });
 
+  it('is done last in a sweep: the renewals, releases and starts that cannot wait come before it, and a bill that is slow to answer does not hold them', async () => {
+    await brickWithMachine('m1');
+    delete process.env.COMPUTER_PROVIDER;
+    process.env.AGENT37_API_KEY = 'a-key-that-is-never-used';
+    const order: string[] = [];
+    const reservations = jest.spyOn(prisma.meterReservation, 'findMany').mockImplementation((() => {
+      order.push('reservations');
+      return Promise.resolve([]);
+    }) as never);
+    try {
+      const slow = { kind: 'real', microsPerMinute: () => 110, maintain: async () => undefined, dayUsage: async () => { order.push('bill'); return new Promise<ProviderDay>(() => undefined); } } as unknown as ComputerProvider;
+      setComputerProviderForTests(slow);
+      await sweepComputers(NOW, undefined, undefined, 50);
+      expect(order.indexOf('reservations')).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf('bill')).toBeGreaterThan(order.lastIndexOf('reservations'));
+    } finally {
+      reservations.mockRestore();
+      delete process.env.AGENT37_API_KEY;
+      process.env.COMPUTER_PROVIDER = 'fake';
+    }
+  });
+
   it('is on the team’s readiness page: not yet compared, matched, and did not match', async () => {
     const botId = await brickWithMachine('m1');
     expect(await reconcileCheck()).toMatchObject({ name: 'books and bill', ok: true, detail: expect.stringContaining('not been compared') });

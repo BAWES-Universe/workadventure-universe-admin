@@ -89,6 +89,16 @@ run('choosing the way by expected cost, in a real database', () => {
     expect(woke()).toBe(0);
   });
 
+  it('does not weigh an app whose step count was not given (or is not a count): a guess of one step would send every such job away from the computer', async () => {
+    const person = await sara();
+    await connect(person.id, person.brickId);
+    for (const plan of [{ app: 'Notion' }, { app: 'Notion', steps: null }, { app: 'Notion', steps: 0 }, { app: 'Notion', steps: Number.NaN }]) {
+      const started = await startJob({ botId: person.brickId, personId: person.id, title: `Job ${JSON.stringify(plan)}`, plan }, NOW);
+      expect(started).toMatchObject({ ok: true });
+      if (started.ok) await prisma.computerJob.deleteMany({ where: { personId: person.id } });
+    }
+  });
+
   it('runs the job when the Brick says why the app cannot do it, and writes the way and what it was expected to cost on the job', async () => {
     const person = await sara();
     await connect(person.id, person.brickId);

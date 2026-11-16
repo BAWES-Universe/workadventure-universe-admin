@@ -79,6 +79,9 @@ export interface RoutePlan {
 /** The model says in a few words why the app cannot do it (the same bar the bot server has always used). */
 const saidWhy = (text: string | null | undefined) => (text ?? '').trim().length >= 8;
 
+/** A step count the model really gave: a whole number of at least one. Not given, or not a count, there is nothing to weigh the app by. */
+const gaveSteps = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 1;
+
 const plain = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
 /** The app this Brick really has connected and switched on that this name means: its name as connected, and what one step of it costs us (null: not known). */
@@ -112,16 +115,17 @@ export type Routed = { ok: true; route: 'computer'; expectedMicros: number } | {
 
 /**
  * The way for a job that asked for the computer. The app the model named is weighed only when this Brick really has it connected and the model
- * did not say it cannot do the job; if it is the cheaper way the job is not started here (`ok: false`, with the app) and the Brick is told to
+ * did not say it cannot do the job and gave about how many steps it would take; if it is the cheaper way the job is not started here (`ok: false`, with the app) and the Brick is told to
  * use it. Otherwise the job takes the computer and carries what it was expected to cost.
  */
 export async function routeJob(input: { botId: string; plan?: RoutePlan | null; awakeMicrosPerMinute: number | null; hasMachine: boolean }): Promise<Routed> {
   const computer = computerQuote({ awakeMicrosPerMinute: input.awakeMicrosPerMinute, hasMachine: input.hasMachine });
   const plan = input.plan;
-  if (plan?.app && !saidWhy(plan.appCannot)) {
+  // Without a count of steps the app is not weighed (a guess of one step would make it win against any computer): the job takes the computer
+  if (plan?.app && gaveSteps(plan.steps) && !saidWhy(plan.appCannot)) {
     const app = await connectedApp(input.botId, plan.app);
     if (app) {
-      const best = chooseRoute([appQuote({ app: app.name, steps: cleanSteps(plan.steps), stepMicros: app.stepMicros }), computer]);
+      const best = chooseRoute([appQuote({ app: app.name, steps: plan.steps, stepMicros: app.stepMicros }), computer]);
       if (best.route === 'app') return { ok: false, app: app.name };
     }
   }
