@@ -433,6 +433,9 @@ run('a Brick’s computer, in a real database', () => {
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'error' });
       expect((await timeOf(job.job.id)).personKey).toBe('unknown');
       expect((await computerView(sara.brickId, sara.id, minutes(60)))?.month?.leftFraction).toBe(1);
+      // Activity says the same for a job stopped by an error as for one that failed: refunded, nothing taken
+      const [item] = await activityFor(sara.id);
+      expect(item).toMatchObject({ title: 'A', state: 'refunded', spentMicros: null });
     });
 
     it('is written the same way when the sweep writes it later, and a job that ran fine or was stopped by the person is still theirs', async () => {
