@@ -129,18 +129,25 @@ const plainWords = (value: string) =>
     .replace(/\s+/g, ' ')
     .trim();
 
-/** A sentence that stops at one of these is not over yet ("Dr. Lee approved it"). Sentence breaking alone does not know them. */
-const ABBREVIATION = /(?:^|[^\p{L}])(?:mr|mrs|ms|dr|prof|sr|jr|st|vs|e\.g|i\.e|inc|ltd)\.$/iu;
-/** A capital initial on its own ("J. Smith"); case matters here, so a lowercase letter before the stop does not count. */
-const INITIAL = /(?:^|[^\p{L}])\p{Lu}\.$/u;
+/** What ends a sentence in the scripts people write in: Latin, Arabic and Urdu, Devanagari (danda), Armenian, Burmese, Khmer, Chinese and Japanese. */
+const TERMINATORS = '.!?\\u061F\\u06D4\\u0964\\u0965\\u0589\\u104A\\u104B\\u17D4\\u17D5\\u3002\\uFF01\\uFF1F\\uFF0E\\u2026';
+/** Quotes and brackets that may close after the stop: “Visa approved.” */
+const CLOSERS = '\\u201D\\u2019"\'\\u00BB\\u300D\\u300F\\uFF09)\\]';
+const ENDS_SENTENCE = new RegExp(`[${TERMINATORS}][${CLOSERS}]*$`, 'u');
+const TRAILING_STOPS = new RegExp(`[${TERMINATORS}]+(?=[${CLOSERS}]*$)`, 'u');
 
-/** The first sentence of some words, for any script ("؟" and "。" end one too); null when there is none. */
+/** A sentence that stops at one of these is not over yet ("Dr. Lee approved it"). Sentence breaking alone does not know them. */
+const ABBREVIATION = new RegExp(`(?:^|[^\\p{L}])(?:mr|mrs|ms|dr|prof|sr|jr|st|vs|e\\.g|i\\.e|inc|ltd)\\.[${CLOSERS}]*$`, 'iu');
+/** A capital initial on its own ("J. Smith"); case matters here, so a lowercase letter before the stop does not count. */
+const INITIAL = new RegExp(`(?:^|[^\\p{L}])\\p{Lu}\\.[${CLOSERS}]*$`, 'u');
+
+/** The first sentence of some words, for any script; null when there is none. */
 function firstSentence(words: string): string | null {
   let sentence = '';
   for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'sentence' }).segment(words)) {
     sentence += segment;
     const done = sentence.trim();
-    if (!ABBREVIATION.test(done) && !INITIAL.test(done)) return /[.!?؟۔。！？…]$/u.test(done) ? done : null;
+    if (!ABBREVIATION.test(done) && !INITIAL.test(done)) return ENDS_SENTENCE.test(done) ? done : null;
   }
   return null;
 }
@@ -163,7 +170,7 @@ export function pushText(
   if (content.msgtype !== 'm.text' && content.msgtype !== 'm.notice') return ordinary;
   const words = plainWords(text(content.body) ?? '');
   const first = firstSentence(words);
-  const title = first?.replace(/[.!?؟۔。！？…]+$/u, '').trim();
+  const title = first?.replace(TRAILING_STOPS, '').trim();
   if (!first || !title || title.length < 3 || title.length > HEADLINE_LENGTH) return ordinary;
   const rest = words.slice(first.length).trim();
   if (!rest) return { title, body: senderName };

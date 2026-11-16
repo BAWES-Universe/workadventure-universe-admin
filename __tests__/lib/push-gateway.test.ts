@@ -218,6 +218,11 @@ describe('what a locked phone shows for a Brick that spoke by itself (game #2002
       body: 'Brick: تم الأمر في المحادثة.',
     });
     expect(pushText(alone('签证已批准。已保存在聊天中。'), true, 'Brick', true).title).toBe('签证已批准');
+    // A Hindi danda ends one too
+    expect(pushText(alone('वीज़ा स्वीकृत है। चैट में सहेजा गया।'), true, 'Brick', true)).toEqual({ title: 'वीज़ा स्वीकृत है', body: 'Brick: चैट में सहेजा गया।' });
+    // A closing quote after the stop stays with the sentence; an abbreviation inside quotes does not end it
+    expect(pushText(alone('\u201CVisa approved.\u201D Details are in chat.'), true, 'Brick', true)).toEqual({ title: '\u201CVisa approved\u201D', body: 'Brick: Details are in chat.' });
+    expect(pushText(alone('\u201CWe met Dr.\u201D Lee approved it. Done.'), true, 'Brick', true).title).toBe('\u201CWe met Dr.\u201D Lee approved it');
     // Too short to be a title
     expect(pushText(alone('Ok. Done and saved.'), true, 'Brick', true).title).toBe('Brick');
   });
