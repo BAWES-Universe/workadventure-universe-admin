@@ -1,0 +1,384 @@
+/**
+ * Git from a Brick's computer (game #2041, the computer's half), with real git on the computer and a real database. The computer is a
+ * temporary home folder; what Orbit tells it to run when it readies a job (`prepareJob`) is run there with `sh`; `git clone`,
+ * `commit` and `push` are then plain git, through Orbit's own route on a port of this machine, to a "GitHub" that is git's own server
+ * (git http-backend) over bare repositories. Runs only with ROLES_DB_TEST=yes and a DATABASE_URL to a migrated THROWAWAY database:
+ *
+ *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/computer-git-db.test.ts --runInBand
+ */
+import { randomUUID } from 'node:crypto';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { NextRequest } from 'next/server';
+
+jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
+jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
+
+import { prisma } from '@/lib/db';
+import { encryptApiKey } from '@/lib/encryption';
+import { createBrick } from '@/lib/brick-create';
+import { saveMeterSettings } from '@/lib/meter';
+import { grantToBrick, removeGrant } from '@/lib/app-connections';
+import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
+import { giveComputer, startJob, takeOver } from '@/lib/computer';
+import { prepareJob } from '@/lib/computer-broker';
+import { verifyJobToken } from '@/lib/computer-token';
+import { jobGitAccess } from '@/lib/github/git-login';
+import { GET as gitGet, POST as gitPost } from '@/app/api/git/[...path]/route';
+
+const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
+const hasHttpBackend = (() => {
+  try {
+    return existsSync(join(execFileSync('git', ['--exec-path'], { encoding: 'utf8' }).trim(), 'git-http-backend'));
+  } catch {
+    return false;
+  }
+})();
+
+const tag = randomUUID().slice(0, 8);
+const NOW = new Date();
+const RELAY = 'https://bot-server.example.test';
+const ORBIT = 'https://orbit.example.com';
+const envBefore = { url: process.env.ADMIN_API_URL, key: process.env.ENCRYPTION_KEY, provider: process.env.COMPUTER_PROVIDER };
+const fetchBefore = global.fetch;
+const people: string[] = [];
+let made = 0;
+let fake: FakeComputerProvider;
+let work = '';
+let port = 0;
+let server: http.Server;
+/** What "GitHub" was asked: the address and the sign-in it was given. */
+let seen: { url: string; authorization: string | undefined }[] = [];
+
+async function person(name: string) {
+  const unique = `${name}-${tag}-${++made}`;
+  const user = await prisma.user.create({ data: { uuid: unique, email: `${unique}@example.test`, name } });
+  people.push(user.id);
+  const brick = await createBrick({ ownerId: user.id, name: `${name}'s Brick` });
+  return { id: user.id, brickId: brick.id };
+}
+
+/** Sara has GitHub connected (signed in as sara-gh) and her Brick may use it, with a computer. */
+async function saraWithGitHub() {
+  const sara = await person('sara');
+  const auth = { provider: 'github', accessToken: 'ghu_owner_token', refreshToken: 'ghr_x', expiresAt: Math.floor(Date.now() / 1000) + 8 * 3600, login: 'sara-gh', githubId: 501 };
+  const connection = await prisma.appConnection.create({
+    data: { ownerId: sara.id, name: 'GitHub', serverUrl: '', source: 'github', catalogKey: '@github', authType: 'oauth', authConfig: encryptApiKey(JSON.stringify(auth)) },
+  });
+  await grantToBrick(sara.id, connection.id, sara.brickId);
+  await giveComputer(sara.brickId, sara.id);
+  return { ...sara, connectionId: connection.id };
+}
+
+async function running(sara: { brickId: string; id: string }, writes = true) {
+  const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Job', writes }, NOW);
+  if (!started.ok) throw new Error(`the job did not start: ${started.reason}`);
+  return started.job.id;
+}
+
+/** "GitHub": git http-backend over bare repositories; and its API's compare, answered from the same repositories. */
+function pretendGitHub(root: string) {
+  return (async (url: string, init: RequestInit = {}) => {
+    const headers = (init.headers ?? {}) as Record<string, string>;
+    seen.push({ url, authorization: headers.Authorization });
+    const parsed = new URL(url);
+    const compare = /^\/repos\/([^/]+\/[^/]+)\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/.exec(parsed.pathname);
+    if (parsed.host === 'api.github.com' && compare) {
+      const repo = join(root, `${compare[1]}.git`);
+      const isAncestor = (a: string, b: string) => spawnSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: repo }).status === 0;
+      const status = compare[2] === compare[3] ? 'identical' : isAncestor(compare[2], compare[3]) ? 'ahead' : 'diverged';
+      return new Response(JSON.stringify({ status }), { status: 200 });
+    }
+    if (parsed.host !== 'github.com') return new Response('{}', { status: 404 });
+    const env = {
+      ...process.env,
+      GIT_PROJECT_ROOT: root,
+      GIT_HTTP_EXPORT_ALL: '1',
+      PATH_INFO: parsed.pathname,
+      QUERY_STRING: parsed.search.slice(1),
+      REQUEST_METHOD: init.method ?? 'GET',
+      CONTENT_TYPE: headers['Content-Type'] ?? '',
+      HTTP_CONTENT_ENCODING: headers['Content-Encoding'] ?? '',
+      HTTP_GIT_PROTOCOL: headers['Git-Protocol'] ?? '',
+      REMOTE_USER: 'sara',
+      REMOTE_ADDR: '127.0.0.1',
+    };
+    const child = spawn('git', ['http-backend'], { env });
+    const chunks: Buffer[] = [];
+    child.stdout.on('data', (chunk) => chunks.push(chunk));
+    if (init.body) child.stdin.end(Buffer.from(init.body as Uint8Array));
+    else child.stdin.end();
+    await new Promise((resolve) => child.on('close', resolve));
+    const output = Buffer.concat(chunks);
+    const split = output.indexOf('\r\n\r\n');
+    const responseHeaders = new Headers();
+    let status = 200;
+    for (const line of output.subarray(0, split).toString().split('\r\n')) {
+      const [name, ...rest] = line.split(':');
+      const value = rest.join(':').trim();
+      if (name.toLowerCase() === 'status') status = parseInt(value, 10);
+      else responseHeaders.set(name, value);
+    }
+    return new Response(new Uint8Array(output.subarray(split + 4)), { status, headers: responseHeaders });
+  }) as unknown as typeof fetch;
+}
+
+/** Orbit's git route, as Next runs it, on a port of this machine. */
+function startOrbit(): Promise<http.Server> {
+  const orbit = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk as Buffer);
+    const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
+    const request = new NextRequest(url, {
+      method: req.method,
+      headers: Object.fromEntries(Object.entries(req.headers).filter(([, v]) => typeof v === 'string') as [string, string][]),
+      ...(req.method === 'POST' ? { body: Buffer.concat(chunks), duplex: 'half' } : {}),
+    } as ConstructorParameters<typeof NextRequest>[1]);
+    const path = url.pathname.replace(/^\/api\/git\//, '').split('/');
+    const answer = await (req.method === 'POST' ? gitPost : gitGet)(request, { params: Promise.resolve({ path }) });
+    res.writeHead(answer.status, Object.fromEntries(answer.headers));
+    res.end(Buffer.from(await answer.arrayBuffer()));
+  });
+  return new Promise((resolve) => orbit.listen(0, '127.0.0.1', () => resolve(orbit)));
+}
+
+/** Run without blocking: Orbit's route runs in this same process and must answer while git waits for it. */
+function runAsync(program: string, args: string[], options: { cwd?: string; env: NodeJS.ProcessEnv }): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(program, args, { cwd: options.cwd, env: options.env });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => (stdout += chunk));
+    child.stderr.on('data', (chunk) => (stderr += chunk));
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+  });
+}
+const git = (cwd: string, home: string, ...args: string[]) =>
+  runAsync('git', args, { cwd, env: { ...process.env, HOME: home, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_GLOBAL: join(home, '.gitconfig') } });
+const sh = (home: string, command: string) => runAsync('sh', ['-c', command], { env: { ...process.env, HOME: home } });
+
+/** Readies the job as Orbit does, runs what it sends on the "computer", and points the relay's https address at this machine's port. */
+async function readyComputer(jobId: string, home: string) {
+  const done = await prepareJob(jobId, RELAY, NOW);
+  expect(done).toMatchObject({ ok: true });
+  const command = fake.commands.at(-1)?.command ?? '';
+  expect((await sh(home, command)).status).toBe(0);
+  const config = join(home, '.universe', 'gitconfig');
+  if (existsSync(config)) writeFileSync(config, readFileSync(config, 'utf8').split(ORBIT).join(`http://127.0.0.1:${port}`));
+  return { done, command };
+}
+
+const all = (dir: string): string[] => readdirSync(dir).flatMap((name) => (statSync(join(dir, name)).isDirectory() ? all(join(dir, name)) : [join(dir, name)]));
+const bare = () => join(work, 'github', 'acme', 'tools.git');
+const branches = () => execFileSync('git', ['branch', '--list'], { cwd: bare(), encoding: 'utf8' });
+
+(hasHttpBackend ? run : describe.skip)('a Brick’s computer uses git as its owner, through Orbit', () => {
+  beforeAll(async () => {
+    process.env.COMPUTER_PROVIDER = 'fake';
+    process.env.ADMIN_API_URL = ORBIT;
+    process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'a'.repeat(64);
+    work = mkdtempSync(join(tmpdir(), 'brick-git-'));
+    execFileSync('git', ['init', '-q', '--bare', '-b', 'main', bare()]);
+    execFileSync('git', ['config', 'http.receivepack', 'true'], { cwd: bare() });
+    const seed = join(work, 'seed');
+    execFileSync('git', ['init', '-q', '-b', 'main', seed]);
+    writeFileSync(join(seed, 'README.md'), 'hello\n');
+    execFileSync('git', ['add', '.'], { cwd: seed });
+    execFileSync('git', ['-c', 'user.name=s', '-c', 'user.email=s@e', 'commit', '-qm', 'first'], { cwd: seed });
+    execFileSync('git', ['push', '-q', bare(), 'main'], { cwd: seed });
+    server = await startOrbit();
+    port = (server.address() as AddressInfo).port;
+  });
+  beforeEach(async () => {
+    fake = new FakeComputerProvider();
+    setComputerProviderForTests(fake);
+    global.fetch = pretendGitHub(join(work, 'github'));
+    seen = [];
+    await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+  });
+  afterEach(async () => {
+    global.fetch = fetchBefore;
+    await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
+    await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
+    await prisma.appConnection.deleteMany({ where: { ownerId: { in: people } } });
+  });
+  afterAll(async () => {
+    setComputerProviderForTests(null);
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(work, { recursive: true, force: true });
+    await prisma.meterEvent.deleteMany({});
+    await prisma.meterReservation.deleteMany({});
+    await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits'] } } });
+    await prisma.user.deleteMany({ where: { id: { in: people } } });
+    for (const [name, value] of [['ADMIN_API_URL', envBefore.url], ['ENCRYPTION_KEY', envBefore.key], ['COMPUTER_PROVIDER', envBefore.provider]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await prisma.$disconnect();
+  });
+
+  it('clones with plain `git clone https://github.com/…`, commits as the owner, and pushes branches; the owner’s token never reaches the computer', async () => {
+    const sara = await saraWithGitHub();
+    const jobId = await running(sara);
+    const home = mkdtempSync(join(tmpdir(), 'brick-home-'));
+    try {
+      const { done } = await readyComputer(jobId, home);
+      expect(done).toMatchObject({ git: true });
+      const clone = join(home, 'tools');
+      const cloned = await git(home, home, 'clone', '-q', 'https://github.com/acme/tools', clone);
+      expect(cloned.stderr).toBe('');
+      expect(cloned.status).toBe(0);
+      // GitHub was asked with the owner's token, put on by Orbit
+      expect(seen.some((call) => call.authorization === `Basic ${Buffer.from('x-access-token:ghu_owner_token').toString('base64')}`)).toBe(true);
+
+      writeFileSync(join(clone, 'a.txt'), 'a\n');
+      expect((await git(clone, home, 'add', '.')).status).toBe(0);
+      // No identity given on the command line: it is the owner's, from the computer's git settings
+      expect((await git(clone, home, 'commit', '-qm', 'add a')).status).toBe(0);
+      expect((await git(clone, home, 'log', '-1', '--format=%an <%ae>')).stdout.trim()).toBe('sara-gh <501+sara-gh@users.noreply.github.com>');
+      expect((await git(clone, home, 'push', '-q', 'origin', 'HEAD:refs/heads/feature')).status).toBe(0);
+      expect(branches()).toContain('feature');
+      // and adds to a branch that is there
+      writeFileSync(join(clone, 'b.txt'), 'b\n');
+      await git(clone, home, 'add', '.');
+      await git(clone, home, 'commit', '-qm', 'add b');
+      expect((await git(clone, home, 'push', '-q', 'origin', 'HEAD:refs/heads/feature')).status).toBe(0);
+      expect(execFileSync('git', ['log', '--format=%s', 'feature'], { cwd: bare(), encoding: 'utf8' }).trim().split('\n')).toEqual(['add b', 'add a', 'first']);
+
+      // Nothing the computer holds is the owner's token, GitHub's own or anyone's key to it
+      for (const file of all(home).filter((f) => !f.includes('/.git/'))) expect(readFileSync(file, 'utf8')).not.toContain('ghu_owner_token');
+      expect(readFileSync(join(clone, '.git', 'config'), 'utf8')).not.toMatch(/cjt_|ghu_/);
+      // the key sits in one file only the machine's own user reads
+      expect(statSync(join(home, '.universe', 'git-token')).mode & 0o077).toBe(0);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('turns down overwriting a branch, deleting one and pushing a tag, and git says why', async () => {
+    const sara = await saraWithGitHub();
+    const jobId = await running(sara);
+    const home = mkdtempSync(join(tmpdir(), 'brick-home-'));
+    try {
+      await readyComputer(jobId, home);
+      const clone = join(home, 'tools');
+      expect((await git(home, home, 'clone', '-q', 'https://github.com/acme/tools', clone)).status).toBe(0);
+      writeFileSync(join(clone, 'c.txt'), 'c\n');
+      await git(clone, home, 'add', '.');
+      await git(clone, home, 'commit', '-qm', 'add c');
+      expect((await git(clone, home, 'push', '-q', 'origin', 'HEAD:refs/heads/work')).status).toBe(0);
+      const before = execFileSync('git', ['rev-parse', 'work'], { cwd: bare(), encoding: 'utf8' });
+      // history rewritten: the branch would lose a commit
+      await git(clone, home, 'commit', '-q', '--amend', '-m', 'rewritten c');
+      const forced = await git(clone, home, 'push', '--force', 'origin', 'HEAD:refs/heads/work');
+      expect(forced.status).not.toBe(0);
+      expect(forced.stderr).toMatch(/never overwrite/);
+      expect((await git(clone, home, 'push', 'origin', '--delete', 'work')).stderr).toMatch(/Deleting is not allowed/);
+      await git(clone, home, 'tag', 'v1');
+      expect((await git(clone, home, 'push', 'origin', 'v1')).stderr).toMatch(/tags is not allowed/);
+      expect(execFileSync('git', ['rev-parse', 'work'], { cwd: bare(), encoding: 'utf8' })).toBe(before);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('a job that is only to look clones and fetches, and its pushes are turned down before git packs anything', async () => {
+    const sara = await saraWithGitHub();
+    const jobId = await running(sara, false);
+    const home = mkdtempSync(join(tmpdir(), 'brick-home-'));
+    try {
+      expect(await readyComputer(jobId, home)).toMatchObject({ done: { git: true } });
+      const clone = join(home, 'tools');
+      expect((await git(home, home, 'clone', '-q', 'https://github.com/acme/tools', clone)).status).toBe(0);
+      writeFileSync(join(clone, 'd.txt'), 'd\n');
+      await git(clone, home, 'add', '.');
+      await git(clone, home, 'commit', '-qm', 'add d');
+      const pushed = await git(clone, home, 'push', 'origin', 'HEAD:refs/heads/looked');
+      expect(pushed.status).not.toBe(0);
+      expect(pushed.stderr).toMatch(/may only read from GitHub for this job/);
+      expect(branches()).not.toContain('looked');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('a job gets no git login when GitHub is not the owner’s to give: no GitHub for the Brick, or not the owner’s own job', async () => {
+    const sara = await saraWithGitHub();
+    const jobId = await running(sara);
+    // Not the owner's own job (a job someone else gave the owner's Brick): no key and no files, and the old ones are removed
+    await prisma.computerJob.update({ where: { id: jobId }, data: { personId: (await person('lee')).id } });
+    expect(await jobGitAccess(jobId)).toBeNull();
+    const home = mkdtempSync(join(tmpdir(), 'brick-home-'));
+    try {
+      writeFileSync(join(home, 'leftover'), 'x');
+      await prisma.computerJob.update({ where: { id: jobId }, data: { personId: sara.id } });
+      await readyComputer(jobId, home);
+      expect(existsSync(join(home, '.universe', 'git-token'))).toBe(true);
+      await prisma.computerJob.update({ where: { id: jobId }, data: { personId: (await person('lee2')).id } });
+      const again = await prepareJob(jobId, RELAY, new Date(NOW.getTime() + 60_000));
+      expect(again).toMatchObject({ ok: true, git: false });
+      expect((await sh(home, fake.commands.at(-1)?.command ?? '')).status).toBe(0);
+      expect(existsSync(join(home, '.universe', 'git-token'))).toBe(false);
+      expect(existsSync(join(home, '.universe', 'gitconfig'))).toBe(false);
+      // and the Brick with GitHub taken away
+      await prisma.computerJob.update({ where: { id: jobId }, data: { personId: sara.id } });
+      await removeGrant(sara.id, sara.connectionId, sara.brickId);
+      expect(await jobGitAccess(jobId)).toBeNull();
+      expect(await prepareJob(jobId, RELAY, new Date(NOW.getTime() + 120_000))).toMatchObject({ ok: true, git: false });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('stops the moment the person takes the computer, GitHub is taken from the Brick, or the job ends; a model key is no git key', async () => {
+    const sara = await saraWithGitHub();
+    const jobId = await running(sara);
+    const home = mkdtempSync(join(tmpdir(), 'brick-home-'));
+    try {
+      await readyComputer(jobId, home);
+      const command = fake.commands.at(-1)?.command ?? '';
+      const modelKey = /"token":"(cjt_[A-Za-z0-9_-]+)"/.exec(command)?.[1] ?? '';
+      const gitKey = readFileSync(join(home, '.universe', 'git-token'), 'utf8');
+      expect(gitKey).toMatch(/^cjt_/);
+      expect(gitKey).not.toBe(modelKey);
+      expect(await verifyJobToken(gitKey, 'model', NOW)).toMatchObject({ ok: false });
+      expect(await verifyJobToken(modelKey, 'git', NOW)).toMatchObject({ ok: false });
+      expect(await verifyJobToken(gitKey, 'git', NOW)).toMatchObject({ ok: true, jobId });
+
+      const clone = join(home, 'tools');
+      expect((await git(home, home, 'clone', '-q', 'https://github.com/acme/tools', clone)).status).toBe(0);
+      // The person takes over: the key goes with the control number, and git gets a refusal
+      await takeOver(sara.brickId, sara.id, NOW);
+      const fetched = await git(clone, home, 'fetch', '-q');
+      expect(fetched.status).not.toBe(0);
+      expect(fetched.stderr).toMatch(/401|Authentication failed|could not read/);
+      expect(await verifyJobToken(gitKey, 'git', NOW)).toMatchObject({ ok: false });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the git key as long as the model key (the job’s lease renews both) and ends both when a new one is made', async () => {
+    const sara = await saraWithGitHub();
+    const jobId = await running(sara);
+    const home = mkdtempSync(join(tmpdir(), 'brick-home-'));
+    try {
+      await readyComputer(jobId, home);
+      const first = readFileSync(join(home, '.universe', 'git-token'), 'utf8');
+      await prepareJob(jobId, RELAY, new Date(NOW.getTime() + 60_000));
+      expect((await sh(home, fake.commands.at(-1)?.command ?? '')).status).toBe(0);
+      const second = readFileSync(join(home, '.universe', 'git-token'), 'utf8');
+      expect(second).not.toBe(first);
+      expect((await verifyJobToken(first, 'git', new Date(NOW.getTime() + 60_000))).ok).toBe(false);
+      expect((await verifyJobToken(second, 'git', new Date(NOW.getTime() + 60_000))).ok).toBe(true);
+      // never in an https address that is not plain: no git login is made for it
+      expect(JSON.stringify(fake.commands)).not.toMatch(/ghu_owner_token/);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

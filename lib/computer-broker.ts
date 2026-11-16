@@ -3,6 +3,7 @@ import { providerFor, fenceMachine } from '@/lib/computer';
 import { mintJobToken, revokeJobTokens } from '@/lib/computer-token';
 import { Agent37Error } from '@/lib/agent37/client';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
+import { gitLoginCommand, jobGitAccess, NO_GIT_COMMAND, relayBase } from '@/lib/github/git-login';
 
 /**
  * The broker (build handoff v2, section 5): how the bot server's runner reaches a computer without ever holding Agent37's key.
@@ -45,12 +46,16 @@ export function relayAddressOf(value: unknown): string | null {
   return /^[A-Za-z0-9:/._-]+$/.test(address) ? address : null;
 }
 
-export type Prepared = { ok: true; expiresAt: Date } | NotLive | { ok: false; reason: 'bad_relay' | 'failed' };
+export type Prepared = { ok: true; expiresAt: Date; git: boolean } | NotLive | { ok: false; reason: 'bad_relay' | 'failed' };
 
 /**
  * Gives the job's computer what it needs to ask for a model: a new key and the relay's address, written where the image's local
  * model address reads them on every call (so Hermes itself never has to restart or learn a new key). Every earlier key of the job
  * ends first, so one key is good at a time. The key crosses only the exec call to the machine, which Agent37 carries over TLS.
+ *
+ * It also gives the computer its git login when the job may have one (the owner's own job, on a Brick the owner let use their
+ * GitHub): a second key of scope "git" and the files that make plain `git clone https://github.com/owner/repo` go through Orbit's git
+ * relay (see lib/github/git-login.ts). Without it the old git files are removed. `git` in the answer says whether the computer has it.
  */
 export async function prepareJob(jobId: string, relay: unknown, now: Date = new Date()): Promise<Prepared> {
   const address = relayAddressOf(relay);
@@ -62,6 +67,7 @@ export async function prepareJob(jobId: string, relay: unknown, now: Date = new 
   const minted = await mintJobToken(jobId, 'model', now, { generation: live.job.generation });
   if (!minted.ok) return { ok: false, reason: minted.reason };
   const file = JSON.stringify({ url: address, token: minted.token });
+  const gitPart = await gitLoginFor(jobId, live.job.generation, now);
   // Written whole to a new file and moved over the old one, so a call never reads half of it. Only the machine's own user can read it.
   // Under a lock, and only over a key of an older or the same control number: a write that was delayed past a take-over and a hand-back
   // finds a newer key there and leaves it alone.
@@ -70,7 +76,8 @@ export async function prepareJob(jobId: string, relay: unknown, now: Date = new 
   const command =
     `umask 077 && d="$HOME/.universe" && mkdir -p "$d" && ( flock 9 || exit 1; read -r who cur < "$d/relay.gen" 2>/dev/null; ` +
     `if [ "$who" = '${jobId}' ] && [ -n "$cur" ] && [ "$cur" -gt ${generation} ] 2>/dev/null; then exit 0; fi; ` +
-    `printf '%s' '${file}' > "$d/relay.json.new" && mv "$d/relay.json.new" "$d/relay.json" && printf '%s %s' '${jobId}' ${generation} > "$d/relay.gen" ) 9>"$d/relay.lock"`;
+    `printf '%s' '${file}' > "$d/relay.json.new" && mv "$d/relay.json.new" "$d/relay.json" && printf '%s %s' '${jobId}' ${generation} > "$d/relay.gen" && ` +
+    `{ ${gitPart.command}; } ) 9>"$d/relay.lock"`;
   try {
     const done = await live.provider.exec(live.job.ref, command, { timeoutMs: 30_000 });
     if (done.exitCode !== 0) {
@@ -87,7 +94,29 @@ export async function prepareJob(jobId: string, relay: unknown, now: Date = new 
   const after = await liveJob(jobId);
   if (!after.ok) return after;
   if (after.job.generation !== generation) return { ok: false, reason: 'not_running' };
-  return { ok: true, expiresAt: minted.expiresAt };
+  return { ok: true, expiresAt: minted.expiresAt, git: gitPart.on };
+}
+
+/**
+ * The git half of preparing a job: a "git" key and the shell that writes the login, when the job may have one; otherwise the shell
+ * that removes it. Never fails the preparing: a computer without git still works, and the reason is only logged.
+ */
+async function gitLoginFor(jobId: string, generation: number, now: Date): Promise<{ on: boolean; command: string }> {
+  const off = { on: false, command: NO_GIT_COMMAND };
+  try {
+    const access = await jobGitAccess(jobId);
+    const base = relayBase();
+    if (!access || !base) return off;
+    // Checked before a key is made: a name or address that is not plain characters gets no key at all
+    if (!gitLoginCommand(`cjt_${'x'.repeat(43)}`, base, access)) return off;
+    const minted = await mintJobToken(jobId, 'git', now, { generation });
+    if (!minted.ok) return off;
+    const command = gitLoginCommand(minted.token, base, access);
+    return command ? { on: true, command } : off;
+  } catch (error) {
+    console.error('[Computer] Could not prepare a git login:', error instanceof Error ? error.message : 'unknown');
+    return off;
+  }
 }
 
 export type StartedTurn =
