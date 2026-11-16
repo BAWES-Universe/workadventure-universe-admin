@@ -1,0 +1,17 @@
+/* "GitHub for Universe" on Orbit home, for super admins: one row, the whole row a link. Amber until set up (as a notice), then quiet. */
+.row { display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 12px 8px 12px 16px; border: 1px solid hsl(var(--border)); border-radius: 18px; background: hsl(var(--card)); color: inherit; text-decoration: none; transition: border-color 160ms; }
+.row:hover { border-color: hsl(var(--foreground) / 0.22); }
+.row:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+.row[data-state='todo'] { border-color: rgb(245 196 81 / .45); background: linear-gradient(160deg, rgb(245 196 81 / .10), transparent 55%), hsl(var(--card)); }
+.glyph { flex: none; }
+.text { flex: 1 1 auto; min-width: 0; display: grid; gap: 3px; }
+.head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
+.head strong { font-family: var(--font-display); font-size: 17px; font-weight: 700; letter-spacing: -.02em; line-height: 1.2; }
+.text small { font-size: 13px; line-height: 1.35; color: hsl(var(--muted-foreground)); }
+.pill { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 10px; border-radius: 999px; border: 1px solid hsl(var(--foreground) / 0.16); font-size: 11px; font-weight: 600; white-space: nowrap; }
+.pill > i { width: 6px; height: 6px; border-radius: 50%; background: var(--status-live); }
+.row[data-state='todo'] .pill { border-color: rgb(245 196 81 / .55); color: #b7791f; }
+:global(.dark) .row[data-state='todo'] .pill { color: #F5C451; }
+.row[data-state='todo'] .pill > i { background: #F5C451; }
+.chevron { flex: none; margin-right: 6px; color: hsl(var(--muted-foreground)); }
+@media (prefers-reduced-motion: reduce) { .row { transition: none; } }
