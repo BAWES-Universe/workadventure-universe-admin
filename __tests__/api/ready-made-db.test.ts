@@ -74,6 +74,10 @@ run('ready-made apps through the adapter, in a real database', () => {
     boss = (await person('boss', 'boss@example.test')).id;
     saraBrick = (await createBrick({ ownerId: sara, name: 'Brick' })).id;
   });
+  beforeEach(async () => {
+    // Paid use of an App is held against two Limits (lib/app-use-cap.ts): other suites change the shared meter setting, so these suites state theirs
+    await saveMeterSettings({ appUseCeilingMicros: 1_000_000_000, appUseMemberCeilingMicros: 1_000_000_000 }, boss);
+  });
   afterEach(async () => {
     setAdapterForTests(undefined);
     mockUser.current = null;
