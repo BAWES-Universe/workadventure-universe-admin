@@ -58,7 +58,8 @@ const POOL_LOCK = 'meter:pool';
 export const CALL_ROOM_PREFIX = 'computer:call:';
 /** The room held for the disk of a machine that is about to be made: it is not a job running either, and it belongs to no person's allowance. */
 export const DISK_ROOM_PREFIX = 'computer:diskroom:';
-export const diskRoomKey = (botId: string) => `${DISK_ROOM_PREFIX}${botId}`;
+/** One room for each try of a job: a try that loses the writer's place gives back only its own, never the room of the one that won. */
+export const diskRoomKey = (botId: string, jobId: string) => `${DISK_ROOM_PREFIX}${botId}:${jobId}`;
 const isNoJob = (key: string) => key.startsWith(CALL_ROOM_PREFIX) || key.startsWith(DISK_ROOM_PREFIX);
 
 const viewOf = (row: { reservationKey: string; personKey: string; botId: string | null; jobId: string | null; amountMicros: bigint; state: string; expiresAt: Date; renewals: number; settledMicros: bigint | null }): Reservation => ({
@@ -259,11 +260,11 @@ export async function reserveRoom(
  * Takes room in the pool for the disk of a machine that is about to be made, before anything is made (a hard stop: a disk the pool cannot carry
  * is never bought). The disk is billed whole for as long as the machine exists, so what the pool must hold is one month of it at the storage
  * Limit. The room belongs to no person (a disk is Universe's, not a member's allowance) and is released once the machine is made and its disk is
- * in the books as kept storage, or when the making fails. Asked again for the same Brick it is the same room. Never throws for "no room".
+ * in the books as kept storage, or when the making fails. Asked again for the same job it is the same room (two jobs of one Brick starting together each hold their own: the pool counts both for a moment, the safe way round). Never throws for "no room".
  */
-export async function reserveDiskRoom(input: { botId: string; bytes: number }, now: Date = new Date()): Promise<{ ok: true } | NoRoom> {
+export async function reserveDiskRoom(input: { botId: string; jobId: string; bytes: number }, now: Date = new Date()): Promise<{ ok: true } | NoRoom> {
   if (!Number.isSafeInteger(input.bytes) || input.bytes <= 0) return { ok: true };
-  const key = diskRoomKey(input.botId);
+  const key = diskRoomKey(input.botId, input.jobId);
   return prisma.$transaction(async (tx): Promise<{ ok: true } | NoRoom> => {
     await lockPool(tx);
     const settings = await getMeterSettings(tx);

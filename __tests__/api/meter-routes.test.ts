@@ -90,6 +90,16 @@ describe('POST /api/meter/events', () => {
     expect(sent(2)).toMatchObject({ payerKind: 'universe', payerPersonId: null });
   });
 
+  it('names the maker as payer only for speech on a person\u2019s own key: any other kind or route with no payer named is written as it came', async () => {
+    resolve.mockResolvedValue({ personId: 'omar', guest: false });
+    await post(event({ eventId: 'e1', kind: 'app_use', botId: 'b1', userId: 'wa-omar', isGuest: false, payerKind: 'person', basis: 'paid_by_other', unit: 'use', costMicros: null, route: 'own-key' }));
+    expect(sent()).toMatchObject({ kind: 'app_use', payerKind: 'person', payerPersonId: null });
+    await post(event({ eventId: 'e2', kind: 'speech', botId: 'b1', userId: 'wa-omar', isGuest: false, payerKind: 'person', basis: 'paid_by_other', unit: 'second', costMicros: null, route: 'universe-ai' }));
+    expect(sent(1)).toMatchObject({ kind: 'speech', payerPersonId: null });
+    await post(event({ eventId: 'e3', kind: 'speech', botId: 'b1', userId: 'wa-omar', isGuest: false, payerKind: 'person', basis: 'paid_by_other', unit: 'second', costMicros: null, route: 'own-key' }));
+    expect(sent(2)).toMatchObject({ kind: 'speech', payerPersonId: 'sara' });
+  });
+
   it('answers a bot that does not exist, and writes nothing for it', async () => {
     describe_.mockResolvedValue(null);
     expect(await (await post(event({ botId: 'gone' }))).json()).toEqual({ results: [{ eventId: 'e1', status: 'unknown_bot', error: 'Bot not found' }] });

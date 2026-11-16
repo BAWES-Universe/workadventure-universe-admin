@@ -24,7 +24,7 @@ jest.mock('@/lib/meter', () => {
   return { ...actual, recordMeterEvent: jest.fn(actual.recordMeterEvent) };
 });
 import { saveMeterSettings, getMeterSettings } from '@/lib/meter';
-import { envelopeIn } from '@/lib/meter-allowance';
+import { diskRoomKey, envelopeIn, releaseRoom, reserveDiskRoom } from '@/lib/meter-allowance';
 import { currentEnvelope } from '@/lib/meter-allowance';
 import { recordGrant } from '@/lib/meter-grants';
 import { mintJobToken, TOKEN_LIFE_MS, TOKEN_RENEW_EVERY_SECONDS, verifyJobToken } from '@/lib/computer-token';
@@ -1575,6 +1575,42 @@ run('a Brick’s computer, in a real database', () => {
       expect(provider.calls.filter((call) => call.name === 'create')).toHaveLength(1);
       expect(await prisma.meterReservation.count({ where: { state: 'held', reservationKey: { startsWith: 'computer:diskroom:' } } })).toBe(0);
       expect(await prisma.meterEvent.count({ where: { botId: sara.brickId, kind: 'stored_bytes', quantity: BigInt(4_000_000_000) } })).toBe(1);
+    });
+
+    it('keeps each job\'s own disk room: two jobs of one Brick starting together each hold theirs while the machine is made, and a try giving back its own never frees the other\'s', async () => {
+      const sara = await person('sara');
+      provider.disk = 4_000_000_000;
+      await setUp({ poolCeilingMicros: 10_000_000, storageMicrosPerGbMonth: 90_000 });
+      await giveComputer(sara.brickId, sara.id);
+      const heldAtCreate: number[] = [];
+      const create = provider.create.bind(provider);
+      provider.create = async (botId: string) => {
+        heldAtCreate.push(await prisma.meterReservation.count({ where: { state: 'held', reservationKey: { startsWith: 'computer:diskroom:' } } }));
+        return create(botId);
+      };
+      await Promise.all([startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW), startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, NOW)]);
+      // The machine is made once, and its disk's room was held while it was made
+      expect(heldAtCreate).toHaveLength(1);
+      expect(heldAtCreate[0]).toBeGreaterThanOrEqual(1);
+      expect(await prisma.meterReservation.count({ where: { state: 'held', reservationKey: { startsWith: 'computer:diskroom:' } } })).toBe(0);
+      // Rooms of two tries of one Brick are two rooms: giving back one leaves the other held
+      await reserveDiskRoom({ botId: sara.brickId, jobId: 'job-a', bytes: 4_000_000_000 }, NOW);
+      await reserveDiskRoom({ botId: sara.brickId, jobId: 'job-b', bytes: 4_000_000_000 }, NOW);
+      await releaseRoom({ key: diskRoomKey(sara.brickId, 'job-b') }, NOW);
+      expect(await prisma.meterReservation.findUnique({ where: { reservationKey: diskRoomKey(sara.brickId, 'job-a') } })).toMatchObject({ state: 'held' });
+    });
+
+    it('lets the sweep give back a disk room that lapsed (the server stopped between taking it and giving it back), and leaves one still good alone', async () => {
+      const sara = await person('sara');
+      await setUp({ poolCeilingMicros: 10_000_000, storageMicrosPerGbMonth: 90_000 });
+      const hold = (key: string, expiresAt: Date) =>
+        prisma.meterReservation.create({ data: { reservationKey: key, personKey: 'system:disk', personId: null, botId: sara.brickId, jobId: null, amountMicros: BigInt(360_000), state: 'held', expiresAt } });
+      await hold(diskRoomKey(sara.brickId, 'lapsed'), new Date(NOW.getTime() - 60_000));
+      await hold(diskRoomKey(sara.brickId, 'fresh'), new Date(NOW.getTime() + 600_000));
+      expect((await currentEnvelope(NOW)).reservedMicros + 0).toBeGreaterThan(0);
+      await sweepComputers(NOW);
+      expect(await prisma.meterReservation.findUnique({ where: { reservationKey: diskRoomKey(sara.brickId, 'lapsed') } })).toMatchObject({ state: 'released' });
+      expect(await prisma.meterReservation.findUnique({ where: { reservationKey: diskRoomKey(sara.brickId, 'fresh') } })).toMatchObject({ state: 'held' });
     });
 
     it('does not count the disk room as a job running, or against the person’s allowance, and gives it back when the making fails', async () => {

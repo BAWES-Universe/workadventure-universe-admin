@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { getBrickLimits } from '@/lib/bot-limits';
-import { diskRoomKey, memberAllowance, releaseRoom, renewRoom, reserveDiskRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
+import { DISK_ROOM_PREFIX, diskRoomKey, memberAllowance, releaseRoom, renewRoom, reserveDiskRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
 import { monthOf } from '@/lib/meter-values';
 import { checkSpend } from '@/lib/spend-rules';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
@@ -503,7 +503,7 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
   // carry it makes no machine, and this job waits in line with its work saved, as for any other room the pool lacks
   const diskBytes = !row.providerRef ? provider.diskBytes?.() ?? null : null;
   if (diskBytes !== null && diskBytes > 0) {
-    const disk = await reserveDiskRoom({ botId: job.botId, bytes: diskBytes }, now);
+    const disk = await reserveDiskRoom({ botId: job.botId, jobId: job.id, bytes: diskBytes }, now);
     if (!disk.ok) {
       await releaseRoom({ key }, now);
       if (disk.reason === 'not_set') return 'not_set';
@@ -512,7 +512,7 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     }
   }
   const dropDiskRoom = async () => {
-    if (diskBytes !== null && diskBytes > 0) await releaseRoom({ key: diskRoomKey(job.botId) }, now);
+    if (diskBytes !== null && diskBytes > 0) await releaseRoom({ key: diskRoomKey(job.botId, job.id) }, now);
   };
 
   // Take the writer's place. The database lets only one writing job hold it; a second one arriving at the same moment queues.
@@ -956,6 +956,13 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
       await releaseRoom({ key: reservation.reservationKey }, now);
       released++;
     }
+  }
+  // Room held for a disk whose making was cut off (the server stopped between taking it and giving it back): nobody is making that machine now, so
+  // the room is given back instead of staying in the pool's envelope until the month ends
+  const lapsedDisks = await prisma.meterReservation.findMany({ where: { state: 'held', expiresAt: { lte: now }, reservationKey: { startsWith: DISK_ROOM_PREFIX } }, take: 200 });
+  for (const reservation of lapsedDisks) {
+    await releaseRoom({ key: reservation.reservationKey }, now);
+    released++;
   }
   // Room held for a model call that never reported back (the bot server stopped, the call was lost): what it cost is not known, so it
   // is written as unknown and settled at the room held, never at 0
