@@ -1087,6 +1087,28 @@ run('a Brick’s computer, in a real database', () => {
       }
     });
 
+    it('a details tap is not claimed when the person handed the machine back after the job was read', async () => {
+      const { sara, jobId } = await waitingJob();
+      const ready = { what: 'Your details', where: 'Step 1' };
+      await requestHandover(jobId, 'details', minutes(1), ready);
+      await takeOver(sara.brickId, sara.id);
+      const asked = await fillInDetails(sara.brickId, sara.id, ready);
+      const key = asked.ok ? asked.job.detailsToFill[0].key : '';
+      const read = prisma.computerJob.findUnique.bind(prisma.computerJob);
+      const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementationOnce(((...args: Parameters<typeof read>) =>
+        read(...args).then(async (row) => {
+          // The job was read with the person in control; they hand it back before the tap is claimed
+          await handBack(sara.brickId, sara.id);
+          return row;
+        })) as never);
+      try {
+        expect(await planEffect(jobId, { key, kind: 'details' })).toEqual({ ok: false, reason: 'hand_over_first' });
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await prisma.computerEffect.findUniqueOrThrow({ where: { jobId_effectKey: { jobId, effectKey: key } } })).state).toBe('approved');
+    });
+
     it('a details tap spent by a failed try is not claimed again by a try that read the row before it failed', async () => {
       const { sara, jobId } = await waitingJob();
       const ready = { what: 'Your details', where: 'Step 1' };

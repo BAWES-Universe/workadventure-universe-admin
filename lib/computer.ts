@@ -1371,8 +1371,17 @@ export async function planEffect(jobId: string, input: { key: string; kind: Effe
     // Approved by the person, or tried and confirmed not done: claimed in one write, so two tries at the same moment do it once
     // Details and uploads are claimed from "approved" only: a tap is spent once, so one that failed needs a new tap, never a second claim
     const states = AFTER_TAKE_OVER.includes(input.kind) ? ['approved'] : ['approved', 'failed'];
-    const claimed = await prisma.computerEffect.updateMany({ where: { id: existing.id, state: { in: states } }, data: { state: 'planned', settledAt: null } });
-    return claimed.count === 1 ? { ok: true, already: false } : { ok: false, reason: 'look_up', evidence: existing.evidence };
+    const claimed = await prisma.$transaction(async (tx) => {
+      // The person's hands: checked again here, with the job held so a hand-back (or the end of the job) waits for this claim. The read
+      // above may be old by now, and a tap is only ever spent while the person still has the machine
+      if (AFTER_TAKE_OVER.includes(input.kind)) {
+        const now = await tx.$queryRaw<{ status: string; control: string }[]>`SELECT "status", "control" FROM "computer_jobs" WHERE "id" = ${jobId} FOR SHARE`;
+        if (now.length === 0 || now[0].status !== 'waiting' || now[0].control !== 'person') return 'hand_over_first' as const;
+      }
+      return (await tx.computerEffect.updateMany({ where: { id: existing.id, state: { in: states } }, data: { state: 'planned', settledAt: null } })).count;
+    });
+    if (claimed === 'hand_over_first') return { ok: false, reason: 'hand_over_first' };
+    return claimed === 1 ? { ok: true, already: false } : { ok: false, reason: 'look_up', evidence: existing.evidence };
   }
   try {
     await prisma.computerEffect.create({ data: { jobId, effectKey: input.key.slice(0, 255), kind: input.kind, state: 'planned', evidence: input.evidence?.slice(0, 500) ?? null } });
