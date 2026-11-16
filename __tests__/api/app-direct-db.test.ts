@@ -183,6 +183,29 @@ run('key apps, in a real database', () => {
     expect((await readKeyForm(id, sara)).triesLeft).toBe(5);
   });
 
+  it('gives the try back even when the database fails for a moment while it does, so the form stays retryable', async () => {
+    const id = await open();
+    await prisma.appKeyRequest.update({ where: { id }, data: { tries: 4 } });
+    const original = prisma.appKeyRequest.updateMany.bind(prisma.appKeyRequest);
+    let refused = 0;
+    const spy = jest.spyOn(prisma.appKeyRequest, 'updateMany').mockImplementation(((args: { data?: { tries?: { decrement?: number } } }) => {
+      if (args.data?.tries?.decrement && refused < 2) {
+        refused += 1;
+        return Promise.reject(new Error('connection lost'));
+      }
+      return original(args as never);
+    }) as never);
+    try {
+      // The last try is taken, the service says it is down, and the refund fails twice before the database answers
+      await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(503).deps)).rejects.toMatchObject({ status: 502 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(refused).toBe(2);
+    expect((await readKeyForm(id, sara)).triesLeft).toBe(1);
+    await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(404).deps)).resolves.toMatchObject({ created: true });
+  });
+
   it('closes a form after its time, and a form can be used once, also when two keys arrive at the same moment', async () => {
     const old = await open();
     await prisma.appKeyRequest.update({ where: { id: old }, data: { expiresAt: new Date(Date.now() - 1000) } });

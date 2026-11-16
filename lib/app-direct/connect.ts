@@ -153,6 +153,9 @@ function readDefinition(row: { definition: unknown; definitionHash: string }): D
   return parsed.data;
 }
 
+const GIVE_BACK_TRIES = 5;
+const GIVE_BACK_WAIT_MS = 100;
+
 /** What the form shows. Only the person it was opened for can read it; anyone else gets "not found". */
 export async function readKeyForm(requestId: string, ownerId: string): Promise<KeyFormView> {
   const row = await prisma.appKeyRequest.findFirst({ where: { id: requestId, ownerId } });
@@ -219,7 +222,22 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
     // a count that none of them has added to yet. A try that does not end with the service refusing the key is given back below.
     const reserved = await prisma.appKeyRequest.updateMany({ where: { id: row.id, usedAt: null, tries: { lt: limits.keyTries } }, data: { tries: { increment: 1 } } });
     if (reserved.count !== 1) throw new KeyFormError(429, 'too_many', 'Too many tries');
-    const giveBack = () => prisma.appKeyRequest.updateMany({ where: { id: row.id, tries: { gt: 0 } }, data: { tries: { decrement: 1 } } });
+    // Given back with a few more tries if the database hiccups: a try left taken for a service that never refused the key would shut the
+    // form ("too many") once the database is back
+    const giveBack = async () => {
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          await prisma.appKeyRequest.updateMany({ where: { id: row.id, tries: { gt: 0 } }, data: { tries: { decrement: 1 } } });
+          return;
+        } catch (error) {
+          if (attempt >= GIVE_BACK_TRIES) {
+            console.error('[AppDirect] Could not give a form try back:', error instanceof Error ? error.message : 'unknown');
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, GIVE_BACK_WAIT_MS * attempt));
+        }
+      }
+    };
     let status: number;
     try {
       const request = buildRequest(definition, definition.check.operation, definition.check.arguments, key);
@@ -228,14 +246,14 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
       if (answer.redirected) throw new KeyFormError(502, 'unreachable', 'The service did not answer as expected');
       status = answer.status;
     } catch (error) {
-      await giveBack().catch(() => undefined);
+      await giveBack();
       if (error instanceof KeyFormError) throw error;
       if (error instanceof GuardError || error instanceof RequestError) throw new KeyFormError(502, 'unreachable', 'The service could not be reached');
       throw error;
     }
     // The service refused it: that is what the try was for
     if (definition.check.rejected.includes(status)) throw new KeyFormError(422, 'rejected', "The service didn't accept this key");
-    await giveBack().catch(() => undefined);
+    await giveBack();
     if (status >= 500) throw new KeyFormError(502, 'unreachable', 'The service could not be reached');
   }
 
