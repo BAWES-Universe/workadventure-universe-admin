@@ -38,7 +38,7 @@ const geminiKey = { ...base, providerId: 'key-3', name: 'My Gemini', ownerId: 'm
 const pinned = { ...universeAiProvider, providerId: 'lmstudio-local', isDefault: false };
 
 const botOn = (ref: string | null, behaviorConfig: object | null = null) => ({
-  id: 'b1', name: 'Sam', aiProviderRef: ref, behaviorConfig, createdById: 'maker', roomId: 'room-1',
+  id: 'b1', name: 'Sam', aiProviderRef: ref, behaviorConfig, createdById: 'maker', roomId: 'room-1', deletedAt: null,
   room: { world: { universe: { id: 'uni-1', name: 'BAWES Universe', ownerId: 'universe-owner' } } },
 });
 const ask = async () => (await GET(new NextRequest('http://localhost:3333/api/bots/b1/ai-credentials'), { params: Promise.resolve({ id: 'b1' }) })).json();
