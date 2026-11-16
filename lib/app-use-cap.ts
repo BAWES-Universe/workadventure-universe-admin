@@ -42,7 +42,7 @@ async function countedUnderLock(event: MeterEventInput, price: number, now: Date
     const where = { pool: 'chat', kind: 'app_use', route: 'app', payerKind: 'universe', occurredAt: { gte: month.start, lt: month.end } };
     const [all, mine] = await Promise.all([
       tx.meterEvent.aggregate({ where, _sum: { costMicros: true } }),
-      event.personId ? tx.meterEvent.aggregate({ where: { ...where, personId: event.personId }, _sum: { costMicros: true } }) : Promise.resolve(null),
+      event.personId ? tx.meterEvent.aggregate({ where: { ...where, personKey: `person:${event.personId}` }, _sum: { costMicros: true } }) : Promise.resolve(null),
     ]);
     if (Number(all._sum.costMicros ?? 0) + price > settings.appUseCeilingMicros) return { recorded: false, conflict: false, stopped: 'month' as const };
     if (mine && Number(mine._sum.costMicros ?? 0) + price > settings.appUseMemberCeilingMicros) return { recorded: false, conflict: false, stopped: 'person' as const };
