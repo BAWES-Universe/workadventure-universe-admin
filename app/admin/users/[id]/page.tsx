@@ -39,6 +39,7 @@ import { Planet } from '../../components/ds/planet-icon';
 import InviteSheet, { firstUniverse, personNote, type UniverseChoice, type SentInvitation } from '../../components/invite-sheet';
 import { useCurrentUniverseId } from '../../hooks/use-current-universe';
 import { membershipButton } from '@/lib/membership-button';
+import { ExtraUsage } from './extra-usage';
 
 interface WorldMembership {
   id: string;
@@ -901,6 +902,8 @@ export default function UserDetailPage() {
                 <dd className="mt-0.5">{timeAgo(new Date(user.updatedAt))}</dd>
               </div>
             </dl>
+
+            {isSuperAdmin && !user.isGuest && <ExtraUsage userId={id} name={name} />}
 
             {!accessHistoryHidden && (
               <div className="grid min-w-0 gap-3" data-testid="access-history">

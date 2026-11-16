@@ -9,17 +9,23 @@ import { prisma } from '@/lib/db';
  */
 export type UsagePerson = { personId: string | null; guest: boolean | null };
 
-export const USAGE_CHANNELS = ['dm', 'nearby'] as const;
+export const USAGE_CHANNELS = ['dm', 'nearby', 'task'] as const;
 export type UsageChannel = (typeof USAGE_CHANNELS)[number];
 
-/** "dm" or "nearby"; the bot server's own word for nearby chat ("world") counts too. Anything else is not recorded. */
+/**
+ * "dm" or "nearby"; the bot server's own word for nearby chat ("world") counts too. "task" is a model call a goal or task made on its
+ * owner's behalf (game #2002): usage of the owner like any other, counted in the same window, and the part goals and tasks may use is
+ * measured by it. Anything else is not recorded.
+ */
 export function readUsageChannel(value: unknown): UsageChannel | null {
   if (value === 'dm') return 'dm';
   if (value === 'nearby' || value === 'world') return 'nearby';
+  if (value === 'task') return 'task';
   return null;
 }
 
-export async function resolveUsagePerson(talkedUserId: unknown, isGuest: unknown): Promise<UsagePerson> {
+/** `db` is the caller's transaction when it asks while holding a lock, so the lookup never waits for a second connection. */
+export async function resolveUsagePerson(talkedUserId: unknown, isGuest: unknown, db: Pick<typeof prisma, 'user'> = prisma): Promise<UsagePerson> {
   // A bot server from before this sends neither, and its rows stay "not told"
   if (typeof talkedUserId !== 'string' || !talkedUserId) {
     return { personId: null, guest: typeof isGuest === 'boolean' ? isGuest : null };
@@ -28,7 +34,7 @@ export async function resolveUsagePerson(talkedUserId: unknown, isGuest: unknown
   // A guest is never looked up, unless the id is an email, which only a signed-in person has
   if (isGuest === true && !isEmail) return { personId: null, guest: true };
   try {
-    const user = await prisma.user.findUnique({
+    const user = await db.user.findUnique({
       where: isEmail ? { email: talkedUserId } : { uuid: talkedUserId },
       select: { id: true, isGuest: true },
     });
