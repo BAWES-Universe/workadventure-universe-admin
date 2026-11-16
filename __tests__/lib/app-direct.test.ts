@@ -222,6 +222,23 @@ describe('the request built from a definition', () => {
     expect(Object.keys(built.headers)).toEqual(['accept']);
   });
 
+  it('keeps a literal empty object of the template, and drops one that an omitted optional value left empty', () => {
+    const def = definitionSchema.parse({
+      ...draft(),
+      operations: [
+        draft().operations[0],
+        {
+          id: 'ship', label: 'Send a parcel', method: 'POST', path: '/v1/parcels', category: 'make', returns: ['id'],
+          params: [{ name: 'to', type: 'string', in: 'body', required: true }, { name: 'note', type: 'string', in: 'body', required: false }],
+          body: { to: { $param: 'to' }, metadata: {}, extra: { note: { $param: 'note' } } },
+        },
+      ],
+      check: { operation: 'track', arguments: { parcelId: 'check' } },
+    });
+    expect(JSON.parse(buildRequest(def, 'ship', { to: 'Sara' }, KEY).body as string)).toEqual({ to: 'Sara', metadata: {} });
+    expect(JSON.parse(buildRequest(def, 'ship', { to: 'Sara', note: 'hi' }, KEY).body as string)).toEqual({ to: 'Sara', metadata: {}, extra: { note: 'hi' } });
+  });
+
   it('keeps every value inside its own part of the path', () => {
     const def = definitionSchema.parse(draft());
     expect(buildRequest(def, 'track', { parcelId: 'a/b?c=d#e' }, KEY).url).toBe('https://api.shiplink.com/v1/parcels/a%2Fb%3Fc%3Dd%23e');
