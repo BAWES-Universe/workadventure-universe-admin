@@ -39,6 +39,8 @@ export async function POST(request: NextRequest) {
     const { botId, serverId, requesterKey, forOwner, tool, callId } = body.data;
     const verdict = await checkAppUse(botId, serverId, { requesterKey, forOwner, callId });
     if (!verdict) return json(request, { allowed: false, reason: 'gone' }, 404);
+    // The team paused Apps: the same answer as the link route gives (nothing was counted or sent)
+    if (!verdict.allowed && verdict.reason === 'paused') return json(request, { error: 'Apps are paused for a while', code: 'paused' }, 503);
     if (!verdict.allowed) return json(request, { allowed: false, reason: verdict.reason }, 403);
     if (!verdict.readyMade) return json(request, { error: 'Not found' }, 404);
     const row = await prisma.botMcpServer.findUnique({ where: { id: serverId }, select: { connectionId: true, connection: { select: { ownerId: true } } } });

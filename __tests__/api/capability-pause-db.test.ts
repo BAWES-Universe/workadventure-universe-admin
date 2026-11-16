@@ -169,10 +169,10 @@ run('pausing each capability on its own, in a real database', () => {
       const answer = await (await check(serverId, `c-${randomUUID()}`)).json();
       expect(answer).toMatchObject({ allowed: false, reason: 'paused' });
       const meterBefore = await prisma.meterEvent.count({ where: { personId: sara } });
-      // The use route asks the same check first, so it answers the same: paused
+      // The use route asks the same check first and answers like the link route does
       const used = await useIt(serverId);
-      expect(used.status).toBe(403);
-      expect(await used.json()).toMatchObject({ allowed: false, reason: 'paused' });
+      expect(used.status).toBe(503);
+      expect(await used.json()).toMatchObject({ code: 'paused' });
       const called = await link(serverId, call, `c-${randomUUID()}`);
       expect(called.status).toBe(503);
       expect(await called.json()).toMatchObject({ code: 'paused' });
@@ -249,6 +249,35 @@ run('pausing each capability on its own, in a real database', () => {
       await command('computers', 'resume');
       await sweepComputers(minutes(8));
       expect((await prisma.computerJob.findUniqueOrThrow({ where: { id: queued.job.id } })).status).toBe('running');
+    });
+
+    it('answers a retry of a run that already has its job with that job, even while paused, and starts no second one', async () => {
+      await giveComputer(saraBrick, sara);
+      const item = await prisma.brickItem.create({ data: { ownerId: sara, botId: saraBrick, kind: 'goal', words: 'Book it', cadence: {}, timeZone: 'UTC' } });
+      const run = await prisma.brickItemRun.create({ data: { itemId: item.id, dueAt: NOW, revision: 1, leaseUntil: minutes(30) } });
+      const first = await startJob({ botId: saraBrick, personId: sara, title: 'Book it', runId: run.id }, NOW);
+      if (!first.ok) throw new Error('did not start');
+      asBoss();
+      await command('computers', 'pause');
+      const again = await startJob({ botId: saraBrick, personId: sara, title: 'Book it', runId: run.id }, minutes(1));
+      expect(again.ok && again.job.id).toBe(first.job.id);
+      // A run with no job yet is a new job: refused while paused
+      const other = await prisma.brickItemRun.create({ data: { itemId: item.id, dueAt: minutes(5), revision: 1, leaseUntil: minutes(30) } });
+      expect(await startJob({ botId: saraBrick, personId: sara, title: 'Another', runId: other.id }, minutes(2))).toEqual({ ok: false, reason: 'paused' });
+      expect(await prisma.computerJob.count({ where: { botId: saraBrick } })).toBe(1);
+      await prisma.brickItem.delete({ where: { id: item.id } });
+    });
+
+    it('waits in line for no reason a person could act on: a job that waited for room says "busy" while paused, never "allowance"', async () => {
+      await giveComputer(saraBrick, sara);
+      const both = await Promise.all([startJob({ botId: saraBrick, personId: sara, title: 'A' }, NOW), startJob({ botId: saraBrick, personId: sara, title: 'B' }, NOW)]);
+      const queued = both.find((one) => one.ok && one.job.status === 'queued');
+      if (!queued || !queued.ok) throw new Error('did not queue');
+      await prisma.computerJob.update({ where: { id: queued.job.id }, data: { queuedFor: 'allowance' } });
+      asBoss();
+      await command('computers', 'pause');
+      await sweepComputers(minutes(3));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: queued.job.id } })).toMatchObject({ status: 'queued', queuedFor: 'busy' });
     });
 
     it('still lets a person give their Brick a computer (that costs nothing) and keeps everything made', async () => {

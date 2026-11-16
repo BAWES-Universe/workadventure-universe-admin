@@ -330,8 +330,6 @@ export async function startJob(input: { botId: string; personId: string; title: 
   if (!providerFor(row)) return { ok: false, reason: 'not_open' };
   // A wind-down is on (the team's command): computers take no new work
   if (await isWindingDown()) return { ok: false, reason: 'not_open' };
-  // The team paused computers: no new job starts (one already going finishes, and a job already in line waits with its work saved)
-  if (await computersArePaused()) return { ok: false, reason: 'paused' };
   // A run of a goal or task (game #2002) starts one job, ever: the same run again (it was handed out again) finds that job, whatever it
   // came to, and takes no second room. The run must be this person's, on this Brick.
   if (input.runId) {
@@ -339,6 +337,9 @@ export async function startJob(input: { botId: string; personId: string; title: 
     const again = await reuseRunJob(input.botId, input.runId, now);
     if (again) return again;
   }
+  // The team paused computers: no new job starts (one already going finishes, and a job already in line waits with its work saved).
+  // A retry of a run that already has its job was answered above, so a pause never hides the job a run already made
+  if (await computersArePaused()) return { ok: false, reason: 'paused' };
   let created;
   try {
     created = await prisma.computerJob.create({
@@ -461,7 +462,11 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
   const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued' }, data: { queuedFor } });
 
   // The team paused computers: a job in line stays in line with its work saved, and starts by itself when they are back
-  if (await computersArePaused()) return 'queued';
+  if (await computersArePaused()) {
+    // Waiting in line, nothing to ask for: not the "allowance" or "turn" reason an earlier try may have left
+    await queue('busy');
+    return 'queued';
+  }
 
   // The person has the machine: nothing starts under Brick's hands until they hand it back. Nothing is reserved while waiting in line.
   if ((await prisma.computerJob.count({ where: { botId: job.botId, status: 'waiting', control: 'person' } })) > 0) {
