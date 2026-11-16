@@ -1944,6 +1944,12 @@ run('the bounded Instant executor, in a real database', () => {
       await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-8', runId: 'run-hide-8', title: 'Only thinking', category: 'apps' });
       await underRun('run-hide-8', 'model_call', 'chat', 0);
       await closeReceipt({ botId: brick, taskKey: 'hide-8', personId: sara, state: 'refunded' });
+      // A charge in the run that names another task's key is that task's, not this one's: hidden
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-9', runId: 'run-hide-9', title: 'Another task’s charge', category: 'apps' });
+      await prisma.meterEvent.create({
+        data: { eventId: `run-hide-9-${tag}`, kind: 'app_use', pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(1000), basis: 'measured', detail: { runId: 'run-hide-9', taskKey: 'some-other-task' } },
+      });
+      await closeReceipt({ botId: brick, taskKey: 'hide-9', personId: sara, state: 'refunded' });
       // A task with no category is not an Apps task here: left as it was
       await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-5', title: 'No category', category: null });
       await closeReceipt({ botId: brick, taskKey: 'hide-5', personId: sara, state: 'refunded' });
@@ -1954,6 +1960,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(titles).not.toContain('Refused by a rule');
       expect(titles).not.toContain('No run made');
       expect(titles).not.toContain('Only thinking');
+      expect(titles).not.toContain('Another task’s charge');
       expect(titles).toEqual(expect.arrayContaining(['Ran and failed', 'Has books, refunded', 'Run-wide charge', 'No category', 'Finished']));
       // The limit counts what is listed: hidden receipts do not take a place
       expect((await activityFor(sara, 5)).length).toBe(5);
