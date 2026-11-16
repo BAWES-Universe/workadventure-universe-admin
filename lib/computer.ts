@@ -9,7 +9,7 @@ import { monthOf } from '@/lib/meter-values';
 import { checkSpend } from '@/lib/spend-rules';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
-import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
+import { callRoomKey, giveBackModelCalls, settleModelCall } from '@/lib/computer-calls';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
 import {
   AFTER_TAKE_OVER,
@@ -811,6 +811,10 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     // The job is over either way: the machine still rests and the line still moves, and the sweep gives the room back
     console.error('[Computer] Could not settle a job’s room:', error instanceof Error ? error.message : 'unknown');
   }
+  // A job that failed on our side takes nothing from the person's month, and neither do the model calls it made (the sweep tries again if this fails)
+  if (givenBackJob(status, endedBy)) {
+    await giveBackModelCalls(job.id, job.personId).catch((error) => console.error('[Computer] Could not give back a job’s model calls:', error instanceof Error ? error.message : 'unknown'));
+  }
 
   if (held) {
     await closeOutIfUnheld(job.botId);
@@ -887,6 +891,29 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
     LIMIT ${batch}`);
   for (const job of ended) {
     await recordComputerTime(job, job.secondsRun, job.endedAt ?? now, { endedBy: job.endedBy as EndedBy | null, status: job.status });
+  }
+  await giveBackMissingModelCalls(batch, botId);
+}
+
+/** How long after a job failed the sweep still looks for model calls of it that were written against the person (a give-back that did not go through). */
+const GIVE_BACK_LOOKBACK_DAYS = 3;
+
+/**
+ * A job that failed on our side has its model calls given back when it ends. If that write did not go through, or a call was recorded
+ * in the same moment, the next sweep finds the call still written against the person and gives it back too. Never throws.
+ */
+async function giveBackMissingModelCalls(batch: number, botId?: string): Promise<void> {
+  const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
+  try {
+    const jobs = await prisma.$queryRaw<Array<{ id: string; personId: string }>>(Prisma.sql`
+      SELECT DISTINCT j."id", j."person_id" AS "personId"
+      FROM "computer_jobs" j
+      WHERE (j."status" = 'failed' OR (j."status" = 'stopped' AND j."ended_by" = 'error')) AND j."ended_at" > NOW() - ${GIVE_BACK_LOOKBACK_DAYS} * INTERVAL '1 day' ${only}
+        AND EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
+      LIMIT ${batch}`);
+    for (const job of jobs) await giveBackModelCalls(job.id, job.personId);
+  } catch (error) {
+    console.error('[Computer] Could not look for a failed job’s model calls:', error instanceof Error ? error.message : 'unknown');
   }
 }
 

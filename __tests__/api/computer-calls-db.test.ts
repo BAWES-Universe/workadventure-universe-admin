@@ -14,7 +14,8 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { currentEnvelope } from '@/lib/meter-allowance';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { finishJob, giveComputer, handBack, renewJob, startJob, sweepComputers, takeOver } from '@/lib/computer';
+import { computerView, finishJob, giveComputer, handBack, renewJob, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
+import { activityFor } from '@/lib/task-receipts';
 import { TOKEN_LIFE_MS, forgetOldTokens, mintJobToken, verifyJobToken } from '@/lib/computer-token';
 import { authorizeModelCall, callRoomKey, releaseModelCall, settleModelCall } from '@/lib/computer-calls';
 
@@ -311,6 +312,114 @@ run('what a computer may ask of Orbit, in a real database', () => {
       const room = await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: callRoomKey(jobId, 'orphan') } });
       expect(room.state).toBe('released');
       expect(await prisma.meterEvent.count({ where: { eventId: `computer:${jobId}:call:orphan` } })).toBe(0);
+    });
+  });
+
+  describe('the model calls of a job that failed on our side', () => {
+    const facts = (costMicros: number) => ({ costMicros, basis: 'measured' as const, payer: { kind: 'universe' as const }, route: 'universe-ai' as const });
+    const callEvent = (jobId: string, callId: string) => prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:${callId}` } });
+    /** A call that was sent and settled while the job ran. */
+    const settledCall = async (jobId: string, callId: string, cost: number) => {
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await authorizeModelCall({ token, callId, estimateMicros: 5_000, payer: 'universe' }, NOW);
+      await settleModelCall(jobId, callId, facts(cost), NOW);
+    };
+
+    it('are not taken from the person’s month, and stay in the books as our own cost, written against nobody', async () => {
+      const { sara, jobId } = await running();
+      await settledCall(jobId, 'c1', 1_200);
+      await settledCall(jobId, 'c2', 3_000);
+      // While it runs they are the person's
+      expect((await callEvent(jobId, 'c1')).personKey).toBe(`person:${sara.id}`);
+      await finishJob(jobId, 'failed', minutes(5));
+      for (const [callId, cost] of [['c1', 1_200], ['c2', 3_000]] as const) {
+        const event = await callEvent(jobId, callId);
+        expect(event).toMatchObject({ kind: 'model_call', pool: 'computer', payerKind: 'universe', personKey: 'unknown', personId: null, jobId, costMicros: BigInt(cost) });
+        expect(event.detail).toMatchObject({ givenBack: true, forPersonId: sara.id });
+      }
+      // Their month is whole, the calls' room is settled (not left held), and our exposure still counts what the providers billed
+      expect((await computerView(sara.brickId, sara.id, minutes(5)))?.month?.leftFraction).toBe(1);
+      expect(await prisma.meterReservation.count({ where: { personKey: `person:${sara.id}`, state: 'held' } })).toBe(0);
+      expect((await currentEnvelope(minutes(5))).unsettledMicros).toBeGreaterThanOrEqual(30_000 + 4_200);
+      // Asked again, it changes nothing more
+      const [item] = await activityFor(sara.id);
+      expect(item).toMatchObject({ state: 'refunded', spentMicros: null });
+    });
+
+    it('are written against nobody when the report comes after the job failed (a call that finished late)', async () => {
+      const { sara, jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await authorizeModelCall({ token, callId: 'late', estimateMicros: 5_000, payer: 'universe' }, NOW);
+      await finishJob(jobId, 'failed', minutes(5));
+      expect(await settleModelCall(jobId, 'late', { ...facts(2_500), cutShort: true }, minutes(6))).toEqual({ ok: true });
+      const event = await callEvent(jobId, 'late');
+      expect(event).toMatchObject({ personKey: 'unknown', personId: null, costMicros: BigInt(2_500) });
+      expect(event.detail).toMatchObject({ givenBack: true, forPersonId: sara.id, cutShort: true });
+      expect((await computerView(sara.brickId, sara.id, minutes(6)))?.month?.leftFraction).toBe(1);
+    });
+
+    it('are given back when the worker was lost: the sweep stops the job, and the call it never heard back from is written against nobody too', async () => {
+      const { sara, jobId } = await running();
+      await settledCall(jobId, 'done1', 1_000);
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await authorizeModelCall({ token, callId: 'lost', estimateMicros: 9_000, payer: 'universe' }, NOW);
+      await sweepComputers(minutes(60));
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } })).toMatchObject({ status: 'stopped', endedBy: 'error' });
+      expect(await callEvent(jobId, 'done1')).toMatchObject({ personKey: 'unknown', personId: null });
+      expect(await callEvent(jobId, 'lost')).toMatchObject({ personKey: 'unknown', personId: null, costMicros: null, basis: 'unknown' });
+      expect((await computerView(sara.brickId, sara.id, minutes(60)))?.month?.leftFraction).toBe(1);
+    });
+
+    it('a report that replaces an unknown figure keeps the call given back', async () => {
+      const { jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await authorizeModelCall({ token, callId: 'lost', estimateMicros: 9_000, payer: 'universe' }, NOW);
+      await sweepComputers(minutes(60));
+      await settleModelCall(jobId, 'lost', facts(4_000), minutes(61));
+      const event = await callEvent(jobId, 'lost');
+      expect(event).toMatchObject({ personKey: 'unknown', personId: null, costMicros: BigInt(4_000), basis: 'measured' });
+      expect(event.detail).toMatchObject({ givenBack: true });
+    });
+
+    it('stay the person’s when the job ran fine or the person stopped it', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const done = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!done.ok) throw new Error('no');
+      await settledCall(done.job.id, 'c1', 1_200);
+      await finishJob(done.job.id, 'done', minutes(5));
+      expect(await callEvent(done.job.id, 'c1')).toMatchObject({ personKey: `person:${sara.id}`, personId: sara.id });
+      expect((await callEvent(done.job.id, 'c1')).detail).not.toHaveProperty('givenBack');
+
+      const stopped = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(6));
+      if (!stopped.ok) throw new Error('no');
+      await settledCall(stopped.job.id, 'c2', 700);
+      await stopJobFor(sara.brickId, sara.id, minutes(9));
+      expect(await callEvent(stopped.job.id, 'c2')).toMatchObject({ personKey: `person:${sara.id}`, personId: sara.id });
+      // Their month has both jobs' calls and minutes taken from it
+      const left = (await computerView(sara.brickId, sara.id, minutes(9)))?.month?.leftFraction ?? 1;
+      expect(left).toBeLessThan(1 - (1_200 + 700) / 1_000_000);
+    });
+
+    it('do not touch a call on the owner’s own key (it was never the platform’s cost or the person’s allowance)', async () => {
+      const { sara, jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await authorizeModelCall({ token, callId: 'k1', estimateMicros: 1, payer: 'own-key' }, NOW);
+      await settleModelCall(jobId, 'k1', { costMicros: 900, basis: 'measured', payer: { kind: 'person', personId: sara.id }, route: 'own-key' }, NOW);
+      await finishJob(jobId, 'failed', minutes(5));
+      expect(await callEvent(jobId, 'k1')).toMatchObject({ payerKind: 'person', payerPersonId: sara.id, personKey: `person:${sara.id}` });
+    });
+
+    it('are found by a later sweep when the give-back at the end did not go through', async () => {
+      const { sara, jobId } = await running();
+      await settledCall(jobId, 'c1', 1_200);
+      await finishJob(jobId, 'failed', minutes(5));
+      // Put it back as it would be had the give-back write failed
+      await prisma.meterEvent.updateMany({ where: { eventId: `computer:${jobId}:call:c1` }, data: { personKey: `person:${sara.id}`, personId: sara.id, detail: {} } });
+      expect((await computerView(sara.brickId, sara.id, minutes(6)))?.month?.leftFraction).toBeLessThan(1);
+      await sweepComputers(minutes(7));
+      expect(await callEvent(jobId, 'c1')).toMatchObject({ personKey: 'unknown', personId: null, costMicros: BigInt(1_200) });
+      expect((await computerView(sara.brickId, sara.id, minutes(7)))?.month?.leftFraction).toBe(1);
     });
   });
 });
