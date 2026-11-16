@@ -1123,6 +1123,8 @@ model BrickItem {
   heldSince   DateTime?   @map("held_since")
   heldToldAt  DateTime?   @map("held_told_at")
   heldNoticeAt  DateTime? @map("held_notice_at")
+  // When the bot server was last asked to tell the person about a run that was given up without a report (handed out again until it confirms with markTold)
+  failureNoticeAt DateTime? @map("failure_notice_at")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
