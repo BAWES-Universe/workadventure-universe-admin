@@ -241,7 +241,8 @@ export async function recordAppAsk(input: { name: unknown; personKey: string }, 
 /** Whether an App of that name or key is already on a list a person can use (a ready-made App that is on, or an entry of the super admin's list that is on). */
 async function appExists(key: string): Promise<boolean> {
   const slug = key.replace(/[^a-z0-9]+/g, '');
-  const ready = (await readReadyMadeApps()).some((app) => app.enabled && (askKey(app.name) === key || app.key.replace(/[^a-z0-9]+/g, '') === slug));
+  // Ready-made Apps are on a list only while the provider is: with it off they cannot be used, so asking for one still counts
+  const ready = (adapterIsOn() ? await readReadyMadeApps() : []).some((app) => app.enabled && (askKey(app.name) === key || app.key.replace(/[^a-z0-9]+/g, '') === slug));
   if (ready) return true;
   const entries = await prisma.appCatalogEntry.findMany({ where: { enabled: true }, select: { key: true, name: true } });
   return entries.some((entry) => askKey(entry.name) === key || entry.key.replace(/[^a-z0-9]+/g, '') === slug);
