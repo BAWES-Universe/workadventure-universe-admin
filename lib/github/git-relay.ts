@@ -248,7 +248,16 @@ export async function refusedOverwrite(
   for (const update of existing) {
     // A tip the push carries is followed through the commits it carries. A tip GitHub has already (a branch pushed earlier, now
     // being moved up to) is asked of GitHub, which knows its history
-    const proved = commits.has(update.newId) ? buildsOn(commits, update.oldId, update.newId) : await onGitHub(update.oldId, update.newId);
+    let proved: boolean;
+    if (!commits.has(update.newId)) {
+      proved = await onGitHub(update.oldId, update.newId);
+    } else {
+      const walked = buildsOn(commits, update.oldId, update.newId);
+      proved = walked === true;
+      // The new commits may stand on a commit GitHub already has on another branch (git leaves it out of the pack): then GitHub says
+      // whether that commit comes after the branch as it is. A few are asked, never a crowd
+      if (Array.isArray(walked)) for (const parent of walked.slice(0, 5)) if (!proved && (await onGitHub(update.oldId, parent))) proved = true;
+    }
     if (!proved) return why(update.ref, 'This push does not build on the branch as it is, so it would overwrite it');
   }
   return null;

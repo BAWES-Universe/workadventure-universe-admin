@@ -786,6 +786,24 @@ run('ready-made apps through the adapter, in a real database', () => {
       });
     });
 
+    it('holds a call back, and says so in plain words, when the limits cannot be checked in time: never a server error, never let through unchecked', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const transaction = jest.spyOn(prisma, '$transaction').mockRejectedValueOnce(new Error('Transaction API error: timed out'));
+      try {
+        const held = await useIt({ serverId });
+        expect(held.status).toBe(200);
+        expect(await held.json()).toMatchObject({ ok: false, data: { stopped: true } });
+        expect(adapter.use).not.toHaveBeenCalled();
+        expect(await paidUses()).toBe(0);
+      } finally {
+        transaction.mockRestore();
+        quiet.mockRestore();
+      }
+      // And the next call, once the books answer again, goes through
+      expect((await useIt({ serverId })).status).toBe(200);
+    });
+
     it('holds back a paid call on the app link with a tool result that says so, and lets listings through', async () => {
       const { adapter, serverId } = await connectedAndGranted();
       const call = (extra: Record<string, unknown>) =>
