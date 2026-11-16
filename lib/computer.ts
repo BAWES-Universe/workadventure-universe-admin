@@ -333,6 +333,8 @@ export async function reviewAppSteps(botId: string, personId: string, input: { a
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   const provider = row?.enabled ? providerFor(row) : null;
   if (!row || !provider || (await isWindingDown())) return { review: false };
+  // A name that matches no connected app (it was disconnected since, or the bot server names it differently) is still steps that were taken, at a
+  // rate we cannot read: it is priced at the dearest tier like any unknown rate, never as nothing. The only result is a line of advice.
   const app = await connectedApp(botId, input.app);
   const computer = computerQuote({ awakeMicrosPerMinute: provider.microsPerMinute() ?? null, hasMachine: !!row.providerRef });
   return { review: stepsReview({ steps: input.steps, stepMicros: app ? app.stepMicros : null, computer }) };

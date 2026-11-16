@@ -189,7 +189,7 @@ run('choosing the way by expected cost, in a real database', () => {
       expect(await reviewAppSteps(person.brickId, person.id, { app: 'Notion', steps: 80 })).toEqual({ review: false });
     });
 
-    it('prices an app that is not connected at the dearest rate, never at nothing', async () => {
+    it('prices a name that matches no connected app (disconnected since, or named differently) at the dearest rate, never at nothing: the advice is only a line', async () => {
       const person = await sara();
       await withMachine(person.brickId);
       expect(await reviewAppSteps(person.brickId, person.id, { app: 'Mystery', steps: 12 })).toEqual({ review: true });
