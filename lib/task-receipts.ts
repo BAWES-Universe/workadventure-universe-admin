@@ -154,11 +154,14 @@ export async function settleReceipt(task: { botId: string; personId: string; tas
     if (!row || row.personId !== task.personId) return null;
     const runs = await tx.instantRun.findMany({ where: { botId: task.botId, personId: task.personId, taskKey: task.taskKey }, select: { state: true } });
     if (runs.length === 0) {
-      // A task with no Instant run has nothing here to look up. One the bot server left in checking is ended when it has waited as long as
-      // an Instant lookup would have (the sweep says when): done, and what it took is read from the books, so it never stays hidden for good.
+      // A task with no Instant run has nothing here to look up, and the bot server may have closed it as checking because its request never
+      // reached Orbit. Once it has waited well past the bot server's own retries, it is ended so it never stays hidden for good: refunded
+      // (nothing was ever sent, so nothing was taken) when the books hold nothing for its key, done (what it took is read from the books) otherwise.
       if (row.state === 'checking' && unwatchedBefore !== null && row.updatedAt < unwatchedBefore) {
-        await tx.taskReceipt.update({ where: { id: row.id }, data: { state: 'done', endedAt: now } });
-        return 'done';
+        const recorded = await tx.meterEvent.count({ where: { OR: [{ jobId: task.taskKey, botId: task.botId }, { botId: task.botId, detail: { path: ['taskKey'], equals: task.taskKey } }] } });
+        const state: ReceiptState = recorded === 0 ? 'refunded' : 'done';
+        await tx.taskReceipt.update({ where: { id: row.id }, data: { state, chargedMicros: recorded === 0 ? BigInt(0) : row.chargedMicros, endedAt: now } });
+        return state;
       }
       return row.state as ReceiptState;
     }
@@ -175,11 +178,14 @@ export async function settleReceipt(task: { botId: string; personId: string; tas
   });
 }
 
+/** How long a receipt in checking with no Instant run waits before it is ended: well past the bot server's own retries (it gives up after 150 s). Internal, not a person-facing limit. */
+export const UNWATCHED_CHECKING_WAIT_MS = 15 * 60 * 1000;
+
 /**
  * Receipts still in checking: the sweep says each one again. Oldest first. Those with Instant runs are settled once every run has ended; those
- * with none are ended after `unwatchedWaitMs` (Instant's own wait for an unclear run), so none stays hidden for good.
+ * with none are ended after `UNWATCHED_CHECKING_WAIT_MS`, so none stays hidden for good.
  */
-export async function settleCheckingReceipts(limit: number, now: Date = new Date(), unwatchedWaitMs: number = 30 * 60 * 1000): Promise<number> {
+export async function settleCheckingReceipts(limit: number, now: Date = new Date(), unwatchedWaitMs: number = UNWATCHED_CHECKING_WAIT_MS): Promise<number> {
   const unwatchedBefore = new Date(now.getTime() - unwatchedWaitMs);
   const rows = await prisma.$queryRaw<Array<{ botId: string; personId: string; taskKey: string }>>(Prisma.sql`
     SELECT r."bot_id" AS "botId", r."person_id" AS "personId", r."task_key" AS "taskKey"

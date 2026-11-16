@@ -4,7 +4,7 @@ import type { ReadyMadeAdapter } from '@/lib/app-adapter/types';
 import { evaluatePause, reconcileRun } from '@/lib/instant/executor';
 import { getInstantFunds, type InstantFunds } from '@/lib/instant/funds';
 import { denyInstantOnSessions, type SessionSweep } from '@/lib/instant/sessions';
-import { getInstantLimits, pauseInstant } from '@/lib/instant/state';
+import { pauseInstant } from '@/lib/instant/state';
 import { settleCheckingReceipts } from '@/lib/task-receipts';
 import { instantListedPrices, usdToMicros } from '@/lib/instant/values';
 
@@ -92,9 +92,7 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
   }
   // A receipt still in checking whose runs have all ended is settled here too, so one the run's own pass could not move (a crash, a failed
   // write) never stays behind. Nothing here is asked of a person or a model.
-  const receipts = await getInstantLimits()
-    .then((limits) => settleCheckingReceipts(BATCH, now, limits.unclearWaitMinutes * 60 * 1000))
-    .catch((error) => {
+  const receipts = await settleCheckingReceipts(BATCH, now).catch((error) => {
     console.error('[Instant] The receipt check failed:', error instanceof Error ? error.message : 'unknown');
     return 0;
   });
