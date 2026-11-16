@@ -128,6 +128,12 @@ describe('the Agent37 client', () => {
       await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
     });
 
+    it('says the machine was not reached, never idle, when the answer about the session is empty or only blanks', async () => {
+      const { api } = client([new Response('', { status: 200 }), new Response('  \n ', { status: 200 })]);
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+      await expect(api.activeTurn('https://abc.agent37.app', 'sess-1')).rejects.toBeInstanceOf(Agent37Unreached);
+    });
+
     it('gives the saved-files archive a signal, so a machine that stops answering cannot hold a save for ever, and takes the caller’s own', async () => {
       const { api, calls } = client([new Response('bytes', { status: 200 }), new Response('bytes', { status: 200 })]);
       await api.archive('https://abc.agent37.app');
