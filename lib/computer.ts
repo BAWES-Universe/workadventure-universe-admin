@@ -777,20 +777,31 @@ async function untilCleaned(botId: string): Promise<void> {
  * one event under the job's id, and its reserved room is settled to that. Then the machine rests if no other job holds it, and
  * the next job in line is tried. A job that is already over is left exactly as it ended.
  */
+/** How many times an end is tried again when the job's state moved between reading it and writing the end. */
+const END_TRIES = 4;
+
 async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string): Promise<void> {
-  const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
-  if (!job || isOver(job.status)) return;
-  // A caller that saw the job in line ends it only while it still is: another try may have put it on the machine in between
-  if (only !== undefined && job.status !== only) return;
-  const held = job.status === 'running' || job.status === 'waiting';
-  const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
-  const seconds = job.secondsRun + stretch;
-  const ended = await prisma.computerJob.updateMany({
-    where: { id: jobId, status: job.status },
-    data: { status, endedBy, endedAt: now, queuedFor: null, waitingFor: null, readyWhat: null, readyWhere: null, control: 'brick', stretchStarted: null, secondsRun: seconds, agentResponseId: null, brief: null },
-  });
+  // The job can change under this (a person's answer moves it between running and waiting): the end is tried again on what it is now, and
+  // only a job that is over, or no longer the one the caller meant, is let go
+  let job: NonNullable<Awaited<ReturnType<typeof prisma.computerJob.findUnique>>> | null = null;
+  let seconds = 0;
+  let ended = { count: 0 };
+  for (let attempt = 0; attempt < END_TRIES && ended.count === 0; attempt++) {
+    job = await prisma.computerJob.findUnique({ where: { id: jobId } });
+    if (!job || isOver(job.status)) return;
+    // A caller that saw the job in line ends it only while it still is: another try may have put it on the machine in between
+    if (only !== undefined && job.status !== only) return;
+    const held = job.status === 'running' || job.status === 'waiting';
+    const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
+    seconds = job.secondsRun + stretch;
+    ended = await prisma.computerJob.updateMany({
+      where: { id: jobId, status: job.status },
+      data: { status, endedBy, endedAt: now, queuedFor: null, waitingFor: null, readyWhat: null, readyWhere: null, control: 'brick', stretchStarted: null, secondsRun: seconds, agentResponseId: null, brief: null },
+    });
+  }
   // Someone else ended it between the read and the write: that one counts and settles
-  if (ended.count === 0) return;
+  if (!job || ended.count === 0) return;
+  const held = job.status === 'running' || job.status === 'waiting';
   // The job's computer holds no key from here on: a call it makes after this is refused
   await revokeJobTokens(jobId, now).catch((error) => console.error('[Computer] Could not revoke a job’s keys:', error instanceof Error ? error.message : 'unknown'));
   // A turn the agent was still running is cancelled, so it does not go on working (and spending) for a job that is over
