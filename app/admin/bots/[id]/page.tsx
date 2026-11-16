@@ -650,7 +650,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
             <Button variant="outline" asChild>
               <Link href={`/admin/bots/${bot.id}/mcp-servers`}>
                 <Server aria-hidden="true" />
-                MCP servers
+                Apps
               </Link>
             </Button>
           ) : undefined

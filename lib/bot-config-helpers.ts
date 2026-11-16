@@ -1,3 +1,4 @@
+import type { Bot } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { parsePlayUri, buildPlayUri } from '@/lib/utils';
 
@@ -110,6 +111,10 @@ export async function transformBotToServerFormat(
   hasPermission: boolean
 ): Promise<any> {
   const playUrl = process.env.PLAY_URL || 'http://play.workadventure.localhost';
+
+  // This shape is a room bot's: it is built around the room's URL. A Brick (game #1992) has none, and the callers answer
+  // for a Brick before they get here.
+  if (!bot.room) throw new Error('A bot with no room has no configuration in the room bot shape');
   
   // Get behaviorConfig and ensure assignedSpace exists
   const behaviorConfig = bot.behaviorConfig as any;
@@ -177,6 +182,137 @@ export async function transformBotToServerFormat(
   return result;
 }
 
+/**
+ * A Brick for the bot server (game #1995): the same fields a room bot has, with no room, world or universe URL, and
+ * `brick` saying whose it is. A Brick lives in its owner's chats, so it stands nowhere: it never moves and is never put
+ * on a map from this answer. Its voice stays off here: a Brick is spoken to in a call, which is its own issue.
+ *
+ * A Brick its owner deleted (game #1996) is still answered while it waits for Undo, as off and with `brick.deleted`
+ * true, and never as "not found": a bot server takes "not found" as gone for good and closes the bot's chats, and Undo
+ * has to find the chat as it was. It is "not found" from the day it is removed.
+ */
+export function transformBrickToServerFormat(
+  bot: Pick<
+    Bot,
+    | 'id'
+    | 'name'
+    | 'ownerId'
+    | 'enabled'
+    | 'behaviorConfig'
+    | 'characterTextureId'
+    | 'createdAt'
+    | 'updatedAt'
+    | 'aiProviderRef'
+    | 'chatInstructions'
+    | 'toolTimeoutSeconds'
+    | 'maxReplyTokens'
+    | 'maxSteps'
+    | 'deletedAt'
+  >,
+  isDefault: boolean
+) {
+  const config = bot.behaviorConfig;
+  const stored: Record<string, unknown> = config && typeof config === 'object' && !Array.isArray(config) ? config : {};
+  const assignedSpace = { center: { x: 0, y: 0 }, radius: 0 };
+  return {
+    botId: bot.id,
+    name: bot.name,
+    brick: { ownerId: bot.ownerId, isDefault, deleted: bot.deletedAt !== null },
+    roomUrl: null,
+    worldUrl: null,
+    universeUrl: null,
+    userId: bot.ownerId,
+    behaviorType: 'idle',
+    behaviorConfig: { ...stored, showToolCalls: stored.showToolCalls === true, behaviorType: 'idle', assignedSpace },
+    assignedSpace,
+    // The database keeps a deleted Brick off; said here too, so the answer never depends on that alone
+    enabled: bot.enabled && bot.deletedAt === null,
+    characterTextureIds: bot.characterTextureId ? [bot.characterTextureId] : [],
+    createdAt: bot.createdAt.toISOString(),
+    updatedAt: bot.updatedAt.toISOString(),
+    aiProviderRef: bot.aiProviderRef || null,
+    chatInstructions: bot.chatInstructions || null,
+    movementInstructions: null,
+    toolTimeoutSeconds: bot.toolTimeoutSeconds ?? null,
+    maxReplyTokens: bot.maxReplyTokens ?? null,
+    maxSteps: bot.maxSteps ?? null,
+    companionTextureId: null,
+    voiceEnabled: false,
+  };
+}
+
+/**
+ * A Brick that visits a room with its owner (game #2005): the same fields the Brick has everywhere, with the room it is
+ * in, and `brick.visiting` saying whose it walks beside, so the bot server can put it next to that person. It stays with
+ * them: no space of its own, no roaming and no greeting. Its voice stays off, as for every Brick.
+ */
+export function transformVisitingBrickToServerFormat(
+  bot: Parameters<typeof transformBrickToServerFormat>[0],
+  isDefault: boolean,
+  where: { roomUrl: string },
+  owner: { uuid: string; name: string | null }
+) {
+  const base = transformBrickToServerFormat(bot, isDefault);
+  const url = new URL(where.roomUrl);
+  const parts = url.pathname.split('/').filter(Boolean);
+  const universeUrl = `${url.origin}/${parts.slice(0, 2).join('/')}`;
+  const worldUrl = `${url.origin}/${parts.slice(0, 3).join('/')}`;
+  return {
+    ...base,
+    brick: { ...base.brick, visiting: { ownerUuid: owner.uuid, ownerName: owner.name } },
+    roomUrl: where.roomUrl,
+    worldUrl,
+    universeUrl,
+  };
+}
+
+/**
+ * What a home may say about where its Brick stands and how it moves there: the same keys the room bot editor writes for
+ * the spot, roaming, route and walking up to people. Nothing else passes, so a room manager who moves a Brick cannot
+ * reach what is its owner's to set (Vision, Show tool calls, anything the bot server reads for the Brick itself).
+ */
+const HOME_BEHAVIOR_KEYS = [
+  'assignedSpace', 'moves', 'goesToPeople', 'facing', 'patrolWaypoints', 'waypoints', 'loop', 'pauseAtWaypoints', 'speed',
+  'respondToPlayers', 'conversationRadius', 'minTimeBetweenConversations', 'maxConversationDuration',
+  'conversationHistorySize', 'respectPlayerStatus', 'maxConcurrentConversations', 'wanderSpeed', 'approachDistance',
+] as const;
+
+export function homeBehaviorConfig(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const source = raw as Record<string, unknown>;
+  const kept: Record<string, unknown> = {};
+  for (const key of HOME_BEHAVIOR_KEYS) if (key in source) kept[key] = source[key];
+  return kept;
+}
+
+/**
+ * A Brick that lives in a room (game #2005): the Brick's own fields, with the room it stands in and how it behaves
+ * there (the home's spot, radius, roaming and routes, written by the same editor as any room bot's), and `brick.home`
+ * saying whose it is. Its voice stays off, as for every Brick.
+ */
+export function transformHomedBrickToServerFormat(
+  bot: Parameters<typeof transformBrickToServerFormat>[0],
+  isDefault: boolean,
+  home: { roomUrl: string; behaviorType: string; behaviorConfig: unknown },
+  owner: { uuid: string; name: string | null }
+) {
+  const base = transformBrickToServerFormat(bot, isDefault);
+  const url = new URL(home.roomUrl);
+  const parts = url.pathname.split('/').filter(Boolean);
+  const stored = homeBehaviorConfig(home.behaviorConfig);
+  const assignedSpace = (stored.assignedSpace as { center: { x: number; y: number }; radius: number } | undefined) ?? { center: { x: 0, y: 0 }, radius: 0 };
+  const behaviorType = home.behaviorType === 'patrol' || home.behaviorType === 'social' ? home.behaviorType : 'idle';
+  return {
+    ...base,
+    brick: { ...base.brick, home: { ownerUuid: owner.uuid, ownerName: owner.name } },
+    roomUrl: home.roomUrl,
+    worldUrl: `${url.origin}/${parts.slice(0, 3).join('/')}`,
+    universeUrl: `${url.origin}/${parts.slice(0, 2).join('/')}`,
+    behaviorType,
+    behaviorConfig: { ...base.behaviorConfig, ...stored, behaviorType, assignedSpace },
+    assignedSpace,
+  };
+}
 
 /**
  * A save that replaces a bot's whole behavior config must not silently turn "Show tool calls"

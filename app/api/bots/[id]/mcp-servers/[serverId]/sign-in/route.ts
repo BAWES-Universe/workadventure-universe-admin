@@ -43,7 +43,7 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
       at: parsed.data.at ? new Date(parsed.data.at) : undefined,
       status: parsed.data.status ?? null,
     });
-    if (!outcome) return json(request, { error: 'MCP server not found' }, 404);
+    if (!outcome) return json(request, { error: 'App not found' }, 404);
     return json(request, outcome);
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'tool-signin' } });

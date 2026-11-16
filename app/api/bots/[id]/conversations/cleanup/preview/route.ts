@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { getViewer, isPrivileged, canManageBot, unauthorizedResponse, forbiddenResponse } from '@/lib/access-scope';
+import { getViewer, viewerManagesBot, unauthorizedResponse, forbiddenResponse } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
 
 export const runtime = 'nodejs';
@@ -35,11 +35,8 @@ export async function GET(
 
     const { id: botId } = await params;
 
-    // Privileged viewers, or managers of the bot's room.
-    if (
-      !isPrivileged(viewer) &&
-      !(viewer.kind === 'user' && (await canManageBot(viewer.user.id, botId)))
-    ) {
+    // Privileged viewers, or managers of the bot's room. A Brick's saved chats are its owner's alone (game #1992).
+    if (!(await viewerManagesBot(viewer, botId))) {
       return forbiddenResponse(corsHeaders(request));
     }
 

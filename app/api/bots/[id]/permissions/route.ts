@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as Sentry from '@sentry/nextjs';
-import { authorizeBotManager, json } from '@/lib/bot-access-api';
-import { BotSettingsError, readBotSettings, saveBotSettings, settingsSchema } from '@/lib/bot-access-settings';
+import { authorizeBotManager, authorizeBrickOwner, json } from '@/lib/bot-access-api';
+import { BotSettingsError, readBotSettings, readBrickSettings, saveBotSettings, settingsSchema } from '@/lib/bot-access-settings';
 import { corsHeaders } from '@/lib/cors';
 
 export const runtime = 'nodejs';
@@ -15,11 +15,17 @@ export async function OPTIONS(request: NextRequest) {
  * Who may use this bot (#427): Private bot, the line refused people hear, the daily reply limit for each person (none until the owner sets one), every rule
  * for a role or a person, and the roles a rule can name with what each gives by default.
  *
- * Auth: whoever manages the bot, or the bot server's admin token.
+ * Auth: whoever manages the bot, or the bot server's admin token. For a Brick, only its owner, with no rules or roles.
  */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
+    const brick = await authorizeBrickOwner(request, id);
+    if (brick) {
+      if (brick.response) return brick.response;
+      const own = await readBrickSettings(id);
+      return own ? json(request, own) : json(request, { error: 'Bot not found' }, 404);
+    }
     const auth = await authorizeBotManager(request, id, { adminTokenReads: true });
     if (auth.response) return auth.response;
     const settings = await readBotSettings(id);
@@ -43,11 +49,19 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 export async function PUT(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const auth = await authorizeBotManager(request, id, { adminTokenReads: false });
-    if (auth.response) return auth.response;
+    const brick = await authorizeBrickOwner(request, id);
+    if (brick?.response) return brick.response;
+    const auth = brick ? null : await authorizeBotManager(request, id, { adminTokenReads: false });
+    if (auth?.response) return auth.response;
 
     const parsed = settingsSchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return json(request, { error: 'Invalid request data', details: parsed.error.issues }, 400);
+
+    if (brick) {
+      await saveBotSettings(id, parsed.data);
+      const own = await readBrickSettings(id);
+      return own ? json(request, own) : json(request, { error: 'Bot not found' }, 404);
+    }
 
     await saveBotSettings(id, parsed.data);
     const settings = await readBotSettings(id);

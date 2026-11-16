@@ -55,6 +55,20 @@ describe('redactCredentialMaterial', () => {
     expect(out).toContain('[redacted]');
   });
 
+  it('redacts a short bearer value too', () => {
+    const out = redactCredentialMaterial('Authorization: Bearer abc123');
+    expect(out).not.toContain('abc123');
+    expect(out).toContain('[redacted]');
+  });
+
+  it('redacts a padded bearer value, and leaves challenge parameters readable', () => {
+    expect(redactCredentialMaterial('Authorization: Bearer abc=')).toBe('Authorization: Bearer [redacted]');
+    expect(redactCredentialMaterial('Authorization: Bearer abc==')).toBe('Authorization: Bearer [redacted]');
+    expect(redactCredentialMaterial('Authorization: Bearer resource_metadata123')).toBe('Authorization: Bearer [redacted]');
+    expect(redactCredentialMaterial('Bearer error="invalid_token"')).toBe('Bearer error="invalid_token"');
+    expect(redactCredentialMaterial('Bearer realm=mcp, error=invalid_token')).toBe('Bearer realm=mcp, error=invalid_token');
+  });
+
   it('redacts JSON token fields', () => {
     const out = redactCredentialMaterial('{"access_token":"ya29.super-secret","refresh_token":"rt_abc123"}');
     expect(out).not.toContain('super-secret');
@@ -144,7 +158,7 @@ describe('summarizeTestResult', () => {
     const legacy: McpTestResult = { success: true, toolCount: 37, toolNames: ['a'] };
     const summary = summarizeTestResult(legacy, { testedAt: '2026-07-31T10:00:00Z', now });
     expect(summary.tone).toBe('ok');
-    expect(summary.label).toBe('Connected — 37 tools');
+    expect(summary.label).toBe('Connected — it can do 37 things');
     expect(summary.detail).toBe('tested 53 days ago');
   });
 
@@ -169,7 +183,7 @@ describe('summarizeTestResult', () => {
       now,
     });
     expect(summary.tone).toBe('stale');
-    expect(summary.label).toBe('Connected — 37 tools');
+    expect(summary.label).toBe('Connected — it can do 37 things');
     expect(summary.detail).toContain('token expired');
     expect(summary.detail).toContain('re-authorize');
   });

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
+import { ROOM_BOTS_ONLY } from '@/lib/brick';
 
 /**
  * GET /api/admin/bots
@@ -32,7 +33,8 @@ export async function GET(request: NextRequest) {
     const search = searchParams.get('search');
 
     // Build where clause
-    const where: any = {};
+    // The bots that stand in rooms. A Brick (game #1992) is its owner's and is not listed here, to a super admin either.
+    const where: any = { ...ROOM_BOTS_ONLY };
 
     if (roomId) {
       where.roomId = roomId;

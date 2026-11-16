@@ -15,6 +15,8 @@ import { GET as botList } from '@/app/api/bots/ai-providers/route';
 import { GET as botCredentials } from '@/app/api/bots/ai-providers/[providerId]/credentials/route';
 import { POST as trackUsage } from '@/app/api/bots/ai-usage/route';
 
+// The meter's books copy each report (game #1998); these tests are about the report, not the books
+jest.mock('@/lib/meter', () => ({ recordModelCall: jest.fn(async () => null) }));
 jest.mock('@/lib/db', () => ({
   prisma: {
     botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), delete: jest.fn(), create: jest.fn() },
