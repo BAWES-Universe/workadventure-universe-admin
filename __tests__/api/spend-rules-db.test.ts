@@ -767,8 +767,9 @@ run('rules said in chat and task receipts, in a real database', () => {
       // A task being looked up is not listed: nobody reads a state they cannot act on. It shows once it settles.
       expect(await activityFor(sara.id)).toEqual([]);
       expect(await closeReceipt({ botId: sara.brickId, taskKey: 'vid', personId: sara.id, state: 'refunded', chargedMicros: 920_000 }, NOW)).toMatchObject({ ok: true, state: 'refunded' });
-      // A refund took nothing, whatever figure came with it
-      expect((await activityFor(sara.id))[0]).toMatchObject({ state: 'refunded', spentMicros: null });
+      // A refund took nothing, whatever figure came with it; an Apps task that came to nothing (no run, nothing in the books) is not listed
+      expect(await prisma.taskReceipt.findFirstOrThrow({ where: { botId: sara.brickId, taskKey: 'vid' } })).toMatchObject({ state: 'refunded', chargedMicros: BigInt(0) });
+      expect(await activityFor(sara.id)).toEqual([]);
       expect(await closeReceipt({ botId: sara.brickId, taskKey: 'vid', personId: sara.id, state: 'done', chargedMicros: 5 }, NOW)).toMatchObject({ ok: true, state: 'refunded' });
       expect(await closeReceipt({ botId: sara.brickId, taskKey: 'nope', personId: sara.id, state: 'done' }, NOW)).toEqual({ ok: false, reason: 'not_found' });
     });

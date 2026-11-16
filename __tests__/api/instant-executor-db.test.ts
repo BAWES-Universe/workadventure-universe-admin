@@ -1891,7 +1891,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await receiptState('look-6')).toBe('done');
     });
 
-    it('a receipt the bot server left in checking with no Instant run (its request never arrived) is refunded after the grace, listed; one with books for its key is done; a young one is left alone', async () => {
+    it('a receipt the bot server left in checking with no Instant run (its request never arrived) is refunded after the grace, not listed (nothing happened); one with books for its key is done and listed; a young one is left alone', async () => {
       await openReceipt({ botId: brick, personId: sara, taskKey: 'look-9', title: 'Never arrived', category: 'apps' });
       await openReceipt({ botId: brick, personId: sara, taskKey: 'look-10', title: 'Has books', category: 'apps' });
       for (const key of ['look-9', 'look-10']) expect(await closeReceipt({ botId: brick, taskKey: key, personId: sara, state: 'checking' })).toMatchObject({ ok: true, state: 'checking' });
@@ -1905,7 +1905,73 @@ run('the bounded Instant executor, in a real database', () => {
       await settleCheckingReceipts(50, new Date(Date.now() + 20 * MIN));
       expect(await receiptState('look-9')).toBe('refunded');
       expect(await receiptState('look-10')).toBe('done');
-      expect((await activityFor(sara)).find((item) => item.title === 'Never arrived')).toMatchObject({ state: 'refunded', spentMicros: null });
+      const titles = (await activityFor(sara)).map((item) => item.title);
+      expect(titles).not.toContain('Never arrived');
+      expect(titles).toContain('Has books');
+    });
+
+    it('an Apps task every request of which was refused before it ran is not listed, however it ended; one that ran and failed, or that has books for its key, still is', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      // Refused by the credit door: a run row that went nowhere, nothing in the books
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-1', title: 'Refused by a rule', category: 'apps' });
+      f.funds.reserve.mockResolvedValueOnce({ ok: false, reason: 'rule', ruleId: 'r0', why: 'cap', words: 'No more than $1 a month for this Brick.', leftMicros: 0 } as never);
+      expect(await runInstant(ask({ taskKey: 'hide-1' }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'rule' });
+      await closeReceipt({ botId: brick, taskKey: 'hide-1', personId: sara, state: 'refunded' });
+      // Refused before any run was made: no run row at all
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-2', title: 'No run made', category: 'apps' });
+      await closeReceipt({ botId: brick, taskKey: 'hide-2', personId: sara, state: 'refunded' });
+      // A task that ran and failed: a run and a (zero) charge in the books; the person sees it was refunded
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-3', title: 'Ran and failed', category: 'apps' });
+      p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'boom', logId: 'log-h3', chargeMicros: 4_000 });
+      expect(await runInstant(ask({ taskKey: 'hide-3' }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'failed' });
+      await closeReceipt({ botId: brick, taskKey: 'hide-3', personId: sara, state: 'refunded' });
+      // Refunded with something in the books for its key and no run: not empty
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-4', title: 'Has books, refunded', category: 'apps' });
+      await prisma.meterEvent.create({
+        data: { eventId: `hide-4-${tag}`, kind: 'app_use', pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(1000), basis: 'measured', detail: { instant: true, taskKey: 'hide-4' } },
+      });
+      await closeReceipt({ botId: brick, taskKey: 'hide-4', personId: sara, state: 'refunded' });
+      // A charge made under the task's run that names no task is shown on the run's receipt: never hidden. The Brick's own thinking is not money taken: hidden.
+      const underRun = (eventId: string, kind: string, route: string, micros: number) =>
+        prisma.meterEvent.create({
+          data: { eventId: `${eventId}-${tag}`, kind, pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'universe', route, jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(micros), basis: 'measured', detail: { runId: eventId } },
+        });
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-7', runId: 'run-hide-7', title: 'Run-wide charge', category: 'apps' });
+      await underRun('run-hide-7', 'app_use', 'instant', 1000);
+      await closeReceipt({ botId: brick, taskKey: 'hide-7', personId: sara, state: 'refunded' });
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-8', runId: 'run-hide-8', title: 'Only thinking', category: 'apps' });
+      await underRun('run-hide-8', 'model_call', 'chat', 0);
+      await closeReceipt({ botId: brick, taskKey: 'hide-8', personId: sara, state: 'refunded' });
+      // Two receipts of one run and one unkeyed charge: the charge is the first receipt's only, so the second is empty and hidden
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-10a', runId: 'run-hide-10', title: 'Owns the run charge', category: 'apps' }, new Date(Date.now() - 2000));
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-10b', runId: 'run-hide-10', title: 'Shares the run, no charge', category: 'apps' }, new Date(Date.now() - 1000));
+      await underRun('run-hide-10', 'app_use', 'instant', 1000);
+      await closeReceipt({ botId: brick, taskKey: 'hide-10a', personId: sara, state: 'refunded' });
+      await closeReceipt({ botId: brick, taskKey: 'hide-10b', personId: sara, state: 'refunded' });
+      // A charge in the run that names another task's key is that task's, not this one's: hidden
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-9', runId: 'run-hide-9', title: 'Another task’s charge', category: 'apps' });
+      await prisma.meterEvent.create({
+        data: { eventId: `run-hide-9-${tag}`, kind: 'app_use', pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(1000), basis: 'measured', detail: { runId: 'run-hide-9', taskKey: 'some-other-task' } },
+      });
+      await closeReceipt({ botId: brick, taskKey: 'hide-9', personId: sara, state: 'refunded' });
+      // A task with no category is not an Apps task here: left as it was
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-5', title: 'No category', category: null });
+      await closeReceipt({ botId: brick, taskKey: 'hide-5', personId: sara, state: 'refunded' });
+      // An Apps task that finished is never hidden
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-6', title: 'Finished', category: 'apps' });
+      await closeReceipt({ botId: brick, taskKey: 'hide-6', personId: sara, state: 'done' });
+      const titles = (await activityFor(sara)).map((item) => item.title);
+      expect(titles).not.toContain('Refused by a rule');
+      expect(titles).not.toContain('No run made');
+      expect(titles).not.toContain('Only thinking');
+      expect(titles).not.toContain('Shares the run, no charge');
+      expect(titles).toContain('Owns the run charge');
+      expect(titles).not.toContain('Another task’s charge');
+      expect(titles).toEqual(expect.arrayContaining(['Ran and failed', 'Has books, refunded', 'Run-wide charge', 'No category', 'Finished']));
+      // The limit counts what is listed: hidden receipts do not take a place
+      expect((await activityFor(sara, 6)).length).toBe(6);
     });
 
     it('a receipt the run’s own pass could not move (no hook then) is moved by the sweep’s pass over receipts still in checking', async () => {
