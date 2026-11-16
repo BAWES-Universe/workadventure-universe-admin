@@ -190,6 +190,8 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     check('the same request key finds the same gift instead of giving another', replay.replayed === true && replay.programId === gift.programId && (await prisma.grantProgram.count({ where: { requestKey: 'gift-A' } })) === 1, replay);
     const other = await refuses(() => rules.createGift({ categoryId: 'instant_apps', amount: 6 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['g1', 'g2'] }, covers: ['instant_apps', 'computers'], requestKey: 'gift-A' }, root, G));
     check('the same key with other figures is refused: the first stands', other?.code === 'key_used', other);
+    const capped = await refuses(() => rules.createGift({ categoryId: 'instant_apps', amount: 5 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['g1', 'g2'] }, covers: ['instant_apps', 'computers'], totalCapMicros: 8 * M, requestKey: 'gift-A' }, root, G));
+    check('the same key with another cap is refused too: the first stands', capped?.code === 'key_used', capped);
     await Promise.all([issue.ensureIssued('g1', G), issue.ensureIssued('g1', G), issue.ensureIssued('g2', G)]);
     const g1lots = await lotsOf('g1');
     check('a gift for both Instant Apps and computers is ONE dollar amount: one lot covering both', g1lots.length === 1 && g1lots[0].covers.length === 2 && Number(g1lots[0].amountMicros) === 5 * M && g1lots[0].source === 'gift', g1lots);
