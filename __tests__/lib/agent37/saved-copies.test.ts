@@ -5,6 +5,7 @@ import { Readable } from 'node:stream';
 const stored = new Map<string, Buffer>();
 let abortCalled = false;
 let failUpload = false;
+let failCopy = false;
 
 jest.mock('@/lib/artifact-storage', () => ({
   artifactBucket: () => ({
@@ -13,6 +14,7 @@ jest.mock('@/lib/artifact-storage', () => ({
       send: async (command: { input: { Key: string; CopySource?: string } }) => {
         const kind = command.constructor.name;
         if (kind === 'CopyObjectCommand') {
+          if (failCopy) throw new Error('bucket could not copy');
           stored.set(command.input.Key, stored.get((command.input.CopySource as string).replace('b/', '')) as Buffer);
           return {};
         }
@@ -58,6 +60,7 @@ beforeEach(() => {
   stored.clear();
   abortCalled = false;
   failUpload = false;
+  failCopy = false;
 });
 
 describe('the saved copy of a Brick computer’s files', () => {
@@ -84,6 +87,15 @@ describe('the saved copy of a Brick computer’s files', () => {
     const before = Buffer.from(stored.get(savedCopyKey('bot-1')) as Buffer);
     await expect(storeSavedCopy('bot-1', webStream(archive.subarray(0, archive.length - 40)))).rejects.toThrow();
     expect(abortCalled).toBe(true);
+    expect([...stored.keys()]).toEqual([savedCopyKey('bot-1')]);
+    expect((stored.get(savedCopyKey('bot-1')) as Buffer).equals(before)).toBe(true);
+  });
+
+  it('a copy step that throws leaves no staging object behind, and the earlier copy stays', async () => {
+    await storeSavedCopy('bot-1', webStream(archive));
+    const before = Buffer.from(stored.get(savedCopyKey('bot-1')) as Buffer);
+    failCopy = true;
+    await expect(storeSavedCopy('bot-1', webStream(archive))).rejects.toThrow('bucket could not copy');
     expect([...stored.keys()]).toEqual([savedCopyKey('bot-1')]);
     expect((stored.get(savedCopyKey('bot-1')) as Buffer).equals(before)).toBe(true);
   });

@@ -511,29 +511,38 @@ const customerChargedMicros = (run: Row): number | null => (run.customerMicros =
 async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: number, basis: 'measured' | 'estimated', now: Date): Promise<void> {
   if (run.providerState === 'settled') return;
   await tx.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt: run.finishedAt ?? now } });
-  await recordMeterEvent(
-    {
-      eventId: `instant:${run.id}`,
-      kind: 'app_use',
-      pool: 'chat',
-      occurredAt: now,
-      personKey: `person:${run.personId}`,
-      personId: run.personId,
-      botId: run.botId,
-      brick: true,
-      payerKind: 'universe',
-      payerPersonId: null,
-      route: 'instant',
-      jobId: null,
-      quantity: 1,
-      unit: 'use',
-      costMicros: micros,
-      basis,
-      sourceRef: `instant_runs:${run.id}`,
-      detail: { instant: true, provider: INSTANT_PROVIDER, ...(run.taskKey ? { taskKey: run.taskKey } : {}), tool: run.toolSlug, toolkit: run.toolkit, runId: run.id, customerMicros: customerChargedMicros(run), basis, state: run.state },
-    },
-    tx,
-  ).catch((error) => console.error('[Instant] Could not write the meter event:', error instanceof Error ? error.message : 'unknown'));
+  // The meter event is a copy for the books: if it cannot be written, the settlement still stands. It is written inside a savepoint,
+  // because a failed statement otherwise leaves the whole transaction aborted, and the settlement above would fail with it
+  await tx.$executeRaw`SAVEPOINT instant_meter_event`;
+  try {
+    await recordMeterEvent(
+      {
+        eventId: `instant:${run.id}`,
+        kind: 'app_use',
+        pool: 'chat',
+        occurredAt: now,
+        personKey: `person:${run.personId}`,
+        personId: run.personId,
+        botId: run.botId,
+        brick: true,
+        payerKind: 'universe',
+        payerPersonId: null,
+        route: 'instant',
+        jobId: null,
+        quantity: 1,
+        unit: 'use',
+        costMicros: micros,
+        basis,
+        sourceRef: `instant_runs:${run.id}`,
+        detail: { instant: true, provider: INSTANT_PROVIDER, ...(run.taskKey ? { taskKey: run.taskKey } : {}), tool: run.toolSlug, toolkit: run.toolkit, runId: run.id, customerMicros: customerChargedMicros(run), basis, state: run.state },
+      },
+      tx,
+    );
+    await tx.$executeRaw`RELEASE SAVEPOINT instant_meter_event`;
+  } catch (error) {
+    await tx.$executeRaw`ROLLBACK TO SAVEPOINT instant_meter_event`;
+    console.error('[Instant] Could not write the meter event:', error instanceof Error ? error.message : 'unknown');
+  }
   if (micros > asNumber(run.topMicros)) await pauseInstant('price_over_top', null, tx);
 }
 

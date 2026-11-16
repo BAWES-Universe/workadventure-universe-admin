@@ -113,8 +113,12 @@ export async function storeSavedCopy(botId: string, archive: ReadableStream<Uint
     throw failed.reason && typeof failed.reason.message === 'string' ? failed.reason : new Error('The copy of the files could not be saved');
   }
   // The stream was whole and the upload finished: now, and only now, it replaces the saved copy (one copy inside the bucket)
-  await s3.send(new CopyObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId), CopySource: `${bucket}/${staging}` }));
-  await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: staging })).catch(() => undefined);
+  // The staging object goes whether the copy worked or threw: a copy that fails is not a saved copy, and nothing else would ever remove it
+  try {
+    await s3.send(new CopyObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId), CopySource: `${bucket}/${staging}` }));
+  } finally {
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: staging })).catch(() => undefined);
+  }
   const copy = await savedCopyOf(botId);
   if (!copy) throw new Error('The saved copy cannot be found after it was stored');
   return copy;
