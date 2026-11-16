@@ -1,0 +1,222 @@
+/** @jest-environment jsdom */
+
+import React from 'react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+
+/** "Apps: use and demand" (spec "Paying for Apps", sections 21 and 22), in the words of the approved mock. */
+
+const fetchMock = jest.fn();
+jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (...args: unknown[]) => fetchMock(...args) }));
+const replace = jest.fn();
+jest.mock('@/app/admin/orbit-frame-context', () => ({ useReplacePage: () => replace }));
+jest.mock('next/link', () => ({ __esModule: true, default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a> }));
+
+import AppsDemandPage from '@/app/admin/ai-providers/apps/page';
+import type { AppRow, DemandReport } from '@/lib/app-demand';
+
+const app = (over: Partial<AppRow> = {}): AppRow => ({
+  key: 'video',
+  name: 'Instant video',
+  kind: 'instant',
+  uses: 412,
+  people: 96,
+  costMicros: 118_400_000,
+  unpriced: 0,
+  ended: 100,
+  failed: 4,
+  refundedMicros: 3_000_000,
+  allFailedRefunded: true,
+  byRoute: { composio: { uses: 412, costMicros: 118_400_000, unpriced: 0 }, universe: { uses: 0, costMicros: null, unpriced: 0 } },
+  route: 'composio',
+  routeVersion: 0,
+  routeChangedAt: null,
+  own: { ready: false, why: ['We have no version of our own for this App yet.'], passedChecksOn: null, topPriceMicros: null },
+  onOwnVersionAtMostMicros: null,
+  ...over,
+});
+
+const report = (over: Partial<DemandReport> = {}): DemandReport => ({
+  from: '2026-10-17',
+  to: '2026-11-15',
+  days: 30,
+  totals: { uses: 14017, people: 402, costMicros: 170_950_000, asks: 156 },
+  apps: [
+    app(),
+    app({ key: 'gmail', name: 'Gmail', kind: 'own', uses: 5940, people: 188, costMicros: 1_780_000, ended: 5940, failed: 24, allFailedRefunded: false, refundedMicros: null, route: 'universe', routeVersion: 2, own: { ready: true, why: [], passedChecksOn: '2026-11-12T00:00:00.000Z', topPriceMicros: 100 } }),
+  ],
+  asked: [
+    { name: 'Talabat orders', times: 64, people: 41 },
+    { name: 'WhatsApp messages', times: 52, people: 37 },
+  ],
+  askedMore: 3,
+  ...over,
+});
+
+const answer = (data: DemandReport | number = report()) =>
+  fetchMock.mockImplementation(() => (typeof data === 'number' ? Promise.resolve({ ok: false, status: data, json: () => Promise.resolve({}) }) : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(data) })));
+
+beforeEach(() => {
+  fetchMock.mockReset();
+  replace.mockReset();
+});
+
+describe('Apps: use and demand', () => {
+  it('shows the totals, the Apps by cost to us with what each runs on, and the names asked for', async () => {
+    answer();
+    render(<AppsDemandPage />);
+    expect(await screen.findByText('14,017')).toBeInTheDocument();
+    expect(screen.getByText('402')).toBeInTheDocument();
+    expect(screen.getByText('$170.95')).toBeInTheDocument();
+    expect(screen.getByText('156')).toBeInTheDocument();
+
+    const video = screen.getByTestId('apps-row-video');
+    expect(within(video).getByText('Instant video')).toBeInTheDocument();
+    expect(video).toHaveTextContent('412 uses');
+    expect(video).toHaveTextContent('96 people');
+    expect(video).toHaveTextContent('Instant');
+    expect(video).toHaveTextContent('$118.40 to us');
+    expect(video).toHaveTextContent('4% failed');
+    expect(screen.getByTestId('apps-runs-on-video')).toHaveTextContent('Runs on Composio');
+    expect(screen.getByTestId('apps-runs-on-gmail')).toHaveTextContent('Runs on Universe');
+    expect(screen.getByTestId('apps-row-gmail')).toHaveTextContent('Their own account');
+
+    const askedRows = screen.getAllByTestId('apps-asked-row');
+    expect(askedRows).toHaveLength(2);
+    expect(askedRows[0]).toHaveTextContent('Talabat orders');
+    expect(askedRows[0]).toHaveTextContent('64 times · by 41 people');
+    expect(screen.getByText(/3 more App names were asked for/)).toBeInTheDocument();
+    // Only the name is kept, and the page says so
+    expect(screen.getByText(/Only the App’s name is kept, never what people wrote/)).toBeInTheDocument();
+  });
+
+  it('uses only the word Apps: never tool, MCP or connector', async () => {
+    answer();
+    const { container } = render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    const text = `${container.textContent} ${document.body.textContent}`;
+    expect(text).not.toMatch(/\b(tools?|mcp|connectors?)\b/i);
+  });
+
+  it('opens an App to choose what it runs on, with the note that people see no change, and cannot pick our own version before it is ready', async () => {
+    answer();
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    expect(within(sheet).getByTestId('apps-sheet-line')).toHaveTextContent('412 uses · 96 people · 4% failed, all refunded');
+    expect(within(sheet).getByTestId('apps-sheet-note')).toHaveTextContent('People see no change: same name, same price, same credit.');
+    expect(within(sheet).getByTestId('apps-sheet-note')).toHaveTextContent('Runs already going finish where they started. You can move it back any time.');
+    expect(within(sheet).getByTestId('apps-route-universe')).toBeDisabled();
+    expect(within(sheet).getByText('We have no version of our own for this App yet.')).toBeInTheDocument();
+    expect(within(sheet).getByTestId('apps-route-save')).toBeDisabled();
+  });
+
+  it('saves a move with the version the admin was looking at, and reads the page again', async () => {
+    const ready = report({ apps: [app({ own: { ready: true, why: [], passedChecksOn: '2026-11-12T00:00:00.000Z', topPriceMicros: 100 }, onOwnVersionAtMostMicros: 41_200_000 })] });
+    fetchMock.mockImplementation((url: string, init?: { method?: string }) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(init?.method === 'PUT' ? { route: 'universe', version: 1 } : ready) }));
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    expect(within(sheet).getByText(/Our own version passed its checks on 12 Nov/)).toBeInTheDocument();
+    expect(within(sheet).getByTestId('apps-sheet-note')).toHaveTextContent('would cost us at most $41.20 on our own version');
+    fireEvent.click(within(sheet).getByTestId('apps-route-universe'));
+    fireEvent.click(within(sheet).getByTestId('apps-route-save'));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PUT')).toBe(true));
+    const put = fetchMock.mock.calls.find(([, init]) => init?.method === 'PUT')!;
+    expect(put[0]).toBe('/api/admin/app-routes/video');
+    expect(JSON.parse(put[1].body)).toEqual({ route: 'universe', expectedVersion: 0 });
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/admin/apps-demand')).length).toBeGreaterThanOrEqual(2));
+  });
+
+  it('says so when someone else moved the App meanwhile, and shows the newer state instead of saving over it', async () => {
+    const ready = report({ apps: [app({ own: { ready: true, why: [], passedChecksOn: null, topPriceMicros: 100 } })] });
+    fetchMock.mockImplementation((url: string, init?: { method?: string }) =>
+      init?.method === 'PUT'
+        ? Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve({ code: 'stale', route: 'universe', version: 1 }) })
+        : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(ready) }),
+    );
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    const sheet = await screen.findByTestId('apps-sheet');
+    fireEvent.click(within(sheet).getByTestId('apps-route-universe'));
+    fireEvent.click(within(sheet).getByTestId('apps-route-save'));
+    expect(await within(sheet).findByTestId('apps-sheet-error')).toHaveTextContent('Someone moved this App since you opened it');
+  });
+
+  it('keeps the stale-save note when reading the page again shows the newer version of the App', async () => {
+    let version = 0;
+    const read = () => report({ apps: [app({ routeVersion: version, route: version > 0 ? 'universe' : 'composio', own: { ready: true, why: [], passedChecksOn: null, topPriceMicros: 100 } })] });
+    fetchMock.mockImplementation((url: string, init?: { method?: string }) => {
+      if (init?.method === 'PUT') {
+        version = 1;
+        return Promise.resolve({ ok: false, status: 409, json: () => Promise.resolve({ code: 'stale', route: 'universe', version: 1 }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(read()) });
+    });
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    let sheet = await screen.findByTestId('apps-sheet');
+    fireEvent.click(within(sheet).getByTestId('apps-route-universe'));
+    fireEvent.click(within(sheet).getByTestId('apps-route-save'));
+    // The sheet is made again for the newer version, and the note is still there to read
+    await waitFor(() => expect(screen.getByTestId('apps-runs-on-video')).toHaveTextContent('Runs on Universe'));
+    sheet = screen.getByTestId('apps-sheet');
+    expect(within(sheet).getByTestId('apps-sheet-error')).toHaveTextContent('Someone moved this App since you opened it');
+    // Opening it again later starts clean
+    fireEvent.keyDown(sheet, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByTestId('apps-sheet')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    expect(within(await screen.findByTestId('apps-sheet')).queryByTestId('apps-sheet-error')).not.toBeInTheDocument();
+  });
+
+  it('a save that finishes after its sheet was closed does not close or warn in the same App opened again', async () => {
+    let finish: (value: unknown) => void = () => {};
+    const ready = report({ apps: [app({ own: { ready: true, why: [], passedChecksOn: null, topPriceMicros: 100 } })] });
+    fetchMock.mockImplementation((url: string, init?: { method?: string }) =>
+      init?.method === 'PUT' ? new Promise((resolve) => (finish = resolve)) : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(ready) }),
+    );
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    let sheet = await screen.findByTestId('apps-sheet');
+    fireEvent.click(within(sheet).getByTestId('apps-route-universe'));
+    fireEvent.click(within(sheet).getByTestId('apps-route-save'));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PUT')).toBe(true));
+    // Close it while the save is still going, then open the same App again
+    fireEvent.keyDown(sheet, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByTestId('apps-sheet')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('apps-row-video'));
+    sheet = await screen.findByTestId('apps-sheet');
+    // The first save now ends with "someone moved it": the new sheet must not show that, and a success must not close it
+    finish({ ok: false, status: 409, json: () => Promise.resolve({ code: 'stale', route: 'universe', version: 1 }) });
+    // The first save has ended: it asked for the page again
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method !== 'PUT')).toHaveLength(2));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(screen.getByTestId('apps-sheet')).toBeInTheDocument();
+    expect(within(screen.getByTestId('apps-sheet')).queryByTestId('apps-sheet-error')).not.toBeInTheDocument();
+  });
+
+  it('goes back to Orbit home for anyone who is not a super admin, and offers a retry when the read fails', async () => {
+    answer(403);
+    const { unmount } = render(<AppsDemandPage />);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith('/admin'));
+    unmount();
+    answer(500);
+    render(<AppsDemandPage />);
+    expect(await screen.findByText(/the Apps/i)).toBeInTheDocument();
+  });
+
+  it('reads a different range when asked', async () => {
+    answer();
+    render(<AppsDemandPage />);
+    await screen.findByText('14,017');
+    fireEvent.click(screen.getByTestId('apps-range-7'));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes('days=7'))).toBe(true));
+  });
+});
