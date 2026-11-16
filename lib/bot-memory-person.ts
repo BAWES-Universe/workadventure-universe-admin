@@ -195,11 +195,22 @@ export async function takeItemForgets(botId: string): Promise<ItemForgetNotice[]
   return rows.map(({ createdAt, ...row }) => ({ ...row, at: createdAt.getTime() }));
 }
 
-/** The bot server reports what it dropped. Ids of other bots are ignored. The Forget itself stays. */
-export async function acknowledgeItemForgets(botId: string, ids: string[]): Promise<number> {
-  if (ids.length === 0) return 0;
-  const { count } = await prisma.botMemoryItemForget.updateMany({ where: { botId, id: { in: ids }, droppedAt: null }, data: { droppedAt: new Date() } });
-  return count;
+/**
+ * The bot server reports what it dropped. Ids of other bots are ignored. The Forget itself stays.
+ * `dropped` carries the `at` of each notice it acted on: a Forget said again after that moment (a newer `createdAt`) was not in the notice,
+ * so it is not marked dropped and is handed out again. An id sent without its `at` (an older bot server) is acknowledged as before.
+ */
+export async function acknowledgeItemForgets(botId: string, ids: string[], dropped: { id: string; at: number }[] = []): Promise<number> {
+  const seen = new Map(dropped.map((one) => [one.id, one.at]));
+  const plain = ids.filter((id) => !seen.has(id));
+  if (plain.length === 0 && seen.size === 0) return 0;
+  const now = new Date();
+  let total = 0;
+  if (plain.length > 0) total += (await prisma.botMemoryItemForget.updateMany({ where: { botId, id: { in: plain }, droppedAt: null }, data: { droppedAt: now } })).count;
+  for (const [id, at] of seen) {
+    total += (await prisma.botMemoryItemForget.updateMany({ where: { botId, id, droppedAt: null, createdAt: { lte: new Date(at) } }, data: { droppedAt: now } })).count;
+  }
+  return total;
 }
 
 /** A save from the bot server, without what these people forgot: one read for all of them. */

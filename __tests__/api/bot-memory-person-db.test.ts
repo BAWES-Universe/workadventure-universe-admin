@@ -362,6 +362,28 @@ run('what a bot remembers about a person (real database)', () => {
     expect(JSON.stringify((await rows(melodyId, people.sara.uuid))?.memories)).not.toContain(COFFEE);
   });
 
+  it('a Forget said again after a notice went out is not marked dropped by that notice, and is handed out again', async () => {
+    const id = memoryItemKey('pref', null, COFFEE);
+    await forgetMine(as('sara', `/api/bots/${melodyId}/my-memory/forget`, { itemId: id }), params(melodyId));
+    const asked = await privacy(asBotServer(`/api/bots/${melodyId}/privacy`), params(melodyId));
+    const notice = ((await asked.json()) as { forgetItems?: { id: string; at: number }[] }).forgetItems!;
+    expect(notice).toHaveLength(2);
+    // The person says it again, after the notice went out and before the bot server reports it dropped what it was told
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await forgetKeys(melodyId, (await prisma.botMemoryItemForget.findMany({ where: { botId: melodyId, itemKey: id }, select: { userUuid: true } })).map((one) => one.userUuid), new Map([[id, 'pref' as const]]));
+    const reported = await reportDropped(asBotServer(`/api/bots/memory/${melodyId}/forgotten`, { items: notice.map((one) => ({ id: one.id, at: one.at })) }), params(melodyId));
+    expect(await reported.json()).toMatchObject({ itemsAcknowledged: 0 });
+    const again = await privacy(asBotServer(`/api/bots/${melodyId}/privacy`), params(melodyId));
+    const second = ((await again.json()) as { forgetItems?: { id: string; at: number }[] }).forgetItems!;
+    expect(second).toHaveLength(2);
+    expect(second.every((one) => one.at > notice[0].at)).toBe(true);
+    // Reported with the new time: dropped. And ids sent the old way (no time) still work
+    const done = await reportDropped(asBotServer(`/api/bots/memory/${melodyId}/forgotten`, { items: second.map((one) => ({ id: one.id, at: one.at })) }), params(melodyId));
+    expect(await done.json()).toMatchObject({ itemsAcknowledged: 2 });
+    const none = await privacy(asBotServer(`/api/bots/${melodyId}/privacy`), params(melodyId));
+    expect(((await none.json()) as { forgetItems?: unknown }).forgetItems).toBeUndefined();
+  });
+
   it('takes a "forget that" said in the chat by its key, even for a thing Orbit has not saved yet', async () => {
     const heldOnly = memoryItemKey('pref', null, 'chess');
     const refused = await forgetByKey(new NextRequest('http://localhost/x', { method: 'POST', body: JSON.stringify({ userUuid: people.sara.uuid, itemKey: heldOnly, kind: 'pref' }) }), params(melodyId));
