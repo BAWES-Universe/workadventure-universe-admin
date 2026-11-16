@@ -316,6 +316,18 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect(await prisma.meterEvent.count({ where: { eventId: `computer:${jobId}:call:late` } })).toBe(1);
     });
 
+    it('a late report that cost more than the room held keeps the overrun beside the figure', async () => {
+      const { jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await call(token, 'late-over', 9_000);
+      await sweepComputers(minutes(30));
+      const facts = { costMicros: 12_000, basis: 'measured' as const, payer: { kind: 'universe' as const }, route: 'universe-ai' as const };
+      expect(await settleModelCall(jobId, 'late-over', facts, minutes(31))).toEqual({ ok: true });
+      const event = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:late-over` } });
+      expect(event).toMatchObject({ basis: 'measured', costMicros: BigInt(12_000) });
+      expect(event.detail).toMatchObject({ overrunMicros: 3_000 });
+    });
+
     it('the sweep gives back room held for a call whose job is gone, instead of finding it again on every sweep', async () => {
       const { jobId } = await running();
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };

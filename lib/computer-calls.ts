@@ -97,6 +97,7 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
   // and the pool's room at once, so the next call is held against it (audit F9)
   const overrun = reservation && !paidByOther && cost !== null && cost > Number(reservation.amountMicros) ? cost - Number(reservation.amountMicros) : 0;
   if (overrun > 0) console.warn(`[Computer] A model call cost ${overrun} millionths of a dollar more than the room held for it`);
+  const detail = { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}), ...(overrun > 0 ? { overrunMicros: overrun } : {}) };
   const written = await recordMeterEvent({
     eventId,
     kind: 'model_call',
@@ -115,14 +116,14 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
     costMicros: cost,
     basis: paidByOther ? 'paid_by_other' : cost === null ? 'unknown' : facts.basis,
     sourceRef: `computer_jobs:${job.id}`,
-    detail: { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}), ...(overrun > 0 ? { overrunMicros: overrun } : {}) },
+    detail,
   });
   // The sweep writes a call that never reported as unknown. A report that comes after it carries the real figure, which replaces the
   // unknown one (only an unknown figure is ever replaced: a figure that was written stays as it was)
   if (!written.recorded && cost !== null) {
     await prisma.meterEvent.updateMany({
       where: { eventId, costMicros: null },
-      data: { costMicros: BigInt(cost), basis: paidByOther ? 'paid_by_other' : facts.basis, route: facts.route, detail: { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}) } },
+      data: { costMicros: BigInt(cost), basis: paidByOther ? 'paid_by_other' : facts.basis, route: facts.route, detail },
     });
   }
   // A price that is not known settles at the room that was held (never 0); one that is settles at what it was, at least 1
