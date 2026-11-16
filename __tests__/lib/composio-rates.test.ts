@@ -196,6 +196,14 @@ describe('the month’s bill', () => {
     expect(bill).toMatchObject({ unsettledPriceExecutions: 3, legacyEvents: 1 });
   });
 
+  it('charges Google Maps from the first call and takes none of the free calls for it', () => {
+    const bill = billFrom([event({ tier: 'managed_maps', tierVerified: false, executions: 3 }), event({ executions: 1000 })], COMPOSIO_BILLING_DEFAULTS, '2026-11');
+    // The 3 Maps runs are paid at once; the other app still has all of the free ones
+    expect(bill).toMatchObject({ freeExecutions: 1000, paidExecutions: 3, usageMicros: 3 * 10_000 });
+    const hobby = billFrom([event({ tier: 'managed_maps', tierVerified: false, executions: 3 })], { plan: 'hobby', zdrOn: false }, '2026-11');
+    expect(hobby).toMatchObject({ freeExecutions: 0, stoppedExecutions: 3 });
+  });
+
   it('on Hobby has no fee and no credit, and says how many calls Composio would refuse', () => {
     const bill = billFrom([event({ executions: 25_000 })], { plan: 'hobby', zdrOn: false }, '2026-11');
     expect(bill).toMatchObject({ planFeeMicros: 0, creditUsedMicros: 0, billedMicros: 0, stoppedExecutions: 5_000 });
