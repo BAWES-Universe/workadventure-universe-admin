@@ -11,7 +11,6 @@ import { NextRequest } from 'next/server';
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException: jest.fn(), addBreadcrumb: jest.fn() }));
-import * as Sentry from '@sentry/nextjs';
 
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
@@ -20,13 +19,11 @@ import { saveMeterSettings } from '@/lib/meter';
 import { releaseRoom, renewRoom, reserveRoom } from '@/lib/meter-allowance';
 import { memberUsage } from '@/lib/meter-usage';
 import { changeRule, checkSpend, endRule, listRules, ownerSpendAllowed, proposeRule } from '@/lib/spend-rules';
-import { activityFor, closeReceipt, openReceipt, reportProblem } from '@/lib/task-receipts';
+import { activityFor, closeReceipt, openReceipt } from '@/lib/task-receipts';
 import { POST as postRule, GET as getRules } from '@/app/api/bots/[id]/spend-rules/route';
 import { POST as postReceipt } from '@/app/api/bots/[id]/task-receipts/route';
 import { GET as getPaidBy } from '@/app/api/bots/[id]/paid-by/route';
 import { POST as postJob } from '@/app/api/bots/[id]/computer-jobs/route';
-import { POST as postDidntWork } from '@/app/api/me/usage/activity/[id]/didnt-work/route';
-import { GET as getTaskReports } from '@/app/api/admin/task-reports/route';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { giveComputer, renewJob, startJob } from '@/lib/computer';
 import { mintJobToken } from '@/lib/computer-token';
@@ -704,7 +701,7 @@ run('rules said in chat and task receipts, in a real database', () => {
       await expect(openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: '', title: 'x' }, NOW)).rejects.toThrow(RangeError);
     });
 
-    it('lists a finished task with what it used from the books, what it took, who paid and a "Didn’t work?"; a running task is not listed yet', async () => {
+    it('lists a finished task with what it used from the books, what it took and who paid; a running task is not listed yet', async () => {
       const sara = await person('sara');
       await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'trip', runId: 'run-9', title: 'Trip page: Web Summit Qatar', category: 'apps' }, NOW);
       expect(await activityFor(sara.id)).toEqual([]);
@@ -724,7 +721,6 @@ run('rules said in chat and task receipts, in a real database', () => {
         category: 'apps',
         payer: 'you',
         paidBy: 'Paid by you',
-        canReport: true,
         lines: [
           { label: 'Instant Apps, 2 uses', amountMicros: 60_000 },
           { label: "sara's Brick's own thinking", note: 'Universe AI' },
@@ -768,7 +764,8 @@ run('rules said in chat and task receipts, in a real database', () => {
       const sara = await person('sara');
       await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'vid', title: 'Welcome video', category: 'apps' }, NOW);
       expect(await closeReceipt({ botId: sara.brickId, taskKey: 'vid', personId: sara.id, state: 'checking' }, NOW)).toMatchObject({ ok: true, state: 'checking' });
-      expect((await activityFor(sara.id))[0]).toMatchObject({ state: 'checking', canReport: false });
+      // A task being looked up is not listed: nobody reads a state they cannot act on. It shows once it settles.
+      expect(await activityFor(sara.id)).toEqual([]);
       expect(await closeReceipt({ botId: sara.brickId, taskKey: 'vid', personId: sara.id, state: 'refunded', chargedMicros: 920_000 }, NOW)).toMatchObject({ ok: true, state: 'refunded' });
       // A refund took nothing, whatever figure came with it
       expect((await activityFor(sara.id))[0]).toMatchObject({ state: 'refunded', spentMicros: null });
@@ -819,15 +816,10 @@ run('rules said in chat and task receipts, in a real database', () => {
       await prisma.meterEvent.create({
         data: { eventId: `unk-${tag}`, kind: 'computer_time', pool: 'computer', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: sara.brickId, brick: true, payerKind: 'universe', route: 'computer', jobId: unknown.id, quantity: BigInt(60), unit: 'second', costMicros: null, basis: 'unknown' },
       });
-      const free = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Took nothing', status: 'failed', endedBy: 'error', endedAt: new Date(NOW.getTime() + 2000) } });
+      await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Took nothing', status: 'failed', endedBy: 'error', endedAt: new Date(NOW.getTime() + 2000) } });
       const byTitle = new Map((await activityFor(sara.id)).map((item) => [item.title, item.state]));
       expect(byTitle.get('Price unknown')).toBe('done');
       expect(byTitle.get('Took nothing')).toBe('refunded');
-      // Reporting a job makes its receipt the same way
-      await reportProblem(sara.id, `act_job_${unknown.id}`);
-      await reportProblem(sara.id, `act_job_${free.id}`);
-      expect((await prisma.taskReceipt.findFirst({ where: { taskKey: unknown.id } }))?.state).toBe('done');
-      expect((await prisma.taskReceipt.findFirst({ where: { taskKey: free.id } }))?.state).toBe('refunded');
     });
 
     it('names a sponsor that pays, to the person it paid for, with nothing taken from their credit', async () => {
@@ -852,56 +844,6 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(failed.id).toBeTruthy();
     });
 
-    it('"Didn’t work?" is kept once, only for the person it is theirs, and answers that it was sent', async () => {
-      const sara = await person('sara');
-      const omar = await person('omar');
-      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'v2', title: 'Welcome video', category: 'apps' }, NOW);
-      await closeReceipt({ botId: sara.brickId, taskKey: 'v2', personId: sara.id, state: 'done', chargedMicros: 100 }, NOW);
-      const [item] = await activityFor(sara.id);
-      expect(await reportProblem(omar.id, item.id)).toEqual({ ok: false, reason: 'not_found' });
-      const told = Sentry.captureMessage as jest.Mock;
-      told.mockClear();
-      expect(await reportProblem(sara.id, item.id)).toEqual({ ok: true, outcome: 'sent' });
-      expect(await reportProblem(sara.id, item.id)).toEqual({ ok: true, outcome: 'sent' });
-      // The people who run Universe are told once, with the Brick and the task and none of the person's words
-      expect(told).toHaveBeenCalledTimes(1);
-      expect(told).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ level: 'warning', extra: { botId: sara.brickId, activityId: item.id } }));
-      expect((await activityFor(sara.id))[0].canReport).toBe(false);
-      expect(await reportProblem(sara.id, 'act_nothing')).toEqual({ ok: false, reason: 'not_found' });
-      expect(await reportProblem(sara.id, 'garbage')).toEqual({ ok: false, reason: 'not_found' });
-      // A computer's job is reported the same way: a receipt is made for it so the report has somewhere to be kept
-      const job = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Weekly sales report', status: 'done', endedAt: NOW } });
-      expect(await reportProblem(sara.id, `act_job_${job.id}`)).toEqual({ ok: true, outcome: 'sent' });
-      expect(await reportProblem(omar.id, `act_job_${job.id}`)).toEqual({ ok: false, reason: 'not_found' });
-      expect((await activityFor(sara.id)).filter((one) => one.title === 'Weekly sales report')).toHaveLength(1);
-    });
-
-    it('what people reported is readable by the team, newest report first, with the task, the Brick and who paid, and by no one else', async () => {
-      const sara = await person('sara');
-      const first = await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'rep-1', title: 'First', category: 'apps' }, NOW);
-      const second = await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'rep-2', title: 'Second', category: 'apps', payer: { kind: 'sponsor', name: 'BAWES Universe' } }, NOW);
-      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'rep-3', title: 'Never reported', category: 'apps' }, NOW);
-      for (const key of ['rep-1', 'rep-2', 'rep-3']) await closeReceipt({ botId: sara.brickId, taskKey: key, personId: sara.id, state: 'done' }, NOW);
-      await reportProblem(sara.id, first.id, new Date(NOW.getTime() + 1000));
-      await reportProblem(sara.id, second.id, new Date(NOW.getTime() + 2000));
-      const before = process.env.SUPER_ADMINS;
-      process.env.SUPER_ADMINS = `team-${tag}@example.test`;
-      const session = getSessionUser as jest.Mock;
-      try {
-        session.mockResolvedValueOnce({ id: sara.id, email: `sara-${tag}@example.test` });
-        expect((await getTaskReports(new NextRequest('http://localhost/api/admin/task-reports'))).status).toBe(403);
-        session.mockResolvedValueOnce({ id: 'team', email: `team-${tag}@example.test` });
-        const body = await (await getTaskReports(new NextRequest('http://localhost/api/admin/task-reports'))).json();
-        const mine = body.reports.filter((one: { botId: string }) => one.botId === sara.brickId);
-        expect(mine.map((one: { title: string }) => one.title)).toEqual(['Second', 'First']);
-        expect(mine[0]).toMatchObject({ id: second.id, botName: expect.any(String), personId: sara.id, payer: 'sponsor', payerName: 'BAWES Universe', state: 'done' });
-        expect(Object.keys(mine[0]).sort()).toEqual(['at', 'botId', 'botName', 'id', 'payer', 'payerName', 'personId', 'reportedAt', 'state', 'title']);
-      } finally {
-        if (before === undefined) delete process.env.SUPER_ADMINS;
-        else process.env.SUPER_ADMINS = before;
-      }
-    });
-
     it('through the routes: open, close and the Usage page’s Activity, and the words for who pays', async () => {
       const sara = await person('sara');
       const opened = await postReceipt(json('/x', 'POST', { userId: sara.uuid, taskKey: 'route-1', action: 'open', title: 'Welcome video', category: 'apps', boundMicros: 1_200_000 }), ctx(sara.brickId));
@@ -914,13 +856,9 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(await (await postReceipt(json('/x', 'POST', { userId: 'g', isGuest: true, taskKey: 'g', action: 'open', title: 'x' }), ctx(sara.brickId))).json()).toEqual({ ok: false, reason: 'not_allowed' });
       const usage = await memberUsage(sara.id);
       expect(usage.activity).toHaveLength(1);
-      expect(usage.activity[0]).toMatchObject({ title: 'Welcome video', spentMicros: 920_000, payer: 'you', canReport: true });
-      (getSessionUser as jest.Mock).mockResolvedValue({ id: sara.id });
-      const reported = await postDidntWork(json('/x', 'POST'), ctx(usage.activity[0].id));
-      expect(await reported.json()).toEqual({ outcome: 'sent' });
-      expect((await postDidntWork(json('/x', 'POST'), ctx('act_missing'))).status).toBe(404);
-      (getSessionUser as jest.Mock).mockResolvedValue(null);
-      expect((await postDidntWork(json('/x', 'POST'), ctx(usage.activity[0].id))).status).toBe(401);
+      expect(usage.activity[0]).toMatchObject({ title: 'Welcome video', spentMicros: 920_000, payer: 'you' });
+      // There is no "Didn’t work?" any more: nothing on an Activity item offers it
+      expect(usage.activity[0]).not.toHaveProperty('canReport');
     });
 
     it('says who pays for a Brick to its owner ("you") and to anyone else (the owner, named)', async () => {

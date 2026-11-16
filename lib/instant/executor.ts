@@ -98,6 +98,8 @@ export interface InstantHooks {
   beforeRun?(input: RunInput, topMicros: number): Promise<{ refuse: true; words: string } | null>;
   /** Told how every run ended, for receipts. */
   afterRun?(input: RunInput, outcome: InstantOutcome): Promise<void>;
+  /** Told when a run was looked up (reconcile, from a retry or the sweep), whatever it came to, so a receipt can follow the run. */
+  afterSettle?(runId: string): Promise<void>;
 }
 
 let hooks: InstantHooks = {};
@@ -709,13 +711,16 @@ export async function reconcileRun(runId: string, ctx: Ctx): Promise<void> {
   // The person's side of whatever is over, said to the books now that the transaction is done (never inside it)
   await finishCustomer(runId, ctx);
   await evaluatePause(ctx.now).catch((error) => console.error('[Instant] The pause check failed:', error instanceof Error ? error.message : 'unknown'));
+  // The task's receipt follows what the run came to. Never throws into the sweep: a receipt that could not be moved now is moved by the
+  // sweep's own pass over receipts still in checking.
+  await hooks.afterSettle?.(runId).catch((error) => console.error('[Instant] A receipt hook failed:', error instanceof Error ? error.message : 'unknown'));
 }
 
 // ---------- Stopping by itself ----------
 
 /**
  * Pauses Instant when too many of the recent runs ended as failures (a share a super admin sets, over a set time, once a set number
- * of runs has happened). Give-backs for "Didn't work" count as failures too. New runs stop; runs going finish and settle.
+ * of runs has happened). Give-backs after a charge count as failures too. New runs stop; runs going finish and settle.
  */
 export async function evaluatePause(now: Date = new Date()): Promise<boolean> {
   const limits = await getInstantLimits();

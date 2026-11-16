@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/db';
 import { checkSpend } from '@/lib/spend-rules';
-import { closeReceipt } from '@/lib/task-receipts';
+import { settleReceipt } from '@/lib/task-receipts';
 import type { InstantHooks, RunInput } from '@/lib/instant/executor';
 import type { InstantOutcome } from '@/lib/instant/values';
 
@@ -11,9 +11,10 @@ import type { InstantOutcome } from '@/lib/instant/values';
  *  - `beforeRun`: a cheap early look at the rules, so a run a rule forbids is refused in the rule's own words before a run is made. It
  *    asks about the provider's top price, which is never more than what would be held, so it can only let through what the credit door's
  *    own check (made under the person's lock, with the whole hold) then refuses. That one is the one that decides; this one saves a run row.
- *  - `afterRun`: a run whose answer did not come back puts the task's receipt (when one is open) in "checking", so Activity says so and
- *    offers no "Didn't work?" until it is known. Done and refused runs need nothing here: what a task used is read from the books by its
- *    key, and the bot server closes the receipt when the task ends.
+ *  - `afterRun`: a run whose answer did not come back puts the task's receipt (when one is open) in "checking", so Activity says so.
+ *    Done and refused runs need nothing here: what a task used is read from the books by its key.
+ *  - `afterSettle`: a run was looked up (by a retry or by the sweep). When it ended, and no other run of its task is still open, the
+ *    receipt leaves "checking" by itself: done when a run worked, refunded when none did. No person and no model is ever asked.
  */
 export const instantRulesAndReceipts: InstantHooks = {
   async beforeRun(input: RunInput, topMicros: number) {
@@ -25,6 +26,11 @@ export const instantRulesAndReceipts: InstantHooks = {
     // The task is the one saved on the run, never the one a retry of the same call says: a retry with another task must not move that task's receipt
     const run = await prisma.instantRun.findUnique({ where: { id: outcome.runId }, select: { botId: true, personId: true, taskKey: true } });
     if (!run?.taskKey) return;
-    await closeReceipt({ botId: run.botId, taskKey: run.taskKey, personId: run.personId, state: 'checking' });
+    await settleReceipt({ botId: run.botId, personId: run.personId, taskKey: run.taskKey });
+  },
+  async afterSettle(runId: string) {
+    const run = await prisma.instantRun.findUnique({ where: { id: runId }, select: { botId: true, personId: true, taskKey: true } });
+    if (!run?.taskKey) return;
+    await settleReceipt({ botId: run.botId, personId: run.personId, taskKey: run.taskKey });
   },
 };

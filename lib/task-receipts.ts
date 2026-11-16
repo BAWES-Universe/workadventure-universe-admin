@@ -1,12 +1,10 @@
 import { Prisma } from '@prisma/client';
-import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { paidBy, payerFromRow, payerOf, payerToRow, type PaidBy, type Payer } from '@/lib/paid-by';
 import {
   activityIdOf,
   categoryOf,
   jobActivityIdOf,
-  readActivityId,
   receiptLines,
   receiptLink,
   spentOf,
@@ -39,8 +37,6 @@ export interface ActivityItem {
   /** The label as the reader sees it ("Paid by you"). */
   paidBy: string;
   lines: ReceiptLine[];
-  /** "Didn't work?" is offered: not while it is being checked, and not twice. */
-  canReport: boolean;
 }
 
 type ReceiptRow = NonNullable<Awaited<ReturnType<typeof prisma.taskReceipt.findUnique>>>;
@@ -98,10 +94,19 @@ export async function openReceipt(input: OpenInput, now: Date = new Date()): Pro
 
 export type Closed = { ok: true; id: string; state: ReceiptState } | { ok: false; reason: 'not_found' };
 
+/** A run of an Instant tool that has not ended yet: still going out, or its answer did not come back and nobody can say whether it ran. */
+const RUN_OPEN_STATES = ['reserving', 'held', 'sent', 'ambiguous'];
+
+const receiptLock = (tx: Prisma.TransactionClient, botId: string, taskKey: string) => tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`receipt:${botId}:${taskKey}`}))`;
+
 /**
  * Closes a task's receipt: done, refunded (a failure on our side: nothing was taken, whatever was held is given back) or checking (an
  * answer did not come back, and it is being looked into before anything is tried again). `checking` can still become done or
  * refunded; once a receipt is done or refunded it stays as it ended, so a second word, even a different one, changes nothing.
+ *
+ * The bot server's word is the task's end, not the money's: while one of the task's Instant runs has not ended (its answer did not come
+ * back and the lookup is still waiting), a done or refunded word leaves the receipt in checking, and the run's settling ends it
+ * (`settleReceipt`). The bot server can say done before Orbit knows what happened to a run, and that must never freeze the receipt.
  */
 export async function closeReceipt(
   input: { botId: string; taskKey: string; personId: string; state: ReceiptState; chargedMicros?: number | null },
@@ -109,17 +114,76 @@ export async function closeReceipt(
 ): Promise<Closed> {
   if (input.chargedMicros !== undefined && input.chargedMicros !== null && !wholeMicros(input.chargedMicros)) throw new RangeError('chargedMicros must be a whole number, 0 or more');
   return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`receipt:${input.botId}:${input.taskKey}`}))`;
+    await receiptLock(tx, input.botId, input.taskKey);
     const row = await tx.taskReceipt.findUnique({ where: { botId_taskKey: { botId: input.botId, taskKey: input.taskKey } } });
     if (!row || row.personId !== input.personId) return { ok: false, reason: 'not_found' };
     if (row.state === 'done' || row.state === 'refunded') return { ok: true, id: activityIdOf(row.id), state: row.state };
-    const charged = input.state === 'refunded' ? 0 : (input.chargedMicros ?? null);
+    const waiting = input.state !== 'checking' && (await openRunsOf(tx, input)) > 0;
+    const state: ReceiptState = waiting ? 'checking' : input.state;
+    const charged = state === 'refunded' ? 0 : (input.chargedMicros ?? null);
     const next = await tx.taskReceipt.update({
       where: { id: row.id },
-      data: { state: input.state, chargedMicros: charged === null ? null : BigInt(charged), endedAt: input.state === 'checking' ? null : now },
+      data: { state, chargedMicros: charged === null ? null : BigInt(charged), endedAt: state === 'checking' ? null : now },
     });
     return { ok: true, id: activityIdOf(next.id), state: next.state as ReceiptState };
   });
+}
+
+const openRunsOf = (tx: Prisma.TransactionClient, task: { botId: string; personId: string; taskKey: string }) =>
+  tx.instantRun.count({ where: { botId: task.botId, personId: task.personId, taskKey: task.taskKey, state: { in: RUN_OPEN_STATES } } });
+
+/**
+ * Orbit's own word on a task's receipt from what its Instant runs came to. Called when a run ends or is looked up, and by the sweep for
+ * a receipt still in checking (so a crash between a run's ending and this never leaves one behind). Safe to say twice and any number of
+ * times; never asks a person, never calls a model.
+ *
+ *  - Any run of the task still open: the receipt is in checking, even when the bot server had closed it (that word came before Orbit knew)
+ *    and even while the task is still running (what was said before is no reason to hide that a run is unclear).
+ *  - Every run ended, receipt in checking: it is done when any run worked (what it took is read from the books by the task's key), and
+ *    refunded, nothing taken, when none did. Runs nobody could vouch for when their wait ended count as not worked: the person's favour.
+ *  - Every run ended, receipt already done or refunded, or still running: left as it is. One run ending never closes a task that has another
+ *    run still open, and Orbit never closes a task the bot server has not ended (a later unclear run puts it back in checking).
+ *  - A task with no Instant run (a computer's) is not touched.
+ */
+export async function settleReceipt(task: { botId: string; personId: string; taskKey: string }, now: Date = new Date()): Promise<ReceiptState | null> {
+  return prisma.$transaction(async (tx) => {
+    await receiptLock(tx, task.botId, task.taskKey);
+    const row = await tx.taskReceipt.findUnique({ where: { botId_taskKey: { botId: task.botId, taskKey: task.taskKey } } });
+    if (!row || row.personId !== task.personId) return null;
+    const runs = await tx.instantRun.findMany({ where: { botId: task.botId, personId: task.personId, taskKey: task.taskKey }, select: { state: true } });
+    if (runs.length === 0) return row.state as ReceiptState;
+    if (runs.some((run) => RUN_OPEN_STATES.includes(run.state))) {
+      if (row.state === 'checking') return 'checking';
+      await tx.taskReceipt.update({ where: { id: row.id }, data: { state: 'checking', endedAt: null } });
+      return 'checking';
+    }
+    if (row.state !== 'checking') return row.state as ReceiptState;
+    const worked = runs.some((run) => run.state === 'succeeded');
+    const state: ReceiptState = worked ? 'done' : 'refunded';
+    await tx.taskReceipt.update({ where: { id: row.id }, data: { state, chargedMicros: worked ? row.chargedMicros : BigInt(0), endedAt: now } });
+    return state;
+  });
+}
+
+/** Receipts still in checking whose Instant runs have all ended: the sweep says each one again. Oldest first. */
+export async function settleCheckingReceipts(limit: number, now: Date = new Date()): Promise<number> {
+  const rows = await prisma.$queryRaw<Array<{ botId: string; personId: string; taskKey: string }>>(Prisma.sql`
+    SELECT r."bot_id" AS "botId", r."person_id" AS "personId", r."task_key" AS "taskKey"
+    FROM task_receipts r
+    WHERE r."state" = 'checking'
+      AND EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key")
+      AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" IN ('reserving', 'held', 'sent', 'ambiguous'))
+    ORDER BY r."updated_at" ASC
+    LIMIT ${limit}`);
+  let settled = 0;
+  for (const row of rows) {
+    const state = await settleReceipt(row, now).catch((error) => {
+      console.error('[Receipts] Could not settle a receipt:', error instanceof Error ? error.message : 'unknown');
+      return null;
+    });
+    if (state && state !== 'checking') settled += 1;
+  }
+  return settled;
 }
 
 interface Header {
@@ -133,7 +197,6 @@ interface Header {
   botId: string;
   taskKey: string;
   runId: string | null;
-  problemAt: Date | null;
 }
 
 const headerOfRow = (row: ReceiptRow): Header => ({
@@ -147,7 +210,6 @@ const headerOfRow = (row: ReceiptRow): Header => ({
   botId: row.botId,
   taskKey: row.taskKey,
   runId: row.runId,
-  problemAt: row.problemAt,
 });
 
 /**
@@ -213,15 +275,14 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
     payerName: who.payerName,
     paidBy: who.label,
     lines,
-    canReport: header.state !== 'checking' && header.problemAt === null,
   };
 }
 
-/** The person's finished receipts, newest by the time Activity shows (when it ended, else when it began), before the limit is applied. */
+/** The person's finished receipts (a task still being looked up is not finished: it shows when it settles), newest by the time Activity shows (when it ended, else when it began), before the limit is applied. */
 async function receiptsNewest(personId: string, limit: number): Promise<ReceiptRow[]> {
   const ids = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
     SELECT "id" FROM task_receipts
-    WHERE "person_id" = ${personId} AND "state" <> 'running'
+    WHERE "person_id" = ${personId} AND "state" NOT IN ('running', 'checking')
     ORDER BY COALESCE("ended_at", "started_at") DESC, "id" DESC
     LIMIT ${limit}`);
   if (ids.length === 0) return [];
@@ -232,7 +293,8 @@ async function receiptsNewest(personId: string, limit: number): Promise<ReceiptR
 
 /**
  * The Activity list of a person: their finished tasks, newest first, at most `ACTIVITY_LISTED`. Tasks that are still running are not
- * listed (their status is in the chat). Reads only; it never starts or changes anything.
+ * listed (their status is in the chat), and neither is one the system is still looking up (an answer did not come back): it is listed
+ * as done or refunded once the lookup settles, so nobody reads a state they cannot act on. Reads only; it never starts or changes anything.
  */
 export async function activityFor(personId: string, limit: number = ACTIVITY_LISTED): Promise<ActivityItem[]> {
   const [rows, jobs] = await Promise.all([
@@ -258,7 +320,6 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
       botId: job.botId,
       taskKey: job.id,
       runId: job.runId,
-      problemAt: null,
     }));
   const all = [...headers, ...computerHeaders];
   const [events, bots] = await Promise.all([eventsFor(all), prisma.bot.findMany({ where: { id: { in: [...new Set(all.map((header) => header.botId))] } }, select: { id: true, name: true } })]);
@@ -272,88 +333,4 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
     return itemOf({ ...header, state }, forHeader, names.get(header.botId) ?? 'Brick', personId);
   });
   return items.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : -1)).slice(0, limit);
-}
-
-/** A report reaches the people who run Universe the way their other warnings do (Sentry): the Brick and the task, never any words of the person's. Once per report. */
-function tellOperators(botId: string, activityId: string): void {
-  Sentry.captureMessage('A person reported that a task did not work', { level: 'warning', tags: { area: 'task-receipts' }, extra: { botId, activityId } });
-}
-
-export type Reported = { ok: true; outcome: 'sent' } | { ok: false; reason: 'not_found' };
-
-/**
- * "Didn't work?" on a receipt: the report is kept once. The answer says what happened to it: `sent` is the one thing this does by
- * itself (it reaches the people who run Universe, with no words of the person's kept). A refund or a re-delivery needs the task's own
- * recovery (the Instant executor's), which answers `refunded`, `redelivered`, `retrying` or `credit` through this same route when it
- * has made one. Only the person who asked can report their own task.
- */
-export async function reportProblem(personId: string, activityId: string, now: Date = new Date()): Promise<Reported> {
-  const read = readActivityId(activityId);
-  if (!read) return { ok: false, reason: 'not_found' };
-  if (read.kind === 'receipt') {
-    const row = await prisma.taskReceipt.findUnique({ where: { id: read.id } });
-    if (!row || row.personId !== personId || row.state === 'running') return { ok: false, reason: 'not_found' };
-    if (row.problemAt === null) {
-      const marked = await prisma.taskReceipt.updateMany({ where: { id: row.id, problemAt: null }, data: { problemAt: now } });
-      if (marked.count > 0) tellOperators(row.botId, activityIdOf(row.id));
-    }
-    return { ok: true, outcome: 'sent' };
-  }
-  const job = await prisma.computerJob.findUnique({ where: { id: read.id } });
-  if (!job || job.personId !== personId || job.endedAt === null) return { ok: false, reason: 'not_found' };
-  // The job has no receipt of its own yet: one is made now, so the report has somewhere to be kept
-  const mayHaveTaken = await prisma.meterEvent.count({ where: { jobId: job.id, kind: 'computer_time', OR: [{ costMicros: null }, { costMicros: { gt: 0 } }] } });
-  const state: ReceiptState = job.status === 'failed' && mayHaveTaken === 0 ? 'refunded' : 'done';
-  await prisma.taskReceipt.createMany({
-    data: [{ botId: job.botId, personId, taskKey: job.id, runId: job.runId, title: job.title.slice(0, 120), category: 'computer', state, payerKind: 'person', payerPersonId: personId, startedAt: job.startedAt ?? job.createdAt, endedAt: job.endedAt }],
-    skipDuplicates: true,
-  });
-  const marked = await prisma.taskReceipt.updateMany({ where: { botId: job.botId, taskKey: job.id, personId, problemAt: null }, data: { problemAt: now } });
-  if (marked.count > 0) tellOperators(job.botId, jobActivityIdOf(job.id));
-  return { ok: true, outcome: 'sent' };
-}
-
-export interface ProblemReport {
-  /** The Activity id the person reported. */
-  id: string;
-  title: string;
-  state: ReceiptState;
-  botId: string;
-  botName: string | null;
-  personId: string;
-  payer: PaidBy['payer'];
-  payerName: string | null;
-  /** When the person said it did not work. */
-  reportedAt: string;
-  /** When the task ended (or began, while it has not). */
-  at: string;
-}
-
-/** How many reports one operator list holds, newest first. */
-export const PROBLEM_REPORTS_LISTED = 100;
-
-/**
- * What people said did not work, for the people who run Universe: newest report first. Only what was stored (the task, the Brick, who
- * asked and who paid, and when); the person's own words are never kept. Reads only.
- */
-export async function problemReports(limit: number = PROBLEM_REPORTS_LISTED): Promise<ProblemReport[]> {
-  const rows = await prisma.taskReceipt.findMany({ where: { problemAt: { not: null } }, orderBy: [{ problemAt: 'desc' }, { id: 'desc' }], take: limit });
-  if (rows.length === 0) return [];
-  const bots = await prisma.bot.findMany({ where: { id: { in: [...new Set(rows.map((row) => row.botId))] } }, select: { id: true, name: true } });
-  const names = new Map(bots.map((bot) => [bot.id, bot.name]));
-  return rows.map((row) => {
-    const who = paidBy(payerFromRow(row), row.personId);
-    return {
-      id: activityIdOf(row.id),
-      title: row.title,
-      state: row.state as ReceiptState,
-      botId: row.botId,
-      botName: names.get(row.botId) ?? null,
-      personId: row.personId,
-      payer: who.payer,
-      payerName: who.payerName,
-      reportedAt: (row.problemAt as Date).toISOString(),
-      at: (row.endedAt ?? row.startedAt).toISOString(),
-    };
-  });
 }
