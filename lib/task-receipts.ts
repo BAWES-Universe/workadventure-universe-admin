@@ -186,7 +186,8 @@ async function eventsFor(headers: readonly Header[]): Promise<Map<string, LineEv
         (row.jobId === header.taskKey ||
           // A run of an Instant tool says which task it belongs to: it is that task's, whatever run the task came from
           (row.jobId === null && isRecord(row.detail) && row.detail.taskKey === header.taskKey) ||
-          (owner && row.jobId === null && isRecord(row.detail) && row.detail.runId === header.runId)),
+          // A run's events with no task of their own go to the receipt that owns the run; an event that names another task is that task's only
+          (owner && row.jobId === null && isRecord(row.detail) && row.detail.runId === header.runId && (row.detail.taskKey === undefined || row.detail.taskKey === header.taskKey))),
     );
     out.set(
       header.id,

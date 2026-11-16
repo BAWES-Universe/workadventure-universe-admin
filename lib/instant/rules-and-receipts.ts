@@ -1,3 +1,4 @@
+import { prisma } from '@/lib/db';
 import { checkSpend } from '@/lib/spend-rules';
 import { closeReceipt } from '@/lib/task-receipts';
 import type { InstantHooks, RunInput } from '@/lib/instant/executor';
@@ -20,7 +21,10 @@ export const instantRulesAndReceipts: InstantHooks = {
     return ruled.ok ? null : { refuse: true, words: ruled.words };
   },
   async afterRun(input: RunInput, outcome: InstantOutcome) {
-    if (outcome.status !== 'checking' || !input.taskKey) return;
-    await closeReceipt({ botId: input.botId, taskKey: input.taskKey, personId: input.personId, state: 'checking' });
+    if (outcome.status !== 'checking') return;
+    // The task is the one saved on the run, never the one a retry of the same call says: a retry with another task must not move that task's receipt
+    const run = await prisma.instantRun.findUnique({ where: { id: outcome.runId }, select: { botId: true, personId: true, taskKey: true } });
+    if (!run?.taskKey) return;
+    await closeReceipt({ botId: run.botId, taskKey: run.taskKey, personId: run.personId, state: 'checking' });
   },
 };

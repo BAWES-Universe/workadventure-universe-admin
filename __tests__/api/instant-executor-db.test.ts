@@ -1723,15 +1723,39 @@ run('the bounded Instant executor, in a real database', () => {
       expect(f.funds.reserve).toHaveBeenCalledTimes(1);
     });
 
-    it('a run whose answer did not come back puts the task’s receipt in "checking", and a call with no task touches nothing', async () => {
+    it('a run whose answer did not come back puts the receipt of the task SAVED on the run in "checking": a call with no task, and a retry naming another task, touch nothing', async () => {
       await openReceipt({ botId: brick, personId: sara, taskKey: 'task-c', title: 'Find the weather', category: 'apps' });
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'task-other', title: 'Another task', category: 'apps' });
+      const mk = (taskKey: string | null) =>
+        prisma.instantRun.create({ data: { runKey: `k-${randomUUID()}`, botId: brick, personId: sara, taskKey, toolSlug: 'EXA_SEARCH', toolkit: 'exa', argsHash: 'h', priceVersion: 'v', topMicros: BigInt(TOP), holdMicros: BigInt(TOP), state: 'ambiguous', customerState: 'held', providerUserId: `u-${randomUUID().slice(0, 6)}` } as never });
+      const withTask = await mk('task-c');
+      const noTask = await mk(null);
+      const state = async (taskKey: string) => (await prisma.taskReceipt.findFirstOrThrow({ where: { personId: sara, taskKey } })).state;
       const input = { botId: brick, personId: sara, tool: 'EXA_SEARCH', arguments: {}, callId: 'c1', taskKey: 'task-c' };
-      await instantRulesAndReceipts.afterRun?.({ ...input, taskKey: null }, { status: 'checking', runId: 'r1' });
-      expect((await prisma.taskReceipt.findFirstOrThrow({ where: { personId: sara } })).state).toBe('running');
-      await instantRulesAndReceipts.afterRun?.(input, { status: 'done', runId: 'r1', ok: true, data: {}, chargedMicros: 1, pending: false });
-      expect((await prisma.taskReceipt.findFirstOrThrow({ where: { personId: sara } })).state).toBe('running');
-      await instantRulesAndReceipts.afterRun?.(input, { status: 'checking', runId: 'r1' });
-      expect((await prisma.taskReceipt.findFirstOrThrow({ where: { personId: sara } })).state).toBe('checking');
+      await instantRulesAndReceipts.afterRun?.({ ...input, taskKey: null }, { status: 'checking', runId: noTask.id });
+      expect(await state('task-c')).toBe('running');
+      await instantRulesAndReceipts.afterRun?.(input, { status: 'done', runId: withTask.id, ok: true, data: {}, chargedMicros: 1, pending: false });
+      expect(await state('task-c')).toBe('running');
+      // A retry of the same call that names another task: the run's own task is the one that moves
+      await instantRulesAndReceipts.afterRun?.({ ...input, taskKey: 'task-other' }, { status: 'checking', runId: withTask.id });
+      expect(await state('task-c')).toBe('checking');
+      expect(await state('task-other')).toBe('running');
+      await prisma.instantRun.deleteMany({ where: { id: { in: [withTask.id, noTask.id] } } });
+    });
+
+    it('an Instant run that names its task is that task’s only: a receipt that merely carries the run id does not show its charge too', async () => {
+      await setLimits({ markupBps: 5_000 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      expect((await runInstant(ask({ taskKey: 'task-b' }), { adapter: p.adapter, funds: f.funds })).status).toBe('done');
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'task-a', title: 'Not its task', category: 'apps', runId: row.id });
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'task-b', title: 'Its task', category: 'apps' });
+      await closeReceipt({ botId: brick, taskKey: 'task-a', personId: sara, state: 'done' });
+      await closeReceipt({ botId: brick, taskKey: 'task-b', personId: sara, state: 'done' });
+      const items = await activityFor(sara);
+      expect(items.find((item) => item.title === 'Its task')).toMatchObject({ spentMicros: Number(row.customerMicros) });
+      expect(items.find((item) => item.title === 'Not its task')).toMatchObject({ spentMicros: null, lines: [] });
     });
   });
 });
