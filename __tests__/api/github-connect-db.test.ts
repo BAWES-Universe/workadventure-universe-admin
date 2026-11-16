@@ -411,6 +411,10 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(login).toBe('sara-gh');
     expect(await gitHubToken(id)).toMatchObject({ status: 'ok', token: 'ghp_good_key_123' });
     expect(await readConnection(id, sara)).toMatchObject({ connected: true });
+    // A sign-in started before the key was saved can no longer finish over it
+    await prisma.appConnection.update({ where: { id }, data: { signInNonce: 'a-sign-in-started-earlier' } });
+    expect((await saveKey(request('/api/me/apps/github/key', { method: 'POST', body: { key: 'ghp_good_key_123' } }))).status).toBe(200);
+    expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInNonce).toBeNull();
     await dropKey(request('/api/me/apps/github/key', { method: 'DELETE' }));
     expect(await readConnection(id, sara)).toMatchObject({ connected: false });
   });
