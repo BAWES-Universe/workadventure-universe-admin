@@ -164,22 +164,29 @@ export function readPackCommits(pack: Buffer): Map<string, string[]> | null {
 }
 
 /**
- * Whether `oldId` can be reached from `newId` through commits in the pack: the new tip builds on what the branch has now. A tip that
- * is not in the pack (an older commit the branch is being moved back to), or a line of history that leaves the pack before meeting
- * `oldId`, is not proved, and so is not taken for an addition.
+ * Whether `oldId` can be reached from `newId` through commits in the pack: the new tip builds on what the branch has now.
+ *  - `true`: proved from the pack alone.
+ *  - a list: not proved by the pack, but the line of history left the pack at these commits (ones GitHub already has, which git leaves
+ *    out of a thin pack). If one of them comes after `oldId` on GitHub, the push still builds on the branch; the caller asks GitHub.
+ *  - `false`: the tip is not in the pack at all, or the history leads nowhere that could be asked about.
  */
-export function buildsOn(commits: Map<string, string[]>, oldId: string, newId: string): boolean {
+export function buildsOn(commits: Map<string, string[]>, oldId: string, newId: string): boolean | string[] {
   if (!HEX40.test(oldId) || !HEX40.test(newId)) return false;
   if (oldId === newId) return true;
   if (!commits.has(newId)) return false;
   const seen = new Set<string>();
+  const outside = new Set<string>();
   const queue = [newId];
   while (queue.length > 0) {
     const id = queue.pop() as string;
     if (id === oldId) return true;
     if (seen.has(id)) continue;
     seen.add(id);
+    if (!commits.has(id)) {
+      outside.add(id);
+      continue;
+    }
     for (const parent of commits.get(id) ?? []) queue.push(parent);
   }
-  return false;
+  return outside.size > 0 ? [...outside] : false;
 }

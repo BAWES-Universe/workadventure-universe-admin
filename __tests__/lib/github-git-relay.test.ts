@@ -217,8 +217,9 @@ const hasHttpBackend = (() => {
     // A branch moved back to an older commit: the pack carries nothing, so nothing proves it builds on the tip
     const back = await tryGit(clone, 'push', '-f', 'origin', 'HEAD~2:work');
     expect(back.ok).toBe(false);
-    // The default branch cannot be reset to something else either
-    const reset = await tryGit(clone, 'push', '-f', 'origin', 'HEAD:main');
+    // The default branch cannot be reset to a history of its own either (a commit with no parent)
+    const orphan = git(clone, ...as, 'commit-tree', 'HEAD^{tree}', '-m', 'orphan').trim();
+    const reset = await tryGit(clone, 'push', '-f', 'origin', `${orphan}:refs/heads/main`);
     expect(reset.ok).toBe(false);
     expect(git(repo, 'rev-parse', 'work').trim()).toBe(tip);
     // A merge that brings another line of history in still builds on the branch
@@ -230,6 +231,33 @@ const hasHttpBackend = (() => {
     git(clone, ...as, 'merge', '-q', '--no-ff', '-m', 'merge', tip);
     expect(await tryGit(clone, 'push', '-q', 'origin', 'HEAD:work')).toMatchObject({ ok: true });
     expect(git(repo, 'rev-parse', 'work').trim()).not.toBe(tip);
+  });
+
+  it('lets a branch move up onto commits that stand on a commit GitHub already has elsewhere, and still turns down a line that does not (the thin pack leaves that commit out)', async () => {
+    const repo = path.join(work, 'github', 'acme', 'tools.git');
+    const clone = path.join(work, 'clone-stacked');
+    const as = ['-c', 'user.name=sara', '-c', 'user.email=1+sara@users.noreply.github.com'];
+    expect(await tryGit(work, 'clone', '-q', `http://127.0.0.1:${port}/api/git/acme/tools.git`, clone)).toMatchObject({ ok: true });
+    const stale = git(clone, 'rev-parse', 'HEAD').trim();
+    // F goes to a branch of its own; G is built on F and pushed to main, which is still where it was: the pack carries G alone
+    writeFileSync(path.join(clone, 'f.txt'), 'F\n');
+    git(clone, 'add', '.');
+    git(clone, ...as, 'commit', '-qm', 'F');
+    expect(await tryGit(clone, 'push', '-q', 'origin', 'HEAD:refs/heads/stack')).toMatchObject({ ok: true });
+    writeFileSync(path.join(clone, 'g.txt'), 'G\n');
+    git(clone, 'add', '.');
+    git(clone, ...as, 'commit', '-qm', 'G');
+    expect(await tryGit(clone, 'push', '-q', 'origin', 'HEAD:main')).toMatchObject({ ok: true });
+    const tip = git(repo, 'rev-parse', 'main').trim();
+    // A commit built on where main used to be is not on top of main now: turned down, main stays
+    git(clone, ...as, 'checkout', '-q', '-b', 'old-line', stale);
+    writeFileSync(path.join(clone, 'x.txt'), 'X\n');
+    git(clone, 'add', '.');
+    git(clone, ...as, 'commit', '-qm', 'X');
+    const diverged = await tryGit(clone, 'push', '-f', 'origin', 'HEAD:main');
+    expect(diverged.ok).toBe(false);
+    expect(diverged.out).toContain('never overwrite');
+    expect(git(repo, 'rev-parse', 'main').trim()).toBe(tip);
   });
 });
 
