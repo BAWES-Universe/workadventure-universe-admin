@@ -517,6 +517,17 @@ describe('getting a machine ready for a job', () => {
     expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-mark']);
   });
 
+  it('asks again once after the restart too, when the browser is still starting then', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    let runs = 0;
+    w.setExec(() => ['ready=1 restart=1\n', 'ready=0 reason=browser\n', 'ready=1 restart=0\n'][Math.min(runs++, 2)]);
+    await expect(p.ready('m1')).resolves.toBeUndefined();
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-up', 'universe-mark']);
+    expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
+  });
+
   it('says the machine is not ready, with the reason, when a part did not come up', async () => {
     const w = world();
     const p = provider(w);

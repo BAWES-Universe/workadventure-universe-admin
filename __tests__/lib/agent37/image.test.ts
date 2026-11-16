@@ -293,7 +293,7 @@ subprocess.Popen(['sleep', '300'])
 time.sleep(300)" &
 GW=$!
 # the real browser: a program root owns, started with the supervisor's own profile and debugging address
-${dir}/bin/chromium -c 'sleep 300; true' --user-data-dir=$HOME/.config/universe-chromium --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 &
+${dir}/bin/chromium -c 'sleep 2; sleep 300; true' --user-data-dir=$HOME/.config/universe-chromium --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 &
 BR=$!
 # the computer's own parts: running before the note is written, under any name
 sh -c 'sleep 306' &
@@ -319,6 +319,9 @@ setsid sleep 301 </dev/null >/dev/null 2>&1 &
 # a short wait is what the computer's own start-up loop runs, and it stops the computer when one is killed: it is never touched
 setsid sleep 9 </dev/null >/dev/null 2>&1 &
 SHORT=$!
+# the same short wait with agent code loaded into it: not one
+LD_PRELOAD=/nonexistent/agent.so setsid sleep 9 </dev/null >/dev/null 2>&1 &
+LOADED=$!
 sh -c 'sleep 302' &
 sleep 1
 for p in $A1 $A2 $A3 $LATE; do kill -0 $p 2>/dev/null && echo "agent-up"; done
@@ -329,6 +332,9 @@ for p in $GW $BR; do kill -0 $p 2>/dev/null && echo "alive" || echo "dead"; done
 for p in $A1 $A2 $A3 $LATE; do kill -0 $p 2>/dev/null && echo "agent-alive" || echo "agent-dead"; done
 kill -0 $OWN 2>/dev/null && echo "own-alive" || echo "own-dead"
 kill -0 $SHORT 2>/dev/null && echo "short-alive" || echo "short-dead"
+kill -0 $LOADED 2>/dev/null && echo "loaded-alive" || echo "loaded-dead"
+# a child the browser started after the note, below a part that was running before it, is the browser's own
+pgrep -P $BR -x sleep >/dev/null && echo "late-child-alive" || echo "late-child-dead"
 `;
     const run = spawnSync('unshare', ['--pid', '--fork', '--mount-proc', 'sh', '-c', scenario], { encoding: 'utf8', timeout: 60_000 });
     // Without the note nothing is stopped and nothing is proved; the note is written once per boot
@@ -348,6 +354,10 @@ kill -0 $SHORT 2>/dev/null && echo "short-alive" || echo "short-dead"
     expect(run.stdout).toContain('own-alive');
     // A short sleep is left, and does not count as something the agent has running
     expect(run.stdout).toContain('short-alive');
+    // A short wait with a loader override in its environment is the agent's code, and goes
+    expect(run.stdout).toContain('loaded-dead');
+    // What a desktop part started after the note is kept, even when the part itself was already kept for being older
+    expect(run.stdout).toContain('late-child-alive');
   });
 });
 

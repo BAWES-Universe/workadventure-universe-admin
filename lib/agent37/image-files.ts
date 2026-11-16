@@ -466,15 +466,31 @@ def runner_part(pid):
     return bool(path) and path.startswith(AGENT37_DIR)
 
 
+CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
 SHORT_SLEEP = re.compile(r"^\d{1,2}(\.\d+)?$")
+
+
+def ticks_now():
+    try:
+        with open("/proc/uptime", "r", encoding="utf-8") as handle:
+            return int(float(handle.read().split()[0]) * CLOCK_TICKS)
+    except Exception:
+        return None
 
 
 def short_sleep(pid):
     # A short wait that does nothing and ends by itself. The computer's own start-up loop runs them as its children (process 1 waits
-    # for each one), and it stops the whole computer when one is killed, so these are never touched. An agent's is just as harmless.
+    # for each one), and it stops the whole computer when one is killed, so these are never touched. Two things keep the exemption from
+    # being a place to hide: a wait that has gone on longer than a real one can is not one (a process that took the name and stayed), and
+    # one started with a loader override in its environment (code of the agent's, loaded into it) is not one either.
     path = program(pid)
     args = argv(pid)
-    return bool(path) and os.path.basename(path) == "sleep" and len(args) == 2 and bool(SHORT_SLEEP.match(args[1])) and float(args[1]) <= 30
+    if not (bool(path) and os.path.basename(path) == "sleep" and len(args) == 2 and bool(SHORT_SLEEP.match(args[1])) and float(args[1]) <= 30):
+        return False
+    begun, now = started(pid), ticks_now()
+    if begun is None or now is None or now - begun > 60 * CLOCK_TICKS:
+        return False
+    return not any(entry.startswith(b"LD_") for entry in read(pid, "environ").split(b"\0"))
 
 
 def protected(tree, cutoff):
@@ -496,10 +512,14 @@ def protected(tree, cutoff):
     below = {}
     for pid, up in tree.items():
         below.setdefault(up, []).append(pid)
+    # Everything below a desktop part is its own, whether or not it was already kept for another reason: a helper that was running before
+    # the note was written still has children (a new tab's renderer) that were not. Its own record of what was visited, apart from the kept set.
+    seen = set(desktop)
     stack = list(desktop)
     while stack:
         for child in below.get(stack.pop(), []):
-            if child not in keep:
+            if child not in seen:
+                seen.add(child)
                 keep.add(child)
                 stack.append(child)
     return keep

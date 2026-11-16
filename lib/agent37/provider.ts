@@ -206,18 +206,20 @@ export class Agent37ComputerProvider implements ComputerProvider {
       await this.client.updateInstance(ref);
       instance = await this.untilHealthy(ref, instance.url);
     }
-    let up = await this.up(ref);
-    // A part that was still coming up (a browser right after a machine woke): `universe-up` is safe to run again, so it is asked once more
-    if (!up.ready && !up.restart) {
+    // A part that was still coming up (a browser right after a machine woke or restarted): `universe-up` is safe to run again, so it is
+    // asked once more, after the first ask and after the restart
+    const again = async (state: { ready: boolean; restart: boolean; reason: string | null }) => {
+      if (state.ready || state.restart) return state;
       await this.pause(5_000);
-      up = await this.up(ref);
-    }
+      return this.up(ref);
+    };
+    let up = await again(await this.up(ref));
     if (up.restart) {
       await this.client.stopInstance(ref);
       await this.untilDown(ref, true);
       await this.client.startInstance(ref);
       await this.untilHealthy(ref, instance.url);
-      up = await this.up(ref);
+      up = await again(await this.up(ref));
     }
     if (!up.ready) throw new Error(`The computer is not ready${up.reason ? ` (${up.reason})` : ''}`);
     // Last, once the computer is as it should be and before any job has used it: the note the take-over fence tells the agent's processes by
