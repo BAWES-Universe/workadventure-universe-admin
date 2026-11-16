@@ -364,6 +364,29 @@ run('key apps, in a real database', () => {
     });
   });
 
+  it('takes the try before the service is asked, so keys sent at the same moment cannot get past the limit together', async () => {
+    try {
+      await saveServerLimits({ bricks: { keyFormMinutes: 5, keyTries: 2 } }, sara);
+      const id = await open();
+      let asked = 0;
+      const slow: GuardDeps = {
+        resolve: async () => [{ address: '93.184.216.34', family: 4 }],
+        send: async () => {
+          asked += 1;
+          // Every look is still on its way while the others start: none has added to the count yet
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return { status: 401, redirected: false, body: '{}', truncated: false, contentType: 'application/json' };
+        },
+      };
+      const results = await Promise.allSettled(Array.from({ length: 6 }, () => submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, slow)));
+      expect(asked).toBe(2);
+      expect(results.filter((r) => r.status === 'rejected' && (r.reason as { code?: string }).code === 'rejected')).toHaveLength(2);
+      expect(results.filter((r) => r.status === 'rejected' && (r.reason as { code?: string }).code === 'too_many')).toHaveLength(4);
+    } finally {
+      await prisma.appSetting.deleteMany({ where: { key: 'bot-limits' } });
+    }
+  });
+
   it('keeps the form time and tries as Limits settings, not numbers in the code', async () => {
     try {
       await saveServerLimits({ bricks: { keyFormMinutes: 1, keyTries: 2 } }, sara);
