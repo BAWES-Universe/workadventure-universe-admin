@@ -279,6 +279,55 @@ describe('the take-over fence', () => {
   (isolated ? it : it.skip)('stops what the agent started, keeps the gateway and the browser, and proves none is left', () => {
     const dir = write();
     mkdirSync(join(dir, 'bin'), { recursive: true });
+    // Two real libraries the agent could preload into a short wait. Each clears LD_PRELOAD from its own environment, then leaves a note
+    // that it ran (so the test knows the code really loaded). The second also copies its code into nameless memory and unmaps itself.
+    mkdirSync(join(dir, 'agent'), { recursive: true });
+    const cleared = `
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <string.h>
+#include <unistd.h>
+extern char **environ;
+static void clear_and_note(const char *note) {
+  for (char **p = environ; *p; p++) if (!strncmp(*p, "LD_", 3)) memset(*p, 0, strlen(*p));
+  int fd = open(note, O_WRONLY | O_CREAT, 0644);
+  if (fd >= 0) { write(fd, "ran", 3); close(fd); }
+}
+`;
+    writeFileSync(join(dir, 'agent', 'wipe.c'), `${cleared}
+__attribute__((constructor)) static void w(void) { clear_and_note("${dir}/agent/wipe.ran"); }
+`);
+    writeFileSync(
+      join(dir, 'agent', 'hide.c'),
+      `${cleared}
+#include <stdint.h>
+#include <stdio.h>
+#include <sys/mman.h>
+__attribute__((naked, noinline)) static void stub(void *ranges, long count) {
+  __asm__ volatile(
+    "mov %rdi,%r8\\n mov %rsi,%r9\\n"
+    "1: test %r9,%r9\\n jz 2f\\n mov (%r8),%rdi\\n mov 8(%r8),%rsi\\n mov $11,%eax\\n syscall\\n add $16,%r8\\n dec %r9\\n jmp 1b\\n"
+    "2: mov $34,%eax\\n syscall\\n jmp 2b\\n");
+}
+__attribute__((constructor)) static void h(void) {
+  uintptr_t ranges[64][2]; long count = 0; char line[4096];
+  FILE *f = fopen("/proc/self/maps", "r");
+  if (!f) _exit(101);
+  while (fgets(line, sizeof(line), f)) {
+    unsigned long a, b;
+    if (strstr(line, "hide.so") && count < 64 && sscanf(line, "%lx-%lx", &a, &b) == 2) { ranges[count][0] = a; ranges[count][1] = b - a; count++; }
+  }
+  fclose(f);
+  void *copy = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (copy == MAP_FAILED) _exit(103);
+  memcpy(copy, (void *)stub, 256);
+  if (mprotect(copy, 4096, PROT_READ | PROT_EXEC)) _exit(104);
+  clear_and_note("${dir}/agent/hide.ran");
+  ((void (*)(void *, long))copy)(ranges, count);
+  _exit(105);
+}
+`,
+    );
     const scenario = `
 export HOME=${dir}/home
 mkdir -p $HOME ${dir}/agent /run/universe
@@ -323,11 +372,14 @@ SHORT=$!
 LD_PRELOAD=/nonexistent/agent.so setsid sleep 9 </dev/null >/dev/null 2>&1 &
 LOADED=$!
 # and with its environment wiped by the library itself (the mapped library still shows)
-if command -v cc >/dev/null 2>&1; then
-  printf '#include <string.h>\nextern char **environ;\n__attribute__((constructor)) static void w(void){ for (char **p = environ; *p; p++) if (!strncmp(*p, "LD_PRELOAD=", 11)) memset(*p, 0, strlen(*p)); }\n' > ${dir}/agent/wipe.c
-  cc -shared -fPIC -o ${dir}/agent/wipe.so ${dir}/agent/wipe.c 2>/dev/null
+if command -v cc >/dev/null 2>&1 && cc -shared -fPIC -o ${dir}/agent/wipe.so ${dir}/agent/wipe.c 2>/dev/null; then
   LD_PRELOAD=${dir}/agent/wipe.so sleep 9 </dev/null >/dev/null 2>&1 &
   WIPED=$!
+fi
+# and with the library gone from the map: its code copied into nameless memory, the library unmapped (x86-64 only)
+if [ "$(uname -m)" = x86_64 ] && command -v cc >/dev/null 2>&1 && cc -shared -fPIC -o ${dir}/agent/hide.so ${dir}/agent/hide.c 2>/dev/null; then
+  LD_PRELOAD=${dir}/agent/hide.so sleep 9 </dev/null >/dev/null 2>&1 &
+  HIDDEN=$!
 fi
 sh -c 'sleep 302' &
 sleep 1
@@ -340,7 +392,8 @@ for p in $A1 $A2 $A3 $LATE; do kill -0 $p 2>/dev/null && echo "agent-alive" || e
 kill -0 $OWN 2>/dev/null && echo "own-alive" || echo "own-dead"
 kill -0 $SHORT 2>/dev/null && echo "short-alive" || echo "short-dead"
 kill -0 $LOADED 2>/dev/null && echo "loaded-alive" || echo "loaded-dead"
-if [ -n "$WIPED" ]; then kill -0 $WIPED 2>/dev/null && echo "wiped-alive" || echo "wiped-dead"; fi
+if [ -n "$WIPED" ]; then [ -f ${dir}/agent/wipe.ran ] && echo "wipe-loaded"; kill -0 $WIPED 2>/dev/null && echo "wiped-alive" || echo "wiped-dead"; fi
+if [ -n "$HIDDEN" ]; then [ -f ${dir}/agent/hide.ran ] && echo "hide-loaded"; kill -0 $HIDDEN 2>/dev/null && echo "hidden-alive" || echo "hidden-dead"; fi
 # a child the browser started after the note, below a part that was running before it, is the browser's own
 pgrep -P $BR -x sleep >/dev/null && echo "late-child-alive" || echo "late-child-dead"
 `;
@@ -364,8 +417,19 @@ pgrep -P $BR -x sleep >/dev/null && echo "late-child-alive" || echo "late-child-
     expect(run.stdout).toContain('short-alive');
     // A short wait with a loader override in its environment is the agent's code, and goes
     expect(run.stdout).toContain('loaded-dead');
-    // ... also when the library wipes the variable from inside (only when the machine running the test has a compiler)
+    // ... also when the library wipes the variable from inside, and when it has copied itself into nameless memory and unmapped itself.
+    // Each library leaves a note that its code ran, so a missing compiler cannot make this pass by accident: without one, it is skipped.
+    const compiler = spawnSync('sh', ['-c', 'command -v cc']).status === 0;
+    if (compiler) {
+      expect(run.stdout).toContain('wipe-loaded');
+      expect(run.stdout).toContain('wiped-dead');
+      if (process.arch === 'x64') {
+        expect(run.stdout).toContain('hide-loaded');
+        expect(run.stdout).toContain('hidden-dead');
+      }
+    }
     expect(run.stdout).not.toContain('wiped-alive');
+    expect(run.stdout).not.toContain('hidden-alive');
     // What a desktop part started after the note is kept, even when the part itself was already kept for being older
     expect(run.stdout).toContain('late-child-alive');
   });

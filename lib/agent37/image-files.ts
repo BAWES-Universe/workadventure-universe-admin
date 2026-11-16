@@ -467,7 +467,7 @@ def runner_part(pid):
 
 
 CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
-SYSTEM_FOLDERS = ("/usr/", "/lib", "/bin/", "/sbin/", "/etc/", "/proc/", "/dev/")
+SYSTEM_FOLDERS = ("/usr/", "/lib/", "/lib64/", "/bin/", "/sbin/", "/etc/ld.so.cache")
 SHORT_SLEEP = re.compile(r"^\d{1,2}(\.\d+)?$")
 
 
@@ -483,8 +483,8 @@ def short_sleep(pid):
     # A short wait that does nothing and ends by itself. The computer's own start-up loop runs them as its children (process 1 waits
     # for each one), and it stops the whole computer when one is killed, so these are never touched. Two things keep the exemption from
     # being a place to hide: a wait that has gone on longer than a real one can is not one (a process that took the name and stayed), and
-    # one with a loader override in its environment, or with a library mapped from outside the system's folders (code of the agent's, loaded
-    # into it; an environment can be wiped from inside, a mapping cannot), is not one either.
+    # one with a loader override in its environment, or with code in it that is not the system's (an environment can be wiped from
+    # inside; see the check on its memory map below), is not one either.
     path = program(pid)
     args = argv(pid)
     if not (bool(path) and os.path.basename(path) == "sleep" and len(args) == 2 and bool(SHORT_SLEEP.match(args[1])) and float(args[1]) <= 30):
@@ -494,12 +494,25 @@ def short_sleep(pid):
         return False
     if any(entry.startswith(b"LD_") for entry in read(pid, "environ").split(b"\0")):
         return False
-    # A loaded library cannot hide where it is from: every file the process has mapped must be under the system's own folders
+    # Nothing that runs in the process can hide where it came from. Every file mapped into it must be one of the system's own (root's
+    # folders, nothing deleted), and no memory may be both code and nameless: a library can copy itself into nameless memory, unmap
+    # itself, and carry on from there. A real wait has neither.
+    seen = False
     for line in read(pid, "maps").decode("utf-8", "replace").splitlines():
         parts = line.split(None, 5)
-        if len(parts) == 6 and parts[5].startswith("/") and not parts[5].startswith(SYSTEM_FOLDERS):
+        if len(parts) < 5:
+            continue
+        seen = True
+        code = "x" in parts[1]
+        where = parts[5] if len(parts) == 6 else ""
+        if where.endswith("(deleted)"):
             return False
-    return True
+        if where.startswith("/"):
+            if not where.startswith(SYSTEM_FOLDERS):
+                return False
+        elif code and where not in ("[vdso]", "[vsyscall]"):
+            return False
+    return seen
 
 
 def protected(tree, cutoff):
