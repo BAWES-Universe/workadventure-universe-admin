@@ -1,4 +1,4 @@
-import { handleGatewayNotification, isDirectMessage, isOurBot, messageLine, readNotification } from '@/lib/push-gateway';
+import { handleGatewayNotification, isDirectMessage, isOurBot, messageLine, OWN_INITIATIVE_KEY, pushText, readNotification } from '@/lib/push-gateway';
 import { sendPush } from '@/lib/push';
 import { getActivity } from '@/lib/push-activity';
 import { DEFAULT_PUSH_SETTINGS, getPushSettings } from '@/lib/push-settings';
@@ -182,6 +182,58 @@ describe('one of our bots', () => {
     expect(isOurBot('@bot_nova:bawes.net', '@khalid:chat.bawes.net')).toBe(false);
     expect(isOurBot('@sara:chat.bawes.net', '@khalid:chat.bawes.net')).toBe(false);
     expect(isOurBot('@bot_nova:chat.bawes.net', null)).toBe(false);
+  });
+});
+
+describe('what a locked phone shows for a Brick that spoke by itself (game #2002, t-3-lock)', () => {
+  const alone = (body: string, extra: Record<string, unknown> = {}) =>
+    readNotification(post({ sender: '@bot_nova:chat', sender_display_name: 'Brick', content: { msgtype: 'm.text', body, [OWN_INITIATIVE_KEY]: true, ...extra } }))!;
+
+  it('puts the news in the title and the rest after the Brick’s name', () => {
+    const notification = alone('Your visa is approved. It is in our chat and saved in my files. Goal done.');
+    expect(pushText(notification, true, 'Brick', true)).toEqual({
+      title: 'Your visa is approved',
+      body: 'Brick: It is in our chat and saved in my files. Goal done.',
+    });
+  });
+
+  it('reads past formatting, and answers with the Brick’s name alone when there is nothing after the news', () => {
+    expect(pushText(alone('**Visa approved!** See [your visa](https://example.com/v) in the chat.'), true, 'Brick', true)).toEqual({
+      title: 'Visa approved',
+      body: 'Brick: See your visa in the chat.',
+    });
+    expect(pushText(alone('Nothing scheduled today.'), true, 'Brick', true)).toEqual({ title: 'Nothing scheduled today', body: 'Brick' });
+  });
+
+  it('shows everything else the ordinary way', () => {
+    const own = alone('Your visa is approved. Goal done.');
+    // Not marked as its own doing: an answer in a chat
+    const answer = readNotification(post({ sender: '@bot_nova:chat', sender_display_name: 'Brick', content: { msgtype: 'm.text', body: 'Your visa is approved. Goal done.' } }))!;
+    expect(pushText(answer, true, 'Brick', true)).toEqual({ title: 'Brick', body: 'Your visa is approved. Goal done.' });
+    // Marked, but not by one of our bots: anyone could set the mark
+    expect(pushText(own, true, 'Brick', false)).toEqual({ title: 'Brick', body: 'Your visa is approved. Goal done.' });
+    // Message text switched off
+    expect(pushText(own, false, 'Brick', true)).toEqual({ title: 'Brick', body: 'New message from Brick' });
+    // A first sentence too long for a title, and one with no end
+    const long = alone(`${'a'.repeat(90)}. Done.`);
+    expect(pushText(long, true, 'Brick', true).title).toBe('Brick');
+    expect(pushText(alone('no sentence end here'), true, 'Brick', true).title).toBe('Brick');
+    // A file or an image
+    expect(pushText(alone('x', { msgtype: 'm.image' }), true, 'Brick', true)).toEqual({ title: 'Brick', body: 'sent an image' });
+  });
+
+  it('reaches the device that way through the gateway, for our bot only', async () => {
+    (getPushSettings as jest.Mock).mockResolvedValue(DEFAULT_PUSH_SETTINGS);
+    await handleGatewayNotification(
+      post({ sender: '@bot_nova:chat', sender_display_name: 'Brick', content: { msgtype: 'm.text', body: 'Your visa is approved. Goal done.', [OWN_INITIATIVE_KEY]: true } }),
+    );
+    await settle();
+    expect(sendPush).toHaveBeenCalledWith(
+      'user-k',
+      'directMessages',
+      expect.objectContaining({ title: 'Your visa is approved', body: 'Brick: Goal done.', tag: 'chat:!dm:chat' }),
+      expect.anything(),
+    );
   });
 });
 

@@ -107,6 +107,47 @@ export function messageLine(notification: GatewayNotification, previews: boolean
   }
 }
 
+/**
+ * What a Brick's message carries when it sent it by itself (a goal reached, a check that needs the person; game #2002,
+ * mock t-3-lock). The bot server sets it on those messages only, never on an answer in a chat the person is in.
+ */
+export const OWN_INITIATIVE_KEY = 'net.bawes.universe.alone';
+/** The news line that fills the title of the push: longer than this and the message is shown the ordinary way. */
+const HEADLINE_LENGTH = 70;
+
+const plainWords = (value: string) =>
+  value
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/[*_`#>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+/**
+ * What a locked phone shows. A message a Brick sent by itself opens with its news, so that is the title and the rest
+ * follows with the Brick's name: "Your visa is approved" / "Brick: it's in our chat and saved in my files. Goal done."
+ * Everything else, and a message whose first sentence is too long to be a title, shows as before: the sender's name and
+ * the message.
+ */
+export function pushText(
+  notification: GatewayNotification,
+  previews: boolean,
+  senderName: string,
+  ourBot: boolean,
+): { title: string; body: string } {
+  const ordinary = { title: senderName, body: messageLine(notification, previews, senderName) };
+  const content = notification.content;
+  if (!ourBot || !previews || notification.type !== 'm.room.message' || content?.msgtype === undefined || content[OWN_INITIATIVE_KEY] !== true) return ordinary;
+  if (content.msgtype !== 'm.text' && content.msgtype !== 'm.notice') return ordinary;
+  const words = plainWords(text(content.body) ?? '');
+  const first = /^(.+?[.!?])(?:\s+|$)/.exec(words)?.[1];
+  const title = first?.replace(/[.!?]+$/, '').trim();
+  if (!first || !title || title.length > HEADLINE_LENGTH) return ordinary;
+  const rest = words.slice(first.length).trim();
+  if (!rest) return { title, body: senderName };
+  const line = `${senderName}: ${rest}`;
+  return { title, body: line.length > PREVIEW_LENGTH ? `${line.slice(0, PREVIEW_LENGTH - 1)}…` : line };
+}
+
 function secretMatches(stored: string, given: unknown): boolean {
   if (typeof given !== 'string') return false;
   const a = Buffer.from(stored);
@@ -138,7 +179,7 @@ async function senderAllowed(recipientId: string, recipientMatrixId: string | nu
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function notifyDevice(userId: string, deviceId: string, notification: GatewayNotification, sender: string): Promise<void> {
+async function notifyDevice(userId: string, deviceId: string, notification: GatewayNotification, sender: string, ourBot: boolean): Promise<void> {
   const roomId = notification.roomId!;
   const decision = messageDecision(await getActivity(userId), roomId, new Date());
   if ('skip' in decision) return;
@@ -153,8 +194,7 @@ async function notifyDevice(userId: string, deviceId: string, notification: Gate
     userId,
     'directMessages',
     {
-      title: senderName,
-      body: messageLine(notification, settings.previews, senderName),
+      ...pushText(notification, settings.previews, senderName, ourBot),
       tag: `chat:${roomId}`,
       chatRoomId: roomId,
     },
@@ -188,7 +228,7 @@ export async function handleGatewayNotification(body: unknown): Promise<{ reject
     void (async () => {
       const settings = await getPushSettings(row.userId);
       if (!settings.directMessages || !(await senderAllowed(row.userId, row.user.matrixChatId, sender, settings.dmFrom))) return;
-      await notifyDevice(row.userId, row.id, notification, sender);
+      await notifyDevice(row.userId, row.id, notification, sender, isOurBot(sender, row.user.matrixChatId));
     })().catch((error) => console.error('[Push] Direct message failed:', error instanceof Error ? error.message : 'unknown'));
   }
   return { rejected };
