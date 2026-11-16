@@ -317,7 +317,9 @@ async function receiptsNewest(personId: string, limit: number): Promise<ReceiptR
           m."job_id" = r."task_key"
           OR (m."job_id" IS NULL AND m."detail"->>'taskKey' = r."task_key")
           -- A charged use made under the task's run that names no task of its own is shown on a receipt of that run (see eventsFor): never hide it. Uncharged lines (the Brick's own thinking) are not money taken.
-          OR (m."job_id" IS NULL AND r."run_id" IS NOT NULL AND m."detail"->>'runId' = r."run_id" AND m."detail"->>'taskKey' IS NULL AND ((m."kind" = 'app_use' AND m."route" = 'instant') OR m."kind" = 'computer_time'))
+          OR (m."job_id" IS NULL AND r."run_id" IS NOT NULL AND m."detail"->>'runId' = r."run_id" AND m."detail"->>'taskKey' IS NULL AND ((m."kind" = 'app_use' AND m."route" = 'instant') OR m."kind" = 'computer_time')
+            -- ...only on the receipt that owns the run's own events: the first one opened for it, as eventsFor says
+            AND NOT EXISTS (SELECT 1 FROM task_receipts o WHERE o."bot_id" = r."bot_id" AND o."run_id" = r."run_id" AND (o."started_at" < r."started_at" OR (o."started_at" = r."started_at" AND o."id" < r."id"))))
         ))
       )
     ORDER BY COALESCE(r."ended_at", r."started_at") DESC, r."id" DESC

@@ -1944,6 +1944,12 @@ run('the bounded Instant executor, in a real database', () => {
       await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-8', runId: 'run-hide-8', title: 'Only thinking', category: 'apps' });
       await underRun('run-hide-8', 'model_call', 'chat', 0);
       await closeReceipt({ botId: brick, taskKey: 'hide-8', personId: sara, state: 'refunded' });
+      // Two receipts of one run and one unkeyed charge: the charge is the first receipt's only, so the second is empty and hidden
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-10a', runId: 'run-hide-10', title: 'Owns the run charge', category: 'apps' }, new Date(Date.now() - 2000));
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-10b', runId: 'run-hide-10', title: 'Shares the run, no charge', category: 'apps' }, new Date(Date.now() - 1000));
+      await underRun('run-hide-10', 'app_use', 'instant', 1000);
+      await closeReceipt({ botId: brick, taskKey: 'hide-10a', personId: sara, state: 'refunded' });
+      await closeReceipt({ botId: brick, taskKey: 'hide-10b', personId: sara, state: 'refunded' });
       // A charge in the run that names another task's key is that task's, not this one's: hidden
       await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-9', runId: 'run-hide-9', title: 'Another task’s charge', category: 'apps' });
       await prisma.meterEvent.create({
@@ -1960,10 +1966,12 @@ run('the bounded Instant executor, in a real database', () => {
       expect(titles).not.toContain('Refused by a rule');
       expect(titles).not.toContain('No run made');
       expect(titles).not.toContain('Only thinking');
+      expect(titles).not.toContain('Shares the run, no charge');
+      expect(titles).toContain('Owns the run charge');
       expect(titles).not.toContain('Another task’s charge');
       expect(titles).toEqual(expect.arrayContaining(['Ran and failed', 'Has books, refunded', 'Run-wide charge', 'No category', 'Finished']));
       // The limit counts what is listed: hidden receipts do not take a place
-      expect((await activityFor(sara, 5)).length).toBe(5);
+      expect((await activityFor(sara, 6)).length).toBe(6);
     });
 
     it('a receipt the run’s own pass could not move (no hook then) is moved by the sweep’s pass over receipts still in checking', async () => {
