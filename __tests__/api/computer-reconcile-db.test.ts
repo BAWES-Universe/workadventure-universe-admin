@@ -93,7 +93,7 @@ run('the daily check of our books against the provider’s bill, in a real datab
     expect(first).toMatchObject({ checked: ['2026-11-15'], drift: [], failed: false });
     expect(asked).toEqual(['2026-11-15']);
     const row = await prisma.computerReconcile.findUniqueOrThrow({ where: { day: '2026-11-15' } });
-    expect(row).toMatchObject({ status: 'ok', agentTotalMicros: 500n, gapMicros: 0n });
+    expect(row).toMatchObject({ status: 'ok', agentTotalMicros: BigInt(500), gapMicros: BigInt(0) });
     expect(Sentry.captureMessage).not.toHaveBeenCalled();
     expect(await reconcileComputers(new Date(NOW.getTime() + 3_600_000), provider)).toMatchObject({ checked: [], skipped: 'not_yet' });
     expect(asked).toEqual(['2026-11-15']);
@@ -147,7 +147,7 @@ run('the daily check of our books against the provider’s bill, in a real datab
 
   it('catches up the days that were missed, oldest first, from the newest day it has', async () => {
     const botId = await brickWithMachine('m1');
-    await prisma.computerReconcile.create({ data: { day: '2026-11-12', agentTotalMicros: 0n, agentBrickMicros: 0n, ourMinutes: 0, agentMinutes: 0, status: 'ok', gapMicros: 0n, findings: [] } });
+    await prisma.computerReconcile.create({ data: { day: '2026-11-12', agentTotalMicros: BigInt(0), agentBrickMicros: BigInt(0), ourMinutes: 0, agentMinutes: 0, status: 'ok', gapMicros: BigInt(0), findings: [] } });
     const { provider, asked } = billing((day) => quiet(day, 'm1', botId));
     const result = await reconcileComputers(NOW, provider);
     expect(result.checked).toEqual(['2026-11-13', '2026-11-14', '2026-11-15']);
