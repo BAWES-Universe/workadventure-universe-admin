@@ -94,7 +94,7 @@ export async function demandReport(days: number = DEMAND_DEFAULT_DAYS, now: Date
   const from = new Date(today.getTime() - (span - 1) * DAY);
   const inRange = Prisma.sql`e.occurred_at >= ${from} AND e.occurred_at <= ${now}`;
 
-  const [groups, totalRows, listed, askRows, askTotals] = await Promise.all([
+  const [groups, totalRows, listed] = await Promise.all([
     // A free lookup is written with quantity 0: it is not a use, so it never counts here (the same rule as the Costs page)
     prisma.$queryRaw<Group[]>(Prisma.sql`
       SELECT e.detail->>'toolkit' AS key,
@@ -122,11 +122,19 @@ export async function demandReport(days: number = DEMAND_DEFAULT_DAYS, now: Date
       FROM meter_events e WHERE e.kind = 'app_use' AND e.quantity > 0 AND ${inRange}`),
     // The App list people can pick from, so an App with no use yet still shows and can still be moved (only while Apps are on at all)
     adapterIsOn() ? readReadyMadeApps() : Promise.resolve([]),
+  ]);
+
+  // Asks for an App that is there now (it was asked for while Apps were off, or before it was added) are not demand any more: they are
+  // taken out first, in the query, so what is listed, counted and "more" are all about Apps that are not there (the rule appExists keeps)
+  const there = await availableAsks(listed);
+  const [askRows, askTotals] = await Promise.all([
     prisma.$queryRaw<{ name: string; times: bigint; people: number }[]>(Prisma.sql`
       SELECT (ARRAY_AGG(name ORDER BY day DESC))[1] AS name, SUM(times)::bigint AS times, (COUNT(DISTINCT person_key))::int AS people
-      FROM app_asks WHERE day >= ${from}::date GROUP BY name_key ORDER BY SUM(times) DESC, COUNT(DISTINCT person_key) DESC, name_key LIMIT ${ASKED_SHOWN}`),
+      FROM app_asks WHERE day >= ${from}::date AND name_key <> ALL(${there.keys}::text[]) AND regexp_replace(name_key, '[^a-z0-9]+', '', 'g') <> ALL(${there.slugs}::text[])
+      GROUP BY name_key ORDER BY SUM(times) DESC, COUNT(DISTINCT person_key) DESC, name_key LIMIT ${ASKED_SHOWN}`),
     prisma.$queryRaw<{ names: number; times: bigint }[]>(Prisma.sql`
-      SELECT (COUNT(DISTINCT name_key))::int AS names, COALESCE(SUM(times), 0)::bigint AS times FROM app_asks WHERE day >= ${from}::date`),
+      SELECT (COUNT(DISTINCT name_key))::int AS names, COALESCE(SUM(times), 0)::bigint AS times FROM app_asks
+      WHERE day >= ${from}::date AND name_key <> ALL(${there.keys}::text[]) AND regexp_replace(name_key, '[^a-z0-9]+', '', 'g') <> ALL(${there.slugs}::text[])`),
   ]);
 
   const names = new Map(listed.map((app) => [app.key, app.name]));
@@ -238,12 +246,20 @@ export async function recordAppAsk(input: { name: unknown; personKey: string }, 
   });
 }
 
-/** Whether an App of that name or key is already on a list a person can use (a ready-made App that is on, or an entry of the super admin's list that is on). */
-async function appExists(key: string): Promise<boolean> {
-  const slug = key.replace(/[^a-z0-9]+/g, '');
-  // Ready-made Apps are on a list only while the provider is: with it off they cannot be used, so asking for one still counts
-  const ready = (adapterIsOn() ? await readReadyMadeApps() : []).some((app) => app.enabled && (askKey(app.name) === key || app.key.replace(/[^a-z0-9]+/g, '') === slug));
-  if (ready) return true;
+const slugOf = (key: string) => key.replace(/[^a-z0-9]+/g, '');
+
+/**
+ * The names (as ask keys) and keys (without marks) of the Apps a person can use now: a ready-made App that is on (only while the
+ * provider is: with it off it cannot be used, so asking for one still counts), and an entry of the super admin's list that is on.
+ */
+async function availableAsks(ready: { name: string; key: string; enabled: boolean }[]): Promise<{ keys: string[]; slugs: string[] }> {
   const entries = await prisma.appCatalogEntry.findMany({ where: { enabled: true }, select: { key: true, name: true } });
-  return entries.some((entry) => askKey(entry.name) === key || entry.key.replace(/[^a-z0-9]+/g, '') === slug);
+  const there = [...ready.filter((app) => app.enabled), ...entries];
+  return { keys: there.map((app) => askKey(app.name)), slugs: there.map((app) => slugOf(app.key)) };
+}
+
+/** Whether an App of that name or key is already on a list a person can use. */
+async function appExists(key: string): Promise<boolean> {
+  const there = await availableAsks(adapterIsOn() ? await readReadyMadeApps() : []);
+  return there.keys.includes(key) || there.slugs.includes(slugOf(key));
 }
