@@ -4,13 +4,19 @@ import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { corsHeaders } from '@/lib/cors';
 import { acknowledgeForgets } from '@/lib/bot-privacy';
+import { acknowledgeItemForgets } from '@/lib/bot-memory-person';
 
 export const runtime = 'nodejs';
 
 /** More than a bot is ever asked to forget at once; the bot server sends what it was told, in one go. */
 const MAX_IDS = 500;
 
-const bodySchema = z.object({ ids: z.array(z.string().min(1).max(100)).min(1).max(MAX_IDS) }).strict();
+const ids = z.array(z.string().min(1).max(100)).max(MAX_IDS);
+// `ids` are Forgets of a whole person (#435), `itemIds` things one person forgot (game #2003): either, or both
+const bodySchema = z
+  .object({ ids: ids.optional(), itemIds: ids.optional() })
+  .strict()
+  .refine((body) => (body.ids?.length ?? 0) + (body.itemIds?.length ?? 0) > 0, { message: 'ids or itemIds required' });
 
 export async function OPTIONS(request: NextRequest) {
   return NextResponse.json({}, { headers: corsHeaders(request) });
@@ -36,8 +42,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       return NextResponse.json({ error: 'Invalid request data', details: parsed.error.issues }, { status: 400, headers: corsHeaders(request) });
     }
 
-    const acknowledged = await acknowledgeForgets(botId, parsed.data.ids);
-    return NextResponse.json({ acknowledged }, { headers: corsHeaders(request) });
+    const acknowledged = await acknowledgeForgets(botId, parsed.data.ids ?? []);
+    // The answer stays what it was for a report that names no thing, so an older bot server reads it as before
+    if (!parsed.data.itemIds) return NextResponse.json({ acknowledged }, { headers: corsHeaders(request) });
+    const itemsAcknowledged = await acknowledgeItemForgets(botId, parsed.data.itemIds);
+    return NextResponse.json({ acknowledged, itemsAcknowledged }, { headers: corsHeaders(request) });
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'Unauthorized: Invalid service token') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(request) });

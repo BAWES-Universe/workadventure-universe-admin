@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
+import { effectiveServer } from '@/lib/app-connections';
 
 export const runtime = 'nodejs';
 
@@ -14,6 +15,7 @@ function parsePositiveInt(value: string | null, defaultVal: number, maxVal: numb
 
 const serverWithBot = Prisma.validator<Prisma.BotMcpServerDefaultArgs>()({
   include: {
+    connection: true,
     bot: {
       select: {
         id: true,
@@ -82,6 +84,8 @@ export async function GET(request: NextRequest) {
         take: limit,
         orderBy: { createdAt: 'desc' },
         include: {
+          // A grant on a person's connection shows the connection's name, link and way in (game #2001)
+          connection: true,
           bot: {
             select: {
               id: true,
@@ -99,7 +103,7 @@ export async function GET(request: NextRequest) {
       prisma.botMcpServer.count({ where }),
     ]);
 
-    const transformed = servers.map((s: ServerWithBot) => ({
+    const transformed = servers.map((row: ServerWithBot) => effectiveServer(row)).map((s: ServerWithBot) => ({
       id: s.id,
       botId: s.botId,
       botName: s.bot.name,
