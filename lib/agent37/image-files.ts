@@ -481,23 +481,29 @@ def ticks_now():
 
 def short_sleep(pid):
     # A short wait that does nothing and ends by itself. The computer's own start-up loop runs them as its children (process 1 waits
-    # for each one), and it stops the whole computer when one is killed, so these are never touched. Two things keep the exemption from
-    # being a place to hide: a wait that has gone on longer than a real one can is not one (a process that took the name and stayed), and
-    # one with a loader override in its environment, or with code in it that is not the system's (an environment can be wiped from
-    # inside; see the check on its memory map below), is not one either.
+    # for each one), and it stops the whole computer when one is killed, so these are never touched. What keeps the exemption from being a
+    # place to hide, all of it read from the process itself (an environment can be wiped from inside, so it is never the only proof):
+    #   - it is what process 1 starts: a child of process 1 in process 1's own session and group (anything the agent starts is in the
+    #     session of the command that started it, or in one of its own, and cannot join another session's group);
+    #   - it is young (a real one ends within 30 seconds), is a real "sleep" with one number, and no one is tracing it;
+    #   - no loader override in its environment, and nothing in its memory that is not the system's: every file mapped from a system folder,
+    #     none deleted, and no memory that is both code and nameless (a library can copy itself there and unmap itself).
     path = program(pid)
     args = argv(pid)
     if not (bool(path) and os.path.basename(path) == "sleep" and len(args) == 2 and bool(SHORT_SLEEP.match(args[1])) and float(args[1]) <= 30):
         return False
+    mine, first = stat_fields(pid), stat_fields(1)
+    if len(mine) < 4 or len(first) < 4 or mine[1] != "1" or mine[2] != first[2] or mine[3] != first[3]:
+        return False
     begun, now = started(pid), ticks_now()
     if begun is None or now is None or now - begun > 60 * CLOCK_TICKS:
         return False
+    for line in read(pid, "status").decode("utf-8", "replace").splitlines():
+        if line.startswith("TracerPid:") and line.split()[1] != "0":
+            return False
     if any(entry.startswith(b"LD_") for entry in read(pid, "environ").split(b"\0")):
         return False
-    # Nothing that runs in the process can hide where it came from. Every file mapped into it must be one of the system's own (root's
-    # folders, nothing deleted), and no memory may be both code and nameless: a library can copy itself into nameless memory, unmap
-    # itself, and carry on from there. A real wait has neither.
-    seen = False
+    seen, before = False, ""
     for line in read(pid, "maps").decode("utf-8", "replace").splitlines():
         parts = line.split(None, 5)
         if len(parts) < 5:
@@ -510,8 +516,11 @@ def short_sleep(pid):
         if where.startswith("/"):
             if not where.startswith(SYSTEM_FOLDERS):
                 return False
-        elif code and where not in ("[vdso]", "[vsyscall]"):
+        elif code and where not in ("[vdso]", "[vsyscall]", "[usertrap]") and not (where == "" and before == "[vvar]"):
+            # The sandbox's own pages (the system call page, and the kernel's code page that comes straight after its data page) are
+            # the only code that has no file
             return False
+        before = where
     return seen
 
 

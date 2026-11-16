@@ -366,10 +366,13 @@ sh -c 'sleep 307' &
 LATE=$!
 setsid sleep 301 </dev/null >/dev/null 2>&1 &
 # a short wait is what the computer's own start-up loop runs, and it stops the computer when one is killed: it is never touched
-setsid sleep 9 </dev/null >/dev/null 2>&1 &
+sleep 9 </dev/null >/dev/null 2>&1 &
 SHORT=$!
+# the same wait started in a session of its own (what anything the agent runs is): not the start-up loop's, so not spared
+setsid sleep 9 </dev/null >/dev/null 2>&1 &
+OTHER=$!
 # the same short wait with agent code loaded into it: not one
-LD_PRELOAD=/nonexistent/agent.so setsid sleep 9 </dev/null >/dev/null 2>&1 &
+LD_PRELOAD=/nonexistent/agent.so sleep 9 </dev/null >/dev/null 2>&1 &
 LOADED=$!
 # and with its environment wiped by the library itself (the mapped library still shows)
 if command -v cc >/dev/null 2>&1 && cc -shared -fPIC -o ${dir}/agent/wipe.so ${dir}/agent/wipe.c 2>/dev/null; then
@@ -391,6 +394,7 @@ for p in $GW $BR; do kill -0 $p 2>/dev/null && echo "alive" || echo "dead"; done
 for p in $A1 $A2 $A3 $LATE; do kill -0 $p 2>/dev/null && echo "agent-alive" || echo "agent-dead"; done
 kill -0 $OWN 2>/dev/null && echo "own-alive" || echo "own-dead"
 kill -0 $SHORT 2>/dev/null && echo "short-alive" || echo "short-dead"
+kill -0 $OTHER 2>/dev/null && echo "other-alive" || echo "other-dead"
 kill -0 $LOADED 2>/dev/null && echo "loaded-alive" || echo "loaded-dead"
 if [ -n "$WIPED" ]; then [ -f ${dir}/agent/wipe.ran ] && echo "wipe-loaded"; kill -0 $WIPED 2>/dev/null && echo "wiped-alive" || echo "wiped-dead"; fi
 if [ -n "$HIDDEN" ]; then [ -f ${dir}/agent/hide.ran ] && echo "hide-loaded"; kill -0 $HIDDEN 2>/dev/null && echo "hidden-alive" || echo "hidden-dead"; fi
@@ -415,6 +419,8 @@ pgrep -P $BR -x sleep >/dev/null && echo "late-child-alive" || echo "late-child-
     expect(run.stdout).toContain('own-alive');
     // A short sleep is left, and does not count as something the agent has running
     expect(run.stdout).toContain('short-alive');
+    // ... but only the one process 1 started; the same wait in a session of its own is the agent's
+    expect(run.stdout).toContain('other-dead');
     // A short wait with a loader override in its environment is the agent's code, and goes
     expect(run.stdout).toContain('loaded-dead');
     // ... also when the library wipes the variable from inside, and when it has copied itself into nameless memory and unmapped itself.
