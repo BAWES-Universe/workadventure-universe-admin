@@ -203,6 +203,21 @@ run('pausing each capability on its own, in a real database', () => {
       expect(adapter.use).toHaveBeenCalledTimes(1);
     });
 
+    it('answers a retry of a call that already ran with "already asked", never "paused", so the Brick does not think it was not done', async () => {
+      const { adapter, serverId } = await granted();
+      const callId = `c-${randomUUID()}`;
+      expect((await link(serverId, call, callId)).status).toBe(200);
+      asBoss();
+      await command('apps', 'pause');
+      const retried = await link(serverId, call, callId);
+      expect(retried.status).toBe(409);
+      expect(await retried.json()).toMatchObject({ code: 'already_asked' });
+      expect(await (await check(serverId, callId)).json()).toMatchObject({ allowed: true });
+      expect(adapter.callLink).toHaveBeenCalledTimes(1);
+      // A new call id is still refused
+      expect((await link(serverId, call, `c-${randomUUID()}`)).status).toBe(503);
+    });
+
     it('reads a pause that cannot be read as a pause', async () => {
       const { serverId } = await granted();
       const find = jest.spyOn(prisma.appSetting, 'findUnique').mockRejectedValueOnce(new Error('db down'));

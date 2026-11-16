@@ -19,7 +19,7 @@ import { revokeAtApp } from '@/lib/mcp/revoke';
 import { holdRefreshLease } from '@/lib/mcp/oauth-refresh';
 import { checkSharedUse, isAppShareable } from '@/lib/app-share';
 import { revokeGitHub } from '@/lib/github/connection';
-import { appsArePaused } from '@/lib/capability-pause';
+import { appCallIsPaused } from '@/lib/capability-pause';
 
 /**
  * Apps a person connects once (game #2001, "Apps").
@@ -136,7 +136,7 @@ export async function checkAppUse(botId: string, serverId: string, input: z.infe
   const connection = row.connection;
   if (!connection) return refuse('gone');
   // The team paused Apps: a use (it has a call id) is refused before anything is counted or sent. Listing what an App can do is not a use.
-  if (input.callId && connection.source === 'ready_made' && (await appsArePaused())) return refuse('paused');
+  if (input.callId && connection.source === 'ready_made' && (await appCallIsPaused(botId, input.callId))) return refuse('paused');
 
   // A room bot: through a lend of a person's app, or through its universe's own app
   if (row.bot.roomId !== null) {

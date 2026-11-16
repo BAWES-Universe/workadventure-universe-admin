@@ -64,6 +64,21 @@ export async function appsArePaused(): Promise<boolean> {
   return (await readRow(KEYS.apps)).paused;
 }
 
+/**
+ * Whether a call to an App is refused because the team paused Apps. A call id that was already asked (the books hold its line,
+ * `app:<brick>:<call id>`) is never "paused": the retry of a call that already ran must hear "already asked", never "not done",
+ * so it is not sent again. Reads like the pause does: a read that fails is a pause.
+ */
+export async function appCallIsPaused(botId: string, callId: string | null | undefined): Promise<boolean> {
+  if (!(await appsArePaused())) return false;
+  if (!callId) return true;
+  try {
+    return !(await prisma.meterEvent.findUnique({ where: { eventId: `app:${botId}:${callId}` }, select: { id: true } }));
+  } catch {
+    return true;
+  }
+}
+
 /** True while computers are paused: no new job starts, and a job in line waits with its work saved. */
 export async function computersArePaused(): Promise<boolean> {
   return (await readRow(KEYS.computers)).paused;

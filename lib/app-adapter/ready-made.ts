@@ -10,7 +10,7 @@ import { priceCall } from '@/lib/composio-rates';
 import { readComposioBilling } from '@/lib/composio-billing';
 import { truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
 import { getGitHubApp } from '@/lib/github/app';
-import { appsArePaused } from '@/lib/capability-pause';
+import { appCallIsPaused } from '@/lib/capability-pause';
 import { routeForRun, type RunRoute } from '@/lib/app-routes';
 import type { OwnAppVersion } from '@/lib/app-routes/own-versions';
 
@@ -216,7 +216,7 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
   const method = typeof input.message.method === 'string' ? input.message.method : '';
   if (!LINK_METHODS.has(method)) return { status: 'refused' };
   // The team paused Apps: a call (a use) is refused before it is counted or sent. Opening a session and listing what an App can do are not uses.
-  if (method === 'tools/call' && (await appsArePaused())) return { status: 'paused' };
+  if (method === 'tools/call' && (await appCallIsPaused(input.botId, input.callId))) return { status: 'paused' };
   const connection = await prisma.appConnection.findFirst({ where: { id: input.connectionId, ownerId: input.ownerId, source: 'ready_made' } });
   if (!connection || !connection.providerToolkit) return { status: 'gone' };
   if (!(await appIsOn(connection.providerToolkit))) return { status: 'off' };
@@ -291,7 +291,7 @@ export async function useReadyMade(input: { botId: string; connectionId: string;
   const adapter = getAdapter();
   if (!adapter) return { status: 'off' };
   // The team paused Apps: nothing is counted or sent
-  if (await appsArePaused()) return { status: 'paused' };
+  if (await appCallIsPaused(input.botId, input.callId)) return { status: 'paused' };
   const connection = await prisma.appConnection.findFirst({ where: { id: input.connectionId, ownerId: input.ownerId, source: 'ready_made' } });
   if (!connection || !connection.providerToolkit) return { status: 'gone' };
   if (!(await appIsOn(connection.providerToolkit))) return { status: 'off' };
