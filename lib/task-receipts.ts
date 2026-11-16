@@ -137,13 +137,15 @@ const openRunsOf = (tx: Prisma.TransactionClient, task: { botId: string; personI
  * a receipt still in checking (so a crash between a run's ending and this never leaves one behind). Safe to say twice and any number of
  * times; never asks a person, never calls a model.
  *
- *  - Any run of the task still open: the receipt is in checking, even when the bot server had closed it (that word came before Orbit knew)
- *    and even while the task is still running (what was said before is no reason to hide that a run is unclear).
- *  - Every run ended, receipt in checking: it is done when any run worked (what it took is read from the books by the task's key), and
+ * "Checking" means the task has ended (the bot server said so) and Orbit is still waiting to learn what a run of it came to. Orbit never
+ * ends a task the bot server has not ended: a task still running keeps running while one of its runs is unclear, however that run ends,
+ * because the task can still make more runs.
+ *
+ *  - Receipt done or refunded, and a run of the task still open: back to checking (the bot server's word came before Orbit knew).
+ *  - Receipt in checking, every run ended: done when any run worked (what it took is read from the books by the task's key), and
  *    refunded, nothing taken, when none did. Runs nobody could vouch for when their wait ended count as not worked: the person's favour.
- *  - Every run ended, receipt already done or refunded, or still running: left as it is. One run ending never closes a task that has another
- *    run still open, and Orbit never closes a task the bot server has not ended (a later unclear run puts it back in checking).
- *  - A task with no Instant run (a computer's) is not touched.
+ *  - Receipt in checking, a run still open: stays in checking. One run ending never ends a task that has another still open.
+ *  - Receipt running, or done/refunded with every run ended: left as it is. A task with no Instant run (a computer's) is not touched.
  */
 export async function settleReceipt(task: { botId: string; personId: string; taskKey: string }, now: Date = new Date()): Promise<ReceiptState | null> {
   return prisma.$transaction(async (tx) => {
@@ -153,7 +155,7 @@ export async function settleReceipt(task: { botId: string; personId: string; tas
     const runs = await tx.instantRun.findMany({ where: { botId: task.botId, personId: task.personId, taskKey: task.taskKey }, select: { state: true } });
     if (runs.length === 0) return row.state as ReceiptState;
     if (runs.some((run) => RUN_OPEN_STATES.includes(run.state))) {
-      if (row.state === 'checking') return 'checking';
+      if (row.state === 'checking' || row.state === 'running') return row.state as ReceiptState;
       await tx.taskReceipt.update({ where: { id: row.id }, data: { state: 'checking', endedAt: null } });
       return 'checking';
     }
