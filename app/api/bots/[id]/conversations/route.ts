@@ -273,7 +273,7 @@ export async function GET(
 ) {
   try {
     const { id: botId } = await params;
-    const denied = await botContentReadDenied(request, corsHeaders(request));
+    const denied = await botContentReadDenied(request, botId, corsHeaders(request));
     if (denied) return denied;
     // Hide bot conversations (#435): no transcript for anyone, super admins included. The count comes from usage rows.
     if (await isBotHidden(botId)) {
