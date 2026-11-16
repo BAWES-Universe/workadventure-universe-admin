@@ -16,6 +16,8 @@ jest.mock('@/lib/db', () => ({
     user: { findUnique: jest.fn() },
     botsAiUsage: { count: jest.fn() },
     botReplyLimitHit: { createMany: jest.fn() },
+    meterGrant: { findMany: jest.fn() },
+    grantRule: { findMany: jest.fn().mockResolvedValue([]) },
   },
 }));
 
@@ -26,6 +28,7 @@ const db = prisma as unknown as {
   user: { findUnique: jest.Mock };
   botsAiUsage: { count: jest.Mock };
   botReplyLimitHit: { createMany: jest.Mock };
+  meterGrant: { findMany: jest.Mock };
 };
 
 const NOW = new Date('2026-10-27T15:20:00Z');
@@ -48,6 +51,48 @@ beforeEach(() => {
   );
   db.botsAiUsage.count.mockReset().mockResolvedValue(0);
   db.botReplyLimitHit.createMany.mockReset().mockResolvedValue({ count: 1 });
+  db.meterGrant.findMany.mockReset().mockResolvedValue([]);
+});
+
+describe('extra usage a super admin gave (game #1999)', () => {
+  const ask = (person: typeof SARA) => checkReplyAllowance('bot-1', { ...person, source: 'universe-ai' }, NOW);
+  const grant = (over: object = {}) => ({ grantKey: 'g', multiplier: 2, noLimit: false, endsAt: new Date('2026-10-30T00:00:00Z'), ...over });
+
+  it('raises a signed-in person’s limit by its multiple while it runs', async () => {
+    db.meterGrant.findMany.mockResolvedValue([grant({ multiplier: 2 })]);
+    counts(59);
+    expect(await ask(SARA)).toEqual({ allowed: true });
+    counts(60);
+    expect(await ask(SARA)).toMatchObject({ allowed: false, limit: 'universe-ai' });
+  });
+
+  it('uses the largest one that runs, never a multiple of a multiple', async () => {
+    db.meterGrant.findMany.mockResolvedValue([grant({ grantKey: 'a', multiplier: 2 }), grant({ grantKey: 'b', multiplier: 5 })]);
+    counts(149);
+    expect(await ask(SARA)).toEqual({ allowed: true });
+    counts(150);
+    expect(await ask(SARA)).toMatchObject({ allowed: false });
+  });
+
+  it('does not count at all with no limit, and asks only for what is running now', async () => {
+    db.meterGrant.findMany.mockResolvedValue([grant({ multiplier: null, noLimit: true })]);
+    counts(9_999);
+    expect(await ask(SARA)).toEqual({ allowed: true });
+    const where = db.meterGrant.findMany.mock.calls[0][0].where;
+    expect(where).toMatchObject({ personId: 'u-sara', startsAt: { lte: NOW }, endsAt: { gt: NOW } });
+  });
+
+  it('is never read for a guest, whose limit nothing lifts', async () => {
+    db.meterGrant.findMany.mockResolvedValue([grant({ multiplier: null, noLimit: true })]);
+    counts(10);
+    expect(await ask(GUEST)).toMatchObject({ allowed: false, limit: 'guest' });
+    expect(db.meterGrant.findMany).not.toHaveBeenCalled();
+  });
+
+  it('is nothing at all when none was given: the usual limit stands', async () => {
+    counts(30);
+    expect(await ask(SARA)).toMatchObject({ allowed: false });
+  });
 });
 
 describe('the numbers', () => {
@@ -89,14 +134,14 @@ describe('Universe AI, per person', () => {
   it('counts a signed-in person by their account across every Universe AI bot, and never key-paid replies', async () => {
     counts(0);
     await checkReplyAllowance('bot-1', { ...SARA, source: 'universe-ai' }, NOW);
-    expect(db.botsAiUsage.count).toHaveBeenCalledWith({ where: { talkedPersonId: 'u-sara', keyOwnerId: null, error: false, timestamp: { gte: STARTED } } });
+    expect(db.botsAiUsage.count).toHaveBeenCalledWith({ where: { talkedPersonId: 'u-sara', keyOwnerId: null, error: false, greeting: false, timestamp: { gte: STARTED } } });
     expect(db.$queryRaw.mock.calls[0][0].values).toEqual(expect.arrayContaining(['ua:person:u-sara']));
   });
 
   it('gives a guest 10, counted by their own id, then the Sign in card', async () => {
     counts(10);
     expect(await checkReplyAllowance('bot-1', { ...GUEST, source: 'universe-ai' }, NOW)).toMatchObject({ allowed: false, limit: 'guest', who: 'guest' });
-    expect(db.botsAiUsage.count).toHaveBeenCalledWith({ where: { talkedUserId: 'wa-guest', talkedGuest: true, keyOwnerId: null, error: false, timestamp: { gte: STARTED } } });
+    expect(db.botsAiUsage.count).toHaveBeenCalledWith({ where: { talkedUserId: 'wa-guest', talkedGuest: true, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: STARTED } } });
     expect(db.user.findUnique).not.toHaveBeenCalled();
   });
 
@@ -120,7 +165,7 @@ describe("a bot's guests share 200", () => {
   it('stops a guest with replies of their own left once the bot\'s guests used 200', async () => {
     counts(3, 200);
     expect(await checkReplyAllowance('bot-1', { ...GUEST, source: 'universe-ai' }, NOW)).toMatchObject({ allowed: false, limit: 'guests', who: 'guest' });
-    expect(db.botsAiUsage.count).toHaveBeenLastCalledWith({ where: { botId: 'bot-1', talkedGuest: true, keyOwnerId: null, error: false, timestamp: { gte: STARTED } } });
+    expect(db.botsAiUsage.count).toHaveBeenLastCalledWith({ where: { botId: 'bot-1', talkedGuest: true, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: STARTED } } });
   });
 
   it('never touches a signed-in person', async () => {
@@ -138,7 +183,7 @@ describe("the bot's own limit", () => {
     expect(await checkReplyAllowance('bot-1', { ...SARA, source: 'own-key' }, NOW)).toEqual({
       allowed: false, limit: 'bot', resetsAt: '2026-10-28T13:20:00.000Z', who: 'member',
     });
-    expect(db.botsAiUsage.count).toHaveBeenCalledWith({ where: { talkedPersonId: 'u-sara', botId: 'bot-1', error: false, timestamp: { gte: STARTED } } });
+    expect(db.botsAiUsage.count).toHaveBeenCalledWith({ where: { talkedPersonId: 'u-sara', botId: 'bot-1', error: false, greeting: false, timestamp: { gte: STARTED } } });
   });
 
   it('is checked after Universe AI, which has the earlier end', async () => {

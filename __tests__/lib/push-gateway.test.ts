@@ -1,4 +1,4 @@
-import { handleGatewayNotification, isDirectMessage, isOurBot, messageLine, readNotification } from '@/lib/push-gateway';
+import { handleGatewayNotification, isDirectMessage, isOurBot, messageLine, OWN_INITIATIVE_KEY, pushText, readNotification } from '@/lib/push-gateway';
 import { sendPush } from '@/lib/push';
 import { getActivity } from '@/lib/push-activity';
 import { DEFAULT_PUSH_SETTINGS, getPushSettings } from '@/lib/push-settings';
@@ -182,6 +182,90 @@ describe('one of our bots', () => {
     expect(isOurBot('@bot_nova:bawes.net', '@khalid:chat.bawes.net')).toBe(false);
     expect(isOurBot('@sara:chat.bawes.net', '@khalid:chat.bawes.net')).toBe(false);
     expect(isOurBot('@bot_nova:chat.bawes.net', null)).toBe(false);
+  });
+});
+
+describe('what a locked phone shows for a Brick that spoke by itself (game #2002, t-3-lock)', () => {
+  const alone = (body: string, extra: Record<string, unknown> = {}) =>
+    readNotification(post({ sender: '@bot_nova:chat', sender_display_name: 'Brick', content: { msgtype: 'm.text', body, [OWN_INITIATIVE_KEY]: true, ...extra } }))!;
+
+  it('puts the news in the title and the rest after the Brick’s name', () => {
+    const notification = alone('Your visa is approved. It is in our chat and saved in my files. Goal done.');
+    expect(pushText(notification, true, 'Brick', true)).toEqual({
+      title: 'Your visa is approved',
+      body: 'Brick: It is in our chat and saved in my files. Goal done.',
+    });
+  });
+
+  it('reads past formatting, and answers with the Brick’s name alone when there is nothing after the news', () => {
+    expect(pushText(alone('**Visa approved!** See [your visa](https://example.com/v) in the chat.'), true, 'Brick', true)).toEqual({
+      title: 'Visa approved',
+      body: 'Brick: See your visa in the chat.',
+    });
+    expect(pushText(alone('Nothing scheduled today.'), true, 'Brick', true)).toEqual({ title: 'Nothing scheduled today', body: 'Brick' });
+  });
+
+  it('does not cut the news at an abbreviation or an initial, and cuts at the end of a sentence in any script', () => {
+    expect(pushText(alone('Dr. Lee approved your visa. Goal done.'), true, 'Brick', true)).toEqual({ title: 'Dr. Lee approved your visa', body: 'Brick: Goal done.' });
+    expect(pushText(alone('J. Smith sent the form. Please check it.'), true, 'Brick', true).title).toBe('J. Smith sent the form');
+    // A lowercase letter before the stop is the end of a sentence, not an initial
+    expect(pushText(alone('The visa is option a. Please check it.'), true, 'Brick', true)).toEqual({ title: 'The visa is option a', body: 'Brick: Please check it.' });
+    // Everyday words that end a sentence are not abbreviations
+    expect(pushText(alone('The answer from the office is no. Please check it.'), true, 'Brick', true).title).toBe('The answer from the office is no');
+    // An Arabic question mark and a full stop in Chinese end one too
+    expect(pushText(alone('هل تمت الموافقة على التأشيرة؟ تم الأمر في المحادثة.'), true, 'Brick', true)).toEqual({
+      title: 'هل تمت الموافقة على التأشيرة',
+      body: 'Brick: تم الأمر في المحادثة.',
+    });
+    expect(pushText(alone('签证已批准。已保存在聊天中。'), true, 'Brick', true).title).toBe('签证已批准');
+    // A Hindi danda ends one too
+    expect(pushText(alone('वीज़ा स्वीकृत है। चैट में सहेजा गया।'), true, 'Brick', true)).toEqual({ title: 'वीज़ा स्वीकृत है', body: 'Brick: चैट में सहेजा गया।' });
+    // A closing quote after the stop stays with the sentence; an abbreviation inside quotes does not end it
+    expect(pushText(alone('\u201CVisa approved.\u201D Details are in chat.'), true, 'Brick', true)).toEqual({ title: '\u201CVisa approved\u201D', body: 'Brick: Details are in chat.' });
+    expect(pushText(alone('\u201CWe met Dr.\u201D Lee approved it. Done.'), true, 'Brick', true).title).toBe('\u201CWe met Dr.\u201D Lee approved it');
+    // Too short to be a title
+    expect(pushText(alone('Ok. Done and saved.'), true, 'Brick', true).title).toBe('Brick');
+  });
+
+  it('removes only paired formatting, so names and addresses stay as written', () => {
+    expect(pushText(alone('doc_id_42 is ready. Done.'), true, 'Brick', true).title).toBe('doc_id_42 is ready');
+    expect(pushText(alone('[page](https://x.test/a_(b)) is live. Ok.'), true, 'Brick', true).title).toBe('page is live');
+    expect(pushText(alone('## __Visa__ approved! *Goal* done in `the chat`.'), true, 'Brick', true)).toEqual({
+      title: 'Visa approved',
+      body: 'Brick: Goal done in the chat.',
+    });
+    expect(pushText(alone('Paid 5 * 3 in #42 today. Done.'), true, 'Brick', true).title).toBe('Paid 5 * 3 in #42 today');
+  });
+
+  it('shows everything else the ordinary way', () => {
+    const own = alone('Your visa is approved. Goal done.');
+    // Not marked as its own doing: an answer in a chat
+    const answer = readNotification(post({ sender: '@bot_nova:chat', sender_display_name: 'Brick', content: { msgtype: 'm.text', body: 'Your visa is approved. Goal done.' } }))!;
+    expect(pushText(answer, true, 'Brick', true)).toEqual({ title: 'Brick', body: 'Your visa is approved. Goal done.' });
+    // Marked, but not by one of our bots: anyone could set the mark
+    expect(pushText(own, true, 'Brick', false)).toEqual({ title: 'Brick', body: 'Your visa is approved. Goal done.' });
+    // Message text switched off
+    expect(pushText(own, false, 'Brick', true)).toEqual({ title: 'Brick', body: 'New message from Brick' });
+    // A first sentence too long for a title, and one with no end
+    const long = alone(`${'a'.repeat(90)}. Done.`);
+    expect(pushText(long, true, 'Brick', true).title).toBe('Brick');
+    expect(pushText(alone('no sentence end here'), true, 'Brick', true).title).toBe('Brick');
+    // A file or an image
+    expect(pushText(alone('x', { msgtype: 'm.image' }), true, 'Brick', true)).toEqual({ title: 'Brick', body: 'sent an image' });
+  });
+
+  it('reaches the device that way through the gateway, for our bot only', async () => {
+    (getPushSettings as jest.Mock).mockResolvedValue(DEFAULT_PUSH_SETTINGS);
+    await handleGatewayNotification(
+      post({ sender: '@bot_nova:chat', sender_display_name: 'Brick', content: { msgtype: 'm.text', body: 'Your visa is approved. Goal done.', [OWN_INITIATIVE_KEY]: true } }),
+    );
+    await settle();
+    expect(sendPush).toHaveBeenCalledWith(
+      'user-k',
+      'directMessages',
+      expect.objectContaining({ title: 'Your visa is approved', body: 'Brick: Goal done.', tag: 'chat:!dm:chat' }),
+      expect.anything(),
+    );
   });
 });
 
