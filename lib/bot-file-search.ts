@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db';
-import { clipText } from '@/lib/artifacts';
+import { clipText, shownInItsChatTo } from '@/lib/artifacts';
 import {
   DAY_MS,
   FILE_KINDS,
@@ -8,6 +8,7 @@ import {
   limitsOf,
   loadUsable,
   passBotGate,
+  readersOf,
   resolvePerson,
   shortIdOf,
   viewOf,
@@ -50,6 +51,14 @@ export interface FindInput extends BotCall {
   page?: number | null;
   /** How many a page holds: the "Files found in one search" setting, sent by the bot server. */
   limit: number;
+  /**
+   * What is found goes into a reply other people in this chat read (game #1993): of the files only those everyone who
+   * reads it was there for (the person and `others`), and of the artifacts only what was made in this chat and is not
+   * "Just you". Nothing else is found, counted or named.
+   */
+  everyoneHere?: boolean | null;
+  /** Everyone else in the bubble or meeting room now, by the ids the bot server names people by. */
+  others?: string[] | null;
 }
 
 export interface FoundFile {
@@ -164,10 +173,18 @@ export function mergePage(files: FoundFile[], artifacts: FoundArtifact[], offset
 function artifactWhere(input: FindInput, who: Who, titled: string[] | null, now: Date) {
   const since = dateOf(input.since);
   const until = dateOf(input.until);
+  // For a reply other people here read (game #1993): this chat's alone, as someone who owns none of them is shown it
+  const everyone = input.everyoneHere === true;
   return {
     AND: [
-      // This chat's, and what this bot made for the person in other chats: never what they made with other bots (game #1781)
-      { OR: [{ chatKind: input.chat.kind, chatRef: input.chat.ref }, ...(who.userId ? [{ ownerId: who.userId, makerBotId: input.botId }] : [])] },
+      // This chat's, and what this bot made for the person in other chats: never what they made with other bots (game #1781).
+      // Of this chat's, never someone else's "Just you" (game #1994): what is found names its title and who made it
+      {
+        OR: [
+          { chatKind: input.chat.kind, chatRef: input.chat.ref, ...shownInItsChatTo(everyone ? null : who.userId) },
+          ...(who.userId && !everyone ? [{ ownerId: who.userId, makerBotId: input.botId }] : []),
+        ],
+      },
       // A guest's artifact past its day is gone for everyone
       { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
       ...(titled === null ? [] : [{ id: { in: titled } }]),
@@ -201,13 +218,15 @@ export async function findFiles(input: FindInput, ctx: SearchContext = defaultCo
         chatRef: input.chat.ref,
         now: ctx.now,
         findableSince: findable > 0 ? new Date(ctx.now.getTime() - findable * DAY_MS) : null,
+        everyoneHere: input.everyoneHere === true,
+        readers: input.everyoneHere === true ? readersOf(who, input) : null,
       },
       { query, every: mode === 'all' && words.length > 1 ? words : null, kinds: fileKinds, source: input.source ?? null, since: dateOf(input.since), until: dateOf(input.until) },
       { offset: 0, limit: offset + limit },
     );
     let titled: string[] | null = null;
     if (wantsArtifacts(input) && words.length > 0) {
-      const byTitle = artifactTitleSql({ botId: input.botId, userId: who.userId, chatKind: input.chat.kind, chatRef: input.chat.ref }, words, mode);
+      const byTitle = artifactTitleSql({ botId: input.botId, userId: who.userId, chatKind: input.chat.kind, chatRef: input.chat.ref, everyoneHere: input.everyoneHere === true }, words, mode);
       titled = (await sql<{ id: string }>(byTitle.sql, byTitle.values)).map((row) => row.id);
     }
     const artifactsWhere = artifactWhere(input, who, titled, ctx.now);
@@ -270,6 +289,9 @@ export interface ReadInput extends BotCall {
   at?: number | null;
   /** How much to read: the "Reads from a kept file" setting, sent by the bot server. */
   chars: number;
+  /** The text goes into a reply other people in this chat read (game #1993): then only a file all of them were there for. */
+  everyoneHere?: boolean | null;
+  others?: string[] | null;
 }
 
 export interface Read {
