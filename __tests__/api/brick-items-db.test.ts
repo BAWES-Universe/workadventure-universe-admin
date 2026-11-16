@@ -297,7 +297,7 @@ run('goals and tasks, in a real database', () => {
   it('a one-off reminder given up with no report still tells the person: a failed notice is handed out, again after the retry time, until confirmed', async () => {
     const wren = await person('wren');
     const item = await set(wren, { kind: 'reminder', words: 'Call the bank', cadence: { type: 'once', at: at(HOUR).toISOString() } });
-    const mine = (list: { itemId: string }[]) => list.filter((one) => one.itemId === item.id);
+    const mine = <T extends { itemId: string }>(list: T[]) => list.filter((one) => one.itemId === item.id);
     const [first] = mine((await claimWork(at(HOUR + MIN))).runs);
     await claimWork(at(HOUR + 20 * MIN));
     await claimWork(at(HOUR + 40 * MIN));
