@@ -33,8 +33,22 @@ export function isAppShareable(connection: { ownerId: string | null; source: str
 export type SharedRefusal = 'not_shared' | 'incomplete' | 'limit_reached' | 'busy' | 'already_asked' | 'gone';
 
 export type SharedVerdict =
-  | { allowed: true; ownerId: string; /** Names of the fields that may come back, or null for the whole answer. */ returns: string[] | null }
-  | { allowed: false; reason: SharedRefusal; /** When today's uses are back, for the kind line the asker reads. */ resetsAt?: Date; /** For `already_asked`: what the first try came to. */ earlier?: string };
+  | { allowed: true; ownerId: string; /** Names of the fields that may come back, or null for the whole answer. */ returns: string[] | null; ownerNote?: OwnerNote }
+  | { allowed: false; reason: SharedRefusal; /** When today's uses are back, for the kind line the asker reads. */ resetsAt?: Date; /** For `already_asked`: what the first try came to. */ earlier?: string; ownerNote?: OwnerNote };
+
+/**
+ * What the bot server needs to tell the owner, in their own chat with the Brick, that today's uses for other people ran out (game
+ * #2006, mock Part 17 picture 6). Only on the ask that made the day's note (once a day, never one per person): it is the same moment
+ * the owner's notice in Orbit is made.
+ */
+export interface OwnerNote {
+  /** The owner's chat id, for the direct chat the two share. */
+  matrixUserId: string;
+  appName: string;
+  botName: string;
+  limit: number;
+  connectionId: string;
+}
 
 export interface SharedAsk {
   requesterKey?: string;
@@ -42,6 +56,19 @@ export interface SharedAsk {
   tool?: string;
   /** Names of the inputs this ask carries, never their values. */
   argumentNames?: string[];
+}
+
+/** The jobs on a grant read with its share, its jobs and its tools, as the bot server is told them: only a job whose tool is still the one that was picked. Nothing when it is not shared. */
+export function sharedJobsOf(grant: { share?: { jobs: { toolName: string; fingerprint: string; inputs: Prisma.JsonValue; returns: Prisma.JsonValue | null }[] } | null; tools?: { name: string; fingerprint: string; heading: string | null; confirmedAt: Date | null }[] }): { shared?: { jobs: { tool: string; inputs: string[]; returns: string[] | null }[] } } {
+  if (!grant.share) return {};
+  const tools = new Map((grant.tools ?? []).map((tool) => [tool.name, tool]));
+  const jobs = grant.share.jobs
+    .filter((job) => {
+      const tool = tools.get(job.toolName);
+      return !!tool && !!tool.confirmedAt && tool.fingerprint === job.fingerprint && (SHAREABLE_HEADINGS as readonly string[]).includes(tool.heading ?? '');
+    })
+    .map((job) => ({ tool: job.toolName, inputs: stringList(job.inputs) ?? [], returns: stringList(job.returns) }));
+  return { shared: { jobs } };
 }
 
 /** Midnight UTC after `now`: when a day's uses are back. */
@@ -89,13 +116,15 @@ export async function checkSharedUse(
       return { allowed: false, reason: outcome.busy ? 'busy' : 'already_asked', earlier: outcome.status };
     case 'busy':
       return { allowed: false, reason: 'busy' };
-    case 'limit':
-      if (outcome.which === 'everyone') await tellOwnerOfLimit({ shareId: found.id, ownerId: owner.ownerId, connectionId: grant.connectionId, botId: grant.botId, serverId: grant.id, appName: connectionName, botName, limit: outcome.limit });
-      return { allowed: false, reason: 'limit_reached', resetsAt: nextDay(new Date()) };
-    default:
+    case 'limit': {
+      const ownerNote = outcome.which === 'everyone' ? await tellOwnerOfLimit({ shareId: found.id, ownerId: owner.ownerId, connectionId: grant.connectionId, botId: grant.botId, serverId: grant.id, appName: connectionName, botName, limit: outcome.limit }) : undefined;
+      return { allowed: false, reason: 'limit_reached', resetsAt: nextDay(new Date()), ...(ownerNote ? { ownerNote } : {}) };
+    }
+    default: {
       // The use that takes the last of the day's uses tells the owner now, not only when someone is turned away
-      if (outcome.lastOfDay !== null) await tellOwnerOfLimit({ shareId: found.id, ownerId: owner.ownerId, connectionId: grant.connectionId, botId: grant.botId, serverId: grant.id, appName: connectionName, botName, limit: outcome.lastOfDay });
-      return { allowed: true, ownerId: owner.ownerId, returns: outcome.returns };
+      const ownerNote = outcome.lastOfDay !== null ? await tellOwnerOfLimit({ shareId: found.id, ownerId: owner.ownerId, connectionId: grant.connectionId, botId: grant.botId, serverId: grant.id, appName: connectionName, botName, limit: outcome.lastOfDay }) : undefined;
+      return { allowed: true, ownerId: owner.ownerId, returns: outcome.returns, ...(ownerNote ? { ownerNote } : {}) };
+    }
   }
 }
 
@@ -195,11 +224,15 @@ async function reserve(input: { shareId: string; grant: { id: string; botId: str
   });
 }
 
-/** The owner is told once a day that today's uses ran out for other people, with what they need to change the limit. Never throws. */
-async function tellOwnerOfLimit(input: { shareId: string; ownerId: string; connectionId: string; botId: string; serverId: string; appName: string; botName: string; limit: number }): Promise<void> {
+/**
+ * The owner is told once a day that today's uses ran out for other people, with what they need to change the limit. Never throws.
+ * Returns what the bot server needs to say it in the owner's own chat with the Brick, only for the one ask that made the day's note
+ * (and only when the owner has a chat id): every other ask that day returns nothing, so the owner is told once, not once per person.
+ */
+async function tellOwnerOfLimit(input: { shareId: string; ownerId: string; connectionId: string; botId: string; serverId: string; appName: string; botName: string; limit: number }): Promise<OwnerNote | undefined> {
   try {
     const day = new Date().toISOString().slice(0, 10);
-    await addNotice({
+    const added = await addNotice({
       userId: input.ownerId,
       kind: 'app-share-limit',
       dedupeKey: `app-share-limit:${input.shareId}:${day}`,
@@ -207,8 +240,13 @@ async function tellOwnerOfLimit(input: { shareId: string; ownerId: string; conne
       body: `${input.botName} carries on without it for them until tomorrow. You can change the limit.`,
       data: { connectionId: input.connectionId, botId: input.botId, serverId: input.serverId },
     });
+    if (!added) return undefined;
+    const owner = await prisma.user.findUnique({ where: { id: input.ownerId }, select: { matrixChatId: true } });
+    if (!owner?.matrixChatId) return undefined;
+    return { matrixUserId: owner.matrixChatId, appName: input.appName, botName: input.botName, limit: input.limit, connectionId: input.connectionId };
   } catch (error) {
     console.error('[AppShare] Could not tell the owner about the limit:', error instanceof Error ? error.message : 'unknown');
+    return undefined;
   }
 }
 
