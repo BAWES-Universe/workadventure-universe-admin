@@ -57,3 +57,41 @@ it('ends the watch at twenty minutes and says so, though a look at the order is 
   });
   expect(signals.length).toBe(looks);
 });
+
+it('a look that fails just before the end of the watch is not asked again after it: no request goes out past the end, and the watch ends on time', async () => {
+  const lookTimes: number[] = [];
+  const startedAt = Date.now();
+  fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+    if (init?.method === 'POST') return Promise.resolve({ ok: true, json: () => Promise.resolve({ orderId: 'o2', checkoutUrl: 'https://pay.example/c', app: 'Pay' }) });
+    lookTimes.push(Date.now() - startedAt);
+    // Each look fails 0.7 s after it starts, so the one before the end fails 1.2 s ahead of it and the next would be due 1.8 s after it
+    return new Promise((_resolve, reject) => setTimeout(() => reject(new Error('network')), 700));
+  });
+  render(
+    <div>
+      <iframe data-artifact-frame="" title="page" />
+      <PagePaymentsBridge artifactId="a1" />
+    </div>,
+  );
+  const frame = document.querySelector('iframe')!;
+  const told = jest.spyOn(frame.contentWindow!, 'postMessage');
+  await act(async () => {
+    window.dispatchEvent(new MessageEvent('message', { data: { universe: 'use-app', app: 'pay' }, source: frame.contentWindow }));
+  });
+  // Up to a moment before the end of the watch: still being asked
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(20 * MIN - 500);
+  });
+  expect(told).not.toHaveBeenCalledWith({ universe: 'app-result', status: 'cant_confirm' }, '*');
+  // At the end: said, on time
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(600);
+  });
+  expect(told).toHaveBeenCalledWith({ universe: 'app-result', status: 'cant_confirm' }, '*');
+  const looks = lookTimes.length;
+  await act(async () => {
+    await jest.advanceTimersByTimeAsync(10_000);
+  });
+  expect(lookTimes.length).toBe(looks);
+  expect(Math.max(...lookTimes)).toBeLessThanOrEqual(20 * MIN);
+});

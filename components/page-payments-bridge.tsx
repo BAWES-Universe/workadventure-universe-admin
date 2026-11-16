@@ -77,8 +77,33 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
         stop();
         if (watchers.current.get(orderId) === stop) watchers.current.delete(orderId);
       };
+      /** The watch ran out with the order unpaid. */
+      const ended = () => {
+        finish();
+        // The look ran out with the order unpaid: "Check again" can ask about it once more
+        expired.current.add(orderId);
+        // An older order's look ends without a word while the buyer is on a newer one; if there is none to be on (it ended, or never
+        // started), the button is how the older one can be asked about again
+        if (primary.current !== orderId) {
+          if (!busy.current) setRecheck((now) => now ?? orderId);
+          return;
+        }
+        if (toldNotPaid) {
+          // The look ends here, and the buyer can ask for another one
+          setRecheck(orderId);
+        } else {
+          // Twenty minutes without an answer: said plainly, never a silent end. The order may still be counted later.
+          busy.current = false;
+          setResume(null);
+          setLine(WORDS.cant_confirm);
+          setRecheck(orderId);
+          tell('cant_confirm');
+        }
+      };
       const poll = async () => {
         if (!alive()) return;
+        // Never start a look after the end of the watch (one asked again after a look that failed just before it would go out late)
+        if (Date.now() >= until) return ended();
         // A look that hangs (a request that never answers, or an answer that never finishes) is ended at its own limit, and never
         // later than the end of the watch: the deadline is kept by this timer, not by being checked between requests
         const controller = new AbortController();
@@ -130,29 +155,11 @@ export function PagePaymentsBridge({ artifactId }: { artifactId: string }) {
         }
         if (!alive()) return;
         if (Date.now() < until) {
-          timer = setTimeout(poll, POLL_MS);
+          // The next look never starts after the end of the watch: it is due at the end at the latest, and ends the watch there
+          timer = setTimeout(poll, Math.min(POLL_MS, Math.max(0, until - Date.now())));
           return;
         }
-        finish();
-        // The look ran out with the order unpaid: "Check again" can ask about it once more
-        expired.current.add(orderId);
-        // An older order's look ends without a word while the buyer is on a newer one; if there is none to be on (it ended, or never
-        // started), the button is how the older one can be asked about again
-        if (primary.current !== orderId) {
-          if (!busy.current) setRecheck((now) => now ?? orderId);
-          return;
-        }
-        if (toldNotPaid) {
-          // The look ends here, and the buyer can ask for another one
-          setRecheck(orderId);
-        } else {
-          // Twenty minutes without an answer: said plainly, never a silent end. The order may still be counted later.
-          busy.current = false;
-          setResume(null);
-          setLine(WORDS.cant_confirm);
-          setRecheck(orderId);
-          tell('cant_confirm');
-        }
+        ended();
       };
       timer = setTimeout(poll, POLL_MS);
     },
