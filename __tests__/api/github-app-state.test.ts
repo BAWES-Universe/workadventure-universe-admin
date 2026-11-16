@@ -7,7 +7,14 @@ import { NextRequest } from 'next/server';
 const mockUser: { current: { id: string; isSuperAdmin?: boolean } | null } = { current: null };
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => mockUser.current) }));
 const mockApp: { current: Record<string, unknown> | null } = { current: null };
-jest.mock('@/lib/github/app', () => ({ getGitHubApp: jest.fn(async () => mockApp.current) }));
+const mockKept: { current: number | null | Error } = { current: null };
+jest.mock('@/lib/github/app', () => ({
+  getGitHubApp: jest.fn(async () => mockApp.current),
+  keptGitHubAppId: jest.fn(async () => {
+    if (mockKept.current instanceof Error) throw mockKept.current;
+    return mockKept.current;
+  }),
+}));
 
 import { GET } from '@/app/api/admin/github-app/route';
 
@@ -16,6 +23,7 @@ const ask = () => GET(new NextRequest('https://orbit.example.com/api/admin/githu
 beforeEach(() => {
   mockUser.current = null;
   mockApp.current = null;
+  mockKept.current = null;
 });
 
 describe('GET /api/admin/github-app', () => {
@@ -35,8 +43,25 @@ describe('GET /api/admin/github-app', () => {
 
   it('says made, with where it is on GitHub, and never the secrets', async () => {
     mockUser.current = { id: 'u1', isSuperAdmin: true };
+    mockKept.current = 1;
     mockApp.current = { appId: 1, slug: 'bawes-universe', clientId: 'c', clientSecret: 'shh', webhookSecret: 'shh2', pem: 'PEM', htmlUrl: 'https://github.com/apps/bawes-universe' };
     const body = await (await ask()).json();
     expect(body).toEqual({ made: true, slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe' });
+  });
+
+  it('says made even when the app cannot be read back, without its address', async () => {
+    mockUser.current = { id: 'u1', isSuperAdmin: true };
+    mockKept.current = 1;
+    expect(await (await ask()).json()).toEqual({ made: true });
+  });
+
+  it('never says not made when the store cannot be read: it answers 500, so the row stays away', async () => {
+    mockUser.current = { id: 'u1', isSuperAdmin: true };
+    mockKept.current = new Error('database is down');
+    const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const response = await ask();
+    expect(response.status).toBe(500);
+    expect(await response.json()).not.toHaveProperty('made');
+    error.mockRestore();
   });
 });
