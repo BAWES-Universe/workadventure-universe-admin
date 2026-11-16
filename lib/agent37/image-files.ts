@@ -467,6 +467,7 @@ def runner_part(pid):
 
 
 CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
+SYSTEM_FOLDERS = ("/usr/", "/lib", "/bin/", "/sbin/", "/etc/", "/proc/", "/dev/")
 SHORT_SLEEP = re.compile(r"^\d{1,2}(\.\d+)?$")
 
 
@@ -482,7 +483,8 @@ def short_sleep(pid):
     # A short wait that does nothing and ends by itself. The computer's own start-up loop runs them as its children (process 1 waits
     # for each one), and it stops the whole computer when one is killed, so these are never touched. Two things keep the exemption from
     # being a place to hide: a wait that has gone on longer than a real one can is not one (a process that took the name and stayed), and
-    # one started with a loader override in its environment (code of the agent's, loaded into it) is not one either.
+    # one with a loader override in its environment, or with a library mapped from outside the system's folders (code of the agent's, loaded
+    # into it; an environment can be wiped from inside, a mapping cannot), is not one either.
     path = program(pid)
     args = argv(pid)
     if not (bool(path) and os.path.basename(path) == "sleep" and len(args) == 2 and bool(SHORT_SLEEP.match(args[1])) and float(args[1]) <= 30):
@@ -490,7 +492,14 @@ def short_sleep(pid):
     begun, now = started(pid), ticks_now()
     if begun is None or now is None or now - begun > 60 * CLOCK_TICKS:
         return False
-    return not any(entry.startswith(b"LD_") for entry in read(pid, "environ").split(b"\0"))
+    if any(entry.startswith(b"LD_") for entry in read(pid, "environ").split(b"\0")):
+        return False
+    # A loaded library cannot hide where it is from: every file the process has mapped must be under the system's own folders
+    for line in read(pid, "maps").decode("utf-8", "replace").splitlines():
+        parts = line.split(None, 5)
+        if len(parts) == 6 and parts[5].startswith("/") and not parts[5].startswith(SYSTEM_FOLDERS):
+            return False
+    return True
 
 
 def protected(tree, cutoff):
