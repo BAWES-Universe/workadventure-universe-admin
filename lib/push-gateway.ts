@@ -130,7 +130,9 @@ const plainWords = (value: string) =>
     .trim();
 
 /** A sentence that stops at one of these is not over yet ("Dr. Lee approved it"). Sentence breaking alone does not know them. */
-const ABBREVIATION = /(?:^|[^\p{L}])(?:mr|mrs|ms|dr|prof|sr|jr|st|vs|e\.g|i\.e|no|inc|ltd|co)\.$|(?:^|[^\p{L}])\p{Lu}\.$/iu;
+const ABBREVIATION = /(?:^|[^\p{L}])(?:mr|mrs|ms|dr|prof|sr|jr|st|vs|e\.g|i\.e|no|inc|ltd|co)\.$/iu;
+/** A capital initial on its own ("J. Smith"); case matters here, so a lowercase letter before the stop does not count. */
+const INITIAL = /(?:^|[^\p{L}])\p{Lu}\.$/u;
 
 /** The first sentence of some words, for any script ("؟" and "。" end one too); null when there is none. */
 function firstSentence(words: string): string | null {
@@ -138,7 +140,7 @@ function firstSentence(words: string): string | null {
   for (const { segment } of new Intl.Segmenter(undefined, { granularity: 'sentence' }).segment(words)) {
     sentence += segment;
     const done = sentence.trim();
-    if (!ABBREVIATION.test(done)) return /[.!?؟۔。！？…]$/u.test(done) ? done : null;
+    if (!ABBREVIATION.test(done) && !INITIAL.test(done)) return /[.!?؟۔。！？…]$/u.test(done) ? done : null;
   }
   return null;
 }

@@ -208,6 +208,8 @@ describe('what a locked phone shows for a Brick that spoke by itself (game #2002
   it('does not cut the news at an abbreviation or an initial, and cuts at the end of a sentence in any script', () => {
     expect(pushText(alone('Dr. Lee approved your visa. Goal done.'), true, 'Brick', true)).toEqual({ title: 'Dr. Lee approved your visa', body: 'Brick: Goal done.' });
     expect(pushText(alone('J. Smith sent the form. Please check it.'), true, 'Brick', true).title).toBe('J. Smith sent the form');
+    // A lowercase letter before the stop is the end of a sentence, not an initial
+    expect(pushText(alone('The visa is option a. Please check it.'), true, 'Brick', true)).toEqual({ title: 'The visa is option a', body: 'Brick: Please check it.' });
     // An Arabic question mark and a full stop in Chinese end one too
     expect(pushText(alone('هل تمت الموافقة على التأشيرة؟ تم الأمر في المحادثة.'), true, 'Brick', true)).toEqual({
       title: 'هل تمت الموافقة على التأشيرة',
