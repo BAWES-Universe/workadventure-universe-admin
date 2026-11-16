@@ -295,7 +295,8 @@ static void clear_and_note(const char *note) {
 }
 `;
     writeFileSync(join(dir, 'agent', 'wipe.c'), `${cleared}
-__attribute__((constructor)) static void w(void) { clear_and_note("${dir}/agent/wipe.ran"); }
+#include <stdlib.h>
+__attribute__((constructor)) static void w(void) { const char *note = getenv("NOTE_FILE"); if (note) clear_and_note(note); }
 `);
     writeFileSync(
       join(dir, 'agent', 'hide.c'),
@@ -376,8 +377,12 @@ LD_PRELOAD=/nonexistent/agent.so sleep 9 </dev/null >/dev/null 2>&1 &
 LOADED=$!
 # and with its environment wiped by the library itself (the mapped library still shows)
 if command -v cc >/dev/null 2>&1 && cc -shared -fPIC -o ${dir}/agent/wipe.so ${dir}/agent/wipe.c 2>/dev/null; then
-  LD_PRELOAD=${dir}/agent/wipe.so sleep 9 </dev/null >/dev/null 2>&1 &
+  NOTE_FILE=${dir}/agent/wipe.ran LD_PRELOAD=${dir}/agent/wipe.so sleep 9 </dev/null >/dev/null 2>&1 &
   WIPED=$!
+  # the same library in a folder every user can write to and that looks like part of the system (/dev/shm)
+  mkdir -p /dev/shm/universe-fence-test && cp ${dir}/agent/wipe.so /dev/shm/universe-fence-test/wipe.so
+  NOTE_FILE=${dir}/agent/shm.ran LD_PRELOAD=/dev/shm/universe-fence-test/wipe.so sleep 9 </dev/null >/dev/null 2>&1 &
+  SHM=$!
 fi
 # and with the library gone from the map: its code copied into nameless memory, the library unmapped (x86-64 only)
 if [ "$(uname -m)" = x86_64 ] && command -v cc >/dev/null 2>&1 && cc -shared -fPIC -o ${dir}/agent/hide.so ${dir}/agent/hide.c 2>/dev/null; then
@@ -387,6 +392,10 @@ fi
 sh -c 'sleep 302' &
 sleep 1
 for p in $A1 $A2 $A3 $LATE; do kill -0 $p 2>/dev/null && echo "agent-up"; done
+# the preloaded code is really in place before the fence runs: the cleared one still maps its library with no LD_ left, the hidden one has
+# unmapped its library and runs from nameless code
+if [ -n "$WIPED" ]; then grep -q wipe.so /proc/$WIPED/maps && ! tr '\\0' '\\n' < /proc/$WIPED/environ | grep -q '^LD_' && echo "wipe-in-place"; fi
+if [ -n "$HIDDEN" ]; then ! grep -q hide.so /proc/$HIDDEN/maps && awk 'NF == 5 && $2 ~ /x/ { found = 1 } END { exit !found }' /proc/$HIDDEN/maps && echo "hide-in-place"; fi
 echo "before: $(python3 ${dir}/universe-fence --check)"
 python3 ${dir}/universe-fence
 echo "after: $(python3 ${dir}/universe-fence --check)"
@@ -396,6 +405,7 @@ kill -0 $OWN 2>/dev/null && echo "own-alive" || echo "own-dead"
 kill -0 $SHORT 2>/dev/null && echo "short-alive" || echo "short-dead"
 kill -0 $OTHER 2>/dev/null && echo "other-alive" || echo "other-dead"
 kill -0 $LOADED 2>/dev/null && echo "loaded-alive" || echo "loaded-dead"
+if [ -n "$SHM" ]; then [ -f ${dir}/agent/shm.ran ] && echo "shm-loaded"; kill -0 $SHM 2>/dev/null && echo "shm-alive" || echo "shm-dead"; rm -rf /dev/shm/universe-fence-test; fi
 if [ -n "$WIPED" ]; then [ -f ${dir}/agent/wipe.ran ] && echo "wipe-loaded"; kill -0 $WIPED 2>/dev/null && echo "wiped-alive" || echo "wiped-dead"; fi
 if [ -n "$HIDDEN" ]; then [ -f ${dir}/agent/hide.ran ] && echo "hide-loaded"; kill -0 $HIDDEN 2>/dev/null && echo "hidden-alive" || echo "hidden-dead"; fi
 # a child the browser started after the note, below a part that was running before it, is the browser's own
@@ -428,14 +438,19 @@ pgrep -P $BR -x sleep >/dev/null && echo "late-child-alive" || echo "late-child-
     const compiler = spawnSync('sh', ['-c', 'command -v cc']).status === 0;
     if (compiler) {
       expect(run.stdout).toContain('wipe-loaded');
+      expect(run.stdout).toContain('wipe-in-place');
       expect(run.stdout).toContain('wiped-dead');
+      expect(run.stdout).toContain('shm-loaded');
+      expect(run.stdout).toContain('shm-dead');
       if (process.arch === 'x64') {
         expect(run.stdout).toContain('hide-loaded');
+        expect(run.stdout).toContain('hide-in-place');
         expect(run.stdout).toContain('hidden-dead');
       }
     }
     expect(run.stdout).not.toContain('wiped-alive');
     expect(run.stdout).not.toContain('hidden-alive');
+    expect(run.stdout).not.toContain('shm-alive');
     // What a desktop part started after the note is kept, even when the part itself was already kept for being older
     expect(run.stdout).toContain('late-child-alive');
   });
