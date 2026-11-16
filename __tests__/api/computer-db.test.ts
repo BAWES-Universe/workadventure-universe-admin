@@ -379,6 +379,30 @@ run('a Brick’s computer, in a real database', () => {
       await prisma.appSetting.deleteMany({ where: { key: 'computer-image' } });
     });
 
+    it('does not start a second build of content that is already building, ready, or failed and still waiting', async () => {
+      const key = 'computer-image';
+      const now = new Date('2026-11-15T12:00:00Z');
+      const put = async (value: Record<string, unknown>) => {
+        await prisma.appSetting.deleteMany({ where: { key } });
+        await prisma.appSetting.create({ data: { key, value: value as never } });
+      };
+      const base = { hash: 'h1', revision: null, startedAt: new Date(now.getTime() - 60_000).toISOString(), failures: 0, error: null };
+      // Another sweep recorded its build id after this one read the setting
+      await put({ ...base, state: 'building', buildId: 'b-1' });
+      expect(await dbImageStore.claim!('h1', now)).toBeNull();
+      await put({ ...base, state: 'ready', buildId: 'b-1', revision: 3 });
+      expect(await dbImageStore.claim!('h1', now)).toBeNull();
+      // A failed build waits out its time, counted from when it failed
+      await put({ ...base, state: 'failed', buildId: 'b-1', failures: 1, failedAt: new Date(now.getTime() - 60_000).toISOString() });
+      expect(await dbImageStore.claim!('h1', now)).toBeNull();
+      await put({ ...base, state: 'failed', buildId: 'b-1', failures: 1, failedAt: new Date(now.getTime() - 6 * 60_000).toISOString() });
+      expect(await dbImageStore.claim!('h1', now)).toMatchObject({ state: 'building', buildId: null, failures: 1 });
+      // Changed content is never held back by an older build
+      await put({ ...base, state: 'ready', buildId: 'b-1', revision: 3 });
+      expect(await dbImageStore.claim!('h2', now)).toMatchObject({ hash: 'h2' });
+      await prisma.appSetting.deleteMany({ where: { key } });
+    });
+
     it('keeps a renewing job going while there is room, and gives every held room back when a job ends or lapses', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
