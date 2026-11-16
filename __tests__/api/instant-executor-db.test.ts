@@ -15,7 +15,7 @@ import { denyInstantOnSessions } from '@/lib/instant/sessions';
 import { admitInstantTool } from '@/lib/instant/values';
 import { instantRulesAndReceipts } from '@/lib/instant/rules-and-receipts';
 import { proposeRule } from '@/lib/spend-rules';
-import { activityFor, closeReceipt, openReceipt } from '@/lib/task-receipts';
+import { activityFor, closeReceipt, openReceipt, settleCheckingReceipts } from '@/lib/task-receipts';
 import { POST as runRoute } from '@/app/api/instant/run/route';
 import { GET as toolsRoute } from '@/app/api/instant/tools/route';
 
@@ -1723,7 +1723,7 @@ run('the bounded Instant executor, in a real database', () => {
       expect(f.funds.reserve).toHaveBeenCalledTimes(1);
     });
 
-    it('a run whose answer did not come back puts the receipt of the task SAVED on the run in "checking": a call with no task, and a retry naming another task, touch nothing', async () => {
+    it('a run whose answer did not come back reopens the receipt of the task SAVED on the run when the bot server had already ended it: a call with no task, and a retry naming another task, touch nothing', async () => {
       await openReceipt({ botId: brick, personId: sara, taskKey: 'task-c', title: 'Find the weather', category: 'apps' });
       await openReceipt({ botId: brick, personId: sara, taskKey: 'task-other', title: 'Another task', category: 'apps' });
       const mk = (taskKey: string | null) =>
@@ -1732,14 +1732,20 @@ run('the bounded Instant executor, in a real database', () => {
       const noTask = await mk(null);
       const state = async (taskKey: string) => (await prisma.taskReceipt.findFirstOrThrow({ where: { personId: sara, taskKey } })).state;
       const input = { botId: brick, personId: sara, tool: 'EXA_SEARCH', arguments: {}, callId: 'c1', taskKey: 'task-c' };
+      // The bot server has ended both tasks (done)
+      await prisma.taskReceipt.updateMany({ where: { personId: sara, taskKey: { in: ['task-c', 'task-other'] } }, data: { state: 'done', endedAt: new Date() } });
       await instantRulesAndReceipts.afterRun?.({ ...input, taskKey: null }, { status: 'checking', runId: noTask.id });
-      expect(await state('task-c')).toBe('running');
+      expect(await state('task-c')).toBe('done');
       await instantRulesAndReceipts.afterRun?.(input, { status: 'done', runId: withTask.id, ok: true, data: {}, chargedMicros: 1, pending: false });
-      expect(await state('task-c')).toBe('running');
+      expect(await state('task-c')).toBe('done');
       // A retry of the same call that names another task: the run's own task is the one that moves
       await instantRulesAndReceipts.afterRun?.({ ...input, taskKey: 'task-other' }, { status: 'checking', runId: withTask.id });
       expect(await state('task-c')).toBe('checking');
-      expect(await state('task-other')).toBe('running');
+      expect(await state('task-other')).toBe('done');
+      // A task the bot server has not ended is never ended by a run: it keeps running
+      await prisma.taskReceipt.updateMany({ where: { personId: sara, taskKey: 'task-c' }, data: { state: 'running', endedAt: null } });
+      await instantRulesAndReceipts.afterRun?.(input, { status: 'checking', runId: withTask.id });
+      expect(await state('task-c')).toBe('running');
       await prisma.instantRun.deleteMany({ where: { id: { in: [withTask.id, noTask.id] } } });
     });
 
@@ -1756,6 +1762,168 @@ run('the bounded Instant executor, in a real database', () => {
       const items = await activityFor(sara);
       expect(items.find((item) => item.title === 'Its task')).toMatchObject({ spentMicros: Number(row.customerMicros) });
       expect(items.find((item) => item.title === 'Not its task')).toMatchObject({ spentMicros: null, lines: [] });
+    });
+  });
+
+  describe('a task’s receipt follows its runs: a task being looked up is not listed, and it ends by itself', () => {
+    beforeEach(() => setInstantHooks(instantRulesAndReceipts));
+    afterEach(() => setInstantHooks(undefined));
+
+    const unclearRun = async (p: ReturnType<typeof fakeProvider>, f: ReturnType<typeof fakeFunds>, taskKey: string, query: string) => {
+      const id = callId();
+      p.script.runs.push({ kind: 'unclear', why: 'timeout', status: null });
+      expect(await runInstant(ask({ callId: id, taskKey, arguments: { query } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'checking' });
+      return runOf(await runIdOf(id));
+    };
+    const receiptState = async (taskKey: string) => (await prisma.taskReceipt.findFirstOrThrow({ where: { personId: sara, taskKey } })).state;
+
+    it('while a run is unclear the task is not listed; a log that says it failed ends the receipt as refunded, nothing taken', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'look-1', title: 'Find the flight', category: 'apps' });
+      const row = await unclearRun(p, f, 'look-1', 'flight');
+      // The task is still running: its receipt is not listed and Orbit does not end it
+      expect(await receiptState('look-1')).toBe('running');
+      expect(await closeReceipt({ botId: brick, taskKey: 'look-1', personId: sara, state: 'done' })).toMatchObject({ ok: true, state: 'checking' });
+      expect(await receiptState('look-1')).toBe('checking');
+      expect((await activityFor(sara)).map((item) => item.title)).not.toContain('Find the flight');
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'failed', null)]);
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(await receiptState('look-1')).toBe('refunded');
+      const [item] = await activityFor(sara);
+      expect(item).toMatchObject({ title: 'Find the flight', state: 'refunded', spentMicros: null });
+      // Said again, by the sweep or by anyone, it changes nothing
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(await receiptState('look-1')).toBe('refunded');
+      expect(f.left()).toBe(1_000_000);
+    });
+
+    it('a log that says it worked ends the receipt as done, with what the person was charged', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'look-2', title: 'Find the weather', category: 'apps' });
+      const row = await unclearRun(p, f, 'look-2', 'weather');
+      // The task is still running: its receipt is not listed and Orbit does not end it
+      expect(await receiptState('look-2')).toBe('running');
+      expect(await closeReceipt({ botId: brick, taskKey: 'look-2', personId: sara, state: 'done' })).toMatchObject({ ok: true, state: 'checking' });
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'success', 7_000)]);
+      await reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      expect(await receiptState('look-2')).toBe('done');
+      const charged = Number((await runOf(row.id)).customerMicros);
+      expect(charged).toBeGreaterThan(0);
+      expect((await activityFor(sara))[0]).toMatchObject({ state: 'done', spentMicros: charged });
+    });
+
+    it('when nobody can vouch for it by the deadline, the receipt ends in the person’s favour: refunded, nothing taken', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'look-3', title: 'Find the hotel', category: 'apps' });
+      const row = await unclearRun(p, f, 'look-3', 'hotel');
+      // The task is still running: its receipt is not listed and Orbit does not end it
+      expect(await receiptState('look-3')).toBe('running');
+      expect(await closeReceipt({ botId: brick, taskKey: 'look-3', personId: sara, state: 'done' })).toMatchObject({ ok: true, state: 'checking' });
+      await sweepInstant({ funds: f.funds, adapter: p.adapter });
+      expect(await receiptState('look-3')).toBe('checking');
+      await sweepInstant({ funds: f.funds, adapter: p.adapter, now: new Date(Date.now() + 24 * 60 * MIN) });
+      expect(await runOf(row.id)).toMatchObject({ state: 'failed', reason: 'unclear', customerState: 'released' });
+      expect(await receiptState('look-3')).toBe('refunded');
+      expect((await activityFor(sara))[0]).toMatchObject({ state: 'refunded', spentMicros: null });
+    });
+
+    it('one finished run does not end a task that has another still unclear; the last one to end does', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'look-4', title: 'Two lookups', category: 'apps' });
+      const first = await unclearRun(p, f, 'look-4', 'one');
+      const second = await unclearRun(p, f, 'look-4', 'two');
+      await closeReceipt({ botId: brick, taskKey: 'look-4', personId: sara, state: 'done' });
+      p.script.byUser.set(first.providerUserId, [p.line(first.providerUserId, 'failed', null)]);
+      await reconcileRun(first.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      expect((await runOf(first.id)).state).toBe('failed');
+      expect(await receiptState('look-4')).toBe('checking');
+      expect((await activityFor(sara)).map((item) => item.title)).not.toContain('Two lookups');
+      p.script.byUser.set(second.providerUserId, [p.line(second.providerUserId, 'success', 7_000)]);
+      await reconcileRun(second.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      // One worked, so the task is done (what it took is read from the books)
+      expect(await receiptState('look-4')).toBe('done');
+    });
+
+    it('a task still running is never ended by a run: an unclear run that fails leaves it running, and a later run and the bot server’s close still count', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'look-8', title: 'Two tries', category: 'apps' });
+      const first = await unclearRun(p, f, 'look-8', 'try1');
+      p.script.byUser.set(first.providerUserId, [p.line(first.providerUserId, 'failed', null)]);
+      await reconcileRun(first.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      expect((await runOf(first.id)).state).toBe('failed');
+      expect(await receiptState('look-8')).toBe('running');
+      // The task goes on and a second run works; the bot server then ends the task
+      expect((await runInstant(ask({ taskKey: 'look-8', arguments: { query: 'try2' } }), { adapter: p.adapter, funds: f.funds })).status).toBe('done');
+      expect(await closeReceipt({ botId: brick, taskKey: 'look-8', personId: sara, state: 'done' })).toMatchObject({ ok: true, state: 'done' });
+      const item = (await activityFor(sara)).find((one) => one.title === 'Two tries');
+      expect(item).toMatchObject({ state: 'done' });
+      expect(item?.spentMicros).toBeGreaterThan(0);
+    });
+
+    it('a done word from the bot server that comes before the lookup ends does not freeze the receipt: the settling still moves it', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'look-5', title: 'Find the weather', category: 'apps' });
+      const row = await unclearRun(p, f, 'look-5', 'weather5');
+      expect(await closeReceipt({ botId: brick, taskKey: 'look-5', personId: sara, state: 'done', chargedMicros: 10 })).toMatchObject({ ok: true, state: 'checking' });
+      expect(await receiptState('look-5')).toBe('checking');
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'failed', null)]);
+      await reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      expect(await receiptState('look-5')).toBe('refunded');
+      // And the other order: the receipt was closed first, then a run turned out unclear: it is reopened until that run settles
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'look-6', title: 'Another', category: 'apps' });
+      await closeReceipt({ botId: brick, taskKey: 'look-6', personId: sara, state: 'done' });
+      const late = await unclearRun(p, f, 'look-6', 'weather6');
+      expect(await receiptState('look-6')).toBe('checking');
+      p.script.byUser.set(late.providerUserId, [p.line(late.providerUserId, 'success', 7_000)]);
+      await reconcileRun(late.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      expect(await receiptState('look-6')).toBe('done');
+    });
+
+    it('a receipt the bot server left in checking with no Instant run (its request never arrived) is refunded after the grace, listed; one with books for its key is done; a young one is left alone', async () => {
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'look-9', title: 'Never arrived', category: 'apps' });
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'look-10', title: 'Has books', category: 'apps' });
+      for (const key of ['look-9', 'look-10']) expect(await closeReceipt({ botId: brick, taskKey: key, personId: sara, state: 'checking' })).toMatchObject({ ok: true, state: 'checking' });
+      await prisma.meterEvent.create({
+        data: { eventId: `look-10-${tag}`, kind: 'app_use', pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(1000), basis: 'measured', detail: { instant: true, taskKey: 'look-10' } },
+      });
+      // Not yet: the request may still arrive
+      await settleCheckingReceipts(50, new Date(Date.now() + 60 * 1000));
+      expect(await receiptState('look-9')).toBe('checking');
+      expect((await activityFor(sara)).map((item) => item.title)).not.toContain('Never arrived');
+      await settleCheckingReceipts(50, new Date(Date.now() + 20 * MIN));
+      expect(await receiptState('look-9')).toBe('refunded');
+      expect(await receiptState('look-10')).toBe('done');
+      expect((await activityFor(sara)).find((item) => item.title === 'Never arrived')).toMatchObject({ state: 'refunded', spentMicros: null });
+    });
+
+    it('a receipt the run’s own pass could not move (no hook then) is moved by the sweep’s pass over receipts still in checking', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'look-7', title: 'Find the weather', category: 'apps' });
+      const row = await unclearRun(p, f, 'look-7', 'weather7');
+      await closeReceipt({ botId: brick, taskKey: 'look-7', personId: sara, state: 'done' });
+      setInstantHooks(undefined);
+      p.script.byUser.set(row.providerUserId, [p.line(row.providerUserId, 'failed', null)]);
+      await reconcileRun(row.id, { funds: f.funds, adapter: p.adapter, now: new Date() });
+      expect(await receiptState('look-7')).toBe('checking');
+      setInstantHooks(instantRulesAndReceipts);
+      expect(await settleCheckingReceipts(50)).toBeGreaterThanOrEqual(1);
+      // And the sweep itself says it too (here nothing is left for it to move)
+      expect((await sweepInstant({ funds: f.funds, adapter: p.adapter })).receipts).toBeGreaterThanOrEqual(0);
+      expect(await receiptState('look-7')).toBe('refunded');
     });
   });
 });

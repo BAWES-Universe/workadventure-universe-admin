@@ -2156,7 +2156,7 @@ model TaskReceipt {
   payerPersonId String?   @map("payer_person_id")
   // The sponsor's name when a universe pays
   payerName     String?   @map("payer_name") @db.VarChar(100)
-  // When the person tapped "Didn't work?"; one tap is one report
+  // Kept for old rows only: the "Didn't work?" button is gone and nothing writes this any more
   problemAt     DateTime? @map("problem_at")
   startedAt     DateTime  @default(now()) @map("started_at")
   endedAt       DateTime? @map("ended_at")
