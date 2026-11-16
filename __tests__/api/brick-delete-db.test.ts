@@ -11,6 +11,13 @@ import { randomUUID } from 'node:crypto';
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 jest.mock('@/lib/tool-signin', () => ({ syncToolSignInNotices: jest.fn(async () => undefined) }));
 
+/** Lets one test stand between a Brick being found and the list being read. */
+const mockListHook: { current: ((read: () => Promise<unknown>) => Promise<unknown>) | null } = { current: null };
+jest.mock('@/lib/brick-default', () => {
+  const actual = jest.requireActual('@/lib/brick-default');
+  return { ...actual, listBricks: (...args: unknown[]) => (mockListHook.current ? mockListHook.current(() => actual.listBricks(...args)) : actual.listBricks(...args)) };
+});
+
 import { prisma } from '@/lib/db';
 import { ensureDefaultBrick, listBricks, listDeletedBricks } from '@/lib/brick-default';
 import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
@@ -104,6 +111,34 @@ run('more Bricks, deleting one and Undo, in a real database', () => {
     expect(answers.filter((answer) => answer.ok && answer.made)).toHaveLength(1);
     expect(new Set(answers.map((answer) => (answer.ok ? answer.brick.id : null))).size).toBe(1);
     expect((await bricksForChat(brick!.id, hadi.uuid))!.map((card) => card.name.toLowerCase())).toEqual(['brick', 'music brick']);
+  });
+
+  it('makes one Brick when two asks both found the one of that name, and it was deleted before they listed', async () => {
+    const uma = await person('uma');
+    const { brick } = await ensureDefaultBrick(uma.id);
+    const there = await makeBrickFromChat(brick!.id, { userId: uma.uuid, name: 'Bolt' });
+    if (!there.ok) throw new Error('expected an answer');
+    let asked = 0;
+    let open: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    mockListHook.current = async (read) => {
+      asked += 1;
+      // Both asks have found it and are about to list: it is deleted now
+      if (asked === 2) {
+        await deleteBrick(there.brick.id, uma.id, NOW);
+        open();
+      }
+      await gate;
+      return read();
+    };
+    let answers: Awaited<ReturnType<typeof makeBrickFromChat>>[];
+    try {
+      answers = await Promise.all([makeBrickFromChat(brick!.id, { userId: uma.uuid, name: 'Bolt' }), makeBrickFromChat(brick!.id, { userId: uma.uuid, name: 'Bolt' })]);
+    } finally {
+      mockListHook.current = null;
+    }
+    expect(answers.every((answer) => answer.ok)).toBe(true);
+    expect((await bricksForChat(brick!.id, uma.uuid))!.map((card) => card.name)).toEqual(['Brick', 'Bolt']);
   });
 
   it('makes one from the person’s own chat with their Brick, opens the one of that name instead of making it twice, and makes none for anyone else', async () => {
