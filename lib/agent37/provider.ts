@@ -1,6 +1,6 @@
 import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
 import { readTurn } from '@/lib/agent37/turn-events';
-import { Agent37Client, Agent37Error, Agent37Unreached, type Instance } from '@/lib/agent37/client';
+import { Agent37Client, Agent37Error, Agent37Unreached, type Instance, type NetworkPolicy } from '@/lib/agent37/client';
 import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros } from '@/lib/agent37/rates';
 import { deleteSavedCopy, savedCopyOf, storeSavedCopy, type SavedCopyInfo } from '@/lib/agent37/saved-copies';
 import { ensureImage, imageReady, type ImageState } from '@/lib/agent37/image';
@@ -22,6 +22,15 @@ import { ensureImage, imageReady, type ImageState } from '@/lib/agent37/image';
 
 /** The image our CI builds from Agent37's `hermes-base` (build handoff v2, step 4). Hermes, a watchable screen, and Universe's commands. */
 export const BRICK_TEMPLATE = 'universe-brick';
+
+/**
+ * What a Brick's computer may reach (build handoff v2, section 4): the public web and nothing private. Agent37's `allow-all` is exactly that: it
+ * never reaches private ranges, other machines or the host (docs agents-api/instance-network, read 16 Nov), and it is the default. It is still
+ * written on every machine we make and checked each time one is made ready, so the rule is ours and a machine that drifted (or was made before
+ * this) is put right before a job runs on it. Agent37 has no deny list and domains only cover HTTPS on port 443, so "the public web except
+ * Composio's hosts" cannot be said to it: those hosts are kept away from the machine by the machine holding no key for them, not by this rule.
+ */
+export const BRICK_NETWORK: NetworkPolicy = 'allow-all';
 
 /** The screen's port in the image (Agent37's `hermes-vnc-desktop` recipe). */
 export const DESKTOP_PORT = 6901;
@@ -177,6 +186,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
         budget: { monthly_cap_micros: 0, credit_micros: 0 },
         auto_sleep: true,
         idle_timeout_seconds: 900,
+        network: BRICK_NETWORK,
       });
     } catch (error) {
       // No answer, or a gateway failure: the machine may exist. Look for it before saying it does not
@@ -206,6 +216,15 @@ export class Agent37ComputerProvider implements ComputerProvider {
   async ready(ref: string): Promise<void> {
     const state = this.image ? await this.image() : null;
     let instance = await this.client.getInstance(ref);
+    // Our network rule is in force before anything runs on the machine. Only a rule Agent37 says is already ours is left alone: one it does not
+    // say, or another one, is set again (asking again is safe). A machine whose reach cannot be set is not handed to a job.
+    if (instance.network !== BRICK_NETWORK) {
+      try {
+        await this.client.setNetwork(ref, BRICK_NETWORK);
+      } catch {
+        throw new Error('The computer is not ready (its network rule could not be set)');
+      }
+    }
     const behind = state && imageReady(state) && state.revision !== null && typeof instance.template_revision === 'number' && instance.template_revision < state.revision;
     if (behind) {
       await this.client.updateInstance(ref);

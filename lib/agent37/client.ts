@@ -28,6 +28,8 @@ export interface Instance {
   past_due?: boolean;
   /** The revision of the template this machine's image came from; behind the template's own revision means it can be updated. */
   template_revision?: number | null;
+  /** What the machine may reach on the internet, as Agent37 stored it (domains are lowercased, a bare address becomes /32). Not every answer carries it. */
+  network?: NetworkPolicy | null;
 }
 
 /** A cloud build of a template: `succeeded` carries the revision it published. */

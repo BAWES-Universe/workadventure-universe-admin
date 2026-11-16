@@ -1,5 +1,5 @@
 import { Agent37Error, Agent37Unreached, type Agent37Client, type Instance } from '@/lib/agent37/client';
-import { Agent37ComputerProvider, Agent37FundsLow, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
+import { Agent37ComputerProvider, Agent37FundsLow, BRICK_NETWORK, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
 import type { ImageState } from '@/lib/agent37/image';
 import { awakeMicrosPerMinute, dayOfRunningMicros, BRICK_SHAPE } from '@/lib/agent37/rates';
 
@@ -20,7 +20,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       calls.push('list');
       return [...instances.values()];
     },
-    async createInstance(input: { metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean }) {
+    async createInstance(input: { metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }) {
       calls.push('create');
       if (refuse.create) {
         const error = refuse.create;
@@ -101,13 +101,25 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       found.template_revision = revisionAfterUpdate;
       return { id, status: 'running', template_revision: revisionAfterUpdate };
     },
+    async setNetwork(id: string, network: unknown) {
+      calls.push(`network:${id}`);
+      networks.push({ id, network });
+      if (refuse.network) {
+        const error = refuse.network;
+        refuse.network = undefined;
+        throw error;
+      }
+      instances.get(id)!.network = network as Instance['network'];
+      return instances.get(id)!;
+    },
     async archive(url: string) {
       calls.push(`archive:${url}`);
       return { body: new ReadableStream() } as unknown as Response;
     },
   };
-  const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean }> = [];
-  return { client: client as unknown as Agent37Client, instances, calls, execs, created, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
+  const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }> = [];
+  const networks: Array<{ id: string; network: unknown }> = [];
+  return { client: client as unknown as Agent37Client, instances, calls, execs, created, networks, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
 }
 
 function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
@@ -133,6 +145,13 @@ describe('the Agent37 provider', () => {
     expect(w.created[0].budget).toEqual({ monthly_cap_micros: 0, credit_micros: 0 });
     expect(w.created[0].env).toBeUndefined();
     expect(w.created[0].auto_sleep).toBe(true);
+  });
+
+  it('makes a machine with the network rule written down: the public web, never a private range', async () => {
+    const w = world();
+    await provider(w).create('bot-1');
+    expect(w.created[0].network).toBe(BRICK_NETWORK);
+    expect(BRICK_NETWORK).toBe('allow-all');
   });
 
   it('adopts the machine a Brick already has instead of making a second one', async () => {
@@ -456,6 +475,43 @@ describe('getting a machine ready for a job', () => {
     expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-mark']);
     expect(w.execs[1].options).toMatchObject({ user: 'root' });
     expect(w.calls.filter((call) => call.startsWith('stop:'))).toEqual([]);
+  });
+
+  describe('the network rule when a machine is made ready', () => {
+    it('sets it on a machine whose rule is not the one we want (a machine made before the rule, or one that drifted), once, before anything runs on it', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.instances.get('m1')!.network = 'deny-all';
+      w.setExec(() => 'ready=1 restart=0\n');
+      await p.ready('m1');
+      expect(w.networks).toEqual([{ id: 'm1', network: BRICK_NETWORK }]);
+      expect(w.calls.indexOf('network:m1')).toBeLessThan(w.calls.indexOf('exec:m1:universe-up'));
+    });
+
+    it('sets it when Agent37 does not say what the rule is, and leaves it when it already is the one we want', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.setExec(() => 'ready=1 restart=0\n');
+      delete w.instances.get('m1')!.network;
+      await p.ready('m1');
+      expect(w.networks).toHaveLength(1);
+      w.instances.get('m1')!.network = BRICK_NETWORK;
+      await p.ready('m1');
+      expect(w.networks).toHaveLength(1);
+    });
+
+    it('is not ready when the rule cannot be set: a machine whose reach is not known is never handed to a job', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.setExec(() => 'ready=1 restart=0\n');
+      delete w.instances.get('m1')!.network;
+      w.refuse.network = new Agent37Error(400, 'invalid_request', 'no');
+      await expect(p.ready('m1')).rejects.toThrow('network rule');
+      expect(w.execs).toEqual([]);
+    });
   });
 
   it('is not ready when the note for the fence cannot be written: a computer that cannot be fenced is never handed to a job', async () => {
