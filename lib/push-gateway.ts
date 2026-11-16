@@ -130,7 +130,7 @@ const plainWords = (value: string) =>
     .trim();
 
 /** A sentence that stops at one of these is not over yet ("Dr. Lee approved it"). Sentence breaking alone does not know them. */
-const ABBREVIATION = /(?:^|[^\p{L}])(?:mr|mrs|ms|dr|prof|sr|jr|st|vs|e\.g|i\.e|no|inc|ltd|co)\.$/iu;
+const ABBREVIATION = /(?:^|[^\p{L}])(?:mr|mrs|ms|dr|prof|sr|jr|st|vs|e\.g|i\.e|inc|ltd)\.$/iu;
 /** A capital initial on its own ("J. Smith"); case matters here, so a lowercase letter before the stop does not count. */
 const INITIAL = /(?:^|[^\p{L}])\p{Lu}\.$/u;
 

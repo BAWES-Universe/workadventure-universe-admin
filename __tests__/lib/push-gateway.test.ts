@@ -210,6 +210,8 @@ describe('what a locked phone shows for a Brick that spoke by itself (game #2002
     expect(pushText(alone('J. Smith sent the form. Please check it.'), true, 'Brick', true).title).toBe('J. Smith sent the form');
     // A lowercase letter before the stop is the end of a sentence, not an initial
     expect(pushText(alone('The visa is option a. Please check it.'), true, 'Brick', true)).toEqual({ title: 'The visa is option a', body: 'Brick: Please check it.' });
+    // Everyday words that end a sentence are not abbreviations
+    expect(pushText(alone('The answer from the office is no. Please check it.'), true, 'Brick', true).title).toBe('The answer from the office is no');
     // An Arabic question mark and a full stop in Chinese end one too
     expect(pushText(alone('هل تمت الموافقة على التأشيرة؟ تم الأمر في المحادثة.'), true, 'Brick', true)).toEqual({
       title: 'هل تمت الموافقة على التأشيرة',
