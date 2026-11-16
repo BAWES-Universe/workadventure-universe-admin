@@ -2,7 +2,7 @@ import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, Sav
 import { readTurn } from '@/lib/agent37/turn-events';
 import { Agent37Client, Agent37Error, Agent37Unreached, type Instance } from '@/lib/agent37/client';
 import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros } from '@/lib/agent37/rates';
-import { savedCopyOf, storeSavedCopy, type SavedCopyInfo } from '@/lib/agent37/saved-copies';
+import { deleteSavedCopy, savedCopyOf, storeSavedCopy, type SavedCopyInfo } from '@/lib/agent37/saved-copies';
 import { ensureImage, imageReady, type ImageState } from '@/lib/agent37/image';
 
 /**
@@ -60,7 +60,7 @@ export interface ProviderOptions {
   /** Where the image stands (its build). Without it the image is taken to be there (tests). */
   image?: () => Promise<ImageState | null>;
   /** For tests: where the saved copy goes and what is saved. */
-  copies?: { latest: (botId: string) => Promise<SavedCopyInfo | null>; store: (botId: string, archive: ReadableStream<Uint8Array>) => Promise<SavedCopyInfo> };
+  copies?: { latest: (botId: string) => Promise<SavedCopyInfo | null>; store: (botId: string, archive: ReadableStream<Uint8Array>) => Promise<SavedCopyInfo>; remove?: (botId: string) => Promise<void> };
 }
 
 const creationId = (botId: string) => `brick:${botId}`;
@@ -338,6 +338,10 @@ export class Agent37ComputerProvider implements ComputerProvider {
     if (instance.status !== 'running') return null;
     const link = await this.client.signedUrl(ref, DESKTOP_PORT, WATCH_LINK_SECONDS);
     return { url: link.url, expiresAt: new Date(this.now() + WATCH_LINK_SECONDS * 1000) };
+  }
+
+  async deleteSavedCopy(botId: string): Promise<void> {
+    await (this.copies.remove ?? deleteSavedCopy)(botId);
   }
 
   async saveFiles(ref: string): Promise<SavedCopy> {

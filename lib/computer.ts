@@ -1516,3 +1516,26 @@ export async function removeMachineBeforeDelete(botId: string, now: Date = new D
   }
   return true;
 }
+
+/**
+ * When a Brick is removed for good, so is what is kept of its computer in our own storage: the saved copy of its files, which the pool
+ * counts as kept storage (audit F4). Asked after the machine is gone and before the Brick's rows are cleared: a copy that could not be
+ * deleted (its provider is off or changed, or the bucket refused) leaves the Brick for the next sweep, like a machine that could not be
+ * removed, so nothing is dropped quietly. True when nothing is in the way, including a Brick that never had a copy.
+ */
+export async function removeSavedCopyBeforeDelete(botId: string): Promise<boolean> {
+  const row = await prisma.brickComputer.findUnique({ where: { botId } });
+  if (!row || (row.filesSavedAt === null && row.filesBytes === BigInt(0))) return true;
+  const provider = providerFor(row);
+  if (!provider?.deleteSavedCopy) return false;
+  try {
+    await provider.deleteSavedCopy(botId);
+  } catch (error) {
+    console.error('[Computer] Could not delete a saved copy:', error instanceof Error ? error.message : 'unknown');
+    return false;
+  }
+  await prisma.brickComputer.update({ where: { botId }, data: { filesBytes: BigInt(0), filesSavedAt: null } });
+  // Nothing of it is kept now: the level in the books goes to 0
+  await recordKeptBytes({ botId, reason: 'gone', machineBytes: null, copyBytes: 0 });
+  return true;
+}

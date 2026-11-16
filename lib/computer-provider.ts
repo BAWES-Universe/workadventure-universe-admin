@@ -88,6 +88,8 @@ export interface ComputerProvider {
   watch(ref: string): Promise<WatchSession | null>;
   /** Saves a copy of its home folder and says how big it is. */
   saveFiles(ref: string): Promise<SavedCopy>;
+  /** Deletes the saved copy of a Brick's folder from our own storage for good (a Brick that was deleted keeps nothing). A copy that is not there is no error. Absent: this provider keeps no copy of its own. */
+  deleteSavedCopy?(botId: string): Promise<void>;
   /**
    * Runs a shell command on the machine. Only for a machine a job holds: a sleeping machine is woken by it. A non-zero exit is an
    * answer, not an error; a command that could not be asked at all throws.
@@ -213,6 +215,14 @@ export class FakeComputerProvider implements ComputerProvider {
     // Only a machine that is awake has a screen: looking never wakes it
     if (!this.awake_.has(ref)) return null;
     return { url: `https://computer.pretend.invalid/screen/${encodeURIComponent(ref)}`, expiresAt: new Date(Date.now() + 5 * 60_000) };
+  }
+
+  /** Make the deleting of a saved copy fail while this is on. */
+  failDeleteCopy = false;
+
+  async deleteSavedCopy(botId: string): Promise<void> {
+    this.note('deleteSavedCopy', botId);
+    if (this.failDeleteCopy) throw new Error('The pretend provider failed on deleteSavedCopy');
   }
 
   async saveFiles(ref: string): Promise<SavedCopy> {

@@ -3,6 +3,7 @@ import { resolveUsagePerson } from '@/lib/usage-person';
 import { ReplyAllowanceError, windowStart } from '@/lib/reply-limits';
 import { servedVoiceLimits } from '@/lib/voice-limits';
 import { runningExtra, type RunningExtra } from '@/lib/meter-grants';
+import { checkSpeechCap } from '@/lib/speech-cap';
 
 /**
  * Voice replies inside the Universe AI allowance (game #1669), decided by Khalid 29 Oct 2026: a spoken reply comes out of the
@@ -85,7 +86,11 @@ export async function checkVoiceAllowance(
   if (!bot) throw new ReplyAllowanceError('Bot not found', 404);
 
   const userId = typeof input.userId === 'string' && input.userId ? input.userId.slice(0, 255) : null;
-  if (!userId) return { allowed: true };
+  if (!userId) {
+    // Nobody to count, but the month's speech for everyone together still has its stop (lib/speech-cap.ts)
+    const stop = await checkSpeechCap({ personId: null, seconds: (await servedVoiceLimits()).limits.replySeconds }, now);
+    return stop ? { allowed: false, resetsAt: stop.resetsAt } : { allowed: true };
+  }
 
   const person = await resolveUsagePerson(userId, input.isGuest);
   const guest = !person.personId;
@@ -112,6 +117,9 @@ export async function checkVoiceAllowance(
     // is taken from `used` as it stands
     const { byVoice, byText } = places(served, guest, spoken, used, extra);
     if (byVoice < 1 || byText < 0) return { allowed: false, resetsAt };
+    // The month's spending stop on the speech Universe AI pays for, asked with the longest a reply may be, before it is spoken (lib/speech-cap.ts)
+    const stop = await checkSpeechCap({ personId: person.personId, seconds: served.limits.replySeconds }, now, tx);
+    if (stop) return { allowed: false, resetsAt: stop.resetsAt };
     await tx.voiceReplyUse.create({ data: { botId, turnId, personKey, createdAt: now } });
     const left = Math.min(byVoice - 1, byText);
     return withLeft(Number.isFinite(left) ? Math.max(0, Math.floor(left)) : null, resetsAt);

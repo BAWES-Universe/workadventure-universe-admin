@@ -44,6 +44,7 @@ import {
   liftWindDown,
   planEffect,
   removeMachineBeforeDelete,
+  removeSavedCopyBeforeDelete,
   renewJob,
   reportProgress,
   requestHandover,
@@ -1479,6 +1480,49 @@ run('a Brick’s computer, in a real database', () => {
       const calls = provider.calls.length;
       expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
       expect(provider.calls.length).toBe(calls);
+    });
+
+    it('deletes the saved copy of the files when the Brick is removed for good, and the level of what is kept goes to 0 (the copy is in our own storage)', async () => {
+      const sara = await person('sara');
+      provider.disk = 4_000_000_000;
+      provider.filesBytes = 1_000_000_000;
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      await finishJob(job.job.id, 'done', minutes(1));
+      expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
+      const newest = async () => Number((await prisma.meterEvent.findFirstOrThrow({ where: { botId: sara.brickId, kind: 'stored_bytes' }, orderBy: [{ occurredAt: 'desc' }, { recordedAt: 'desc' }] })).quantity);
+      expect(await newest()).toBe(1_000_000_000);
+      // A copy that cannot be deleted leaves everything as it was, to be tried again
+      provider.failDeleteCopy = true;
+      expect(await removeSavedCopyBeforeDelete(sara.brickId)).toBe(false);
+      expect(Number((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).filesBytes)).toBe(1_000_000_000);
+      expect(await newest()).toBe(1_000_000_000);
+      provider.failDeleteCopy = false;
+      expect(await removeSavedCopyBeforeDelete(sara.brickId)).toBe(true);
+      expect(provider.calls.filter((call) => call.name === 'deleteSavedCopy')).toEqual([expect.objectContaining({ ref: sara.brickId }), expect.objectContaining({ ref: sara.brickId })]);
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ filesBytes: BigInt(0), filesSavedAt: null });
+      expect(await newest()).toBe(0);
+      // Asked again there is nothing to delete and nothing is asked of the provider
+      const calls = provider.calls.length;
+      expect(await removeSavedCopyBeforeDelete(sara.brickId)).toBe(true);
+      expect(provider.calls.length).toBe(calls);
+    });
+
+    it('a Brick whose saved copy cannot be deleted waits for the next sweep, and is removed once it can', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      await finishJob(job.job.id, 'done', minutes(1));
+      await deleteBrick(sara.brickId, sara.id, minutes(2));
+      await prisma.bot.update({ where: { id: sara.brickId }, data: { goneAt: minutes(3) } });
+      provider.failDeleteCopy = true;
+      expect(await removeGoneBricks(minutes(10), sara.id)).toEqual([]);
+      expect(await prisma.bot.count({ where: { id: sara.brickId } })).toBe(1);
+      provider.failDeleteCopy = false;
+      expect(await removeGoneBricks(minutes(10), sara.id)).toEqual([sara.brickId]);
+      expect(await prisma.bot.count({ where: { id: sara.brickId } })).toBe(0);
     });
 
     it('writes what is kept for the machine (its disk, and its saved copy) to the books when it changes, so the pool counts it (audit F4)', async () => {

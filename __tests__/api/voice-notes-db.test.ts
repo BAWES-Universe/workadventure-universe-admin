@@ -54,6 +54,7 @@ jest.mock('@/lib/voice-note-hearing', () => {
 import * as Sentry from '@sentry/nextjs';
 import { prisma } from '@/lib/db';
 import { saveVoiceLimits } from '@/lib/voice-limits';
+import { saveMeterSettings } from '@/lib/meter';
 import { leaseVoiceNoteStage, recordVoiceNote, reserveVoiceNote, sweepStaleReservations, type Reservation } from '@/lib/voice-note-turns';
 import { addVoiceNoteCleanup, claimVoiceNoteCleanups, settleVoiceNoteCleanup } from '@/lib/voice-note-cleanups';
 
@@ -64,6 +65,7 @@ const people: string[] = [];
 const universes: string[] = [];
 const providers: string[] = [];
 let makerId = '';
+let meterBefore: { value: unknown } | null = null;
 let botId = '';
 let roomUrl = '';
 let settingBefore: { value: unknown } | null = null;
@@ -111,9 +113,14 @@ run('voice notes for every bot, in a real database', () => {
     settingBefore = await prisma.appSetting.findUnique({ where: { key: 'voice-limits' }, select: { value: true } });
     // Small numbers, so each case can fill them. Minutes: 3 for a person, 3 for a bot's day, 2 for a guest, 3 for a universe
     await saveVoiceLimits({ noteMinutesPerPerson: 3, listenMinutesPerDay: 60, guestNoteMinutesPerGuest: 2, guestNoteMinutesPerUniverse: 3, notesAtOnce: 1_000, noteMinutesPerHour: 100_000 }, makerId);
+    // The month's speech Limits are wide open, so only the per-person and per-bot numbers above stop a note; the case on the speech Limits sets its own
+    meterBefore = await prisma.appSetting.findUnique({ where: { key: 'meter' }, select: { value: true } });
+    await saveMeterSettings({ speechCeilingSeconds: 1_000_000_000, speechMemberCeilingSeconds: 100_000_000 }, makerId);
   });
 
   afterAll(async () => {
+    if (meterBefore) await prisma.appSetting.update({ where: { key: 'meter' }, data: { value: meterBefore.value as never } });
+    else await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
     if (settingBefore) await prisma.appSetting.update({ where: { key: 'voice-limits' }, data: { value: settingBefore.value as never } });
     else await prisma.appSetting.deleteMany({ where: { key: 'voice-limits' } });
     const bots = (await prisma.bot.findMany({ where: { createdById: makerId }, select: { id: true } })).map((row) => row.id);
@@ -135,6 +142,35 @@ run('voice notes for every bot, in a real database', () => {
       expect(new Date((refused as { resetsAt: string }).resetsAt).getTime()).toBeGreaterThan(Date.now());
       // Another person still has theirs
       expect(await reserve(`omar-${randomUUID()}`)).toMatchObject({ ok: true });
+    });
+
+    it('holds a note back whole, before it is heard, when the month\'s speech Universe AI pays for would pass a Limit (seconds, all people and one person)', async () => {
+      const before = await prisma.appSetting.findUnique({ where: { key: 'meter' } });
+      const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1));
+      const spent = Number((await prisma.meterEvent.aggregate({ where: { kind: 'speech', payerKind: 'universe', occurredAt: { gte: monthStart } }, _sum: { quantity: true } }))._sum.quantity ?? 0);
+      const speech = (id: string, seconds: number, personId: string | null) =>
+        prisma.meterEvent.create({
+          data: { eventId: `speech:test:${id}`, kind: 'speech', pool: 'chat', occurredAt: new Date(), personKey: personId ? `person:${personId}` : 'unknown', personId, payerKind: 'universe', quantity: BigInt(seconds), unit: 'second', basis: 'unknown', brick: true },
+        });
+      try {
+        // Room for one more 60 s note in the month, everyone together
+        await saveMeterSettings({ speechCeilingSeconds: spent + 100, speechMemberCeilingSeconds: 1_000_000 }, makerId);
+        const first = await reserve(`sam-${randomUUID()}`);
+        expect(first).toMatchObject({ ok: true });
+        await speech(randomUUID(), 60, null);
+        const held = await reserve(`sam-${randomUUID()}`);
+        expect(held).toMatchObject({ ok: false, reason: 'note-minutes', limit: 'universe' });
+        expect(new Date((held as { resetsAt: string }).resetsAt).getTime()).toBe(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 1));
+        // Empty stops it, 0 pauses it
+        await saveMeterSettings({ speechCeilingSeconds: null }, makerId);
+        expect(await reserve(`sam-${randomUUID()}`)).toMatchObject({ ok: false, reason: 'note-minutes' });
+        await saveMeterSettings({ speechCeilingSeconds: 0 }, makerId);
+        expect(await reserve(`sam-${randomUUID()}`)).toMatchObject({ ok: false, reason: 'note-minutes' });
+      } finally {
+        await prisma.meterEvent.deleteMany({ where: { eventId: { startsWith: 'speech:test:' } } });
+        if (before) await prisma.appSetting.update({ where: { key: 'meter' }, data: { value: before.value as never } });
+        else await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
+      }
     });
 
     it('never passes a person\'s minutes when many notes come at the same moment', async () => {
