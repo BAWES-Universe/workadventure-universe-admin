@@ -701,8 +701,13 @@ describe("someone else's Brick: its chats, memory and emotions are its owner's, 
     expect(db.botsMemory.findMany).not.toHaveBeenCalled();
   });
 
-  it('a super admin reading a room bot, and the admin token reading a Brick, are not shut out', async () => {
+  it('a super admin reading a room bot, a super admin reading their own Brick, and the admin token reading a Brick, are not shut out', async () => {
     root();
+    // A room bot (it has a room): not a Brick, so not someone's to keep from a super admin
+    db.bot.findUnique.mockImplementation(async () => ({ roomId: 'room-1', ownerId: 'u-sara', deletedAt: null, hideConversations: null, room: null }));
+    expect((await call(getConversations)).status).toBe(200);
+    // A Brick the super admin owns
+    brickOf('u-root');
     expect((await call(getConversations)).status).toBe(200);
     session.mockResolvedValue(null);
     brickOf('u-sara');

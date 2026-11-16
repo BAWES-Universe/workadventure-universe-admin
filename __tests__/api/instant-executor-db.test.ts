@@ -292,9 +292,11 @@ run('the bounded Instant executor, in a real database', () => {
       const p = fakeProvider();
       const f = fakeFunds(1_000_000);
       // A real database refusal on the meter's table: the failed statement would abort the whole transaction, settlement included
-      await prisma.$executeRawUnsafe(`ALTER TABLE meter_events ADD CONSTRAINT instant_event_refused CHECK (event_id NOT LIKE 'instant:%') NOT VALID`);
+      // (dropped first, in case an earlier run stopped before its cleanup; the add is inside the try so the cleanup always runs)
+      await prisma.$executeRawUnsafe('ALTER TABLE meter_events DROP CONSTRAINT IF EXISTS instant_event_refused');
       const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
       try {
+        await prisma.$executeRawUnsafe(`ALTER TABLE meter_events ADD CONSTRAINT instant_event_refused CHECK (event_id NOT LIKE 'instant:%') NOT VALID`);
         const outcome = await runInstant(ask(), { adapter: p.adapter, funds: f.funds });
         expect(outcome).toMatchObject({ status: 'done', ok: true, chargedMicros: 7_000 });
         const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
@@ -304,7 +306,7 @@ run('the bounded Instant executor, in a real database', () => {
         expect(quiet).toHaveBeenCalledWith('[Instant] Could not write the meter event:', expect.any(String));
       } finally {
         quiet.mockRestore();
-        await prisma.$executeRawUnsafe('ALTER TABLE meter_events DROP CONSTRAINT instant_event_refused');
+        await prisma.$executeRawUnsafe('ALTER TABLE meter_events DROP CONSTRAINT IF EXISTS instant_event_refused');
       }
     });
 

@@ -246,8 +246,9 @@ export async function botReadDenied(
 
 /**
  * Guard for routes that return what people said to a bot or what the bot remembers about them (transcripts, memory,
- * emotions): super admins and the admin token only, and never someone else's Brick (game #1992): its chats, memory and
- * emotions are its owner's, a super admin included, the same rule viewerManagesBot keeps for its figures. Managers of
+ * emotions): super admins and the admin token only. Never someone else's Brick (game #1992), except for the admin token (the
+ * bot server): a Brick's chats, memory and emotions are its owner's, a super admin included, the same rule viewerManagesBot
+ * keeps for its figures. Managers of
  * the bot's room read counts through botReadDenied, never the words. Same answers as botReadDenied: 401 signed out,
  * 403 otherwise.
  */
