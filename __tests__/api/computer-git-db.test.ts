@@ -29,6 +29,7 @@ import { prepareJob } from '@/lib/computer-broker';
 import { verifyJobToken } from '@/lib/computer-token';
 import { jobGitAccess } from '@/lib/github/git-login';
 import { GET as gitGet, POST as gitPost } from '@/app/api/git/[...path]/route';
+import { POST as openPull } from '@/app/api/computer/github/pull/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const hasHttpBackend = (() => {
@@ -53,6 +54,8 @@ let port = 0;
 let server: http.Server;
 /** What "GitHub" was asked: the address and the sign-in it was given. */
 let seen: { url: string; authorization: string | undefined }[] = [];
+/** The pull requests "GitHub" was asked to open. */
+let pulls: Record<string, unknown>[] = [];
 
 async function person(name: string) {
   const unique = `${name}-${tag}-${++made}`;
@@ -92,6 +95,11 @@ function pretendGitHub(root: string) {
       const isAncestor = (a: string, b: string) => spawnSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: repo }).status === 0;
       const status = compare[2] === compare[3] ? 'identical' : isAncestor(compare[2], compare[3]) ? 'ahead' : 'diverged';
       return new Response(JSON.stringify({ status }), { status: 200 });
+    }
+    if (parsed.host === 'api.github.com' && parsed.pathname === '/repos/acme/tools' && (init.method ?? 'GET') === 'GET') return new Response(JSON.stringify({ default_branch: 'main' }), { status: 200 });
+    if (parsed.host === 'api.github.com' && parsed.pathname === '/repos/acme/tools/pulls' && init.method === 'POST') {
+      pulls.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify({ number: 3, html_url: 'https://github.com/acme/tools/pull/3' }), { status: 201 });
     }
     if (parsed.host !== 'github.com') return new Response('{}', { status: 404 });
     const env = {
@@ -139,7 +147,7 @@ function startOrbit(): Promise<http.Server> {
       ...(req.method === 'POST' ? { body: Buffer.concat(chunks), duplex: 'half' } : {}),
     } as ConstructorParameters<typeof NextRequest>[1]);
     const path = url.pathname.replace(/^\/api\/git\//, '').split('/');
-    const answer = await (req.method === 'POST' ? gitPost : gitGet)(request, { params: Promise.resolve({ path }) });
+    const answer = url.pathname === '/api/computer/github/pull' ? await openPull(request) : await (req.method === 'POST' ? gitPost : gitGet)(request, { params: Promise.resolve({ path }) });
     res.writeHead(answer.status, Object.fromEntries(answer.headers));
     res.end(Buffer.from(await answer.arrayBuffer()));
   });
@@ -169,10 +177,13 @@ async function readyComputer(jobId: string, home: string) {
   expect((await sh(home, command)).status).toBe(0);
   const config = join(home, '.universe', 'gitconfig');
   if (existsSync(config)) writeFileSync(config, readFileSync(config, 'utf8').split(ORBIT).join(`http://127.0.0.1:${port}`));
+  const script = join(home, '.universe', 'open-pr');
+  if (existsSync(script)) writeFileSync(script, readFileSync(script, 'utf8').split(ORBIT).join(`http://127.0.0.1:${port}`));
   return { done, command };
 }
 
 const all = (dir: string): string[] => readdirSync(dir).flatMap((name) => (statSync(join(dir, name)).isDirectory() ? all(join(dir, name)) : [join(dir, name)]));
+const openPr = (home: string, ...args: string[]) => runAsync('python3', [join(home, '.universe', 'open-pr'), ...args], { env: { ...process.env, HOME: home } });
 const bare = () => join(work, 'github', 'acme', 'tools.git');
 const branches = () => execFileSync('git', ['branch', '--list'], { cwd: bare(), encoding: 'utf8' });
 
@@ -198,6 +209,7 @@ const branches = () => execFileSync('git', ['branch', '--list'], { cwd: bare(), 
     setComputerProviderForTests(fake);
     global.fetch = pretendGitHub(join(work, 'github'));
     seen = [];
+    pulls = [];
     await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
   });
   afterEach(async () => {
@@ -379,6 +391,49 @@ const branches = () => execFileSync('git', ['branch', '--list'], { cwd: bare(), 
       expect(JSON.stringify(fake.commands)).not.toMatch(/ghu_owner_token/);
     } finally {
       rmSync(home, { recursive: true, force: true });
+    }
+  });
+  it('after pushing a branch, the computer opens the pull request as the owner; a job that only looks, and a job the person took over, cannot', async () => {
+    const sara = await saraWithGitHub();
+    const jobId = await running(sara);
+    const home = mkdtempSync(join(tmpdir(), 'brick-home-'));
+    try {
+      await readyComputer(jobId, home);
+      const clone = join(home, 'tools');
+      expect((await git(home, home, 'clone', '-q', 'https://github.com/acme/tools', clone)).status).toBe(0);
+      writeFileSync(join(clone, 'e.txt'), 'e\n');
+      await git(clone, home, 'add', '.');
+      await git(clone, home, 'commit', '-qm', 'add e');
+      expect((await git(clone, home, 'push', '-q', 'origin', 'HEAD:refs/heads/for-pr')).status).toBe(0);
+      const opened = await openPr(home, 'acme/tools', 'for-pr', 'Add e', 'Because e.');
+      expect(opened).toMatchObject({ status: 0, stdout: 'https://github.com/acme/tools/pull/3\n' });
+      // as the owner (her token, put on by Orbit), from the branch, onto the repository's own default branch
+      expect(pulls).toEqual([{ head: 'for-pr', base: 'main', title: 'Add e', body: 'Because e.', draft: false }]);
+      expect(seen.some((call) => call.url.endsWith('/repos/acme/tools/pulls') && call.authorization === 'Bearer ghu_owner_token')).toBe(true);
+      // Only a pull request, and only with a good key
+      const bad = await openPr(home, 'not a repo', 'for-pr', 'x');
+      expect(bad.status).not.toBe(0);
+      expect(pulls).toHaveLength(1);
+      await takeOver(sara.brickId, sara.id, NOW);
+      const afterTakeOver = await openPr(home, 'acme/tools', 'for-pr', 'Again');
+      expect(afterTakeOver.status).not.toBe(0);
+      expect(afterTakeOver.stderr).toMatch(/job key from Universe is needed/);
+      expect(pulls).toHaveLength(1);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+
+    const looker = await saraWithGitHub();
+    const lookJob = await running(looker, false);
+    const lookHome = mkdtempSync(join(tmpdir(), 'brick-home-'));
+    try {
+      await readyComputer(lookJob, lookHome);
+      const refused = await openPr(lookHome, 'acme/tools', 'for-pr', 'Nope');
+      expect(refused.status).not.toBe(0);
+      expect(refused.stderr).toMatch(/may only read from GitHub/);
+      expect(pulls).toHaveLength(1);
+    } finally {
+      rmSync(lookHome, { recursive: true, force: true });
     }
   });
 });

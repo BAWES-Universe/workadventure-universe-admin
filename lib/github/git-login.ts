@@ -79,6 +79,7 @@ export function relayBase(): string | null {
  * into place, with nothing but the machine's own user able to read them:
  *   git-token       the job key (what the credential helper hands to git)
  *   git-credential  the credential helper: git asks it for the password, it prints the key
+ *   open-pr         opens a pull request for a pushed branch through Orbit (POST /api/computer/github/pull, same key)
  *   gitconfig       who commits, the relay as the way to github.com (`https://github.com/` and `git@github.com:` both go through it), the helper
  * and makes `~/.gitconfig` include that file. Nothing here is allowed to fail the key's own write: every step is best-effort.
  * Returns null when the pieces are not plain enough to put in a command.
@@ -86,7 +87,40 @@ export function relayBase(): string | null {
 export function gitLoginCommand(token: string, base: string, who: { name: string; email: string }): string | null {
   if (!SAFE_TOKEN.test(token) || !SAFE_ADDRESS.test(base) || !SAFE_NAME.test(who.name) || !SAFE_EMAIL.test(who.email)) return null;
   const origin = new URL(base).origin;
+  const pullAddress = `${origin}/api/computer/github/pull`;
   const credential = ['#!/bin/sh', '[ "$1" = get ] || exit 0', 'cat > /dev/null', 'echo username=x-universe-job', 'echo "password=$(cat "$HOME/.universe/git-token")"', ''].join('\n');
+  // `open-pr`: opens the pull request for a pushed branch through Orbit (the owner's GitHub token stays in Orbit). Python is in the image.
+  // Written with double quotes only: the whole file sits inside single quotes in the command.
+  const openPr = [
+    '#!/usr/bin/env python3',
+    '# Usage: python3 ~/.universe/open-pr OWNER/REPO BRANCH "Title" ["Body"] ["BASE-BRANCH"]',
+    'import base64, json, os, sys, urllib.error, urllib.request',
+    'if len(sys.argv) < 4:',
+    '    sys.exit("Usage: open-pr OWNER/REPO BRANCH TITLE [BODY] [BASE-BRANCH]")',
+    'repo, head, title = sys.argv[1:4]',
+    'payload = {"repo": repo, "head": head, "title": title}',
+    'if len(sys.argv) > 4 and sys.argv[4]:',
+    '    payload["body"] = sys.argv[4]',
+    'if len(sys.argv) > 5 and sys.argv[5]:',
+    '    payload["base"] = sys.argv[5]',
+    'token = open(os.path.expanduser("~/.universe/git-token")).read().strip()',
+    'login = base64.b64encode(("x-universe-job:" + token).encode()).decode()',
+    `request = urllib.request.Request("${pullAddress}", data=json.dumps(payload).encode(), method="POST", headers={"Authorization": "Basic " + login, "Content-Type": "application/json"})`,
+    'try:',
+    '    answer = json.load(urllib.request.urlopen(request, timeout=60))',
+    'except urllib.error.HTTPError as error:',
+    '    try:',
+    '        answer = json.load(error)',
+    '    except Exception:',
+    '        answer = {"error": "Orbit answered " + str(error.code)}',
+    'except Exception:',
+    '    sys.exit("Orbit could not be reached just now. Try again in a minute.")',
+    'if answer.get("ok"):',
+    '    print(answer.get("url"))',
+    'else:',
+    '    sys.exit("Pull request not opened: " + str(answer.get("error")))',
+    '',
+  ].join('\n');
   const config = [
     '[user]',
     `    name = ${who.name}`,
@@ -102,10 +136,11 @@ export function gitLoginCommand(token: string, base: string, who: { name: string
   return (
     `{ printf '%s' '${token}' > "$d/git-token.new" && mv "$d/git-token.new" "$d/git-token" && ` +
     `printf '%s' '${credential}' > "$d/git-credential.new" && mv "$d/git-credential.new" "$d/git-credential" && ` +
+    `printf '%s' '${openPr}' > "$d/open-pr.new" && chmod 700 "$d/open-pr.new" && mv "$d/open-pr.new" "$d/open-pr" && ` +
     `printf '%s' '${config}' > "$d/gitconfig.new" && mv "$d/gitconfig.new" "$d/gitconfig" && ` +
     `{ git config --global --get-all include.path 2>/dev/null | grep -qxF "$d/gitconfig" || git config --global --add include.path "$d/gitconfig"; }; } >/dev/null 2>&1 || true`
   );
 }
 
 /** No git login for this job: whatever an earlier job left is removed (the key is already revoked, this is tidiness). Best-effort. */
-export const NO_GIT_COMMAND = `rm -f "$d/git-token" "$d/git-credential" "$d/gitconfig" >/dev/null 2>&1 || true`;
+export const NO_GIT_COMMAND = `rm -f "$d/git-token" "$d/git-credential" "$d/gitconfig" "$d/open-pr" >/dev/null 2>&1 || true`;
