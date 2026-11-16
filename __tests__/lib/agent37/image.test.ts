@@ -71,7 +71,7 @@ describe('what is in the image', () => {
 
   python('has scripts that are well formed', () => {
     const dir = write();
-    for (const name of ['universe-up', 'universe-supervise', 'universe-clean', 'universe-files']) expect(spawnSync('sh', ['-n', join(dir, name)]).status).toBe(0);
+    for (const name of ['universe-up', 'universe-supervise', 'universe-clean', 'universe-files', 'universe-mark']) expect(spawnSync('sh', ['-n', join(dir, name)]).status).toBe(0);
     for (const name of ['universe-proxy', 'universe-fence']) {
       const compiled = spawnSync('python3', ['-c', `import ast,sys;ast.parse(open(sys.argv[1]).read())`, join(dir, name)]);
       expect(compiled.status).toBe(0);
@@ -279,9 +279,62 @@ describe('the take-over fence', () => {
   (isolated ? it : it.skip)('stops what the agent started, keeps the gateway and the browser, and proves none is left', () => {
     const dir = write();
     mkdirSync(join(dir, 'bin'), { recursive: true });
+    // Two real libraries the agent could preload into a short wait. Each clears LD_PRELOAD from its own environment, then leaves a note
+    // that it ran (so the test knows the code really loaded). The second also copies its code into nameless memory and unmaps itself.
+    mkdirSync(join(dir, 'agent'), { recursive: true });
+    const cleared = `
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <string.h>
+#include <unistd.h>
+extern char **environ;
+static void clear_and_note(const char *note) {
+  for (char **p = environ; *p; p++) if (!strncmp(*p, "LD_", 3)) memset(*p, 0, strlen(*p));
+  int fd = open(note, O_WRONLY | O_CREAT, 0644);
+  if (fd >= 0) { write(fd, "ran", 3); close(fd); }
+}
+`;
+    writeFileSync(join(dir, 'agent', 'wipe.c'), `${cleared}
+#include <stdlib.h>
+__attribute__((constructor)) static void w(void) { const char *note = getenv("NOTE_FILE"); if (note) clear_and_note(note); }
+`);
+    writeFileSync(
+      join(dir, 'agent', 'hide.c'),
+      `${cleared}
+#include <stdint.h>
+#include <stdio.h>
+#include <sys/mman.h>
+__attribute__((naked, noinline)) static void stub(void *ranges, long count) {
+  __asm__ volatile(
+    "mov %rdi,%r8\\n mov %rsi,%r9\\n"
+    "1: test %r9,%r9\\n jz 2f\\n mov (%r8),%rdi\\n mov 8(%r8),%rsi\\n mov $11,%eax\\n syscall\\n add $16,%r8\\n dec %r9\\n jmp 1b\\n"
+    "2: mov $34,%eax\\n syscall\\n jmp 2b\\n");
+}
+__attribute__((constructor)) static void h(void) {
+  uintptr_t ranges[64][2]; long count = 0; char line[4096];
+  FILE *f = fopen("/proc/self/maps", "r");
+  if (!f) _exit(101);
+  while (fgets(line, sizeof(line), f)) {
+    unsigned long a, b;
+    if (strstr(line, "hide.so") && count < 64 && sscanf(line, "%lx-%lx", &a, &b) == 2) { ranges[count][0] = a; ranges[count][1] = b - a; count++; }
+  }
+  fclose(f);
+  void *copy = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (copy == MAP_FAILED) _exit(103);
+  memcpy(copy, (void *)stub, 256);
+  if (mprotect(copy, 4096, PROT_READ | PROT_EXEC)) _exit(104);
+  clear_and_note("${dir}/agent/hide.ran");
+  ((void (*)(void *, long))copy)(ranges, count);
+  _exit(105);
+}
+`,
+    );
     const scenario = `
 export HOME=${dir}/home
-mkdir -p $HOME ${dir}/agent
+mkdir -p $HOME ${dir}/agent /run/universe
+# the folder of the note is a private one here, so the real machine's is never touched
+mount -t tmpfs tmpfs /run/universe
+echo "unmarked: $(python3 ${dir}/universe-fence --check; echo rc=$?)"
 cp /bin/sh ${dir}/bin/chromium
 python3 -c "
 import socket, subprocess, time
@@ -290,8 +343,15 @@ subprocess.Popen(['sleep', '300'])
 time.sleep(300)" &
 GW=$!
 # the real browser: a program root owns, started with the supervisor's own profile and debugging address
-${dir}/bin/chromium -c 'sleep 300; true' --user-data-dir=$HOME/.config/universe-chromium --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 &
+${dir}/bin/chromium -c 'sleep 2; sleep 300; true' --user-data-dir=$HOME/.config/universe-chromium --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 &
 BR=$!
+# the computer's own parts: running before the note is written, under any name
+sh -c 'sleep 306' &
+OWN=$!
+sleep 1
+echo "mark: $(sh ${dir}/universe-mark)"
+echo "mark again: $(sh ${dir}/universe-mark)"
+sleep 1
 # what the agent can start: the same words from a program it owns, a script called chromium, a real program with other arguments
 cp /bin/sh ${dir}/agent/chromium && chown 65534:65534 ${dir}/agent/chromium
 ${dir}/agent/chromium -c 'sleep 303; true' --user-data-dir=$HOME/.config/universe-chromium --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 &
@@ -302,26 +362,97 @@ A2=$!
 cp /bin/sh ${dir}/bin/x11vnc
 ${dir}/bin/x11vnc -c 'sleep 305; true' -display :99 -rfbport 5901 &
 A3=$!
+# the same kind of thing, started after the note: the agent's
+sh -c 'sleep 307' &
+LATE=$!
 setsid sleep 301 </dev/null >/dev/null 2>&1 &
+# a short wait is what the computer's own start-up loop runs, and it stops the computer when one is killed: it is never touched
+sleep 9 </dev/null >/dev/null 2>&1 &
+SHORT=$!
+# the same wait started in a session of its own (what anything the agent runs is): not the start-up loop's, so not spared
+setsid sleep 9 </dev/null >/dev/null 2>&1 &
+OTHER=$!
+# the same short wait with agent code loaded into it: not one
+LD_PRELOAD=/nonexistent/agent.so sleep 9 </dev/null >/dev/null 2>&1 &
+LOADED=$!
+# and with its environment wiped by the library itself (the mapped library still shows)
+if command -v cc >/dev/null 2>&1 && cc -shared -fPIC -o ${dir}/agent/wipe.so ${dir}/agent/wipe.c 2>/dev/null; then
+  NOTE_FILE=${dir}/agent/wipe.ran LD_PRELOAD=${dir}/agent/wipe.so sleep 9 </dev/null >/dev/null 2>&1 &
+  WIPED=$!
+  # the same library in a folder every user can write to and that looks like part of the system (/dev/shm)
+  mkdir -p /dev/shm/universe-fence-test && cp ${dir}/agent/wipe.so /dev/shm/universe-fence-test/wipe.so
+  NOTE_FILE=${dir}/agent/shm.ran LD_PRELOAD=/dev/shm/universe-fence-test/wipe.so sleep 9 </dev/null >/dev/null 2>&1 &
+  SHM=$!
+fi
+# and with the library gone from the map: its code copied into nameless memory, the library unmapped (x86-64 only)
+if [ "$(uname -m)" = x86_64 ] && command -v cc >/dev/null 2>&1 && cc -shared -fPIC -o ${dir}/agent/hide.so ${dir}/agent/hide.c 2>/dev/null; then
+  LD_PRELOAD=${dir}/agent/hide.so sleep 9 </dev/null >/dev/null 2>&1 &
+  HIDDEN=$!
+fi
 sh -c 'sleep 302' &
 sleep 1
-for p in $A1 $A2 $A3; do kill -0 $p 2>/dev/null && echo "agent-up"; done
+for p in $A1 $A2 $A3 $LATE; do kill -0 $p 2>/dev/null && echo "agent-up"; done
+# the preloaded code is really in place before the fence runs: the cleared one still maps its library with no LD_ left, the hidden one has
+# unmapped its library and runs from nameless code
+if [ -n "$WIPED" ]; then grep -q wipe.so /proc/$WIPED/maps && ! tr '\\0' '\\n' < /proc/$WIPED/environ | grep -q '^LD_' && echo "wipe-in-place"; fi
+if [ -n "$HIDDEN" ]; then ! grep -q hide.so /proc/$HIDDEN/maps && awk 'NF == 5 && $2 ~ /x/ { found = 1 } END { exit !found }' /proc/$HIDDEN/maps && echo "hide-in-place"; fi
 echo "before: $(python3 ${dir}/universe-fence --check)"
 python3 ${dir}/universe-fence
 echo "after: $(python3 ${dir}/universe-fence --check)"
 for p in $GW $BR; do kill -0 $p 2>/dev/null && echo "alive" || echo "dead"; done
-for p in $A1 $A2 $A3; do kill -0 $p 2>/dev/null && echo "agent-alive" || echo "agent-dead"; done
+for p in $A1 $A2 $A3 $LATE; do kill -0 $p 2>/dev/null && echo "agent-alive" || echo "agent-dead"; done
+kill -0 $OWN 2>/dev/null && echo "own-alive" || echo "own-dead"
+kill -0 $SHORT 2>/dev/null && echo "short-alive" || echo "short-dead"
+kill -0 $OTHER 2>/dev/null && echo "other-alive" || echo "other-dead"
+kill -0 $LOADED 2>/dev/null && echo "loaded-alive" || echo "loaded-dead"
+if [ -n "$SHM" ]; then [ -f ${dir}/agent/shm.ran ] && echo "shm-loaded"; kill -0 $SHM 2>/dev/null && echo "shm-alive" || echo "shm-dead"; rm -rf /dev/shm/universe-fence-test; fi
+if [ -n "$WIPED" ]; then [ -f ${dir}/agent/wipe.ran ] && echo "wipe-loaded"; kill -0 $WIPED 2>/dev/null && echo "wiped-alive" || echo "wiped-dead"; fi
+if [ -n "$HIDDEN" ]; then [ -f ${dir}/agent/hide.ran ] && echo "hide-loaded"; kill -0 $HIDDEN 2>/dev/null && echo "hidden-alive" || echo "hidden-dead"; fi
+# a child the browser started after the note, below a part that was running before it, is the browser's own
+pgrep -P $BR -x sleep >/dev/null && echo "late-child-alive" || echo "late-child-dead"
 `;
     const run = spawnSync('unshare', ['--pid', '--fork', '--mount-proc', 'sh', '-c', scenario], { encoding: 'utf8', timeout: 60_000 });
+    // Without the note nothing is stopped and nothing is proved; the note is written once per boot
+    expect(run.stdout).toMatch(/unmarked: unmarked=1\s+rc=3/);
+    expect(run.stdout).toMatch(/mark: marked=1\n/);
+    expect(run.stdout).toMatch(/mark again: marked=1 kept=1/);
     expect(run.stdout).toMatch(/before: remaining=[1-9]/);
     expect(run.stdout).toMatch(/killed=[1-9]/);
     expect(run.stdout).toMatch(/after: remaining=0/);
     expect(run.stdout.match(/(^|\n)alive/g)).toHaveLength(2);
     expect(run.stdout).not.toMatch(/(^|\n)dead/);
     // Whatever wears the desktop's name or words is the agent's, and goes
-    expect(run.stdout.match(/agent-up/g)).toHaveLength(3);
-    expect(run.stdout.match(/agent-dead/g)).toHaveLength(3);
+    expect(run.stdout.match(/agent-up/g)).toHaveLength(4);
+    expect(run.stdout.match(/agent-dead/g)).toHaveLength(4);
     expect(run.stdout).not.toContain('agent-alive');
+    // What was running before the note is the computer's own, whatever it is called
+    expect(run.stdout).toContain('own-alive');
+    // A short sleep is left, and does not count as something the agent has running
+    expect(run.stdout).toContain('short-alive');
+    // ... but only the one process 1 started; the same wait in a session of its own is the agent's
+    expect(run.stdout).toContain('other-dead');
+    // A short wait with a loader override in its environment is the agent's code, and goes
+    expect(run.stdout).toContain('loaded-dead');
+    // ... also when the library wipes the variable from inside, and when it has copied itself into nameless memory and unmapped itself.
+    // Each library leaves a note that its code ran, so a missing compiler cannot make this pass by accident: without one, it is skipped.
+    const compiler = spawnSync('sh', ['-c', 'command -v cc']).status === 0;
+    if (compiler) {
+      expect(run.stdout).toContain('wipe-loaded');
+      expect(run.stdout).toContain('wipe-in-place');
+      expect(run.stdout).toContain('wiped-dead');
+      expect(run.stdout).toContain('shm-loaded');
+      expect(run.stdout).toContain('shm-dead');
+      if (process.arch === 'x64') {
+        expect(run.stdout).toContain('hide-loaded');
+        expect(run.stdout).toContain('hide-in-place');
+        expect(run.stdout).toContain('hidden-dead');
+      }
+    }
+    expect(run.stdout).not.toContain('wiped-alive');
+    expect(run.stdout).not.toContain('hidden-alive');
+    expect(run.stdout).not.toContain('shm-alive');
+    // What a desktop part started after the note is kept, even when the part itself was already kept for being older
+    expect(run.stdout).toContain('late-child-alive');
   });
 });
 

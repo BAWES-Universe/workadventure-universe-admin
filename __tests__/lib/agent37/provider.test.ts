@@ -12,6 +12,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const execs: Array<{ id: string; command: string; options: unknown }> = [];
   let healthy = true;
   let execOut: (command: string) => string = () => 'ok';
+  let markOut = 'marked=1\n';
   let revisionAfterUpdate = 2;
   const refuse: Record<string, Error | undefined> = {};
   const client = {
@@ -76,7 +77,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
     async exec(id: string, command: string, options?: unknown) {
       calls.push(`exec:${id}:${command}`);
       execs.push({ id, command, options });
-      return { exitCode: 0, stdout: execOut(command), stderr: '', truncated: false };
+      return { exitCode: 0, stdout: command === 'universe-mark' ? markOut : execOut(command), stderr: '', truncated: false };
     },
     async openTurn(url: string, input: { text: string; sessionId?: string | null }) {
       calls.push(`turn:${url}:${input.text}`);
@@ -106,7 +107,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
     },
   };
   const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean }> = [];
-  return { client: client as unknown as Agent37Client, instances, calls, execs, created, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn) };
+  return { client: client as unknown as Agent37Client, instances, calls, execs, created, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
 }
 
 function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
@@ -451,8 +452,21 @@ describe('getting a machine ready for a job', () => {
     await p.create('bot-1');
     w.setExec(() => 'ready=1 restart=0\n');
     await expect(p.ready('m1')).resolves.toBeUndefined();
-    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up']);
+    // The note the take-over fence tells the agent's processes by is written last, as root
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-mark']);
+    expect(w.execs[1].options).toMatchObject({ user: 'root' });
     expect(w.calls.filter((call) => call.startsWith('stop:'))).toEqual([]);
+  });
+
+  it('is not ready when the note for the fence cannot be written: a computer that cannot be fenced is never handed to a job', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.setExec(() => 'ready=1 restart=0\n');
+    w.setMark('marked=0 reason=write\n');
+    await expect(p.ready('m1')).rejects.toThrow('could not be marked (write)');
+    w.setMark('');
+    await expect(p.ready('m1')).rejects.toThrow('could not be marked');
   });
 
   it('stops and starts a machine once when its config was just written, then runs universe-up again', async () => {
@@ -462,7 +476,8 @@ describe('getting a machine ready for a job', () => {
     let runs = 0;
     w.setExec(() => (++runs === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n'));
     await p.ready('m1');
-    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up']);
+    // The note is written once, after the restart (a note from before it would be for the old boot)
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-mark']);
     expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
   });
 
@@ -492,12 +507,35 @@ describe('getting a machine ready for a job', () => {
     expect(reads).toBeGreaterThanOrEqual(3);
   });
 
+  it('is ready when the second ask succeeds after a part that was still coming up', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    let runs = 0;
+    w.setExec(() => (++runs === 1 ? 'ready=0 reason=browser\n' : 'ready=1 restart=0\n'));
+    await expect(p.ready('m1')).resolves.toBeUndefined();
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-mark']);
+  });
+
+  it('asks again once after the restart too, when the browser is still starting then', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    let runs = 0;
+    w.setExec(() => ['ready=1 restart=1\n', 'ready=0 reason=browser\n', 'ready=1 restart=0\n'][Math.min(runs++, 2)]);
+    await expect(p.ready('m1')).resolves.toBeUndefined();
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-up', 'universe-mark']);
+    expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
+  });
+
   it('says the machine is not ready, with the reason, when a part did not come up', async () => {
     const w = world();
     const p = provider(w);
     await p.create('bot-1');
     w.setExec(() => 'ready=0 reason=browser\n');
     await expect(p.ready('m1')).rejects.toThrow('not ready (browser)');
+    // asked a second time before giving up: a part that was still coming up is not a failure
+    expect(w.execs.filter((entry) => entry.command === 'universe-up')).toHaveLength(2);
     w.setExec(() => 'nothing useful');
     await expect(p.ready('m1')).rejects.toThrow('not ready');
   });
