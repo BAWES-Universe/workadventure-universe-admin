@@ -290,6 +290,12 @@ describe('a key is taken out of anything that quotes it', () => {
     for (const form of secretForms(key)) expect(scrubSecret(`error at ${form} end`, key)).toBe('error at [key] end');
     expect(scrubSecret(`Basic ${Buffer.from(key).toString('base64')}`, key)).toBe('Basic [key]');
     expect(scrubSecret(`?k=${encodeURIComponent(key)}`, key)).toBe('?k=[key]');
+    // The query a request is built with writes some characters differently from encodeURIComponent
+    const odd = "sk_live~abcd!ef'g(h)i j";
+    const built = new URL('https://api.example.com/x');
+    built.searchParams.set('key', odd);
+    expect(built.search).not.toContain(encodeURIComponent(odd));
+    expect(scrubSecret(`error at ${built.toString()}`, odd)).toBe('error at https://api.example.com/x?key=[key]');
     expect(scrubDeep({ a: [`x ${key}`], [key]: 'y' }, key)).toEqual({ a: ['x [key]'], '[key]': 'y' });
   });
 
