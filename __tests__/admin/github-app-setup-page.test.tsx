@@ -18,6 +18,8 @@ const FORM = { action: 'https://github.com/organizations/BAWES-Universe/settings
 const json = (body: unknown, ok = true) => Promise.resolve({ ok, status: ok ? 200 : 500, json: () => Promise.resolve(body) });
 
 let submit: jest.SpyInstance;
+/** What each form sent to GitHub carried: where it was posted, to which window, and the filled-in form. */
+let sent: { action: string; target: string; manifest: string }[];
 let open: jest.SpyInstance;
 
 /** Answers by method and address: the form (or the existing app) on POST, whether it is made on GET. */
@@ -37,7 +39,10 @@ async function settle() {
 beforeEach(() => {
   jest.useFakeTimers();
   fetchMock.mockReset();
-  submit = jest.spyOn(HTMLFormElement.prototype, 'submit').mockImplementation(() => undefined);
+  sent = [];
+  submit = jest.spyOn(HTMLFormElement.prototype, 'submit').mockImplementation(function (this: HTMLFormElement) {
+    sent.push({ action: this.getAttribute('action') ?? '', target: this.getAttribute('target') ?? '', manifest: (this.querySelector('input[name=manifest]') as HTMLInputElement).value });
+  });
   open = jest.spyOn(window, 'open').mockReturnValue({} as Window);
 });
 afterEach(() => {
@@ -61,17 +66,64 @@ describe('GitHub for Universe setup page', () => {
 
   it('opens GitHub in its own window inside the tap, then waits', async () => {
     backend();
-    const { container } = render(<GitHubAppSetupPage />);
+    render(<GitHubAppSetupPage />);
     await settle();
     fireEvent.click(screen.getByRole('button', { name: 'Continue to GitHub' }));
     expect(open).toHaveBeenCalledWith('', GITHUB_WINDOW, expect.any(String));
     expect(submit).toHaveBeenCalledTimes(1);
-    const form = container.querySelector('form') as HTMLFormElement;
-    expect(form.getAttribute('target')).toBe(GITHUB_WINDOW);
-    expect(form.getAttribute('action')).toBe(FORM.action);
-    expect((form.querySelector('input[name=manifest]') as HTMLInputElement).value).toBe(FORM.manifest);
+    expect(sent).toEqual([{ action: FORM.action, target: GITHUB_WINDOW, manifest: FORM.manifest }]);
+    // The form is not left behind on the page
+    expect(document.querySelector('form')).toBeNull();
     expect(screen.getByText(/Waiting for you on GitHub/)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Open GitHub again' })).toBeTruthy();
+  });
+
+  it('asks for the form again when it has waited too long, and sends the new one to the window already open', async () => {
+    let calls = 0;
+    fetchMock.mockImplementation((url: string, init?: { method?: string }) => {
+      if (init?.method === 'POST') return json({ action: `${FORM.action}-${++calls}`, manifest: FORM.manifest });
+      return json({ made: false });
+    });
+    render(<GitHubAppSetupPage />);
+    await settle();
+    await act(async () => {
+      jest.advanceTimersByTime(51 * 60 * 1000);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to GitHub' }));
+    // The window is opened inside the tap, before the wait for the new form
+    expect(open).toHaveBeenCalledTimes(1);
+    await settle();
+    await settle();
+    expect(calls).toBe(2);
+    expect(sent).toEqual([{ action: `${FORM.action}-2`, target: GITHUB_WINDOW, manifest: FORM.manifest }]);
+    expect(screen.getByText(/Waiting for you on GitHub/)).toBeTruthy();
+  });
+
+  it('closes the window and says so when the new form cannot be had', async () => {
+    const popup = { close: jest.fn() };
+    open.mockReturnValue(popup as unknown as Window);
+    let first = true;
+    fetchMock.mockImplementation((url: string, init?: { method?: string }) => {
+      if (init?.method === 'POST') {
+        if (first) {
+          first = false;
+          return json(FORM);
+        }
+        return json({ error: 'Could not open GitHub' }, false);
+      }
+      return json({ made: false });
+    });
+    render(<GitHubAppSetupPage />);
+    await settle();
+    await act(async () => {
+      jest.advanceTimersByTime(51 * 60 * 1000);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to GitHub' }));
+    await settle();
+    await settle();
+    expect(popup.close).toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert').textContent).toMatch(/Could not open GitHub/);
   });
 
   it('says so, and goes nowhere, when the browser blocks the window', async () => {
@@ -121,6 +173,9 @@ describe('GitHub for Universe setup page', () => {
     expect(fetchMock.mock.calls.length).toBe(callsBefore);
     // Opening GitHub again starts the wait afresh, so finishing there is still noticed
     fireEvent.click(screen.getByRole('button', { name: 'Open GitHub again' }));
+    // The form is that old by now, so a new one is asked for first
+    await settle();
+    await settle();
     made = true;
     await act(async () => {
       jest.advanceTimersByTime(2500);

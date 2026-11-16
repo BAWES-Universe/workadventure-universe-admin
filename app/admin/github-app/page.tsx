@@ -15,6 +15,8 @@ export const GITHUB_WINDOW = 'github-app-setup';
 /** How often a waiting page asks whether the app has been made, and for how long (GitHub's own limit for the setup is an hour). */
 const POLL_MS = 2500;
 const POLL_FOR_MS = 60 * 60 * 1000;
+/** The form Orbit hands out is good for an hour; one older than this is asked for again before it is sent. */
+const FORM_FRESH_MS = 50 * 60 * 1000;
 
 /** Asks Orbit for the filled-in form (or says the app is already made). */
 async function load(again: boolean): Promise<{ answer?: Answer; failed?: string }> {
@@ -42,7 +44,7 @@ export default function GitHubAppSetupPage() {
   const [busy, setBusy] = useState(false);
   // Counts each time GitHub is opened, so the wait starts afresh (and asking again after an hour of waiting) even while still waiting
   const [opened, setOpened] = useState(0);
-  const formRef = useRef<HTMLFormElement>(null);
+  const loadedAt = useRef(0);
   const again = useRef(false);
   // The app the waiting page is waiting to see replaced (none while the first one is made)
   const replaced = useRef<number | null>(null);
@@ -61,6 +63,7 @@ export default function GitHubAppSetupPage() {
       setStep('made');
     } else if (answer.action && answer.manifest) {
       setForm({ action: answer.action, manifest: answer.manifest });
+      loadedAt.current = Date.now();
       setStep('ready');
     }
   }, []);
@@ -107,8 +110,28 @@ export default function GitHubAppSetupPage() {
     };
   }, [step, opened]);
 
-  /** Opens GitHub's page in a window of its own, right inside the tap (a browser can refuse a window opened after a wait). */
-  const openGitHub = () => {
+  /** Posts the filled-in form to GitHub's page, which opens in the window already opened for it. */
+  const send = (answer: Form) => {
+    const element = document.createElement('form');
+    element.method = 'post';
+    element.action = answer.action;
+    element.target = GITHUB_WINDOW;
+    element.hidden = true;
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.name = 'manifest';
+    input.value = answer.manifest;
+    element.appendChild(input);
+    document.body.appendChild(element);
+    element.submit();
+    element.remove();
+  };
+
+  /**
+   * Opens GitHub's page in a window of its own. The window is opened right now, inside the tap (a browser can refuse one opened
+   * after a wait); a form kept too long to still be good is asked for again before it is sent to that window.
+   */
+  const openGitHub = async () => {
     if (!form) return;
     const popup = window.open('', GITHUB_WINDOW, 'width=980,height=820');
     if (!popup) {
@@ -116,7 +139,26 @@ export default function GitHubAppSetupPage() {
       return;
     }
     setBlocked(false);
-    formRef.current?.submit();
+    let toSend = form;
+    if (Date.now() - loadedAt.current > FORM_FRESH_MS) {
+      const result = await load(again.current);
+      // Made meanwhile (another tab): nothing to open
+      if (result.answer?.existing) {
+        popup.close();
+        apply(result);
+        return;
+      }
+      if (!result.answer?.action || !result.answer.manifest) {
+        popup.close();
+        setFailed(result.failed ?? 'Could not open GitHub');
+        setStep('failed');
+        return;
+      }
+      toSend = { action: result.answer.action, manifest: result.answer.manifest };
+      setForm(toSend);
+      loadedAt.current = Date.now();
+    }
+    send(toSend);
     setOpened((count) => count + 1);
     setStep('waiting');
   };
@@ -165,7 +207,7 @@ export default function GitHubAppSetupPage() {
                 Your browser blocked the window. Allow pop-ups for Orbit, then press the button again.
               </p>
             )}
-            <Button type="button" variant={step === 'ready' ? 'default' : 'outline'} onClick={openGitHub} className="w-max">
+            <Button type="button" variant={step === 'ready' ? 'default' : 'outline'} onClick={() => void openGitHub()} className="w-max">
               {step === 'ready' ? 'Continue to GitHub' : 'Open GitHub again'}
             </Button>
           </>
@@ -216,11 +258,6 @@ export default function GitHubAppSetupPage() {
           </>
         )}
       </div>
-      {form && (
-        <form ref={formRef} method="post" action={form.action} target={GITHUB_WINDOW} hidden>
-          <input type="hidden" name="manifest" value={form.manifest} />
-        </form>
-      )}
     </div>
   );
 }
