@@ -11,6 +11,7 @@ import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provi
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
+import { computersArePaused } from '@/lib/capability-pause';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
@@ -305,7 +306,7 @@ async function stopMachine(botId: string, ref: string, provider: Provider, only?
 export type Started =
   | { ok: true; job: JobView; restoredFrom: Date | null }
   /** Not the owner's Brick, or not theirs to ask: only the owner starts computer work on their Brick. */
-  | { ok: false; reason: 'not_owner' | 'off' | 'not_open' | 'broken_start' | 'no_run' }
+  | { ok: false; reason: 'not_owner' | 'off' | 'not_open' | 'broken_start' | 'no_run' | 'paused' }
   /** The meter's controls are not set up yet: a computer does not open before they do. */
   | { ok: false; reason: 'not_set' }
   /** A rule the person said in chat does not let this job take room: nothing is left behind, and the rule's own words come with it. */
@@ -329,6 +330,8 @@ export async function startJob(input: { botId: string; personId: string; title: 
   if (!providerFor(row)) return { ok: false, reason: 'not_open' };
   // A wind-down is on (the team's command): computers take no new work
   if (await isWindingDown()) return { ok: false, reason: 'not_open' };
+  // The team paused computers: no new job starts (one already going finishes, and a job already in line waits with its work saved)
+  if (await computersArePaused()) return { ok: false, reason: 'paused' };
   // A run of a goal or task (game #2002) starts one job, ever: the same run again (it was handed out again) finds that job, whatever it
   // came to, and takes no second room. The run must be this person's, on this Brick.
   if (input.runId) {
@@ -456,6 +459,9 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     return 'gone';
   }
   const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued' }, data: { queuedFor } });
+
+  // The team paused computers: a job in line stays in line with its work saved, and starts by itself when they are back
+  if (await computersArePaused()) return 'queued';
 
   // The person has the machine: nothing starts under Brick's hands until they hand it back. Nothing is reserved while waiting in line.
   if ((await prisma.computerJob.count({ where: { botId: job.botId, status: 'waiting', control: 'person' } })) > 0) {

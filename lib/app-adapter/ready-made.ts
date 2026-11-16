@@ -10,6 +10,7 @@ import { priceCall } from '@/lib/composio-rates';
 import { readComposioBilling } from '@/lib/composio-billing';
 import { truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
 import { getGitHubApp } from '@/lib/github/app';
+import { appsArePaused } from '@/lib/capability-pause';
 import { routeForRun, type RunRoute } from '@/lib/app-routes';
 import type { OwnAppVersion } from '@/lib/app-routes/own-versions';
 
@@ -199,7 +200,7 @@ async function appIsOn(toolkit: string): Promise<boolean> {
 
 export type ReadyMadeLinkOutcome =
   | { status: 'done'; answer: LinkAnswer }
-  | { status: 'off' | 'gone' | 'not_owner' | 'already_asked' | 'unavailable' | 'refused' };
+  | { status: 'off' | 'gone' | 'not_owner' | 'already_asked' | 'unavailable' | 'refused' | 'paused' };
 
 /** What may be sent to an app link through Orbit: opening a session, listing tools, and running one (which is counted like a use). */
 const LINK_METHODS = new Set(['initialize', 'notifications/initialized', 'tools/list', 'tools/call']);
@@ -214,6 +215,8 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
   if (!adapter) return { status: 'off' };
   const method = typeof input.message.method === 'string' ? input.message.method : '';
   if (!LINK_METHODS.has(method)) return { status: 'refused' };
+  // The team paused Apps: a call (a use) is refused before it is counted or sent. Opening a session and listing what an App can do are not uses.
+  if (method === 'tools/call' && (await appsArePaused())) return { status: 'paused' };
   const connection = await prisma.appConnection.findFirst({ where: { id: input.connectionId, ownerId: input.ownerId, source: 'ready_made' } });
   if (!connection || !connection.providerToolkit) return { status: 'gone' };
   if (!(await appIsOn(connection.providerToolkit))) return { status: 'off' };
@@ -276,7 +279,7 @@ async function answerFromOwnVersion(
 
 export type ReadyMadeUseOutcome =
   | { status: 'done'; ok: boolean; data: unknown }
-  | { status: 'off' | 'gone' | 'not_owner' | 'already_asked' | 'unavailable' };
+  | { status: 'off' | 'gone' | 'not_owner' | 'already_asked' | 'unavailable' | 'paused' };
 
 /**
  * One use of a ready-made app for the person who owns it. The meter is written FIRST, under an event id taken from the call's
@@ -287,6 +290,8 @@ export type ReadyMadeUseOutcome =
 export async function useReadyMade(input: { botId: string; connectionId: string; ownerId: string; tool: string; arguments: Record<string, unknown>; callId: string }): Promise<ReadyMadeUseOutcome> {
   const adapter = getAdapter();
   if (!adapter) return { status: 'off' };
+  // The team paused Apps: nothing is counted or sent
+  if (await appsArePaused()) return { status: 'paused' };
   const connection = await prisma.appConnection.findFirst({ where: { id: input.connectionId, ownerId: input.ownerId, source: 'ready_made' } });
   if (!connection || !connection.providerToolkit) return { status: 'gone' };
   if (!(await appIsOn(connection.providerToolkit))) return { status: 'off' };

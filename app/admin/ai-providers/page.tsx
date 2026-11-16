@@ -11,6 +11,7 @@ import { EnabledPill, providerTypeLabel } from './components/provider-state';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import { useToast } from '@/components/ui/toast';
 import { UniverseAiLimits } from '../components/limits';
+import { CapabilityPauses } from '../components/pauses';
 import { VoiceSection } from './voice-section';
 
 interface AiProvider {
@@ -267,6 +268,8 @@ export default function AiProvidersPage() {
       )}
 
       {allowed && <VoiceSection />}
+
+      <CapabilityPauses />
 
       <UniverseAiLimits />
 
