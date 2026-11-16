@@ -341,8 +341,11 @@ function linkJson(body: string, id?: number | string): Record<string, unknown> |
       return null;
     }
   };
+  // An answer is for the question asked: one that carries another id is somebody else's, never taken for this one. (A reply with no id,
+  // or a null one, is how a server answers a request it could not read, and is kept.)
+  const answers = (message: Record<string, unknown>) => id === undefined || message.id === undefined || message.id === null || String(message.id) === String(id);
   const whole = attempt(body.trim());
-  if (whole) return whole;
+  if (whole) return answers(whole) ? whole : null;
   // An event stream may carry notifications before the answer: the message that answers the question asked (its id) is the one wanted
   const messages: Record<string, unknown>[] = [];
   for (const line of body.split('\n')) {
@@ -352,7 +355,7 @@ function linkJson(body: string, id?: number | string): Record<string, unknown> |
     }
   }
   if (id === undefined) return messages[0] ?? null;
-  return messages.find((message) => message.id === id) ?? messages.find((message) => 'result' in message || 'error' in message) ?? null;
+  return messages.find((message) => message.id !== undefined && message.id !== null && String(message.id) === String(id)) ?? messages.find((message) => (message.id === undefined || message.id === null) && 'error' in message) ?? null;
 }
 
 /** The text of a JSON-RPC error carried in an answer that came with a 2xx status, or null when there is none. */
