@@ -25,6 +25,7 @@ jest.mock('@/lib/meter', () => {
 });
 import { saveMeterSettings } from '@/lib/meter';
 import { currentEnvelope } from '@/lib/meter-allowance';
+import { activityFor } from '@/lib/task-receipts';
 import { recordGrant } from '@/lib/meter-grants';
 import { mintJobToken, TOKEN_LIFE_MS, TOKEN_RENEW_EVERY_SECONDS, verifyJobToken } from '@/lib/computer-token';
 import { CLAIM_MS, dbImageStore } from '@/lib/agent37/image';
@@ -389,6 +390,75 @@ run('a Brick’s computer, in a real database', () => {
       expect(await sweepComputers(minutes(60))).toMatchObject({ stopped: 1 });
       expect(await prisma.meterReservation.count({ where: { personKey: `person:${sara.id}`, state: 'held' } })).toBe(0);
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'error' });
+    });
+  });
+
+  describe('a job that failed on our side', () => {
+    const timeOf = (jobId: string) => prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:time` } });
+
+    it('is not taken from the person’s month: what it ran stays in the books as our cost, written against nobody', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form' }, NOW);
+      if (!job.ok) throw new Error('no');
+      await finishJob(job.job.id, 'failed', minutes(5));
+      const event = await timeOf(job.job.id);
+      // The five minutes and their cost are still there (the provider bills them), but not under the person
+      expect(event).toMatchObject({ kind: 'computer_time', pool: 'computer', quantity: BigInt(300), costMicros: BigInt(30_000), personKey: 'unknown', personId: null, jobId: job.job.id });
+      expect(event.detail).toMatchObject({ givenBack: true, forPersonId: sara.id, status: 'failed', endedBy: 'error' });
+      // Their month is whole, and the room that was held is settled, not left held
+      expect((await computerView(sara.brickId, sara.id, minutes(5)))?.month?.leftFraction).toBe(1);
+      expect(await prisma.meterReservation.count({ where: { personKey: `person:${sara.id}`, state: 'held' } })).toBe(0);
+      // Our own exposure is unchanged: the pool still counts what the provider billed
+      expect((await currentEnvelope(minutes(5))).unsettledMicros).toBeGreaterThanOrEqual(30_000);
+    });
+
+    it('shows in Activity as refunded, with no amount taken', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form' }, NOW);
+      if (!job.ok) throw new Error('no');
+      await finishJob(job.job.id, 'failed', minutes(5));
+      const [item] = await activityFor(sara.id);
+      expect(item).toMatchObject({ title: 'Visa form', state: 'refunded', spentMicros: null });
+      expect(item.lines).toEqual([{ label: 'Computer, 5 minutes', note: 'Nothing' }]);
+    });
+
+    it('is the same when the worker was lost: a job whose room lapsed is stopped by the sweep and not charged to the person', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      expect(await sweepComputers(minutes(60))).toMatchObject({ stopped: 1 });
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'error' });
+      expect((await timeOf(job.job.id)).personKey).toBe('unknown');
+      expect((await computerView(sara.brickId, sara.id, minutes(60)))?.month?.leftFraction).toBe(1);
+    });
+
+    it('is written the same way when the sweep writes it later, and a job that ran fine or was stopped by the person is still theirs', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const failed = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!failed.ok) throw new Error('no');
+      // The first write of its time fails; the sweep writes it again, and the decision is the same
+      (meter.recordMeterEvent as jest.Mock).mockRejectedValueOnce(new Error('books down'));
+      await finishJob(failed.job.id, 'failed', minutes(4));
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${failed.job.id}:time` } })).toBe(0);
+      await sweepComputers(minutes(10));
+      expect((await timeOf(failed.job.id)).personKey).toBe('unknown');
+
+      const done = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(11));
+      if (!done.ok) throw new Error('no');
+      await finishJob(done.job.id, 'done', minutes(16));
+      expect(await timeOf(done.job.id)).toMatchObject({ personKey: `person:${sara.id}`, personId: sara.id });
+      expect((await timeOf(done.job.id)).detail).not.toHaveProperty('givenBack');
+
+      const stopped = await startJob({ botId: sara.brickId, personId: sara.id, title: 'C' }, minutes(17));
+      if (!stopped.ok) throw new Error('no');
+      await stopJobFor(sara.brickId, sara.id, minutes(20));
+      expect((await timeOf(stopped.job.id)).personKey).toBe(`person:${sara.id}`);
+      // Only the two the person had are taken: 5 and 3 minutes of 6,000 millionths
+      expect((await computerView(sara.brickId, sara.id, minutes(20)))?.month?.leftFraction).toBeCloseTo(1 - 48_000 / 1_000_000, 3);
     });
   });
 

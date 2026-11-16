@@ -20,6 +20,12 @@ describe('what a task’s receipt says it used', () => {
     ]);
   });
 
+  it('time of a job that failed on our side is shown as Nothing taken, never as an amount', () => {
+    const lines = receiptLines([event({ kind: 'computer_time', route: 'computer', quantity: 300, costMicros: 30_000, detail: { givenBack: true, forPersonId: 'p1' } })], 'Brick');
+    expect(lines).toEqual([{ label: 'Computer, 5 minutes', note: 'Nothing' }]);
+    expect(spentOf('refunded', null, lines)).toBeNull();
+  });
+
   it('a computer line says its minutes; its own key is named as the key it ran on', () => {
     const lines = receiptLines([event({ kind: 'computer_time', route: 'computer', quantity: 600, costMicros: 60_000 }), event({ kind: 'model_call', route: 'own-key', costMicros: null })], 'Scout');
     expect(lines).toEqual([

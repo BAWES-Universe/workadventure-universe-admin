@@ -4,6 +4,7 @@ import { paidBy, payerFromRow, payerOf, payerToRow, type PaidBy, type Payer } fr
 import {
   activityIdOf,
   categoryOf,
+  givenBackTime,
   jobActivityIdOf,
   receiptLines,
   receiptLink,
@@ -369,7 +370,7 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
   const items = all.map((header) => {
     const forHeader = events.get(header.id) ?? [];
     // A computer job that failed is "refunded, nothing taken" only when the books show nothing was taken: a price not known yet is not "nothing"
-    const mayHaveTaken = forHeader.some((event) => event.kind === 'computer_time' && (event.costMicros === null || event.costMicros > 0));
+    const mayHaveTaken = forHeader.some((event) => event.kind === 'computer_time' && !givenBackTime(event) && (event.costMicros === null || event.costMicros > 0));
     const state: ReceiptState = failedJobs.has(header.id) && !mayHaveTaken ? 'refunded' : header.state;
     return itemOf({ ...header, state }, forHeader, names.get(header.botId) ?? 'Brick', personId);
   });
