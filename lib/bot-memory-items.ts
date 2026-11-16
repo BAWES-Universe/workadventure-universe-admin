@@ -214,7 +214,8 @@ export function withoutItems(memoryData: unknown, keys: ReadonlySet<string>, onl
         kept.push([name, value]);
         continue;
       }
-      takeLines(drawn, name === 'current_state' ? value : '');
+      // The words of a fact go from the chat too (when no line was noted for it): "I work at Acme" is not left there to bring it back
+      takeLines(drawn, value);
       drop(info.heard, key);
       drop(info.drawnFrom, key);
       if (name === 'current_state') alsoGoes.add(`${value}_mentioned_at`);
