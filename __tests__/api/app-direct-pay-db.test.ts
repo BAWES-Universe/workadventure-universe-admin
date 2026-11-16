@@ -10,7 +10,8 @@ import { NextRequest } from 'next/server';
 const mockUser: { current: { id: string; isGuest?: boolean } | null } = { current: null };
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => mockUser.current) }));
 type Sent = { host: string; path: string; method: string; headers: Record<string, string>; body?: string };
-const mockSend: { current: ((target: Sent) => { status: number; body?: unknown; redirected?: boolean }) | null } = { current: null };
+type Answer = { status: number; body?: unknown; redirected?: boolean };
+const mockSend: { current: ((target: Sent) => Answer | Promise<Answer>) | null } = { current: null };
 jest.mock('@/lib/app-direct/guard', () => {
   const actual = jest.requireActual('@/lib/app-direct/guard');
   return {
@@ -20,7 +21,7 @@ jest.mock('@/lib/app-direct/guard', () => {
         ? actual.guardedRequest(request, {
             resolve: async () => [{ address: '93.184.216.34', family: 4 }],
             send: async (target: Sent) => {
-              const answer = mockSend.current!(target);
+              const answer = await mockSend.current!(target);
               return { status: answer.status, redirected: answer.redirected ?? false, body: JSON.stringify(answer.body ?? {}), truncated: false, contentType: 'application/json' };
             },
           })
@@ -309,6 +310,23 @@ run('payments for pages, in a real database', () => {
       expect((await start(artifactId, '203.0.113.8')).status).toBe(200);
       expect(sent.length).toBeGreaterThan(0);
       expect((await prisma.appConnection.findUniqueOrThrow({ where: { id } })).signInLostAt).toBeNull();
+    });
+
+    it('gives out no checkout address when the order was closed while the service was being asked', async () => {
+      const { serverId } = await connectGateway();
+      const artifactId = await makeArtifact();
+      await job(serverId, artifactId);
+      gateway();
+      const answer = mockSend.current!;
+      mockSend.current = async (target) => {
+        // The order is closed (by a sweep, or by the owner stopping the page) after the charge was made and before it is kept
+        await prisma.appPageOrder.updateMany({ where: { ownerId: sara }, data: { status: 'not_paid', closedAt: new Date() } });
+        return answer(target);
+      };
+      const response = await start(artifactId);
+      expect(response.status).toBe(409);
+      expect(await response.json()).not.toHaveProperty('checkoutUrl');
+      expect(await prisma.appPageOrder.findFirst({ where: { ownerId: sara } })).toMatchObject({ status: 'not_paid', checkoutUrl: null });
     });
 
     it('closes the order, never leaves it open, when the key cannot be read', async () => {

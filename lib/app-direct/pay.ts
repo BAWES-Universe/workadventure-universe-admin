@@ -342,7 +342,10 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
   if (checkoutUrl && carriesKey(checkoutUrl, key)) return fail('cant_confirm');
   if (typeof providerRef !== 'string' || !providerRef || providerRef.length > 255 || !checkoutUrl) return fail('cant_confirm');
   // Kept so a blocked pop-up can go on with the SAME order, and so a later look can find the payment
-  await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'creating' }, data: { status: 'pending', providerRef, checkoutUrl } });
+  // An order that was closed while the service was being asked (a sweep, the owner stopping the page) no longer holds: nothing could look
+  // for its payment, so its address is not given out
+  const kept = await prisma.appPageOrder.updateMany({ where: { id: order.id, status: 'creating' }, data: { status: 'pending', providerRef, checkoutUrl } });
+  if (kept.count !== 1) return { status: 'unavailable' } as const;
   return { status: 'ok', orderId: order.id, checkoutUrl, amount: minorToText(job.amountMinor, job.currency), currency: job.currency, app: definition.short };
 }
 
