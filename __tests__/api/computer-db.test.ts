@@ -1447,6 +1447,27 @@ run('a Brick’s computer, in a real database', () => {
       expect(await prisma.computerJob.count({ where: { botId: sara.brickId, status: { in: ['queued', 'running', 'waiting'] } } })).toBe(0);
     });
 
+    it('Stop still ends a job that went from running to waiting between the read and the end', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      const read = prisma.computerJob.findUnique.bind(prisma.computerJob);
+      const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementationOnce(((...args: Parameters<typeof read>) =>
+        read(...args).then(async (row) => {
+          // The job asks the person to take over right after it was read as running
+          await prisma.computerJob.update({ where: { id: job.job.id }, data: { status: 'waiting', waitingFor: 'details' } });
+          return row;
+        })) as never);
+      try {
+        await stopJobFor(sara.brickId, sara.id, minutes(2));
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: job.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'person' });
+      expect(await prisma.meterReservation.count({ where: { personKey: `person:${sara.id}`, state: 'held' } })).toBe(0);
+    });
+
     it('Stop ends a job waiting for the allowance too, so it never starts later', async () => {
       const sara = await person('sara');
       await setUp({ memberAllowanceMicros: 50_000 });
