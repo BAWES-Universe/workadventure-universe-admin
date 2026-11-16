@@ -59,6 +59,9 @@ export function instantRunKey(botId: string, callId: string): string {
 
 const fundsKey = (runId: string): string => `instant:${runId}`;
 
+/** The task a run belongs to, or null when it belongs to none. */
+const taskKeyOf = (input: Pick<RunInput, 'taskKey'>): string | null => (input.taskKey ? input.taskKey : null);
+
 function instantAdapter(adapter?: ReadyMadeAdapter | null): InstantAdapter | null {
   return (adapter === undefined ? getAdapter() : adapter)?.instant ?? null;
 }
@@ -71,6 +74,11 @@ export interface RunInput {
   arguments: Record<string, unknown>;
   /** The bot server's own id for this call: a retry is the same call and never runs or pays twice. */
   callId: string;
+  /**
+   * The task this run belongs to (the same key its receipt is opened under): a rule about one task counts all of its runs, "for each task"
+   * counts the task's own, and the task's receipt reads what its runs used. A call that belongs to no task has none.
+   */
+  taskKey?: string | null;
 }
 
 export interface Deps {
@@ -174,6 +182,7 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
           runKey,
           botId: input.botId,
           personId: input.personId,
+          taskKey: taskKeyOf(input),
           toolSlug: input.tool,
           toolkit: admitted.toolkit,
           argsHash: fingerprint,
@@ -203,7 +212,7 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
   let run = created.run;
 
   // Step 2: the person's credit
-  const held = await holdCustomer(run, funds);
+  const held = await holdCustomer(run, funds, taskKeyOf(input));
   if (!held.ok && held.unsure === true) {
     // The books failed in a way that may have left a hold behind: it is given back now, and when that cannot be said either the run
     // stays open for the sweep, which says it again until the books answer (never closed over a hold that may exist)
@@ -222,7 +231,9 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
   if (!held.ok) {
     // "Unavailable" is the books being unreachable: said as that, never as the person's credit being used up
     const reason: InstantReason = held.reason === 'unavailable' ? 'credit_unavailable' : held.reason;
-    await moveRun(run.id, 'reserving', { state: 'refused', reason, finishedAt: now, customerState: 'none', providerState: 'none' });
+    // A rule's own words are kept on the run, so asking again with the same call id says the same words (not a general sentence)
+    const ruleDetail = held.reason === 'rule' ? { detail: { ruleWords: held.words, leftMicros: held.leftMicros } } : {};
+    await moveRun(run.id, 'reserving', { state: 'refused', reason, finishedAt: now, customerState: 'none', providerState: 'none', ...ruleDetail });
     // A rule the person said in chat that stopped the hold says so in its own words (nothing is held, and there is nothing to ask more credit for)
     return refuse(reason, held.reason === 'rule' ? { runId: run.id, words: held.words, leftMicros: held.leftMicros } : { runId: run.id });
   }
@@ -292,7 +303,7 @@ async function standDown(runId: string, ctx: Ctx): Promise<InstantOutcome> {
 const holdIsGone = (answer: { ok: boolean; none?: boolean }): boolean => answer.ok || answer.none === true;
 
 /** The credit hold for a run, with an error from the books read as "unavailable": a hold nobody could make is no hold. */
-async function holdCustomer(run: Row, funds: InstantFunds): Promise<Awaited<ReturnType<InstantFunds['reserve']>> & { unsure?: boolean }> {
+async function holdCustomer(run: Row, funds: InstantFunds, taskKey: string | null): Promise<Awaited<ReturnType<InstantFunds['reserve']>> & { unsure?: boolean }> {
   try {
     return await funds.reserve({
       key: fundsKey(run.id),
@@ -300,6 +311,7 @@ async function holdCustomer(run: Row, funds: InstantFunds): Promise<Awaited<Retu
       amountMicros: asNumber(run.holdMicros),
       botId: run.botId,
       runId: run.id,
+      taskKey,
       charge: { class: 'instant', route: 'composio', provider: 'composio', priceVersion: run.priceVersion },
     });
   } catch (error) {
@@ -374,7 +386,7 @@ async function finishCall(runId: string, call: InstantCall, ctx: Ctx): Promise<I
       case 'rejected': {
         // Refused before anything ran: nothing is charged to anyone
         const reason = reasonOfRejection(call.code, call.status);
-        await settleProvider(run, tx, 0, 'measured', ctx.now);
+        await settleProvider({ ...run, state: 'failed' }, tx, 0, 'measured', ctx.now);
         await tx.instantRun.update({ where: { id: run.id }, data: { state: 'failed', reason, finishedAt: ctx.now, detail: { status: call.status, code: call.code } } });
         // Composio's balance is empty: every run would fail the same way, so Instant stops until a super admin has looked
         if (reason === 'provider_empty') await pauseInstant('provider_empty', null, tx);
@@ -488,6 +500,12 @@ async function finishCustomer(runId: string, ctx: Pick<Ctx, 'funds'>): Promise<R
  * Composio's charge is known: written on the run (provider side) and once to the meter's books. A charge above the top price
  * means the table is too low: the run still settles, the excess is ours, and Instant stops.
  */
+/**
+ * What the person was charged, as the meter event records it. A failed run released its hold, so the person paid nothing: that is a
+ * zero, not "not known" (which would show as "Price not known yet" on the task's receipt for good). A run still held is not known yet.
+ */
+const customerChargedMicros = (run: Row): number | null => (run.customerMicros === null ? (run.state === 'failed' ? 0 : null) : Number(run.customerMicros));
+
 async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: number, basis: 'measured' | 'estimated', now: Date): Promise<void> {
   if (run.providerState === 'settled') return;
   await tx.instantRun.update({ where: { id: run.id }, data: { providerState: 'settled', providerMicros: BigInt(micros), providerBasis: basis, finishedAt: run.finishedAt ?? now } });
@@ -510,7 +528,7 @@ async function settleProvider(run: Row, tx: Prisma.TransactionClient, micros: nu
       costMicros: micros,
       basis,
       sourceRef: `instant_runs:${run.id}`,
-      detail: { instant: true, provider: INSTANT_PROVIDER, tool: run.toolSlug, toolkit: run.toolkit, runId: run.id, customerMicros: run.customerMicros === null ? null : Number(run.customerMicros), basis, state: run.state },
+      detail: { instant: true, provider: INSTANT_PROVIDER, ...(run.taskKey ? { taskKey: run.taskKey } : {}), tool: run.toolSlug, toolkit: run.toolkit, runId: run.id, customerMicros: customerChargedMicros(run), basis, state: run.state },
     },
     tx,
   ).catch((error) => console.error('[Instant] Could not write the meter event:', error instanceof Error ? error.message : 'unknown'));
@@ -546,8 +564,13 @@ async function describeKnown(run: Row, ctx: Ctx): Promise<InstantOutcome> {
 
 function outcomeOf(run: Row): InstantOutcome {
   switch (run.state) {
-    case 'refused':
+    case 'refused': {
+      const detail = isObject(run.detail) ? run.detail : null;
+      if (run.reason === 'rule' && detail && typeof detail.ruleWords === 'string') {
+        return refuse('rule', { runId: run.id, words: detail.ruleWords, leftMicros: typeof detail.leftMicros === 'number' ? detail.leftMicros : null });
+      }
       return refuse((run.reason as InstantReason) ?? 'unclear', { runId: run.id });
+    }
     case 'failed': {
       const reason = (run.reason as InstantReason) ?? 'provider_failed';
       return { status: 'failed', runId: run.id, reason, message: REASON_WORDS[reason] };

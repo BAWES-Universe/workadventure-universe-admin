@@ -3361,6 +3361,8 @@ model InstantRun {
   botId             String    @map("bot_id")
   // The person who asked and pays (the Brick's owner)
   personId          String    @map("person_id")
+  // The bot server's id for the task this run belongs to (the key its receipt is opened under); none for a call that belongs to no task
+  taskKey           String?   @map("task_key") @db.VarChar(255)
   toolSlug          String    @map("tool_slug") @db.VarChar(120)
   toolkit           String    @db.VarChar(80)
   // sha256 of the canonical arguments: lets a second ask for the very same thing wait while the first is unclear. Never the arguments.

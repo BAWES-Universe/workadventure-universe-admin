@@ -13,6 +13,9 @@ import { getInstantPause, resumeInstant, saveInstantLimits } from '@/lib/instant
 import { checkPriceDrift, forgetDriftClock, sweepInstant } from '@/lib/instant/sweep';
 import { denyInstantOnSessions } from '@/lib/instant/sessions';
 import { admitInstantTool } from '@/lib/instant/values';
+import { instantRulesAndReceipts } from '@/lib/instant/rules-and-receipts';
+import { proposeRule } from '@/lib/spend-rules';
+import { activityFor, closeReceipt, openReceipt } from '@/lib/task-receipts';
 import { POST as runRoute } from '@/app/api/instant/run/route';
 import { GET as toolsRoute } from '@/app/api/instant/tools/route';
 
@@ -1620,6 +1623,139 @@ run('the bounded Instant executor, in a real database', () => {
 
     it('rejects a body with anything extra', async () => {
       expect((await post({ botId: brick, forOwner: true, tool: 'EXA_SEARCH', callId: callId(), price: 0 })).status).toBe(400);
+    });
+  });
+
+  describe('rules and receipts wired in (O4)', () => {
+    beforeEach(() => setInstantHooks(instantRulesAndReceipts));
+    afterEach(async () => {
+      setInstantHooks(undefined);
+      await prisma.spendRule.deleteMany({ where: { ownerPersonId: sara } });
+      await prisma.taskReceipt.deleteMany({ where: { personId: sara } });
+    });
+    const post = (body: unknown) =>
+      runRoute(new NextRequest('http://localhost/api/instant/run', { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${SERVICE_TOKEN}` }, body: JSON.stringify(body) }));
+
+    it('a credit door that says a rule forbids the hold refuses in the rule’s words, final, with the task kept on the run', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      f.funds.reserve.mockResolvedValueOnce({ ok: false, reason: 'rule', ruleId: 'r0', why: 'cap', words: 'No more than $1 a month for this Brick.', leftMicros: 0 } as never);
+      const outcome = await runInstant(ask({ taskKey: 'task-a' }), { adapter: p.adapter, funds: f.funds });
+      expect(outcome).toMatchObject({ status: 'refused', reason: 'rule', words: 'No more than $1 a month for this Brick.' });
+      expect(f.funds.reserve).toHaveBeenCalledWith(expect.objectContaining({ taskKey: 'task-a' }));
+      expect(p.instant.run).not.toHaveBeenCalled();
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      expect(row).toMatchObject({ state: 'refused', reason: 'rule', taskKey: 'task-a', customerState: 'none' });
+    });
+
+    it('a rule the owner said refuses before a run is made, only for the task it is about, and says it plainly through the route with a stop', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      setAdapterForTests(p.adapter);
+      const f = fakeFunds(1_000_000);
+      setInstantFunds(f.funds);
+      const made = await proposeRule({ botId: brick, speakerId: sara, scope: 'task', taskKey: 'task-x', period: 'task', capMicros: 1 });
+      expect(made.ok).toBe(true);
+      const refused = await post({ botId: brick, forOwner: true, tool: 'EXA_SEARCH', arguments: { query: 'x' }, callId: callId(), taskKey: 'task-x' });
+      const body = await refused.json();
+      expect(body).toMatchObject({ status: 'refused', reason: 'rule', stop: true, runId: null });
+      expect(body.message).toContain('No more than');
+      expect(f.funds.reserve).not.toHaveBeenCalled();
+      expect(await prisma.instantRun.count({ where: { personId: sara } })).toBe(0);
+      // Another task, and a call that belongs to no task, are not that rule's
+      const other = await post({ botId: brick, forOwner: true, tool: 'EXA_SEARCH', arguments: { query: 'y' }, callId: callId(), taskKey: 'task-y' });
+      expect(await other.json()).toMatchObject({ status: 'done' });
+      const none = await post({ botId: brick, forOwner: true, tool: 'EXA_SEARCH', arguments: { query: 'z' }, callId: callId() });
+      expect(await none.json()).toMatchObject({ status: 'done' });
+    });
+
+    it('a run for a task puts its charge on that task: the task’s receipt shows what the person was charged, not what Composio charged us', async () => {
+      await setLimits({ markupBps: 5_000 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'task-r', title: 'Find the weather', category: 'apps' });
+      const outcome = await runInstant(ask({ taskKey: 'task-r' }), { adapter: p.adapter, funds: f.funds });
+      expect(outcome.status).toBe('done');
+      await closeReceipt({ botId: brick, taskKey: 'task-r', personId: sara, state: 'done' });
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      const charged = Number(row.customerMicros);
+      expect(charged).toBeGreaterThan(7_000);
+      const [item] = await activityFor(sara);
+      expect(item).toMatchObject({ title: 'Find the weather', state: 'done', category: 'apps', spentMicros: charged, lines: [{ label: 'Instant Apps, 1 use', amountMicros: charged }] });
+    });
+
+    it('a run that failed puts a zero on the meter event as what the person was charged (not "not known"), so the receipt does not wait for a price', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'task-f', title: 'Find the weather', category: 'apps' });
+      p.script.runs.push({ kind: 'done', successful: false, data: null, error: 'boom', logId: 'log-g', chargeMicros: 4_000 });
+      const outcome = await runInstant(ask({ callId: id, taskKey: 'task-f' }), { adapter: p.adapter, funds: f.funds });
+      expect(outcome).toMatchObject({ status: 'failed', reason: 'provider_failed' });
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      const event = await prisma.meterEvent.findFirstOrThrow({ where: { eventId: `instant:${row.id}` } });
+      expect(event.detail).toMatchObject({ instant: true, taskKey: 'task-f', customerMicros: 0 });
+      expect(Number(event.costMicros)).toBe(4_000);
+    });
+
+    it('a run Composio refused before anything ran also records a zero charge on its meter event', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      p.script.runs.push({ kind: 'rejected', status: 403, code: 'ManagedCredential_NotEnabled' });
+      expect(await runInstant(ask({ taskKey: 'task-j' }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'failed' });
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      const event = await prisma.meterEvent.findFirstOrThrow({ where: { eventId: `instant:${row.id}` } });
+      expect(event.detail).toMatchObject({ instant: true, taskKey: 'task-j', customerMicros: 0 });
+    });
+
+    it('asking again with the same call id after a rule refused it says the rule’s own words, not a general sentence', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      const id = callId();
+      f.funds.reserve.mockResolvedValueOnce({ ok: false, reason: 'rule', ruleId: 'r1', why: 'cap', words: 'No more than $1 a month for this Brick.', leftMicros: 250 } as never);
+      expect(await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'refused', reason: 'rule', words: 'No more than $1 a month for this Brick.' });
+      const again = await runInstant(ask({ callId: id }), { adapter: p.adapter, funds: f.funds });
+      expect(again).toMatchObject({ status: 'refused', reason: 'rule', words: 'No more than $1 a month for this Brick.', leftMicros: 250 });
+      expect(f.funds.reserve).toHaveBeenCalledTimes(1);
+    });
+
+    it('a run whose answer did not come back puts the receipt of the task SAVED on the run in "checking": a call with no task, and a retry naming another task, touch nothing', async () => {
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'task-c', title: 'Find the weather', category: 'apps' });
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'task-other', title: 'Another task', category: 'apps' });
+      const mk = (taskKey: string | null) =>
+        prisma.instantRun.create({ data: { runKey: `k-${randomUUID()}`, botId: brick, personId: sara, taskKey, toolSlug: 'EXA_SEARCH', toolkit: 'exa', argsHash: 'h', priceVersion: 'v', topMicros: BigInt(TOP), holdMicros: BigInt(TOP), state: 'ambiguous', customerState: 'held', providerUserId: `u-${randomUUID().slice(0, 6)}` } as never });
+      const withTask = await mk('task-c');
+      const noTask = await mk(null);
+      const state = async (taskKey: string) => (await prisma.taskReceipt.findFirstOrThrow({ where: { personId: sara, taskKey } })).state;
+      const input = { botId: brick, personId: sara, tool: 'EXA_SEARCH', arguments: {}, callId: 'c1', taskKey: 'task-c' };
+      await instantRulesAndReceipts.afterRun?.({ ...input, taskKey: null }, { status: 'checking', runId: noTask.id });
+      expect(await state('task-c')).toBe('running');
+      await instantRulesAndReceipts.afterRun?.(input, { status: 'done', runId: withTask.id, ok: true, data: {}, chargedMicros: 1, pending: false });
+      expect(await state('task-c')).toBe('running');
+      // A retry of the same call that names another task: the run's own task is the one that moves
+      await instantRulesAndReceipts.afterRun?.({ ...input, taskKey: 'task-other' }, { status: 'checking', runId: withTask.id });
+      expect(await state('task-c')).toBe('checking');
+      expect(await state('task-other')).toBe('running');
+      await prisma.instantRun.deleteMany({ where: { id: { in: [withTask.id, noTask.id] } } });
+    });
+
+    it('an Instant run that names its task is that task’s only: a receipt that merely carries the run id does not show its charge too', async () => {
+      await setLimits({ markupBps: 5_000 });
+      const p = fakeProvider();
+      const f = fakeFunds(1_000_000);
+      expect((await runInstant(ask({ taskKey: 'task-b' }), { adapter: p.adapter, funds: f.funds })).status).toBe('done');
+      const row = await prisma.instantRun.findFirstOrThrow({ where: { personId: sara } });
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'task-a', title: 'Not its task', category: 'apps', runId: row.id });
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'task-b', title: 'Its task', category: 'apps' });
+      await closeReceipt({ botId: brick, taskKey: 'task-a', personId: sara, state: 'done' });
+      await closeReceipt({ botId: brick, taskKey: 'task-b', personId: sara, state: 'done' });
+      const items = await activityFor(sara);
+      expect(items.find((item) => item.title === 'Its task')).toMatchObject({ spentMicros: Number(row.customerMicros) });
+      expect(items.find((item) => item.title === 'Not its task')).toMatchObject({ spentMicros: null, lines: [] });
     });
   });
 });

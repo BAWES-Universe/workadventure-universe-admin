@@ -25,11 +25,11 @@ export function createInstantFunds(clock: () => Date = () => new Date()): Instan
           route: input.charge.route,
           provider: input.charge.provider,
           priceVersion: input.charge.priceVersion ?? null,
-          jobKey: input.runId ?? null,
+          jobKey: input.taskKey ?? input.runId ?? null,
           // What the person said in chat is checked inside the hold's own transaction, under the person's lock, before any credit is held:
           // two steps asked at the same moment cannot both pass a cap that only has room for one
           guard: async (tx) => {
-            const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.runId ?? null, chargeClass: 'apps', amountMicros: input.amountMicros }, clock(), tx);
+            const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.taskKey ?? input.runId ?? null, chargeClass: 'apps', amountMicros: input.amountMicros }, clock(), tx);
             return ruled.ok ? null : { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
           },
         }, clock());
