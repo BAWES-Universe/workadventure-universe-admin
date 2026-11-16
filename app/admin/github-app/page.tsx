@@ -40,6 +40,8 @@ export default function GitHubAppSetupPage() {
   const [failed, setFailed] = useState<string | null>(null);
   const [blocked, setBlocked] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Counts each time GitHub is opened, so the wait starts afresh (and asking again after an hour of waiting) even while still waiting
+  const [opened, setOpened] = useState(0);
   const formRef = useRef<HTMLFormElement>(null);
   const again = useRef(false);
   // The app the waiting page is waiting to see replaced (none while the first one is made)
@@ -103,7 +105,7 @@ export default function GitHubAppSetupPage() {
       alive = false;
       clearInterval(timer);
     };
-  }, [step]);
+  }, [step, opened]);
 
   /** Opens GitHub's page in a window of its own, right inside the tap (a browser can refuse a window opened after a wait). */
   const openGitHub = () => {
@@ -115,6 +117,7 @@ export default function GitHubAppSetupPage() {
     }
     setBlocked(false);
     formRef.current?.submit();
+    setOpened((count) => count + 1);
     setStep('waiting');
   };
 

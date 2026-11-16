@@ -104,6 +104,30 @@ describe('GitHub for Universe setup page', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/admin/github-app');
   });
 
+  it('asks again after an hour of waiting when GitHub is opened again', async () => {
+    let made = false;
+    backend({ made: () => (made ? { made: true, appId: 7, slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe' } : { made: false }) });
+    render(<GitHubAppSetupPage />);
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to GitHub' }));
+    // An hour passes without the app being made: the page stops asking
+    await act(async () => {
+      jest.advanceTimersByTime(60 * 60 * 1000 + 5000);
+    });
+    const callsBefore = fetchMock.mock.calls.length;
+    await act(async () => {
+      jest.advanceTimersByTime(10000);
+    });
+    expect(fetchMock.mock.calls.length).toBe(callsBefore);
+    // Opening GitHub again starts the wait afresh, so finishing there is still noticed
+    fireEvent.click(screen.getByRole('button', { name: 'Open GitHub again' }));
+    made = true;
+    await act(async () => {
+      jest.advanceTimersByTime(2500);
+    });
+    expect(screen.getByText(/GitHub is set up/)).toBeTruthy();
+  });
+
   it('shows the set-up state when the app is already made, with the way to make it again', async () => {
     backend({ existing: { slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe', appId: 7 } });
     render(<GitHubAppSetupPage />);
