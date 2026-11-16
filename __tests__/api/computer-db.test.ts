@@ -1481,23 +1481,70 @@ run('a Brick’s computer, in a real database', () => {
       expect(provider.calls.length).toBe(calls);
     });
 
-    it('writes the machine’s disk to the books when it is made and a 0 when it is taken away, so the pool counts the disks it keeps (audit F4)', async () => {
+    it('writes what is kept for the machine (its disk, and its saved copy) to the books when it changes, so the pool counts it (audit F4)', async () => {
       const sara = await person('sara');
       provider.disk = 4_000_000_000;
+      provider.filesBytes = 0;
       await giveComputer(sara.brickId, sara.id);
       const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!job.ok) throw new Error('no');
       await finishJob(job.job.id, 'done', minutes(1));
-      const ref = (await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).providerRef as string;
-      const made = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:disk:${ref}:made` } });
-      expect(made).toMatchObject({ kind: 'stored_bytes', pool: 'computer', payerKind: 'universe', botId: sara.brickId, personId: sara.id, quantity: BigInt(4_000_000_000), unit: 'byte' });
-      // The pool's envelope now carries the kept disk: 4 GB at the storage price
-      const kept = async () => (await envelopeIn(prisma, new Date(), { ...(await getMeterSettings()), storageMicrosPerGbMonth: 90_000 })).keptStorageMicros;
-      expect(await kept()).toBeGreaterThanOrEqual(360_000);
+      const kept = () => prisma.meterEvent.findMany({ where: { botId: sara.brickId, kind: 'stored_bytes' }, orderBy: [{ occurredAt: 'asc' }, { recordedAt: 'asc' }] });
+      // Made: its disk. The rest that follows saves a copy (the pretend one is empty): the level did not change, so nothing more is written
+      const first = await kept();
+      expect(first).toHaveLength(1);
+      expect(first[0]).toMatchObject({ kind: 'stored_bytes', pool: 'computer', payerKind: 'universe', botId: sara.brickId, personId: sara.id, quantity: BigInt(4_000_000_000), unit: 'byte' });
+      // The pool's envelope carries the kept disk: 4 GB at the storage price
+      const envelope = async () => (await envelopeIn(prisma, new Date(), { ...(await getMeterSettings()), storageMicrosPerGbMonth: 90_000 })).keptStorageMicros;
+      expect(await envelope()).toBe(360_000);
+      // A saved copy of 1 GB in our own storage is kept as well: the level is the disk and the copy
+      provider.filesBytes = 1_000_000_000;
+      const second = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(5));
+      if (!second.ok) throw new Error('no');
+      await finishJob(second.job.id, 'done', minutes(6));
+      expect((await kept()).map((event) => Number(event.quantity))).toEqual([4_000_000_000, 5_000_000_000]);
+      expect(await envelope()).toBe(450_000);
+      // Taken away: the disk is gone and the copy stays
       expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
-      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:disk:${ref}:gone` } })).toMatchObject({ quantity: BigInt(0) });
-      // Asked again nothing is written twice
-      expect(await prisma.meterEvent.count({ where: { botId: sara.brickId, kind: 'stored_bytes' } })).toBe(2);
+      expect((await kept()).map((event) => Number(event.quantity))).toEqual([4_000_000_000, 5_000_000_000, 1_000_000_000]);
+      expect(await envelope()).toBe(90_000);
+      // Asked again, nothing is written twice
+      expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
+      expect(await kept()).toHaveLength(3);
+    });
+
+    it('holds the disk of a machine that is not made yet in the pool before making it: a pool that cannot carry it makes no machine and the job waits (hard stop)', async () => {
+      const sara = await person('sara');
+      provider.disk = 4_000_000_000;
+      // The job's own room (10 minutes, 60,000) fits under the ceiling; a month of the 4 GB disk (360,000) does not
+      await setUp({ poolCeilingMicros: 200_000, storageMicrosPerGbMonth: 90_000 });
+      await giveComputer(sara.brickId, sara.id);
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      expect(started.ok && started.job).toMatchObject({ status: 'queued', queuedFor: 'pool' });
+      expect(provider.calls.filter((call) => call.name === 'create')).toEqual([]);
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).providerRef).toBeNull();
+      // Nothing stays held: not the job's room, not the disk's
+      expect(await prisma.meterReservation.count({ where: { state: 'held' } })).toBe(0);
+      // Room in the pool: the same job runs, the machine is made, and the disk's room is given back (the disk now counts as kept storage)
+      await setUp({ poolCeilingMicros: 1_000_000, storageMicrosPerGbMonth: 90_000 });
+      expect((await sweepComputers(minutes(1))).started).toBeGreaterThanOrEqual(1);
+      expect(provider.calls.filter((call) => call.name === 'create')).toHaveLength(1);
+      expect(await prisma.meterReservation.count({ where: { state: 'held', reservationKey: { startsWith: 'computer:diskroom:' } } })).toBe(0);
+      expect(await prisma.meterEvent.count({ where: { botId: sara.brickId, kind: 'stored_bytes', quantity: BigInt(4_000_000_000) } })).toBe(1);
+    });
+
+    it('does not count the disk room as a job running, or against the person’s allowance, and gives it back when the making fails', async () => {
+      const sara = await person('sara');
+      provider.disk = 4_000_000_000;
+      await setUp({ poolCeilingMicros: 10_000_000, storageMicrosPerGbMonth: 90_000, atOnceAll: 1 });
+      await giveComputer(sara.brickId, sara.id);
+      provider.failNext.create = true;
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW)).toEqual({ ok: false, reason: 'broken_start' });
+      expect(await prisma.meterReservation.count({ where: { state: 'held' } })).toBe(0);
+      // The one place for a job at a time (atOnceAll 1) was not taken by the disk: the next job starts
+      const next = await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(1));
+      expect(next.ok && next.job.status).toBe('running');
+      expect(await prisma.meterReservation.count({ where: { state: 'held', reservationKey: { startsWith: 'computer:diskroom:' } } })).toBe(0);
     });
 
     it('removes the machine for good only after its files were saved; a save that failed leaves it for the next sweep', async () => {

@@ -29,7 +29,9 @@ async function write(raw: unknown): Promise<EventResult> {
   // Work a Brick does on its own, with nobody talking to it, is its owner's
   if (!personId && !guestId && bot?.brick) personId = bot.ownerId;
 
-  const checked = readMeterEvent({ ...body, personKey: personKeyOf({ personId, guestId }), personId, brick: bot ? bot.brick : null });
+  // Whose key paid is the Brick maker's when the writer says a person's key did and names nobody: the key a bot speaks with is its maker's, never another's
+  const payerPersonId = body.payerKind === 'person' && !body.payerPersonId && bot?.ownerId ? bot.ownerId : body.payerPersonId;
+  const checked = readMeterEvent({ ...body, personKey: personKeyOf({ personId, guestId }), personId, payerPersonId, brick: bot ? bot.brick : null });
   if (!checked.ok) return { eventId, status: 'invalid', error: checked.error };
   const result = await recordMeterEvent(checked.value);
   return { eventId: checked.value.eventId, status: result.recorded ? 'recorded' : result.conflict ? 'conflict' : 'duplicate' };

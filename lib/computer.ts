@@ -4,13 +4,13 @@ import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { getBrickLimits } from '@/lib/bot-limits';
-import { memberAllowance, releaseRoom, renewRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
+import { diskRoomKey, memberAllowance, releaseRoom, renewRoom, reserveDiskRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
 import { monthOf } from '@/lib/meter-values';
 import { checkSpend } from '@/lib/spend-rules';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
-import { recordKeptDisk } from '@/lib/computer-disk';
+import { recordKeptBytes } from '@/lib/computer-disk';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
 import {
   AFTER_TAKE_OVER,
@@ -275,6 +275,8 @@ async function saveCopy(botId: string, ref: string, provider: Provider): Promise
   try {
     const copy = await provider.saveFiles(ref);
     await prisma.brickComputer.updateMany({ where: { botId }, data: { filesBytes: BigInt(Math.max(0, Math.trunc(copy.bytes))), filesSavedAt: copy.savedAt } });
+    // The copy is kept in our own storage, beside the machine's disk: what is kept is written when its size changes
+    await recordKeptBytes({ botId, reason: 'saved', machineBytes: provider.diskBytes?.() ?? null, copyBytes: Math.max(0, Math.trunc(copy.bytes)) });
     return true;
   } catch (error) {
     console.error('[Computer] Could not save a copy of the files:', error instanceof Error ? error.message : 'unknown');
@@ -497,6 +499,22 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     return 'queued';
   }
 
+  // A machine that is not made yet takes its disk's room in the pool first (a disk is bought whole the moment it is made): a pool that cannot
+  // carry it makes no machine, and this job waits in line with its work saved, as for any other room the pool lacks
+  const diskBytes = !row.providerRef ? provider.diskBytes?.() ?? null : null;
+  if (diskBytes !== null && diskBytes > 0) {
+    const disk = await reserveDiskRoom({ botId: job.botId, bytes: diskBytes }, now);
+    if (!disk.ok) {
+      await releaseRoom({ key }, now);
+      if (disk.reason === 'not_set') return 'not_set';
+      await queue('pool');
+      return 'queued';
+    }
+  }
+  const dropDiskRoom = async () => {
+    if (diskBytes !== null && diskBytes > 0) await releaseRoom({ key: diskRoomKey(job.botId) }, now);
+  };
+
   // Take the writer's place. The database lets only one writing job hold it; a second one arriving at the same moment queues.
   try {
     const claimed = await prisma.computerJob.updateMany({
@@ -506,15 +524,20 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     if (claimed.count === 0) {
       // Two tries in the same millisecond share one room: it is given back only when the job that won did not take it
       const holder = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { reservationKey: true } });
-      if (holder?.reservationKey !== key) await releaseRoom({ key }, now);
+      if (holder?.reservationKey !== key) {
+        await releaseRoom({ key }, now);
+        await dropDiskRoom();
+      }
       return 'gone';
     }
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
       await releaseRoom({ key }, now);
+      await dropDiskRoom();
       await queue('turn');
       return 'queued';
     }
+    await dropDiskRoom();
     throw error;
   }
 
@@ -532,13 +555,17 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
   const brick = await prisma.bot.findUnique({ where: { id: job.botId }, select: { deletedAt: true } });
   if (!brick || brick.deletedAt !== null) {
     await endJob(job.id, 'stopped', 'deleted', now);
+    await dropDiskRoom();
     return 'gone';
   }
 
   // The machine: made once, here, or woken. A start that breaks leaves the job over, its room given back and the machine "broken".
   try {
     await bringUp(job.botId, provider, now);
+    // The disk is in the books as kept storage now: the room held for it is given back
+    await dropDiskRoom();
   } catch (error) {
+    await dropDiskRoom();
     console.error('[Computer] A machine did not start:', error instanceof Error ? error.message : 'unknown');
     // Another job holds this machine (it is waking it, or working on it): its state is theirs, and this failure does not rewrite it.
     // Only when this job was the only one asking is the machine marked, so a failed second start never breaks a machine that works
@@ -620,7 +647,7 @@ async function bringUp(botId: string, provider: Provider, now: Date): Promise<vo
       try {
         const info = await provider.create(botId);
         row = await prisma.brickComputer.update({ where: { botId }, data: { providerRef: info.ref, madeAt: now, machine: 'waking' } });
-        await recordKeptDisk({ botId, ref: info.ref, bytes: provider.diskBytes?.() ?? null, now });
+        await recordKeptBytes({ botId, reason: 'made', machineBytes: provider.diskBytes?.() ?? null, now });
       } catch (error) {
         await prisma.brickComputer.updateMany({ where: { botId, providerRef: null }, data: { machine: 'none' } });
         throw error;
@@ -1481,7 +1508,7 @@ export async function removeMachineBeforeDelete(botId: string, now: Date = new D
     return false;
   }
   // The machine is gone: say so at once, so a later try (if the Brick's own delete fails) does not save a copy of a machine that is not there
-  await recordKeptDisk({ botId, ref: row.providerRef, bytes: null, gone: true });
+  await recordKeptBytes({ botId, reason: 'gone', machineBytes: null });
   try {
     await prisma.brickComputer.update({ where: { botId }, data: { providerRef: null, machine: 'none' } });
   } catch (error) {
