@@ -1891,6 +1891,17 @@ run('the bounded Instant executor, in a real database', () => {
       expect(await receiptState('look-6')).toBe('done');
     });
 
+    it('a receipt the bot server left in checking with no Instant run is ended by the sweep after the wait, never hidden for good', async () => {
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'look-9', title: 'No Instant run', category: 'apps' });
+      expect(await closeReceipt({ botId: brick, taskKey: 'look-9', personId: sara, state: 'checking' })).toMatchObject({ ok: true, state: 'checking' });
+      // Not yet: it has not waited as long as an Instant lookup would
+      await settleCheckingReceipts(50, new Date());
+      expect(await receiptState('look-9')).toBe('checking');
+      await settleCheckingReceipts(50, new Date(Date.now() + 31 * MIN));
+      expect(await receiptState('look-9')).toBe('done');
+      expect((await activityFor(sara)).map((item) => item.title)).toContain('No Instant run');
+    });
+
     it('a receipt the run’s own pass could not move (no hook then) is moved by the sweep’s pass over receipts still in checking', async () => {
       await setLimits();
       const p = fakeProvider();

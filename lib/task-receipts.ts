@@ -147,13 +147,21 @@ const openRunsOf = (tx: Prisma.TransactionClient, task: { botId: string; personI
  *  - Receipt in checking, a run still open: stays in checking. One run ending never ends a task that has another still open.
  *  - Receipt running, or done/refunded with every run ended: left as it is. A task with no Instant run (a computer's) is not touched.
  */
-export async function settleReceipt(task: { botId: string; personId: string; taskKey: string }, now: Date = new Date()): Promise<ReceiptState | null> {
+export async function settleReceipt(task: { botId: string; personId: string; taskKey: string }, now: Date = new Date(), unwatchedBefore: Date | null = null): Promise<ReceiptState | null> {
   return prisma.$transaction(async (tx) => {
     await receiptLock(tx, task.botId, task.taskKey);
     const row = await tx.taskReceipt.findUnique({ where: { botId_taskKey: { botId: task.botId, taskKey: task.taskKey } } });
     if (!row || row.personId !== task.personId) return null;
     const runs = await tx.instantRun.findMany({ where: { botId: task.botId, personId: task.personId, taskKey: task.taskKey }, select: { state: true } });
-    if (runs.length === 0) return row.state as ReceiptState;
+    if (runs.length === 0) {
+      // A task with no Instant run has nothing here to look up. One the bot server left in checking is ended when it has waited as long as
+      // an Instant lookup would have (the sweep says when): done, and what it took is read from the books, so it never stays hidden for good.
+      if (row.state === 'checking' && unwatchedBefore !== null && row.updatedAt < unwatchedBefore) {
+        await tx.taskReceipt.update({ where: { id: row.id }, data: { state: 'done', endedAt: now } });
+        return 'done';
+      }
+      return row.state as ReceiptState;
+    }
     if (runs.some((run) => RUN_OPEN_STATES.includes(run.state))) {
       if (row.state === 'checking' || row.state === 'running') return row.state as ReceiptState;
       await tx.taskReceipt.update({ where: { id: row.id }, data: { state: 'checking', endedAt: null } });
@@ -167,19 +175,25 @@ export async function settleReceipt(task: { botId: string; personId: string; tas
   });
 }
 
-/** Receipts still in checking whose Instant runs have all ended: the sweep says each one again. Oldest first. */
-export async function settleCheckingReceipts(limit: number, now: Date = new Date()): Promise<number> {
+/**
+ * Receipts still in checking: the sweep says each one again. Oldest first. Those with Instant runs are settled once every run has ended; those
+ * with none are ended after `unwatchedWaitMs` (Instant's own wait for an unclear run), so none stays hidden for good.
+ */
+export async function settleCheckingReceipts(limit: number, now: Date = new Date(), unwatchedWaitMs: number = 30 * 60 * 1000): Promise<number> {
+  const unwatchedBefore = new Date(now.getTime() - unwatchedWaitMs);
   const rows = await prisma.$queryRaw<Array<{ botId: string; personId: string; taskKey: string }>>(Prisma.sql`
     SELECT r."bot_id" AS "botId", r."person_id" AS "personId", r."task_key" AS "taskKey"
     FROM task_receipts r
     WHERE r."state" = 'checking'
-      AND EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key")
-      AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" IN ('reserving', 'held', 'sent', 'ambiguous'))
+      AND (
+        (r."updated_at" < ${unwatchedBefore} AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key"))
+        OR (EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key") AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" IN ('reserving', 'held', 'sent', 'ambiguous')))
+      )
     ORDER BY r."updated_at" ASC
     LIMIT ${limit}`);
   let settled = 0;
   for (const row of rows) {
-    const state = await settleReceipt(row, now).catch((error) => {
+    const state = await settleReceipt(row, now, unwatchedBefore).catch((error) => {
       console.error('[Receipts] Could not settle a receipt:', error instanceof Error ? error.message : 'unknown');
       return null;
     });
