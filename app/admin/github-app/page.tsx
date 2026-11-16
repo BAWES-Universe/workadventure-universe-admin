@@ -1,11 +1,20 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { PageHeader } from '../components/ds';
 
-type Answer = { existing?: { slug: string; url: string }; action?: string; manifest?: string; error?: string };
+type Existing = { slug?: string; url?: string; appId?: number };
+type Answer = { existing?: Existing; action?: string; manifest?: string; error?: string };
+type Form = { action: string; manifest: string };
+type Step = 'loading' | 'ready' | 'waiting' | 'made' | 'confirm' | 'failed';
+
+/** GitHub's Create page opens in this window, so the game and Orbit stay where they are. */
+export const GITHUB_WINDOW = 'github-app-setup';
+/** How often a waiting page asks whether the app has been made, and for how long (GitHub's own limit for the setup is an hour). */
+const POLL_MS = 2500;
+const POLL_FOR_MS = 60 * 60 * 1000;
 
 /** Asks Orbit for the filled-in form (or says the app is already made). */
 async function load(again: boolean): Promise<{ answer?: Answer; failed?: string }> {
@@ -19,19 +28,40 @@ async function load(again: boolean): Promise<{ answer?: Answer; failed?: string 
 }
 
 /**
- * The one step that makes Universe's GitHub App (game #2041): this page opens GitHub's "Create GitHub App" page with everything
- * filled in, for the BAWES-Universe organization. The super admin presses Create there; nothing else is asked of them.
+ * The one step that makes Universe's GitHub App (game #2041). The page says what is about to happen, and only when the super
+ * admin presses Continue it opens GitHub's "Create GitHub App" page, filled in for the BAWES-Universe organization, in a window of
+ * its own (so the game tab is never taken over). The super admin presses Create there; nothing else is asked of them. This page
+ * waits, and shows "Set up" by itself once the app is made. Once made, the same page can make it again (it replaces the app).
  */
 export default function GitHubAppSetupPage() {
-  const [answer, setAnswer] = useState<Answer | null>(null);
+  const [step, setStep] = useState<Step>('loading');
+  const [existing, setExisting] = useState<Existing | null>(null);
+  const [form, setForm] = useState<Form | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
-  const form = useRef<HTMLFormElement>(null);
+  const [blocked, setBlocked] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  const again = useRef(false);
+  // The app the waiting page is waiting to see replaced (none while the first one is made)
+  const replaced = useRef<number | null>(null);
 
-  const apply = (result: { answer?: Answer; failed?: string }) => {
-    setFailed(result.failed ?? null);
-    if (result.answer) setAnswer(result.answer);
-  };
-  const ask = () => void load(false).then(apply);
+  const apply = useCallback((result: { answer?: Answer; failed?: string }) => {
+    if (result.failed) {
+      setFailed(result.failed);
+      setStep('failed');
+      return;
+    }
+    const answer = result.answer ?? {};
+    setFailed(null);
+    if (answer.existing) {
+      setExisting(answer.existing);
+      replaced.current = answer.existing.appId ?? null;
+      setStep('made');
+    } else if (answer.action && answer.manifest) {
+      setForm({ action: answer.action, manifest: answer.manifest });
+      setStep('ready');
+    }
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -41,39 +71,153 @@ export default function GitHubAppSetupPage() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [apply]);
 
-  // The filled-in form goes to GitHub as soon as it is here
+  // While GitHub's window is open, ask now and then whether the app is made
   useEffect(() => {
-    if (answer?.action) form.current?.submit();
-  }, [answer]);
+    if (step !== 'waiting') return;
+    let alive = true;
+    const started = Date.now();
+    const timer = setInterval(async () => {
+      if (Date.now() - started > POLL_FOR_MS) {
+        clearInterval(timer);
+        return;
+      }
+      try {
+        const response = await authenticatedFetch('/api/admin/github-app');
+        if (!response.ok) return;
+        const body = (await response.json()) as { made?: unknown; appId?: unknown; slug?: unknown; url?: unknown };
+        if (!alive || body.made !== true) return;
+        const appId = typeof body.appId === 'number' ? body.appId : undefined;
+        // The first app: any app is new. A replacement: only another app than the one it replaces
+        if (replaced.current !== null && appId === replaced.current) return;
+        clearInterval(timer);
+        setExisting({ appId, slug: typeof body.slug === 'string' ? body.slug : undefined, url: typeof body.url === 'string' ? body.url : undefined });
+        replaced.current = appId ?? null;
+        setStep('made');
+      } catch {
+        // Asked again in a moment
+      }
+    }, POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [step]);
+
+  /** Opens GitHub's page in a window of its own, right inside the tap (a browser can refuse a window opened after a wait). */
+  const openGitHub = () => {
+    if (!form) return;
+    const popup = window.open('', GITHUB_WINDOW, 'width=980,height=820');
+    if (!popup) {
+      setBlocked(true);
+      return;
+    }
+    setBlocked(false);
+    formRef.current?.submit();
+    setStep('waiting');
+  };
+
+  const makeAgain = async () => {
+    setBusy(true);
+    again.current = true;
+    apply(await load(true));
+    setBusy(false);
+  };
+
+  const retry = () => {
+    setStep('loading');
+    void load(again.current).then(apply);
+  };
 
   return (
     <div>
       <PageHeader title="GitHub for Universe" />
-      {failed && (
-        <div role="alert">
-          <p>{failed}</p>
-          <Button type="button" variant="outline" onClick={ask}>
-            Try again
-          </Button>
-        </div>
-      )}
-      {answer?.existing && (
-        <div>
-          <p>
-            GitHub is set up: Universe&apos;s GitHub App is <a href={answer.existing.url} target="_blank" rel="noreferrer">{answer.existing.slug}</a>. Everyone can connect GitHub in Apps.
-          </p>
-        </div>
-      )}
-      {answer?.action && (
-        <form ref={form} method="post" action={answer.action} target="_top">
-          <input type="hidden" name="manifest" value={answer.manifest} />
-          <p>GitHub opens with everything filled in. Press Create GitHub App there.</p>
-          <Button type="submit">Continue to GitHub</Button>
+      <div className="mt-6 grid max-w-xl gap-4 rounded-[18px] border border-border bg-card p-5 text-sm leading-relaxed" data-testid="github-setup-card" data-step={step}>
+        {step === 'loading' && <p>One moment…</p>}
+
+        {step === 'failed' && (
+          <div role="alert" className="grid gap-3">
+            <p>{failed}</p>
+            <Button type="button" variant="outline" onClick={retry} className="w-max">
+              Try again
+            </Button>
+          </div>
+        )}
+
+        {(step === 'ready' || step === 'waiting') && (
+          <>
+            {step === 'ready' ? (
+              <p>
+                GitHub opens in its own window with everything filled in. Press <strong>Create GitHub App</strong> there. That is the only step.
+              </p>
+            ) : (
+              <p role="status">
+                Waiting for you on GitHub. Press <strong>Create GitHub App</strong> in the window that opened. This page updates by itself.
+              </p>
+            )}
+            <p className="text-muted-foreground">Only an owner of BAWES-Universe on GitHub can press it.</p>
+            {blocked && (
+              <p role="alert" className="text-destructive">
+                Your browser blocked the window. Allow pop-ups for Orbit, then press the button again.
+              </p>
+            )}
+            <Button type="button" variant={step === 'ready' ? 'default' : 'outline'} onClick={openGitHub} className="w-max">
+              {step === 'ready' ? 'Continue to GitHub' : 'Open GitHub again'}
+            </Button>
+          </>
+        )}
+
+        {step === 'made' && (
+          <>
+            <p>
+              GitHub is set up: Universe&apos;s GitHub App is{' '}
+              {existing?.slug && existing.url ? (
+                <a href={existing.url} target="_blank" rel="noreferrer" className="font-semibold underline underline-offset-4">
+                  {existing.slug}
+                </a>
+              ) : (
+                'made'
+              )}
+              . Everyone can connect GitHub in Apps.
+            </p>
+            <Button type="button" variant="outline" onClick={() => setStep('confirm')} className="w-max">
+              Make the app again
+            </Button>
+          </>
+        )}
+
+        {step === 'confirm' && (
+          <>
+            <p>
+              <strong>Make the app again?</strong> Universe&apos;s GitHub App is replaced by a new one. Everyone who connected GitHub has to sign in again.
+            </p>
+            <p className="text-muted-foreground">
+              GitHub names are unique, so delete the old app on GitHub first
+              {existing?.url ? (
+                <>
+                  {' '}
+                  (<a href={existing.url} target="_blank" rel="noreferrer" className="underline underline-offset-4">its page</a>)
+                </>
+              ) : null}
+              , or choose a new name on GitHub&apos;s page.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" onClick={() => void makeAgain()} disabled={busy}>
+                Make it again
+              </Button>
+              <Button type="button" variant="outline" onClick={() => setStep('made')}>
+                Keep this app
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
+      {form && (
+        <form ref={formRef} method="post" action={form.action} target={GITHUB_WINDOW} hidden>
+          <input type="hidden" name="manifest" value={form.manifest} />
         </form>
       )}
-      {!answer && !failed && <p>Opening GitHub…</p>}
     </div>
   );
 }

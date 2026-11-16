@@ -60,7 +60,7 @@ describe('GitHubSetupRow', () => {
     expect(row.getAttribute('data-state')).toBe('todo');
     expect(screen.getByText('GitHub for Universe')).toBeTruthy();
     expect(screen.getByText('Not set up')).toBeTruthy();
-    expect(screen.getByText(/press Create on GitHub/)).toBeTruthy();
+    expect(screen.getByText(/Press Create on GitHub, once/)).toBeTruthy();
   });
 
   it('says it is set up once it is, still a link', () => {

@@ -1,0 +1,164 @@
+/** @jest-environment jsdom */
+
+import React from 'react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
+
+/**
+ * The one-time "GitHub for Universe" setup page (game #2041). It says what is about to happen and opens GitHub's Create page
+ * only when asked, in a window of its own (never taking over the game tab), waits, and shows "Set up" by itself.
+ */
+
+const fetchMock = jest.fn();
+jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (...args: unknown[]) => fetchMock(...args) }));
+jest.mock('@/app/admin/components/ds', () => ({ PageHeader: ({ title }: { title: string }) => <h1>{title}</h1> }));
+
+import GitHubAppSetupPage, { GITHUB_WINDOW } from '@/app/admin/github-app/page';
+
+const FORM = { action: 'https://github.com/organizations/BAWES-Universe/settings/apps/new?state=abc', manifest: '{"name":"BAWES Universe"}' };
+const json = (body: unknown, ok = true) => Promise.resolve({ ok, status: ok ? 200 : 500, json: () => Promise.resolve(body) });
+
+let submit: jest.SpyInstance;
+let open: jest.SpyInstance;
+
+/** Answers by method and address: the form (or the existing app) on POST, whether it is made on GET. */
+function backend(options: { existing?: { slug: string; url: string; appId: number }; made?: () => { made: boolean; appId?: number; slug?: string; url?: string } } = {}) {
+  fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+    if (init?.method === 'POST') return json(options.existing && !JSON.parse(init.body ?? '{}').again ? { existing: options.existing } : FORM);
+    return json(options.made ? options.made() : { made: false });
+  });
+}
+
+async function settle() {
+  await act(async () => {
+    await Promise.resolve();
+  });
+}
+
+beforeEach(() => {
+  jest.useFakeTimers();
+  fetchMock.mockReset();
+  submit = jest.spyOn(HTMLFormElement.prototype, 'submit').mockImplementation(() => undefined);
+  open = jest.spyOn(window, 'open').mockReturnValue({} as Window);
+});
+afterEach(() => {
+  jest.useRealTimers();
+  submit.mockRestore();
+  open.mockRestore();
+});
+
+describe('GitHub for Universe setup page', () => {
+  it('explains the step first and does not open GitHub on its own', async () => {
+    backend();
+    render(<GitHubAppSetupPage />);
+    await settle();
+    expect(screen.getByText(/GitHub opens in its own window with everything filled in/)).toBeTruthy();
+    expect(screen.getByText('Create GitHub App')).toBeTruthy();
+    expect(screen.getByText('Only an owner of BAWES-Universe on GitHub can press it.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Continue to GitHub' })).toBeTruthy();
+    expect(submit).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it('opens GitHub in its own window inside the tap, then waits', async () => {
+    backend();
+    const { container } = render(<GitHubAppSetupPage />);
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to GitHub' }));
+    expect(open).toHaveBeenCalledWith('', GITHUB_WINDOW, expect.any(String));
+    expect(submit).toHaveBeenCalledTimes(1);
+    const form = container.querySelector('form') as HTMLFormElement;
+    expect(form.getAttribute('target')).toBe(GITHUB_WINDOW);
+    expect(form.getAttribute('action')).toBe(FORM.action);
+    expect((form.querySelector('input[name=manifest]') as HTMLInputElement).value).toBe(FORM.manifest);
+    expect(screen.getByText(/Waiting for you on GitHub/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Open GitHub again' })).toBeTruthy();
+  });
+
+  it('says so, and goes nowhere, when the browser blocks the window', async () => {
+    backend();
+    open.mockReturnValue(null);
+    render(<GitHubAppSetupPage />);
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to GitHub' }));
+    expect(screen.getByRole('alert').textContent).toMatch(/blocked the window/);
+    expect(submit).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Continue to GitHub' })).toBeTruthy();
+  });
+
+  it('shows Set up by itself once the app is made', async () => {
+    let made = false;
+    backend({ made: () => (made ? { made: true, appId: 7, slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe' } : { made: false }) });
+    render(<GitHubAppSetupPage />);
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to GitHub' }));
+    await act(async () => {
+      jest.advanceTimersByTime(2500);
+    });
+    expect(screen.getByText(/Waiting for you on GitHub/)).toBeTruthy();
+    made = true;
+    await act(async () => {
+      jest.advanceTimersByTime(2500);
+    });
+    expect(screen.getByText(/GitHub is set up/)).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'bawes-universe' }).getAttribute('href')).toBe('https://github.com/apps/bawes-universe');
+    expect(fetchMock).toHaveBeenCalledWith('/api/admin/github-app');
+  });
+
+  it('shows the set-up state when the app is already made, with the way to make it again', async () => {
+    backend({ existing: { slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe', appId: 7 } });
+    render(<GitHubAppSetupPage />);
+    await settle();
+    expect(screen.getByText(/GitHub is set up/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Make the app again' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Continue to GitHub' })).toBeNull();
+  });
+
+  it('asks before replacing the app, and can be left alone', async () => {
+    backend({ existing: { slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe', appId: 7 } });
+    render(<GitHubAppSetupPage />);
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'Make the app again' }));
+    expect(screen.getByText(/Everyone who connected GitHub has to sign in again/)).toBeTruthy();
+    expect(screen.getByText(/GitHub names are unique/)).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Keep this app' }));
+    expect(screen.getByText(/GitHub is set up/)).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('makes it again only after the confirmation, and waits for another app than the old one', async () => {
+    let appId = 7;
+    backend({ existing: { slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe', appId: 7 }, made: () => ({ made: true, appId, slug: appId === 7 ? 'bawes-universe' : 'bawes-universe-2', url: 'https://github.com/apps/x' }) });
+    render(<GitHubAppSetupPage />);
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'Make the app again' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Make it again' }));
+    await settle();
+    const post = fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST').pop();
+    expect(JSON.parse(post[1].body)).toEqual({ again: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to GitHub' }));
+    // The old app is still the one kept: not done yet
+    await act(async () => {
+      jest.advanceTimersByTime(2500);
+    });
+    expect(screen.getByText(/Waiting for you on GitHub/)).toBeTruthy();
+    appId = 8;
+    await act(async () => {
+      jest.advanceTimersByTime(2500);
+    });
+    expect(screen.getByRole('link', { name: 'bawes-universe-2' })).toBeTruthy();
+  });
+
+  it('says what went wrong and offers Try again', async () => {
+    fetchMock.mockImplementationOnce(() => json({ error: 'Only a super admin can set up GitHub for Universe' }, false));
+    backend();
+    render(<GitHubAppSetupPage />);
+    await settle();
+    expect(screen.getByRole('alert').textContent).toMatch(/Only a super admin/);
+    fetchMock.mockReset();
+    backend();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await settle();
+    expect(screen.getByRole('button', { name: 'Continue to GitHub' })).toBeTruthy();
+  });
+});

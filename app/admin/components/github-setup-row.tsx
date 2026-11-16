@@ -48,7 +48,7 @@ export function GitHubSetupRow({ made }: { made: boolean }) {
             {made ? 'Set up' : 'Not set up'}
           </span>
         </span>
-        <small>{made ? 'Everyone can connect GitHub in Apps.' : 'One tap, then press Create on GitHub. After that everyone can connect GitHub in Apps.'}</small>
+        <small>{made ? 'Everyone can connect GitHub in Apps.' : 'Press Create on GitHub, once. After that everyone can connect GitHub in Apps.'}</small>
       </span>
       <ChevronRight size={20} className={styles.chevron} aria-hidden="true" />
     </Link>

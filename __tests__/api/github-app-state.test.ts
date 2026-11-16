@@ -46,13 +46,13 @@ describe('GET /api/admin/github-app', () => {
     mockKept.current = 1;
     mockApp.current = { appId: 1, slug: 'bawes-universe', clientId: 'c', clientSecret: 'shh', webhookSecret: 'shh2', pem: 'PEM', htmlUrl: 'https://github.com/apps/bawes-universe' };
     const body = await (await ask()).json();
-    expect(body).toEqual({ made: true, slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe' });
+    expect(body).toEqual({ made: true, appId: 1, slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe' });
   });
 
   it('says made even when the app cannot be read back, without its address', async () => {
     mockUser.current = { id: 'u1', isSuperAdmin: true };
     mockKept.current = 1;
-    expect(await (await ask()).json()).toEqual({ made: true });
+    expect(await (await ask()).json()).toEqual({ made: true, appId: 1 });
   });
 
   it('never says not made when the store cannot be read: it answers 500, so the row stays away', async () => {
