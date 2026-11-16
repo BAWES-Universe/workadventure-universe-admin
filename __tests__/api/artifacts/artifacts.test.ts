@@ -1047,11 +1047,12 @@ describe('artifacts', () => {
     it('does not leave a file behind when a change lands while it is deleting', async () => {
       const made = await makeApp();
       const id = made.artifact.id;
-      const findMany = fakePrisma.artifactVersion.findMany;
-      const spy = jest.spyOn(fakePrisma.artifactVersion, 'findMany').mockImplementationOnce(async (args: unknown) => {
-        const found = await findMany(args as never);
-        await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>2</p>' }, { id });
-        return found;
+      // After the delete read the artifact, and before the step that takes its rows: inside that step its row is held,
+      // and a new version starts by writing to that row, so it lands before the step or finds no artifact
+      const step = fakePrisma.$transaction;
+      const spy = jest.spyOn(fakePrisma, '$transaction').mockImplementationOnce(async (fn: unknown) => {
+        expect((await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>2</p>' }, { id })).status).toBe(200);
+        return step(fn as never);
       });
       expect((await removing(id)).status).toBe(200);
       spy.mockRestore();
