@@ -300,12 +300,22 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
   };
 }
 
-/** The person's finished receipts (a task still being looked up is not finished: it shows when it settles), newest by the time Activity shows (when it ended, else when it began), before the limit is applied. */
+/**
+ * The person's finished receipts (a task still being looked up is not finished: it shows when it settles), newest by the time Activity shows
+ * (when it ended, else when it began), before the limit is applied. An Apps task that came to nothing is not listed: refunded, with no run
+ * that went out (a refused one went nowhere) and nothing in the books for its key. Every request of it was refused before it ran (a rule, no
+ * credit, not offered) or never arrived, so nothing happened and nothing was taken, and there is nothing for the person to read or act on.
+ */
 async function receiptsNewest(personId: string, limit: number): Promise<ReceiptRow[]> {
   const ids = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-    SELECT "id" FROM task_receipts
-    WHERE "person_id" = ${personId} AND "state" NOT IN ('running', 'checking')
-    ORDER BY COALESCE("ended_at", "started_at") DESC, "id" DESC
+    SELECT r."id" FROM task_receipts r
+    WHERE r."person_id" = ${personId} AND r."state" NOT IN ('running', 'checking')
+      AND NOT (
+        r."state" = 'refunded' AND COALESCE(r."category", '') = 'apps'
+        AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" <> 'refused')
+        AND NOT EXISTS (SELECT 1 FROM meter_events m WHERE m."bot_id" = r."bot_id" AND (m."job_id" = r."task_key" OR (m."job_id" IS NULL AND m."detail"->>'taskKey' = r."task_key")))
+      )
+    ORDER BY COALESCE(r."ended_at", r."started_at") DESC, r."id" DESC
     LIMIT ${limit}`);
   if (ids.length === 0) return [];
   const rows = await prisma.taskReceipt.findMany({ where: { id: { in: ids.map((row) => row.id) } } });
