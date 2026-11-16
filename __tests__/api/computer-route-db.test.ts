@@ -13,7 +13,7 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { giveComputer, startJob } from '@/lib/computer';
+import { giveComputer, reviewAppSteps, startJob, startWindDown } from '@/lib/computer';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -144,5 +144,45 @@ run('choosing the way by expected cost, in a real database', () => {
     const person = await sara();
     // No run exists for this id, so the refusal for a run that is not theirs comes first, as it always did
     expect(await startJob({ botId: person.brickId, personId: person.id, title: 'Job', runId: randomUUID(), plan: { app: 'Notion', steps: 2 } }, NOW)).toEqual({ ok: false, reason: 'no_run' });
+  });
+
+  describe('the review at 20 app steps', () => {
+    const withMachine = (botId: string) => prisma.brickComputer.update({ where: { botId }, data: { providerRef: 'm1', machine: 'resting' } });
+
+    it('asks for a look when the steps so far cost as much as the job on the computer, and changes nothing', async () => {
+      const person = await sara();
+      await connect(person.id, person.brickId);
+      await withMachine(person.brickId);
+      expect(await reviewAppSteps(person.brickId, person.id, { app: 'Notion', steps: 80 })).toEqual({ review: true });
+      expect(woke()).toBe(0);
+      expect(await prisma.computerJob.count({ where: { personId: person.id } })).toBe(0);
+      expect(await prisma.meterEvent.count({})).toBe(0);
+    });
+
+    it('asks for nothing while the steps still cost less', async () => {
+      const person = await sara();
+      await connect(person.id, person.brickId);
+      await withMachine(person.brickId);
+      expect(await reviewAppSteps(person.brickId, person.id, { app: 'Notion', steps: 20 })).toEqual({ review: false });
+    });
+
+    it('has nothing to say where there is no computer to move to: one that is off, a Brick that is not theirs, or a wind-down', async () => {
+      const person = await sara();
+      const other = await sara();
+      await connect(person.id, person.brickId);
+      await withMachine(person.brickId);
+      expect(await reviewAppSteps(person.brickId, other.id, { app: 'Notion', steps: 80 })).toEqual({ review: false });
+      await startWindDown('team');
+      expect(await reviewAppSteps(person.brickId, person.id, { app: 'Notion', steps: 80 })).toEqual({ review: false });
+      await prisma.appSetting.deleteMany({ where: { key: 'computer-wind-down' } });
+      await prisma.brickComputer.update({ where: { botId: person.brickId }, data: { enabled: false } });
+      expect(await reviewAppSteps(person.brickId, person.id, { app: 'Notion', steps: 80 })).toEqual({ review: false });
+    });
+
+    it('prices an app that is not connected at the dearest rate, never at nothing', async () => {
+      const person = await sara();
+      await withMachine(person.brickId);
+      expect(await reviewAppSteps(person.brickId, person.id, { app: 'Mystery', steps: 12 })).toEqual({ review: true });
+    });
   });
 });

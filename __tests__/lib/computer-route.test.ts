@@ -1,4 +1,4 @@
-import { appQuote, chooseRoute, computerQuote, CHAT_TURN_MICROS, COMPUTER_JOB_CALLS, COMPUTER_JOB_MINUTES, HERMES_CALL_MICROS, MAX_PLANNED_STEPS, UNKNOWN_APP_STEP_MICROS, cleanSteps } from '@/lib/computer-route';
+import { appQuote, chooseRoute, computerQuote, stepsReview, CHAT_TURN_MICROS, COMPUTER_JOB_CALLS, COMPUTER_JOB_MINUTES, HERMES_CALL_MICROS, MAX_PLANNED_STEPS, UNKNOWN_APP_STEP_MICROS, cleanSteps } from '@/lib/computer-route';
 import { RATE_MICROS } from '@/lib/composio-rates';
 import { keptDiskMonthMicros } from '@/lib/agent37/rates';
 
@@ -60,6 +60,22 @@ describe('choosing the route by what the whole task is expected to cost', () => 
 
     it('is the computer when there is nothing else', () => {
       expect(chooseRoute([computerQuote({ awakeMicrosPerMinute: 110, hasMachine: true })]).route).toBe('computer');
+    });
+  });
+
+  describe('the review at the checkpoint', () => {
+    const computer = computerQuote({ awakeMicrosPerMinute: 110, hasMachine: true });
+
+    it('asks for a look once the steps taken so far have cost what the whole job on the computer would', () => {
+      expect(stepsReview({ steps: 20, stepMicros: 300, computer })).toBe(true);
+      expect(stepsReview({ steps: 5, stepMicros: 0, computer })).toBe(false);
+    });
+
+    it('prices the steps taken so far like any app route, an unknown rate as the dearest, never nothing', () => {
+      expect(stepsReview({ steps: 11, stepMicros: null, computer })).toBe(true);
+      expect(stepsReview({ steps: 11, stepMicros: 0, computer })).toBe(false);
+      expect(stepsReview({ steps: 12, stepMicros: 0, computer })).toBe(false);
+      expect(stepsReview({ steps: 14, stepMicros: 0, computer })).toBe(true);
     });
   });
 });

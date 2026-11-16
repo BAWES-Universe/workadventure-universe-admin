@@ -12,7 +12,7 @@ import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/li
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { recordKeptBytes } from '@/lib/computer-disk';
 import { reconcileComputers } from '@/lib/computer-reconcile';
-import { routeJob, type RoutePlan } from '@/lib/computer-route';
+import { computerQuote, connectedApp, routeJob, stepsReview, type RoutePlan } from '@/lib/computer-route';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
 import {
   AFTER_TAKE_OVER,
@@ -322,6 +322,21 @@ export type Started =
 const roomKey = (jobId: string, now: Date) => `computer:job:${jobId}:${now.getTime()}`;
 
 const queueReasonOf = (no: NoRoom): QueuedFor | null => (no.reason === 'allowance' ? 'allowance' : no.reason === 'busy' ? 'busy' : no.reason === 'pool' ? 'pool' : null);
+
+/**
+ * The review at 20 app steps (the bot server counts them): whether the steps an app has taken so far cost as much as the whole job is expected
+ * to cost on this Brick's computer, so the Brick should weigh moving the rest there. Advice only: it reads, never makes, wakes, reserves or
+ * writes anything, and says no where there is no computer to move to (not the owner, off, not open, or a wind-down).
+ */
+export async function reviewAppSteps(botId: string, personId: string, input: { app: string; steps: number }): Promise<{ review: boolean }> {
+  if (!(await brickOf(botId, personId))) return { review: false };
+  const row = await prisma.brickComputer.findUnique({ where: { botId } });
+  const provider = row?.enabled ? providerFor(row) : null;
+  if (!row || !provider || (await isWindingDown())) return { review: false };
+  const app = await connectedApp(botId, input.app);
+  const computer = computerQuote({ awakeMicrosPerMinute: provider.microsPerMinute() ?? null, hasMachine: !!row.providerRef });
+  return { review: stepsReview({ steps: input.steps, stepMicros: app ? app.stepMicros : null, computer }) };
+}
 
 /**
  * Starts a job on a Brick's computer. Only its owner starts work on it. The job is saved first and then tried: if another job

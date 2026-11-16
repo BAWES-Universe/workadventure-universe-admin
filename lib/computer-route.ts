@@ -82,7 +82,7 @@ const saidWhy = (text: string | null | undefined) => (text ?? '').trim().length 
 const plain = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
 /** The app this Brick really has connected and switched on that this name means: its name as connected, and what one step of it costs us (null: not known). */
-async function connectedApp(botId: string, name: string): Promise<{ name: string; stepMicros: number | null } | null> {
+export async function connectedApp(botId: string, name: string): Promise<{ name: string; stepMicros: number | null } | null> {
   const wanted = plain(name);
   if (!wanted) return null;
   const grants = await prisma.botMcpServer.findMany({ where: { botId, enabled: true, NOT: { connectionId: null } }, include: { connection: true } });
@@ -97,6 +97,15 @@ async function connectedApp(botId: string, name: string): Promise<{ name: string
     return { name: grant.name, stepMicros: RATE_MICROS[tierOf(connection.providerToolkit, !!listed?.authConfigId).tier] };
   }
   return null;
+}
+
+/**
+ * The review at the checkpoint (the bot server counts a Brick's app steps in one answer and asks at 20): true when the steps taken so far have
+ * cost as much as the whole job is expected to cost on the computer, so the Brick should look at whether the computer would finish it for less.
+ * It is advice only, never a switch: nothing is stopped, started or woken by it.
+ */
+export function stepsReview(input: { steps: number; stepMicros: number | null; computer: RouteQuote }): boolean {
+  return appQuote({ app: '', steps: input.steps, stepMicros: input.stepMicros }).expectedMicros >= input.computer.expectedMicros;
 }
 
 export type Routed = { ok: true; route: 'computer'; expectedMicros: number } | { ok: false; app: string };
