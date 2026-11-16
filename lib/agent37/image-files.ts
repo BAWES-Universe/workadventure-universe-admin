@@ -11,6 +11,7 @@
  *   universe-supervise brings a part back that stopped.
  *   universe-fence    take-over fence: stops every process the agent started (the screen, the browser and the gateway stay).
  *   universe-clean    clears the browser's sign-in state between jobs.
+ *   universe-mark     run by Orbit as root once a computer is ready: records the moment from which everything that runs is the agent's (see the fence).
  *
  * Nothing here is written under /home/node at build time (it is masked at runtime): the scripts run from /usr/local/bin and write
  * their state under the home folder when they run.
@@ -35,8 +36,8 @@ USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify chromium x11-utils procps python3 fonts-liberation fonts-noto-color-emoji ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-COPY universe-up universe-supervise universe-proxy universe-fence universe-clean universe-files /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/universe-up /usr/local/bin/universe-supervise /usr/local/bin/universe-proxy /usr/local/bin/universe-fence /usr/local/bin/universe-clean /usr/local/bin/universe-files
+COPY universe-up universe-supervise universe-proxy universe-fence universe-clean universe-files universe-mark /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/universe-up /usr/local/bin/universe-supervise /usr/local/bin/universe-proxy /usr/local/bin/universe-fence /usr/local/bin/universe-clean /usr/local/bin/universe-files /usr/local/bin/universe-mark
 # Hermes' browser tool drives the visible Chromium that the screen shows
 ENV DISPLAY=:99 BROWSER_CDP_URL=http://127.0.0.1:9222 AGENT37_SCREEN_GEOMETRY=1440x900
 USER node
@@ -77,8 +78,10 @@ done
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 
 # The agent reads its model config only when it starts. A config written here leaves a restart pending that stays until the machine has
-# really restarted (its first process is a new one), whatever else fails in between: a later run that succeeds still asks for it.
-INIT="$(sed 's/.*) //' /proc/1/stat 2>/dev/null | cut -d' ' -f20)"
+# really restarted (the boot is a new one), whatever else fails in between: a later run that succeeds still asks for it.
+# Which start this is: the kernel's id for this boot. (The first process's start time says nothing here: on a computer it is 0 or 1 on every boot.)
+INIT="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+[ -n "$INIT" ] || INIT="$(sed 's/.*) //' /proc/1/stat 2>/dev/null | cut -d' ' -f20)"
 if [ "$(cat "$STATE/setup" 2>/dev/null)" != "$VERSION" ]; then
   CONFIG="$HOME_DIR/.hermes/config.yaml"
   if [ -f "$CONFIG" ] && [ ! -f "$CONFIG.stock" ]; then cp "$CONFIG" "$CONFIG.stock" 2>/dev/null; fi
@@ -300,8 +303,14 @@ export const UNIVERSE_FENCE = String.raw`#!/usr/bin/env python3
 # proves none is left. What stays: the screen, the browser, the model address, this machine's own agent gateway, and whatever started
 # this command. Everything else is the agent's (or something it started) and goes.
 #
-#   universe-fence           stops them, prints killed=N
-#   universe-fence --check   prints remaining=N and exits 0 only when N is 0
+# "Started by the agent" is told by TIME, because the agent runs as the same user as the computer's own parts (Agent37's gateway, Hermes, the
+# terminal and file services, the command runner) and anything can be started under any name. Orbit runs universe-mark as root once the
+# computer is ready, before any job has used it; that writes a root-owned note (this boot, and the moment). A process that was already
+# running at that moment is the computer's own, because nothing the agent started can be older than the note, and one started after it is not.
+# The agent cannot write the note. A computer with no note for this boot is not fenced: nothing is stopped and nothing is proved.
+#
+#   universe-fence           stops them, prints killed=N (or unmarked=1 and exits 3)
+#   universe-fence --check   prints remaining=N and exits 0 only when N is 0 (or unmarked=1 and exits 3)
 import os
 import re
 import signal
@@ -322,6 +331,12 @@ WEBSOCKIFY_ARGS = ["--web", "/usr/share/novnc", "6901", "127.0.0.1:5900"]
 CHROMIUM_FLAGS = ["--user-data-dir=" + PROFILE, "--remote-debugging-port=9222", "--remote-debugging-address=127.0.0.1"]
 # The agent's gateway answers on these ports; whoever listens there stays, and so does everything above it
 GATEWAY_PORTS = {3737, 8642}
+# The note universe-mark writes as root, and the folder it is in: both must belong to root and be closed to everyone else
+MARK_DIR = "/run/universe"
+MARK = MARK_DIR + "/mark"
+BOOT_ID = "/proc/sys/kernel/random/boot_id"
+# What the computer's own command runner is made of: a program file of Agent37's, root's and closed to everyone else
+AGENT37_DIR = "/.agent37/"
 
 
 def pids():
@@ -421,8 +436,54 @@ def listeners():
     return found
 
 
-def protected(tree):
+def marked_at():
+    # The moment (in clock ticks since the machine started) from which the agent is running, or None when this boot has no note
+    try:
+        for path in (MARK_DIR, MARK):
+            info = os.stat(path)
+            if info.st_uid != 0 or info.st_mode & 0o022:
+                return None
+        with open(MARK, "r", encoding="utf-8") as handle:
+            boot, ticks = handle.read().split()[:2]
+        with open(BOOT_ID, "r", encoding="utf-8") as handle:
+            if handle.read().strip() != boot:
+                return None
+        return int(ticks)
+    except Exception:
+        return None
+
+
+def started(pid):
+    try:
+        return int(stat_fields(pid)[19])
+    except Exception:
+        return None
+
+
+def runner_part(pid):
+    # Agent37's own command runner (it is what this very command runs under): a program file of theirs that root owns
+    path = program(pid)
+    return bool(path) and path.startswith(AGENT37_DIR)
+
+
+SHORT_SLEEP = re.compile(r"^\d{1,2}(\.\d+)?$")
+
+
+def short_sleep(pid):
+    # A short wait that does nothing and ends by itself. The computer's own start-up loop runs them as its children (process 1 waits
+    # for each one), and it stops the whole computer when one is killed, so these are never touched. An agent's is just as harmless.
+    path = program(pid)
+    args = argv(pid)
+    return bool(path) and os.path.basename(path) == "sleep" and len(args) == 2 and bool(SHORT_SLEEP.match(args[1])) and float(args[1]) <= 30
+
+
+def protected(tree, cutoff):
     keep = {1, os.getpid()}
+    # What was already running when the computer was made ready is the computer's own, and so is Agent37's command runner
+    for pid in tree:
+        begun = started(pid)
+        if (begun is not None and begun <= cutoff) or runner_part(pid) or short_sleep(pid):
+            keep.add(pid)
     # Whatever started this command, all the way up (the machine's own command runner), and the gateway's own chain
     for start in [os.getpid()] + list(listeners()):
         pid = start
@@ -450,20 +511,25 @@ def alive(pid):
     return state not in ("Z", "X", "?") and read(pid, "cmdline") != b""
 
 
-def others():
+def others(cutoff):
     tree = {pid: parent(pid) for pid in pids()}
-    keep = protected(tree)
+    keep = protected(tree, cutoff)
     return [pid for pid in tree if pid not in keep and alive(pid)]
 
 
+cutoff = marked_at()
+if cutoff is None:
+    print("unmarked=1")
+    sys.exit(3)
+
 if "--check" in sys.argv:
-    left = others()
+    left = others(cutoff)
     print("remaining=%d" % len(left))
     sys.exit(0 if not left else 1)
 
 killed = 0
 for _ in range(5):
-    victims = others()
+    victims = others(cutoff)
     if not victims:
         break
     for pid in victims:
@@ -518,6 +584,27 @@ trap - EXIT
 echo "cleaned=1"
 `;
 
+/** The note the fence reads: written by Orbit as root once a computer is ready, never by the agent. */
+export const UNIVERSE_MARK = String.raw`#!/bin/sh
+# Run by Orbit as root once a computer is ready, before a job uses it. Writes the moment from which everything that runs is the agent's:
+# this boot's id and the machine's clock then, in ticks. Run again on the same boot it keeps the first note (a later moment would take
+# in what the agent has started since); a new boot (a stop and start) gets a new one. Prints marked=1 when the note is in place.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+[ "$(id -u)" = "0" ] || { echo "marked=0 reason=not_root"; exit 1; }
+DIR=/run/universe
+BOOT="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+[ -n "$BOOT" ] || { echo "marked=0 reason=boot"; exit 1; }
+mkdir -p "$DIR" && chown root:root "$DIR" && chmod 0755 "$DIR" || { echo "marked=0 reason=folder"; exit 1; }
+if [ -f "$DIR/mark" ] && [ "$(cut -d' ' -f1 "$DIR/mark" 2>/dev/null)" = "$BOOT" ]; then echo "marked=1 kept=1"; exit 0; fi
+HZ="$(getconf CLK_TCK 2>/dev/null)"
+[ -n "$HZ" ] || HZ=100
+TICKS="$(cut -d' ' -f1 /proc/uptime | awk -v hz="$HZ" '{ printf "%d", $1 * hz + 2 }')"
+[ -n "$TICKS" ] || { echo "marked=0 reason=clock"; exit 1; }
+printf '%s %s\n' "$BOOT" "$TICKS" > "$DIR/mark.new" && chown root:root "$DIR/mark.new" && chmod 0644 "$DIR/mark.new" && mv -f "$DIR/mark.new" "$DIR/mark" || { echo "marked=0 reason=write"; exit 1; }
+echo "marked=1"
+`;
+
 /** Lists the files a person would look for: regular files in the home folder (not hidden ones, not the tools' own folders), newest first. */
 export const UNIVERSE_FILES = String.raw`#!/bin/sh
 # One line for each file: size in bytes, TAB, modified (seconds), TAB, path from the home folder. At most 201 lines (the caller says "more" for the 201st).
@@ -537,5 +624,6 @@ export function imageFiles(): Array<{ name: string; mode: number; text: string }
     { name: 'universe-fence', mode: 0o755, text: UNIVERSE_FENCE },
     { name: 'universe-clean', mode: 0o755, text: UNIVERSE_CLEAN },
     { name: 'universe-files', mode: 0o755, text: UNIVERSE_FILES },
+    { name: 'universe-mark', mode: 0o755, text: UNIVERSE_MARK },
   ];
 }

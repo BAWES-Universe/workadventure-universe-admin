@@ -207,6 +207,11 @@ export class Agent37ComputerProvider implements ComputerProvider {
       instance = await this.untilHealthy(ref, instance.url);
     }
     let up = await this.up(ref);
+    // A part that was still coming up (a browser right after a machine woke): `universe-up` is safe to run again, so it is asked once more
+    if (!up.ready && !up.restart) {
+      await this.pause(5_000);
+      up = await this.up(ref);
+    }
     if (up.restart) {
       await this.client.stopInstance(ref);
       await this.untilDown(ref, true);
@@ -215,6 +220,11 @@ export class Agent37ComputerProvider implements ComputerProvider {
       up = await this.up(ref);
     }
     if (!up.ready) throw new Error(`The computer is not ready${up.reason ? ` (${up.reason})` : ''}`);
+    // Last, once the computer is as it should be and before any job has used it: the note the take-over fence tells the agent's processes by
+    // (everything already running is the computer's own, everything started after is the agent's). As root, so the agent cannot write it.
+    // Run again on the same boot it keeps the first note. A computer that cannot be marked cannot be fenced, so it is not ready.
+    const marked = await this.client.exec(ref, 'universe-mark', { user: 'root', timeoutMs: 30_000 });
+    if (!/(^|\n)marked=1\b/.test(marked.stdout)) throw new Error(`The computer could not be marked${/marked=0 reason=([a-z_]+)/.exec(marked.stdout)?.[1] ? ` (${/marked=0 reason=([a-z_]+)/.exec(marked.stdout)?.[1]})` : ''}`);
   }
 
   /** Runs `universe-up` and reads what it says. */
