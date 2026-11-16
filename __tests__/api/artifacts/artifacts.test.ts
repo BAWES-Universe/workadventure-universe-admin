@@ -702,6 +702,26 @@ describe('artifacts', () => {
         expect((await call(mine, { person: person('owner') }, asGame)).body.artifacts.map((a: { id: string }) => a.id)).toEqual([id]);
       });
 
+      it('makes no copy for someone the owner stopped allowing while the change was being stored', async () => {
+        const made = await makeApp();
+        const id = made.artifact.id;
+        await sharing(id, { changeScope: 'openers' });
+        const friend = { botId: 'bot2', person: person('friend'), chat: NEARBY };
+        const put = jest.spyOn(fakeFiles, 'put').mockImplementationOnce(async (key, body) => {
+          db.files.set(key, body);
+          // The owner takes back who may ask for changes after the ask was allowed and before the copy is written
+          db.artifacts.find((a) => a.id === id)!.changeScope = 'owner';
+        });
+        try {
+          const res = await call(change, { ...friend, content: '<p>friend</p>' }, { id });
+          expect(res.status).toBe(409);
+        } finally {
+          put.mockRestore();
+        }
+        expect(db.artifacts).toHaveLength(1);
+        expect(bucketKeys().filter((key) => key.includes('/v1-'))).toHaveLength(1);
+      });
+
       it('makes a copy for a guest that goes after a day like their other artifacts, and one for a deleted maker bot (Orbit #800)', async () => {
         const guestMade = await makeApp(guest, NEARBY, { title: 'Guest' });
         const res = await call(change, { botId: 'bot2', person: guest, chat: NEARBY, content: '<p>g</p>' }, { id: guestMade.artifact.id });
