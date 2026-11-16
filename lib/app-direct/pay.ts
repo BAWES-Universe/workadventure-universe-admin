@@ -249,6 +249,9 @@ export async function startCheckout(input: StartCheckout, deps: GuardDeps = {}):
 
   const started = await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`page-orders:${first.job.ownerId}`}, 0))`;
+    // The platform's own limit counts every owner's orders, so checkouts of different owners take turns at counting and writing the order,
+    // or two of them at the same moment could both find room for the last one. Always after the owner's lock, in this one order
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('page-orders:platform', 0))`;
     // Holding both rows keeps the owner from replacing the terms, the app or its key until this order is written; what they hold NOW is what
     // the order and the request use, never what was read before the lock
     const held = await tx.$queryRaw<{ connectionId: string }[]>`SELECT "connection_id" AS "connectionId" FROM "app_page_jobs" WHERE "id" = ${first.job.id} AND "status" = 'active' FOR SHARE`;

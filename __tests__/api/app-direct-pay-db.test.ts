@@ -755,6 +755,34 @@ run('payments for pages, in a real database', () => {
     });
   });
 
+  describe('the platform’s limit', () => {
+    it('is counted by one checkout at a time across every owner, so two at the same moment cannot both take the last place', async () => {
+      const { artifactId } = await pending();
+      gateway();
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let locked: () => void = () => undefined;
+      const taken = new Promise<void>((resolve) => (locked = resolve));
+      // Another owner's checkout is in the middle of counting and writing its order
+      const other = prisma.$transaction(
+        async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('page-orders:platform', 0))`;
+          locked();
+          await held;
+        },
+        { timeout: 20_000 },
+      );
+      await taken;
+      let finished = false;
+      const mine = startCheckout({ artifactId, visitor: 'one' }).then((outcome) => ((finished = true), outcome));
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      expect(finished).toBe(false);
+      release();
+      await other;
+      expect((await mine).status).toBe('ok');
+    });
+  });
+
   describe('after the review of the first version', () => {
     it('measures the late-payment window from when the order was closed, not from when it was made', async () => {
       const { artifactId } = await pending();
