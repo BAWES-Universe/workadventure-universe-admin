@@ -1933,6 +1933,17 @@ run('the bounded Instant executor, in a real database', () => {
         data: { eventId: `hide-4-${tag}`, kind: 'app_use', pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'universe', route: 'instant', jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(1000), basis: 'measured', detail: { instant: true, taskKey: 'hide-4' } },
       });
       await closeReceipt({ botId: brick, taskKey: 'hide-4', personId: sara, state: 'refunded' });
+      // A charge made under the task's run that names no task is shown on the run's receipt: never hidden. The Brick's own thinking is not money taken: hidden.
+      const underRun = (eventId: string, kind: string, route: string, micros: number) =>
+        prisma.meterEvent.create({
+          data: { eventId: `${eventId}-${tag}`, kind, pool: 'chat', occurredAt: new Date(), personKey: `person:${sara}`, personId: sara, botId: brick, brick: true, payerKind: 'universe', route, jobId: null, quantity: BigInt(1), unit: 'use', costMicros: BigInt(micros), basis: 'measured', detail: { runId: eventId } },
+        });
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-7', runId: 'run-hide-7', title: 'Run-wide charge', category: 'apps' });
+      await underRun('run-hide-7', 'app_use', 'instant', 1000);
+      await closeReceipt({ botId: brick, taskKey: 'hide-7', personId: sara, state: 'refunded' });
+      await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-8', runId: 'run-hide-8', title: 'Only thinking', category: 'apps' });
+      await underRun('run-hide-8', 'model_call', 'chat', 0);
+      await closeReceipt({ botId: brick, taskKey: 'hide-8', personId: sara, state: 'refunded' });
       // A task with no category is not an Apps task here: left as it was
       await openReceipt({ botId: brick, personId: sara, taskKey: 'hide-5', title: 'No category', category: null });
       await closeReceipt({ botId: brick, taskKey: 'hide-5', personId: sara, state: 'refunded' });
@@ -1942,9 +1953,10 @@ run('the bounded Instant executor, in a real database', () => {
       const titles = (await activityFor(sara)).map((item) => item.title);
       expect(titles).not.toContain('Refused by a rule');
       expect(titles).not.toContain('No run made');
-      expect(titles).toEqual(expect.arrayContaining(['Ran and failed', 'Has books, refunded', 'No category', 'Finished']));
+      expect(titles).not.toContain('Only thinking');
+      expect(titles).toEqual(expect.arrayContaining(['Ran and failed', 'Has books, refunded', 'Run-wide charge', 'No category', 'Finished']));
       // The limit counts what is listed: hidden receipts do not take a place
-      expect((await activityFor(sara, 4)).length).toBe(4);
+      expect((await activityFor(sara, 5)).length).toBe(5);
     });
 
     it('a receipt the run’s own pass could not move (no hook then) is moved by the sweep’s pass over receipts still in checking', async () => {

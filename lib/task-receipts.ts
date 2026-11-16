@@ -303,7 +303,7 @@ function itemOf(header: Header, events: readonly LineEvent[], botName: string, r
 /**
  * The person's finished receipts (a task still being looked up is not finished: it shows when it settles), newest by the time Activity shows
  * (when it ended, else when it began), before the limit is applied. An Apps task that came to nothing is not listed: refunded, with no run
- * that went out (a refused one went nowhere) and nothing in the books for its key. Every request of it was refused before it ran (a rule, no
+ * that went out (a refused one went nowhere) and nothing charged in the books for its key or its run. Every request of it was refused before it ran (a rule, no
  * credit, not offered) or never arrived, so nothing happened and nothing was taken, and there is nothing for the person to read or act on.
  */
 async function receiptsNewest(personId: string, limit: number): Promise<ReceiptRow[]> {
@@ -313,7 +313,12 @@ async function receiptsNewest(personId: string, limit: number): Promise<ReceiptR
       AND NOT (
         r."state" = 'refunded' AND COALESCE(r."category", '') = 'apps'
         AND NOT EXISTS (SELECT 1 FROM instant_runs i WHERE i."bot_id" = r."bot_id" AND i."person_id" = r."person_id" AND i."task_key" = r."task_key" AND i."state" <> 'refused')
-        AND NOT EXISTS (SELECT 1 FROM meter_events m WHERE m."bot_id" = r."bot_id" AND (m."job_id" = r."task_key" OR (m."job_id" IS NULL AND m."detail"->>'taskKey' = r."task_key")))
+        AND NOT EXISTS (SELECT 1 FROM meter_events m WHERE m."bot_id" = r."bot_id" AND (
+          m."job_id" = r."task_key"
+          OR (m."job_id" IS NULL AND m."detail"->>'taskKey' = r."task_key")
+          -- A charged use made under the task's run that names no task of its own is shown on a receipt of that run (see eventsFor): never hide it. Uncharged lines (the Brick's own thinking) are not money taken.
+          OR (m."job_id" IS NULL AND r."run_id" IS NOT NULL AND m."detail"->>'runId' = r."run_id" AND m."detail"->>'taskKey' IS NULL AND ((m."kind" = 'app_use' AND m."route" = 'instant') OR m."kind" = 'computer_time'))
+        ))
       )
     ORDER BY COALESCE(r."ended_at", r."started_at") DESC, r."id" DESC
     LIMIT ${limit}`);
