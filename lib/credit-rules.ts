@@ -626,13 +626,15 @@ async function previewIn(db: Tx, checked: Checked, ids: readonly string[], now: 
   const renewals = checked.schedule === 'monthly' ? (months === null ? null : Math.max(0, months - 1)) : 0;
   // A cap on how many can join and a total cap bound a group that grows; with neither, a growing group has no lifetime maximum
   const capped = checked.totalCapMicros !== null || (checked.joinerCap !== null && checked.share === 'each');
-  const unbounded = checked.schedule !== 'none' && ((growing && !capped) || (checked.schedule === 'monthly' && months === null));
+  // A monthly rule with no end date goes on for ever, unless a total cap stops it: then the cap is the most it ever issues
+  const unbounded = checked.schedule !== 'none' && ((growing && !capped) || (checked.schedule === 'monthly' && months === null && checked.totalCapMicros === null));
   let lifetime: number | null = null;
   if (!unbounded && checked.schedule !== 'none') {
     const periods = checked.schedule === 'monthly' ? (months ?? 1) : 1;
     const joiners = growing && checked.joinerCap !== null && checked.share === 'each' ? Math.max(people, checked.joinerCap) : people;
     const whole = (checked.share === 'shared' ? eachMicros : eachMicros * joiners) * periods;
-    lifetime = checked.totalCapMicros !== null ? Math.min(whole, checked.totalCapMicros) : whole;
+    // With no end date the months have no number: only the total cap is left to say how much
+    lifetime = checked.totalCapMicros !== null ? (months === null && checked.schedule === 'monthly' ? checked.totalCapMicros : Math.min(whole, checked.totalCapMicros)) : whole;
   }
   const dollars = (micros: number) => `$${(micros / 1_000_000).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`;
   const unit = universeAi ? 'replies' : '';
@@ -640,7 +642,7 @@ async function previewIn(db: Tx, checked: Checked, ids: readonly string[], now: 
   let sentence: string;
   if (checked.schedule === 'none') sentence = 'Gives nothing: those people get no grant.';
   else if (unbounded) sentence = growing && !capped ? `Issues ${amountWords} to each person who qualifies, including people who join or sign up later. It has no lifetime maximum.` : `Renews every month with no end date, so it has no lifetime maximum.`;
-  else sentence = `Issues at most ${universeAi ? `${lifetime} ${unit}` : dollars(lifetime ?? 0)} in all${checked.schedule === 'monthly' ? ` over ${months} month${months === 1 ? '' : 's'}` : ''}.`;
+  else sentence = `Issues at most ${universeAi ? `${lifetime} ${unit}` : dollars(lifetime ?? 0)} in all${checked.schedule === 'monthly' ? (months === null ? ', then stops at the total cap' : ` over ${months} month${months === 1 ? '' : 's'}`) : ''}.`;
   // The envelope is only a figure beside the preview: if it cannot be read, the preview goes on without it. It is read inside a savepoint,
   // because a failed query otherwise leaves the whole transaction aborted and every read after it fails too
   let envelope: Awaited<ReturnType<typeof envelopeIn>> | null = null;
