@@ -822,6 +822,17 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect(byTitle.get('Took nothing')).toBe('refunded');
     });
 
+    it('a computer’s job whose receipt is still being looked up (checking) is not listed as the job’s own line either', async () => {
+      const sara = await person('sara');
+      await prisma.brickComputer.upsert({ where: { botId: sara.brickId }, create: { botId: sara.brickId, enabled: true, provider: 'fake' }, update: {} });
+      const job = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Hidden while checked', status: 'done', startedAt: NOW, endedAt: new Date(NOW.getTime() + 1000) } });
+      await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: job.id, title: 'Hidden while checked', category: 'computer' }, NOW);
+      await prisma.taskReceipt.updateMany({ where: { personId: sara.id, taskKey: job.id }, data: { state: 'checking' } });
+      expect((await activityFor(sara.id)).map((item) => item.title)).not.toContain('Hidden while checked');
+      await prisma.taskReceipt.updateMany({ where: { personId: sara.id, taskKey: job.id }, data: { state: 'done', endedAt: NOW } });
+      expect((await activityFor(sara.id)).filter((item) => item.title === 'Hidden while checked')).toHaveLength(1);
+    });
+
     it('names a sponsor that pays, to the person it paid for, with nothing taken from their credit', async () => {
       const sara = await person('sara');
       await openReceipt({ botId: sara.brickId, personId: sara.id, taskKey: 'flights', title: 'Flights to Doha', payer: { kind: 'sponsor', name: 'BAWES Universe' } }, NOW);

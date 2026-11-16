@@ -305,8 +305,10 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
     prisma.computerJob.findMany({ where: { personId, status: { in: ['done', 'stopped', 'failed'] }, endedAt: { not: null }, OR: [{ endedBy: null }, { endedBy: { not: 'rule' } }, { startedAt: { not: null } }] }, orderBy: [{ endedAt: 'desc' }, { id: 'desc' }], take: limit }),
   ]);
   const headers = rows.map(headerOfRow);
-  // A computer's job with a receipt of its own is that receipt: shown once
-  const kept = new Set(rows.map((row) => `${row.botId}:${row.taskKey}`));
+  // A computer's job with a receipt of its own is that receipt: shown once. One whose receipt is still being looked up (checking) is not
+  // listed either, so it does not come back as the job's own line
+  const lookingUp = jobs.length === 0 ? [] : await prisma.taskReceipt.findMany({ where: { personId, state: 'checking', taskKey: { in: jobs.map((job) => job.id) } }, select: { botId: true, taskKey: true } });
+  const kept = new Set([...rows, ...lookingUp].map((row) => `${row.botId}:${row.taskKey}`));
   const youPay = (id: string): Payer => ({ kind: 'person', personId: id, name: null });
   const computerHeaders: Header[] = jobs
     .filter((job) => !kept.has(`${job.botId}:${job.id}`))
