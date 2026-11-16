@@ -176,6 +176,10 @@ export interface MeterSettings {
   atOnceAll: number | null;
   /** One price for every paid step of a ready-made app, replacing the provider's list prices (lib/composio-rates.ts). Empty means those list prices are used, which is the usual case. Not needed to open anything. */
   appUseMicros: number | null;
+  /** The most Universe pays in a calendar month for the use of connected ready-made Apps, all people together (lib/app-use-cap.ts). Empty stops that use; 0 pauses it. */
+  appUseCeilingMicros: number | null;
+  /** The most of that one person's Bricks may use in a calendar month. */
+  appUseMemberCeilingMicros: number | null;
   /**
    * What the platform's funding account may issue in credit in one calendar month (UTC), in millionths of a dollar: the funded rollout
    * budget. Empty means no default grant, gift or renewal issues anything yet: nothing is assumed (paying spec v3, sections 16 and 19).
@@ -196,6 +200,8 @@ export const METER_SETTINGS_EMPTY: MeterSettings = {
   atOnceMember: null,
   atOnceAll: null,
   appUseMicros: null,
+  appUseCeilingMicros: null,
+  appUseMemberCeilingMicros: null,
   rolloutBudgetMicros: null,
   renewMinutes: METER_RENEW_MINUTES_RECOMMENDED,
 };
@@ -214,6 +220,8 @@ export const METER_RANGES: Record<keyof MeterSettings, MeterRange> = {
   atOnceMember: { min: 1, max: 100_000 },
   atOnceAll: { min: 1, max: 1_000_000 },
   appUseMicros: { min: 0, max: 1_000_000_000 },
+  appUseCeilingMicros: { min: 0, max: 1_000_000_000_000_000 },
+  appUseMemberCeilingMicros: { min: 0, max: 1_000_000_000_000 },
   rolloutBudgetMicros: { min: 0, max: 1_000_000_000_000_000 },
   renewMinutes: { min: 1, max: 1_440 },
 };
@@ -221,7 +229,7 @@ export const METER_RANGES: Record<keyof MeterSettings, MeterRange> = {
 const NEEDED: (keyof MeterSettings)[] = ['memberAllowanceMicros', 'poolCeilingMicros', 'reserveMicros', 'storageMicrosPerGbMonth', 'atOnceMember', 'atOnceAll'];
 
 /** Settings that may be emptied again but that nothing is refused without (see `missingSettings`). */
-const OPTIONAL_MONEY: (keyof MeterSettings)[] = ['appUseMicros', 'rolloutBudgetMicros'];
+const OPTIONAL_MONEY: (keyof MeterSettings)[] = ['appUseMicros', 'appUseCeilingMicros', 'appUseMemberCeilingMicros', 'rolloutBudgetMicros'];
 
 const fits = (value: unknown, range: MeterRange): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= range.min && value <= range.max;
 

@@ -92,6 +92,11 @@ export class Agent37ComputerProvider implements ComputerProvider {
     return awakeMicrosPerMinute(BRICK_SHAPE);
   }
 
+  /** Agent37 bills the whole disk of the shape for as long as the machine exists, awake or asleep (a gigabyte is 10^9 bytes). */
+  diskBytes(): number {
+    return BRICK_SHAPE.disk * 1_000_000_000;
+  }
+
   /**
    * The wallet must hold what Agent37 asks for a new machine (a day of running) on top of every room Universe has reserved for jobs
    * that are working, so a computer is never started that the wallet cannot carry. An unreadable wallet is a no.

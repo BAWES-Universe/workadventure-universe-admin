@@ -23,7 +23,8 @@ jest.mock('@/lib/meter', () => {
   const actual = jest.requireActual('@/lib/meter');
   return { ...actual, recordMeterEvent: jest.fn(actual.recordMeterEvent) };
 });
-import { saveMeterSettings } from '@/lib/meter';
+import { saveMeterSettings, getMeterSettings } from '@/lib/meter';
+import { envelopeIn } from '@/lib/meter-allowance';
 import { currentEnvelope } from '@/lib/meter-allowance';
 import { recordGrant } from '@/lib/meter-grants';
 import { mintJobToken, TOKEN_LIFE_MS, TOKEN_RENEW_EVERY_SECONDS, verifyJobToken } from '@/lib/computer-token';
@@ -1478,6 +1479,25 @@ run('a Brick’s computer, in a real database', () => {
       const calls = provider.calls.length;
       expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
       expect(provider.calls.length).toBe(calls);
+    });
+
+    it('writes the machine’s disk to the books when it is made and a 0 when it is taken away, so the pool counts the disks it keeps (audit F4)', async () => {
+      const sara = await person('sara');
+      provider.disk = 4_000_000_000;
+      await giveComputer(sara.brickId, sara.id);
+      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!job.ok) throw new Error('no');
+      await finishJob(job.job.id, 'done', minutes(1));
+      const ref = (await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).providerRef as string;
+      const made = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:disk:${ref}:made` } });
+      expect(made).toMatchObject({ kind: 'stored_bytes', pool: 'computer', payerKind: 'universe', botId: sara.brickId, personId: sara.id, quantity: BigInt(4_000_000_000), unit: 'byte' });
+      // The pool's envelope now carries the kept disk: 4 GB at the storage price
+      const kept = async () => (await envelopeIn(prisma, new Date(), { ...(await getMeterSettings()), storageMicrosPerGbMonth: 90_000 })).keptStorageMicros;
+      expect(await kept()).toBeGreaterThanOrEqual(360_000);
+      expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:disk:${ref}:gone` } })).toMatchObject({ quantity: BigInt(0) });
+      // Asked again nothing is written twice
+      expect(await prisma.meterEvent.count({ where: { botId: sara.brickId, kind: 'stored_bytes' } })).toBe(2);
     });
 
     it('removes the machine for good only after its files were saved; a save that failed leaves it for the next sweep', async () => {

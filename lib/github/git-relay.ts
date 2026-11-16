@@ -4,12 +4,14 @@ import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { orbitBase } from '@/lib/github/app';
 import { gitHubToken, gitHubTokenRefused, GITHUB_SOURCE, readGitHubAuth } from '@/lib/github/connection';
 import type { FetchLike } from '@/lib/github/api';
+import { buildsOn, readPackCommits, VERIFY_MAX_BYTES } from '@/lib/github/pack-commits';
 
 /**
  * The git relay (game #2041): a Brick's computer has full git, but never the owner's GitHub key. Its remote is Orbit
  * (`https://orbit…/api/git/<owner>/<repo>.git`), signed in with a job pass that lasts 15 minutes. Orbit checks the pass, puts the
  * owner's own token on the request and passes it to github.com. What a Brick may not do through it, whatever it is told: delete a
- * branch, or push a tag.
+ * branch, push a tag, or overwrite a branch (a push to an existing branch must build on what the branch has: it adds commits, it
+ * never replaces history).
  */
 
 /** How long a job pass lasts. A job that runs longer asks for a new one. */
@@ -185,14 +187,14 @@ const isProbe = (body: Buffer | null): boolean => !!body && body.length === 4 &&
  * The ref updates at the start of a push (git's receive-pack request: pkt-lines up to the first flush). Null when the request is
  * not one that can be read: a push that cannot be read is refused, never passed on unchecked.
  */
-export function readPushCommands(body: Buffer): { updates: RefUpdate[]; capabilities: string[] } | null {
+export function readPushCommands(body: Buffer): { updates: RefUpdate[]; capabilities: string[]; packAt: number } | null {
   const updates: RefUpdate[] = [];
   let capabilities: string[] = [];
   let at = 0;
   while (at + 4 <= body.length) {
     const length = parseInt(body.subarray(at, at + 4).toString('ascii'), 16);
     if (Number.isNaN(length)) return null;
-    if (length === 0) return updates.length ? { updates, capabilities } : null;
+    if (length === 0) return updates.length ? { updates, capabilities, packAt: at + 4 } : null;
     if (length < 4 || at + length > body.length) return null;
     let line = body.subarray(at + 4, at + length).toString('utf8');
     at += length;
@@ -221,6 +223,54 @@ export function refusedPush(updates: RefUpdate[]): string | null {
   return null;
 }
 
+/**
+ * A push that moves an existing branch (it had a commit before) must build on it: its new tip has to come from the old one through
+ * commits the push carries. That is how a forced overwrite is told from an addition, since both look alike in the ref update.
+ * Nothing is guessed: a push that cannot be read, is too big to check, or moves a branch back or sideways is turned down, and the
+ * Brick is told to push a new branch instead. The reason, or null when it may go.
+ */
+export async function refusedOverwrite(
+  updates: RefUpdate[],
+  body: Buffer,
+  contentEncoding: string | null,
+  packAt: number,
+  /** Asks GitHub whether `newId`, a commit it already has, comes after `oldId`. Not asked for a tip the push carries itself. */
+  onGitHub: (oldId: string, newId: string) => Promise<boolean>,
+): Promise<string | null> {
+  const existing = updates.filter((update) => !ZERO_ID.test(update.oldId) && update.oldId !== update.newId);
+  if (existing.length === 0) return null;
+  const why = (ref: string, what: string) => `${what} (${ref}). Bricks add to a branch, they never overwrite one: push to a new branch instead.`;
+  // The commands were read from the start of the body; the pack comes after them, in the same body unzipped
+  const whole = contentEncoding === 'gzip' ? await unzipStart(body, VERIFY_MAX_BYTES + 1) : body;
+  if (!whole || whole.length > VERIFY_MAX_BYTES) return why(existing[0].ref, 'This push is too big to check against the branch');
+  const commits = readPackCommits(whole.subarray(packAt));
+  if (!commits) return why(existing[0].ref, 'The history of this push could not be read');
+  for (const update of existing) {
+    // A tip the push carries is followed through the commits it carries. A tip GitHub has already (a branch pushed earlier, now
+    // being moved up to) is asked of GitHub, which knows its history
+    const proved = commits.has(update.newId) ? buildsOn(commits, update.oldId, update.newId) : await onGitHub(update.oldId, update.newId);
+    if (!proved) return why(update.ref, 'This push does not build on the branch as it is, so it would overwrite it');
+  }
+  return null;
+}
+
+/** Whether GitHub says `newId` comes after `oldId` (ahead of it, or the same): GitHub's compare. Anything else, or no answer, is no. */
+async function commitFollows(repo: string, oldId: string, newId: string, token: string, fetchImpl: FetchLike): Promise<boolean> {
+  if (!/^[0-9a-f]{40}$/.test(oldId) || !/^[0-9a-f]{40}$/.test(newId)) return false;
+  try {
+    const answer = await fetchImpl(`https://api.github.com/repos/${repo}/compare/${oldId}...${newId}`, {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'BAWES-Universe-Orbit', 'X-GitHub-Api-Version': '2022-11-28' },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!answer.ok) return false;
+    const body = (await answer.json()) as { status?: unknown };
+    return body.status === 'ahead' || body.status === 'identical';
+  } catch {
+    return false;
+  }
+}
+
 export type RelayOutcome =
   | { status: 'pass'; response: Response }
   | { status: 'refused'; message: string; response: Response }
@@ -242,6 +292,7 @@ export async function relayGit(
   } else if (input.method !== 'POST' || !input.body) {
     return { status: 'bad_request' };
   }
+  let checkedPush: NonNullable<ReturnType<typeof readPushCommands>> | null = null;
   if (target.step === 'git-receive-pack' && input.body) {
     if (input.body.length > MAX_PUSH_BYTES) return { status: 'too_big' };
     const raw = input.contentEncoding === 'gzip' ? await unzipStart(input.body, COMMANDS_MAX_BYTES) : input.body;
@@ -252,11 +303,19 @@ export async function relayGit(
       if (!read) return { status: 'bad_request' };
       const refused = refusedPush(read.updates);
       if (refused) return { status: 'refused', message: refused, response: rejectedPush(read.updates, refused, read.capabilities) };
+      checkedPush = read;
     }
   }
   const token = await gitHubToken(pass.connectionId, fetchImpl);
   if (token.status === 'reconnect') return { status: 'reconnect' };
   if (token.status !== 'ok') return { status: 'unavailable' };
+  if (checkedPush && input.body) {
+    // Needs the owner's token (it may ask GitHub), so it comes after the token; nothing was sent to GitHub before it passes
+    const overwrite = await refusedOverwrite(checkedPush.updates, input.body, input.contentEncoding, checkedPush.packAt, (oldId, newId) =>
+      commitFollows(target.repo, oldId, newId, token.token, fetchImpl),
+    );
+    if (overwrite) return { status: 'refused', message: overwrite, response: rejectedPush(checkedPush.updates, overwrite, checkedPush.capabilities) };
+  }
 
   const query = target.step === 'info/refs' ? `?service=${new URLSearchParams(input.search).get('service')}` : '';
   const headers: Record<string, string> = {

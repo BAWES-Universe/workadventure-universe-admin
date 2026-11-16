@@ -427,6 +427,22 @@ run('voice notes for every bot, in a real database', () => {
       expect(await reserve(person, { clientTurnId, contentHash: 'h' })).toMatchObject({ ok: true, turn: { state: 'delivered' } });
     });
 
+    it('writes what was heard to the books once, paid by Universe AI, and never as 0 when the cost is not known (audit F4)', async () => {
+      const turn = await fresh();
+      await leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: ADAPTERS });
+      await recordVoiceNote(turn.id, { event: 'heard', generation: 1, transcript: 'Hello', seconds: 12 });
+      // The same event again (a retry that gets past the fence) adds nothing
+      await prisma.voiceNoteTurn.update({ where: { id: turn.id }, data: { state: 'hearing' } });
+      await recordVoiceNote(turn.id, { event: 'heard', generation: 1, transcript: 'Hello', seconds: 12 }).catch(() => undefined);
+      const events = await prisma.meterEvent.findMany({ where: { kind: 'speech', eventId: `speech:note:${turn.id}` } });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ kind: 'speech', pool: 'chat', unit: 'second', quantity: BigInt(12), payerKind: 'universe', costMicros: null, basis: 'unknown', sourceRef: `voice_note_turns:${turn.id}` });
+      const priced = await fresh();
+      await leaseVoiceNoteStage(priced.id, { stage: 'hearing', adapters: ADAPTERS });
+      await recordVoiceNote(priced.id, { event: 'heard', generation: 1, transcript: 'Hi', seconds: 5, costMicros: 450 });
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `speech:note:${priced.id}` } })).toMatchObject({ costMicros: BigInt(450), basis: 'estimated', quantity: BigInt(5) });
+    });
+
     it('fences out a bot server whose lease was taken over', async () => {
       const turn = await fresh();
       await leaseVoiceNoteStage(turn.id, { stage: 'hearing', adapters: ADAPTERS });

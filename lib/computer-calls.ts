@@ -92,6 +92,11 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
   const cost = facts.costMicros === null ? null : Math.max(0, Math.min(MAX_MICROS, Math.round(facts.costMicros)));
   const paidByOther = facts.payer.kind === 'person';
   const eventId = `computer:${job.id}:call:${callId}`;
+  // A call can cost more than the room held for it (the room is an upper reading made before the call; the price is known after). It cannot be
+  // taken back, so it is written as it was, said as an overrun beside the figure, and counted from then on: it comes off the person's allowance
+  // and the pool's room at once, so the next call is held against it (audit F9)
+  const overrun = reservation && !paidByOther && cost !== null && cost > Number(reservation.amountMicros) ? cost - Number(reservation.amountMicros) : 0;
+  if (overrun > 0) console.warn(`[Computer] A model call cost ${overrun} millionths of a dollar more than the room held for it`);
   const written = await recordMeterEvent({
     eventId,
     kind: 'model_call',
@@ -110,7 +115,7 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
     costMicros: cost,
     basis: paidByOther ? 'paid_by_other' : cost === null ? 'unknown' : facts.basis,
     sourceRef: `computer_jobs:${job.id}`,
-    detail: { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}) },
+    detail: { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}), ...(overrun > 0 ? { overrunMicros: overrun } : {}) },
   });
   // The sweep writes a call that never reported as unknown. A report that comes after it carries the real figure, which replaces the
   // unknown one (only an unknown figure is ever replaced: a figure that was written stays as it was)

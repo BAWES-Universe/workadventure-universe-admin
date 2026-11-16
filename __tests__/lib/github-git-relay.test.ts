@@ -3,7 +3,7 @@
  * server on this machine (git http-backend), so what is checked is what git really sends and reads.
  */
 import crypto from 'node:crypto';
-import { execFile, execFileSync, spawn } from 'child_process';
+import { execFile, execFileSync, spawn, spawnSync } from 'child_process';
 import { promisify } from 'util';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import http from 'http';
@@ -30,6 +30,14 @@ function pretendGitHub(root: string) {
     const headers = (init.headers ?? {}) as Record<string, string>;
     seen.push({ url, authorization: headers.Authorization });
     const parsed = new URL(url);
+    // GitHub's compare of two commits, played by git itself
+    const compare = /^\/repos\/([^/]+\/[^/]+)\/compare\/([0-9a-f]{40})\.\.\.([0-9a-f]{40})$/.exec(parsed.pathname);
+    if (parsed.host === 'api.github.com' && compare) {
+      const dir = path.join(root, `${compare[1]}.git`);
+      const isAncestor = (a: string, b: string) => spawnSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: dir }).status === 0;
+      const status = compare[2] === compare[3] ? 'identical' : isAncestor(compare[2], compare[3]) ? 'ahead' : isAncestor(compare[3], compare[2]) ? 'behind' : 'diverged';
+      return new Response(JSON.stringify({ status }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
     const env = {
       ...process.env,
       GIT_PROJECT_ROOT: root,
@@ -149,8 +157,9 @@ const hasHttpBackend = (() => {
     git(clone, '-c', 'user.name=sara', '-c', 'user.email=1+sara@users.noreply.github.com', 'commit', '-qm', 'a');
     expect(await tryGit(clone, 'push', '-q', 'origin', 'HEAD:refs/heads/feature')).toMatchObject({ ok: true });
     expect(await tryGit(clone, 'push', '-q', 'origin', 'HEAD:main')).toMatchObject({ ok: true });
-    expect(upstream.seen.every((call) => call.url.startsWith('https://github.com/acme/tools.git/'))).toBe(true);
-    expect(upstream.seen.every((call) => call.authorization === `Basic ${Buffer.from('x-access-token:ghu_owner').toString('base64')}`)).toBe(true);
+    expect(upstream.seen.every((call) => call.url.startsWith('https://github.com/acme/tools.git/') || call.url.startsWith('https://api.github.com/repos/acme/tools/compare/'))).toBe(true);
+    expect(upstream.seen.filter((call) => call.url.startsWith('https://github.com/')).every((call) => call.authorization === `Basic ${Buffer.from('x-access-token:ghu_owner').toString('base64')}`)).toBe(true);
+    expect(upstream.seen.filter((call) => call.url.startsWith('https://api.github.com/')).every((call) => call.authorization === 'Bearer ghu_owner')).toBe(true);
     expect(git(path.join(work, 'github', 'acme', 'tools.git'), 'branch', '--list')).toContain('feature');
   });
 
@@ -184,6 +193,44 @@ const hasHttpBackend = (() => {
     expect(branches).not.toContain('other');
     expect(git(path.join(work, 'github', 'acme', 'tools.git'), 'tag', '--list')).toBe('');
   });
+
+  it('lets a branch grow but never be overwritten: a forced push, an amended commit and a move back are turned down, and git says why', async () => {
+    const repo = path.join(work, 'github', 'acme', 'tools.git');
+    const clone = path.join(work, 'clone-overwrite');
+    const as = ['-c', 'user.name=sara', '-c', 'user.email=1+sara@users.noreply.github.com'];
+    expect(await tryGit(work, 'clone', '-q', `http://127.0.0.1:${port}/api/git/acme/tools.git`, clone)).toMatchObject({ ok: true });
+    // A branch of its own, then two commits added to it one after the other: both are additions
+    writeFileSync(path.join(clone, 'o1.txt'), '1\n');
+    git(clone, 'add', '.');
+    git(clone, ...as, 'commit', '-qm', 'one');
+    expect(await tryGit(clone, 'push', '-q', 'origin', 'HEAD:refs/heads/work')).toMatchObject({ ok: true });
+    writeFileSync(path.join(clone, 'o2.txt'), '2\n');
+    git(clone, 'add', '.');
+    git(clone, ...as, 'commit', '-qm', 'two');
+    expect(await tryGit(clone, 'push', '-q', 'origin', 'HEAD:work')).toMatchObject({ ok: true });
+    const tip = git(repo, 'rev-parse', 'work').trim();
+    // An amended commit pushed with force: the same ref update as an addition, but not built on the branch
+    git(clone, ...as, 'commit', '-q', '--amend', '-m', 'two, again');
+    const forced = await tryGit(clone, 'push', '-f', 'origin', 'HEAD:work');
+    expect(forced.ok).toBe(false);
+    expect(forced.out).toContain('Bricks add to a branch, they never overwrite one');
+    // A branch moved back to an older commit: the pack carries nothing, so nothing proves it builds on the tip
+    const back = await tryGit(clone, 'push', '-f', 'origin', 'HEAD~2:work');
+    expect(back.ok).toBe(false);
+    // The default branch cannot be reset to something else either
+    const reset = await tryGit(clone, 'push', '-f', 'origin', 'HEAD:main');
+    expect(reset.ok).toBe(false);
+    expect(git(repo, 'rev-parse', 'work').trim()).toBe(tip);
+    // A merge that brings another line of history in still builds on the branch
+    git(clone, 'reset', '-q', '--hard', tip);
+    git(clone, ...as, 'checkout', '-q', '-b', 'side', 'HEAD~1');
+    writeFileSync(path.join(clone, 'side.txt'), 's\n');
+    git(clone, 'add', '.');
+    git(clone, ...as, 'commit', '-qm', 'side');
+    git(clone, ...as, 'merge', '-q', '--no-ff', '-m', 'merge', tip);
+    expect(await tryGit(clone, 'push', '-q', 'origin', 'HEAD:work')).toMatchObject({ ok: true });
+    expect(git(repo, 'rev-parse', 'work').trim()).not.toBe(tip);
+  });
 });
 
 describe('reading a git address and a push', () => {
@@ -198,7 +245,7 @@ describe('reading a git address and a push', () => {
   it('reads the ref updates and refuses what cannot be read', () => {
     const line = (text: string) => `${(text.length + 4).toString(16).padStart(4, '0')}${text}`;
     const body = Buffer.from(`${line(`${'a'.repeat(40)} ${'b'.repeat(40)} refs/heads/main\0report-status side-band-64k\n`)}0000PACK`);
-    expect(readPushCommands(body)).toEqual({ updates: [{ oldId: 'a'.repeat(40), newId: 'b'.repeat(40), ref: 'refs/heads/main' }], capabilities: ['report-status', 'side-band-64k'] });
+    expect(readPushCommands(body)).toEqual({ updates: [{ oldId: 'a'.repeat(40), newId: 'b'.repeat(40), ref: 'refs/heads/main' }], capabilities: ['report-status', 'side-band-64k'], packAt: body.length - 4 });
     expect(readPushCommands(Buffer.from('zzzz'))).toBeNull();
     expect(readPushCommands(Buffer.from('0000'))).toBeNull();
     expect(refusedPush([{ oldId: 'a', newId: '0'.repeat(64), ref: 'refs/heads/main' }])).toContain('Deleting');

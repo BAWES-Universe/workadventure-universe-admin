@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { Prisma, type VoiceNoteTurn } from '@prisma/client';
 import { prisma } from '@/lib/db';
+import { recordSpeechHeard } from '@/lib/meter-speech';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { VOICE_RANGES, savedVoiceKeyLimits } from '@/lib/voice-limit-values';
 import { checkReplyAllowance, type ReplyAllowance } from '@/lib/reply-limits';
@@ -504,6 +505,8 @@ export async function recordVoiceNote(id: string, input: Record<string, unknown>
       const costMicros = input.costMicros === undefined ? null : wholeOf(input.costMicros, 'costMicros', 0, 2_000_000_000);
       const buffer = sealBuffer(turn.id, { transcript: input.transcript.slice(0, 20_000) });
       fenced((await moveOn(turn, { state: 'heard', heardSeconds, costMicros, buffer, bufferUntil: new Date(now.getTime() + BUFFER_MS), leaseUntil: null })).count);
+      // What was heard is in the books once (the turn's id is the event's), whoever pays; hearing that was done stays counted
+      await recordSpeechHeard(turn, heardSeconds, costMicros, now);
       return ok('heard');
     }
     case 'hearing-failed': {

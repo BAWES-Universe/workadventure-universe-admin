@@ -10,6 +10,7 @@ import { checkSpend } from '@/lib/spend-rules';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
+import { recordKeptDisk } from '@/lib/computer-disk';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
 import {
   AFTER_TAKE_OVER,
@@ -619,6 +620,7 @@ async function bringUp(botId: string, provider: Provider, now: Date): Promise<vo
       try {
         const info = await provider.create(botId);
         row = await prisma.brickComputer.update({ where: { botId }, data: { providerRef: info.ref, madeAt: now, machine: 'waking' } });
+        await recordKeptDisk({ botId, ref: info.ref, bytes: provider.diskBytes?.() ?? null, now });
       } catch (error) {
         await prisma.brickComputer.updateMany({ where: { botId, providerRef: null }, data: { machine: 'none' } });
         throw error;
@@ -1479,6 +1481,7 @@ export async function removeMachineBeforeDelete(botId: string, now: Date = new D
     return false;
   }
   // The machine is gone: say so at once, so a later try (if the Brick's own delete fails) does not save a copy of a machine that is not there
+  await recordKeptDisk({ botId, ref: row.providerRef, bytes: null, gone: true });
   try {
     await prisma.brickComputer.update({ where: { botId }, data: { providerRef: null, machine: 'none' } });
   } catch (error) {

@@ -61,6 +61,8 @@ export interface ComputerProvider {
   readonly kind: 'fake' | 'real';
   /** What an awake minute costs, in millionths of a dollar, as the provider says; null when it has not said. */
   microsPerMinute(): number | null;
+  /** How big the disk of a machine it makes is, in bytes, as the provider bills it (a disk is billed whole, asleep or not); null when it bills none. */
+  diskBytes?(): number | null;
   /** Makes this Brick's one computer. Asked once for a Brick: a second ask for the same Brick is the same machine. */
   create(botId: string): Promise<MachineInfo>;
   /** Wakes a resting or cold machine. */
@@ -119,6 +121,8 @@ export class FakeComputerProvider implements ComputerProvider {
   execAnswer: (command: string) => Partial<ExecResult> | Promise<Partial<ExecResult>> = (command) => (command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {});
   /** Every command is refused (the machine does not answer) while this is on. */
   failExec = false;
+  /** The disk of a machine it makes, in bytes; a test sets this (the pretend one bills none). */
+  disk: number | null = null;
   /** The turns the pretend agent will run, one list of events per turn, used in order. */
   turns: TurnEvent[][] = [];
   /** What was asked of the pretend agent, and what was cancelled. */
@@ -140,6 +144,10 @@ export class FakeComputerProvider implements ComputerProvider {
 
   microsPerMinute(): number | null {
     return this.rate;
+  }
+
+  diskBytes(): number | null {
+    return this.disk;
   }
 
   private note(name: string, ref?: string) {

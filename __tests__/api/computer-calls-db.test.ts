@@ -172,6 +172,20 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect(Number(room.settledMicros)).toBe(1_200);
     });
 
+    it('says so when a call cost more than the room held for it, and the extra counts from then on (audit F9)', async () => {
+      const { jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      expect(await call(token, 'c-over', 1_000)).toMatchObject({ ok: true, reservedMicros: 1_000 });
+      await settleModelCall(jobId, 'c-over', { costMicros: 1_800, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW);
+      const event = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:c-over` } });
+      expect(Number(event.costMicros)).toBe(1_800);
+      expect(event.detail).toMatchObject({ overrunMicros: 800 });
+      // A call that stayed inside its room says nothing of the kind
+      expect(await call(token, 'c-fine', 1_000)).toMatchObject({ ok: true });
+      await settleModelCall(jobId, 'c-fine', { costMicros: 900, basis: 'measured', payer: { kind: 'universe' }, route: 'universe-ai' }, NOW);
+      expect((await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${jobId}:call:c-fine` } })).detail).not.toHaveProperty('overrunMicros');
+    });
+
     it('is the same call when asked twice, and a settled call is not another', async () => {
       const { jobId } = await running();
       const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
