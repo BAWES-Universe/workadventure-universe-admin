@@ -215,6 +215,11 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
 
   // Prove the key with the definition's own non-changing request. A key the service refuses costs a try.
   if (definition.check) {
+    // The try is taken BEFORE the service is asked, in one step that also holds the limit: keys sent at the same moment cannot all pass
+    // a count that none of them has added to yet. A try that does not end with the service refusing the key is given back below.
+    const reserved = await prisma.appKeyRequest.updateMany({ where: { id: row.id, usedAt: null, tries: { lt: limits.keyTries } }, data: { tries: { increment: 1 } } });
+    if (reserved.count !== 1) throw new KeyFormError(429, 'too_many', 'Too many tries');
+    const giveBack = () => prisma.appKeyRequest.updateMany({ where: { id: row.id, tries: { gt: 0 } }, data: { tries: { decrement: 1 } } });
     let status: number;
     try {
       const request = buildRequest(definition, definition.check.operation, definition.check.arguments, key);
@@ -223,14 +228,14 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
       if (answer.redirected) throw new KeyFormError(502, 'unreachable', 'The service did not answer as expected');
       status = answer.status;
     } catch (error) {
+      await giveBack().catch(() => undefined);
       if (error instanceof KeyFormError) throw error;
       if (error instanceof GuardError || error instanceof RequestError) throw new KeyFormError(502, 'unreachable', 'The service could not be reached');
       throw error;
     }
-    if (definition.check.rejected.includes(status)) {
-      await prisma.appKeyRequest.update({ where: { id: row.id }, data: { tries: { increment: 1 } } });
-      throw new KeyFormError(422, 'rejected', "The service didn't accept this key");
-    }
+    // The service refused it: that is what the try was for
+    if (definition.check.rejected.includes(status)) throw new KeyFormError(422, 'rejected', "The service didn't accept this key");
+    await giveBack().catch(() => undefined);
     if (status >= 500) throw new KeyFormError(502, 'unreachable', 'The service could not be reached');
   }
 
