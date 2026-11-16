@@ -324,6 +324,10 @@ SCRIPTS_DIR = "/usr/local/bin"
 # name): the program file must belong to root and be closed to everyone else (the agent cannot make one), and the arguments must be the ones
 # universe-up starts it with. The screen's own server and window manager are the base image's, so only the program is checked.
 DESKTOP_PROGRAMS = {"Xvfb", "openbox"}
+# What the screen's server and window manager must NOT be started with: the agent can run these root-owned programs itself, so a second
+# screen (any display but :99), or a window manager that runs a command of its own, is the agent's and is never kept. And what they
+# start is not kept below them: only the browser's own helpers are.
+OPENBOX_RUNS = ("--startup", "--config-file", "--exec")
 INTERPRETERS = re.compile(r"^(python3(\.\d+)?|sh|dash|bash)$")
 OWN_SCRIPTS = {os.path.join(SCRIPTS_DIR, name) for name in ("universe-proxy", "universe-supervise", "universe-up", "universe-fence")}
 X11VNC_ARGS = ["-display", ":99", "-rfbport", "5900", "-localhost", "-forever", "-shared", "-nopw", "-quiet"]
@@ -391,8 +395,10 @@ def desktop_part(pid):
         return False
     name = os.path.basename(path)
     args = argv(pid)
-    if name in DESKTOP_PROGRAMS:
-        return True
+    if name == "Xvfb":
+        return [part for part in args[1:] if re.match(r"^:\d+$", part)] == [":99"]
+    if name == "openbox":
+        return not any(part.split("=")[0] in OPENBOX_RUNS for part in args[1:])
     if name == "x11vnc":
         return args[1:] == X11VNC_ARGS
     if name in ("chromium", "chrome"):
@@ -545,8 +551,10 @@ def protected(tree, cutoff):
         below.setdefault(up, []).append(pid)
     # Everything below a desktop part is its own, whether or not it was already kept for another reason: a helper that was running before
     # the note was written still has children (a new tab's renderer) that were not. Its own record of what was visited, apart from the kept set.
-    seen = set(desktop)
-    stack = list(desktop)
+    # (Not below the screen's server or window manager: the agent can run those programs itself, and what they start is the agent's.)
+    parents = {pid for pid in desktop if os.path.basename(program(pid) or "") not in DESKTOP_PROGRAMS}
+    seen = set(parents)
+    stack = list(parents)
     while stack:
         for child in below.get(stack.pop(), []):
             if child not in seen:
