@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
-import { BarChart3, Coins, Cpu, Gift, Loader2, Plus, Sparkles } from 'lucide-react';
+import { BarChart3, Coins, Cpu, Gift, Loader2, Plus, Sparkles, Wallet } from 'lucide-react';
 import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, SectionHeader, StatLine, count } from '../components/ds';
 import { FormSheet } from '../components/form-sheet';
 import { EnabledPill, providerTypeLabel } from './components/provider-state';
@@ -164,6 +164,12 @@ export default function AiProvidersPage() {
               <Link href="/admin/ai-providers/new">
                 <Plus className="mr-2 h-4 w-4" />
                 New text provider
+              </Link>
+            </Button>
+            <Button asChild variant="outline" className="h-11">
+              <Link href="/admin/ai-providers/budget">
+                <Wallet className="mr-2 h-4 w-4" />
+                Budget
               </Link>
             </Button>
             <Button asChild variant="outline" className="h-11">

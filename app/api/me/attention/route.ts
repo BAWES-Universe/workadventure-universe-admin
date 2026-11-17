@@ -1,6 +1,8 @@
 import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
+import { isSuperAdmin } from '@/lib/super-admin';
+import { refreshBudgetNotices } from '@/lib/budget/refresh';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 import { countOpenNotices } from '@/lib/notices';
 import { dropOrphanedToolSignInNotices } from '@/lib/tool-signin';
@@ -24,6 +26,8 @@ export async function GET(request: NextRequest) {
   const user = await getSessionUser(request);
   if (!user) return respond(request, { error: 'Unauthorized' }, 401);
 
+  // A super admin with Orbit open: Orbit looks at the budgets for something to warn about, in the background and never in the answer's way
+  if (isSuperAdmin(user.email)) void refreshBudgetNotices().catch((error) => console.error('[Budget] Could not look at the budgets:', error instanceof Error ? error.message : 'unknown'));
   try {
     await dropOrphanedToolSignInNotices(user.id);
     const [pending, dismissed, notices] = await Promise.all([

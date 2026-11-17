@@ -2,6 +2,7 @@ import { createHash } from 'crypto';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
+import { changesBetween, recordChanges } from '@/lib/budget/history';
 import { readMeterSettings, MEMBER_ALLOWANCE_LATER_KEY, basisOfCall, personKeyOf, type MeterEventInput, type MeterSettings } from '@/lib/meter-values';
 
 /**
@@ -40,6 +41,8 @@ export async function saveMeterSettings(change: Partial<MeterSettings>, userId: 
     if (Object.prototype.hasOwnProperty.call(change, 'memberAllowanceMicros')) delete next[MEMBER_ALLOWANCE_LATER_KEY];
     const value = next as Prisma.InputJsonValue;
     await tx.appSetting.upsert({ where: { key: SETTING_KEY }, create: { key: SETTING_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });
+    // Who changed which number, from what to what, in the same transaction: a number never changes without its line
+    await recordChanges(tx, changesBetween('meter', Object.keys(change), saved, next), userId);
     return readMeterSettings(next);
   });
 }
@@ -52,6 +55,9 @@ export async function scheduleMemberAllowance(micros: number, from: Date, userId
     const saved = row?.value && typeof row.value === 'object' && !Array.isArray(row.value) ? (row.value as Record<string, unknown>) : {};
     const value = { ...saved, [MEMBER_ALLOWANCE_LATER_KEY]: { micros, from: from.toISOString() } } as Prisma.InputJsonValue;
     await tx.appSetting.upsert({ where: { key: SETTING_KEY }, create: { key: SETTING_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });
+    const waiting = saved[MEMBER_ALLOWANCE_LATER_KEY];
+    const before = waiting && typeof waiting === 'object' && !Array.isArray(waiting) ? (waiting as { micros?: unknown }).micros : null;
+    await recordChanges(tx, changesBetween('meter', ['memberAllowanceMicros'], { memberAllowanceMicros: before }, { memberAllowanceMicros: micros }, `Starts ${from.toISOString().slice(0, 10)}`), userId);
   });
 }
 

@@ -53,6 +53,8 @@ export interface Limit {
   range?: Range;
   /** Another row it can't go above: a choice past it is turned down with this line, never cut to fit. */
   atMost?: { value: number; line: string };
+  /** Who last changed it and when ("Last changed by Khalid, 12 Nov"), shown under the row's words. */
+  changed?: string;
 }
 
 export interface ModelCap {
@@ -96,6 +98,11 @@ export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }
       <span className="grid min-w-0 flex-1 gap-0.5">
         <strong className="text-sm font-semibold">{limit.label}</strong>
         <span className="text-xs leading-snug text-muted-foreground">{limit.hint}</span>
+        {limit.changed && (
+          <span className="text-[11px] leading-snug text-muted-foreground/80" data-testid={`limit-${limit.id}-changed`}>
+            {limit.changed}
+          </span>
+        )}
         {limit.cap?.line && (
           <span className="mt-1 flex items-start gap-1.5 text-xs leading-snug text-foreground/85" data-testid={`limit-${limit.id}-cap`}>
             <Info size={14} aria-hidden="true" className="mt-px shrink-0 text-muted-foreground" />
@@ -1656,8 +1663,8 @@ export function UniverseAiLimits() {
             limits={[...(allowance ? [computerAllowanceLimit(allowance.micros)] : []), ...brickLimits(limits.bricks)]}
             onChange={(id, value) => (id === COMPUTER_ALLOWANCE_ID ? saveAllowance(value) : save({ bricks: { [id]: value } }))}
           />
-          {instant && <LimitGroup title="Instant Apps" note="Apps that work without connecting anything. Universe pays for each run, so each limit is yours to set. Instant Apps do not run until the required ones have a number." limits={instantLimits(instant)} onChange={saveInstant} />}
-          {allowance && <LimitGroup title="Credit and give-backs" note="What Universe funds and returns. None of these has a built-in value: set each one yourself." limits={moneyLimits(money)} onChange={saveMoney} />}
+          {instant && <LimitGroup title="Instant Apps" note="Apps that work without connecting anything. Universe pays for each run, so each limit is yours to set. Instant Apps do not run until the required ones have a number. The same numbers are on the Budget page, with who changed them and when." limits={instantLimits(instant)} onChange={saveInstant} />}
+          {allowance && <LimitGroup title="Credit and give-backs" note="What Universe funds and returns. None of these has a built-in value: set each one yourself. The Budget page shows them beside what is spent." limits={moneyLimits(money)} onChange={saveMoney} />}
           {voiceFailed ? (
             <LoadError label="the voice limits" retry={loadVoice} />
           ) : !voice ? (

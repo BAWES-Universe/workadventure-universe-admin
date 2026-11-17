@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { readInstantLimits, type InstantLimits } from '@/lib/instant/values';
+import { changesBetween, recordChanges } from '@/lib/budget/history';
 
 /**
  * What a super admin set for Instant, and whether it is paused. Both live in the app's own settings table, never in code, so
@@ -38,6 +39,8 @@ export async function saveInstantLimits(change: Partial<Record<keyof InstantLimi
     }
     const value = next as Prisma.InputJsonValue;
     await tx.appSetting.upsert({ where: { key: LIMITS_KEY }, create: { key: LIMITS_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });
+    // Who changed which limit, from what to what, in the same transaction (the Budget page's history)
+    await recordChanges(tx, changesBetween('instant', Object.keys(change), saved, next), userId);
     return readInstantLimits(next);
   });
 }
