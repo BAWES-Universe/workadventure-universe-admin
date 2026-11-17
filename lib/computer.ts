@@ -28,6 +28,7 @@ import { recordKeptBytes } from '@/lib/computer-disk';
 import { reconcileComputers } from '@/lib/computer-reconcile';
 import { computerQuote, connectedApp, routeJob, stepsReview, type RoutePlan } from '@/lib/computer-route';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
+import { computersArePaused } from '@/lib/capability-pause';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
@@ -325,7 +326,7 @@ async function stopMachine(botId: string, ref: string, provider: Provider, only?
 export type Started =
   | { ok: true; job: JobView; restoredFrom: Date | null }
   /** Not the owner's Brick, or not theirs to ask: only the owner starts computer work on their Brick. */
-  | { ok: false; reason: 'not_owner' | 'off' | 'not_open' | 'broken_start' | 'no_run' }
+  | { ok: false; reason: 'not_owner' | 'off' | 'not_open' | 'broken_start' | 'no_run' | 'paused' }
   /** A connected app would do this for less than the computer: nothing is started, and the Brick is told which app to use. */
   | { ok: false; reason: 'cheaper_route'; app: string }
   /** The meter's controls are not set up yet: a computer does not open before they do. */
@@ -380,6 +381,9 @@ export async function startJob(input: { botId: string; personId: string; title: 
   // The way: a connected app that would do this for less is used instead, before anything is made, woken or reserved
   const routed = await routeJob({ botId: input.botId, plan: input.plan, awakeMicrosPerMinute: providerFor(row)?.microsPerMinute() ?? null, hasMachine: !!row.providerRef });
   if (!routed.ok) return { ok: false, reason: 'cheaper_route', app: routed.app };
+  // The team paused computers: no new job starts (one already going finishes, and a job already in line waits with its work saved).
+  // A retry of a run that already has its job was answered above, so a pause never hides the job a run already made
+  if (await computersArePaused()) return { ok: false, reason: 'paused' };
   let created;
   try {
     created = await prisma.computerJob.create({
@@ -500,6 +504,13 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     return 'gone';
   }
   const queue = (queuedFor: QueuedFor) => prisma.computerJob.updateMany({ where: { id: job.id, status: 'queued' }, data: { queuedFor } });
+
+  // The team paused computers: a job in line stays in line with its work saved, and starts by itself when they are back
+  if (await computersArePaused()) {
+    // Waiting in line, nothing to ask for: not the "allowance" or "turn" reason an earlier try may have left
+    await queue('busy');
+    return 'queued';
+  }
 
   // The person has the machine: nothing starts under Brick's hands until they hand it back. Nothing is reserved while waiting in line.
   if ((await prisma.computerJob.count({ where: { botId: job.botId, status: 'waiting', control: 'person' } })) > 0) {
