@@ -864,22 +864,22 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(Number(newest.quantity)).toBeGreaterThanOrEqual(4_000_000_000);
     });
 
-    it('a second job that comes in while a machine is waking after an older-copy return keeps the day the files are from', async () => {
+    it('a second job that comes in while a machine is waking after an older-copy return keeps the day the files are from, even though the saved-copy date is later than that day', async () => {
       const brick = await idleBrick();
       await packAway(brick.botId, provider, NOW);
       const cameFrom = new Date(NOW.getTime() - 3 * DAY);
-      // The first job restored the older copy and the machine is still waking
-      await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'waking', providerRef: `fake-${brick.botId}`, olderCopyUsed: true, restoredFrom: cameFrom, filesSavedAt: new Date(cameFrom.getTime() - DAY) } });
+      // The newest copy (a day ago) stayed the saved-copy date; the older copy (3 days ago) was restored an hour ago and nothing was saved since
+      await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'waking', providerRef: `fake-${brick.botId}`, olderCopyUsed: true, restoredFrom: cameFrom, filesSavedAt: new Date(NOW.getTime() - DAY), returnedAt: new Date(NOW.getTime() - 60 * 60_000) } });
       const started = await startJob({ botId: brick.botId, personId: brick.personId, title: 'Second' }, NOW);
       expect(started.ok && started.job.status).toBe('running');
       expect(await row(brick.botId)).toMatchObject({ machine: 'working', olderCopyUsed: true, restoredFrom: cameFrom });
     });
 
-    it('that day is dropped once a newer saved copy of the files exists', async () => {
+    it('that day is dropped once the files were saved after the return', async () => {
       const brick = await idleBrick();
       await packAway(brick.botId, provider, NOW);
       const cameFrom = new Date(NOW.getTime() - 3 * DAY);
-      await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'waking', providerRef: `fake-${brick.botId}`, olderCopyUsed: true, restoredFrom: cameFrom, filesSavedAt: new Date(NOW.getTime() - DAY) } });
+      await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'waking', providerRef: `fake-${brick.botId}`, olderCopyUsed: true, restoredFrom: cameFrom, filesSavedAt: new Date(NOW.getTime() - 10 * 60_000), returnedAt: new Date(NOW.getTime() - 60 * 60_000) } });
       const started = await startJob({ botId: brick.botId, personId: brick.personId, title: 'Third' }, NOW);
       expect(started.ok && started.job.status).toBe('running');
       expect(await row(brick.botId)).toMatchObject({ machine: 'working', olderCopyUsed: false, restoredFrom: null });
