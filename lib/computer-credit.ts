@@ -278,6 +278,27 @@ export async function settleJobCredit(jobId: string, costMicros: number, real: b
   }
 }
 
+/**
+ * A job that was already running when the lots took over has room in the meter's books but no credit held for the stretches it already
+ * began: nothing it used before its first renewal would ever be charged to the person. Before it renews or ends, the stretches it holds
+ * room for are held in the lots too, as far as the person's credit reaches (work that began under the old rule is never refused after
+ * the fact, only charged for what the credit covers). Once only: the hold is under the job's own room key. A job that began after the
+ * lots took over already holds its first stretch, so nothing happens for it.
+ */
+export async function adoptEarlierStretches(job: { id: string; personId: string; botId: string; reservationKey: string | null; startedAt: Date | null }, now: Date, prepared: Prepared): Promise<void> {
+  if (prepared.unlimited || !job.reservationKey || !job.startedAt) return;
+  const cutover = await readCutover();
+  if (!cutover || job.startedAt >= cutover) return;
+  if (await prisma.creditHold.findUnique({ where: { holdKey: job.reservationKey }, select: { id: true } })) return;
+  const room = await prisma.meterReservation.findUnique({ where: { reservationKey: job.reservationKey }, select: { amountMicros: true } });
+  // Whatever state the room is in (a job that is ending has just settled it), the amount it held is what the job's stretches were
+  if (!room) return;
+  const left = await computerCreditLeft(prisma, job.personId, now, false, prepared.notSet);
+  const amount = Math.min(asNumber(room.amountMicros), Math.floor(left.availableMicros));
+  if (amount <= 0) return;
+  await holdForJob({ key: job.reservationKey, personId: job.personId, amountMicros: amount, botId: job.botId, jobId: job.id, chargeClass: 'computer_job' }, now, prepared);
+}
+
 /** The job never ran, or ended before it began: everything it held goes back. Safe to say twice. */
 export async function releaseJobCredit(jobId: string, now: Date): Promise<void> {
   const holds = await prisma.creditHold.findMany({ where: { jobKey: jobId, category: 'computers', chargeClass: 'computer_job', state: 'held' }, select: { holdKey: true } });

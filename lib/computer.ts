@@ -5,7 +5,7 @@ import { ownsBrick } from '@/lib/brick';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { getBrickLimits } from '@/lib/bot-limits';
 import { releaseRoom, renewRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
-import { computerCreditFor, creditCheck, giveBackJobCredit, holdForJob, prepareComputerCredit, reconcileComputerHolds, releaseCreditHold, releaseJobCredit, renewHoldKey, settleJobCredit } from '@/lib/computer-credit';
+import { adoptEarlierStretches, computerCreditFor, creditCheck, giveBackJobCredit, holdForJob, prepareComputerCredit, reconcileComputerHolds, releaseCreditHold, releaseJobCredit, renewHoldKey, settleJobCredit } from '@/lib/computer-credit';
 import { monthOf } from '@/lib/meter-values';
 import { checkSpend } from '@/lib/spend-rules';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
@@ -701,10 +701,13 @@ export async function renewJob(
   const prepared = await prepareComputerCredit(job.personId, now);
   // The credit for the next stretch is asked in the pool's lock, in its place in the order, and then held: one hold for each stretch, keyed by
   // the stretch it is, so asking again for the same stretch (two renewals at the same moment) takes the credit once
-  const reserved = await prisma.meterReservation.findUnique({ where: { reservationKey: job.reservationKey }, select: { renewals: true, state: true } });
+  // A job that was running before the lots took over has its earlier stretches held first, so what it already used is charged too
+  await adoptEarlierStretches(job, now, prepared);
   let room = await renewRoom({ key: job.reservationKey, moreMicros, personal: creditCheck(job.personId, now, prepared) }, now);
-  if (room.ok && reserved) {
-    const held = await holdForJob({ key: renewHoldKey(job.reservationKey, reserved.renewals + 1), personId: job.personId, amountMicros: moreMicros, botId: job.botId, jobId: job.id, chargeClass: 'computer_job' }, now, prepared);
+  if (room.ok) {
+    // The stretch is the renewal count the room just reached, read under the pool's lock with the renewal itself: two renewals at the same moment
+    // each get their own stretch and their own hold, never one hold for two stretches
+    const held = await holdForJob({ key: renewHoldKey(job.reservationKey, room.reservation.renewals), personId: job.personId, amountMicros: moreMicros, botId: job.botId, jobId: job.id, chargeClass: 'computer_job' }, now, prepared);
     // Credit that was there at the check and not at the hold (another step took it): the job stops safely, the same answer as credit used up
     if (!held.ok) room = held.reason === 'allowance' ? { ok: false, reason: 'allowance', leftMicros: 0 } : held.reason === 'not_set' ? { ok: false, reason: 'not_set', missing: ['rolloutBudgetMicros'] } : { ok: false, reason: 'closed' };
   }
@@ -833,6 +836,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
         const cost = await recordComputerTime({ id: job.id, botId: job.botId, personId: job.personId, runId: job.runId }, seconds, now, { endedBy, status });
         await settleRoom({ key: job.reservationKey, settledMicros: Math.max(1, cost ?? 1) }, now);
         // The person's credit settles to the same figure, once: what they held for the job is charged for what ran, and the rest goes back
+        await adoptEarlierStretches(job, now, await prepareComputerCredit(job.personId, now, false));
         await settleJobCredit(job.id, Math.max(1, cost ?? 1), providerFor(await prisma.brickComputer.findUnique({ where: { botId: job.botId } }))?.kind === 'real', now);
       } else {
         await releaseRoom({ key: job.reservationKey }, now);

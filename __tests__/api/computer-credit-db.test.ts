@@ -286,6 +286,58 @@ run('computer jobs are paid from the credit lots, in a real database', () => {
       expect(Number(call.customerMicros)).toBe(4_000);
     });
 
+    it('two renewals at the same moment each hold their own stretch: no stretch of machine time goes uncharged', async () => {
+      const faisal = await person('faisal', false);
+      await exception([faisal.id], { mode: 'own', amountMicros: 400_000, interval: 'monthly' });
+      await giveComputer(faisal.brickId, faisal.id);
+      const started = await startJob({ botId: faisal.brickId, personId: faisal.id, title: 'Renewed twice at once' }, NOW);
+      if (!started.ok) throw new Error('not started');
+      const answers = await Promise.all([renewJob(started.job.id, minutes(8)), renewJob(started.job.id, minutes(8))]);
+      expect(answers.every((answer) => answer.ok)).toBe(true);
+      const holds = await holdsOf(started.job.id);
+      expect(holds).toHaveLength(3);
+      expect(new Set(holds.map((hold) => hold.holdKey)).size).toBe(3);
+      expect(holds.reduce((sum, hold) => sum + Number(hold.amountMicros), 0)).toBe(3 * STRETCH);
+      // What the room holds and what the credit holds agree
+      expect(Number((await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).amountMicros)).toBe(3 * STRETCH);
+    });
+
+    it('a job that was already running when the lots took over is charged for what it used, from its first stretch', async () => {
+      const sara = await person('sara');
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Running at deploy' }, NOW);
+      if (!started.ok) throw new Error('not started');
+      // As it was before: room in the meter's books, nothing held in the lots, and the lots took over after it began
+      const before = await holdsOf(started.job.id);
+      await prisma.creditAllocation.deleteMany({ where: { holdId: { in: before.map((hold) => hold.id) } } });
+      await prisma.creditHold.deleteMany({ where: { id: { in: before.map((hold) => hold.id) } } });
+      await prisma.appSetting.update({ where: { key: 'computer-credit-books' }, data: { value: { from: minutes(1).toISOString() } } });
+      await finishJob(started.job.id, 'done', minutes(5));
+      const holds = await holdsOf(started.job.id);
+      expect(holds).toHaveLength(1);
+      expect(holds[0]).toMatchObject({ state: 'settled', holdKey: expect.not.stringContaining(':r') });
+      // 5 minutes at 6,000 a minute, charged once
+      expect(Number(holds[0].customerMicros)).toBe(30_000);
+      expect((await credit(sara.id, minutes(6))).availableMicros).toBe(70_000);
+    });
+
+    it('a job that was running at the deploy and renews first is charged for its earlier stretch too', async () => {
+      const faisal = await person('faisal', false);
+      await exception([faisal.id], { mode: 'own', amountMicros: 400_000, interval: 'monthly' });
+      await giveComputer(faisal.brickId, faisal.id);
+      const started = await startJob({ botId: faisal.brickId, personId: faisal.id, title: 'Renews after deploy' }, NOW);
+      if (!started.ok) throw new Error('not started');
+      const before = await holdsOf(started.job.id);
+      await prisma.creditAllocation.deleteMany({ where: { holdId: { in: before.map((hold) => hold.id) } } });
+      await prisma.creditHold.deleteMany({ where: { id: { in: before.map((hold) => hold.id) } } });
+      await prisma.appSetting.update({ where: { key: 'computer-credit-books' }, data: { value: { from: minutes(1).toISOString() } } });
+      expect(await renewJob(started.job.id, minutes(8))).toMatchObject({ ok: true });
+      await finishJob(started.job.id, 'done', minutes(12));
+      const holds = await holdsOf(started.job.id);
+      expect(holds).toHaveLength(2);
+      // 12 minutes at 6,000 a minute, across the two stretches
+      expect(holds.reduce((sum, hold) => sum + Number(hold.customerMicros), 0)).toBe(72_000);
+    });
+
     it('a start asked again for the same run does not hold twice', async () => {
       const sara = await person('sara');
       const item = await prisma.brickItem.create({ data: { ownerId: sara.id, botId: sara.brickId, kind: 'goal', words: 'Report', outcome: 'Done', cadence: { type: 'none' }, timeZone: 'Asia/Kuwait' } as never });
