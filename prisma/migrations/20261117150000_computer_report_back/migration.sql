@@ -5,6 +5,7 @@
 -- until that wait was said. `end_note` and `end_waiting_for` keep the two things an ending message needs that the job loses when it is over.
 
 ALTER TABLE "computer_jobs" ADD COLUMN "ended_told_at" TIMESTAMP(3);
+ALTER TABLE "computer_jobs" ADD COLUMN "end_closed_at" TIMESTAMP(3);
 ALTER TABLE "computer_jobs" ADD COLUMN "handover_seq" INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE "computer_jobs" ADD COLUMN "handover_untold" BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE "computer_jobs" ADD COLUMN "end_note" VARCHAR(200);

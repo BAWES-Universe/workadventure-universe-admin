@@ -52,6 +52,8 @@ export interface Report {
   givenBack: boolean;
 }
 
+/** How long an ending that never finished its own work (its server stopped halfway) waits before it is told as it stands. Its own work takes well under a minute. */
+const UNFINISHED_ENDING_MS = 5 * 60 * 1000;
 const WHY_MAX = 160;
 const WHERE_MAX = 120;
 const FILE_NAME_MAX = 80;
@@ -161,21 +163,23 @@ async function givenBackIn(jobId: string, seconds: number): Promise<boolean> {
 }
 
 // In the order they were planned, so what is said reads in the order it happened
-const EFFECTS = { select: { effectKey: true, kind: true, state: true, evidence: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } as const;
+const EFFECTS = { select: { effectKey: true, kind: true, state: true, evidence: true }, orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }] };
 
 /**
  * What Brick is to tell now, oldest first: endings not told yet, then waits for the person not told yet. A job whose person has no chat is still
  * listed (with no chat id) so the bot server can say it cannot and Orbit stops offering it.
  */
-export async function reportsToTell(limit = 50): Promise<Report[]> {
+export async function reportsToTell(limit = 50, now: Date = new Date()): Promise<Report[]> {
   const size = Math.max(1, Math.min(limit, 200));
+  // An ending is told once everything it does is finished; one a server left half done is told anyway after a while, never held for ever
+  const unfinishedBefore = new Date(now.getTime() - UNFINISHED_ENDING_MS);
   const ended = await prisma.computerJob.findMany({
     where: {
       status: { in: ['done', 'stopped', 'failed'] },
       endToldAt: null,
       startedAt: { not: null },
       bot: { deletedAt: null },
-      OR: [{ endedBy: null }, { endedBy: { notIn: ['person', 'off', 'deleted'] } }],
+      AND: [{ OR: [{ endedBy: null }, { endedBy: { notIn: ['person', 'off', 'deleted'] } }] }, { OR: [{ endClosedAt: { not: null } }, { endedAt: { lte: unfinishedBefore } }] }],
     },
     orderBy: [{ endedAt: 'asc' }, { id: 'asc' }],
     take: size,

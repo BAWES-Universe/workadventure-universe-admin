@@ -225,6 +225,28 @@ run('Brick tells the person how a computer job went, in a real database', () => 
     expect(await mine([id])).toEqual([]);
   });
 
+  it('tells an ending only once everything it does is finished, and tells one a stopped server left half done after a while', async () => {
+    const sara = await person('sara');
+    const justNow = new Date();
+    // Over, but its time is not yet in the books and its files not yet listed (the ending is still at work)
+    const open = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Open', status: 'done', startedAt: new Date(justNow.getTime() - 60_000), endedAt: justNow } });
+    expect((await reportsToTell(200, justNow)).filter((report) => report.jobId === open.id)).toEqual([]);
+    // Its work finishes: now it is told
+    await prisma.computerJob.update({ where: { id: open.id }, data: { endClosedAt: new Date() } });
+    expect((await reportsToTell(200, justNow)).filter((report) => report.jobId === open.id).map((report) => report.kind)).toEqual(['done']);
+    // One whose server stopped halfway is told as it stands, a few minutes later
+    const stuck = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Stuck', status: 'done', startedAt: new Date(justNow.getTime() - 60_000), endedAt: justNow } });
+    expect((await reportsToTell(200, justNow)).filter((report) => report.jobId === stuck.id)).toEqual([]);
+    expect((await reportsToTell(200, new Date(justNow.getTime() + 6 * 60_000))).filter((report) => report.jobId === stuck.id).map((report) => report.kind)).toEqual(['done']);
+  });
+
+  it('marks an ending closed when its own work is finished, so a real finish is told at once', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    await finishJob(id, 'done', minutes(5));
+    expect((await prisma.computerJob.findUniqueOrThrow({ where: { id } })).endClosedAt).toEqual(expect.any(Date));
+  });
+
   it('does not tell a wait the person already took over, and tells nothing of a job that is over for a wait it never told', async () => {
     const sara = await person('sara');
     const id = await started(sara);

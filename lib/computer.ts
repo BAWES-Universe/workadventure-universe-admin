@@ -843,6 +843,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     await closeOutIfUnheld(job.botId);
     await restIfUnheld(job.botId, now);
   }
+  // Everything this ending does is finished: only now may Brick tell the person how it went (its time is in the books, its files are listed)
+  await prisma.computerJob.updateMany({ where: { id: jobId }, data: { endClosedAt: new Date() } }).catch((error) => console.error('[Computer] Could not mark an ending closed:', error instanceof Error ? error.message : 'unknown'));
   // The turn passes to the next job in line, except while a Stop is ending everything
   if (advance && endedBy !== 'off' && endedBy !== 'deleted') await startNext(job.botId, now);
 }
