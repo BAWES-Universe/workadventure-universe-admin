@@ -31,6 +31,8 @@ export const PIECE_BYTES = 300_000;
 const PIECES_AT_ONCE = 4;
 /** The most time handing over may take after a job ends: the machine is held for it, so it is counted as the job's time. What is left is only named. */
 export const HAND_OVER_BUDGET_MS = 2 * 60_000;
+/** The longest handing over can still be running (the budget, and one last command that was already asked): after this its claim on the machine is stale, and nothing is written after it. */
+export const HAND_OVER_LATEST_MS = HAND_OVER_BUDGET_MS + 2 * 60_000;
 const NAME_MAX = 120;
 
 export const cardKey = (botId: string, fileId: string) => `computer-files/${botId}/${fileId}.ubf`;

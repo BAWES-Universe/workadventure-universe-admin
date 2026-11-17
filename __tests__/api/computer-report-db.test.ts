@@ -250,7 +250,9 @@ run('Brick tells the person how a computer job went, in a real database', () => 
     // One whose server stopped halfway is told as it stands, a few minutes later
     const stuck = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Stuck', status: 'done', startedAt: new Date(justNow.getTime() - 60_000), endedAt: justNow } });
     expect((await reportsToTell(200, justNow)).filter((report) => report.jobId === stuck.id)).toEqual([]);
-    expect((await reportsToTell(200, new Date(justNow.getTime() + 6 * 60_000))).filter((report) => report.jobId === stuck.id).map((report) => report.kind)).toEqual(['done']);
+    // Not while a hand-over of files could still be running (5 minutes plus the longest hand-over), then it goes out as it stands
+    expect((await reportsToTell(200, new Date(justNow.getTime() + 6 * 60_000))).filter((report) => report.jobId === stuck.id)).toEqual([]);
+    expect((await reportsToTell(200, new Date(justNow.getTime() + 10 * 60_000))).filter((report) => report.jobId === stuck.id).map((report) => report.kind)).toEqual(['done']);
   });
 
   it('marks an ending closed when its own work is finished, so a real finish is told at once', async () => {

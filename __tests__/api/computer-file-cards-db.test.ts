@@ -174,6 +174,36 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect(await mine([id], new Date(Date.now() + 60 * 60 * 1000))).toHaveLength(1);
   });
 
+  it('does not tell a half-closed ending while the files could still be being handed over', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    await finishJob(id, 'done', minutes(9));
+    await prisma.computerJob.update({ where: { id }, data: { endClosedAt: null, endedAt: minutes(9) } });
+    // The 5 minutes the rest of the ending takes, plus the longest hand-over (budget and the command it may still wait on), have not passed
+    expect(await mine([id], minutes(9 + 5 + 3))).toEqual([]);
+    expect(await mine([id], minutes(9 + 5 + 4 + 1))).toHaveLength(1);
+  });
+
+  it('hands over no file while another job still holds the machine: what it made cannot be told apart, so the job that closes the machine gets it', async () => {
+    const sara = await person('sara');
+    const writer = await started(sara, 'Writer');
+    const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Reader', writes: false }, minutes(1));
+    if (!reader.ok) throw new Error('no read-only job');
+    const readerJob = await prisma.computerJob.findUniqueOrThrow({ where: { id: reader.job.id } });
+    expect(readerJob.status).toBe('running');
+    // The writer makes a file while both run; the reader ends first
+    made_('invoice.pdf', 'inv', 4);
+    await finishJob(reader.job.id, 'done', minutes(6));
+    expect(await prisma.computerJobFile.count({ where: { jobId: reader.job.id } })).toBe(0);
+    expect(kept.size).toBe(0);
+    // The writer ends last and closes the machine: the file is its own
+    await finishJob(writer, 'done', minutes(8));
+    const [done] = await mine([writer]);
+    expect(done.handed.map((card) => card.name)).toEqual(['invoice.pdf']);
+    expect(await mine([reader.job.id])).toHaveLength(1);
+    expect((await mine([reader.job.id]))[0].handed).toEqual([]);
+  });
+
   it('has the cards on the job before the ending is closed', async () => {
     const sara = await person('sara');
     const id = await started(sara);

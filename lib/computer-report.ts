@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { readFilesList } from '@/lib/computer-files';
 import { silentEnding, type WaitingFor } from '@/lib/computer-values';
-import { cardsOfJobs, purgeCardsOfJob, type Card } from '@/lib/computer-file-cards';
+import { cardsOfJobs, HAND_OVER_LATEST_MS, purgeCardsOfJob, type Card } from '@/lib/computer-file-cards';
 
 /**
  * Brick tells the person how a computer job went (the report back), in their own chat with it. Orbit never speaks in a chat: the bot server asks
@@ -56,8 +56,11 @@ export interface Report {
   givenBack: boolean;
 }
 
-/** How long an ending that never finished its own work (its server stopped halfway) waits before it is told as it stands. Its own work takes well under a minute. */
-const UNFINISHED_ENDING_MS = 5 * 60 * 1000;
+/**
+ * How long an ending that never finished its own work (its server stopped halfway) waits before it is told as it stands: its own work takes well under a minute,
+ * plus the longest handing over of files can run, so the cards are never written after the message went without them.
+ */
+const UNFINISHED_ENDING_MS = 5 * 60 * 1000 + HAND_OVER_LATEST_MS;
 const WHY_MAX = 160;
 const WHERE_MAX = 120;
 const FILE_NAME_MAX = 80;

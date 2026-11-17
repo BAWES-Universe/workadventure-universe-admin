@@ -11,7 +11,7 @@ import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provi
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
-import { HAND_OVER_BUDGET_MS, handOverFiles, purgeCardsOfBot, purgeStaleCards } from '@/lib/computer-file-cards';
+import { HAND_OVER_LATEST_MS, handOverFiles, purgeCardsOfBot, purgeStaleCards } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
 import {
   AFTER_TAKE_OVER,
@@ -777,7 +777,7 @@ async function closeOutIfUnheld(botId: string): Promise<FilesList | null> {
 }
 
 /** How long a claim for handing over files is believed: the hand-over ends within its own time budget, so one older than this was left by a server that stopped. */
-const FILES_CLAIM_MS = HAND_OVER_BUDGET_MS + 2 * 60 * 1000;
+const FILES_CLAIM_MS = HAND_OVER_LATEST_MS;
 
 /** How long a cleanup claim is believed: the commands it runs end within 40 seconds, so one older than this was left by a server that stopped. */
 const CLEAN_CLAIM_STALE_MS = 90_000;
@@ -875,6 +875,9 @@ async function handOverJobFiles(job: { id: string; botId: string; startedAt: Dat
     const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
     const provider = providerFor(row);
     if (!row?.providerRef || !provider || row.machine !== 'working') return 0;
+    // Another job still on the machine (a read-only one runs alongside): files made now cannot be told apart by time, so they stay for the job that closes the machine
+    const others = await prisma.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: { in: [...HOLDS_MACHINE] } } });
+    if (others > 0) return 0;
     const limits = await getBrickLimits();
     // The machine is not put to rest while its files are read (the sweep rests a working machine nobody holds, and the job is already over)
     const claimedAt = new Date();
