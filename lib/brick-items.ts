@@ -426,7 +426,7 @@ const manualMayRun = (item: { state: string; pausedBy: string | null }): boolean
  * a routine that came with a template and is not turned on, for a check whose goal is paused, for one that is done, and while a run of
  * this item is running (`busy`). Asked with the same `key`, or again while its run still waits, it is the same run: never two.
  */
-async function requestRun(tx: Tx, row: ItemRow, ownerId: string, key: string | null, now: Date, roomSettings: RoomSettings): Promise<{ ok: true; item: ItemView; run: RunNowInfo } | Refused> {
+async function requestRun(tx: Tx, row: ItemRow, ownerId: string, key: string | null, now: Date, roomSettings: RoomSettings, limits: Awaited<ReturnType<typeof getBrickLimits>>): Promise<{ ok: true; item: ItemView; run: RunNowInfo } | Refused> {
   const view = viewOf(row);
   // The same tap again finds the run it made, whatever has happened to it or the item since
   if (key) {
@@ -450,7 +450,7 @@ async function requestRun(tx: Tx, row: ItemRow, ownerId: string, key: string | n
 
   // The usage and the runs a day a watch, briefing or goal takes, checked as a scheduled run is (a reminder is fixed text and takes none)
   if (row.kind !== 'reminder') {
-    const limits = await getBrickLimits();
+    // `limits` was read before the transaction opened: reading it here would take a second connection while this one is held
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-runs:${row.ownerId}`}))`;
     const room = bot.aiProviderRef === UNIVERSE_AI_REF ? await goalsRoom(row.ownerId, now, tx, roomSettings) : ({ ok: true } as const);
     if (!room.ok) return { ok: false, status: 409, code: 'no_room', until: room.resumesAt.toISOString(), error: 'Your usage for goals and tasks is used up for now' };
@@ -601,7 +601,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         return finish({ state: 'on', pausedBy: null, timeZone: zone, nextDueAt: plan.nextDueAt, regularDueAt: plan.regularDueAt, snoozedUntil: plan.nextDueAt, ...bump });
       }
       case 'run': {
-        return requestRun(tx, row, ownerId, input.key ?? null, now, roomSettings!);
+        return requestRun(tx, row, ownerId, input.key ?? null, now, roomSettings!, limits);
       }
       case 'change': {
         const change = input.change;

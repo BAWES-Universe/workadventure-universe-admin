@@ -14,7 +14,14 @@ jest.mock('@/lib/tool-signin', () => ({ syncToolSignInNotices: jest.fn(async () 
 import { prisma } from '@/lib/db';
 import { ensureDefaultBrick } from '@/lib/brick-default';
 import { deleteBrick } from '@/lib/brick-delete';
+import * as botLimits from '@/lib/bot-limits';
 import { saveServerLimits } from '@/lib/bot-limits';
+
+// The real limits, with the read counted
+jest.mock('@/lib/bot-limits', () => {
+  const actual = jest.requireActual('@/lib/bot-limits');
+  return { ...actual, getBrickLimits: jest.fn(actual.getBrickLimits) };
+});
 import { changeItem, checkRun, claimDueRuns, claimWork, createItem, finishRun, readItem, type NewItemInput } from '@/lib/brick-items';
 import { changeFromScreen, didByBrick } from '@/lib/brick-item-screens';
 
@@ -309,6 +316,16 @@ run('Run now and snooze, in a real database', () => {
       // Dropped runs are on record; the item itself carries on untouched
       expect((await didByBrick(kit.id, kit.brickId)).runs.map((one) => one.state)).toEqual(['dropped', 'dropped']);
       expect(await row(briefing.id)).toMatchObject({ state: 'on', nextDueAt: at(HOUR), heldSince: null });
+    });
+
+    it('reads the limits once, before its transaction opens: it never takes a second connection while the transaction holds one', async () => {
+      const zed = await person('zed');
+      const briefing = await set(zed, { kind: 'schedule', cadence: hourly });
+      const reads = botLimits.getBrickLimits as unknown as jest.Mock;
+      reads.mockClear();
+      expect(await tap(zed, briefing.id, 'run', at(MIN))).toMatchObject({ ok: true, run: { state: 'queued' } });
+      // changeItem reads them before it opens the transaction; Run now itself reads none
+      expect(reads).toHaveBeenCalledTimes(1);
     });
 
     it('a tap that was dropped never ran, so it never uses up the runs a day', async () => {
