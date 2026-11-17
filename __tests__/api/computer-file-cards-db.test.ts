@@ -18,7 +18,8 @@ import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
 import { keepReportTold, reportsToTell } from '@/lib/computer-report';
-import { PIECE_BYTES, readCard, setCardStoreForTests, type CardStore } from '@/lib/computer-file-cards';
+import { deleteResult, markFileDelivered, PIECE_BYTES, purgeStaleCards, readCard, readResult, resultsOf, setCardStoreForTests, type CardStore } from '@/lib/computer-file-cards';
+import { listBrickFiles } from '@/lib/brick-files';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -124,15 +125,17 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     await prisma.$disconnect();
   });
 
-  it('hands over what the job made, and the message carries the cards: the bytes come back whole, and are deleted once told', async () => {
+  it('hands over what the job made, and the message carries the cards: the bytes come back whole, and stay the person’s result once told', async () => {
     const sara = await person('sara');
+    // Before the job began: an old file, and a sensitive one touched a moment before the job (it must never be taken for the job's)
+    made_('old/notes.txt', 'older', -600);
+    made_('Documents/passport-scan.pdf', 'sensitive', -0.5);
     const id = await started(sara);
     const receipt = Buffer.from('%PDF-1.4 visa receipt'.repeat(40));
     const big = Buffer.alloc(PIECE_BYTES + 777, 9);
     made_('Documents/visa_receipt.pdf', receipt, 5);
     made_('Documents/photo.png', big, 6);
     made_('.hermes/state.db', 'internal', 6);
-    made_('old/notes.txt', 'older', -600);
     await finishJob(id, 'done', minutes(9));
     const [done, ...rest] = await mine([id]);
     expect(rest).toEqual([]);
@@ -153,14 +156,129 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect((await readCard(id, done.handed[0].id))?.data.equals(big)).toBe(true);
     // A file that is not this job's is not given
     expect(await readCard(randomUUID(), done.handed[0].id)).toBeNull();
-    // Told: the copies are deleted at once, the record stays, and the message is not offered again
+    // Told: the message is not offered again. The files stay the person's results (a copy in the chat is not the only copy), until the chat took each
     expect(await keepReportTold(id, 'done')).toBe(true);
-    expect(kept.size).toBe(0);
     expect(await mine([id])).toEqual([]);
-    expect(await readCard(id, done.handed[0].id)).toBeNull();
+    expect(kept.size).toBe(2);
+    expect((await readCard(id, done.handed[0].id))?.data.equals(big)).toBe(true);
     const rows = await prisma.computerJobFile.findMany({ where: { jobId: id } });
     expect(rows).toHaveLength(2);
-    expect(rows.every((row) => row.storageKey === null && row.purgedAt !== null)).toBe(true);
+    expect(rows.every((row) => row.storageKey !== null && row.purgedAt === null && row.deliveredAt === null)).toBe(true);
+    // The sensitive file touched just before the job, and the old one, were never the job's
+    expect(rows.map((row) => row.path).sort()).toEqual(['Documents/photo.png', 'Documents/visa_receipt.pdf']);
+  });
+
+  it('marks a file delivered when the chat took it, and a restart never offers it again', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    made_('a.pdf', 'a', 5);
+    made_('b.pdf', 'b', 6);
+    await finishJob(id, 'done', minutes(9));
+    const [done] = await mine([id]);
+    expect(done.handed.map((card) => card.name)).toEqual(['b.pdf', 'a.pdf']);
+    // The chat took the first one before the server stopped; the report was not confirmed
+    expect(await markFileDelivered(id, done.handed[0].id)).toBe(true);
+    expect(await markFileDelivered(id, done.handed[0].id)).toBe(true);
+    expect(await markFileDelivered(randomUUID(), done.handed[1].id)).toBe(false);
+    const [again] = await mine([id]);
+    expect(again.handed.map((card) => card.name)).toEqual(['a.pdf']);
+  });
+
+  it('keeps a person’s results in Files whether or not the chat took them, and says which', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    made_('taken.pdf', 'a', 5);
+    made_('refused.pdf', 'b', 6);
+    made_('later.pdf', 'c', 7);
+    await finishJob(id, 'done', minutes(9));
+    const [done] = await mine([id]);
+    const idOf = (name: string) => done.handed.find((card) => card.name === name)!.id;
+    // Before anything is said, all are waiting
+    expect((await resultsOf(sara.brickId, sara.id)).map((one) => one.delivery)).toEqual(['waiting', 'waiting', 'waiting']);
+    await markFileDelivered(id, idOf('taken.pdf'));
+    // The message went; one file the chat refused for good stays undelivered, and the report is told
+    await keepReportTold(id, 'done');
+    const results = await resultsOf(sara.brickId, sara.id);
+    const state = Object.fromEntries(results.map((one) => [one.name, one.delivery]));
+    expect(state).toEqual({ 'taken.pdf': 'delivered', 'refused.pdf': 'not_delivered', 'later.pdf': 'not_delivered' });
+    expect(results[0].jobTitle).toBe('Visa form');
+    // They are in the Files view, owner only, and open whole
+    const view = await listBrickFiles(sara.brickId, sara.id, { text: 2_000_000, findable: 0, guestDays: 1 });
+    expect(view.results.map((one) => one.name).sort()).toEqual(['later.pdf', 'refused.pdf', 'taken.pdf']);
+    expect((await readResult(sara.brickId, sara.id, idOf('refused.pdf')))?.data.toString()).toBe('b');
+    // Someone else's Files never has them
+    const mia = await person('mia');
+    expect((await listBrickFiles(mia.brickId, mia.id, { text: 2_000_000, findable: 0, guestDays: 1 })).results).toEqual([]);
+    expect(await readResult(sara.brickId, mia.id, idOf('refused.pdf'))).toBeNull();
+    expect(await deleteResult(sara.brickId, mia.id, idOf('refused.pdf'))).toBe(false);
+    // The owner deletes one: the copy goes
+    expect(await deleteResult(sara.brickId, sara.id, idOf('refused.pdf'))).toBe(true);
+    expect(await readResult(sara.brickId, sara.id, idOf('refused.pdf'))).toBeNull();
+    expect((await resultsOf(sara.brickId, sara.id)).map((one) => one.name).sort()).toEqual(['later.pdf', 'taken.pdf']);
+  });
+
+  it('keeps the result when the report can never be delivered, and never calls it told', async () => {
+    const sara = await person('sara', null);
+    const id = await started(sara);
+    made_('a.pdf', 'a', 5);
+    await finishJob(id, 'done', minutes(9));
+    const [done] = await mine([id]);
+    expect(done.matrixUserId).toBeNull();
+    // No chat to be told in: the bot server says so for good. It is not told, not offered again, and the file is still the person's
+    expect(await keepReportTold(id, 'done', null, { delivered: false, why: 'no_chat' })).toBe(true);
+    expect(await mine([id])).toEqual([]);
+    const job = await prisma.computerJob.findUniqueOrThrow({ where: { id } });
+    expect(job.endToldAt).toBeNull();
+    expect(job.endUndeliverableAt).not.toBeNull();
+    expect(job.endUndeliverableWhy).toBe('no_chat');
+    expect(kept.size).toBe(1);
+    expect((await resultsOf(sara.brickId, sara.id))[0]).toMatchObject({ name: 'a.pdf', delivery: 'not_delivered' });
+    // Saying it twice, or saying "told" after, changes nothing
+    expect(await keepReportTold(id, 'done', null, { delivered: false, why: 'no_chat' })).toBe(true);
+    expect(await keepReportTold(id, 'done')).toBe(true);
+    expect((await prisma.computerJob.findUniqueOrThrow({ where: { id } })).endToldAt).toBeNull();
+  });
+
+  it('keeps results past a restart of everything: they are in the bucket and the rows, not in anyone’s memory', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    made_('a.pdf', 'a', 5);
+    await finishJob(id, 'done', minutes(9));
+    await keepReportTold(id, 'done', null, { delivered: false, why: 'refused' });
+    // The sweep (the days in Limits not yet passed) deletes nothing
+    expect(await purgeStaleCards(new Date(), 7)).toBe(0);
+    expect(kept.size).toBe(1);
+    // Past the days it does
+    expect(await purgeStaleCards(new Date(Date.now() + 8 * 24 * 60 * 60 * 1000), 7)).toBe(1);
+    expect(kept.size).toBe(0);
+  });
+
+  it('attributes nothing without a list from before the job began, and nothing to a read-only job', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    made_('a.pdf', 'a', 5);
+    // The list from before could not be taken
+    await prisma.computerJob.update({ where: { id }, data: { startFiles: undefined } });
+    await prisma.$executeRaw`UPDATE computer_jobs SET start_files = NULL WHERE id = ${id}`;
+    await finishJob(id, 'done', minutes(9));
+    const [done] = await mine([id]);
+    expect(done.handed).toEqual([]);
+    expect(done.files).toEqual([]);
+    expect(kept.size).toBe(0);
+  });
+
+  it('remembers the conversation a job began in, and the report carries it', async () => {
+    const sara = await person('sara');
+    await giveComputer(sara.brickId, sara.id);
+    const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'From a chat', origin: { kind: 'dm', ref: '!room-abc:chat.example' } }, NOW);
+    if (!job.ok) throw new Error('no job');
+    await finishJob(job.job.id, 'done', minutes(5));
+    expect((await mine([job.job.id]))[0].origin).toEqual({ kind: 'dm', ref: '!room-abc:chat.example' });
+    // A job that began without one (a goal's run) has none: it goes to the person's own direct chat
+    const plain = await startJob({ botId: sara.brickId, personId: sara.id, title: 'No chat' }, minutes(6));
+    if (!plain.ok) throw new Error('no job');
+    await finishJob(plain.job.id, 'done', minutes(8));
+    expect((await mine([plain.job.id]))[0].origin).toBeNull();
   });
 
   it('keeps the message back until the ending is closed, which is after the files were handed over, and tells anyway when the server stopped in the middle', async () => {

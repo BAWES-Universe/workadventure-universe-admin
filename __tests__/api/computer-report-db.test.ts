@@ -117,40 +117,54 @@ run('Brick tells the person how a computer job went, in a real database', () => 
     expect(done.effects).toEqual([{ kind: 'details', state: 'done', where: 'visa-portal.example' }]);
   });
 
-  it('lists the files that appeared while the job ran, not old ones and not hidden ones', async () => {
+  it('lists the files the job made, not what was there before and not hidden ones', async () => {
     const sara = await person('sara');
     const id = await started(sara);
     await finishJob(id, 'done', minutes(9));
-    // The list the end of a job takes is kept on that job (the pretend machine here lists nothing, so it is written the way the end writes it)
+    // The lists the job took (the pretend machine here lists nothing, so they are written the way the job writes them): before it began, and as it ended
+    const list = (items: { path: string; bytes: number; modifiedAt: string }[]) => ({ listedAt: minutes(8).toISOString(), more: false, items });
+    const old = { path: 'old/notes.txt', bytes: 4, modifiedAt: minutes(-600).toISOString() };
+    const recent = { path: 'Documents/passport.pdf', bytes: 7, modifiedAt: minutes(-0.5).toISOString() };
     await prisma.computerJob.update({
       where: { id },
       data: {
-        endFiles: {
-          listedAt: minutes(8).toISOString(),
-          more: false,
-          items: [
-            { path: 'Documents/2026-11-17_visa_receipt.pdf', bytes: 5000, modifiedAt: minutes(7).toISOString() },
-            { path: '.hermes/state.db', bytes: 9, modifiedAt: minutes(7).toISOString() },
-            { path: 'old/notes.txt', bytes: 4, modifiedAt: minutes(-600).toISOString() },
-          ],
-        },
+        startFiles: list([old, recent]),
+        endFiles: list([
+          { path: 'Documents/2026-11-17_visa_receipt.pdf', bytes: 5000, modifiedAt: minutes(7).toISOString() },
+          { path: '.hermes/state.db', bytes: 9, modifiedAt: minutes(7).toISOString() },
+          old,
+          recent,
+        ]),
       },
     });
     const [done] = await mine([id]);
     expect(done.files).toEqual(['2026-11-17_visa_receipt.pdf']);
   });
 
-  it('never reads a later job’s files as this job’s: the computer’s latest list is not what a report uses', async () => {
+  it('names no file for a read-only job, which makes none', async () => {
     const sara = await person('sara');
-    const id = await started(sara);
-    await finishJob(id, 'done', minutes(9));
-    // A later job on the same computer wrote its own list before this report was polled
-    await prisma.brickComputer.updateMany({
-      where: { botId: sara.brickId },
-      data: { filesList: { listedAt: minutes(20).toISOString(), more: false, items: [{ path: 'later-job.txt', bytes: 4, modifiedAt: minutes(19).toISOString() }] } },
+    await giveComputer(sara.brickId, sara.id);
+    const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Look it up', writes: false }, NOW);
+    if (!job.ok) throw new Error('no job');
+    await finishJob(job.job.id, 'done', minutes(9));
+    await prisma.computerJob.update({
+      where: { id: job.job.id },
+      data: { startFiles: { listedAt: NOW.toISOString(), more: false, items: [] }, endFiles: { listedAt: minutes(8).toISOString(), more: false, items: [{ path: 'made-by-another-job.pdf', bytes: 9, modifiedAt: minutes(5).toISOString() }] } },
     });
-    const [done] = await mine([id]);
+    const [done] = await mine([job.job.id]);
     expect(done.files).toEqual([]);
+  });
+
+  it('is not told when it was only found undeliverable, survives a restart as such, and stays out of the list', async () => {
+    const sara = await person('sara', null);
+    const id = await started(sara);
+    await finishJob(id, 'done', minutes(5));
+    const [done] = await mine([id]);
+    expect(done.matrixUserId).toBeNull();
+    await keepReportTold(id, 'done', null, { delivered: false, why: 'not_allowed' });
+    expect(await mine([id])).toEqual([]);
+    const job = await prisma.computerJob.findUniqueOrThrow({ where: { id } });
+    expect(job).toMatchObject({ endToldAt: null, endUndeliverableWhy: 'not_allowed' });
   });
 
   it('tells nothing when the person pressed Stop, and nothing when the computer was turned off', async () => {

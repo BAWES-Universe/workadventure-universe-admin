@@ -1,5 +1,6 @@
 import { prisma } from '@/lib/db';
 import { hasGone, type FileLimits } from '@/lib/bot-files';
+import { resultsOf, type ResultDelivery } from '@/lib/computer-file-cards';
 
 /**
  * A Brick's files in one place (game #2003): what it made for its person, what they sent it, and, later, what is on its
@@ -39,12 +40,26 @@ export interface BrickComputerFiles {
   savedAt: string | null;
 }
 
+/** A file the Brick's computer made for its owner: theirs in Files whether or not the chat took it (`delivery`). */
+export interface BrickComputerResult {
+  id: string;
+  name: string;
+  sizeBytes: number;
+  /** The job it came from, as the bar showed it. */
+  job: string;
+  /** When it was made, ISO. */
+  at: string;
+  delivery: ResultDelivery;
+}
+
 export interface BrickFiles {
   /** The files it made for them, the latest few; `total` counts every file it made and every artifact it made. */
   made: { files: BrickFile[]; total: number; artifacts: number };
   /** What they sent it, all of it. */
   sent: { files: BrickFile[]; total: number };
   computer: BrickComputerFiles | null;
+  /** What its computer made for them (its results), newest first. */
+  results: BrickComputerResult[];
   /** Files and bytes in all (made, sent and on the computer), for the line under "Files". */
   count: number;
   bytes: number;
@@ -94,9 +109,10 @@ const sumBytes = (files: BrickFile[]) => files.reduce((total, file) => total + (
  * not listed. The caller has checked the Brick is theirs.
  */
 export async function listBrickFiles(botId: string, userId: string, limits: FileLimits, now: Date = new Date()): Promise<BrickFiles> {
-  const [rows, artifacts] = await Promise.all([
+  const [rows, artifacts, results] = await Promise.all([
     prisma.botFile.findMany({ where: { botId, ownerId: userId }, select: { ...SELECT, source: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] }),
     prisma.artifact.count({ where: { makerBotId: botId, ownerId: userId, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] } }),
+    resultsOf(botId, userId),
   ]);
   const live = rows.filter((row) => !hasGone(row, limits, now));
   const made = live.filter((row) => row.source === 'bot').flatMap((row) => viewOf(row) ?? []);
@@ -106,8 +122,9 @@ export async function listBrickFiles(botId: string, userId: string, limits: File
     sent: { files: sent.slice(0, SENT_LISTED), total: sent.length },
     // Nothing on a computer until a Brick has one (game #2000)
     computer: null,
-    count: made.length + sent.length,
-    bytes: sumBytes(made) + sumBytes(sent),
+    results: results.map((result) => ({ id: result.id, name: result.name, sizeBytes: result.bytes, job: result.jobTitle, at: result.at.toISOString(), delivery: result.delivery })),
+    count: made.length + sent.length + results.length,
+    bytes: sumBytes(made) + sumBytes(sent) + results.reduce((sum, result) => sum + result.bytes, 0),
   };
 }
 

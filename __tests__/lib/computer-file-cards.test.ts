@@ -7,7 +7,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, s
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { cardKey, cardName, mimeOf, openCard, pickFiles, PIECE_BYTES, pieceCommand, probeCommand, readFile, sealCard, shellQuote } from '@/lib/computer-file-cards';
+import { cardKey, cardName, mimeOf, openCard, pickFiles, madeInJob, PIECE_BYTES, pieceCommand, probeCommand, readFile, sealCard, shellQuote } from '@/lib/computer-file-cards';
 import type { FileEntry, FilesList } from '@/lib/computer-files';
 
 const run = promisify(execFile);
@@ -63,40 +63,54 @@ describe('the name and type of a card', () => {
 const T = (minutes: number) => new Date(Date.UTC(2026, 10, 17, 12, 0) + minutes * 60_000).toISOString();
 const entry = (path: string, minutes: number, bytes = 1000): FileEntry => ({ path, bytes, modifiedAt: T(minutes) });
 const listOf = (...items: FileEntry[]): FilesList => ({ items, more: false, listedAt: T(30) });
-const JOB = { startedAt: new Date(T(0)), endedAt: new Date(T(10)) };
+// What was on the machine before the job began: what the job made is what the end list has that this does not
+const BEFORE = listOf(entry('old.pdf', -30), entry('Documents/taxes-2025.pdf', -600), entry('.hermes/state.db', -2));
 const LIMITS = { count: 5, bytes: 10_000 };
 const none = () => false;
 
 describe('which files a job hands over', () => {
-  it('takes the ones made in the job’s time, newest first, as many as Limits say', () => {
-    const list = listOf(entry('c.pdf', 9), entry('b.pdf', 5), entry('a.pdf', 2));
-    expect(pickFiles(list, JOB, LIMITS, none).map((pick) => pick.name)).toEqual(['c.pdf', 'b.pdf', 'a.pdf']);
-    expect(pickFiles(list, JOB, { count: 2, bytes: 10_000 }, none).map((pick) => pick.name)).toEqual(['c.pdf', 'b.pdf']);
-    expect(pickFiles(list, JOB, { count: 0, bytes: 10_000 }, none)).toEqual([]);
+  it('takes the ones that are new since the job began, newest first, as many as Limits say', () => {
+    const list = listOf(entry('c.pdf', 9), entry('b.pdf', 5), entry('a.pdf', 2), ...BEFORE.items);
+    expect(pickFiles(list, BEFORE, LIMITS, none).map((pick) => pick.name)).toEqual(['c.pdf', 'b.pdf', 'a.pdf']);
+    expect(pickFiles(list, BEFORE, { count: 2, bytes: 10_000 }, none).map((pick) => pick.name)).toEqual(['c.pdf', 'b.pdf']);
+    expect(pickFiles(list, BEFORE, { count: 0, bytes: 10_000 }, none)).toEqual([]);
   });
-  it('leaves out old files, files made after the job, hidden folders, empty files and files over the size', () => {
+  it('never takes a file that was there before the job, however recently it was touched; one the job changed is taken', () => {
+    // "taxes.pdf" was touched a minute before the job (a time window would have taken it); "notes.txt" was changed by the job (new size and time)
+    const before = listOf(entry('taxes.pdf', -1), entry('notes.txt', -300, 40));
+    const end = listOf(entry('notes.txt', 6, 55), entry('taxes.pdf', -1), entry('made.pdf', 5));
+    expect(pickFiles(end, before, LIMITS, none).map((pick) => pick.name)).toEqual(['notes.txt', 'made.pdf']);
+  });
+  it('leaves out hidden folders, empty files and files over the size', () => {
     const list = listOf(
-      entry('late.pdf', 40),
       entry('.hermes/state.db', 5),
       entry('docs/.cache/x.pdf', 5),
       entry('empty.txt', 5, 0),
       entry('big.zip', 5, 10_001),
-      entry('old.pdf', -30),
-      entry('fine.pdf', 5, 10_000)
+      entry('fine.pdf', 5, 10_000),
+      ...BEFORE.items
     );
-    expect(pickFiles(list, JOB, LIMITS, none).map((pick) => pick.name)).toEqual(['fine.pdf']);
-  });
-  it('gives a minute either side for the machine’s clock', () => {
-    const list = listOf(entry('before.pdf', -0.5), entry('after.pdf', 10.5), entry('toofar.pdf', 11.5));
-    expect(pickFiles(list, JOB, LIMITS, none).map((pick) => pick.name).sort()).toEqual(['after.pdf', 'before.pdf']);
+    expect(pickFiles(list, BEFORE, LIMITS, none).map((pick) => pick.name)).toEqual(['fine.pdf']);
   });
   it('leaves out what an earlier job handed over', () => {
     const list = listOf(entry('a.pdf', 5), entry('b.pdf', 6));
-    expect(pickFiles(list, JOB, LIMITS, (one) => one.path === 'a.pdf').map((pick) => pick.name)).toEqual(['b.pdf']);
+    expect(pickFiles(list, BEFORE, LIMITS, (one) => one.path === 'a.pdf').map((pick) => pick.name)).toEqual(['b.pdf']);
   });
-  it('hands over nothing for a job that did not start or a list that is not there', () => {
-    expect(pickFiles(null, JOB, LIMITS, none)).toEqual([]);
-    expect(pickFiles(listOf(entry('a.pdf', 5)), { startedAt: null, endedAt: null }, LIMITS, none)).toEqual([]);
+  it('hands over nothing when there is no list from before the job or no list at its end: nothing can be proved', () => {
+    expect(pickFiles(null, BEFORE, LIMITS, none)).toEqual([]);
+    expect(pickFiles(listOf(entry('a.pdf', 5)), null, LIMITS, none)).toEqual([]);
+  });
+});
+
+describe('what a job made', () => {
+  it('is what the end list has that the list from before did not (path, size and time)', () => {
+    const end = listOf(entry('a.pdf', 5), entry('old.pdf', -30), entry('same-name-new-time.pdf', 8));
+    const before = listOf(entry('old.pdf', -30), entry('same-name-new-time.pdf', -20));
+    expect(madeInJob(end, before).map((one) => one.path)).toEqual(['a.pdf', 'same-name-new-time.pdf']);
+  });
+  it('is nothing without both lists', () => {
+    expect(madeInJob(null, listOf())).toEqual([]);
+    expect(madeInJob(listOf(entry('a.pdf', 1)), null)).toEqual([]);
   });
 });
 

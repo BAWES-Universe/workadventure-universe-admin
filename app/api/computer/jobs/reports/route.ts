@@ -3,6 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { keepReportTold, reportsToTell } from '@/lib/computer-report';
+import { UNDELIVERABLE_WHY } from '@/lib/computer-values';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -11,6 +12,9 @@ const toldSchema = z.object({
   jobId: z.string().min(1).max(64),
   kind: z.enum(['done', 'failed', 'needs', 'unanswered', 'month', 'rule']),
   seq: z.number().int().min(0).nullable().optional(),
+  // Whether it reached the person (the default, as it always was) or can never be delivered (and why): only the first is "told"
+  outcome: z.enum(['delivered', 'undeliverable']).optional(),
+  why: z.enum(UNDELIVERABLE_WHY).optional(),
 });
 
 function guard(request: NextRequest): NextResponse | null {
@@ -39,14 +43,20 @@ export async function GET(request: NextRequest) {
   }
 }
 
-/** POST /api/computer/jobs/reports { jobId, kind, seq? } - that report was said (or can never be said): it is not offered again. Safe to say twice. */
+/**
+ * POST /api/computer/jobs/reports { jobId, kind, seq?, outcome?, why? } - what became of a report. `delivered` (the default): it reached the person, so it is told.
+ * `undeliverable` with a reason: it can never reach them (no chat, not allowed, the conversation it began in is gone, the chat refused it): it is not offered again
+ * and is NOT recorded as told; the result stays with the person in Files. A report not confirmed is still to be tried. Safe to say twice.
+ */
 export async function POST(request: NextRequest) {
   const denied = guard(request);
   if (denied) return denied;
   try {
     const parsed = toldSchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
-    const kept = await keepReportTold(parsed.data.jobId, parsed.data.kind, parsed.data.seq);
+    if (parsed.data.outcome === 'undeliverable' && !parsed.data.why) return NextResponse.json({ error: 'Invalid input data' }, { status: 400 });
+    const outcome = parsed.data.outcome === 'undeliverable' && parsed.data.why ? ({ delivered: false, why: parsed.data.why } as const) : ({ delivered: true } as const);
+    const kept = await keepReportTold(parsed.data.jobId, parsed.data.kind, parsed.data.seq, outcome);
     return kept ? NextResponse.json({ ok: true }) : NextResponse.json({ error: 'Job not found' }, { status: 404 });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'computer' } });

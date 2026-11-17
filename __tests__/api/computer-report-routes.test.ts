@@ -58,9 +58,21 @@ describe('POST /api/computer/jobs/reports', () => {
   it('keeps an ending, and a wait with its number', async () => {
     lib.keepReportTold.mockResolvedValue(true);
     expect((await POST(call({ body: { jobId: 'j', kind: 'done' } }))).status).toBe(200);
-    expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'done', undefined);
+    expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'done', undefined, { delivered: true });
     expect((await POST(call({ body: { jobId: 'j', kind: 'needs', seq: 2 } }))).status).toBe(200);
-    expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'needs', 2);
+    expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'needs', 2, { delivered: true });
+  });
+
+  it('keeps an ending that can never be delivered as that, with why, never as told', async () => {
+    lib.keepReportTold.mockResolvedValue(true);
+    expect((await POST(call({ body: { jobId: 'j', kind: 'done', outcome: 'undeliverable', why: 'no_chat' } }))).status).toBe(200);
+    expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'done', undefined, { delivered: false, why: 'no_chat' });
+    // Undeliverable without a reason, or with one that is not a reason, is refused
+    expect((await POST(call({ body: { jobId: 'j', kind: 'done', outcome: 'undeliverable' } }))).status).toBe(400);
+    expect((await POST(call({ body: { jobId: 'j', kind: 'done', outcome: 'undeliverable', why: 'because' } }))).status).toBe(400);
+    // Delivered says nothing more than that
+    expect((await POST(call({ body: { jobId: 'j', kind: 'done', outcome: 'delivered' } }))).status).toBe(200);
+    expect(lib.keepReportTold).toHaveBeenLastCalledWith('j', 'done', undefined, { delivered: true });
   });
 
   it('refuses what it does not understand, and says not found for a job that is not there', async () => {

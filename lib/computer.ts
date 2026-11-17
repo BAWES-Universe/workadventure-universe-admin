@@ -324,7 +324,13 @@ const queueReasonOf = (no: NoRoom): QueuedFor | null => (no.reason === 'allowanc
  * is writing it waits its turn, if the person's allowance or our room is used up it waits with its work saved (and the first
  * leads to "Ask for more"), and otherwise it runs and the machine is made or woken, here and nowhere else.
  */
-export async function startJob(input: { botId: string; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null }, now: Date = new Date()): Promise<Started> {
+/** The conversation a job began in: only a direct chat, by its id. A job always goes back to where it began; one with no conversation (a goal's run) goes to the person's own direct chat. */
+export interface JobOrigin {
+  kind: 'dm';
+  ref: string;
+}
+
+export async function startJob(input: { botId: string; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null; origin?: JobOrigin | null }, now: Date = new Date()): Promise<Started> {
   const bot = await brickOf(input.botId, input.personId);
   if (!bot) return { ok: false, reason: 'not_owner' };
   const row = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
@@ -342,7 +348,7 @@ export async function startJob(input: { botId: string; personId: string; title: 
   let created;
   try {
     created = await prisma.computerJob.create({
-      data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null },
+      data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null, originKind: input.origin?.kind ?? null, originRef: input.origin?.ref.slice(0, 255) ?? null },
     });
   } catch (error) {
     // Two asks for the same run at once: the first made the job, the second finds it
@@ -563,7 +569,25 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     await restIfUnheld(job.botId, now);
     return 'gone';
   }
+  // What is on the machine before this job works on it: what the job makes is what is new after this (never a guess from when a file was touched)
+  if (job.writes) await takeBaseline(job.id, job.botId, provider);
   return 'running';
+}
+
+/**
+ * The list of files on the machine as the job begins, kept on the job. Best effort: a list that could not be taken is left empty, and then nothing is
+ * attributed to the job (nothing can be proved), never a wrong file handed over. It never holds up the start for long (one quick command).
+ */
+async function takeBaseline(jobId: string, botId: string, provider: Provider): Promise<void> {
+  try {
+    const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { providerRef: true } });
+    if (!row?.providerRef) return;
+    const listed = await provider.exec(row.providerRef, 'universe-files', { timeoutMs: 20_000 });
+    if (listed.exitCode !== 0 || listed.truncated) return;
+    await prisma.computerJob.updateMany({ where: { id: jobId }, data: { startFiles: parseFilesList(listed.stdout, new Date()) as unknown as Prisma.InputJsonValue } });
+  } catch (error) {
+    console.error('[Computer] Could not list the files a job began with:', error instanceof Error ? error.message : 'unknown');
+  }
 }
 
 /**
@@ -870,12 +894,14 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
  * the job's ending is closed, and a "done" message is told only after that, so the cards are never missed. Returns the whole seconds it took, already added to
  * the job's time (the machine was held for them). Never throws: a machine that cannot be read only means no cards.
  */
-async function handOverJobFiles(job: { id: string; botId: string; startedAt: Date | null }, now: Date): Promise<number> {
+async function handOverJobFiles(job: { id: string; botId: string; writes: boolean; startFiles: unknown }, now: Date): Promise<number> {
   try {
+    // Only a job that writes makes files (a read-only one may run beside it and must never be given what the other made), and only one with a list from before it began can be shown to have made any
+    if (!job.writes || !readFilesList(job.startFiles)) return 0;
     const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
     const provider = providerFor(row);
     if (!row?.providerRef || !provider || row.machine !== 'working') return 0;
-    // Another job still on the machine (a read-only one runs alongside): files made now cannot be told apart by time, so they stay for the job that closes the machine
+    // Another job still on the machine (a read-only one runs alongside): files made now cannot be told apart, so they stay for the job that closes the machine
     const others = await prisma.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: { in: [...HOLDS_MACHINE] } } });
     if (others > 0) return 0;
     const limits = await getBrickLimits();
@@ -894,12 +920,11 @@ async function handOverJobFiles(job: { id: string; botId: string; startedAt: Dat
   }
 }
 
-async function handOver(job: { id: string; botId: string; startedAt: Date | null }, now: Date, ref: string, provider: Provider, limits: Awaited<ReturnType<typeof getBrickLimits>>): Promise<number> {
+async function handOver(job: { id: string; botId: string; startFiles: unknown }, now: Date, ref: string, provider: Provider, limits: Awaited<ReturnType<typeof getBrickLimits>>): Promise<number> {
   const result = await handOverFiles({
     jobId: job.id,
     botId: job.botId,
-    startedAt: job.startedAt,
-    endedAt: now,
+    start: readFilesList(job.startFiles),
     ref,
     provider,
     limits: { count: limits.computerFiles, bytes: limits.computerFileMb * 1024 * 1024 },

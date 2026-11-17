@@ -46,16 +46,21 @@ describe('kindOfEnding', () => {
 describe('filesMadeBy', () => {
   const at = new Date('2026-11-17T12:00:00Z');
   const list = (items: { path: string; modifiedAt: string }[]) => ({ items: items.map((item) => ({ ...item, bytes: 10 })), more: false, listedAt: at.toISOString() });
+  // On the machine before the job began
+  const before = list([
+    { path: 'old.txt', modifiedAt: '2026-11-17T08:00:00Z' },
+    { path: 'Documents/taxes.pdf', modifiedAt: '2026-11-17T11:59:00Z' },
+  ]);
 
-  it('keeps files that appeared while the job ran, by name, and drops older and hidden ones', () => {
-    const made = list([
+  it('names what is new since the job began, and drops what was there before, however recently it was touched, and hidden ones', () => {
+    const end = list([
       { path: 'Documents/visa-receipt.pdf', modifiedAt: '2026-11-17T12:09:00Z' },
       { path: 'notes.txt', modifiedAt: '2026-11-17T12:03:00Z' },
       { path: '.hermes/state.db', modifiedAt: '2026-11-17T12:09:00Z' },
       { path: 'Documents/.cache/x', modifiedAt: '2026-11-17T12:09:00Z' },
-      { path: 'old.txt', modifiedAt: '2026-11-17T08:00:00Z' },
+      ...before.items,
     ]);
-    expect(filesMadeBy(made, at)).toEqual(['visa-receipt.pdf', 'notes.txt']);
+    expect(filesMadeBy(end, before)).toEqual(['visa-receipt.pdf', 'notes.txt']);
   });
 
   it('names a file as the computer did: underscores, long hash names and dates stay, markers and control characters go', () => {
@@ -67,20 +72,20 @@ describe('filesMadeBy', () => {
   });
 
   it('keeps underscores in the names it lists', () => {
-    expect(filesMadeBy(list([{ path: 'Documents/visa_receipt_final.pdf', modifiedAt: '2026-11-17T12:09:00Z' }]), at)).toEqual(['visa_receipt_final.pdf']);
+    expect(filesMadeBy(list([{ path: 'Documents/visa_receipt_final.pdf', modifiedAt: '2026-11-17T12:09:00Z' }]), before)).toEqual(['visa_receipt_final.pdf']);
   });
 
   it('does not name a file that was handed over as a card', () => {
-    const made = list([
+    const end = list([
       { path: 'Documents/visa-receipt.pdf', modifiedAt: '2026-11-17T12:09:00Z' },
       { path: 'notes.txt', modifiedAt: '2026-11-17T12:03:00Z' },
     ]);
-    expect(filesMadeBy(made, at, new Set(['Documents/visa-receipt.pdf']))).toEqual(['notes.txt']);
+    expect(filesMadeBy(end, before, new Set(['Documents/visa-receipt.pdf']))).toEqual(['notes.txt']);
   });
 
-  it('gives nothing when there is no list or the job never started', () => {
-    expect(filesMadeBy(null, at)).toEqual([]);
+  it('gives nothing when either list is missing: nothing can be proved', () => {
+    expect(filesMadeBy(null, before)).toEqual([]);
     expect(filesMadeBy(list([{ path: 'a.txt', modifiedAt: '2026-11-17T12:09:00Z' }]), null)).toEqual([]);
-    expect(filesMadeBy('junk', at)).toEqual([]);
+    expect(filesMadeBy('junk', before)).toEqual([]);
   });
 });

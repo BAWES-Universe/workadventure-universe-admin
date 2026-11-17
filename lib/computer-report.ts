@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { readFilesList } from '@/lib/computer-files';
-import { silentEnding, type WaitingFor } from '@/lib/computer-values';
-import { cardsOfJobs, HAND_OVER_LATEST_MS, purgeCardsOfJob, type Card } from '@/lib/computer-file-cards';
+import { silentEnding, type UndeliverableWhy, type WaitingFor } from '@/lib/computer-values';
+import { cardsOfJobs, HAND_OVER_LATEST_MS, madeInJob, type Card } from '@/lib/computer-file-cards';
 
 /**
  * Brick tells the person how a computer job went (the report back), in their own chat with it. Orbit never speaks in a chat: the bot server asks
@@ -33,6 +33,8 @@ export interface Report {
   botId: string;
   /** The person's chat id on the Matrix server; null when they have no chat to be told in. */
   matrixUserId: string | null;
+  /** The conversation the job began in (a direct chat, by its id); the result goes back there and nowhere else. Null for a job that began without one: it goes to the person's own direct chat. */
+  origin: { kind: 'dm'; ref: string } | null;
   kind: ReportKind;
   title: string;
   writes: boolean;
@@ -160,14 +162,13 @@ function effectsOf(job: JobWithEffects): ReportEffect[] {
   return out;
 }
 
-/** Files that appeared while the job ran, from the list taken when THIS job ended (kept on the job, never the computer's latest list): no hidden folder and no file older than the job. */
-export function filesMadeBy(list: unknown, startedAt: Date | null, skip: ReadonlySet<string> = new Set()): string[] {
-  const files = readFilesList(list);
-  if (!files || !startedAt) return [];
-  const since = startedAt.getTime() - 60_000;
+/**
+ * Files the job made, named, from the list taken when THIS job ended and the one taken before it began (both kept on the job, never the computer's latest
+ * list): what is new in the end list, no hidden folder. Nothing when the job writes nothing or has no list from before it began (nothing can be proved).
+ */
+export function filesMadeBy(end: unknown, start: unknown, skip: ReadonlySet<string> = new Set()): string[] {
   const names: string[] = [];
-  for (const entry of files.items) {
-    if (new Date(entry.modifiedAt).getTime() < since) continue;
+  for (const entry of madeInJob(readFilesList(end), readFilesList(start))) {
     // A file handed over as a card is not named again
     if (skip.has(entry.path)) continue;
     const parts = entry.path.split('/');
@@ -190,6 +191,8 @@ async function givenBackIn(jobId: string, seconds: number): Promise<boolean> {
   return event.personId === null && detail.givenBack === true;
 }
 
+const originOf = (job: { originKind: string | null; originRef: string | null }): Report['origin'] => (job.originKind === 'dm' && job.originRef ? { kind: 'dm', ref: job.originRef } : null);
+
 // In the order they were planned, so what is said reads in the order it happened
 const EFFECTS = { select: { effectKey: true, kind: true, state: true, evidence: true }, orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }] };
 
@@ -205,6 +208,7 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
     where: {
       status: { in: ['done', 'stopped', 'failed'] },
       endToldAt: null,
+      endUndeliverableAt: null,
       startedAt: { not: null },
       bot: { deletedAt: null },
       AND: [{ OR: [{ endedBy: null }, { endedBy: { notIn: ['person', 'off', 'deleted'] } }] }, { OR: [{ endClosedAt: { not: null } }, { endedAt: { lte: unfinishedBefore } }] }],
@@ -240,6 +244,7 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
       jobId: job.id,
       botId: job.botId,
       matrixUserId: chatOf.get(job.personId) ?? null,
+      origin: originOf(job),
       kind,
       title: job.title,
       writes: job.writes,
@@ -250,7 +255,7 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
       waitedFor: kind === 'unanswered' ? (job.endWaitingFor as WaitingFor | null) : null,
       why: kind === 'failed' || kind === 'rule' ? job.endNote : null,
       effects: effectsOf(job),
-      files: kind === 'done' ? filesMadeBy(job.endFiles, job.startedAt, new Set(handedPaths.get(job.id) ?? [])) : [],
+      files: kind === 'done' && job.writes ? filesMadeBy(job.endFiles, job.startFiles, new Set(handedPaths.get(job.id) ?? [])) : [],
       handed: kind === 'done' ? (cardsOf.get(job.id) ?? []).map((card) => ({ id: card.id, name: card.name, bytes: card.bytes, mime: card.mime })) : [],
       givenBack: kind === 'failed' ? await givenBackIn(job.id, job.secondsRun) : false,
     });
@@ -261,6 +266,7 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
       jobId: job.id,
       botId: job.botId,
       matrixUserId: chatOf.get(job.personId) ?? null,
+      origin: originOf(job),
       kind: 'needs',
       title: job.title,
       writes: job.writes,
@@ -279,24 +285,27 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
   return reports;
 }
 
+export type ReportOutcome = { delivered: true } | { delivered: false; why: UndeliverableWhy };
+
 /**
- * The bot server says this was told. An ending is marked once; a wait is marked only for the wait it said (`seq`), so a later wait that began in
- * between is still to be told. Safe to say twice. False when there is no such job.
+ * The bot server says what became of a report. Only a DELIVERED report is "told" (ending: `ended_told_at`; wait: its own wait only, by `seq`, so a later
+ * wait that began in between is still to be told). One that can never be delivered is marked so and never offered again, and is never called told. A
+ * report that has not been confirmed either way is still to be tried. The files a job made stay the person's in Files whichever it was. Safe to say
+ * twice. False when there is no such job.
  */
-export async function keepReportTold(jobId: string, kind: ReportKind, seq?: number | null, now: Date = new Date()): Promise<boolean> {
+export async function keepReportTold(jobId: string, kind: ReportKind, seq?: number | null, outcome: ReportOutcome = { delivered: true }, now: Date = new Date()): Promise<boolean> {
   if (kind === 'needs') {
     if (typeof seq !== 'number') return false;
     const found = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true } });
     if (!found) return false;
+    // A wait that can never be said is not offered again either (the person still sees it in the bar and in Files), and it is not recorded as said
     await prisma.computerJob.updateMany({ where: { id: jobId, handoverSeq: seq }, data: { handoverUntold: false } });
     return true;
   }
   const found = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true } });
   if (!found) return false;
-  await prisma.computerJob.updateMany({ where: { id: jobId, endToldAt: null, status: { in: ['done', 'stopped', 'failed'] } }, data: { endToldAt: now } });
-  // The files reached the chat (or never can): the copies kept in Universe go now. One that cannot be deleted is deleted by the sweep once Limits' days are up
-  if (kind === 'done') {
-    await purgeCardsOfJob(jobId).catch((error) => console.error('[Computer] Could not delete the files that reached the chat:', error instanceof Error ? error.message : 'unknown'));
-  }
+  const over = { status: { in: ['done', 'stopped', 'failed'] } };
+  if (outcome.delivered) await prisma.computerJob.updateMany({ where: { id: jobId, endToldAt: null, endUndeliverableAt: null, ...over }, data: { endToldAt: now } });
+  else await prisma.computerJob.updateMany({ where: { id: jobId, endToldAt: null, endUndeliverableAt: null, ...over }, data: { endUndeliverableAt: now, endUndeliverableWhy: outcome.why } });
   return true;
 }

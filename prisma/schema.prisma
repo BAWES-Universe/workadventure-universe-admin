@@ -3284,6 +3284,17 @@ model ComputerJob {
   endClosedAt    DateTime? @map("end_closed_at")
   /// The files list taken as this job ended (what its report says it saved); null when none was taken.
   endFiles       Json?     @map("end_files")
+  /// The files list taken when this job began on the machine: what was there before it. What the job made is what the end list has that this one
+  /// does not (same path, size and time); null when it could not be taken, and then nothing is attributed to the job.
+  startFiles     Json?     @map("start_files")
+  /// The conversation the job began in (only a direct chat: `dm`, and the chat's id). The result goes back to THAT conversation; null for a job that
+  /// began without one (a goal's run), which goes to the person's own direct chat.
+  originKind     String?   @map("origin_kind") @db.VarChar(10)
+  originRef      String?   @map("origin_ref") @db.VarChar(255)
+  /// The report could not be delivered for good (no chat, not allowed, the original conversation gone, or the chat refused it): it is not "told". The
+  /// result stays with the person in Files; it is never offered again.
+  endUndeliverableAt  DateTime? @map("end_undeliverable_at")
+  endUndeliverableWhy String?   @map("end_undeliverable_why") @db.VarChar(20)
   handoverSeq    Int       @default(0) @map("handover_seq")
   handoverUntold Boolean   @default(false) @map("handover_untold")
   // What the computer said in one plain sentence when it could not go on, cleaned (no links, no markup), and what the job was waiting for
@@ -3319,6 +3330,8 @@ model ComputerJobFile {
   storageKey String?   @map("storage_key") @db.VarChar(255)
   createdAt  DateTime  @default(now()) @map("created_at")
   purgedAt   DateTime? @map("purged_at")
+  // When the chat took this file; null while it has not (it is still the person's, in Files)
+  deliveredAt DateTime? @map("delivered_at")
 
   job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
 

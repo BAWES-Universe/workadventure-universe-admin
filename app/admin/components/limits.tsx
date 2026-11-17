@@ -1060,7 +1060,7 @@ export function brickLimits(values: BrickLimits): Limit[] {
     {
       id: 'computerFileMb',
       label: 'Largest file a computer job hands over',
-      hint: 'A file bigger than this is not copied into the chat. Brick names it in the message and it stays on the computer. Every file handed over is kept in Universe until it reaches the chat, so this also limits storage. The chat takes up to 50 MB.',
+      hint: 'A file bigger than this is not copied into the chat. Brick names it in the message and it stays on the computer. Every file handed over is kept in Universe in Files, so this also limits storage. The chat takes up to 50 MB.',
       unit: 'megabytes',
       value: values.computerFileMb,
       recommended: recommended.computerFileMb,
@@ -1072,15 +1072,15 @@ export function brickLimits(values: BrickLimits): Limit[] {
     },
     {
       id: 'computerFileDays',
-      label: 'How long a file waits if it could not reach the chat',
-      hint: 'A file that reached the chat is deleted from Universe at once. One that could not be put there is tried again, and deleted after this many days.',
+      label: 'How long a file a computer made stays in Files',
+      hint: 'Every file a finished computer job hands over is kept encrypted in Universe as its owner\'s own result, in Files, whether or not the chat took it, and deleted after this many days (or when its owner deletes it, or the Brick is deleted). This also limits storage.',
       unit: 'days',
       value: values.computerFileDays,
       recommended: recommended.computerFileDays,
       options: [
-        { value: 1, label: '1 day', meaning: 'Frees the space sooner.' },
-        { value: 3, label: '3 days', meaning: 'Time for the chat to come back.' },
-        { value: 7, label: '7 days', meaning: 'For a long outage.' },
+        { value: 3, label: '3 days', meaning: 'Frees the space sooner.' },
+        { value: 7, label: '7 days', meaning: 'Time to come back for it.' },
+        { value: 30, label: '30 days', meaning: 'The longest; uses the most storage.' },
       ],
     },
   ], LIMIT_RANGES.bricks);
