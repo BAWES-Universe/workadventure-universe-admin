@@ -473,7 +473,7 @@ run('ready-made apps through the adapter, in a real database', () => {
 
     it('counts a tool run through the link like a use, once for each call id, and needs a call id', async () => {
       const { adapter, serverId } = await connectedAndGranted();
-      const message = { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'COMPOSIO_REMOTE_WORKBENCH', arguments: { code: 'secret code' } } };
+      const message = { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'GMAIL_FETCH_EMAILS', arguments: { query: 'secret code' } } };
       expect((await link(serverId, { message })).status).toBe(400);
       expect(adapter.callLink).not.toHaveBeenCalled();
       const callId = `call-${randomUUID()}`;
@@ -483,8 +483,8 @@ run('ready-made apps through the adapter, in a real database', () => {
       expect(adapter.callLink).toHaveBeenCalledTimes(1);
       const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
       expect(events).toHaveLength(1);
-      expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, basis: 'estimated', payerKind: 'universe', quantity: BigInt(1), costMicros: BigInt(100) });
-      expect(events[0].detail).toMatchObject({ kind: 'sandbox', sandboxRuns: 1, executions: 0 });
+      expect(events[0]).toMatchObject({ eventId: `app:${saraBrick}:${callId}`, basis: 'estimated', payerKind: 'universe', quantity: BigInt(1), costMicros: BigInt(300) });
+      expect(events[0].detail).toMatchObject({ kind: 'execution', sandboxRuns: 0, executions: 1 });
       // What was asked is not written down: only which app and which tool
       expect(JSON.stringify(events[0].detail)).not.toContain('secret code');
     });

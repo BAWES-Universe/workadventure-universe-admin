@@ -1186,6 +1186,54 @@ export function instantLimits(views: InstantLimitViews): Limit[] {
   });
 }
 
+
+/**
+ * The code job limits for Apps (the bounded Workbench): read from /api/admin/workbench, which says each limit's words, range and value.
+ * Sizes are held in bytes and shown in MB (the code itself in KB), money in millionths of a dollar and shown in dollars. Nothing is built in here.
+ */
+export type CodeJobLimitView = {
+  value: number | null;
+  range: { min: number; max: number };
+  recommended: number | null;
+  label: string;
+  help: string;
+  unit: 'seconds' | 'count' | 'bytes' | 'micros' | 'days';
+  required: boolean;
+};
+export type CodeJobLimitViews = Record<string, CodeJobLimitView>;
+
+const CODE_JOB_COUNT_WORDS: Record<string, string> = { maxCells: 'runs', maxOutputFiles: 'files', maxResultChars: 'characters', maxReads: 'reads', atOncePerPerson: 'jobs', atOnceAll: 'jobs', jobsPerPersonPerDay: 'jobs' };
+const codeJobScale = (key: string, unit: CodeJobLimitView['unit']) => (unit === 'micros' ? 1_000_000 : unit === 'bytes' ? (key === 'maxCodeBytes' || key === 'maxAnswerBytes' ? 1024 : 1_048_576) : 1);
+const codeJobUnit = (key: string, unit: CodeJobLimitView['unit']) => (unit === 'micros' ? 'dollars' : unit === 'bytes' ? (key === 'maxCodeBytes' || key === 'maxAnswerBytes' ? 'KB' : 'MB') : unit === 'count' ? (CODE_JOB_COUNT_WORDS[key] ?? 'times') : unit);
+
+/** The limits of an answer from /api/admin/workbench, or null when it is not that answer (each one needs its words and range). */
+export function readCodeJobLimits(answer: unknown): CodeJobLimitViews | null {
+  const limits = (answer as { limits?: unknown } | null)?.limits;
+  if (!limits || typeof limits !== 'object') return null;
+  const entries = Object.entries(limits as Record<string, Partial<CodeJobLimitView>>);
+  const valid = entries.length > 0 && entries.every(([, view]) => view && typeof view.label === 'string' && typeof view.help === 'string' && view.range && typeof view.range.min === 'number' && typeof view.range.max === 'number' && ['seconds', 'count', 'bytes', 'micros', 'days'].includes(view.unit as string));
+  return valid ? (limits as CodeJobLimitViews) : null;
+}
+
+export function codeJobLimits(views: CodeJobLimitViews): Limit[] {
+  return Object.entries(views).map(([key, view]) => {
+    const scale = codeJobScale(key, view.unit);
+    const unset = view.value === null;
+    return {
+      id: key,
+      label: view.label,
+      hint: view.help,
+      unit: codeJobUnit(key, view.unit),
+      value: unset ? 0 : (view.value as number) / scale,
+      recommended: view.recommended === null ? -1 : view.recommended / scale,
+      unset,
+      options: [],
+      note: unset ? (view.required ? 'Not set yet. Code jobs do not run until you set it.' : key === 'maxAnswerBytes' ? 'Not set yet. Every App answer is passed on whole.' : 'Not set yet. Printed results are kept until the person deletes them.') : undefined,
+      range: { min: view.range.min / scale, max: view.range.max / scale },
+    };
+  });
+}
+
 /** The id without its maker's prefix: "openai/gpt-4o-mini" is "gpt-4o-mini". */
 const shortModel = (id: string) => (id.includes('/') ? id.slice(id.indexOf('/') + 1) : id);
 const listOf = (names: string[]) => new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(names);
@@ -1536,6 +1584,8 @@ export function UniverseAiLimits() {
   const [allowanceFailed, setAllowanceFailed] = useState(false);
   // Instant Apps' own limits come from their own route; when it is not there (or not readable) the group is simply not shown
   const [instant, setInstant] = useState<InstantLimitViews | null>(null);
+  // Code jobs' own limits, the same way
+  const [codeJobs, setCodeJobs] = useState<CodeJobLimitViews | null>(null);
 
   async function load() {
     setFailed(false);
@@ -1588,11 +1638,24 @@ export function UniverseAiLimits() {
     }
   }
 
+  async function loadCodeJobs() {
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/workbench');
+      if (!response.ok) return;
+      const views = readCodeJobLimits(await response.json());
+      if (views) setCodeJobs(views);
+    } catch {
+      // Not shown until it can be read
+    }
+  }
+
   useEffect(() => {
     load();
     loadVoice();
     loadAllowance();
     loadInstant();
+    loadCodeJobs();
   }, []);
 
   async function saveAllowance(dollars: number): Promise<boolean> {
@@ -1628,6 +1691,20 @@ export function UniverseAiLimits() {
     }
     const views = readInstantLimits(result.data);
     if (views) setInstant(views);
+    addToast({ description: 'Saved', variant: 'success', duration: 2000 });
+    return true;
+  }
+
+  async function saveCodeJobs(id: string, value: number): Promise<boolean> {
+    const view = codeJobs?.[id];
+    if (!view) return false;
+    const result = await sendLimits('/api/admin/workbench', { [id]: Math.round(value * codeJobScale(id, view.unit)) });
+    if (!result.ok) {
+      addToast({ description: result.error, variant: 'error' });
+      return false;
+    }
+    const views = readCodeJobLimits(result.data);
+    if (views) setCodeJobs(views);
     addToast({ description: 'Saved', variant: 'success', duration: 2000 });
     return true;
   }
@@ -1695,6 +1772,7 @@ export function UniverseAiLimits() {
             onChange={(id, value) => (id === COMPUTER_ALLOWANCE_ID ? saveAllowance(value) : save({ bricks: { [id]: value } }))}
           />
           {instant && <LimitGroup title="Instant Apps" note="Apps that work without connecting anything. Universe pays for each run, so each limit is yours to set. Instant Apps do not run until the required ones have a number." limits={instantLimits(instant)} onChange={saveInstant} />}
+          {codeJobs && <LimitGroup title="Apps: code jobs" note="Short pieces of code an App's Brick may run in a separate, temporary workspace with no access to anyone's accounts. They are on by default, with these starting values; change any of them here. A job stops at its time and size limits, whatever it was doing." limits={codeJobLimits(codeJobs)} onChange={saveCodeJobs} />}
           {allowance && <LimitGroup title="Credit and give-backs" note="What Universe funds and returns. None of these has a built-in value: set each one yourself." limits={moneyLimits(money)} onChange={saveMoney} />}
           {voiceFailed ? (
             <LoadError label="the voice limits" retry={loadVoice} />
