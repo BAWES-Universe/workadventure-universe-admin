@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { recordMeterEvent } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
@@ -22,50 +23,72 @@ export async function recordKeptBytes(input: {
   now?: Date;
   /** The Brick's owner, for a Brick whose row is already gone (a purge confirming its outside deletions): else read from the Brick. */
   ownerId?: string | null;
+  /**
+   * Write only while the Brick's computer is still packed away (cold, no machine): the check and the write happen under a lock on the computer's row, which a
+   * return must also take to claim the Brick, so a return cannot make its machine and write its disk between the check and this line (the line would then
+   * say the new disk is not there). When the Brick is not cold any more nothing is written and the books are as they should be (true).
+   */
+  onlyWhileCold?: boolean;
 }): Promise<boolean> {
   try {
-    const machine = input.machineBytes !== null && Number.isSafeInteger(input.machineBytes) && input.machineBytes > 0 ? input.machineBytes : 0;
-    let copy = 0;
-    if (input.copyBytes !== undefined) {
-      copy = input.copyBytes !== null && Number.isSafeInteger(input.copyBytes) && input.copyBytes > 0 ? input.copyBytes : 0;
-    } else {
-      const row = await prisma.brickComputer.findUnique({ where: { botId: input.botId }, select: { filesBytes: true, filesSavedAt: true } });
-      copy = row?.filesSavedAt ? Number(row.filesBytes) : 0;
+    if (input.onlyWhileCold) {
+      return await prisma.$transaction(async (tx) => {
+        const cold = await tx.$queryRaw<Array<{ one: number }>>`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${input.botId} AND "machine" = 'cold' AND "provider_ref" IS NULL FOR UPDATE`;
+        if (cold.length === 0) return true;
+        return writeLevel(tx, input);
+      });
     }
-    const level = machine + copy;
-    const newest = await prisma.meterEvent.findFirst({
-      where: { kind: 'stored_bytes', payerKind: 'universe', botId: input.botId },
-      orderBy: [{ occurredAt: 'desc' }, { recordedAt: 'desc' }],
-      select: { quantity: true },
-    });
-    // Nothing kept and nothing ever written: there is no level to say. The same level as the newest one is already the answer.
-    if (newest ? Number(newest.quantity) === level : level === 0) return true;
-    const ownerId = input.ownerId !== undefined ? input.ownerId : (await prisma.bot.findUnique({ where: { id: input.botId }, select: { ownerId: true } }))?.ownerId ?? null;
-    const now = input.now ?? new Date();
-    await recordMeterEvent({
-      eventId: `computer:kept:${input.botId}:${input.reason}:${now.getTime()}:${level}`.slice(0, 255),
-      kind: 'stored_bytes',
-      pool: 'computer',
-      occurredAt: now,
-      personKey: personKeyOf({ personId: ownerId }),
-      personId: ownerId,
-      botId: input.botId,
-      brick: true,
-      payerKind: 'universe',
-      payerPersonId: null,
-      route: 'computer',
-      jobId: null,
-      quantity: level,
-      unit: 'byte',
-      // What is kept costs by its size and the storage Limit when the books are read, not on the line
-      costMicros: 0,
-      basis: 'estimated',
-      sourceRef: `brick_computers:${input.botId}`,
-      detail: { reason: input.reason, machineBytes: machine, copyBytes: copy },
-    });
-    return true;
+    return await writeLevel(prisma, input);
   } catch (error) {
     console.error('[Computer] Could not write what is kept to the books:', error instanceof Error ? error.message : 'unknown');
     return false;
   }
+}
+
+type Db = Prisma.TransactionClient | typeof prisma;
+
+async function writeLevel(
+  db: Db,
+  input: { botId: string; reason: 'made' | 'gone' | 'saved'; machineBytes: number | null; copyBytes?: number | null; now?: Date; ownerId?: string | null },
+): Promise<boolean> {
+  const machine = input.machineBytes !== null && Number.isSafeInteger(input.machineBytes) && input.machineBytes > 0 ? input.machineBytes : 0;
+  let copy = 0;
+  if (input.copyBytes !== undefined) {
+    copy = input.copyBytes !== null && Number.isSafeInteger(input.copyBytes) && input.copyBytes > 0 ? input.copyBytes : 0;
+  } else {
+    const row = await db.brickComputer.findUnique({ where: { botId: input.botId }, select: { filesBytes: true, filesSavedAt: true } });
+    copy = row?.filesSavedAt ? Number(row.filesBytes) : 0;
+  }
+  const level = machine + copy;
+  const newest = await db.meterEvent.findFirst({
+    where: { kind: 'stored_bytes', payerKind: 'universe', botId: input.botId },
+    orderBy: [{ occurredAt: 'desc' }, { recordedAt: 'desc' }],
+    select: { quantity: true },
+  });
+  // Nothing kept and nothing ever written: there is no level to say. The same level as the newest one is already the answer.
+  if (newest ? Number(newest.quantity) === level : level === 0) return true;
+  const ownerId = input.ownerId !== undefined ? input.ownerId : (await db.bot.findUnique({ where: { id: input.botId }, select: { ownerId: true } }))?.ownerId ?? null;
+  const now = input.now ?? new Date();
+  await recordMeterEvent({
+    eventId: `computer:kept:${input.botId}:${input.reason}:${now.getTime()}:${level}`.slice(0, 255),
+    kind: 'stored_bytes',
+    pool: 'computer',
+    occurredAt: now,
+    personKey: personKeyOf({ personId: ownerId }),
+    personId: ownerId,
+    botId: input.botId,
+    brick: true,
+    payerKind: 'universe',
+    payerPersonId: null,
+    route: 'computer',
+    jobId: null,
+    quantity: level,
+    unit: 'byte',
+    // What is kept costs by its size and the storage Limit when the books are read, not on the line
+    costMicros: 0,
+    basis: 'estimated',
+    sourceRef: `brick_computers:${input.botId}`,
+    detail: { reason: input.reason, machineBytes: machine, copyBytes: copy },
+  }, db);
+  return true;
 }

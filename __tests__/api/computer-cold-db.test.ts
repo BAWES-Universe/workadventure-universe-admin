@@ -753,6 +753,103 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(await row(brick.botId)).toMatchObject({ machine: 'cold', providerRef: null, packStage: null, packClaimId: 'took-over' });
     });
 
+    it('a return that lost its claim while its computer was being made leaves that computer to the return that took over, which got the same machine from the provider', async () => {
+      const brick = await idleBrick();
+      await packAway(brick.botId, provider, NOW);
+      const before = names().length;
+      const create = provider.create.bind(provider);
+      provider.create = async (botId) => {
+        const machine = await create(botId);
+        // A sweep took the stopped return over and a replacement came: the provider gave it this very machine and it has recorded it
+        await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { packClaimId: 'replacement', providerRef: machine.ref } });
+        return machine;
+      };
+      await expect(bringBackFromCold(brick.botId, provider, NOW)).rejects.toMatchObject({ why: 'busy' });
+      expect(names().slice(before)).not.toContain(`remove:fake-${brick.botId}`);
+      expect(await row(brick.botId)).toMatchObject({ machine: 'restoring', providerRef: `fake-${brick.botId}`, packClaimId: 'replacement' });
+    });
+
+    it('a return that lost its claim and whose replacement is still on its way (nothing recorded yet) leaves the machine alone too', async () => {
+      const brick = await idleBrick();
+      await packAway(brick.botId, provider, NOW);
+      const before = names().length;
+      const create = provider.create.bind(provider);
+      provider.create = async (botId) => {
+        const machine = await create(botId);
+        await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { packClaimId: 'replacement', providerRef: null } });
+        return machine;
+      };
+      await expect(bringBackFromCold(brick.botId, provider, NOW)).rejects.toMatchObject({ why: 'busy' });
+      expect(names().slice(before)).not.toContain(`remove:fake-${brick.botId}`);
+    });
+
+    it('a return that lost its claim and finds nobody holding the Brick any more still removes the computer it made', async () => {
+      const brick = await idleBrick();
+      await packAway(brick.botId, provider, NOW);
+      const before = names().length;
+      const create = provider.create.bind(provider);
+      provider.create = async (botId) => {
+        const machine = await create(botId);
+        // Taken over and put back to cold, with no replacement yet
+        await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'cold', packStage: null, providerRef: null, packClaimId: 'took-over' } });
+        return machine;
+      };
+      await expect(bringBackFromCold(brick.botId, provider, NOW)).rejects.toMatchObject({ why: 'busy' });
+      expect(names().slice(before)).toContain(`remove:fake-${brick.botId}`);
+    });
+
+    it('a return that lost its claim during the restore does not remove the half-restored computer the return that took over now holds', async () => {
+      const brick = await idleBrick();
+      await packAway(brick.botId, provider, NOW);
+      const before = names().length;
+      const original = provider.restoreInto.bind(provider);
+      provider.restoreInto = async (ref, source) => {
+        await original(ref, source);
+        await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { packClaimId: 'replacement' } });
+        return { ok: false, reason: 'did not check out', ms: 1 };
+      };
+      await expect(bringBackFromCold(brick.botId, provider, NOW)).rejects.toMatchObject({ why: 'busy' });
+      expect(names().slice(before)).not.toContain(`remove:fake-${brick.botId}`);
+      expect(await row(brick.botId)).toMatchObject({ machine: 'restoring', providerRef: `fake-${brick.botId}`, packClaimId: 'replacement' });
+    });
+
+    it('the line that says a packed-away disk is gone is written only while the Brick is still cold: a return that claimed meanwhile keeps its own disk line as the newest', async () => {
+      const brick = await idleBrick();
+      const { recordKeptBytes } = await import('@/lib/computer-disk');
+      expect(await recordKeptBytes({ botId: brick.botId, reason: 'made', machineBytes: 4_000_000_000, copyBytes: 0, now: new Date(NOW.getTime() - 60_000) })).toBe(true);
+      await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'cold', providerRef: null, packStage: null } });
+      const lines = () => prisma.meterEvent.count({ where: { botId: brick.botId, kind: 'stored_bytes' } });
+      // The return claims the row and holds it while it makes its computer: the correction waits for it, then finds the Brick is not cold and writes nothing
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      let claimed!: () => void;
+      const claimedIt = new Promise<void>((resolve) => { claimed = resolve; });
+      const returning = prisma.$transaction(async (tx) => {
+        await tx.brickComputer.updateMany({ where: { botId: brick.botId, machine: 'cold' }, data: { machine: 'restoring', packStage: 'returning', packClaimId: 'return-1' } });
+        claimed();
+        await held;
+      });
+      await claimedIt;
+      const settling = recordKeptBytes({ botId: brick.botId, reason: 'gone', machineBytes: null, copyBytes: 7, now: NOW, onlyWhileCold: true });
+      // It has not finished while the return holds the row
+      const early = await Promise.race([settling.then(() => 'done'), new Promise((resolve) => setTimeout(() => resolve('waiting'), 400))]);
+      expect(early).toBe('waiting');
+      release();
+      await returning;
+      expect(await settling).toBe(true);
+      expect(await lines()).toBe(1);
+    });
+
+    it('the line that says a packed-away disk is gone is still written when the Brick stays cold', async () => {
+      const brick = await idleBrick();
+      const { recordKeptBytes } = await import('@/lib/computer-disk');
+      await recordKeptBytes({ botId: brick.botId, reason: 'made', machineBytes: 4_000_000_000, copyBytes: 0, now: new Date(NOW.getTime() - 60_000) });
+      await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'cold', providerRef: null, packStage: null } });
+      expect(await recordKeptBytes({ botId: brick.botId, reason: 'gone', machineBytes: null, copyBytes: 7, now: NOW, onlyWhileCold: true })).toBe(true);
+      const lines = await prisma.meterEvent.findMany({ where: { botId: brick.botId, kind: 'stored_bytes' }, orderBy: [{ occurredAt: 'asc' }] });
+      expect(lines.map((line) => Number(line.quantity))).toEqual([4_000_000_000, 7]);
+    });
+
     it('cleans up a return a stopped server left: the half-restored computer is removed and the Brick is cold again', async () => {
       const brick = await idleBrick();
       await packAway(brick.botId, provider, NOW);

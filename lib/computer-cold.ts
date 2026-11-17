@@ -184,7 +184,8 @@ async function settleColdLevels(now: Date): Promise<number> {
     LIMIT 50`);
   let written = 0;
   for (const row of stale) {
-    if (await recordKeptBytes({ botId: row.botId, reason: 'gone', machineBytes: null, copyBytes: await archiveBytes(row.botId), now })) written++;
+    // Under the lock of the computer's row and only while it is still packed away: a return that starts meanwhile writes its own disk after this line, never before it
+    if (await recordKeptBytes({ botId: row.botId, reason: 'gone', machineBytes: null, copyBytes: await archiveBytes(row.botId), now, onlyWhileCold: true })) written++;
   }
   return written;
 }
@@ -453,6 +454,19 @@ export interface Returned {
 }
 
 /**
+ * Whether the computer `ref` of a return that lost its claim now belongs to another return. The provider gives the machine made for a Brick to the next
+ * one that asks for it, so the return that replaced a stopped one may hold this very machine: it has recorded it, or it is on its way (claimed, nothing
+ * recorded yet). Removing it from the run that lost the claim would delete the replacement's computer. A return that still holds its own claim is never
+ * "another", and a Brick that is gone or cold again with no claim leaves the computer to be removed.
+ */
+async function heldByAnotherReturn(botId: string, claimId: string, ref: string): Promise<boolean> {
+  const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { machine: true, packStage: true, packClaimId: true, providerRef: true } });
+  if (!row) return false;
+  if (row.machine === 'restoring' && row.packStage === 'returning' && row.packClaimId === claimId) return false;
+  return row.providerRef === ref || (row.machine === 'restoring' && row.packStage === 'returning');
+}
+
+/**
  * Makes a computer again for a cold Brick and puts the newest verified copy on it. If that copy does not restore, the computer is deleted and the
  * one before it is tried on a fresh one. Leaves the Brick `cold` (nothing made, nothing lost) when no copy restores. Returns with the machine
  * `waking` and its reference stored: the caller makes it ready.
@@ -499,8 +513,10 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
       // Written at once, so a server that stops here leaves a reference to find and remove
       const noted = await prisma.brickComputer.updateMany({ where: { botId, machine: 'restoring', packStage: 'returning', packClaimId: claimId }, data: { providerRef: made.ref, madeAt: new Date(), packClaimedAt: new Date() } });
       if (noted.count !== 1) {
-        // Taken over while the computer was being made: the run that took over knows of no computer of this one's, so it is removed here
-        await cold.remove(made.ref).catch((error) => console.error('[Computer] Could not remove a computer of a return that was taken over:', words(error)));
+        // Taken over while the computer was being made: removed only when no other return can hold it (see heldByAnotherReturn)
+        if (!(await heldByAnotherReturn(botId, claimId, made.ref))) {
+          await cold.remove(made.ref).catch((error) => console.error('[Computer] Could not remove a computer of a return that was taken over:', words(error)));
+        }
         throw new ColdError('The return was taken over', 'busy');
       }
       let result: RestoreResult;
@@ -524,7 +540,9 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
       }
       lastReason = result.reason ?? 'unknown';
       console.error(`[Computer] A copy did not restore (${lastReason})${at + 1 < archives.length ? '; the older one is tried' : ''}`);
-      // A computer with half a restore is never used: it is removed, and the next copy goes on a fresh one
+      // A computer with half a restore is never used: it is removed, and the next copy goes on a fresh one. A return that was taken over meanwhile leaves
+      // the computer to the one that took over (the provider hands the same machine to the next return for this Brick)
+      if (await heldByAnotherReturn(botId, claimId, made.ref)) throw new ColdError('The return was taken over', 'busy');
       try {
         await cold.remove(made.ref);
         if ((await cold.confirmRemoved(made.ref)) !== 'gone') throw new Error('still listed');
