@@ -46,6 +46,8 @@ The result message says how many steps ran, which did not work, which never ran,
 
 ## Money
 
+The person's code is sent exactly as written. The folder for files is made by a small run of its own before the first step; it is a real run at the provider, so it is reserved, settled and metered like a step (`prepared_runs`), but it is never shown as one of the person's steps. The listing of a job's files stops once the number kept plus 50 are in hand, and one more is asked for so "(more files)" is only said when there really are more.
+
 An estimate is reserved when the job starts and the meter event `codejob:<id>` is settled once, at what was used. A job whose meter line did not get written (the meter did not answer, or the process stopped between the two) has no `metered_at`, and the sweep writes it a minute after the job ended; the event id makes that safe to repeat. The sandbox is not billed by the provider today; the price is the saved App price or the built-in per-run figure, and the ceiling guards a future bill.
 
 ## Kept files (owned results)

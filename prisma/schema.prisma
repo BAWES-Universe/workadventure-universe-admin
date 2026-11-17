@@ -3593,6 +3593,8 @@ model CodeJob {
   codeHash          String    @map("code_hash") @db.VarChar(64)
   steps             Int
   cellsRun          Int       @default(0) @map("cells_run")
+  /// Runs that made the folder for files (0 or 1): a real run at the provider, charged like a step but never shown as one
+  preparedRuns      Int       @default(0) @map("prepared_runs")
   // The opaque id the provider session is made under (never a person's id), and the session itself
   providerUserId    String    @map("provider_user_id") @db.VarChar(120)
   providerSessionId String?   @map("provider_session_id") @db.VarChar(120)

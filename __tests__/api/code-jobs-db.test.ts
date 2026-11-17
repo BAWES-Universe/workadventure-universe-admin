@@ -270,11 +270,11 @@ run('code jobs for Apps, in a real database', () => {
       await finishAll();
       expect(await start({ code: 'print(1)' })).toMatchObject({ status: 'refused', reason: 'daily_limit' });
 
-      await saveCodeJobLimits({ jobsPerPersonPerDay: 100, exposureCeilingMicros: 250 }, boss);
+      await saveCodeJobLimits({ jobsPerPersonPerDay: 100, exposureCeilingMicros: 450 }, boss);
       await prisma.codeJob.deleteMany({ where: { personId: sara } });
       jobOf(await start({ steps: ['print(1)', 'print(2)'] }));
       await finishAll();
-      // 200 micros are used this month: one more run fits under 250? 200 + 100 > 250, so it does not
+      // 300 micros are used this month (two steps and the run that makes the folder for files): one more step with its folder run is 200, and 300 + 200 > 450, so it does not
       expect(await start({ code: 'print(3)' })).toMatchObject({ status: 'refused', reason: 'exposure_full' });
     });
   });
@@ -318,12 +318,25 @@ run('code jobs for Apps, in a real database', () => {
       // Settled once, as an estimate paid by the universe, naming what ran and never what it was given
       const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
       expect(events).toHaveLength(1);
-      expect(events[0]).toMatchObject({ eventId: `codejob:${job.jobId}`, basis: 'estimated', payerKind: 'universe', quantity: BigInt(1), costMicros: BigInt(100) });
+      expect(events[0]).toMatchObject({ eventId: `codejob:${job.jobId}`, basis: 'estimated', payerKind: 'universe', quantity: BigInt(2), costMicros: BigInt(200) });
       expect(JSON.stringify(events[0].detail)).not.toContain('hello');
       // The job keeps what it was admitted under
       expect(row.capabilities).toMatchObject({ credentials: 'none', appTools: 'none', rawRequests: 'off', instant: 'off', network: 'provider-default' });
       expect(row.limits).toMatchObject({ maxSeconds: 10 });
       expect(row.expiresAt).not.toBeNull();
+    });
+
+    it('counts the run that makes the folder for files like any other run: reserved, settled and metered', async () => {
+      provider.state.runs.push(() => done('1'));
+      const job = jobOf(await start({ code: 'print(1)' }));
+      await finishAll();
+      const row = await rowOf(job.jobId);
+      // One step shown to the person, two runs at the provider, two runs paid for
+      expect(row).toMatchObject({ cellsRun: 1, preparedRuns: 1, steps: 1, reservedMicros: BigInt(200), settledMicros: BigInt(200) });
+      expect(provider.state.prepared).toBe(1);
+      expect(await getCodeJob({ jobId: job.jobId, botId: saraBrick, personId: sara, waitSeconds: 0 }, deps())).toMatchObject({ status: 'ok', job: { runsUsed: 1 } });
+      const events = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
+      expect(events[0]).toMatchObject({ quantity: BigInt(2), costMicros: BigInt(200) });
     });
 
     it('sends code that begins with a __future__ import exactly as written, so it still runs, and prepares the folder in a run of its own', async () => {
@@ -374,7 +387,7 @@ run('code jobs for Apps, in a real database', () => {
       expect(provider.state.codes).toHaveLength(2);
       expect(row.outputs.map((output) => output.name)).toEqual(['partial.txt']);
       // Only the runs that happened are charged
-      expect((await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } }))[0]).toMatchObject({ quantity: BigInt(2), costMicros: BigInt(200) });
+      expect((await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } }))[0]).toMatchObject({ quantity: BigInt(3), costMicros: BigInt(300) });
     });
 
     it('says which steps really ran, which did not work and which never ran, never more than is known', async () => {
@@ -547,6 +560,23 @@ run('code jobs for Apps, in a real database', () => {
       const notKept = (row.result as { notKept: { name: string; why: string }[] }).notKept;
       expect(notKept.some((entry) => entry.name === '(more files)')).toBe(true);
       expect(notKept.some((entry) => entry.name === '(all)')).toBe(false);
+    });
+
+    it('says "(more files)" only when there really are more, not when the listing is exactly the number looked at', async () => {
+      await saveCodeJobLimits({ maxOutputFiles: 3 }, boss);
+      const leave = (count: number) => provider.state.runs.push(({ files }) => {
+        for (let n = 0; n < count; n += 1) files.set(`out/f${String(n).padStart(3, '0')}.txt`, text('x'));
+        return done();
+      });
+      const notKeptOf = async (count: number) => {
+        leave(count);
+        const job = jobOf(await start({ code: `print(${count})` }));
+        await finishAll();
+        return ((await rowOf(job.jobId)).result as { notKept: { name: string }[] }).notKept.map((entry) => entry.name);
+      };
+      // 3 kept and 50 more looked at: exactly 53 files is all of them, 54 is not
+      expect(await notKeptOf(53)).not.toContain('(more files)');
+      expect(await notKeptOf(54)).toContain('(more files)');
     });
 
     it('does not keep a file bigger than what is left, and does not fail the job over a listing it cannot read', async () => {
@@ -790,7 +820,7 @@ run('code jobs for Apps, in a real database', () => {
       expect(provider.sessions.size).toBe(0);
       expect(row.outputs).toHaveLength(0);
       expect(kept.files.size).toBe(0);
-      expect((await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } }))[0]).toMatchObject({ quantity: BigInt(1), costMicros: BigInt(100) });
+      expect((await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } }))[0]).toMatchObject({ quantity: BigInt(2), costMicros: BigInt(200) });
     });
 
     it('stops a run that does not answer by deleting the workspace, not by trusting the wait', async () => {
@@ -885,7 +915,7 @@ run('code jobs for Apps, in a real database', () => {
           state: 'running',
           capabilities: {},
           limits: LIMITS as unknown as object,
-          reservedMicros: BigInt(300),
+          reservedMicros: BigInt(400),
           codeHash: 'x',
           steps: 3,
           cellsRun: 1,
@@ -898,7 +928,7 @@ run('code jobs for Apps, in a real database', () => {
         },
       });
       expect((await sweepCodeJobs(deps())).stopped).toBe(1);
-      expect(await rowOf(id)).toMatchObject({ state: 'interrupted', reason: 'interrupted', providerState: 'closed', settledMicros: BigInt(300) });
+      expect(await rowOf(id)).toMatchObject({ state: 'interrupted', reason: 'interrupted', providerState: 'closed', settledMicros: BigInt(400) });
       expect(provider.sessions.size).toBe(0);
     });
 
