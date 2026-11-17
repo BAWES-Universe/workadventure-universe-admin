@@ -1928,6 +1928,9 @@ model VoiceReplyUse {
   turnId    String   @map("turn_id") @db.VarChar(255)
   // "person:<user id>" or "guest:<their id>", the same words the Universe AI reply window is kept under
   personKey String   @map("person_key") @db.VarChar(320)
+  // The longest this reply may be, as it was when it was admitted: what it holds of the month's speech Limit until its usage arrives. A later
+  // change of that setting never changes what an admitted reply holds. Empty only for a row from before this was kept.
+  seconds   Int?
   createdAt DateTime @default(now()) @map("created_at")
 
   bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
@@ -3284,6 +3287,8 @@ model BrickPurge {
   // Still to delete outside: the machine at its provider (also any made for this Brick that was never written down), the saved files in our bucket
   machinePending Boolean   @default(false) @map("machine_pending")
   copyPending    Boolean   @default(false) @map("copy_pending")
+  // Its chat rooms (Matrix) still to clear: the bot server holds the chat account, so it asks for this list and confirms each Brick it cleared
+  chatPending    Boolean   @default(false) @map("chat_pending")
   attempts       Int       @default(0)
   nextTryAt      DateTime  @default(now()) @map("next_try_at")
   lastTriedAt    DateTime? @map("last_tried_at")
@@ -3293,6 +3298,20 @@ model BrickPurge {
 
   @@index([doneAt, nextTryAt])
   @@map("brick_purges")
+}
+
+// A save of a Brick's computer folder that is under way (lib/agent37/saved-copies.ts), written down BEFORE it starts and removed once it is
+// finished and checked against the purge marker. No foreign key on purpose, like BrickPurge: a purge that finds one cannot call the saved
+// files gone, so a copy that lands late (or a server that stopped after it landed) is still found and deleted. `expiresAt` is the longest a
+// save may run; past it the row is stale (its server is gone) and the purge deletes once more after it, and then removes it.
+model SavedCopyWrite {
+  id        String   @id @default(uuid())
+  botId     String   @map("bot_id") @db.VarChar(255)
+  startedAt DateTime @default(now()) @map("started_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@index([botId])
+  @@map("saved_copy_writes")
 }
 
 // The daily check of our books against the computer provider's own bill (one row per UTC day, never changed once written): what the provider
@@ -3367,15 +3386,47 @@ model ComputerJob {
   // The way this job took and what the whole task was expected to cost when it was chosen, in micros (the real cost is on the books under the job's id)
   route             String  @default("computer") @db.VarChar(10)
   expectedMicros    BigInt? @map("expected_micros")
+  // How well the record of where the computer's browser went (computer_job_visits) was taken when the job ended: complete, partial (a gap or a cut
+  // in what the computer recorded, or more than is kept), unread (the computer could not be read), none (the computer has no recorder). Empty until the job ends.
+  visitsState       String? @map("visits_state") @db.VarChar(8)
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]
   tokens  ComputerJobToken[]
+  visits  ComputerJobVisit[]
 
   @@unique([botId, runId])
   @@index([botId, status])
   @@index([personId, status])
   @@map("computer_jobs")
+}
+
+// Where a job's computer browsed, for the owner to look at later (R06, handoff v2 section 4: "every navigation and form post is recorded"). Taken
+// from the browser's DevTools on the computer when the job ends. HOST AND PATH ONLY, never a query string, a fragment, a sign-in name in the address,
+// a header or a body, and a path part that looks like a one-time code is not kept. `hands` rows are Orbit's own notes of when the person took the
+// computer and gave it back, so a page the person opened is told apart from one Brick did. Goes with the job (and so with a purged Brick).
+model ComputerJobVisit {
+  id     String   @id @default(uuid())
+  jobId  String   @map("job_id")
+  // visit (a page the browser opened), post (a post it sent, a page's form or a script's), hands (Orbit's note of who has the computer from `at`)
+  kind   String   @db.VarChar(5)
+  at     DateTime
+  // brick or person; on a `hands` note, who has the computer from then on
+  by     String   @default("brick") @db.VarChar(6)
+  method String?  @db.VarChar(8)
+  host   String?  @db.VarChar(255)
+  path   String?  @db.VarChar(300)
+  // The same thing again right after is one row with a count
+  count  Int      @default(1)
+  // A page that did not load
+  failed Boolean  @default(false)
+  // A post that was a page's own form
+  form   Boolean  @default(false)
+
+  job ComputerJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, at])
+  @@map("computer_job_visits")
 }
 
 // An effect outside the computer that a job meant to have, written BEFORE it is tried and once per key, so a retry looks up

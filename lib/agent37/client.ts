@@ -406,6 +406,22 @@ export class Agent37Client {
     return this.again(() => this.call('PATCH', `${this.api}/v1/instances/${encodeURIComponent(id)}`, this.account(), { network }));
   }
 
+  /**
+   * A machine's managed budget as Agent37 holds it (`GET /v1/instances/{id}/budget`, docs agents-api/budgets): the monthly cap, what is left of
+   * the month, and what is left of the ONE-TIME credit. Agent37's managed services (model router, Brave, Composio, Perflo) can spend from either.
+   * A number that is not there is read as "not zero", so a changed answer never looks closed.
+   */
+  async getBudget(id: string): Promise<{ monthlyCapMicros: number; monthlyRemainingMicros: number; creditRemainingMicros: number }> {
+    const answer = await this.again(() => this.call<Record<string, unknown>>('GET', `${this.api}/v1/instances/${encodeURIComponent(id)}/budget`, this.account()));
+    const micros = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : Number.MAX_SAFE_INTEGER);
+    return { monthlyCapMicros: micros(answer?.monthly_cap_micros), monthlyRemainingMicros: micros(answer?.monthly_remaining_micros), creditRemainingMicros: micros(answer?.credit_remaining_micros) };
+  }
+
+  /** Sets the monthly cap (`PATCH /v1/instances/{id}/budget`); it takes effect at once. The one-time credit has no call that lowers it. */
+  setMonthlyCap(id: string, micros: number): Promise<unknown> {
+    return this.again(() => this.call('PATCH', `${this.api}/v1/instances/${encodeURIComponent(id)}/budget`, this.account(), { monthly_cap_micros: micros }));
+  }
+
   /** A streamed call: returns the response when it is a 200, so the caller reads the body as it comes. */
   private async stream(method: string, url: string, body: unknown, signal?: AbortSignal): Promise<Response> {
     let response: Response;

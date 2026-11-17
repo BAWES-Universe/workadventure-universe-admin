@@ -5,6 +5,7 @@ import { createGunzip } from 'node:zlib';
 import { CopyObjectCommand, DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { artifactBucket } from '@/lib/artifact-storage';
+import { prisma } from '@/lib/db';
 import { derivedKey } from '@/lib/encryption';
 
 /**
@@ -24,6 +25,9 @@ const NONCE = 12;
 const TAG = 16;
 export const COPY_OVERHEAD = MAGIC.length + NONCE + TAG;
 const PURPOSE = 'universe-computer-saved-copy';
+
+/** The longest a save may run. A row of a save that began longer ago than this is stale: its server is gone. */
+export const SAVE_WINDOW_MS = 2 * 60 * 60_000;
 
 export const savedCopyKey = (botId: string) => `computer-saves/${botId}.ubc`;
 /** Where a copy is written first: it takes the place of the saved one only after the check of the whole stream has passed. */
@@ -80,7 +84,7 @@ export interface Sealed {
  * end and checked as a gzip (a stream cut short fails the check) while it is written under `stagingKey`; only a whole one is copied over `finalKey`.
  * Throws when the stream was not a whole gzip or the upload did not finish: what was at `finalKey` is then untouched.
  */
-export async function storeSealed(finalKey: string, stagingKey: string, archive: ReadableStream<Uint8Array>): Promise<Sealed> {
+export async function storeSealed(finalKey: string, stagingKey: string, archive: ReadableStream<Uint8Array>, leftNothing: () => void = () => undefined): Promise<Sealed> {
   const { s3, bucket } = artifactBucket();
   const source = Readable.fromWeb(archive as never);
   const toBucket = new PassThrough();
@@ -121,7 +125,7 @@ export async function storeSealed(finalKey: string, stagingKey: string, archive:
   if (failed) {
     await upload.abort().catch(() => undefined);
     // The upload may have finished a moment before the check failed: what it wrote is not a copy, and the saved one is untouched
-    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).catch(() => undefined);
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).then(leftNothing, () => undefined);
     throw failed.reason && typeof failed.reason.message === 'string' ? failed.reason : new Error('The copy of the files could not be saved');
   }
   // The stream was whole and the upload finished: now, and only now, it takes the place of what was there (one copy inside the bucket)
@@ -135,10 +139,34 @@ export async function storeSealed(finalKey: string, stagingKey: string, archive:
  * the previous copy is then still the saved one.
  */
 export async function storeSavedCopy(botId: string, archive: ReadableStream<Uint8Array>): Promise<SavedCopyInfo> {
-  await storeSealed(savedCopyKey(botId), stagingKey(botId, randomUUID()), archive);
-  const copy = await savedCopyOf(botId);
-  if (!copy) throw new Error('The saved copy cannot be found after it was stored');
-  return copy;
+  // Written down first, and kept until the copy has been checked against the purge marker: a purge looks at these before it calls the saved
+  // files gone, so a copy that lands after the purge deleted (or a server that stops right after it landed) is still found and deleted
+  const write = await prisma.savedCopyWrite.create({ data: { botId, expiresAt: new Date(Date.now() + SAVE_WINDOW_MS) }, select: { id: true } });
+  let settled = false;
+  try {
+    // Purge marker and this row are each written before the other is read, so a save and a purge can never both miss each other: a Brick
+    // purged before this point is seen here, and one purged after is seen by the purge, which finds this row
+    if ((await prisma.brickPurge.count({ where: { botId } })) > 0) {
+      settled = true;
+      throw new Error('The Brick was deleted while its files were being saved');
+    }
+    await storeSealed(savedCopyKey(botId), stagingKey(botId, randomUUID()), archive, () => (settled = true));
+    // A Brick purged while this save was running: the purge wrote its marker before it deleted anything in the bucket, so a marker seen now (after
+    // the copy) means the delete either already ran and missed this copy, or will run after it and take it. Either way this copy must not stay
+    if ((await prisma.brickPurge.count({ where: { botId } })) > 0) {
+      const { s3, bucket } = artifactBucket();
+      await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId) }));
+      settled = true;
+      throw new Error('The Brick was deleted while its files were being saved');
+    }
+    const copy = await savedCopyOf(botId);
+    if (!copy) throw new Error('The saved copy cannot be found after it was stored');
+    settled = true;
+    return copy;
+  } finally {
+    // Only a save that is certain it left nothing behind lets go of its row; any other leaves it for the purge to settle once it is stale
+    if (settled) await prisma.savedCopyWrite.deleteMany({ where: { id: write.id } }).catch(() => undefined);
+  }
 }
 
 /** Decrypts what `encryptor` wrote, as it streams. The tag is the last 16 bytes, so it is only known at the end: a copy that was changed or cut short fails there, and the stream errors. */

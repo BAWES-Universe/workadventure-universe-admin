@@ -67,7 +67,7 @@ run('choosing the way by expected cost, in a real database', () => {
     await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
     provider = new FakeComputerProvider();
     setComputerProviderForTests(provider);
-    await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+    await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10, appUseCeilingMicros: 50_000_000, appUseMemberCeilingMicros: 5_000_000 }, 'admin');
   });
   afterAll(async () => {
     await wipe();
@@ -87,6 +87,33 @@ run('choosing the way by expected cost, in a real database', () => {
     expect(started).toEqual({ ok: false, reason: 'cheaper_route', app: 'Notion' });
     expect(await prisma.computerJob.count({ where: { personId: person.id } })).toBe(0);
     expect(woke()).toBe(0);
+  });
+
+  it('sends the job to the computer when the App is the cheaper way but its spending stop would refuse the step: the month\u2019s Limit used up, this person\u2019s own, or no Limit set', async () => {
+    const person = await sara();
+    await connect(person.id, person.brickId);
+    const plan = { app: 'Notion', steps: 3 };
+    // Used up for this person: what they have already used this month is all of their Limit
+    await prisma.meterEvent.create({
+      data: { eventId: `ev-${randomUUID()}`, kind: 'app_use', pool: 'chat', occurredAt: NOW, personKey: `person:${person.id}`, personId: person.id, botId: person.brickId, brick: true, payerKind: 'universe', route: 'app', quantity: BigInt(1), unit: 'call', costMicros: BigInt(5_000_000), basis: 'measured' },
+    });
+    const own = await startJob({ botId: person.brickId, personId: person.id, title: 'Add a page', plan }, NOW);
+    expect(own.ok && own.job.status).toBeTruthy();
+    expect(await prisma.computerJob.count({ where: { personId: person.id } })).toBe(1);
+    await prisma.computerJob.deleteMany({ where: { personId: person.id } });
+    await prisma.meterEvent.deleteMany({});
+    await prisma.meterReservation.deleteMany({});
+    // The whole month used up by others
+    await prisma.meterEvent.create({
+      data: { eventId: `ev-${randomUUID()}`, kind: 'app_use', pool: 'chat', occurredAt: NOW, personKey: 'person:someone-else', botId: person.brickId, brick: true, payerKind: 'universe', route: 'app', quantity: BigInt(1), unit: 'call', costMicros: BigInt(50_000_000), basis: 'measured' },
+    });
+    expect((await startJob({ botId: person.brickId, personId: person.id, title: 'Add a page', plan }, NOW)).ok).toBe(true);
+    await prisma.computerJob.deleteMany({ where: { personId: person.id } });
+    await prisma.meterEvent.deleteMany({});
+    await prisma.meterReservation.deleteMany({});
+    // No Limit set at all: nothing is let through, so nothing is sent to an App
+    await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10, appUseCeilingMicros: null, appUseMemberCeilingMicros: null }, 'admin');
+    expect((await startJob({ botId: person.brickId, personId: person.id, title: 'Add a page', plan }, NOW)).ok).toBe(true);
   });
 
   it('does not weigh an app whose step count was not given (or is not a count): a guess of one step would send every such job away from the computer', async () => {

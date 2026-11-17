@@ -190,7 +190,13 @@ export class FakeComputerProvider implements ComputerProvider {
   /** Every save fails until this is turned off. */
   failSaves = false;
   /** What a command run on the pretend machine answers with, by what it says; a test sets this. Without it every command succeeds with no output. */
-  execAnswer: (command: string) => Partial<ExecResult> | Promise<Partial<ExecResult>> = (command) => (command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {});
+  execAnswer: (command: string) => Partial<ExecResult> | Promise<Partial<ExecResult>> = (command) =>
+    command.startsWith('universe-fence --check')
+      ? { stdout: 'remaining=0\n' }
+      : command.startsWith('universe-visits read')
+        ? // The pretend computer's browser went nowhere: a clean, empty record
+          { stdout: `now=${Date.now()}\nstate=none\nalive=1\nend=1\n` }
+        : {};
   /** Every command is refused (the machine does not answer) while this is on. */
   failExec = false;
   /** The disk of a machine it makes, in bytes; a test sets this (the pretend one bills none). */

@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { RATE_MICROS, tierOf } from '@/lib/composio-rates';
 import { connectedState } from '@/lib/app-connections';
+import { appUseHasRoom } from '@/lib/app-use-cap';
 import { readReadyMadeApps } from '@/lib/app-adapter/settings';
 import { BRICK_SHAPE, awakeMicrosPerMinute as publishedAwakeMicrosPerMinute, keptDiskMonthMicros } from '@/lib/agent37/rates';
 
@@ -118,7 +119,7 @@ export type Routed = { ok: true; route: 'computer'; expectedMicros: number } | {
  * did not say it cannot do the job and gave about how many steps it would take; if it is the cheaper way the job is not started here (`ok: false`, with the app) and the Brick is told to
  * use it. Otherwise the job takes the computer and carries what it was expected to cost.
  */
-export async function routeJob(input: { botId: string; plan?: RoutePlan | null; awakeMicrosPerMinute: number | null; hasMachine: boolean }): Promise<Routed> {
+export async function routeJob(input: { botId: string; personId?: string | null; plan?: RoutePlan | null; awakeMicrosPerMinute: number | null; hasMachine: boolean }): Promise<Routed> {
   const computer = computerQuote({ awakeMicrosPerMinute: input.awakeMicrosPerMinute, hasMachine: input.hasMachine });
   const plan = input.plan;
   // Without a count of steps the app is not weighed (a guess of one step would make it win against any computer): the job takes the computer
@@ -126,7 +127,9 @@ export async function routeJob(input: { botId: string; plan?: RoutePlan | null; 
     const app = await connectedApp(input.botId, plan.app);
     if (app) {
       const best = chooseRoute([appQuote({ app: app.name, steps: plan.steps, stepMicros: app.stepMicros }), computer]);
-      if (best.route === 'app') return { ok: false, app: app.name };
+      // An App whose paid steps the spending stop would refuse (the month's or this person's Limit is used up) is no way at all: the computer does it
+      const stopped = best.route === 'app' && app.stepMicros !== null && app.stepMicros > 0 && !(await appUseHasRoom(input.personId ?? null, app.stepMicros * cleanSteps(plan.steps)));
+      if (best.route === 'app' && !stopped) return { ok: false, app: app.name };
     }
   }
   return { ok: true, route: 'computer', expectedMicros: computer.expectedMicros };

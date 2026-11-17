@@ -72,7 +72,7 @@ describe('what is in the image', () => {
   python('has scripts that are well formed', () => {
     const dir = write();
     for (const name of ['universe-up', 'universe-supervise', 'universe-clean', 'universe-files', 'universe-mark']) expect(spawnSync('sh', ['-n', join(dir, name)]).status).toBe(0);
-    for (const name of ['universe-proxy', 'universe-fence']) {
+    for (const name of ['universe-proxy', 'universe-fence', 'universe-visits']) {
       const compiled = spawnSync('python3', ['-c', `import ast,sys;ast.parse(open(sys.argv[1]).read())`, join(dir, name)]);
       expect(compiled.status).toBe(0);
     }
@@ -348,6 +348,9 @@ BR=$!
 # the computer's own parts: running before the note is written, under any name
 sh -c 'sleep 306' &
 OWN=$!
+# the record of where the browser went, as the real scripts folder holds it (a private overlay, so the real folder is never touched)
+mkdir -p ${dir}/overlay/up ${dir}/overlay/work
+if mount -t overlay overlay -o lowerdir=/usr/local/bin,upperdir=${dir}/overlay/up,workdir=${dir}/overlay/work /usr/local/bin 2>/dev/null && cp ${dir}/universe-visits /usr/local/bin/universe-visits && chown 0:0 /usr/local/bin/universe-visits && chmod 0755 /usr/local/bin/universe-visits; then RECORDER=yes; fi
 sleep 1
 echo "mark: $(sh ${dir}/universe-mark)"
 echo "mark again: $(sh ${dir}/universe-mark)"
@@ -365,6 +368,14 @@ A3=$!
 # the same kind of thing, started after the note: the agent's
 sh -c 'sleep 307' &
 LATE=$!
+# the record's listener started after the note is the computer's own (it waits for a browser that is not there); a copy of it the agent made is not
+if [ -n "$RECORDER" ]; then
+  UNIVERSE_DEVTOOLS_PORT=1 python3 /usr/local/bin/universe-visits run >/dev/null 2>&1 </dev/null &
+  REC=$!
+  cp ${dir}/universe-visits ${dir}/agent/universe-visits && chown 65534:65534 ${dir}/agent/universe-visits
+  UNIVERSE_DEVTOOLS_PORT=1 python3 ${dir}/agent/universe-visits run >/dev/null 2>&1 </dev/null &
+  FAKEREC=$!
+fi
 setsid sleep 301 </dev/null >/dev/null 2>&1 &
 # a short wait is what the computer's own start-up loop runs, and it stops the computer when one is killed: it is never touched
 sleep 9 </dev/null >/dev/null 2>&1 &
@@ -410,6 +421,10 @@ if [ -n "$WIPED" ]; then [ -f ${dir}/agent/wipe.ran ] && echo "wipe-loaded"; kil
 if [ -n "$HIDDEN" ]; then [ -f ${dir}/agent/hide.ran ] && echo "hide-loaded"; kill -0 $HIDDEN 2>/dev/null && echo "hidden-alive" || echo "hidden-dead"; fi
 # a child the browser started after the note, below a part that was running before it, is the browser's own
 pgrep -P $BR -x sleep >/dev/null && echo "late-child-alive" || echo "late-child-dead"
+if [ -n "$RECORDER" ]; then
+  kill -0 $REC 2>/dev/null && echo "recorder-kept" || echo "recorder-gone"
+  kill -0 $FAKEREC 2>/dev/null && echo "copy-by-agent-kept" || echo "copy-by-agent-gone"
+fi
 `;
     const run = spawnSync('unshare', ['--pid', '--fork', '--mount-proc', 'sh', '-c', scenario], { encoding: 'utf8', timeout: 60_000 });
     // Without the note nothing is stopped and nothing is proved; the note is written once per boot
@@ -453,6 +468,12 @@ pgrep -P $BR -x sleep >/dev/null && echo "late-child-alive" || echo "late-child-
     expect(run.stdout).not.toContain('shm-alive');
     // What a desktop part started after the note is kept, even when the part itself was already kept for being older
     expect(run.stdout).toContain('late-child-alive');
+    // The record of where the browser went is one of the computer's own parts, so a take-over does not end it; a copy the agent made does not count.
+    // Without a private overlay to put the real scripts folder in (a kernel without one) it is skipped, so it never passes by accident.
+    if (run.stdout.includes('recorder-kept') || run.stdout.includes('recorder-gone')) {
+      expect(run.stdout).toContain('recorder-kept');
+      expect(run.stdout).toContain('copy-by-agent-gone');
+    }
   });
 });
 

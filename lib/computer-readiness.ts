@@ -4,6 +4,7 @@ import { missingSettings } from '@/lib/meter-values';
 import { isWindingDown } from '@/lib/computer';
 import { reconcileCheck } from '@/lib/computer-reconcile';
 import { coldProvider, coldStatus } from '@/lib/computer-cold';
+import { computersArePaused } from '@/lib/capability-pause';
 
 export interface Readiness {
   /** Every check passed: a person's job can run now. */
@@ -46,5 +47,7 @@ export async function computerReadiness(): Promise<Readiness> {
   }
   const winding = await isWindingDown();
   checks.push({ name: 'wind-down', ok: !winding, detail: winding ? 'A wind-down is on: no computer takes new work' : 'No wind-down is on' });
+  const paused = await computersArePaused();
+  checks.push({ name: 'pause', ok: !paused, detail: paused ? 'Computers are paused: no new job starts until the team resumes them' : 'Computers are not paused' });
   return { ready: checks.every((check) => check.ok), checks };
 }

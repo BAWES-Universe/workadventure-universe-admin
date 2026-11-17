@@ -1,12 +1,7 @@
 import { Agent37Error, Agent37Unreached, type Agent37Client, type Instance } from '@/lib/agent37/client';
-import { Agent37ComputerProvider, Agent37FundsLow, DESKTOP_PORT, EgressNotSetUp, ImageNotReady } from '@/lib/agent37/provider';
-import { networkFor, type EgressConfig } from '@/lib/egress/config';
+import { Agent37ComputerProvider, Agent37FundsLow, BRICK_NETWORK, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
 import type { ImageState } from '@/lib/agent37/image';
 import { awakeMicrosPerMinute, dayOfRunningMicros, BRICK_SHAPE } from '@/lib/agent37/rates';
-
-/** The internet gateways a test computer's rule is built from (documentation addresses: never real). */
-const EGRESS: EgressConfig = { gateways: [{ host: '203.0.113.10', port: 3128 }, { host: '198.51.100.7', port: 3128 }], secret: 'test-secret-test-secret-test-secret' };
-const WANTED = networkFor(EGRESS);
 
 jest.mock('@/lib/agent37/saved-copies', () => ({ savedCopyOf: jest.fn(), storeSavedCopy: jest.fn() }));
 
@@ -18,9 +13,9 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   let healthy = true;
   let execOut: (command: string) => string = () => 'ok';
   let markOut = 'marked=1\n';
-  let applyOut = 'egress=1 hosts=1\n';
-  let checkOut = 'egress=1 gateway=ok direct=blocked\n';
   let revisionAfterUpdate = 2;
+  /** What Agent37 holds as each machine's managed budget: the monthly cap and the remaining one-time credit (a machine not here has both at zero). */
+  const budgets = new Map<string, { cap: number; credit: number }>();
   const refuse: Record<string, Error | undefined> = {};
   const client = {
     async listInstances() {
@@ -84,7 +79,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
     async exec(id: string, command: string, options?: unknown) {
       calls.push(`exec:${id}:${command}`);
       execs.push({ id, command, options });
-      return { exitCode: 0, stdout: command.startsWith('universe-egress apply') ? applyOut : command === 'universe-egress check' ? checkOut : command === 'universe-mark' ? markOut : execOut(command), stderr: '', truncated: false };
+      return { exitCode: 0, stdout: command === 'universe-mark' ? markOut : execOut(command), stderr: '', truncated: false };
     },
     async openTurn(url: string, input: { text: string; sessionId?: string | null }) {
       calls.push(`turn:${url}:${input.text}`);
@@ -123,6 +118,15 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       calls.push(`usage:${day}`);
       return usage;
     },
+    async getBudget(id: string) {
+      calls.push(`budget:${id}`);
+      const b = budgets.get(id) ?? { cap: 0, credit: 0 };
+      return { monthlyCapMicros: b.cap, monthlyRemainingMicros: b.cap, creditRemainingMicros: b.credit };
+    },
+    async setMonthlyCap(id: string, micros: number) {
+      calls.push(`cap:${id}:${micros}`);
+      budgets.set(id, { cap: micros, credit: budgets.get(id)?.credit ?? 0 });
+    },
     async archive(url: string) {
       calls.push(`archive:${url}`);
       return { body: new ReadableStream() } as unknown as Response;
@@ -131,10 +135,10 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }> = [];
   const networks: Array<{ id: string; network: unknown }> = [];
   const usage: { day: string; totalMicros: number; instances: Array<{ id: string; totalMicros: number; computeMicros: number; awakeMinutes: number }> } = { day: '2026-11-15', totalMicros: 0, instances: [] };
-  return { client: client as unknown as Agent37Client, instances, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value), setApply: (value: string) => (applyOut = value), setCheck: (value: string) => (checkOut = value) };
+  return { client: client as unknown as Agent37Client, instances, budgets, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
 }
 
-function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number }; egress?: EgressConfig | null } = {}) {
+function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
   const clock = extra.clock ?? { t: 1_000_000 };
   return new Agent37ComputerProvider({
     client: w.client,
@@ -145,8 +149,6 @@ function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<Im
     now: () => clock.t,
     copies: extra.copies,
     image: extra.image,
-    egress: () => (extra.egress === undefined ? EGRESS : extra.egress),
-    providerNames: async () => ['api.openai.com'],
   });
 }
 
@@ -161,18 +163,11 @@ describe('the Agent37 provider', () => {
     expect(w.created[0].auto_sleep).toBe(true);
   });
 
-  it('makes a machine whose network rule is the gateways and nothing else (never allow-all)', async () => {
+  it('makes a machine with the network rule written down: the public web, never a private range', async () => {
     const w = world();
     await provider(w).create('bot-1');
-    expect(w.created[0].network).toEqual(WANTED);
-    expect(WANTED).toEqual({ allow: ['203.0.113.10', '198.51.100.7'] });
-  });
-
-  it('makes no machine without a gateway (it fails closed) and spends nothing on the way', async () => {
-    const w = world();
-    await expect(provider(w, { egress: null }).create('bot-1')).rejects.toBeInstanceOf(EgressNotSetUp);
-    expect(w.calls).not.toContain('create');
-    expect(w.calls).not.toContain('billing');
+    expect(w.created[0].network).toBe(BRICK_NETWORK);
+    expect(BRICK_NETWORK).toBe('allow-all');
   });
 
   it('adopts the machine a Brick already has instead of making a second one', async () => {
@@ -231,7 +226,8 @@ describe('the Agent37 provider', () => {
       expect(checks['agent37 key'].ok).toBe(true);
       expect(checks['agent37 wallet'].ok).toBe(true);
       expect(checks['computer image']).toMatchObject({ ok: true });
-      expect(w.calls.filter((call) => call !== 'billing')).toEqual([]);
+      // It only looks (the wallet, the list of machines, their budgets): nothing is made, woken or changed
+      expect(w.calls.filter((call) => call !== 'billing' && call !== 'list' && !call.startsWith('budget:'))).toEqual([]);
     });
 
     it('says a wallet that cannot carry a job, an overdrawn one, and a key that was refused, and never shows the key', async () => {
@@ -351,6 +347,8 @@ describe('the Agent37 provider', () => {
     await p.create('bot-2');
     // A second machine made for bot-1 whose answer was lost, so it was never written down
     w.instances.set('stray', { id: 'stray', status: 'sleeping', url: 'https://stray.agent37.app', metadata: { creation_id: 'brick:bot-1' }, region: 'us' } as Instance);
+    // And one that failed to come up: it is still there at the provider, so it goes too
+    w.instances.set('broken', { id: 'broken', status: 'failed', url: '', metadata: { creation_id: 'brick:bot-1' }, region: 'us' } as Instance);
     await p.removeAllFor('bot-1');
     expect([...w.instances.keys()]).toEqual(['m2']);
     // Nothing made for it: nothing to do, and no error
@@ -561,9 +559,8 @@ describe('getting a machine ready for a job', () => {
     w.setExec(() => 'ready=1 restart=0\n');
     await expect(p.ready('m1')).resolves.toBeUndefined();
     // The note the take-over fence tells the agent's processes by is written last, as root
-    // The gateway settings go first and the proof that the way out is the gateway comes before the mark; the note for the fence is last, as root
-    expect(w.execs.map((entry) => entry.command.split(' ')[0] + (entry.command.startsWith('universe-egress') ? ` ${entry.command.split(' ')[1]}` : ''))).toEqual(['universe-egress apply', 'universe-up', 'universe-egress check', 'universe-mark']);
-    expect(w.execs[3].options).toMatchObject({ user: 'root' });
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-mark']);
+    expect(w.execs[1].options).toMatchObject({ user: 'root' });
     expect(w.calls.filter((call) => call.startsWith('stop:'))).toEqual([]);
   });
 
@@ -572,14 +569,14 @@ describe('getting a machine ready for a job', () => {
       const w = world();
       const p = provider(w);
       await p.create('bot-1');
-      w.instances.get('m1')!.network = 'allow-all';
+      w.instances.get('m1')!.network = 'deny-all';
       w.setExec(() => 'ready=1 restart=0\n');
       await p.ready('m1');
-      expect(w.networks).toEqual([{ id: 'm1', network: WANTED }]);
+      expect(w.networks).toEqual([{ id: 'm1', network: BRICK_NETWORK }]);
       expect(w.calls.indexOf('network:m1')).toBeLessThan(w.calls.indexOf('exec:m1:universe-up'));
     });
 
-    it('sets it when Agent37 does not say what the rule is, and leaves it when it already is the one we want (a bare address is kept as /32)', async () => {
+    it('sets it when Agent37 does not say what the rule is, and leaves it when it already is the one we want', async () => {
       const w = world();
       const p = provider(w);
       await p.create('bot-1');
@@ -587,7 +584,7 @@ describe('getting a machine ready for a job', () => {
       delete w.instances.get('m1')!.network;
       await p.ready('m1');
       expect(w.networks).toHaveLength(1);
-      w.instances.get('m1')!.network = { allow: ['203.0.113.10/32', '198.51.100.7/32'] } as never;
+      w.instances.get('m1')!.network = BRICK_NETWORK;
       await p.ready('m1');
       expect(w.networks).toHaveLength(1);
     });
@@ -601,62 +598,6 @@ describe('getting a machine ready for a job', () => {
       w.refuse.network = new Agent37Error(400, 'invalid_request', 'no');
       await expect(p.ready('m1')).rejects.toThrow('network rule');
       expect(w.execs).toEqual([]);
-    });
-
-    it('puts the gateways and this computer’s own key on it as root, with the names to keep out as an extra layer, before anything starts', async () => {
-      const w = world();
-      const p = provider(w);
-      await p.create('bot-1');
-      w.setExec(() => 'ready=1 restart=0\n');
-      await p.ready('m1');
-      const apply = w.execs[0];
-      expect(apply.command).toMatch(/^universe-egress apply /);
-      expect(apply.options).toMatchObject({ user: 'root' });
-      expect(apply.command).toContain('203.0.113.10:3128');
-      expect(apply.command).toContain('198.51.100.7:3128');
-      expect(apply.command).toContain('"user":"m1"');
-      expect(apply.command).toContain('composio.dev');
-      expect(apply.command).toContain('api.openai.com');
-      // The secret itself never travels: only a key made for this computer
-      expect(apply.command).not.toContain(EGRESS.secret);
-    });
-
-    it('is not ready when the gateway settings cannot be put in place', async () => {
-      const w = world();
-      const p = provider(w);
-      await p.create('bot-1');
-      w.setApply('egress=0 reason=write\n');
-      await expect(p.ready('m1')).rejects.toThrow('gateway settings could not be put in place: write');
-      expect(w.execs.map((entry) => entry.command)).toHaveLength(1);
-    });
-
-    it('is not ready when the computer can still reach the internet directly, or the gateway refuses its key', async () => {
-      const w = world();
-      const p = provider(w);
-      await p.create('bot-1');
-      w.setExec(() => 'ready=1 restart=0\n');
-      w.setCheck('egress=0 reason=direct_reachable\n');
-      await expect(p.ready('m1')).rejects.toThrow('direct_reachable');
-      w.setCheck('egress=0 reason=key_refused\n');
-      await expect(p.ready('m1')).rejects.toThrow('key_refused');
-    });
-
-    it('waits for a rule that was just changed to reach the computer (it takes up to two minutes), and not otherwise', async () => {
-      const w = world();
-      const p = provider(w);
-      await p.create('bot-1');
-      w.setExec(() => 'ready=1 restart=0\n');
-      delete w.instances.get('m1')!.network;
-      const checks = ['egress=0 reason=direct_reachable\n', 'egress=0 reason=direct_reachable\n', 'egress=1 gateway=ok direct=blocked\n'];
-      w.setCheck(checks[0]);
-      let asked = 0;
-      const original = w.client.exec.bind(w.client);
-      (w.client as unknown as { exec: typeof original }).exec = async (id, command, options) => {
-        if (command === 'universe-egress check') w.setCheck(checks[Math.min(asked++, checks.length - 1)]);
-        return original(id, command, options);
-      };
-      await expect(p.ready('m1')).resolves.toBeUndefined();
-      expect(asked).toBe(3);
     });
   });
 
@@ -679,7 +620,7 @@ describe('getting a machine ready for a job', () => {
     w.setExec(() => (++runs === 1 ? 'ready=1 restart=1\n' : 'ready=1 restart=0\n'));
     await p.ready('m1');
     // The note is written once, after the restart (a note from before it would be for the old boot)
-    expect(w.execs.map((entry) => entry.command).filter((command) => !command.startsWith('universe-egress'))).toEqual(['universe-up', 'universe-up', 'universe-mark']);
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-mark']);
     expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
   });
 
@@ -716,7 +657,7 @@ describe('getting a machine ready for a job', () => {
     let runs = 0;
     w.setExec(() => (++runs === 1 ? 'ready=0 reason=browser\n' : 'ready=1 restart=0\n'));
     await expect(p.ready('m1')).resolves.toBeUndefined();
-    expect(w.execs.map((entry) => entry.command).filter((command) => !command.startsWith('universe-egress'))).toEqual(['universe-up', 'universe-up', 'universe-mark']);
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-mark']);
   });
 
   it('asks again once after the restart too, when the browser is still starting then', async () => {
@@ -726,7 +667,7 @@ describe('getting a machine ready for a job', () => {
     let runs = 0;
     w.setExec(() => ['ready=1 restart=1\n', 'ready=0 reason=browser\n', 'ready=1 restart=0\n'][Math.min(runs++, 2)]);
     await expect(p.ready('m1')).resolves.toBeUndefined();
-    expect(w.execs.map((entry) => entry.command).filter((command) => !command.startsWith('universe-egress'))).toEqual(['universe-up', 'universe-up', 'universe-up', 'universe-mark']);
+    expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-up', 'universe-up', 'universe-mark']);
     expect(w.calls.filter((call) => call.startsWith('stop:') || call.startsWith('start:'))).toEqual(['stop:m1', 'start:m1']);
   });
 
@@ -780,23 +721,21 @@ describe('cold storage operations on a computer', () => {
     await expect(p.prepack('m1')).rejects.toThrow('not whole');
   });
 
-  it('makes a throwaway computer with the gateways as its only way out, named so it is never mistaken for a Brick’s, and fails closed without a gateway', async () => {
+  it('makes a throwaway computer with the same network rule and a closed budget, named so it is never mistaken for a Brick’s', async () => {
     const w = world();
     const info = await provider(w).makeScratch();
     expect(info.ref).toBe('m1');
     const made = w.created[0];
     expect(made.metadata?.creation_id).toMatch(/^scratch:/);
     expect(Number(made.metadata?.made_at)).toBeGreaterThan(0);
-    expect(made.network).toEqual(WANTED);
+    expect(made.network).toBe(BRICK_NETWORK);
+    expect(made.budget).toEqual({ monthly_cap_micros: 0, credit_micros: 0 });
     // A Brick's own lookup never finds it
     const brick = await provider(w).create('bot-1');
     expect(brick.ref).not.toBe('m1');
-    const none = world();
-    await expect(provider(none, { egress: null }).makeScratch()).rejects.toBeInstanceOf(EgressNotSetUp);
-    expect(none.calls).not.toContain('create');
   });
 
-  it('restores a copy: the gateway settings first, then the fetch and check, then the finish as root', async () => {
+  it('restores a copy: the machine put in order first, then the fetch and check, then the finish as root', async () => {
     const w = world();
     const p = provider(w);
     await p.create('bot-1');
@@ -804,12 +743,14 @@ describe('cold storage operations on a computer', () => {
     const result = await p.restoreInto('m1', source);
     expect(result).toMatchObject({ ok: true, reason: null });
     const commands = w.execs.map((entry) => entry.command);
-    expect(commands[0]).toMatch(/^universe-egress apply /);
-    expect(commands[1]).toMatch(/^universe-cold restore <<'RESTORE_JSON'/);
-    expect(commands[1]).toContain(source.url);
-    expect(commands[1]).toContain(source.sha256);
-    expect(commands[2]).toBe('universe-cold finish');
-    expect(w.execs[2].options).toMatchObject({ user: 'root' });
+    expect(commands[0]).toMatch(/^universe-cold restore <<'RESTORE_JSON'/);
+    expect(commands[0]).toContain(source.url);
+    expect(commands[0]).toContain(source.sha256);
+    expect(commands[1]).toBe('universe-cold finish');
+    expect(w.execs[1].options).toMatchObject({ user: 'root' });
+    // Its budget was read before anything was put on it
+    expect(w.calls.indexOf('budget:m1')).toBeGreaterThanOrEqual(0);
+    expect(w.calls.indexOf('budget:m1')).toBeLessThan(w.calls.indexOf(`exec:m1:${commands[0]}`));
   });
 
   it('says why a restore did not check out, in a word, and does not go on to the finish', async () => {
@@ -849,3 +790,83 @@ describe('cold storage operations on a computer', () => {
   });
 });
 
+describe('Agent37 managed spending stays shut (monthly cap AND one-time credit)', () => {
+  const open = (w: ReturnType<typeof world>, id: string, cap: number, credit: number) => w.budgets.set(id, { cap, credit });
+
+  it('reads both parts of a new machine’s budget when it is made, and again when it is made ready', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    expect(w.created[0].budget).toEqual({ monthly_cap_micros: 0, credit_micros: 0 });
+    expect(w.calls.filter((call) => call === 'budget:m1')).toHaveLength(1);
+    w.setExec(() => 'ready=1 restart=0\n');
+    await p.ready('m1');
+    expect(w.calls.filter((call) => call === 'budget:m1')).toHaveLength(2);
+  });
+
+  it('sets a monthly cap that is not zero back to zero (and reads it again) before handing the machine on', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    open(w, 'm1', 5_000_000, 0);
+    w.setExec(() => 'ready=1 restart=0\n');
+    await expect(p.ready('m1')).resolves.toBeUndefined();
+    expect(w.calls).toContain('cap:m1:0');
+    expect(w.budgets.get('m1')).toEqual({ cap: 0, credit: 0 });
+  });
+
+  it('does not hand over a machine that still holds one-time credit: a $0 cap alone leaves it spendable, and the credit is never spent down', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    open(w, 'm1', 0, 2_000_000);
+    w.setExec(() => 'ready=1 restart=0\n');
+    await expect(p.ready('m1')).rejects.toThrow('managed budget is not zero');
+    expect(w.execs).toEqual([]);
+    // Nothing was done to the credit: no top-up, no cap raised
+    expect(w.calls.filter((call) => call.startsWith('cap:') && !call.endsWith(':0'))).toEqual([]);
+    expect(w.budgets.get('m1')).toEqual({ cap: 0, credit: 2_000_000 });
+  });
+
+  it('checks the budget of a machine it adopts (one nobody wrote down may have been topped up) and refuses it when credit is left', async () => {
+    const w = world();
+    w.instances.set('old1', { id: 'old1', status: 'running', url: 'https://old1.agent37.app', metadata: { creation_id: 'brick:bot-1' }, region: 'us' } as Instance);
+    open(w, 'old1', 0, 1_000);
+    await expect(provider(w).create('bot-1')).rejects.toThrow('managed budget is not zero');
+    open(w, 'old1', 0, 0);
+    await expect(provider(w).create('bot-1')).resolves.toMatchObject({ ref: 'old1' });
+  });
+
+  it('checks the budget of a machine a copy is restored onto, before anything is put on it, and of a throwaway one', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    open(w, 'm1', 0, 500);
+    await expect(p.restoreInto('m1', { url: 'https://orbit.example/d', token: 't', sha256: 'a'.repeat(64) })).rejects.toThrow('managed budget is not zero');
+    expect(w.execs).toEqual([]);
+    const scratch = world();
+    const q = provider(scratch);
+    await q.makeScratch();
+    expect(scratch.calls).toContain('budget:m1');
+  });
+
+  it('says in the checkup how many machines still have budget, and that the broker is what guards paid actions', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    const named = (checks: Array<{ name: string; ok: boolean; detail: string }>) => Object.fromEntries(checks.map((check) => [check.name, check]));
+    expect(named(await p.checkup())['agent37 managed budget']).toMatchObject({ ok: true });
+    open(w, 'm1', 0, 700);
+    expect(named(await p.checkup())['agent37 managed budget']).toMatchObject({ ok: false });
+    const broker = named(await p.checkup())['orbit broker'];
+    expect(broker.detail).toMatch(/Orbit/);
+  });
+
+  it('keeps the open internet: a machine is made with allow-all and nothing about a gateway', async () => {
+    const w = world();
+    await provider(w).create('bot-1');
+    expect(w.created[0].network).toBe(BRICK_NETWORK);
+    expect(BRICK_NETWORK).toBe('allow-all');
+    expect(JSON.stringify(w.created[0])).not.toMatch(/gateway|proxy|3128/);
+  });
+});

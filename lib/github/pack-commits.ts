@@ -14,6 +14,8 @@ import { inflateSync } from 'zlib';
 /** A push to an existing branch is only checked up to this size (after unzipping); a bigger one goes to a new branch. */
 export const VERIFY_MAX_BYTES = 32 * 1024 * 1024;
 const MAX_OBJECTS = 200_000;
+/** The most bytes a pack may unzip to and rebuild from deltas, all objects together: a small pack of deltas on one big base can ask for terabytes. */
+const MAX_TOTAL_BYTES = 2 * VERIFY_MAX_BYTES;
 const HEX40 = /^[0-9a-f]{40}$/;
 
 const TYPE_NAMES: Record<number, string> = { 1: 'commit', 2: 'tree', 3: 'blob', 4: 'tag' };
@@ -27,12 +29,17 @@ interface Entry {
   data: Buffer;
   /** The object once its delta is applied. */
   done?: { type: number; data: Buffer };
+  /** The object's id, once it is done. */
+  id?: string;
 }
 
 const idOf = (type: number, data: Buffer): string => createHash('sha1').update(`${TYPE_NAMES[type]} ${data.length}\0`).update(data).digest('hex');
 
-/** Applies a git delta to its base; null when the delta is not well formed. */
-export function applyDelta(base: Buffer, delta: Buffer): Buffer | null {
+/**
+ * Applies a git delta to its base; null when the delta is not well formed. `charge` is told the size the delta says it will rebuild, before
+ * anything is allocated, and answers false to refuse it (the caller's budget for the whole pack): a delta that goes on to fail still spent it.
+ */
+export function applyDelta(base: Buffer, delta: Buffer, charge?: (resultSize: number) => boolean): Buffer | null {
   let at = 0;
   const size = (): number | null => {
     let value = 0;
@@ -49,6 +56,7 @@ export function applyDelta(base: Buffer, delta: Buffer): Buffer | null {
   const baseSize = size();
   const resultSize = size();
   if (baseSize === null || resultSize === null || baseSize !== base.length || resultSize > VERIFY_MAX_BYTES) return null;
+  if (charge && !charge(resultSize)) return null;
   const out = Buffer.alloc(resultSize);
   let written = 0;
   while (at < delta.length) {
@@ -83,6 +91,7 @@ export function readPackCommits(pack: Buffer): Map<string, string[]> | null {
   const entries: Entry[] = [];
   const byOffset = new Map<number, Entry>();
   let at = 12;
+  let total = 0;
   try {
     for (let n = 0; n < count; n++) {
       const offset = at;
@@ -117,6 +126,8 @@ export function readPackCommits(pack: Buffer): Map<string, string[]> | null {
         return null;
       }
       if (size > VERIFY_MAX_BYTES) return null;
+      total += size;
+      if (total > MAX_TOTAL_BYTES) return null;
       const inflated = inflateSync(pack.subarray(at), { info: true, maxOutputLength: Math.max(size, 1) }) as unknown as { buffer: Buffer; engine: { bytesWritten: number } };
       if (inflated.buffer.length !== size) return null;
       at += inflated.engine.bytesWritten;
@@ -128,25 +139,50 @@ export function readPackCommits(pack: Buffer): Map<string, string[]> | null {
     return null;
   }
 
-  // Deltas are put together from their bases, which may themselves be deltas: until nothing more resolves
-  const byId = new Map<string, { type: number; data: Buffer }>();
+  // Deltas are put together from their bases, which may themselves be deltas. Each delta waits on its base (by offset or by id) and is put together
+  // once, when that base is done: one pass over the entries however the chains run, never a pass over everything for each one settled
+  const waitingOnOffset = new Map<number, Entry[]>();
+  const waitingOnId = new Map<string, Entry[]>();
+  const queue: Entry[] = [];
   const settle = (entry: Entry, object: { type: number; data: Buffer }) => {
     entry.done = object;
-    byId.set(idOf(object.type, object.data), object);
+    entry.id = idOf(object.type, object.data);
+    queue.push(entry);
   };
+  // One list for each base, made once and added to: a copy of the list for every delta waiting on the same base is quadratic
+  const wait = <K,>(map: Map<K, Entry[]>, key: K, entry: Entry) => {
+    const list = map.get(key);
+    if (list) list.push(entry);
+    else map.set(key, [entry]);
+  };
+  for (const entry of entries) {
+    if (entry.type <= 4) continue;
+    if (entry.baseOffset !== undefined) wait(waitingOnOffset, entry.baseOffset, entry);
+    else if (entry.baseId !== undefined) wait(waitingOnId, entry.baseId, entry);
+  }
   for (const entry of entries) if (entry.type <= 4) settle(entry, { type: entry.type, data: entry.data });
-  let pending = entries.filter((entry) => !entry.done);
-  while (pending.length > 0) {
-    const before = pending.length;
-    pending = pending.filter((entry) => {
-      const base = entry.baseOffset !== undefined ? byOffset.get(entry.baseOffset)?.done : byId.get(entry.baseId ?? '');
-      if (!base) return true;
-      const data = applyDelta(base.data, entry.data);
-      if (!data) return true;
-      settle(entry, { type: base.type, data });
-      return false;
-    });
-    if (pending.length === before) break;
+  // What every delta says it will rebuild is charged before it is built, whether it then applies or not
+  let rebuilt = 0;
+  let over = false;
+  const charge = (resultSize: number) => {
+    rebuilt += resultSize;
+    if (rebuilt > MAX_TOTAL_BYTES) over = true;
+    return !over;
+  };
+  while (queue.length > 0) {
+    const base = queue.pop() as Entry;
+    const object = base.done as { type: number; data: Buffer };
+    const dependents = [...(waitingOnOffset.get(base.offset) ?? []), ...(waitingOnId.get(base.id as string) ?? [])];
+    waitingOnOffset.delete(base.offset);
+    waitingOnId.delete(base.id as string);
+    for (const entry of dependents) {
+      if (entry.done) continue;
+      const data = applyDelta(object.data, entry.data, charge);
+      if (over) return null;
+      // A delta that does not apply stays unread, as before
+      if (!data) continue;
+      settle(entry, { type: object.type, data });
+    }
   }
   // What is still a delta of something outside the pack (a thin pack leans on what the branch already has) cannot be read, and is left
   // out: if it was a commit the line of history through it is not seen, and `buildsOn` then does not prove the push. Nothing is guessed.
@@ -155,10 +191,17 @@ export function readPackCommits(pack: Buffer): Map<string, string[]> | null {
   for (const entry of entries) {
     const object = entry.done;
     if (!object || object.type !== 1) continue;
-    const text = object.data.toString('utf8');
-    const head = text.split('\n\n', 1)[0];
-    const parents = [...head.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((match) => match[1]);
-    commits.set(idOf(1, object.data), parents);
+    // Read as git reads a commit: `tree` first, then the `parent` lines directly after it. A "parent" line further down (after author or committer,
+    // or in the message) is not a parent, so it can neither hide the real history nor make the push look like it builds on the branch
+    const lines = object.data.toString('utf8').split('\n\n', 1)[0].split('\n');
+    if (!/^tree [0-9a-f]{40}$/.test(lines[0] ?? '')) continue;
+    const parents: string[] = [];
+    for (let i = 1; i < lines.length; i++) {
+      const parent = /^parent ([0-9a-f]{40})$/.exec(lines[i]);
+      if (!parent) break;
+      parents.push(parent[1]);
+    }
+    commits.set(entry.id as string, parents);
   }
   return commits;
 }
