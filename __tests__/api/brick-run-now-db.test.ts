@@ -139,6 +139,40 @@ run('Run now and snooze, in a real database', () => {
       expect(mine(await claimDueRuns(at(5 * HOUR + MIN)), reminder.id)).toMatchObject([{ manual: false, dueAt: iso(5 * HOUR) }]);
     });
 
+    it('one run of an item at a time: a scheduled run waits while the run the owner asked for is running, and then comes once, never a backlog', async () => {
+      const eli = await person('eli');
+      const reminder = await set(eli, { words: 'Stretch', cadence: { type: 'once', at: at(15 * MIN).toISOString() } });
+      await tap(eli, reminder.id, 'run', at(10 * MIN));
+      const [manual] = mine(await claimDueRuns(at(11 * MIN)), reminder.id);
+      expect(manual).toMatchObject({ manual: true, leaseUntil: iso(21 * MIN) });
+      // It falls due while the extra run is still running: it is not started beside it, and it stays due
+      expect(mine(await claimDueRuns(at(16 * MIN)), reminder.id)).toEqual([]);
+      expect(mine(await claimDueRuns(at(17 * MIN)), reminder.id)).toEqual([]);
+      expect(await row(reminder.id)).toMatchObject({ state: 'on', nextDueAt: at(15 * MIN) });
+      expect(await runsOf(reminder.id)).toHaveLength(1);
+      // The extra run is reported: the scheduled one comes, once
+      await finishRun(manual.runId, { attempt: 1, state: 'done', outcome: 'spoke' }, at(18 * MIN));
+      const scheduled = mine(await claimDueRuns(at(19 * MIN)), reminder.id);
+      expect(scheduled).toMatchObject([{ manual: false, dueAt: iso(15 * MIN) }]);
+      expect(mine(await claimDueRuns(at(20 * MIN)), reminder.id)).toEqual([]);
+      expect(await runsOf(reminder.id)).toHaveLength(2);
+    });
+
+    it('one run of an item at a time: a run the owner asked for waits for a scheduled run that is running, and is then handed out, or dropped when it was not taken up in time', async () => {
+      const fay = await person('fay');
+      const reminder = await set(fay, { kind: 'schedule', words: 'Drink water', cadence: hourly });
+      const asked = await tap(fay, reminder.id, 'run', at(10 * MIN));
+      if (!asked.ok) throw new Error('expected the run to be asked for');
+      // A scheduled run of this item is running (made by the claim a moment before this ask)
+      const item = await row(reminder.id);
+      const going = await prisma.brickItemRun.create({ data: { itemId: reminder.id, dueAt: at(9 * MIN), revision: item.revision, claimedAt: at(10 * MIN), leaseUntil: at(20 * MIN) } });
+      expect(mine(await claimDueRuns(at(12 * MIN)), reminder.id)).toEqual([]);
+      expect((await prisma.brickItemRun.findUniqueOrThrow({ where: { id: asked.run!.runId } })).state).toBe('queued');
+      // That run is reported: the one that was asked for is handed out
+      await finishRun(going.id, { attempt: 1, state: 'done', outcome: 'spoke' }, at(13 * MIN));
+      expect(mine(await claimDueRuns(at(14 * MIN)), reminder.id)).toMatchObject([{ runId: asked.run!.runId, manual: true }]);
+    });
+
     it('does not end a one-off, and does not undo a pause: the item the owner paused can be run now and stays paused, for as long as that is its only pause', async () => {
       const dev = await person('dev');
       const once = await set(dev, { words: 'Call mum', cadence: { type: 'once', at: at(2 * HOUR).toISOString() } });

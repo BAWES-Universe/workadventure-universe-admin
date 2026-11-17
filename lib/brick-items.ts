@@ -907,7 +907,11 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
         // Only while the item is the one that was asked: a pause, a change or a delete since the tap stops it
         if (!item || item.revision !== run.revision || !manualMayRun(item)) return drop('It changed before it ran');
         if (now.getTime() - run.claimedAt.getTime() > LATE_GRACE) return drop('It was not taken up in time');
-        const bot = await tx.bot.findUnique({ where: { id: item.botId }, select: { enabled: true, deletedAt: true, roomId: true, ownerId: true, aiProviderRef: true } });
+        // One run of an item at a time: a scheduled run of this item that is still running (it fell due after the tap) goes first. This one stays
+        // queued and is handed out by a later ask once that run is over, or dropped as not taken up in time.
+        const running = await tx.brickItemRun.findFirst({ where: { itemId, id: { not: id }, state: 'claimed', leaseUntil: { gt: now } }, select: { id: true } });
+        if (running) return null;
+        const bot =await tx.bot.findUnique({ where: { id: item.botId }, select: { enabled: true, deletedAt: true, roomId: true, ownerId: true, aiProviderRef: true } });
         if (!bot?.enabled || bot.deletedAt || bot.roomId !== null || bot.ownerId !== item.ownerId) return drop('Its Brick is switched off');
         let onUniverse = false;
         if (item.kind !== 'reminder') {
@@ -989,6 +993,10 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
             ${ofKinds}
           FOR UPDATE OF i SKIP LOCKED`);
         if (!locked.length) return null;
+        // One run of an item at a time: while a run the owner asked for (Run now) is still running, the scheduled one waits. The item stays due
+        // and is claimed by the next ask once that run is reported or its lease is over, as one catch-up run and never a backlog.
+        const manualRunning = await tx.brickItemRun.findFirst({ where: { itemId: id, manual: true, state: 'claimed', leaseUntil: { gt: now } }, select: { id: true } });
+        if (manualRunning) return null;
         const item = await tx.brickItem.findUniqueOrThrow({ where: { id } });
         const dueAt = item.nextDueAt!;
         const cadence = readCadence(item.cadence);
