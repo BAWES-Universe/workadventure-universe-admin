@@ -265,6 +265,28 @@ run('purging a deleted Brick, in a real database', () => {
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ machinePending: false, copyPending: false, doneAt: expect.any(Date), providerRef: null });
     });
 
+    it('is not done while the books cannot say that nothing is kept any more: the provider side is already finished, and the next try writes the line', async () => {
+      const sara = await person('sara');
+      provider.disk = 4_000_000_000;
+      const brick = await fullBrick(sara, 'Books last Brick', { computer: true });
+      await deleteBrick(brick.id, sara.id, NOW);
+      (meter.recordMeterEvent as jest.Mock).mockRejectedValue(new Error('The books are down'));
+      try {
+        expect(await removeGoneBricks(later(8), sara.id)).toEqual([brick.id]);
+      } finally {
+        (meter.recordMeterEvent as jest.Mock).mockImplementation(actualRecord);
+      }
+      const note = await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } });
+      expect(note).toMatchObject({ machinePending: false, copyPending: false, doneAt: null, attempts: 1 });
+      const newest = async () => Number((await prisma.meterEvent.findFirstOrThrow({ where: { botId: brick.id, kind: 'stored_bytes' }, orderBy: [{ occurredAt: 'desc' }, { recordedAt: 'desc' }] })).quantity);
+      expect(await newest()).toBeGreaterThan(0);
+      await removeGoneBricks(note.nextTryAt);
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ doneAt: expect.any(Date) });
+      expect(await newest()).toBe(0);
+      // The machine was not asked to go a second time
+      expect(provider.calls.filter((call) => call.name === 'remove')).toHaveLength(1);
+    });
+
     it('does not lose the machine when the server has no provider for it right now: the note stays, and a later server with the provider finishes it', async () => {
       const sara = await person('sara');
       const brick = await fullBrick(sara, 'Offline Brick', { computer: true });

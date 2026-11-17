@@ -110,10 +110,7 @@ export interface Outside {
 export async function finishOutside(botId: string, now: Date = new Date()): Promise<Outside> {
   const note = await prisma.brickPurge.findUnique({ where: { botId } });
   if (!note) return { done: true, left: [] };
-  if (!note.machinePending && !note.copyPending) {
-    if (!note.doneAt) await prisma.brickPurge.update({ where: { botId }, data: { doneAt: now, providerRef: null } });
-    return { done: true, left: [] };
-  }
+  if (!note.machinePending && !note.copyPending && note.doneAt) return { done: true, left: [] };
   const provider = providerFor({ provider: note.provider ?? 'none' });
   const left: string[] = [];
   let machineGone = !note.machinePending;
@@ -146,8 +143,12 @@ export async function finishOutside(botId: string, now: Date = new Date()): Prom
     }
   }
   // What is kept stops being counted in the books only when everything kept is confirmed gone: a machine still at its provider is still billed
-  const finished = machineGone && copyGone;
-  if (finished) await recordKeptBytes({ botId, reason: 'gone', machineBytes: null, copyBytes: 0, ownerId: note.ownerId });
+  // Done only when the books also say nothing is kept any more: a line that could not be written is tried again with the rest, never dropped
+  let finished = machineGone && copyGone;
+  if (finished && !(await recordKeptBytes({ botId, reason: 'gone', machineBytes: null, copyBytes: 0, ownerId: note.ownerId }))) {
+    finished = false;
+    left.push('books');
+  }
   const attempts = note.attempts + 1;
   await prisma.brickPurge.update({
     where: { botId },
