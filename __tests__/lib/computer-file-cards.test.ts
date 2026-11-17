@@ -105,7 +105,7 @@ describe('reading a file off a machine', () => {
   const commands: string[] = [];
   // The machine: every command runs in a real shell with this folder as its home folder
   const machine = {
-    async exec(_ref: string, command: string) {
+    async exec(_ref: string, command: string, _options?: { timeoutMs?: number }) {
       commands.push(command);
       try {
         const { stdout } = await run('sh', ['-c', command], { env: { ...process.env, HOME: home }, maxBuffer: 5_000_000 });
