@@ -60,11 +60,17 @@ interface Pretend {
   connections: number;
   /** What to say once the listener has attached to the page (and let it go), through a socket. */
   script: (say: (message: unknown) => void) => void;
+  /** Keeps the first connection open after the page has done its things (a browser that is still there). */
+  hold: boolean;
+  /** The page has done its things. */
+  done: Promise<void>;
   close: () => void;
 }
 
-async function pretendBrowser(script: Pretend['script']): Promise<Pretend> {
-  const pretend = { sockets: [], connections: 0, script } as unknown as Pretend;
+async function pretendBrowser(script: Pretend['script'], hold = false): Promise<Pretend> {
+  const pretend = { sockets: [], connections: 0, script, hold } as unknown as Pretend;
+  let finish: () => void = () => undefined;
+  pretend.done = new Promise<void>((resolve) => (finish = resolve));
   pretend.server = createServer((req, res) => {
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ webSocketDebuggerUrl: `ws://127.0.0.1:${pretend.port}/devtools/browser/abc` }));
@@ -89,7 +95,8 @@ async function pretendBrowser(script: Pretend['script']): Promise<Pretend> {
         // The listener lets the page go last, so everything it asked for is in place: the pretend page now does its things
         if (message.method === 'Runtime.runIfWaitingForDebugger' && message.sessionId === 'S-PAGE' && first) {
           pretend.script(say);
-          setTimeout(() => socket.end(), 300);
+          finish();
+          if (!pretend.hold) setTimeout(() => socket.end(), 300);
         }
       }
     });
@@ -185,6 +192,30 @@ describe('the record of where the browser went (the listener on the computer)', 
     }
   }, 30_000);
 
+  python('puts the last seconds before a read in the read, while the browser is still connected', async () => {
+    const home = mkdtempSync(join(folder, 'home-'));
+    const pretend = await pretendBrowser((say) => {
+      say({ method: 'Page.frameNavigated', sessionId: 'S-PAGE', params: { frame: { id: 'F1', url: 'https://last.example/just-now' } } });
+      say({ method: 'Network.requestWillBeSent', sessionId: 'S-PAGE', params: { type: 'Document', request: { url: 'https://last.example/send?x=1', method: 'POST' } } });
+    }, true);
+    try {
+      listener = spawn('python3', [script, 'run'], { env: { ...process.env, HOME: home, UNIVERSE_DEVTOOLS_PORT: String(pretend.port) }, stdio: 'ignore' });
+      await pretend.done;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Not yet 3 seconds quiet, so the listener still holds the last line in memory; the read asks it to write it out first
+      const back = parseReadBack(readBack(home));
+      expect(back.alive).toBe(true);
+      expect(back.lines.filter((line): line is VisitLine => line.kind === 'visit' || line.kind === 'post').map((line) => [line.kind, line.path])).toEqual([
+        ['visit', '/just-now'],
+        ['post', '/send'],
+      ]);
+      // and the listener goes on: a second read finds the same, not twice
+      expect(parseReadBack(readBack(home)).lines.filter((line) => line.kind === 'post')).toHaveLength(1);
+    } finally {
+      pretend.close();
+    }
+  }, 30_000);
+
   python('connects again when the browser comes back, and says when it was away', async () => {
     const home = mkdtempSync(join(folder, 'home-'));
     const pretend = await pretendBrowser((say) => say({ method: 'Page.frameNavigated', sessionId: 'S-PAGE', params: { frame: { id: 'F1', url: 'https://one.example/a' } } }));
@@ -243,6 +274,9 @@ mod.Log().write({"k": "post", "at": 99999, "m": "POST", "h": "busy.example", "p"
       'https://example.com:443/',
       'https://example.com:8443/AbCd1234EfGh5678IjKl9012MnOp/reset',
       'https://example.com/share/550e8400-e29b-41d4-a716-446655440000',
+      'https://example.com/files/v1-3fa9c2d41b7e8a905c6d1e2f/download',
+      'https://example.com/af/AbCdEfGhIjKlMnOpQrStUvWxYz',
+      'https://example.com/t/abcdefghijklmnop0123456789ab',
       'https://example.com/how-to-apply-for-a-visa-in-2026-step-by-step',
       'https://example.com/%E2%9C%93/path',
       'http://[2001:db8::1]:8080/x',
@@ -271,6 +305,9 @@ print(json.dumps([mod.cut(url) for url in json.loads(sys.argv[2])]))`,
       ['example.com', '/'],
       ['example.com:8443', '/…/reset'],
       ['example.com', '/share/…'],
+      ['example.com', '/files/\u2026/download'],
+      ['example.com', '/af/\u2026'],
+      ['example.com', '/t/\u2026'],
       ['example.com', '/how-to-apply-for-a-visa-in-2026-step-by-step'],
       ['example.com', '/%E2%9C%93/path'],
       ['[2001:db8::1]:8080', '/x'],

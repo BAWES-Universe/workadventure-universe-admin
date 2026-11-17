@@ -27,6 +27,10 @@ describe('what is kept of an address', () => {
     expect(cleanPath('/a/b#frag')).toBe('/a/b');
     expect(cleanPath('/share/550e8400-e29b-41d4-a716-446655440000')).toBe('/share/…');
     expect(cleanPath('/r/AbCd1234EfGh5678IjKl9012MnOp/x')).toBe('/r/…/x');
+    // a versioned storage key, a random code with no digit in it, and a long code of lower case and digits are not kept either
+    expect(cleanPath('/files/v1-3fa9c2d41b7e8a905c6d1e2f/download')).toBe('/files/\u2026/download');
+    expect(cleanPath('/af/AbCdEfGhIjKlMnOpQrStUvWxYz')).toBe('/af/\u2026');
+    expect(cleanPath('/t/abcdefghijklmnop0123456789ab')).toBe('/t/\u2026');
     // a long readable address is kept: a private link is a mix of cases and digits, a slug is not
     expect(cleanPath('/how-to-apply-for-a-visa-in-2026-step-by-step')).toBe('/how-to-apply-for-a-visa-in-2026-step-by-step');
     for (const bad of ['cart', 'with space', '/tab\there', '/nul\u0000', '', 42, null]) expect(cleanPath(bad)).toBeNull();

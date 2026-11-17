@@ -313,6 +313,7 @@ import json
 import os
 import re
 import select
+import signal
 import socket
 import struct
 import sys
@@ -333,8 +334,9 @@ HOST_MAX = 255
 # The same page or post again within this long is one line with a count
 JOIN_MS = 3000
 PLAIN = {"GET", "HEAD", "OPTIONS"}
-HEX = re.compile(r"^[0-9a-fA-F-]{20,}$")
+HEX = re.compile(r"^(v[0-9]+-)?[0-9a-fA-F-]{20,}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_-]{24,}$")
+PLAIN_TOKEN = re.compile(r"^[A-Za-z0-9]{24,}$")
 
 
 def now_ms():
@@ -345,7 +347,10 @@ def segment(part):
     # An address can carry a one-time code or a private link in its path (a reset or share link): a part that looks like one is not kept
     if HEX.match(part):
         return "…"
-    if TOKEN.match(part) and re.search(r"[A-Z]", part) and re.search(r"[a-z]", part) and re.search(r"[0-9]", part):
+    # A long run of mixed case is a random code (a readable address is lower case with hyphens); a long run with no hyphen that mixes letters and digits is one too
+    if TOKEN.match(part) and re.search(r"[A-Z]", part) and re.search(r"[a-z]", part):
+        return "…"
+    if PLAIN_TOKEN.match(part) and re.search(r"[0-9]", part) and re.search(r"[A-Za-z]", part):
         return "…"
     return part
 
@@ -381,9 +386,10 @@ def last_state(lines):
     return None
 
 
-def alive():
-    # Whether the listener is running: a process that is this script with "run"
+def listeners():
+    # The listener's process ids: processes that are this script with "run"
     me = os.getpid()
+    found = []
     for name in os.listdir("/proc"):
         if not name.isdigit() or int(name) == me:
             continue
@@ -393,11 +399,30 @@ def alive():
         except Exception:
             continue
         if len(args) >= 3 and args[1].endswith(b"/universe-visits") and args[2] == b"run":
-            return True
-    return False
+            found.append(int(name))
+    return found
+
+
+def alive():
+    return len(listeners()) > 0
+
+
+def settle():
+    # What the listener holds in memory (the latest line waits a moment to be joined with the same again) is written out first, so the
+    # last seconds before a read are in it: the listener is asked to, and given a moment
+    asked = False
+    for pid in listeners():
+        try:
+            os.kill(pid, signal.SIGUSR1)
+            asked = True
+        except Exception:
+            pass
+    if asked:
+        time.sleep(0.4)
 
 
 def read(since):
+    settle()
     try:
         with open(LOG, "r", encoding="utf-8", errors="replace") as handle:
             lines = handle.read().splitlines()
@@ -670,6 +695,8 @@ def listen(log):
 
 def run():
     log = Log()
+    # A read asks for what is held in memory to be written out now
+    signal.signal(signal.SIGUSR1, lambda number, frame: log.flush())
     while True:
         try:
             listen(log)

@@ -75,15 +75,18 @@ export interface VisitRow {
 }
 
 // The same rule as the listener's, so what it kept is kept and what it cut stays cut (and a part already cut is the same part again)
-const HEX = /^[0-9a-fA-F-]{20,}$/;
+const HEX = /^(v[0-9]+-)?[0-9a-fA-F-]{20,}$/;
 const TOKEN = /^[A-Za-z0-9_-]{24,}$/;
+const PLAIN_TOKEN = /^[A-Za-z0-9]{24,}$/;
 const CUT_PART = '\u2026';
 const HOST = /^(\[[0-9a-f:.]+\]|[a-z0-9_.-]+)(:[0-9]{1,5})?$/;
 const NOT_PATH = /[\u0000-\u0020\u007f]/;
 
 function part(value: string): string {
   if (HEX.test(value)) return CUT_PART;
-  if (TOKEN.test(value) && /[A-Z]/.test(value) && /[a-z]/.test(value) && /[0-9]/.test(value)) return CUT_PART;
+  // A long run of mixed case is a random code (a readable address is lower case with hyphens); a long run with no hyphen that mixes letters and digits is one too
+  if (TOKEN.test(value) && /[A-Z]/.test(value) && /[a-z]/.test(value)) return CUT_PART;
+  if (PLAIN_TOKEN.test(value) && /[0-9]/.test(value) && /[A-Za-z]/.test(value)) return CUT_PART;
   return value;
 }
 
