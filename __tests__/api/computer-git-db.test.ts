@@ -6,7 +6,7 @@
  *
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/computer-git-db.test.ts --runInBand
  */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
@@ -24,10 +24,12 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { grantToBrick, removeGrant } from '@/lib/app-connections';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { giveComputer, startJob, takeOver } from '@/lib/computer';
+import { giveComputer, handBack, startJob, stopJobFor, takeOver, turnOffComputer } from '@/lib/computer';
+import { deleteBrick } from '@/lib/brick-delete';
 import { prepareJob } from '@/lib/computer-broker';
-import { verifyJobToken } from '@/lib/computer-token';
+import { mintJobToken, verifyJobToken } from '@/lib/computer-token';
 import { jobGitAccess } from '@/lib/github/git-login';
+import { checkGitKey, recheckGitKey, UPLOAD_GRACE_SECONDS } from '@/lib/github/git-relay';
 import { GET as gitGet, POST as gitPost } from '@/app/api/git/[...path]/route';
 import { POST as openPull } from '@/app/api/computer/github/pull/route';
 
@@ -186,6 +188,32 @@ const all = (dir: string): string[] => readdirSync(dir).flatMap((name) => (statS
 const openPr = (home: string, ...args: string[]) => runAsync('python3', [join(home, '.universe', 'open-pr'), ...args], { env: { ...process.env, HOME: home } });
 const bare = () => join(work, 'github', 'acme', 'tools.git');
 const branches = () => execFileSync('git', ['branch', '--list'], { cwd: bare(), encoding: 'utf8' });
+
+const basic = (key: string) => `Basic ${Buffer.from(`x-universe-job:${key}`).toString('base64')}`;
+const refsPath = ['acme', 'tools.git', 'info', 'refs'];
+/** Orbit's git route asked directly, as a computer holding `key` (or the sign-in `header`) would. */
+const askRefs = (header: string | null, service: 'git-upload-pack' | 'git-receive-pack') =>
+  gitGet(new NextRequest(`${ORBIT}/api/git/acme/tools.git/info/refs?service=${service}`, { headers: header ? { authorization: header } : {} }), { params: Promise.resolve({ path: refsPath }) });
+const pkt = (text: string) => `${(text.length + 4).toString(16).padStart(4, '0')}${text}`;
+/** A push that makes one new branch at a commit GitHub already has: the commands, and a pack with nothing in it (what git sends). */
+function newBranchPush(ref: string, id: string): Buffer {
+  const header = Buffer.concat([Buffer.from('PACK'), Buffer.from([0, 0, 0, 2, 0, 0, 0, 0])]);
+  return Buffer.concat([Buffer.from(`${pkt(`${'0'.repeat(40)} ${id} ${ref}\0report-status\n`)}0000`), header, createHash('sha1').update(header).digest()]);
+}
+const receivePost = (header: string | null, body: Buffer | ReadableStream<Uint8Array>, extra: Record<string, string> = {}) =>
+  gitPost(
+    new NextRequest(`${ORBIT}/api/git/acme/tools.git/git-receive-pack`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-git-receive-pack-request', ...(header ? { authorization: header } : {}), ...extra },
+      body: body instanceof ReadableStream ? body : new Uint8Array(body),
+      duplex: 'half',
+    } as ConstructorParameters<typeof NextRequest>[1] & { duplex: 'half' }),
+    { params: Promise.resolve({ path: ['acme', 'tools.git', 'git-receive-pack'] }) },
+  );
+const openPullWith = (header: string | null) =>
+  openPull(new NextRequest(`${ORBIT}/api/computer/github/pull`, { method: 'POST', headers: { 'content-type': 'application/json', ...(header ? { authorization: header } : {}) }, body: JSON.stringify({ repo: 'acme/tools', head: 'for-pr', title: 'A change' }) }));
+const mainTip = () => execFileSync('git', ['rev-parse', 'main'], { cwd: bare(), encoding: 'utf8' }).trim();
+const hasBranch = (name: string) => branches().split('\n').some((line) => line.replace('*', '').trim() === name);
 
 (hasHttpBackend ? run : describe.skip)('a Brick’s computer uses git as its owner, through Orbit', () => {
   beforeAll(async () => {
@@ -434,6 +462,247 @@ const branches = () => execFileSync('git', ['branch', '--list'], { cwd: bare(), 
       expect(pulls).toHaveLength(1);
     } finally {
       rmSync(lookHome, { recursive: true, force: true });
+    }
+  });
+
+  it('takes no sign-in but the running job’s git key: the old encrypted pass, a model key and made-up secrets get nowhere, and nothing goes to GitHub', async () => {
+    const sara = await saraWithGitHub();
+    const jobId = await running(sara);
+    // A pass of the old kind, made with Orbit's own key for this very Brick, grant and owner, good for another 15 minutes
+    const legacy = basic(encryptApiKey(JSON.stringify({ kind: 'git-pass', botId: sara.brickId, connectionId: sara.connectionId, ownerId: sara.id, exp: Math.floor(Date.now() / 1000) + 900 })));
+    const model = await mintJobToken(jobId, 'model', NOW);
+    if (!model.ok) throw new Error('no model key');
+    const before = seen.length;
+    for (const header of [null, legacy, basic(model.token), basic('made-up'), 'Bearer cjt_nope']) {
+      expect((await askRefs(header, 'git-upload-pack')).status).toBe(401);
+      expect((await askRefs(header, 'git-receive-pack')).status).toBe(401);
+      expect((await receivePost(header, newBranchPush('refs/heads/nope', mainTip()))).status).toBe(401);
+      expect((await openPullWith(header)).status).toBe(401);
+      expect(await checkGitKey(header)).toBeNull();
+    }
+    expect(seen.length).toBe(before);
+    expect(hasBranch('nope')).toBe(false);
+    expect(pulls).toHaveLength(0);
+    // and the route that used to give such a pass is gone
+    expect(existsSync(join(process.cwd(), 'app', 'api', 'bots', '[id]', 'git-pass', 'route.ts'))).toBe(false);
+  });
+
+  /** Every way a job's git key can end, each with the key in the computer's hand: nothing it asks for after goes to GitHub. */
+  const ways: [string, (sara: { id: string; brickId: string; connectionId: string }, jobId: string) => Promise<unknown>][] = [
+    ['the job is stopped', (sara) => stopJobFor(sara.brickId, sara.id, NOW)],
+    ['the person takes the computer', (sara) => takeOver(sara.brickId, sara.id, NOW)],
+    ['GitHub is taken from the Brick', (sara) => removeGrant(sara.id, sara.connectionId, sara.brickId)],
+    ['the owner’s GitHub connection is deleted', (sara) => prisma.appConnection.delete({ where: { id: sara.connectionId } })],
+    ['the Brick is deleted', (sara) => deleteBrick(sara.brickId, sara.id, NOW)],
+    ['the job is removed', (_sara, jobId) => prisma.computerJob.delete({ where: { id: jobId } })],
+    ['the computer is turned off', (sara) => turnOffComputer(sara.brickId, sara.id, NOW)],
+    ['the job turns out to be someone else’s', async (_sara, jobId) => prisma.computerJob.update({ where: { id: jobId }, data: { personId: (await person('other')).id } })],
+    ['the key is revoked', (_sara, jobId) => prisma.computerJobToken.updateMany({ where: { jobId }, data: { revokedAt: new Date() } })],
+    ['the key runs out', (_sara, jobId) => prisma.computerJobToken.updateMany({ where: { jobId }, data: { expiresAt: new Date(Date.now() - 60_000) } })],
+  ];
+  /** A key that only ran out still counts for an upload that began before (the grace); every other ending is final. */
+  const onlyRanOut = 'the key runs out';
+  it.each(ways)('the key stops for reading, pushing and opening a pull request, the moment %s', async (name, end) => {
+    const sara = await saraWithGitHub();
+    const jobId = await running(sara);
+    const minted = await mintJobToken(jobId, 'git', NOW);
+    if (!minted.ok) throw new Error('no key');
+    const header = basic(minted.token);
+    const tip = mainTip();
+    // First, that it works: the same three things go through
+    expect((await askRefs(header, 'git-upload-pack')).status).toBe(200);
+    expect((await receivePost(header, newBranchPush('refs/heads/control', tip))).status).toBe(200);
+    expect(hasBranch('control')).toBe(true);
+    expect((await openPullWith(header)).status).toBe(200);
+    expect(pulls).toHaveLength(1);
+    const asked = seen.length;
+
+    await end(sara, jobId);
+
+    expect(await checkGitKey(header)).toBeNull();
+    expect((await askRefs(header, 'git-upload-pack')).status).toBe(401);
+    expect((await askRefs(header, 'git-receive-pack')).status).toBe(401);
+    expect((await receivePost(header, newBranchPush('refs/heads/after', tip))).status).toBe(401);
+    expect((await openPullWith(header)).status).toBe(401);
+    // An upload already on its way when it ended gets nowhere either, whatever grace it has
+    if (name === onlyRanOut) expect(await checkGitKey(header, UPLOAD_GRACE_SECONDS)).toMatchObject({ jobId });
+    else expect(await checkGitKey(header, UPLOAD_GRACE_SECONDS)).toBeNull();
+    expect(seen.length).toBe(asked);
+    expect(hasBranch('after')).toBe(false);
+    expect(pulls).toHaveLength(1);
+  });
+
+  it('a key made before a hand-back is dead after it, and the one made for the job after is good: nothing from the earlier control works', async () => {
+    const sara = await saraWithGitHub();
+    const jobId = await running(sara);
+    const first = await mintJobToken(jobId, 'git', NOW);
+    if (!first.ok) throw new Error('no key');
+    expect((await askRefs(basic(first.token), 'git-upload-pack')).status).toBe(200);
+    expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
+    expect(await handBack(sara.brickId, sara.id)).toMatchObject({ ok: true });
+    // The job runs again, under a later control number: the old key is not brought back by that
+    expect((await askRefs(basic(first.token), 'git-upload-pack')).status).toBe(401);
+    expect(await checkGitKey(basic(first.token), UPLOAD_GRACE_SECONDS)).toBeNull();
+    const second = await mintJobToken(jobId, 'git', NOW);
+    if (!second.ok) throw new Error('no second key');
+    expect((await askRefs(basic(second.token), 'git-upload-pack')).status).toBe(200);
+  });
+
+  it('a job that may only read cannot push by any road: not git’s own, and not a push sent by hand without asking first', async () => {
+    const sara = await saraWithGitHub();
+    const jobId = await running(sara, false);
+    const minted = await mintJobToken(jobId, 'git', NOW);
+    if (!minted.ok) throw new Error('no key');
+    const header = basic(minted.token);
+    expect((await askRefs(header, 'git-upload-pack')).status).toBe(200);
+    const asked = seen.length;
+    const advert = await askRefs(header, 'git-receive-pack');
+    expect(await advert.text()).toContain('may only read from GitHub');
+    const sent = await receivePost(header, newBranchPush('refs/heads/by-hand', mainTip()));
+    expect(sent.status).toBe(403);
+    expect(await sent.text()).toContain('may only read from GitHub');
+    expect((await openPullWith(header)).status).toBe(403);
+    expect(seen.length).toBe(asked);
+    expect(hasBranch('by-hand')).toBe(false);
+    expect(pulls).toHaveLength(0);
+  });
+
+  it('a job that may write loses that when the owner turns GitHub’s “make” and “change” both off: reading stays, pushing and pull requests go', async () => {
+    const sara = await saraWithGitHub();
+    const jobId = await running(sara);
+    const minted = await mintJobToken(jobId, 'git', NOW);
+    if (!minted.ok) throw new Error('no key');
+    const header = basic(minted.token);
+    expect((await receivePost(header, newBranchPush('refs/heads/before-off', mainTip()))).status).toBe(200);
+    await prisma.botMcpServer.updateMany({ where: { botId: sara.brickId }, data: { makeSetting: 'off', changeSetting: 'off' } });
+    expect((await askRefs(header, 'git-upload-pack')).status).toBe(200);
+    expect((await receivePost(header, newBranchPush('refs/heads/after-off', mainTip()))).status).toBe(403);
+    expect((await openPullWith(header)).status).toBe(403);
+    expect(hasBranch('before-off')).toBe(true);
+    expect(hasBranch('after-off')).toBe(false);
+  });
+
+  it('looks at the key again once a push is read: a push that was let in and then loses its job, its grant or its GitHub is not passed on', async () => {
+    const sara = await saraWithGitHub();
+    const tip = mainTip();
+    // The upload is slow on purpose: `during` runs once the route has started reading, which is after it let the push in
+    const slow = (body: Buffer, during: () => Promise<unknown>) => {
+      let started = false;
+      return new ReadableStream<Uint8Array>(
+        {
+          async pull(controller) {
+            if (started) return controller.close();
+            started = true;
+            await during();
+            controller.enqueue(new Uint8Array(body));
+          },
+        },
+        { highWaterMark: 0 },
+      );
+    };
+    const cases: [string, (jobId: string) => Promise<unknown>][] = [
+      ['the person takes the computer', () => takeOver(sara.brickId, sara.id, NOW)],
+      ['GitHub is taken from the Brick', () => removeGrant(sara.id, sara.connectionId, sara.brickId)],
+      ['the key is revoked', (jobId) => prisma.computerJobToken.updateMany({ where: { jobId }, data: { revokedAt: new Date() } })],
+      ['the job is stopped', () => stopJobFor(sara.brickId, sara.id, NOW)],
+    ];
+    for (const [index, [name, during]] of cases.entries()) {
+      if (index > 0) {
+        // A fresh job each time, and the grant back
+        await prisma.computerJob.deleteMany({ where: { personId: sara.id } });
+        await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: {} });
+        await grantToBrick(sara.id, sara.connectionId, sara.brickId).catch(() => undefined);
+      }
+      const jobId = await running(sara);
+      const minted = await mintJobToken(jobId, 'git', NOW);
+      if (!minted.ok) throw new Error('no key');
+      const asked = seen.length;
+      const answer = await receivePost(basic(minted.token), slow(newBranchPush(`refs/heads/slow-${index}`, tip), () => during(jobId)), { 'transfer-encoding': 'chunked' });
+      expect([name, answer.status]).toEqual([name, 401]);
+      expect(seen.length).toBe(asked);
+      expect(hasBranch(`slow-${index}`)).toBe(false);
+    }
+  });
+
+  it('an upload whose key ran out while it was on its way still counts for a while, but not for ever', async () => {
+    const sara = await saraWithGitHub();
+    const jobId = await running(sara);
+    const minted = await mintJobToken(jobId, 'git', NOW);
+    if (!minted.ok) throw new Error('no key');
+    const tip = mainTip();
+    const upload = (ref: string, ranOutAgoMs: number) => {
+      let started = false;
+      return new ReadableStream<Uint8Array>(
+        {
+          async pull(controller) {
+            if (started) return controller.close();
+            started = true;
+            await prisma.computerJobToken.updateMany({ where: { jobId }, data: { expiresAt: new Date(Date.now() - ranOutAgoMs) } });
+            controller.enqueue(new Uint8Array(newBranchPush(ref, tip)));
+          },
+        },
+        { highWaterMark: 0 },
+      );
+    };
+    expect((await receivePost(basic(minted.token), upload('refs/heads/grace-one', 60_000), { 'transfer-encoding': 'chunked' })).status).toBe(200);
+    expect(hasBranch('grace-one')).toBe(true);
+    await prisma.computerJobToken.updateMany({ where: { jobId }, data: { expiresAt: new Date(Date.now() + 600_000) } });
+    expect((await receivePost(basic(minted.token), upload('refs/heads/grace-two', (UPLOAD_GRACE_SECONDS + 60) * 1000), { 'transfer-encoding': 'chunked' })).status).toBe(401);
+    expect(hasBranch('grace-two')).toBe(false);
+  });
+
+  it('a push is judged against the same job, owner, Brick and GitHub connection that let it in: a connection swapped while it uploaded is not the one that was let in', async () => {
+    const sara = await saraWithGitHub();
+    const jobId = await running(sara);
+    const minted = await mintJobToken(jobId, 'git', NOW);
+    if (!minted.ok) throw new Error('no key');
+    const header = basic(minted.token);
+    const before = await checkGitKey(header);
+    expect(before).toMatchObject({ jobId, botId: sara.brickId, ownerId: sara.id, connectionId: sara.connectionId, readOnly: false });
+    if (!before) throw new Error('no pass');
+    expect(await recheckGitKey(header, before)).toMatchObject({ jobId });
+    // Sara connects a second GitHub login and gives the Brick that one instead
+    const auth = { provider: 'github', accessToken: 'ghu_other', refreshToken: 'ghr_y', expiresAt: Math.floor(Date.now() / 1000) + 8 * 3600, login: 'sara-other', githubId: 777 };
+    const other = await prisma.appConnection.create({
+      data: { ownerId: sara.id, name: 'GitHub 2', serverUrl: '', source: 'github', catalogKey: '@github-second', authType: 'oauth', authConfig: encryptApiKey(JSON.stringify(auth)) },
+    });
+    await removeGrant(sara.id, sara.connectionId, sara.brickId);
+    await grantToBrick(sara.id, other.id, sara.brickId);
+    // Still a good key (the Brick has GitHub), but not for the connection the push was let in under
+    expect(await checkGitKey(header)).toMatchObject({ connectionId: other.id });
+    expect(await recheckGitKey(header, before)).toBeNull();
+    // a take-over moves the control number: a pass from before it is not the job as it stands
+    const again = await checkGitKey(header);
+    if (!again) throw new Error('no pass');
+    await takeOver(sara.brickId, sara.id, NOW);
+    expect(await recheckGitKey(header, again)).toBeNull();
+  });
+
+  it('never gives the computer the owner’s GitHub token, in what it is told to run, in what the relay answers, or in what a refusal says', async () => {
+    const sara = await saraWithGitHub();
+    const jobId = await running(sara);
+    const home = mkdtempSync(join(tmpdir(), 'brick-home-'));
+    try {
+      const { command } = await readyComputer(jobId, home);
+      for (const secret of ['ghu_owner_token', 'ghr_x']) {
+        expect(command).not.toContain(secret);
+        expect(JSON.stringify(fake.commands)).not.toContain(secret);
+      }
+      const header = basic(readFileSync(join(home, '.universe', 'git-token'), 'utf8'));
+      const answers = [
+        await askRefs(header, 'git-upload-pack'),
+        await receivePost(header, newBranchPush('refs/heads/tokens', mainTip())),
+        await openPullWith(header),
+        await askRefs(basic('cjt_made-up-key-0000000000000000'), 'git-upload-pack'),
+      ];
+      for (const answer of answers) {
+        const text = Buffer.from(await answer.arrayBuffer()).toString('latin1');
+        expect(text).not.toContain('ghu_owner_token');
+        expect(text).not.toContain('ghr_x');
+        expect([...answer.headers.values()].join('\n')).not.toMatch(/ghu_|ghr_|x-access-token/);
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
   });
 });
