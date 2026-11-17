@@ -311,12 +311,33 @@ run('Run now and snooze, in a real database', () => {
       expect(await row(briefing.id)).toMatchObject({ state: 'on', nextDueAt: at(HOUR), heldSince: null });
     });
 
+    it('a tap that was dropped never ran, so it never uses up the runs a day', async () => {
+      const lou = await person('lou');
+      const a = await set(lou, { kind: 'schedule', cadence: hourly });
+      await saveServerLimits({ bricks: { runsPerDay: 1 } }, lou.id);
+      try {
+        await tap(lou, a.id, 'run', at(MIN));
+        // Not taken up in time: dropped, never handed out
+        expect(mine(await claimDueRuns(at(20 * MIN)), a.id)).toEqual([]);
+        expect((await runsOf(a.id))[0]).toMatchObject({ state: 'dropped', attempts: 0 });
+        // The day's one run is still free: a new tap is asked for, handed out and runs
+        expect(await tap(lou, a.id, 'run', at(21 * MIN))).toMatchObject({ ok: true, run: { state: 'queued' } });
+        const [handed] = mine(await claimDueRuns(at(22 * MIN)), a.id);
+        expect(handed).toBeDefined();
+        await finishRun(handed.runId, { attempt: 1, state: 'done', outcome: 'quiet' }, at(23 * MIN));
+        // And the scheduled one at its own time is the one that now finds the day used up, as one that ran
+        expect(mine(await claimDueRuns(at(HOUR + MIN)), a.id)).toEqual([]);
+      } finally {
+        await saveServerLimits({ bricks: { runsPerDay: 24 } }, lou.id);
+      }
+    });
+
     it('is handed only to a bot server that can run its kind; a watch that nothing tried stays waiting', async () => {
       const lea = await person('lea');
       const watch = await set(lea, { kind: 'watch', words: 'Flight', condition: 'It drops', cadence: hourly });
       await tap(lea, watch.id, 'run', at(MIN));
       expect(mine((await claimWork(at(2 * MIN), undefined, undefined, ['reminder'])).runs, watch.id)).toEqual([]);
-      expect((await runsOf(watch.id))[0]).toMatchObject({ state: 'queued', attempts: 1 });
+      expect((await runsOf(watch.id))[0]).toMatchObject({ state: 'queued', attempts: 0 });
       expect(mine((await claimWork(at(3 * MIN), undefined, undefined, ['watch'])).runs, watch.id)).toMatchObject([{ manual: true, kind: 'watch' }]);
     });
 

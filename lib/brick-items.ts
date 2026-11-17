@@ -410,6 +410,9 @@ export interface RunNowInfo {
 const runInfo = (run: { id: string; state: string }, replay: boolean): RunNowInfo => ({ runId: run.id, state: run.state as RunNowInfo['state'], replay });
 
 /** Whether a Run now request, or a run already queued, may use this item as it is: on, or paused by the owner themselves. */
+/** A run the owner asked for that was dropped before the bot server was ever handed it (0 tries): it never ran, so it never counts in the runs a day. */
+const NEVER_RAN = { state: 'dropped', attempts: 0 } as const;
+
 const manualMayRun = (item: { state: string; pausedBy: string | null }): boolean => item.state === 'on' || (item.state === 'paused' && (item.pausedBy === 'owner' || item.pausedBy === null));
 
 /**
@@ -454,7 +457,7 @@ async function requestRun(tx: Tx, row: ItemRow, ownerId: string, key: string | n
     const since = new Date(now.getTime() - DAY);
     const ofOwner = { item: { ownerId: row.ownerId, kind: { not: 'reminder' } } };
     const [today, waiting] = await Promise.all([
-      tx.brickItemRun.count({ where: { ...ofOwner, state: { not: 'queued' }, claimedAt: { gt: since } } }),
+      tx.brickItemRun.count({ where: { ...ofOwner, state: { not: 'queued' }, NOT: NEVER_RAN, claimedAt: { gt: since } } }),
       tx.brickItemRun.count({ where: { ...ofOwner, state: 'queued' } }),
     ]);
     if (today + waiting >= limits.runsPerDay) return { ok: false, status: 422, code: 'runs_a_day', limit: limits.runsPerDay, error: `${limits.runsPerDay} runs a day is the most` };
@@ -465,8 +468,8 @@ async function requestRun(tx: Tx, row: ItemRow, ownerId: string, key: string | n
   for (let step = 0; step < 5; step++) {
     const dueAt = new Date(now.getTime() + step);
     const made = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
-      INSERT INTO "brick_item_runs" ("id", "item_id", "due_at", "revision", "claimed_at", "lease_until", "state", "manual", "request_key")
-      VALUES (${randomUUID()}, ${row.id}, ${dueAt}, ${row.revision}, ${now}, ${now}, 'queued', true, ${key})
+      INSERT INTO "brick_item_runs" ("id", "item_id", "due_at", "revision", "claimed_at", "lease_until", "attempts", "state", "manual", "request_key")
+      VALUES (${randomUUID()}, ${row.id}, ${dueAt}, ${row.revision}, ${now}, ${now}, 0, 'queued', true, ${key})
       ON CONFLICT ("item_id", "due_at") DO NOTHING
       RETURNING "id"`);
     if (made.length) return { ok: true, item: view, run: { runId: made[0].id, state: 'queued', replay: false } };
@@ -919,7 +922,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
           onUniverse = bot.aiProviderRef === UNIVERSE_AI_REF;
           const room = onUniverse ? await goalsRoom(item.ownerId, now, tx, roomSettings) : ({ ok: true } as const);
           if (!room.ok) return drop('There was no room in the usage for goals and tasks');
-          const today = await tx.brickItemRun.count({ where: { state: { not: 'queued' }, claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' } } } });
+          const today = await tx.brickItemRun.count({ where: { state: { not: 'queued' }, NOT: NEVER_RAN, claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' } } } });
           if (today >= limits.runsPerDay) return drop('The runs a day were used up');
         }
         // It is the person's run now. The item's own time, held wait and state are not touched: it was extra.
@@ -976,7 +979,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
       -- A person who is at their runs a day is left out here, so what they hold back never fills the batch ahead of everyone else
       AND (i."kind" = 'reminder' OR (
         SELECT count(*) FROM "brick_item_runs" r JOIN "brick_items" j ON j."id" = r."item_id"
-        WHERE j."owner_id" = i."owner_id" AND j."kind" <> 'reminder' AND r."state" <> 'queued' AND r."claimed_at" > ${new Date(now.getTime() - DAY)}
+        WHERE j."owner_id" = i."owner_id" AND j."kind" <> 'reminder' AND r."state" <> 'queued' AND NOT (r."state" = 'dropped' AND r."attempts" = 0) AND r."claimed_at" > ${new Date(now.getTime() - DAY)}
       ) < ${limits.runsPerDay})
     ORDER BY i."next_due_at" ASC, i."id" ASC
     LIMIT ${limit}`);
@@ -1034,7 +1037,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
 
         // Runs a day: watches, schedules and goals together, per person. A reminder is fixed text with no AI and never uses them.
         if (item.kind !== 'reminder') {
-          const today = await tx.brickItemRun.count({ where: { state: { not: 'queued' }, claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' } } } });
+          const today = await tx.brickItemRun.count({ where: { state: { not: 'queued' }, NOT: NEVER_RAN, claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' } } } });
           if (today >= limits.runsPerDay) return null;
         }
 
