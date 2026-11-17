@@ -187,6 +187,17 @@ export function installUrl(app: Pick<GitHubApp, 'slug'>, state?: string): string
   return url.toString();
 }
 
+/**
+ * GitHub's own page for adding the app on ONE organization (its numeric id): an owner installs it, and a member who is not an owner
+ * sends the request, which GitHub emails to the organization's owners. `state` comes back like it does from the install page.
+ */
+export function installOnUrl(app: Pick<GitHubApp, 'slug'>, targetId: number, state?: string): string {
+  const url = new URL(`${GITHUB_WEB}/apps/${app.slug}/installations/new/permissions`);
+  url.searchParams.set('target_id', String(targetId));
+  if (state) url.searchParams.set('state', state);
+  return url.toString();
+}
+
 /** "Add a place or change repos": GitHub's own page for picking an account to install on or change. */
 export function selectTargetUrl(app: Pick<GitHubApp, 'slug'>): string {
   return `${GITHUB_WEB}/apps/${app.slug}/installations/select_target`;

@@ -11,6 +11,7 @@ import {
   GITHUB_API,
   GITHUB_CALLBACK_PATH,
   GITHUB_WEB,
+  installOnUrl,
   installUrl,
   orbitBase,
   OWN_KEY_PAGE,
@@ -544,6 +545,32 @@ async function waitingRequests(app: GitHubApp, githubId: number | undefined, pla
   } catch {
     return [];
   }
+}
+
+/* ------------------------------ an organization's OK ------------------------------ */
+
+export type OwnerOkPage = { status: 'ok'; askUrl: string; ownKeyPage: string } | { status: 'not_org' | 'unavailable' };
+
+/**
+ * "Ask the owner" on a Brick's card (design 14 Nov, Part 3): GitHub's own page for adding Universe's app on this organization, where
+ * an owner installs it and anyone else sends the request that GitHub emails to the owners. It carries the same ticket as the install
+ * page, so the window that opened it is closed when GitHub sends the person back. Also gives the page for a key of their own.
+ */
+export async function ownerOkPage(connection: AppConnection, organization: string, redirectUrl: string, fetchImpl: FetchLike = fetch): Promise<OwnerOkPage> {
+  const app = await getGitHubApp();
+  const personId = connection.ownerId;
+  if (!app || !personId) return { status: 'unavailable' };
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(organization)) return { status: 'not_org' };
+  const who = await gitHubRequest<{ id?: number; type?: string }>(null, `/users/${encodeURIComponent(organization)}`, {}, fetchImpl).catch(() => null);
+  if (!who) return { status: 'unavailable' };
+  if (!who.ok || who.data.type !== 'Organization' || typeof who.data.id !== 'number') return { status: who.status === 404 || who.ok ? 'not_org' : 'unavailable' };
+  // The ticket the return is finished with, once (a newer one replaces it: only the latest page can finish)
+  const nonce = crypto.randomBytes(24).toString('base64url');
+  await prisma.appConnection.update({ where: { id: connection.id }, data: { signInNonce: nonce } });
+  const state = encryptApiKey(
+    JSON.stringify({ kind: 'github-install', connectionId: connection.id, personId, nonce, redirectUrl, exp: Math.floor(Date.now() / 1000) + 60 * 60 } satisfies InstallState),
+  );
+  return { status: 'ok', askUrl: installOnUrl(app, who.data.id, state), ownKeyPage: OWN_KEY_PAGE };
 }
 
 /* ---------------------------------- disconnect ---------------------------------- */

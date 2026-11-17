@@ -23,6 +23,7 @@ import { GET as signIn } from '@/app/api/me/apps/[connectionId]/sign-in/route';
 import { GET as callback } from '@/app/api/github/callback/route';
 import { POST as finish } from '@/app/api/me/apps/github/finish/route';
 import { GET as installed } from '@/app/api/github/installed/route';
+import { GET as ownerOk } from '@/app/api/me/apps/github/owner-ok/route';
 import { POST as webhook } from '@/app/api/github/webhook/route';
 import { POST as saveKey, DELETE as dropKey } from '@/app/api/me/apps/github/key/route';
 import { POST as createPage } from '@/app/api/admin/github-app/create/route';
@@ -377,6 +378,44 @@ run('Connect GitHub for Bricks, in a real database', () => {
       expect(tried.status).toBe(400);
       expect(calls).toHaveLength(0);
     });
+  });
+
+  it('gives "Ask the owner" GitHub\'s page for that organization, with a ticket that brings the window back', async () => {
+    await makeApp();
+    const id = await signedIn();
+    const calls = pretendGitHub({
+      'GET https://api.github.com/users/acme-corp': { body: { id: 4242, type: 'Organization', login: 'acme-corp' } },
+      'GET https://api.github.com/users/sara': { body: { id: 5, type: 'User', login: 'sara' } },
+      'GET https://api.github.com/users/nobody-here': { status: 404, body: { message: 'Not Found' } },
+    });
+    const ask = (org: string) => ownerOk(request(`/api/me/apps/github/owner-ok?org=${org}&redirectUrl=${encodeURIComponent(OPENER)}`));
+    mockUser.current = { id: sara };
+    const asked = await ask('acme-corp');
+    expect(asked.status).toBe(200);
+    const body = await asked.json();
+    const page = new URL(body.askUrl);
+    expect(page.origin + page.pathname).toBe('https://github.com/apps/bawes-universe/installations/new/permissions');
+    expect(page.searchParams.get('target_id')).toBe('4242');
+    expect(body.ownKeyPage).toContain('https://github.com/settings/tokens/new');
+    // No sign-in of Sara's goes to GitHub for this: it is a public page of an organization
+    expect(calls).toHaveLength(1);
+    expect(new Headers(calls[0].init.headers as Record<string, string>).get('authorization')).toBeNull();
+
+    // GitHub sends her back after the request (no code: an owner's OK is awaited): the window closes on the game
+    const back = await callback(request(`/api/github/callback?setup_action=request&state=${encodeURIComponent(page.searchParams.get('state') as string)}`));
+    expect(back.headers.get('location')).toBe('https://play.example.com/oauth-popup-callback.html?oauth=success');
+
+    // A person's own account is not an organization to ask; a name that does not exist neither
+    expect((await ask('sara')).status).toBe(404);
+    expect((await ask('nobody-here')).status).toBe(404);
+    expect((await ask('not%20a%20name')).status).toBe(404);
+    // Someone with no GitHub connection has nothing to ask with
+    const stranger = await prisma.user.create({ data: { uuid: `no-github-${tag}`, email: `no-github-${tag}@example.test`, name: 'No GitHub' } });
+    mockUser.current = { id: stranger.id };
+    const none = await ask('acme-corp');
+    await prisma.user.delete({ where: { id: stranger.id } });
+    expect(none.status).toBe(404);
+    expect(id).toBeTruthy();
   });
 
   it('a Brick gets GitHub through Orbit: no token is handed out, the tools are listed, a call runs once', async () => {
