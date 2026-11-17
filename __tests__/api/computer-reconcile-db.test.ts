@@ -63,6 +63,9 @@ const quiet = (day: string, ref: string, botId: string, over: Partial<ProviderDa
 
 const wipe = async () => {
   await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
+  // Every test makes its own Brick with the machine 'm1'. The books read the machine's owner from whichever row comes back last, so a machine
+  // left by an earlier test is a second owner of 'm1' that only the database's row order decides between (it depends on what ran before)
+  await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
   await prisma.computerReconcile.deleteMany({});
   await prisma.appSetting.deleteMany({ where: { key: 'computer-reconcile-tried' } });
 };
