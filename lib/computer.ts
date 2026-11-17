@@ -1323,12 +1323,16 @@ export async function fenceMachine(botId: string, stillLeader?: () => Promise<bo
     const provider = providerFor(row);
     if (!row?.providerRef || !provider || row.machine !== 'working') return 'skipped';
     const ref = row.providerRef;
+    // A leader whose lease was taken over sends nothing: not the cancel of a turn, not a fence attempt (what the new leader's agent started is not ours to stop)
+    if (stillLeader && !(await stillLeader())) return 'lost';
     const turns = await prisma.computerJob.findMany({ where: { botId, status: { in: ['running', 'waiting'] }, NOT: { agentResponseId: null } }, select: { id: true, agentResponseId: true } });
     for (const turn of turns) {
+      if (stillLeader && !(await stillLeader())) return 'lost';
       if (turn.agentResponseId) await provider.cancelTurn(ref, turn.agentResponseId).catch((error) => console.error('[Computer] Could not cancel a turn:', error instanceof Error ? error.message : 'unknown'));
       await prisma.computerJob.updateMany({ where: { id: turn.id, agentResponseId: turn.agentResponseId }, data: { agentResponseId: null } });
     }
     for (let attempt = 0; attempt < FENCE_TRIES; attempt++) {
+      if (stillLeader && !(await stillLeader())) return 'lost';
       try {
         await provider.exec(ref, 'universe-fence', { timeoutMs: 30_000 });
         const check = await provider.exec(ref, 'universe-fence --check', { timeoutMs: 30_000 });
@@ -1436,6 +1440,9 @@ async function secureMachine(botId: string, stillLeader?: () => Promise<boolean>
   if (!row?.providerRef || !provider) return 'proved';
   // A stop that was asked and not proved yet (or a machine that fell back to stopping): asked again here, never taken as proof
   if (row.machine === 'stopping') return (await stopMachine(botId, row.providerRef, provider, ['stopping'])) ? 'proved' : 'unproved';
+  // A machine still working after a failed fence (it failed before its stop could be asked: the database away, a cancel that did not take) has
+  // not been closed: agent processes may still run, so it is never taken as proved
+  if (row.machine === 'working') return 'unproved';
   // The fence failed and the machine was stopped by it, or it was not a working machine at all (nothing was running to fence)
   return 'proved';
 }

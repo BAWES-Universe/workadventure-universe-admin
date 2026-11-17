@@ -17,7 +17,7 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { finishJob, giveComputer, handBack, recoverControl, requestHandover, startJob, sweepComputers, takeOver, planEffect, fillInDetails } from '@/lib/computer';
+import { fenceMachine, finishJob, giveComputer, handBack, recoverControl, requestHandover, startJob, sweepComputers, takeOver, planEffect, fillInDetails } from '@/lib/computer';
 import { authorizeHumanInput, beginTransition, CONTROL_TIMING, readControl, releaseIfUnheld } from '@/lib/computer-control';
 import { checkScreen, openScreen, screenTicket } from '@/lib/computer-screen';
 import { mintJobToken, verifyJobToken } from '@/lib/computer-token';
@@ -307,6 +307,43 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
       const after = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
       expect(after.machine).toBe(before.machine);
       expect(after.controlState).toBe('human_ready');
+      // ...and it sends nothing more on the way out: the second leader's one fence and the stalled leader's own one, not another attempt after its check failed
+      expect(fences()).toBe(2);
+    });
+
+    it('a leader whose lease was taken over before it started sends no cancel and no fence at all', async () => {
+      const { sara, jobId } = await running();
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-1' } });
+      const row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
+      const cancels: string[] = [];
+      const original = fake.cancelTurn.bind(fake);
+      fake.cancelTurn = async (ref: string, id: string) => {
+        cancels.push(id);
+        return original(ref, id);
+      };
+      const lost = await fenceMachine(sara.brickId, async () => false);
+      expect(lost).toBe('lost');
+      expect(cancels).toEqual([]);
+      expect(fences()).toBe(0);
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe(row.machine);
+    });
+
+    it('a fence that fails before it could stop the machine is not proved while the machine is still working', async () => {
+      const { sara, jobId } = await running();
+      await prisma.computerJob.update({ where: { id: jobId }, data: { agentResponseId: 'resp-1' } });
+      // The turn is cancelled, then noting that fails (the database away a moment): the fence ends in an error before it could stop anything
+      const real = prisma.computerJob.updateMany.bind(prisma.computerJob);
+      const spy = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation(((args: { data?: { agentResponseId?: unknown } }) => {
+        if (args?.data && 'agentResponseId' in args.data && args.data.agentResponseId === null) return Promise.reject(new Error('database away'));
+        return real(args as never);
+      }) as unknown as typeof prisma.computerJob.updateMany);
+      try {
+        expect(await takeOver(sara.brickId, sara.id, NOW)).toEqual({ ok: false, reason: 'not_secured' });
+      } finally {
+        spy.mockRestore();
+      }
+      expect((await readControl(sara.brickId))?.state).toBe('fencing');
+      expect(await screenTicket(sara.brickId, sara.id, 'input', NOW)).toEqual({ ok: false, reason: 'securing' });
     });
 
     it('a take over whose leader is alive (its lease has not run out) is joined, never taken over', async () => {
