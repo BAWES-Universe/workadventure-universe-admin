@@ -641,6 +641,44 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       }
     });
 
+    it('says it is alive while the provider makes the computer for a return and while a pack-away’s computer is being removed', async () => {
+      const brick = await idleBrick();
+      const before = heartbeat.ms;
+      heartbeat.ms = 25;
+      try {
+        // The removal at the end of a pack-away is slow
+        const removeComputer = provider.remove.bind(provider);
+        let removeStart: Date | null = null;
+        let removeEnd: Date | null = null;
+        provider.remove = async (ref) => {
+          if (ref === brick.ref) {
+            removeStart = (await row(brick.botId)).packClaimedAt;
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            removeEnd = (await row(brick.botId)).packClaimedAt;
+          }
+          return removeComputer(ref);
+        };
+        expect(await packAway(brick.botId, provider, NOW)).toBe('packed');
+        expect(removeStart).not.toBeNull();
+        expect((removeEnd as unknown as Date).getTime()).toBeGreaterThan((removeStart as unknown as Date).getTime());
+        // Making the computer for the return is slow too
+        const create = provider.create.bind(provider);
+        let madeStart: Date | null = null;
+        let madeEnd: Date | null = null;
+        provider.create = async (botId) => {
+          madeStart = (await row(brick.botId)).packClaimedAt;
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          madeEnd = (await row(brick.botId)).packClaimedAt;
+          return create(botId);
+        };
+        await bringBackFromCold(brick.botId, provider, NOW);
+        expect(madeStart).not.toBeNull();
+        expect((madeEnd as unknown as Date).getTime()).toBeGreaterThan((madeStart as unknown as Date).getTime());
+      } finally {
+        heartbeat.ms = before;
+      }
+    });
+
     it('a return that was taken over while it restored changes nothing: the Brick is not marked awake on a computer the other run removed', async () => {
       const brick = await idleBrick();
       await packAway(brick.botId, provider, NOW);
