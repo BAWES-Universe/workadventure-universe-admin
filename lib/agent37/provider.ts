@@ -1,6 +1,8 @@
-import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, ProviderDay, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
+import { randomUUID } from 'node:crypto';
+import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, PackInventory, ProviderDay, RestoreResult, RestoreSource, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
+import { applyCommand, egressConfig, egressProblem, hostsBlockNames, networkFor, sameNetwork, type EgressConfig } from '@/lib/egress/config';
 import { readTurn } from '@/lib/agent37/turn-events';
-import { Agent37Client, Agent37Error, Agent37Unreached, type Instance, type NetworkPolicy } from '@/lib/agent37/client';
+import { Agent37Client, Agent37Error, Agent37Unreached, type Instance } from '@/lib/agent37/client';
 import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros, restingMicrosPerMinute } from '@/lib/agent37/rates';
 import { deleteSavedCopy, savedCopyOf, storeSavedCopy, type SavedCopyInfo } from '@/lib/agent37/saved-copies';
 import { ensureImage, imageReady, type ImageState } from '@/lib/agent37/image';
@@ -24,13 +26,19 @@ import { ensureImage, imageReady, type ImageState } from '@/lib/agent37/image';
 export const BRICK_TEMPLATE = 'universe-brick';
 
 /**
- * What a Brick's computer may reach (build handoff v2, section 4): the public web and nothing private. Agent37's `allow-all` is exactly that: it
- * never reaches private ranges, other machines or the host (docs agents-api/instance-network, read 16 Nov), and it is the default. It is still
- * written on every machine we make and checked each time one is made ready, so the rule is ours and a machine that drifted (or was made before
- * this) is put right before a job runs on it. Agent37 has no deny list and domains only cover HTTPS on port 443, so "the public web except
- * Composio's hosts" cannot be said to it: those hosts are kept away from the machine by the machine holding no key for them, not by this rule.
+ * What a Brick's computer may reach: ONLY Universe's egress gateways (lib/egress). Its Agent37 network rule is an allow list of the gateways'
+ * addresses and nothing else, so a program that ignores the proxy settings has no internet at all, and no program can go around the gateway:
+ * Agent37 enforces the rule outside the machine. The gateways let the public web through and refuse Composio and the Universe AI providers by
+ * name, raw addresses with no name behind them, and private, metadata and internal addresses (lib/egress/gateway.ts). The rule is written on
+ * every machine at creation and checked, and put right, each time one is made ready. With no gateway set up (EGRESS_GATEWAYS and
+ * EGRESS_GATEWAY_SECRET) NO computer is made and none is made ready: the rule is never left open ("fails closed").
  */
-export const BRICK_NETWORK: NetworkPolicy = 'allow-all';
+export class EgressNotSetUp extends Error {
+  constructor(message = 'The computers\' internet gateway is not set up') {
+    super(message);
+    this.name = 'EgressNotSetUp';
+  }
+}
 
 /** The screen's port in the image (Agent37's `hermes-vnc-desktop` recipe). */
 export const DESKTOP_PORT = 6901;
@@ -70,9 +78,15 @@ export interface ProviderOptions {
   image?: () => Promise<ImageState | null>;
   /** For tests: where the saved copy goes and what is saved. */
   copies?: { latest: (botId: string) => Promise<SavedCopyInfo | null>; store: (botId: string, archive: ReadableStream<Uint8Array>) => Promise<SavedCopyInfo>; remove?: (botId: string) => Promise<void> };
+  /** The egress gateways (default: from the environment). Without any, nothing is made and nothing is made ready. */
+  egress?: () => EgressConfig | null;
+  /** The names of the Universe AI providers, for the hosts file's extra layer. A list that cannot be had is left out: the gateway is what refuses them. */
+  providerNames?: () => Promise<string[]>;
 }
 
 const creationId = (botId: string) => `brick:${botId}`;
+/** A throwaway computer made to prove a restore carries this in its metadata, so the daily check knows it and a sweep can remove one that was left behind. */
+export const SCRATCH_PREFIX = 'scratch:';
 const gone = (status: string) => status === 'deleting' || status === 'deleted' || status === 'failed';
 
 export class Agent37ComputerProvider implements ComputerProvider {
@@ -84,6 +98,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
   private readonly template: string;
   private readonly image: ProviderOptions['image'];
   private readonly copies: NonNullable<ProviderOptions['copies']>;
+  private readonly egress: () => EgressConfig | null;
+  private readonly providerNames: () => Promise<string[]>;
   /** Which machine belongs to which Brick, learned from the metadata we wrote: `save` needs the Brick of a machine. */
   private readonly brickOf = new Map<string, string>();
 
@@ -95,6 +111,15 @@ export class Agent37ComputerProvider implements ComputerProvider {
     this.template = options.template ?? BRICK_TEMPLATE;
     this.image = options.image;
     this.copies = options.copies ?? { latest: savedCopyOf, store: storeSavedCopy };
+    this.egress = options.egress ?? (() => egressConfig());
+    this.providerNames = options.providerNames ?? (async () => (await import('@/lib/egress/deny-list')).deniedProviderNames());
+  }
+
+  /** The gateways, or the refusal to go on without them: a computer is never made or made ready with its way out open. */
+  private egressOrThrow(): EgressConfig {
+    const config = this.egress();
+    if (!config) throw new EgressNotSetUp(`The computers' internet gateway is not set up (${egressProblem() ?? 'no gateway'})`);
+    return config;
   }
 
   microsPerMinute(): number {
@@ -145,6 +170,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
         checks.push({ name: 'agent37 wallet', ok: false, detail: 'What is already set aside could not be read' });
       }
     }
+    const config = this.egress();
+    checks.push(config ? { name: 'internet gateway', ok: true, detail: `Computers reach the internet only through ${config.gateways.length} gateway${config.gateways.length === 1 ? '' : 's'}` } : { name: 'internet gateway', ok: false, detail: `No computer can start: the internet gateway is not set up (${egressProblem() ?? 'no gateway'})` });
     if (this.image) {
       const state = await this.image().catch(() => null);
       if (imageReady(state)) checks.push({ name: 'computer image', ok: true, detail: `The computer image is built (revision ${state?.revision ?? 'unknown'})` });
@@ -174,6 +201,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
     }
     // A machine is only made from an image that was built: a job that comes first waits for it, the sweep builds it
     if (this.image && !imageReady(await this.image())) throw new ImageNotReady();
+    // The way out is the gateway or nothing: no gateway, no machine
+    const egress = this.egressOrThrow();
     await this.checkFunds();
     let made: Instance;
     try {
@@ -186,7 +215,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
         budget: { monthly_cap_micros: 0, credit_micros: 0 },
         auto_sleep: true,
         idle_timeout_seconds: 900,
-        network: BRICK_NETWORK,
+        network: networkFor(egress),
       });
     } catch (error) {
       // No answer, or a gateway failure: the machine may exist. Look for it before saying it does not
@@ -232,7 +261,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
         const instance = present.get(entry.id);
         const creation = typeof instance?.metadata?.creation_id === 'string' ? instance.metadata.creation_id : null;
         const botId = creation && creation.startsWith('brick:') ? creation.slice('brick:'.length) : null;
-        const kind: 'brick' | 'other' | 'gone' = !instance ? 'gone' : botId ? 'brick' : 'other';
+        const scratch = creation !== null && creation.startsWith(SCRATCH_PREFIX);
+        const kind: 'brick' | 'other' | 'gone' | 'scratch' = !instance ? 'gone' : scratch ? 'scratch' : botId ? 'brick' : 'other';
         const minutes = Math.min(entry.awakeMinutes, 1440);
         return { ref: entry.id, kind, botId, totalMicros: entry.totalMicros, computeMicros: entry.computeMicros, awakeMinutes: entry.awakeMinutes, expectedMicros: Math.round(minutes * awake + (1440 - minutes) * resting) };
       }),
@@ -244,27 +274,61 @@ export class Agent37ComputerProvider implements ComputerProvider {
   }
 
   /**
-   * A machine made ready for a job: moved to the image's current revision if it was made from an older one (its files are kept), then
-   * `universe-up` brings the screen, the browser and the local model address up. The first time on a machine it also writes Hermes' config,
-   * and Hermes only reads that when it starts: so the machine is stopped and started once, and `universe-up` is run again.
+   * Puts a machine's way out in order, before anything runs on it (for a job and for a restore): its network rule is the gateway allow list
+   * (read back, and set again when it is not exactly that), it is moved to the image's current revision when it was made from an older one (its
+   * files are kept; the gateway's scripts are in the image), and this machine's gateway key and settings are written. No gateway set up, a rule
+   * that cannot be set, or settings that cannot be written means the machine is not handed to anything. Returns whether the rule had to be changed
+   * (Agent37 carries a changed rule to the machine within two minutes, so the proof that nothing goes out direct then waits for it).
    */
-  async ready(ref: string): Promise<void> {
+  private async secure(ref: string): Promise<{ instance: Instance; ruleChanged: boolean }> {
+    const egress = this.egressOrThrow();
     const state = this.image ? await this.image() : null;
     let instance = await this.client.getInstance(ref);
-    // Our network rule is in force before anything runs on the machine. Only a rule Agent37 says is already ours is left alone: one it does not
-    // say, or another one, is set again (asking again is safe). A machine whose reach cannot be set is not handed to a job.
-    if (instance.network !== BRICK_NETWORK) {
+    let ruleChanged = false;
+    const wanted = networkFor(egress);
+    if (!sameNetwork(instance.network, wanted)) {
       try {
-        await this.client.setNetwork(ref, BRICK_NETWORK);
+        await this.client.setNetwork(ref, wanted);
       } catch {
         throw new Error('The computer is not ready (its network rule could not be set)');
       }
+      ruleChanged = true;
     }
     const behind = state && imageReady(state) && state.revision !== null && typeof instance.template_revision === 'number' && instance.template_revision < state.revision;
     if (behind) {
       await this.client.updateInstance(ref);
       instance = await this.untilHealthy(ref, instance.url);
     }
+    // The gateway's address and this machine's key go onto it, as root, so the agent cannot change them; the hosts file gets the names as an extra layer
+    const names = hostsBlockNames(await this.providerNames().catch(() => []));
+    const applied = await this.client.exec(ref, applyCommand(egress, ref, names, this.now()), { user: 'root', timeoutMs: 60_000 });
+    if (!/(^|\n)egress=1\b/.test(applied.stdout)) {
+      const reason = /egress=0 reason=([a-z_]+)/.exec(applied.stdout)?.[1];
+      throw new Error(`The computer is not ready (its gateway settings could not be put in place${reason ? `: ${reason}` : ''})`);
+    }
+    return { instance, ruleChanged };
+  }
+
+  /** Proves the way out is the gateway and only the gateway: it answers with this machine's key, and a direct connection gets nowhere. A rule just changed may take two minutes to arrive, so only then is "direct" waited on. */
+  private async proveEgress(ref: string, waitForRule: boolean): Promise<void> {
+    const until = this.now() + (waitForRule ? 150_000 : 0);
+    for (;;) {
+      const done = await this.client.exec(ref, 'universe-egress check', { timeoutMs: 60_000 });
+      if (/(^|\n)egress=1\b/.test(done.stdout)) return;
+      const reason = /egress=0 reason=([a-z_]+)/.exec(done.stdout)?.[1] ?? `exit ${done.exitCode}`;
+      if (reason !== 'direct_reachable' || this.now() >= until) throw new Error(`The computer is not ready (its way out is not only the gateway: ${reason})`);
+      await this.pause(10_000);
+    }
+  }
+
+  /**
+   * A machine made ready for a job: its way out put in order (`secure`), then `universe-up` brings the screen, the browser and the local model
+   * address up. The first time on a machine it also writes Hermes' config, and Hermes only reads that when it starts: so the machine is
+   * stopped and started once, and `universe-up` is run again. Last, the way out is proved to be the gateway and nothing else.
+   */
+  async ready(ref: string): Promise<void> {
+    const { instance: secured, ruleChanged } = await this.secure(ref);
+    let instance = secured;
     // A part that was still coming up (a browser right after a machine woke or restarted): `universe-up` is safe to run again, so it is
     // asked once more, after the first ask and after the restart
     const again = async (state: { ready: boolean; restart: boolean; reason: string | null }) => {
@@ -278,9 +342,11 @@ export class Agent37ComputerProvider implements ComputerProvider {
       await this.untilDown(ref, true);
       await this.client.startInstance(ref);
       await this.untilHealthy(ref, instance.url);
+      // The restart cleared what is written under /run and not what is on the disk; the gateway key is on the disk, and the forwarder starts with `universe-up`
       up = await again(await this.up(ref));
     }
     if (!up.ready) throw new Error(`The computer is not ready${up.reason ? ` (${up.reason})` : ''}`);
+    await this.proveEgress(ref, ruleChanged);
     // Last, once the computer is as it should be and before any job has used it: the note the take-over fence tells the agent's processes by
     // (everything already running is the computer's own, everything started after is the agent's). As root, so the agent cannot write it.
     // Run again on the same boot it keeps the first note. A computer that cannot be marked cannot be fenced, so it is not ready.
@@ -417,6 +483,119 @@ export class Agent37ComputerProvider implements ComputerProvider {
     const archive = await this.client.archive(url);
     const saved = await this.copies.store(botId, archive.body as ReadableStream<Uint8Array>);
     return { bytes: saved.bytes, savedAt: saved.savedAt };
+  }
+
+  // ---------- Cold storage (lib/computer-cold.ts) ----------
+
+  /**
+   * Runs `universe-cold prepack` as root: what the computer holds outside its home folder (changed files, added software) is copied into the home
+   * folder so one copy carries it, and the home folder is counted. A computer that holds more outside than can be carried says so (`blocked`) and is
+   * not packed away: nothing is thrown away to make a copy fit.
+   */
+  async prepack(ref: string): Promise<PackInventory> {
+    const done = await this.client.exec(ref, 'universe-cold prepack', { user: 'root', timeoutMs: 10 * 60_000 });
+    const line = /(^|\n)prepack=(\{[^\n]*\})/.exec(done.stdout)?.[2];
+    if (!line) throw new Error(`The computer could not be inventoried (exit ${done.exitCode})`);
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(line);
+    } catch {
+      throw new Error('The computer\'s inventory could not be read');
+    }
+    const count = (value: unknown) => (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null);
+    const homeFiles = count(data.home_files);
+    const homeBytes = count(data.home_bytes);
+    const outsideFiles = count(data.outside_files);
+    const outsideBytes = count(data.outside_bytes);
+    if (homeFiles === null || homeBytes === null || outsideFiles === null || outsideBytes === null) throw new Error('The computer\'s inventory was not whole');
+    const packages = Array.isArray(data.packages) ? data.packages.filter((name): name is string => typeof name === 'string' && /^[a-z0-9][a-z0-9+.:-]{0,100}$/.test(name)).slice(0, 500) : [];
+    const blocked = typeof data.blocked === 'string' && /^[a-z_]{1,40}$/.test(data.blocked) ? data.blocked : null;
+    return { homeFiles, homeBytes, outsideFiles, outsideBytes, packages, blocked };
+  }
+
+  /** The home folder as a tar.gz stream. Only for a machine that is awake (the address wakes a sleeper). */
+  async streamFiles(ref: string): Promise<ReadableStream<Uint8Array>> {
+    const url = await this.urlOf(ref);
+    const archive = await this.client.archive(url);
+    return archive.body as ReadableStream<Uint8Array>;
+  }
+
+  /** A throwaway computer, the same shape and the same way out as a Brick's, for a restore to be proved on. Billed until it is removed: the caller removes it. */
+  async makeScratch(): Promise<MachineInfo> {
+    if (this.image && !imageReady(await this.image())) throw new ImageNotReady();
+    const egress = this.egressOrThrow();
+    await this.checkFunds();
+    const id = randomUUID();
+    const made = await this.client.createInstance({
+      template: this.template,
+      name: `scratch-${id.slice(0, 8)}`,
+      region: 'us',
+      resources: { cpu: BRICK_SHAPE.cpu, memory: BRICK_SHAPE.memory, disk: BRICK_SHAPE.disk },
+      metadata: { creation_id: `${SCRATCH_PREFIX}${id}`, made_at: String(this.now()) },
+      budget: { monthly_cap_micros: 0, credit_micros: 0 },
+      auto_sleep: true,
+      idle_timeout_seconds: 300,
+      network: networkFor(egress),
+    });
+    await this.untilHealthy(made.id, made.url);
+    return { ref: made.id, region: made.region ?? 'us' };
+  }
+
+  /**
+   * Puts a copy onto a computer and checks it: the gateway's settings first (the copy comes from Orbit through the gateway), then
+   * `universe-cold restore` fetches the copy, compares its SHA-256, unpacks it and compares every file with the copy, and `universe-cold finish`
+   * puts back what was outside the home folder and installs the added software again. Never throws for a copy that does not check out: that is a result.
+   */
+  async restoreInto(ref: string, source: RestoreSource): Promise<RestoreResult> {
+    const started = this.now();
+    await this.secure(ref);
+    const settings = JSON.stringify({ url: source.url, token: source.token, sha256: source.sha256 });
+    const restored = await this.client.exec(ref, `universe-cold restore <<'RESTORE_JSON'\n${settings}\nRESTORE_JSON`, { timeoutMs: 20 * 60_000 });
+    if (!/(^|\n)restored=1\b/.test(restored.stdout)) {
+      const reason = /restored=0 reason=([a-z_]+)/.exec(restored.stdout)?.[1] ?? `exit_${restored.exitCode}`;
+      return { ok: false, reason, ms: this.now() - started };
+    }
+    const finished = await this.client.exec(ref, 'universe-cold finish', { user: 'root', timeoutMs: 15 * 60_000 });
+    if (!/(^|\n)finished=1\b/.test(finished.stdout)) {
+      const reason = /finished=0 reason=([a-z_]+)/.exec(finished.stdout)?.[1] ?? `exit_${finished.exitCode}`;
+      return { ok: false, reason: `finish_${reason}`, ms: this.now() - started };
+    }
+    return { ok: true, reason: null, ms: this.now() - started };
+  }
+
+  /** Asks again until the provider says the machine is gone and no longer in its list (so no longer billed), for up to two minutes. */
+  async confirmRemoved(ref: string): Promise<'gone' | 'still_there'> {
+    const until = this.now() + 120_000;
+    for (;;) {
+      let present: Instance | null = null;
+      try {
+        present = await this.client.getInstance(ref);
+      } catch (error) {
+        if (!(error instanceof Agent37Error && error.status === 404)) throw error;
+      }
+      const listed = present ? (await this.client.listInstances()).some((instance) => instance.id === ref && !gone(String(instance.status))) : false;
+      if ((!present || String(present.status) === 'deleted') && !listed) return 'gone';
+      if (this.now() >= until) return 'still_there';
+      await this.pause(5_000);
+    }
+  }
+
+  /** Removes throwaway computers a restore proof left behind (an Orbit that stopped half way). Only ours (their metadata says so), only older than the given time. */
+  async removeScratches(olderThanMs: number): Promise<number> {
+    let removed = 0;
+    for (const instance of await this.client.listInstances()) {
+      const creation = typeof instance.metadata?.creation_id === 'string' ? instance.metadata.creation_id : '';
+      if (!creation.startsWith(SCRATCH_PREFIX) || gone(String(instance.status))) continue;
+      const madeAt = Number(instance.metadata?.made_at);
+      if (!Number.isFinite(madeAt) || this.now() - madeAt < olderThanMs) continue;
+      try {
+        await this.client.deleteInstance(instance.id);
+        removed++;
+      } catch (error) {
+        if (!(error instanceof Agent37Error && error.status === 404)) console.error('[Computer] Could not remove a throwaway computer:', error instanceof Error ? error.message : 'unknown');
+      }
+    }
+    return removed;
   }
 
   /** The address of a machine's own agent. Asked of Agent37 each time (a few ms), so a machine that moved host is still found. */

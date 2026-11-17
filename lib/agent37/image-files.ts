@@ -36,10 +36,18 @@ USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify chromium x11-utils procps python3 fonts-liberation fonts-noto-color-emoji ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-COPY universe-up universe-supervise universe-proxy universe-fence universe-clean universe-files universe-mark /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/universe-up /usr/local/bin/universe-supervise /usr/local/bin/universe-proxy /usr/local/bin/universe-fence /usr/local/bin/universe-clean /usr/local/bin/universe-files /usr/local/bin/universe-mark
+COPY universe-up universe-supervise universe-proxy universe-fence universe-clean universe-files universe-mark universe-egress universe-egress-forward universe-cold /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/universe-up /usr/local/bin/universe-supervise /usr/local/bin/universe-proxy /usr/local/bin/universe-fence /usr/local/bin/universe-clean /usr/local/bin/universe-files /usr/local/bin/universe-mark /usr/local/bin/universe-egress /usr/local/bin/universe-egress-forward /usr/local/bin/universe-cold
+# What the image holds at the moment it is built: the software it was made with, and when. Cold storage compares a computer with these to know what the
+# agent added (universe-cold).
+RUN mkdir -p /usr/local/share/universe \
+ && apt-mark showmanual | sort > /usr/local/share/universe/manual-packages.txt \
+ && date +%s > /usr/local/share/universe/built
 # Hermes' browser tool drives the visible Chromium that the screen shows
 ENV DISPLAY=:99 BROWSER_CDP_URL=http://127.0.0.1:9222 AGENT37_SCREEN_GEOMETRY=1440x900
+# The computer's only way out is Universe's egress gateway, through the forwarder on this machine (universe-egress-forward), which holds the
+# gateway key. The address is the machine's own, so no secret is in the image; a program that ignores these has no internet at all.
+ENV http_proxy=http://127.0.0.1:3128 https_proxy=http://127.0.0.1:3128 HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 no_proxy=localhost,127.0.0.1,::1 NO_PROXY=localhost,127.0.0.1,::1
 USER node
 `;
 
@@ -144,11 +152,16 @@ if [ ! -S /tmp/.X11-unix/X99 ]; then
   i=0
   while [ ! -S /tmp/.X11-unix/X99 ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
 fi
+# The forwarder in front of the egress gateways (the computer's only way out). It starts before the browser, which is told to use it.
+if ! pgrep -f universe-egress-forward >/dev/null 2>&1; then
+  nohup setsid python3 /usr/local/bin/universe-egress-forward >>"$LOGS/egress.log" 2>&1 </dev/null &
+fi
 run x11vnc x11vnc -display :99 -rfbport 5900 -localhost -forever -shared -nopw -quiet
 run websockify websockify --web /usr/share/novnc 6901 127.0.0.1:5900
 if ! pgrep -x chromium >/dev/null 2>&1; then
   nohup setsid chromium --user-data-dir="$HOME_DIR/.config/universe-chromium" --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 \
     --no-sandbox --test-type --disable-dev-shm-usage --no-first-run --no-default-browser-check --hide-crash-restore-bubble --start-maximized \
+    --proxy-server=http://127.0.0.1:3128 \
     about:blank >>"$LOGS/chromium.log" 2>&1 </dev/null &
 fi
 if ! pgrep -f universe-proxy >/dev/null 2>&1; then
@@ -170,13 +183,14 @@ PYEND
 }
 i=0
 while [ "$i" -lt 100 ]; do
-  if answers 9222 && answers __PORT__ && answers 6901; then break; fi
+  if answers 9222 && answers __PORT__ && answers 6901 && answers 3128; then break; fi
   sleep 0.2
   i=$((i+1))
 done
 if ! answers 9222; then echo "ready=0 reason=browser"; exit 1; fi
 if ! answers __PORT__; then echo "ready=0 reason=model_address"; exit 1; fi
 if ! answers 6901; then echo "ready=0 reason=screen"; exit 1; fi
+if ! answers 3128; then echo "ready=0 reason=egress_forwarder"; exit 1; fi
 
 # A part that stops later (the browser crashing) is brought back by this supervisor
 if [ "$CHILD" = "0" ] && ! pgrep -f universe-supervise >/dev/null 2>&1; then
@@ -665,6 +679,454 @@ cd "$HOME_DIR" 2>/dev/null || exit 0
 find . -maxdepth 5 \( -path './.*' -o -name node_modules -o -name __pycache__ \) -prune -o -type f -printf '%s\t%T@\t%P\n' 2>/dev/null | sort -t "$(printf '\t')" -k2,2nr | head -n 201
 `;
 
+/** The local forwarder: 127.0.0.1:3128, in front of the egress gateways. It adds this computer's gateway key and passes the request on. */
+export const UNIVERSE_EGRESS_FORWARD = String.raw`#!/usr/bin/env python3
+# Listens on 127.0.0.1:3128 and passes every proxy request to the first egress gateway that answers, adding this computer's key (read from
+# /etc/universe/egress.json on EVERY connection, so a new key never needs a restart). Nothing is looked at beyond the request's headers: a
+# tunnel is opened by the gateway, the bytes after them are only passed along. Without that file it answers 503 and nothing goes out.
+import asyncio, base64, json, os, sys
+
+# The settings file and the port can be moved for a test; on a computer they are these
+CONF = os.environ.get("UNIVERSE_EGRESS_CONF", "/etc/universe/egress.json")
+PORT = int(os.environ.get("UNIVERSE_EGRESS_PORT", "3128"))
+
+def conf():
+    try:
+        with open(CONF) as handle:
+            data = json.load(handle)
+        if data.get("gateways") and data.get("user") and data.get("pass"):
+            return data
+    except Exception:
+        pass
+    return None
+
+async def pipe(reader, writer):
+    try:
+        while True:
+            chunk = await reader.read(65536)
+            if not chunk:
+                break
+            writer.write(chunk)
+            await writer.drain()
+    except Exception:
+        pass
+    finally:
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+async def reply(writer, status, text):
+    writer.write(("HTTP/1.1 %d %s\r\nContent-Length: 0\r\nConnection: close\r\nX-Egress-Reason: %s\r\n\r\n" % (status, text, text)).encode("latin1"))
+    try:
+        await writer.drain()
+    except Exception:
+        pass
+    writer.close()
+
+async def connect_gateway(data):
+    for gateway in data["gateways"]:
+        host, _, port = gateway.rpartition(":")
+        try:
+            return await asyncio.wait_for(asyncio.open_connection(host, int(port)), 4)
+        except Exception:
+            continue
+    return None
+
+async def handle(reader, writer):
+    try:
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 15)
+    except Exception:
+        writer.close()
+        return
+    data = conf()
+    if data is None:
+        await reply(writer, 503, "egress_not_set")
+        return
+    lines = head.decode("latin1").split("\r\n")[:-2]
+    if not lines:
+        writer.close()
+        return
+    drop = ("proxy-authorization:", "proxy-connection:", "connection:")
+    kept = [line for line in lines[1:] if not line.lower().startswith(drop)]
+    token = base64.b64encode((data["user"] + ":" + data["pass"]).encode()).decode()
+    request = lines[0] + "\r\n" + "".join(line + "\r\n" for line in kept) + "Proxy-Authorization: Basic " + token + "\r\nConnection: close\r\n\r\n"
+    upstream = await connect_gateway(data)
+    if upstream is None:
+        await reply(writer, 502, "no_gateway")
+        return
+    up_reader, up_writer = upstream
+    up_writer.write(request.encode("latin1"))
+    await up_writer.drain()
+    await asyncio.gather(pipe(reader, up_writer), pipe(up_reader, writer))
+
+async def main():
+    server = await asyncio.start_server(handle, "127.0.0.1", PORT, limit=1 << 16)
+    async with server:
+        await server.serve_forever()
+
+try:
+    asyncio.run(main())
+except OSError as error:
+    # Already running (the port is taken): that one serves
+    sys.exit(0)
+`;
+
+/** Run as root by Orbit each time a computer is made ready: puts the gateway settings in place and proves the way out is the gateway and nothing else. */
+export const UNIVERSE_EGRESS = String.raw`#!/bin/sh
+# universe-egress apply <name>...   (root; the settings come on standard input as JSON: gateways, user, pass)
+#     Writes /etc/universe/egress.json for the forwarder, the settings of tools that read files and not the environment (apt, git), and,
+#     as an extra layer, the names after "apply" into the hosts file pointing nowhere. Prints egress=1 hosts=1|0, or egress=0 reason=...
+# universe-egress check             (anyone)
+#     Proves the gateway answers with this computer's key, and that a direct connection to the internet does not get out.
+#     Prints egress=1 gateway=ok direct=blocked, or egress=0 reason=...
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+CONF=/etc/universe/egress.json
+case "$1" in
+apply)
+  shift
+  [ "$(id -u)" = "0" ] || { echo "egress=0 reason=not_root"; exit 1; }
+  mkdir -p /etc/universe || { echo "egress=0 reason=folder"; exit 1; }
+  umask 022
+  cat > "$CONF.new" || { echo "egress=0 reason=write"; exit 1; }
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["gateways"] and d["user"] and d["pass"]' "$CONF.new" 2>/dev/null || { rm -f "$CONF.new"; echo "egress=0 reason=bad_settings"; exit 1; }
+  chmod 0644 "$CONF.new" && mv -f "$CONF.new" "$CONF" || { echo "egress=0 reason=write"; exit 1; }
+  if [ -d /etc/apt/apt.conf.d ]; then
+    printf 'Acquire::http::Proxy "http://127.0.0.1:3128";\nAcquire::https::Proxy "http://127.0.0.1:3128";\n' > /etc/apt/apt.conf.d/99universe-egress 2>/dev/null
+  fi
+  git config --system http.proxy http://127.0.0.1:3128 2>/dev/null
+  hosts=0
+  if [ -w /etc/hosts ]; then
+    BEGIN="# universe-egress begin"
+    END="# universe-egress end"
+    tmp="$(mktemp 2>/dev/null)" || tmp=/tmp/universe-hosts.$$
+    awk -v b="$BEGIN" -v e="$END" '$0==b{skip=1} !skip{print} $0==e{skip=0}' /etc/hosts > "$tmp" 2>/dev/null
+    { echo "$BEGIN"; for name in "$@"; do echo "0.0.0.0 $name"; done; echo "$END"; } >> "$tmp"
+    if cat "$tmp" > /etc/hosts 2>/dev/null; then hosts=1; fi
+    rm -f "$tmp"
+  fi
+  echo "egress=1 hosts=$hosts"
+  ;;
+check)
+  python3 - <<'PYEND'
+import json, socket, sys, urllib.request
+
+def say(text):
+    print(text)
+    sys.exit(0 if text.startswith("egress=1") else 1)
+
+# 1. The gateway answers through the forwarder, and takes this computer's key
+try:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open("http://127.0.0.1:3128/__egress/whoami", timeout=8) as response:
+        body = json.loads(response.read().decode())
+    if not body.get("ok"):
+        say("egress=0 reason=key_refused")
+except urllib.error.HTTPError as error:
+    say("egress=0 reason=key_refused" if error.code == 407 else "egress=0 reason=gateway_error")
+except Exception:
+    say("egress=0 reason=gateway_unreachable")
+
+# 2. A connection that does not use the gateway gets nowhere (IPv4 and IPv6), so nothing can go out direct
+for family, address in ((socket.AF_INET, "1.1.1.1"), (socket.AF_INET6, "2606:4700:4700::1111")):
+    try:
+        probe = socket.socket(family, socket.SOCK_STREAM)
+        probe.settimeout(4)
+        probe.connect((address, 443))
+        probe.close()
+        say("egress=0 reason=direct_reachable")
+    except OSError:
+        pass
+say("egress=1 gateway=ok direct=blocked")
+PYEND
+  ;;
+*)
+  echo "egress=0 reason=usage"
+  exit 2
+  ;;
+esac
+`;
+
+/**
+ * Cold storage on the computer (lib/computer-cold.ts asks, this does):
+ *   universe-cold prepack   (root)  copies what the agent changed outside the home folder into the home folder, so one copy carries it, and counts the home folder.
+ *   universe-cold restore   (node)  reads {url, token, sha256} on standard input, fetches the copy from Orbit through the gateway, checks its SHA-256, unpacks it
+ *                                   into the home folder and compares EVERY file with the copy; prints restored=1, or restored=0 reason=...
+ *   universe-cold finish    (root)  puts back what was outside the home folder and installs the software the agent had added; prints finished=1, or finished=0 reason=...
+ */
+export const UNIVERSE_COLD = String.raw`#!/usr/bin/env python3
+import hashlib, json, os, pwd, re, shutil, subprocess, sys, tarfile, threading, urllib.request
+
+try:
+    NODE = pwd.getpwnam("node")
+    HOME, UID, GID = NODE.pw_dir, NODE.pw_uid, NODE.pw_gid
+except KeyError:
+    HOME, UID, GID = "/home/node", 1000, 1000
+# The home folder and the proxy can be moved for a test; on a computer they are the node user's home and the forwarder on this machine
+HOME = os.environ.get("UNIVERSE_COLD_HOME", HOME)
+PROXY = os.environ.get("UNIVERSE_COLD_PROXY", "http://127.0.0.1:3128")
+STATE = os.path.join(HOME, ".universe")
+OUTSIDE = os.path.join(STATE, "outside")
+PACKAGES_FILE = os.path.join(STATE, "outside-packages.txt")
+BUILT = "/usr/local/share/universe/built"
+BASELINE = "/usr/local/share/universe/manual-packages.txt"
+ROOTS = ["/etc", "/opt", "/srv", "/usr/local", "/root", "/var/www", "/var/spool/cron"]
+# Ours or made again by the system: never part of a copy (and never written back from one)
+SKIP = ("/etc/universe/", "/etc/hosts", "/etc/hostname", "/etc/resolv.conf", "/etc/mtab", "/etc/gitconfig", "/etc/apt/apt.conf.d/99universe-egress",
+        "/usr/local/bin/universe-", "/usr/local/share/universe/", "/etc/ssl/certs/", "/etc/ld.so.cache", "/etc/alternatives/", "/etc/passwd", "/etc/shadow",
+        "/etc/group", "/etc/gshadow", "/etc/subuid", "/etc/subgid", "/etc/machine-id", "/etc/profile.d/universe", "/etc/ca-certificates")
+MAX_FILES = 5000
+MAX_BYTES = 200 * 1024 * 1024
+PACKAGE_NAME = re.compile(r"^[a-z0-9][a-z0-9+.:-]{0,100}$")
+
+def skipped(path):
+    return path.endswith("-") or any(path == item or path.startswith(item) for item in SKIP)
+
+def home_stats():
+    files = 0
+    size = 0
+    for root, _dirs, names in os.walk(HOME, followlinks=False):
+        for name in names:
+            path = os.path.join(root, name)
+            try:
+                if os.path.islink(path):
+                    continue
+                size += os.lstat(path).st_size
+                files += 1
+            except OSError:
+                pass
+    return files, size
+
+def prepack():
+    if os.getuid() != 0:
+        print("prepack=" + json.dumps({"blocked": "not_root", "home_files": 0, "home_bytes": 0, "outside_files": 0, "outside_bytes": 0, "packages": []}))
+        return 1
+    os.makedirs(STATE, exist_ok=True)
+    shutil.rmtree(OUTSIDE, ignore_errors=True)
+    os.makedirs(OUTSIDE, exist_ok=True)
+    # A job's key is never part of a copy
+    for name in ("relay.json", "relay.json.new", "relay.gen", "relay.lock"):
+        try:
+            os.remove(os.path.join(STATE, name))
+        except OSError:
+            pass
+    blocked = None
+    found = []
+    total = 0
+    if os.path.exists(BUILT):
+        reference = os.stat(BUILT).st_mtime
+        for root in ROOTS:
+            for current, dirs, names in os.walk(root, followlinks=False):
+                if current.startswith("/usr/local/share/universe"):
+                    dirs[:] = []
+                    continue
+                for name in names:
+                    path = os.path.join(current, name)
+                    if skipped(path):
+                        continue
+                    try:
+                        info = os.lstat(path)
+                    except OSError:
+                        continue
+                    if info.st_mtime <= reference:
+                        continue
+                    found.append(path)
+                    total += info.st_size if not os.path.islink(path) else 0
+                    if len(found) > MAX_FILES or total > MAX_BYTES:
+                        blocked = "outside_too_big"
+                        break
+                if blocked:
+                    break
+            if blocked:
+                break
+    else:
+        blocked = "image_marker_missing"
+    copied = 0
+    if blocked is None:
+        for path in found:
+            target = os.path.join(OUTSIDE, path.lstrip("/"))
+            try:
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                if os.path.islink(path):
+                    os.symlink(os.readlink(path), target)
+                else:
+                    shutil.copy2(path, target)
+                copied += 1
+            except OSError:
+                blocked = "outside_not_copied"
+                break
+    packages = []
+    if blocked is None:
+        try:
+            current = set(subprocess.run(["apt-mark", "showmanual"], capture_output=True, text=True, timeout=120, check=True).stdout.split())
+            with open(BASELINE) as handle:
+                base = set(handle.read().split())
+            packages = sorted(name for name in current - base if PACKAGE_NAME.match(name))
+            with open(PACKAGES_FILE, "w") as handle:
+                handle.write("\n".join(packages) + ("\n" if packages else ""))
+        except Exception:
+            blocked = "packages_unknown"
+    subprocess.run(["chown", "-R", "%d:%d" % (UID, GID), OUTSIDE, PACKAGES_FILE], capture_output=True)
+    files, size = home_stats()
+    out_bytes = 0
+    for root, _d, names in os.walk(OUTSIDE):
+        for name in names:
+            try:
+                out_bytes += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                pass
+    print("prepack=" + json.dumps({"home_files": files, "home_bytes": size, "outside_files": copied, "outside_bytes": out_bytes, "packages": packages[:500], "blocked": blocked}))
+    return 0 if blocked is None else 1
+
+def prefix_for(names):
+    for name in names:
+        clean = name[2:] if name.startswith("./") else name
+        if clean in ("", "."):
+            continue
+        first = clean.split("/")[0]
+        home = HOME.strip("/")
+        if clean == home or clean.startswith(home + "/"):
+            return "/"
+        if first == os.path.basename(HOME):
+            return os.path.dirname(HOME)
+        return HOME
+    return HOME
+
+def restore():
+    cfg = json.load(sys.stdin)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": PROXY, "https": PROXY}))
+    def fetch():
+        return opener.open(urllib.request.Request(cfg["url"], headers={"Authorization": "Bearer " + cfg["token"]}), timeout=300)
+    def fail(reason):
+        print("restored=0 reason=" + reason)
+        return 1
+    # Where the copy's names start (the home folder itself, or inside it): read from its first entries
+    base = HOME
+    try:
+        resp = fetch()
+        names = []
+        with tarfile.open(fileobj=resp, mode="r|gz") as archive:
+            for member in archive:
+                names.append(member.name)
+                if len(names) >= 5:
+                    break
+        resp.close()
+        if names:
+            base = prefix_for(names)
+    except OSError:
+        return fail("unreachable")
+    except Exception:
+        return fail("unreadable")
+    # 1. Unpack while hashing: the bytes must be the ones that were stored
+    try:
+        resp = fetch()
+        length = resp.headers.get("Content-Length")
+        digest = hashlib.sha256()
+        total = 0
+        tar = subprocess.Popen(["tar", "-xzf", "-", "-C", base, "--no-same-owner"], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        while True:
+            chunk = resp.read(1 << 20)
+            if not chunk:
+                break
+            digest.update(chunk)
+            total += len(chunk)
+            tar.stdin.write(chunk)
+        tar.stdin.close()
+        code = tar.wait()
+    except Exception:
+        return fail("download")
+    if length is not None and int(length) != total:
+        return fail("cut_short")
+    if digest.hexdigest() != cfg["sha256"]:
+        return fail("checksum")
+    if code != 0:
+        return fail("unpack")
+    # 2. Compare every file on this computer with the copy (the copy is read again, so nothing is trusted from the first pass)
+    try:
+        resp = fetch()
+        compare = subprocess.Popen(
+            ["tar", "-dzf", "-", "-C", base, "--wildcards", "--exclude=*.universe/logs*", "--exclude=*.universe/up.lock*", "--exclude=*.universe/relay*", "--exclude=*.universe/restart.pending", "--exclude=*.cache/*"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        def pour():
+            try:
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    compare.stdin.write(chunk)
+                compare.stdin.close()
+            except Exception:
+                try:
+                    compare.kill()
+                except Exception:
+                    pass
+        pourer = threading.Thread(target=pour, daemon=True)
+        pourer.start()
+        differing = sum(1 for _ in compare.stdout)
+        pourer.join()
+        code = compare.wait()
+    except Exception:
+        return fail("compare")
+    if code > 1:
+        return fail("compare")
+    if differing > 0:
+        return fail("differs_%d" % min(differing, 99999))
+    # The job's key is never carried over: the new computer gets its own
+    for name in ("relay.json", "relay.json.new", "relay.gen", "relay.lock"):
+        try:
+            os.remove(os.path.join(STATE, name))
+        except OSError:
+            pass
+    print("restored=1 sha=%s bytes=%d" % (digest.hexdigest(), total))
+    return 0
+
+def finish():
+    if os.getuid() != 0:
+        print("finished=0 reason=not_root")
+        return 1
+    files = 0
+    if os.path.isdir(OUTSIDE):
+        for root, _dirs, names in os.walk(OUTSIDE, followlinks=False):
+            for name in names:
+                source = os.path.join(root, name)
+                target = "/" + os.path.relpath(source, OUTSIDE)
+                if skipped(target) or not any(target.startswith(r + "/") for r in ROOTS):
+                    continue
+                try:
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    if os.path.islink(source):
+                        if os.path.lexists(target):
+                            os.remove(target)
+                        os.symlink(os.readlink(source), target)
+                    else:
+                        shutil.copy2(source, target)
+                        os.chown(target, 0, 0)
+                    files += 1
+                except OSError:
+                    print("finished=0 reason=outside_not_written")
+                    return 1
+    packages = []
+    try:
+        with open(PACKAGES_FILE) as handle:
+            packages = [name for name in handle.read().split() if PACKAGE_NAME.match(name)]
+    except OSError:
+        packages = []
+    if packages:
+        update = subprocess.run(["apt-get", "update", "-qq"], capture_output=True, timeout=600)
+        install = subprocess.run(["apt-get", "install", "-y", "--no-install-recommends", "-qq"] + packages, capture_output=True, timeout=1800)
+        if update.returncode != 0 or install.returncode != 0:
+            print("finished=0 reason=packages")
+            return 1
+    print("finished=1 files=%d packages=%d" % (files, len(packages)))
+    return 0
+
+if __name__ == "__main__":
+    command = sys.argv[1] if len(sys.argv) > 1 else ""
+    code = {"prepack": prepack, "restore": restore, "finish": finish}.get(command, lambda: (print("usage: universe-cold prepack|restore|finish") or 2))()
+    sys.exit(code)
+`;
+
 /** Every file of the build context: the folder Agent37 builds. The Dockerfile is at its root. */
 export function imageFiles(): Array<{ name: string; mode: number; text: string }> {
   return [
@@ -676,5 +1138,8 @@ export function imageFiles(): Array<{ name: string; mode: number; text: string }
     { name: 'universe-clean', mode: 0o755, text: UNIVERSE_CLEAN },
     { name: 'universe-files', mode: 0o755, text: UNIVERSE_FILES },
     { name: 'universe-mark', mode: 0o755, text: UNIVERSE_MARK },
+    { name: 'universe-egress', mode: 0o755, text: UNIVERSE_EGRESS },
+    { name: 'universe-egress-forward', mode: 0o755, text: UNIVERSE_EGRESS_FORWARD },
+    { name: 'universe-cold', mode: 0o755, text: UNIVERSE_COLD },
   ];
 }

@@ -3185,12 +3185,80 @@ model BrickComputer {
   keptAwakeAt   DateTime? @map("kept_awake_at")
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again
   noticeDismissedJobId String? @map("notice_dismissed_job_id") @db.VarChar(40)
+  // Cold storage (the machine is packed into our own storage after idle days and made again on the next use): when it was packed, and how a
+  // pack-away that is under way stands. `machine` is "packing" while one runs and "cold" once the computer is gone and only the copies remain.
+  packedAt      DateTime? @map("packed_at")
+  packClaimedAt DateTime? @map("pack_claimed_at")
+  // claimed, stored (the copy is written whole), verified (restored on a clean computer and checked), removing (the computer is being deleted)
+  packStage     String?   @map("pack_stage") @db.VarChar(10)
+  packArchiveId String?   @map("pack_archive_id") @db.VarChar(40)
+  // What the stored state was before the pack-away took the machine, so a pack-away that gives up puts it back as it was
+  packPrevious  String?   @map("pack_previous") @db.VarChar(10)
+  // A pack-away that failed is not tried again at once: when it was last tried and how many times in a row it failed
+  packTriedAt   DateTime? @map("pack_tried_at")
+  packFailures  Int       @default(0) @map("pack_failures")
+  // How the last return from cold storage went: when it came back, how long it took (milliseconds), and whether an older copy had to be used
+  returnedAt    DateTime? @map("returned_at")
+  returnMs      Int?      @map("return_ms")
+  olderCopyUsed Boolean   @default(false) @map("older_copy_used")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
   bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
 
   @@map("brick_computers")
+}
+
+// One versioned, encrypted copy of a Brick computer's home folder, made when the computer is packed away into cold storage. The newest two that were
+// restored on a clean computer and checked ("verified") are kept; everything else is cleaned up on a schedule. The object holds the folder's
+// tar.gz (encrypted, lib/agent37/saved-copies.ts); the manifest says what is in it and where it came from.
+model ComputerArchive {
+  id            String    @id @default(uuid())
+  botId         String    @map("bot_id")
+  generation    Int
+  // staging (being written), stored (written whole, not yet proved), verified (restored on a clean computer and checked), failed (a check failed: never restored from), superseded (replaced by two newer verified ones, waiting to be deleted)
+  state         String    @db.VarChar(10)
+  objectKey     String    @map("object_key") @db.VarChar(255)
+  // The folder's tar.gz size (not counting the encryption's 32 bytes), and its SHA-256
+  bytes         BigInt    @default(0)
+  sha256        String?   @db.VarChar(64)
+  // What is in it: file count and size of the home folder, what was found outside the home folder, the image revision it came from, the key version
+  manifest      Json?
+  keyVersion    Int       @default(1) @map("key_version")
+  imageRevision Int?      @map("image_revision")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  verifiedAt    DateTime? @map("verified_at")
+  // How long the proving restore took, in milliseconds (the number the wake time target is measured from)
+  proofMs       Int?      @map("proof_ms")
+  // Why it failed, in a few plain words
+  failure       String?   @db.VarChar(200)
+
+  @@unique([botId, generation])
+  @@index([botId, state])
+  @@index([state, createdAt])
+  @@map("computer_archives")
+}
+
+// Awake time the computer provider bills that no job holds: a pack-away, a return from cold storage, a restore drill, and the throwaway computer
+// a restore is proved on. Kept so the daily check of the books counts it (it is not an "unbooked time" finding) and the cost is on the books.
+model ComputerColdRun {
+  id         String    @id @default(uuid())
+  // pack, return, drill
+  kind       String    @db.VarChar(8)
+  botId      String?   @map("bot_id")
+  // Whose computer was awake: the Brick's own, or the throwaway one
+  machineRef String?   @map("machine_ref") @db.VarChar(255)
+  scratch    Boolean   @default(false)
+  startedAt  DateTime  @default(now()) @map("started_at")
+  endedAt    DateTime? @map("ended_at")
+  seconds    Int       @default(0)
+  // ok, failed, or open while it runs
+  outcome    String    @default("open") @db.VarChar(8)
+  detail     String?   @db.VarChar(200)
+
+  @@index([botId, startedAt])
+  @@index([kind, startedAt])
+  @@map("computer_cold_runs")
 }
 
 // The daily check of our books against the computer provider's own bill (one row per UTC day, never changed once written): what the provider

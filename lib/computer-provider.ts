@@ -60,7 +60,8 @@ export interface Check {
 /** One machine in the provider's bill for a day. `ref` is the provider's own id; `kind` says whose machine it is (a Brick's, another one on the same account, or one that is gone). */
 export interface ProviderDayInstance {
   ref: string;
-  kind: 'brick' | 'other' | 'gone';
+  /** A throwaway computer made to prove a restore is `scratch`: it is billed but is no Brick's. */
+  kind: 'brick' | 'other' | 'gone' | 'scratch';
   /** The Brick it was made for, from what we wrote on it when we made it; null for `other` and `gone`. */
   botId: string | null;
   totalMicros: number;
@@ -75,6 +76,34 @@ export interface ProviderDay {
   day: string;
   totalMicros: number;
   instances: ProviderDayInstance[];
+}
+
+/** What a computer holds besides its home folder that a copy must carry, and how big the home folder is: what `prepack` found. */
+export interface PackInventory {
+  homeFiles: number;
+  homeBytes: number;
+  /** Files outside the home folder that were changed since the image was built, copied into the home folder so they travel with it. */
+  outsideFiles: number;
+  outsideBytes: number;
+  /** Software added to the computer after the image was built (their names), which a restore installs again. */
+  packages: string[];
+  /** Why this computer cannot be packed away yet (more outside the home folder than can be carried, or the image's own list is missing); null when it can. */
+  blocked: string | null;
+}
+
+/** Where a computer fetches a copy from when it is restored: Orbit's own address, a key that lasts a short while and only for this copy, and the SHA-256 the bytes must have. */
+export interface RestoreSource {
+  url: string;
+  token: string;
+  sha256: string;
+}
+
+export interface RestoreResult {
+  ok: boolean;
+  /** Why it did not restore, in a few plain words (never a path or what a file held). */
+  reason: string | null;
+  /** How long the restore took on the computer, in milliseconds. */
+  ms: number;
 }
 
 export interface ComputerProvider {
@@ -110,6 +139,20 @@ export interface ComputerProvider {
   watch(ref: string): Promise<WatchSession | null>;
   /** Saves a copy of its home folder and says how big it is. */
   saveFiles(ref: string): Promise<SavedCopy>;
+  /**
+   * Cold storage, step by step (lib/computer-cold.ts). Only for a computer that is awake and that Universe holds (a pack-away or a return). A
+   * provider without them keeps its computers where they are.
+   * `prepack`: copies what is outside the home folder into it and says what is there. `streamFiles`: the home folder as a tar.gz stream (as `saveFiles`
+   * reads it). `makeScratch`: a throwaway computer to prove a restore on (billed until it is removed). `restoreInto`: puts a copy onto a computer and
+   * checks it file by file. `confirmRemoved`: asks again until the provider says the computer is gone and no longer billed. `removeScratches`: removes
+   * throwaway computers older than this many milliseconds that were left behind.
+   */
+  prepack?(ref: string): Promise<PackInventory>;
+  streamFiles?(ref: string): Promise<ReadableStream<Uint8Array>>;
+  makeScratch?(): Promise<MachineInfo>;
+  restoreInto?(ref: string, source: RestoreSource): Promise<RestoreResult>;
+  confirmRemoved?(ref: string): Promise<'gone' | 'still_there'>;
+  removeScratches?(olderThanMs: number): Promise<number>;
   /** Deletes the saved copy of a Brick's folder from our own storage for good (a Brick that was deleted keeps nothing). A copy that is not there is no error. Absent: this provider keeps no copy of its own. */
   deleteSavedCopy?(botId: string): Promise<void>;
   /**
@@ -159,6 +202,21 @@ export class FakeComputerProvider implements ComputerProvider {
   filesBytes = 1_288_490_188;
   /** The machines that were made ready for a job. */
   readied: string[] = [];
+  /** Cold storage: what the pretend provider answers, and what a test can make it get wrong. */
+  coldFail: Partial<Record<'prepack' | 'stream' | 'scratch' | 'restore' | 'remove' | 'confirm', boolean>> = {};
+  inventory: PackInventory = { homeFiles: 12, homeBytes: 3_000_000, outsideFiles: 0, outsideBytes: 0, packages: [], blocked: null };
+  /** The bytes the pretend home folder streams as its tar.gz. A test sets real gzip bytes so the saved copy's check passes. */
+  homeArchive: Uint8Array = new Uint8Array(0);
+  /** What each restore answers, in order (a test queues failures); without a queued answer a restore succeeds. */
+  restoreResults: RestoreResult[] = [];
+  restored: Array<{ ref: string; source: RestoreSource }> = [];
+  scratches: string[] = [];
+  /** The machines that were made, in order, with the Brick (made) or the pretend throwaway name. */
+  made: string[] = [];
+  /** `confirmRemoved` says "still there" this many times before it says gone. */
+  stillThere = 0;
+  /** What the pretend wake time is, in milliseconds (a return from cold storage reads it). */
+  restoreMs = 1_200;
   private rate: number | null;
   private awake_ = new Set<string>();
 
@@ -188,7 +246,56 @@ export class FakeComputerProvider implements ComputerProvider {
   async create(botId: string): Promise<MachineInfo> {
     this.note('create', botId);
     this.fail('create');
+    this.made.push(botId);
     return { ref: `fake-${botId}`, region: 'pretend' };
+  }
+
+  async prepack(ref: string): Promise<PackInventory> {
+    this.note('prepack', ref);
+    if (this.coldFail.prepack) throw new Error('The pretend provider failed on prepack');
+    return this.inventory;
+  }
+
+  async streamFiles(ref: string): Promise<ReadableStream<Uint8Array>> {
+    this.note('streamFiles', ref);
+    if (this.coldFail.stream) throw new Error('The pretend provider failed on streamFiles');
+    const bytes = this.homeArchive;
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes);
+        controller.close();
+      },
+    });
+  }
+
+  async makeScratch(): Promise<MachineInfo> {
+    this.note('makeScratch');
+    if (this.coldFail.scratch) throw new Error('The pretend provider failed on makeScratch');
+    const ref = `scratch-${this.scratches.length + 1}`;
+    this.scratches.push(ref);
+    return { ref, region: 'pretend' };
+  }
+
+  async restoreInto(ref: string, source: RestoreSource): Promise<RestoreResult> {
+    this.note('restoreInto', ref);
+    this.restored.push({ ref, source });
+    if (this.coldFail.restore) throw new Error('The pretend provider failed on restoreInto');
+    return this.restoreResults.shift() ?? { ok: true, reason: null, ms: this.restoreMs };
+  }
+
+  async confirmRemoved(ref: string): Promise<'gone' | 'still_there'> {
+    this.note('confirmRemoved', ref);
+    if (this.coldFail.confirm) throw new Error('The pretend provider failed on confirmRemoved');
+    if (this.stillThere > 0) {
+      this.stillThere--;
+      return 'still_there';
+    }
+    return 'gone';
+  }
+
+  async removeScratches(): Promise<number> {
+    this.note('removeScratches');
+    return 0;
   }
 
   async ready(ref: string): Promise<void> {
@@ -222,6 +329,7 @@ export class FakeComputerProvider implements ComputerProvider {
 
   async remove(ref: string): Promise<void> {
     this.note('remove', ref);
+    if (this.coldFail.remove) throw new Error('The pretend provider failed on remove');
     this.awake_.delete(ref);
   }
 
