@@ -1,0 +1,45 @@
+name: Prune images dry run
+
+# Prints what the image clean-up would delete right now, without deleting anything, on any pull request that
+# changes the clean-up (prune-images.yml and scripts/prune-images*.mjs). Its tests run with the rest in Build and Push Docker Image.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/prune-images.yml'
+      - '.github/workflows/prune-images-check.yml'
+      - 'scripts/prune-images.mjs'
+      - 'scripts/prune-images-cli.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    # A PR from a fork gets no package access.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: What workadventure-universe-admin would lose
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEV_COOLIFY_BASE: ${{ vars.DEV_COOLIFY_BASE }}
+          DEV_COOLIFY_TOKEN: ${{ secrets.DEV_COOLIFY_TOKEN }}
+          DEV_APPS: |
+            workadventure-universe-admin ${{ vars.DEV_COOLIFY_ORBIT_UUID }}
+          PROD_COOLIFY_BASE: ${{ secrets.COOLIFY_BASE }}
+          PROD_COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          PROD_APPS: |
+            workadventure-universe-admin ${{ secrets.COOLIFY_ADMIN_UUID }}
+        run: node scripts/prune-images-cli.mjs --package workadventure-universe-admin --prod-branch main --dev-branch develop
