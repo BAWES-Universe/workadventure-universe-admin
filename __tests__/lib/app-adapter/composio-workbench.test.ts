@@ -71,6 +71,13 @@ describe('the provider’s workspace for a code job, as its docs and a live chec
       await expect(bench.open({ jobUserId: 'codejob-1' })).rejects.toThrow('did not come back restricted');
     });
 
+    it('carries the provider’s own status on a refusal, so its limit (too many requests, no funds) can be told from a failure', async () => {
+      for (const status of [429, 402, 500]) {
+        const error = await make(() => json({ error: 'no' }, status)).open({ jobUserId: 'x' }).catch((caught: unknown) => caught);
+        expect(error).toMatchObject({ kind: 'provider', status });
+      }
+    });
+
     it('fails when the provider sends no session', async () => {
       await expect(make(() => json({ config: {} })).open({ jobUserId: 'x' })).rejects.toThrow('no job workspace');
     });

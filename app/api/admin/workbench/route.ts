@@ -3,6 +3,7 @@ import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { getAdapter } from '@/lib/app-adapter';
 import { prisma } from '@/lib/db';
+import { readCodeJobsBudget } from '@/lib/workbench/budget';
 import { getCodeJobLimits, getCodeJobPause, saveCodeJobLimits } from '@/lib/workbench/state';
 import { CODE_JOB_LIMIT_LABELS, CODE_JOB_LIMIT_RANGES, CODE_JOB_LIMITS_RECOMMENDED, CODE_JOB_NEEDED, checkCodeJobLimits, missingCodeJobLimits, type CodeJobLimits } from '@/lib/workbench/values';
 
@@ -28,15 +29,18 @@ function shape(limits: CodeJobLimits) {
 
 async function answer() {
   const limits = await getCodeJobLimits();
-  const [pause, running, unconfirmed] = await Promise.all([
+  const [pause, running, unconfirmed, budget] = await Promise.all([
     getCodeJobPause(),
     prisma.codeJob.count({ where: { state: { in: ['starting', 'running'] } } }),
     prisma.codeJob.count({ where: { providerState: { in: ['open', 'unknown'] }, state: { notIn: ['starting', 'running'] } } }),
+    readCodeJobsBudget(),
   ]);
   return {
     limits: shape(limits),
     missing: missingCodeJobLimits(limits),
     pause,
+    // The third Apps line of the Budget page: what code jobs count against their monthly ceiling, and what is owed while a workspace is not confirmed deleted
+    budget,
     readiness: { providerAdapterOn: !!getAdapter()?.workbench, running, workspacesNotConfirmedDeleted: unconfirmed },
   };
 }

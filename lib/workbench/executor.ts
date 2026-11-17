@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getAdapter } from '@/lib/app-adapter';
-import type { ReadyMadeAdapter, WorkbenchAdapter } from '@/lib/app-adapter/types';
+import { AdapterError, type ReadyMadeAdapter, type WorkbenchAdapter } from '@/lib/app-adapter/types';
 import { SANDBOX_RUN_MICROS } from '@/lib/composio-rates';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
@@ -131,10 +131,17 @@ async function runPriceMicros(): Promise<number> {
 
 const monthStart = (now: Date): Date => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 
-/** What code jobs may still owe the provider this month: each job counts at what it settled at, or what it holds while it is going. */
+/**
+ * Jobs whose provider workspace is, as far as anyone knows, still standing: going, or ended with the delete not yet confirmed. Code may still
+ * be running in it, so it counts as running and as owed at what was held, never at what a job settled at: a pause or a later delete limits
+ * further loss but cannot undo a fee already incurred.
+ */
+export const STANDING: Prisma.CodeJobWhereInput = { OR: [{ state: { in: ACTIVE } }, { providerState: { in: ['open', 'unknown'] } }] };
+
+/** What code jobs may still owe the provider this month: each job counts at what it settled at once its workspace is confirmed gone, and at what it holds until then. */
 export async function exposureIn(db: Pick<Prisma.TransactionClient, 'codeJob'>, now: Date): Promise<number> {
-  const rows = await db.codeJob.findMany({ where: { createdAt: { gte: monthStart(now) } }, select: { reservedMicros: true, settledMicros: true } });
-  return rows.reduce((sum, row) => sum + asNumber(row.settledMicros ?? row.reservedMicros), 0);
+  const rows = await db.codeJob.findMany({ where: { createdAt: { gte: monthStart(now) } }, select: { reservedMicros: true, settledMicros: true, providerState: true } });
+  return rows.reduce((sum, row) => sum + asNumber(row.providerState === 'open' || row.providerState === 'unknown' ? row.reservedMicros : (row.settledMicros ?? row.reservedMicros)), 0);
 }
 
 // ---------- Starting ----------
@@ -183,8 +190,8 @@ export async function startCodeJob(input: StartInput, deps: Deps = {}): Promise<
         const again = await tx.codeJob.findUnique({ where: { jobKey: key } });
         if (again) return { kind: 'known', row: again };
         const [mine, everyone, today] = await Promise.all([
-          tx.codeJob.count({ where: { personId: input.personId, state: { in: ACTIVE } } }),
-          tx.codeJob.count({ where: { state: { in: ACTIVE } } }),
+          tx.codeJob.count({ where: { personId: input.personId, ...STANDING } }),
+          tx.codeJob.count({ where: STANDING }),
           tx.codeJob.count({ where: { personId: input.personId, createdAt: { gte: new Date(started.getTime() - DAY_MS) } } }),
         ]);
         if (mine >= limits.atOncePerPerson || everyone >= limits.atOnceAll) return { kind: 'refused', outcome: refuse('busy') };
@@ -323,7 +330,8 @@ async function work(job: Row, limits: FilledLimits, plan: Plan, ctx: Ctx, signal
     sessionId = (await wb.open({ jobUserId: job.providerUserId })).sessionId;
   } catch (error) {
     console.error('[CodeJob] The workspace could not be made:', error instanceof Error ? error.message : 'unknown');
-    return { state: 'failed', reason: 'unavailable' };
+    // The provider's own limit (too many requests, or its funds): nothing ran and nothing is charged, and the Brick is told it is the provider's limit
+    return { state: 'failed', reason: error instanceof AdapterError && (error.status === 429 || error.status === 402) ? 'provider_limit' : 'unavailable' };
   }
   const saved = await prisma.codeJob.updateMany({ where: { id: job.id, state: { in: ACTIVE } }, data: { providerSessionId: sessionId, providerState: 'open' } });
   if (saved.count === 0) {
@@ -583,9 +591,9 @@ async function dropOutputs(jobId: string, store: OutputStore): Promise<void> {
  * left standing on a guess.
  */
 async function closeSession(jobId: string, ctx: Ctx): Promise<void> {
-  const row = await prisma.codeJob.findUnique({ where: { id: jobId }, select: { providerSessionId: true, providerState: true, startedAt: true, createdAt: true } });
-  if (!row || !row.providerSessionId || row.providerState === 'closed') return;
-  let confirmed = false;
+  const row = await prisma.codeJob.findUnique({ where: { id: jobId }, select: { providerSessionId: true, providerState: true, startedAt: true, createdAt: true, nestedCheckedAt: true } });
+  if (!row || !row.providerSessionId || (row.providerState === 'closed' && row.nestedCheckedAt !== null)) return;
+  let confirmed = row.providerState === 'closed';
   for (let attempt = 0; attempt < CLOSE_RETRIES && !confirmed; attempt += 1) {
     try {
       await ctx.adapter.close(row.providerSessionId);
@@ -595,13 +603,16 @@ async function closeSession(jobId: string, ctx: Ctx): Promise<void> {
     }
   }
   await prisma.codeJob.updateMany({ where: { id: jobId, providerState: { not: 'closed' } }, data: { providerState: confirmed ? 'closed' : 'unknown' } });
-  if (!confirmed) return;
+  // The provider's log is read whether or not the delete was confirmed: a workspace that would not be deleted may still be running something,
+  // and the check must not wait for the provider to answer a delete. It is read again once the delete is confirmed (the log may have grown),
+  // and until one read after that has worked, the sweep tries again.
   const nested = await ctx.adapter.nestedRuns({ sessionId: row.providerSessionId, sinceMs: (row.startedAt ?? row.createdAt).getTime() }).catch(() => null);
   if (nested !== null && nested > 0) {
     await prisma.codeJob.update({ where: { id: jobId }, data: { nestedCalls: nested } });
     // The session has no tools, so a run that was not ours means the restrictions are not doing what they were read back as: stop new jobs
     await pauseCodeJobs('provider_ran_tools').catch(() => undefined);
   }
+  if (confirmed && nested !== null) await prisma.codeJob.updateMany({ where: { id: jobId, nestedCheckedAt: null }, data: { nestedCheckedAt: ctx.now() } });
 }
 
 /** The meter line of a finished job, once (its id is the job's). Paid by the universe, like any App step; always an estimate. */
@@ -792,7 +803,7 @@ export async function sweepCodeJobs(deps: Deps = {}): Promise<SweepResult> {
       const won = await finishJob(job.id, late ? { state: 'timed_out', reason: 'timed_out' } : { state: 'interrupted', reason: 'interrupted' }, { runs: [], reads: [], files: [], notKept: [], clipped: false }, limits, price, ctx);
       if (won) result.stopped += 1;
     }
-    const open = await prisma.codeJob.findMany({ where: { state: { notIn: ACTIVE }, providerState: { in: ['open', 'unknown'] }, providerSessionId: { not: null } }, orderBy: { createdAt: 'asc' }, take: SWEEP_BATCH, select: { id: true } });
+    const open = await prisma.codeJob.findMany({ where: { state: { notIn: ACTIVE }, providerSessionId: { not: null }, OR: [{ providerState: { in: ['open', 'unknown'] } }, { nestedCheckedAt: null }] }, orderBy: { createdAt: 'asc' }, take: SWEEP_BATCH, select: { id: true } });
     for (const job of open) {
       await closeSession(job.id, ctx);
       const after = await prisma.codeJob.findUnique({ where: { id: job.id }, select: { providerState: true } });
