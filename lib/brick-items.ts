@@ -593,6 +593,9 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         // A repeating one moves THIS occurrence, never the recurrence: the next regular one stays where the rule puts it (an hourly task due at
         // 8:00 and snoozed to 8:10 still runs at 9:00 after it). When the snooze would reach that next regular run, the two are one run at the
         // regular time and nothing is snoozed (see snoozePlan).
+        // An occurrence that waits for the person's usage (held) is already put off, and its next due time is when the usage is back, not a place
+        // on the rule: snoozing it only meets the same wait, so it is the item as it is and the occurrence runs once the usage is back.
+        if (row.state === 'on' && row.heldSince !== null) return { ok: true as const, item: viewOf(row) };
         const plan = snoozePlan(cadence, zone, row.nextDueAt, now, limits.snooze);
         if (!plan || !plan.snoozed) return { ok: true as const, item: viewOf(row) };
         return finish({ state: 'on', pausedBy: null, timeZone: zone, nextDueAt: plan.nextDueAt, regularDueAt: plan.regularDueAt, snoozedUntil: plan.nextDueAt, ...bump });

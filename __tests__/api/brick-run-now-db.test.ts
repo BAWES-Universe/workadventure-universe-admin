@@ -469,6 +469,31 @@ run('Run now and snooze, in a real database', () => {
       expect(await row(daily.id)).toMatchObject({ nextDueAt: regular, regularDueAt: null, timeZone: 'Asia/Kuwait' });
     });
 
+    it('an occurrence that waits for usage is already put off: snoozing it is the item as it is, never a place on the rule that is not one', async () => {
+      const wes = await person('wes');
+      const briefing = await set(wes, { kind: 'schedule', words: 'Headlines', cadence: hourly });
+      await prisma.botsAiProvider.upsert({ where: { providerId: 'universe-ai' }, create: { providerId: 'universe-ai', name: 'Universe AI', type: 'universe-ai', enabled: true }, update: {} });
+      await prisma.botsAiUsage.createMany({ data: Array.from({ length: 30 }, () => ({ botId: wes.brickId, providerId: 'universe-ai', talkedPersonId: wes.id, channel: 'dm', timestamp: at(MIN) })) });
+      await prisma.replyWindow.upsert({ where: { key: `ua:person:${wes.id}` }, create: { key: `ua:person:${wes.id}`, startedAt: NOW }, update: { startedAt: NOW } });
+      // It falls due with no room: it waits for the usage, due again when that is back
+      expect(mine(await claimDueRuns(at(HOUR + MIN)), briefing.id)).toEqual([]);
+      const held = await row(briefing.id);
+      expect(held.heldSince).not.toBeNull();
+      expect(held.nextDueAt!.getTime()).toBeGreaterThan(at(HOUR + MIN).getTime());
+      // A snooze tap meets the same wait: nothing is moved, nothing is snoozed, and no stray place is made on the rule
+      const snoozed = await tap(wes, briefing.id, 'snooze', at(HOUR + 2 * MIN));
+      expect(snoozed).toMatchObject({ ok: true, item: { state: 'on' } });
+      expect(await row(briefing.id)).toMatchObject({ nextDueAt: held.nextDueAt, regularDueAt: null, snoozedUntil: null, revision: held.revision });
+      // The usage is back: it runs once, and the rule goes on from there with nothing extra
+      await prisma.botsAiUsage.deleteMany({ where: { talkedPersonId: wes.id } });
+      const handed = mine(await claimDueRuns(at(HOUR + 5 * MIN)), briefing.id);
+      expect(handed).toHaveLength(1);
+      await finishRun(handed[0].runId, { attempt: 1, state: 'done', outcome: 'quiet' }, at(HOUR + 6 * MIN));
+      expect(await row(briefing.id)).toMatchObject({ regularDueAt: null, snoozedUntil: null, heldSince: null });
+      expect(mine(await claimDueRuns(at(HOUR + 7 * MIN)), briefing.id)).toEqual([]);
+      expect(await runsOf(briefing.id)).toHaveLength(1);
+    });
+
     it('a one-off snoozed is the one occurrence that moves, and a repeat tap while it waits is the snooze as it is', async () => {
       const tia = await person('tia');
       const once = await set(tia, { words: 'Call mum', cadence: { type: 'once', at: at(HOUR).toISOString() } });
