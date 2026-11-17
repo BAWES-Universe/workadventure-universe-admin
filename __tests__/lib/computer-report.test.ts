@@ -9,6 +9,12 @@ describe('cleanEndNote', () => {
     expect(cleanEndNote('use a8f7g6h5j4k3l2m1n0b9v8c7x6z5q4w3 to pay')).toBe('use to pay');
   });
 
+  it('cuts between whole characters, never through an emoji', () => {
+    const cut = cleanEndNote(`${'a'.repeat(158)}😀😀 end`);
+    expect(cut).toBe(`${'a'.repeat(158)}😀…`);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(cut ?? '')).toBe(false);
+  });
+
   it('is empty when nothing readable is left, and shortened with a mark when it is long', () => {
     expect(cleanEndNote('   ')).toBeNull();
     expect(cleanEndNote(null)).toBeNull();

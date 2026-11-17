@@ -80,7 +80,9 @@ export function cleanEndNote(text: string | null | undefined, max: number = WHY_
     .replace(/\s+([,.;:!?])/g, '$1')
     .trim();
   if (cleaned.length < 3) return null;
-  return cleaned.length > max ? `${cleaned.slice(0, max - 1).trimEnd()}…` : cleaned;
+  // Cut between whole characters, never through an emoji
+  const letters = Array.from(cleaned);
+  return letters.length > max ? `${letters.slice(0, max - 1).join('').trimEnd()}…` : cleaned;
 }
 
 const DETAILS_SEPARATOR = '\u001f';
