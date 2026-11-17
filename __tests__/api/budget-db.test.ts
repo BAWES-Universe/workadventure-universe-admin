@@ -17,6 +17,7 @@ import { clearBudgetNotices, sendNotices } from '@/lib/budget/warnings';
 import { PATCH as patchMeterSettings } from '@/app/api/admin/meter-settings/route';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
+import { clearSonioxOrgKey, saveSonioxOrgKey } from '@/lib/budget/provider-keys';
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: jest.fn() }));
@@ -29,7 +30,7 @@ let sara = '';
 const saved: Record<string, { value: unknown } | null> = {};
 // Other suites share this database and also leave lines (every save is recorded), so only this test's own admin's lines are read
 const listChanges = async (options: { take?: number } = {}) => (await listAllChanges({ take: 1000 })).filter((line) => line.changedById === admin).slice(0, options.take ?? 100);
-const KEYS = ['meter', 'instant-limits', 'budget', 'budget-accounts'];
+const KEYS = ['meter', 'instant-limits', 'budget', 'budget-accounts', 'budget-soniox-org-key'];
 
 const fakeFetch = async (url: string) => ({
   ok: true,
@@ -205,6 +206,25 @@ run('the Budget page, in a real database', () => {
       expect(agent37.balanceMicros).toBe(20_550_000);
       expect(agent37.checkedAt).not.toBeNull();
       expect(agent37.line).toMatch(/could not be reached/);
+    });
+
+    it('says Soniox is not connected without its organization key, and reads it with one that is saved encrypted', async () => {
+      process.env.ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'a'.repeat(64);
+      await clearSonioxOrgKey();
+      const before = (await buildReport({ fetchImpl: fakeFetch, agent37: null, userId: admin })).accounts.find((account) => account.key === 'soniox')!;
+      expect(before).toMatchObject({ state: 'unknown', balanceMicros: null, connection: { connected: false } });
+      expect(before.line).toContain('Not connected');
+      const sonioxFetch = async (url: string) => ({ ok: true, status: 200, json: async () => (url.includes('soniox') ? { available_balance_usd: '31.25', balance_exhausted: false, invoice_billing_enabled: false, autopay_enabled: false, has_payment_method: true, has_payment_error: false } : {}) });
+      try {
+        await saveSonioxOrgKey('snx_org_plaintext-marker', admin);
+        const stored = await prisma.appSetting.findUnique({ where: { key: 'budget-soniox-org-key' } });
+        expect(JSON.stringify(stored!.value)).not.toContain('plaintext-marker');
+        const after = (await buildReport({ fetchImpl: sonioxFetch, agent37: null, userId: admin })).accounts.find((account) => account.key === 'soniox')!;
+        expect(after).toMatchObject({ state: 'ok', balanceMicros: 31_250_000, connection: { connected: true } });
+        expect(JSON.stringify(after)).not.toContain('plaintext-marker');
+      } finally {
+        await clearSonioxOrgKey();
+      }
     });
   });
 

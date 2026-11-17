@@ -2,6 +2,10 @@ import { prisma } from '@/lib/db';
 import { decryptApiKey } from '@/lib/encryption';
 import { Agent37Client, Agent37Error } from '@/lib/agent37/client';
 import { recentDays } from '@/lib/budget/books';
+import { sonioxOrgKey } from '@/lib/budget/provider-keys';
+import { getAdapter } from '@/lib/app-adapter';
+import { readComposioBilling } from '@/lib/composio-billing';
+import { monthOf } from '@/lib/meter-values';
 import type { AccountState, AccountView } from '@/lib/budget/types';
 
 /**
@@ -52,7 +56,15 @@ export interface Reading {
   planDaysLeft?: number | null;
   /** The reading is ours (a count from our books) and not the company's own. */
   ours?: boolean;
+  /** What else the company tells us, a line each. */
+  facts?: string[];
+  /** The company says the account is overdrawn or a payment failed. */
+  overdue?: boolean;
+  /** For a company read with its own key: whether that key is saved here. */
+  connected?: boolean;
 }
+
+const dollarsOf = (value: number) => dollars(Math.round(value * 1_000_000));
 
 const asRecord = (value: unknown): Record<string, unknown> | null => (typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null);
 
@@ -71,8 +83,16 @@ export async function readDeepSeek(key: string, fetchImpl: FetchLike): Promise<R
   const usd = infos.map(asRecord).find((info) => info?.currency === 'USD');
   const total = usd ? Number(usd.total_balance) : NaN;
   if (!Number.isFinite(total)) throw new Unreadable('DeepSeek did not give a balance in dollars');
-  return { kind: 'balance', balanceMicros: Math.round(total * 1_000_000), empty: body.is_available === false || total <= 0 };
+  const facts: string[] = [];
+  const granted = Number(usd?.granted_balance);
+  const toppedUp = Number(usd?.topped_up_balance);
+  if (Number.isFinite(granted) && granted > 0) facts.push(`${dollars(Math.round(granted * 1_000_000))} of it was granted`);
+  if (Number.isFinite(toppedUp) && toppedUp > 0) facts.push(`${dollars(Math.round(toppedUp * 1_000_000))} of it was topped up`);
+  facts.push('Pay as you go: no plan and no automatic top up. The run-out date is the warning.');
+  return { kind: 'balance', balanceMicros: Math.round(total * 1_000_000), empty: body.is_available === false || total <= 0, facts };
 }
+
+const cents = (value: unknown): string | null => (typeof value === 'number' && Number.isFinite(value) ? dollars(Math.round(value * 10_000)) : null);
 
 /** ElevenLabs' plan (`GET /v1/user/subscription`): characters used of those included, and when the count starts again. */
 export async function readElevenLabs(key: string, fetchImpl: FetchLike, now: Date): Promise<Reading> {
@@ -93,7 +113,51 @@ export async function readElevenLabs(key: string, fetchImpl: FetchLike, now: Dat
     const elapsed = (now.getTime() - startedAt.getTime()) / DAY;
     if (elapsed > 0 && used > 0) planDaysLeft = (limit - used) / (used / elapsed);
   }
-  return { kind: 'plan', planLeftPercent: left, planRenewsAt: renews ? renews.toISOString() : null, empty: used >= limit, planDaysLeft };
+  const facts = [`${used.toLocaleString('en')} of ${limit.toLocaleString('en')} credits used this period`];
+  const tier = typeof body.tier === 'string' && body.tier ? body.tier : null;
+  if (tier) facts.push(`Plan: ${tier}`);
+  const planStatus = typeof body.status === 'string' ? body.status : null;
+  const overdue = planStatus === 'past_due' || planStatus === 'unpaid';
+  if (planStatus && planStatus !== 'active' && planStatus !== 'free' && planStatus !== 'trialing') facts.push(`Status: ${planStatus.replace(/_/g, ' ')}`);
+  if (body.allowed_to_extend_character_limit === true) facts.push('Goes past the plan’s credits and bills the extra (overage is on)');
+  else if (body.allowed_to_extend_character_limit === false) facts.push('Stops at the plan’s credits (overage is off)');
+  const next = asRecord(body.next_invoice);
+  const nextDue = cents(next?.amount_due_cents);
+  if (nextDue) facts.push(`Next invoice ${nextDue}`);
+  const open = Array.isArray(body.open_invoices) ? body.open_invoices.length : 0;
+  if (open > 0) facts.push(`${open} open invoice${open === 1 ? '' : 's'} to pay`);
+  facts.push('ElevenLabs does not give the prepaid dollar balance or Auto Top Up through its API: see its billing page.');
+  return { kind: 'plan', planLeftPercent: left, planRenewsAt: renews ? renews.toISOString() : null, empty: used >= limit, planDaysLeft, facts, overdue: overdue || open > 0 };
+}
+
+/**
+ * Soniox's prepaid balance (`GET /v1/organization/balance`). It needs a separate organization key (starts snx_org_) that an organization admin makes in
+ * the Soniox console; the usual project key cannot read it. Under invoice billing there is no balance: it is billed after use.
+ */
+export async function readSoniox(key: string, fetchImpl: FetchLike): Promise<Reading> {
+  const { status, body } = await getJson(fetchImpl, 'https://api.soniox.com/v1/organization/balance', { Authorization: `Bearer ${key}`, Accept: 'application/json' });
+  if (status === 401 || status === 403) throw new Unreadable('Soniox refused the organization key');
+  if (status === 429) throw new Unreadable('Soniox asked Orbit to wait before reading again');
+  if (!body) throw new Unreadable('Soniox did not give its balance');
+  const usd = (value: unknown): number | null => {
+    const number = typeof value === 'string' || typeof value === 'number' ? Number(value) : NaN;
+    return Number.isFinite(number) ? Math.round(number * 1_000_000) : null;
+  };
+  const facts: string[] = [];
+  const free = usd(body.free_balance_usd);
+  if (free !== null && free > 0) facts.push(`${dollars(free)} of it was granted`);
+  if (body.autopay_enabled === true) {
+    const threshold = usd(body.autopay_threshold_usd);
+    const amount = usd(body.autopay_amount_usd);
+    facts.push(`Autopay is on${threshold !== null ? `: ${amount !== null ? `adds ${dollars(amount)} ` : ''}when under ${dollars(threshold)}` : ''}`);
+  } else if (body.autopay_enabled === false) facts.push('Autopay is off');
+  const failed = body.has_payment_error === true;
+  if (failed) facts.push('The last payment failed');
+  if (body.has_payment_method === false) facts.push('No payment method on file');
+  if (body.invoice_billing_enabled === true) return { kind: 'after', facts: ['Invoiced by Soniox after use', ...facts.filter((fact) => !fact.startsWith('Autopay'))], overdue: failed, connected: true };
+  const balance = usd(body.available_balance_usd);
+  if (balance === null) throw new Unreadable('Soniox did not give a balance in dollars');
+  return { kind: 'balance', balanceMicros: balance, empty: body.balance_exhausted === true || balance <= 0, facts, overdue: failed, connected: true };
 }
 
 /** Agent37's wallet (`GET /v1/billing`). */
@@ -102,7 +166,17 @@ export async function readAgent37(client: Pick<Agent37Client, 'billing'>): Promi
     const wallet = await client.billing();
     const dollars = Number(wallet.balance_usd);
     if (!Number.isFinite(dollars)) throw new Unreadable('Agent37 did not give a balance');
-    return { kind: 'balance', balanceMicros: Math.round(dollars * 1_000_000), empty: dollars <= 0 || wallet.past_due === true, note: wallet.past_due ? 'The wallet is overdrawn.' : null };
+    const facts: string[] = [];
+    if (typeof wallet.tier === 'number') facts.push(`Tier ${wallet.tier}${typeof wallet.instance_limit === 'number' ? `, up to ${wallet.instance_limit} computers` : ''}`);
+    const rule = wallet.auto_top_up as { enabled?: boolean; threshold_usd?: number; amount_usd?: number } | null | undefined;
+    if (rule?.enabled === true) {
+      const threshold = Number(rule.threshold_usd);
+      const amount = Number(rule.amount_usd);
+      facts.push(`Auto top up is on${Number.isFinite(threshold) ? `: ${Number.isFinite(amount) ? `adds ${dollarsOf(amount)} ` : ''}when under ${dollarsOf(threshold)}` : ''}`);
+    } else facts.push('Auto top up is off (it is set on Agent37’s own page)');
+    const overdue = wallet.past_due === true;
+    if (overdue) facts.push('Agent37 puts computers to sleep while the wallet is negative, and deletes one left suspended for 30 days');
+    return { kind: 'balance', balanceMicros: Math.round(dollars * 1_000_000), empty: dollars <= 0 || overdue, note: overdue ? 'The wallet is overdrawn.' : null, facts, overdue };
   } catch (error) {
     if (error instanceof Unreadable) throw error;
     if (error instanceof Agent37Error && (error.status === 401 || error.status === 403)) throw new Unreadable('Agent37 refused the key');
@@ -156,6 +230,12 @@ export function runway(balanceMicros: number, dailyMicros: number | null | undef
 
 /** The words and state for one reading. A pure function of the reading, the pace and the days left in the month. */
 export function describe(company: Company, reading: Reading, now: Date, monthEnd: Date): Pick<AccountView, 'kind' | 'balanceMicros' | 'planLeftPercent' | 'planRenewsAt' | 'state' | 'line' | 'daysLeft' | 'thirtyDayMicros' | 'checkedBy'> {
+  const worded = describeReading(company, reading, now, monthEnd);
+  // A failed payment or an overdrawn account is never "fine": it is at least a warning, whatever the amount says
+  return reading.overdue && worded.state === 'ok' ? { ...worded, state: 'low', line: `${reading.note ?? 'A payment needs attention.'} ${worded.line}`.trim() } : worded;
+}
+
+function describeReading(company: Company, reading: Reading, now: Date, monthEnd: Date): Pick<AccountView, 'kind' | 'balanceMicros' | 'planLeftPercent' | 'planRenewsAt' | 'state' | 'line' | 'daysLeft' | 'thirtyDayMicros' | 'checkedBy'> {
   const daysToMonthEnd = Math.max(0, (monthEnd.getTime() - now.getTime()) / DAY);
   const base = { kind: reading.kind, balanceMicros: reading.balanceMicros ?? null, planLeftPercent: reading.planLeftPercent ?? null, planRenewsAt: reading.planRenewsAt ?? null, daysLeft: null as number | null, thirtyDayMicros: null as number | null, checkedBy: (reading.ours ? 'ours' : 'company') as 'company' | 'ours' };
   if (reading.kind === 'balance' && reading.balanceMicros !== null && reading.balanceMicros !== undefined) {
@@ -187,7 +267,8 @@ export function describe(company: Company, reading: Reading, now: Date, monthEnd
   }
   if (reading.kind === 'after') return { ...base, state: 'ok', line: `Billed after use, so there is no balance.${reading.balanceMicros ? ` About ${dollars(reading.balanceMicros)} this month so far.` : ''}`, balanceMicros: null };
   // Unknown: the company does not tell us. Never shown as zero
-  return { ...base, state: reading.empty ? 'zero' : 'unknown', line: `${company.name} doesn’t tell us its balance.${reading.balanceMicros ? ` By our count about ${dollars(reading.balanceMicros)} this month.` : ''}`, balanceMicros: null };
+  const ourCount = reading.balanceMicros ? ` By our count about ${dollars(reading.balanceMicros)} this month.` : '';
+  return { ...base, state: reading.empty ? 'zero' : 'unknown', line: reading.empty ? `${reading.note ?? `${company.name} said it has no money.`}${ourCount}` : `${reading.note ?? `${company.name} doesn’t tell us its balance.`}${ourCount}`, balanceMicros: null };
 }
 
 export interface Stored {
@@ -240,12 +321,20 @@ export async function readAccounts(ctx: ReadContext, previous: Stored, only?: st
       daysLeft: null,
       thirtyDayMicros: null,
       canVerify: true,
+      facts: [],
+      overdue: false,
+      addFunds: company.key === 'agent37',
+      ...(company.key === 'soniox' ? { connection: { connected: false, what: 'Soniox organization key' } } : {}),
     };
     if (used) {
       const worded = describe(company, { ...used, dailyMicros: pace }, ctx.now, monthEnd);
       Object.assign(view, worded);
+      view.facts = used.facts ?? [];
+      view.overdue = used.overdue === true || worded.state === 'zero';
+      if (view.connection) view.connection.connected = used.connected === true;
     } else {
       view.line = failure ?? `${company.name} is not set up here, so it cannot be read.`;
+      if (view.connection) view.connection.connected = !!failure;
       view.state = failure ? 'error' : 'unknown';
     }
     // A read that failed now is said, never read as zero: the last good reading stays, with its time
@@ -272,12 +361,25 @@ async function readCompany(key: string, ctx: ReadContext, fetchImpl: FetchLike):
     }
     case 'agent37':
       return ctx.agent37 ? readAgent37(ctx.agent37) : null;
-    case 'soniox':
-      // Soniox gives no balance through its API: Universe's own count is shown, and it is said to be ours
-      return { kind: 'unknown', balanceMicros: ctx.ours?.soniox ?? null, ours: true };
-    case 'composio':
-      // Composio gives no balance either. Instant pauses itself when it runs out, so that is what is known
-      return { kind: 'unknown', balanceMicros: ctx.ours?.composio ?? null, ours: true, empty: ctx.composioEmpty === true };
+    case 'soniox': {
+      const secret = await sonioxOrgKey();
+      // Without the organization key nothing else stops: the row says it is not connected and where to connect
+      if (!secret) return { kind: 'unknown', connected: false, note: 'Not connected. Soniox gives its balance only to an organization key: add one here and this row shows it.', facts: ['Made by an organization admin in the Soniox console (it starts snx_org_)'] };
+      return readSoniox(secret, fetchImpl);
+    }
+    case 'composio': {
+      // Composio gives no prepaid balance or plan through its API. Said plainly: the plan saved here, Composio's own count of calls, and our count
+      const facts: string[] = [];
+      const billing = await readComposioBilling();
+      facts.push(`Plan saved in Orbit: ${billing.plan === 'pro' ? 'Pro' : 'Hobby'} (Composio does not tell us its plan or balance)`);
+      const adapter = getAdapter();
+      if (adapter?.usage) {
+        const month = monthOf(ctx.now);
+        const usage = await adapter.usage({ fromMs: month.start.getTime(), toMs: month.end.getTime() }).catch(() => null);
+        if (usage) facts.push(`Composio counts ${usage.toolCalls.toLocaleString('en')} tool call${usage.toolCalls === 1 ? '' : 's'} this month`);
+      }
+      return { kind: 'unknown', balanceMicros: ctx.ours?.composio ?? null, ours: true, empty: ctx.composioEmpty === true, note: ctx.composioEmpty === true ? 'Composio said its balance is used up, so Instant Apps paused.' : 'Composio doesn’t tell us its balance. Instant Apps pause by themselves if it runs out.', facts };
+    }
     case 'r2':
       return { kind: 'after', balanceMicros: ctx.ours?.r2 ?? null, ours: true };
     default:

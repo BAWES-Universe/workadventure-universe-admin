@@ -15,6 +15,7 @@ import { WokaAvatar } from '../../components/profile-card';
 import styles from '../../components/ds/ds.module.css';
 import type { AccountView, AreaView, BudgetReport, ChangeView, LineView, NumberView } from '@/lib/budget/types';
 import { AccountLine, AreaCard } from './parts';
+import { ConnectSheet, FundsSheet } from './account-sheets';
 import { RaiseSheet, walletNoteFor, type RaiseTarget } from './raise-sheet';
 import { dayWords, limitOf, money, timeWords, toSaved, valueWords, whenWords } from './format';
 
@@ -30,6 +31,10 @@ const DETAIL_GROUPS: { group: NumberView['group']; title: string; note?: string 
   { group: 'forecast', title: 'How forecasts and suggestions are worked', note: 'What a forecast reads from and how big a suggested raise is.' },
 ];
 
+/** After a payment link is opened, how often the company is read again and for how many reads (about three minutes) before the page stops asking. */
+const WATCH_EVERY_MS = 10_000;
+const WATCH_TICKS = 18;
+
 export default function BudgetPage() {
   const replacePage = useReplacePage();
   const params = useSearchParams();
@@ -41,6 +46,10 @@ export default function BudgetPage() {
   const [checking, setChecking] = useState<string | null>(null);
   const [checked, setChecked] = useState<Record<string, string>>({});
   const [allChanges, setAllChanges] = useState<ChangeView[] | null>(null);
+  const [connecting, setConnecting] = useState<AccountView | null>(null);
+  const [funding, setFunding] = useState<AccountView | null>(null);
+  // After a payment link is opened: the company and the balance it showed, so the page can say when it changes
+  const [watching, setWatching] = useState<{ key: string; before: number | null } | null>(null);
 
   const load = useCallback(async () => {
     setFailed(false);
@@ -139,6 +148,82 @@ export default function BudgetPage() {
       setChecking(null);
     }
   }
+
+  function replaceAccount(fresh: AccountView) {
+    setReport((now) => now && { ...now, accounts: now.accounts.map((entry) => (entry.key === fresh.key ? fresh : entry)) });
+  }
+
+  async function saveKey(account: AccountView, key: string): Promise<{ ok: boolean; error?: string }> {
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/budget/soniox-key', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key }) });
+      const data = (await response.json().catch(() => ({}))) as { account?: AccountView; error?: string };
+      if (!response.ok || !data.account) return { ok: false, error: data.error ?? 'The key could not be saved.' };
+      replaceAccount(data.account);
+      addToast({ description: `${account.name} is connected: ${data.account.line}`, variant: 'success', duration: 5000 });
+      setConnecting(null);
+      await load();
+      return { ok: true };
+    } catch {
+      return { ok: false, error: 'Orbit could not be reached. Nothing was saved.' };
+    }
+  }
+
+  async function removeKey(account: AccountView): Promise<{ ok: boolean; error?: string }> {
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/budget/soniox-key', { method: 'DELETE' });
+      const data = (await response.json().catch(() => ({}))) as { account?: AccountView; error?: string };
+      if (!response.ok || !data.account) return { ok: false, error: data.error ?? 'The key could not be removed.' };
+      replaceAccount(data.account);
+      addToast({ description: `${account.name} is disconnected. Nothing else stopped.`, variant: 'success', duration: 4000 });
+      setConnecting(null);
+      return { ok: true };
+    } catch {
+      return { ok: false, error: 'Orbit could not be reached. Nothing was changed.' };
+    }
+  }
+
+  async function askForLink(account: AccountView, amountUsd: number): Promise<{ ok: boolean; error?: string; url?: string }> {
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/budget/funds', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ company: account.key, amountUsd }) });
+      const data = (await response.json().catch(() => ({}))) as { url?: string; error?: string };
+      if (!response.ok || !data.url) return { ok: false, error: data.error ?? 'No payment link was made. Nothing was charged.' };
+      setWatching({ key: account.key, before: account.balanceMicros });
+      window.open(data.url, '_blank', 'noopener,noreferrer');
+      return { ok: true, url: data.url };
+    } catch {
+      return { ok: false, error: 'Orbit could not be reached. Nothing was charged.' };
+    }
+  }
+
+  // After a payment link: read the company again every few seconds until the balance is not what it was, then say so and carry on with waiting work
+  useEffect(() => {
+    if (!watching) return;
+    let ticks = 0;
+    const timer = setInterval(async () => {
+      ticks += 1;
+      if (ticks > WATCH_TICKS) {
+        setWatching(null);
+        return;
+      }
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const response = await authenticatedFetch(`/api/admin/budget/accounts/${encodeURIComponent(watching.key)}/verify`, { method: 'POST' });
+        const data = (await response.json().catch(() => ({}))) as { account?: AccountView; looked?: { line: string } };
+        if (response.ok && data.account && data.account.balanceMicros !== watching.before) {
+          setWatching(null);
+          addToast({ description: `${data.account.name} now shows ${data.account.balanceMicros === null ? 'a new balance' : money(data.account.balanceMicros)}. ${data.looked?.line ?? ''}`.trim(), variant: 'success', duration: 6000 });
+          await load();
+        }
+      } catch {
+        // Try again at the next tick
+      }
+    }, WATCH_EVERY_MS);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watching]);
 
   async function showAll() {
     try {
@@ -315,7 +400,7 @@ export default function BudgetPage() {
         <div className="grid min-w-0 gap-0.5">
           {report.accounts.map((account) => (
             <div key={account.key} className="grid gap-0.5">
-              <AccountLine account={account} onVerify={verify} checking={checking === account.key} />
+              <AccountLine account={account} onVerify={verify} checking={checking === account.key} onConnect={setConnecting} onAddFunds={setFunding} />
               {checked[account.key] && (
                 <p className="px-3 pb-1 text-xs text-muted-foreground" data-testid={`verified-${account.key}`}>
                   {checked[account.key]}
@@ -386,6 +471,8 @@ export default function BudgetPage() {
       </section>
 
       <RaiseSheet target={raising} onClose={() => setRaising(null)} onSave={(number, micros) => saveNumber(number, micros)} />
+      <ConnectSheet account={connecting} onClose={() => setConnecting(null)} onSave={saveKey} onRemove={removeKey} />
+      <FundsSheet account={funding} onClose={() => setFunding(null)} onAsk={askForLink} />
     </div>
   );
 }

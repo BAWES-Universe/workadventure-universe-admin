@@ -99,6 +99,14 @@ export interface AccountView {
   thirtyDayMicros: number | null;
   /** Whether "I topped up, check again" does anything for this one. */
   canVerify: boolean;
+  /** What else the company tells us, one short line each: auto refill, the free part, invoices, the plan saved here, our own count. */
+  facts: string[];
+  /** The company says the account is overdrawn or a payment failed: shown in red. */
+  overdue: boolean;
+  /** For a company read with a key of its own (Soniox): whether that key is saved. Absent when no extra key is needed. */
+  connection?: { connected: boolean; what: string };
+  /** Orbit can ask the company for a payment link (Agent37). */
+  addFunds: boolean;
 }
 
 export interface AskView {

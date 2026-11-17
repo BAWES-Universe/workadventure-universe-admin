@@ -19,7 +19,7 @@ jest.mock('next/navigation', () => ({ useSearchParams: () => new URLSearchParams
 jest.mock('next/link', () => ({ __esModule: true, default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => <a href={href} {...rest}>{children}</a> }));
 
 import BudgetPage from '@/app/admin/ai-providers/budget/page';
-import type { BudgetReport } from '@/lib/budget/types';
+import type { AccountView, BudgetReport } from '@/lib/budget/types';
 
 const MILLION = 1_000_000;
 
@@ -145,5 +145,73 @@ describe('the raise sheet on the Budget page', () => {
     fetchMock.mockImplementation(() => ok({ error: 'Forbidden' }, 403));
     render(<BudgetPage />);
     await waitFor(() => expect(replace).toHaveBeenCalledWith('/admin'));
+  });
+});
+
+const account = (over: Partial<AccountView>): AccountView => ({
+  key: 'x',
+  name: 'X',
+  paysFor: 'Things',
+  kind: 'balance',
+  balanceMicros: 5 * MILLION,
+  planLeftPercent: null,
+  planRenewsAt: null,
+  state: 'ok',
+  line: 'Fine.',
+  checkedAt: '2026-11-18T09:00:00.000Z',
+  checkedBy: 'company',
+  url: 'https://billing.example.test',
+  daysLeft: null,
+  thirtyDayMicros: null,
+  canVerify: true,
+  facts: [],
+  overdue: false,
+  addFunds: false,
+  ...over,
+});
+
+describe('the company rows', () => {
+  const soniox = account({ key: 'soniox', name: 'Soniox', kind: 'unknown', balanceMicros: null, state: 'unknown', line: 'Not connected. Soniox gives its balance only to an organization key.', canVerify: true, connection: { connected: false, what: 'Soniox organization key' } });
+  const agent37 = account({ key: 'agent37', name: 'Agent37', state: 'zero', overdue: true, line: 'The wallet is overdrawn.', facts: ['Auto top up is off (it is set on Agent37’s own page)'], addFunds: true, balanceMicros: -3 * MILLION });
+
+  beforeEach(() => {
+    query = '';
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      if (url === '/api/admin/budget' && method === 'GET') return ok({ ...report, accounts: [soniox, agent37] });
+      if (url === '/api/admin/budget/soniox-key' && method === 'PUT') return ok({ account: { ...soniox, state: 'ok', line: 'About 20 days left.', balanceMicros: 31 * MILLION, connection: { connected: true, what: 'Soniox organization key' } } });
+      if (url === '/api/admin/budget/funds' && method === 'POST') return ok({ url: 'https://checkout.example.test/pay/1', amountUsd: 25 });
+      return ok({}, 404);
+    });
+    window.open = jest.fn();
+  });
+
+  it('shows what a company tells us, an overdue wallet, and "Not connected" instead of a number', async () => {
+    render(<BudgetPage />);
+    expect(await screen.findByTestId('account-soniox-line')).toHaveTextContent('Not connected');
+    expect(screen.queryByTestId('verify-soniox')).toBeNull();
+    expect(screen.getByTestId('account-agent37-line')).toHaveTextContent('overdrawn');
+    expect(screen.getByText('Auto top up is off (it is set on Agent37’s own page)')).toBeInTheDocument();
+  });
+
+  it('connects Soniox with an organization key and says so', async () => {
+    render(<BudgetPage />);
+    fireEvent.click(await screen.findByTestId('connect-soniox'));
+    fireEvent.change(screen.getByTestId('connect-key'), { target: { value: 'snx_org_abc' } });
+    fireEvent.click(screen.getByTestId('connect-save'));
+    await waitFor(() => expect(mockAddToast).toHaveBeenCalled());
+    expect(mockAddToast.mock.calls[0][0].description).toContain('Soniox is connected');
+    expect(JSON.parse((puts()[0][1] as RequestInit).body as string)).toEqual({ key: 'snx_org_abc' });
+  });
+
+  it('asks Agent37 for a payment link for the typed amount and opens it', async () => {
+    render(<BudgetPage />);
+    fireEvent.click(await screen.findByTestId('funds-agent37'));
+    fireEvent.change(screen.getByTestId('funds-amount'), { target: { value: '25' } });
+    fireEvent.click(screen.getByTestId('funds-ask'));
+    expect(await screen.findByTestId('funds-link')).toHaveAttribute('href', 'https://checkout.example.test/pay/1');
+    expect(window.open).toHaveBeenCalledWith('https://checkout.example.test/pay/1', '_blank', 'noopener,noreferrer');
+    const call = fetchMock.mock.calls.find(([url]) => url === '/api/admin/budget/funds')!;
+    expect(JSON.parse((call[1] as RequestInit).body as string)).toEqual({ company: 'agent37', amountUsd: 25 });
   });
 });

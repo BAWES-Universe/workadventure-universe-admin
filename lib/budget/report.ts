@@ -153,9 +153,14 @@ export async function buildReport(options: BuildOptions = {}): Promise<BudgetRep
   const values = await readValues();
   const previous = await storedAccounts();
   const sampleDays = values.budget.sampleDays ?? 1;
-  const [pace, pause] = await Promise.all([paces(now, sampleDays), getInstantPause().catch(() => null)]);
+  const [pace, pause, appsMonth, instantMonth] = await Promise.all([
+    paces(now, sampleDays),
+    getInstantPause().catch(() => null),
+    monthSum({ pool: 'chat', kind: 'app_use', route: 'app' }, now),
+    monthSum({ pool: 'chat', kind: 'app_use', route: 'instant' }, now),
+  ]);
   const { accounts, fresh } = await readAccounts(
-    { now, fetchImpl: options.fetchImpl, agent37: options.agent37 === undefined ? agent37Client() : options.agent37, pace, composioEmpty: pause?.paused === true && pause.reason === 'provider_empty' },
+    { now, fetchImpl: options.fetchImpl, agent37: options.agent37 === undefined ? agent37Client() : options.agent37, pace, composioEmpty: pause?.paused === true && pause.reason === 'provider_empty', ours: { composio: appsMonth.costMicros + instantMonth.costMicros } },
     previous,
     options.onlyCompany,
   );

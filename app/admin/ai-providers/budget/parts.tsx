@@ -172,7 +172,7 @@ export function AreaCard({ area, onRaise, onCapacity, lastChange }: { area: Area
 }
 
 /** One company: what it holds in the status that fits it, when it was last read, and where to top up. Unknown is never shown as zero. */
-export function AccountLine({ account, onVerify, checking }: { account: AccountView; onVerify: (account: AccountView) => void; checking: boolean }) {
+export function AccountLine({ account, onVerify, checking, onConnect, onAddFunds }: { account: AccountView; onVerify: (account: AccountView) => void; checking: boolean; onConnect?: (account: AccountView) => void; onAddFunds?: (account: AccountView) => void }) {
   const Glyph = ACCOUNT_ICON[account.key] ?? Mic;
   const icon =
     account.key === 'deepseek' ? (
@@ -182,7 +182,8 @@ export function AccountLine({ account, onVerify, checking }: { account: AccountV
         <Glyph size={22} aria-hidden="true" />
       </span>
     );
-  const warn = account.state === 'low' || account.state === 'zero' || account.state === 'error';
+  const warn = account.state === 'low' || account.state === 'zero' || account.state === 'error' || account.overdue;
+  const notConnected = account.connection?.connected === false;
   const amount = account.balanceMicros !== null ? money(account.balanceMicros) : account.planLeftPercent !== null ? `${Math.round(account.planLeftPercent)}% left` : null;
   const stamp = account.checkedAt ? `${account.checkedBy === 'ours' ? 'Our count' : 'Checked'} ${timeWords(account.checkedAt)}` : 'Not read yet';
   return (
@@ -195,10 +196,23 @@ export function AccountLine({ account, onVerify, checking }: { account: AccountV
           <span className={styles.pill}>{account.state === 'zero' ? 'Empty' : account.state === 'error' ? 'Could not read' : KIND_WORDS[account.kind]}</span>
         </span>
         <StatLine items={[account.paysFor, stamp]} />
-        <span className={cn('text-xs leading-snug', warn ? 'text-amber-300' : 'text-foreground/85')}>{account.line}</span>
+        <span className={cn('text-xs leading-snug', account.overdue ? 'text-red-400' : warn ? 'text-amber-300' : 'text-foreground/85')} data-testid={`account-${account.key}-line`}>
+          {account.line}
+        </span>
+        {account.facts.length > 0 && <Facts items={account.facts} />}
       </div>
       <div className={cn(styles.trailing, 'flex flex-wrap justify-end gap-2')}>
-        {account.canVerify && (
+        {account.connection && onConnect && (
+          <Button variant={notConnected ? 'default' : 'outline'} className="h-11 px-4" onClick={() => onConnect(account)} data-testid={`connect-${account.key}`}>
+            {notConnected ? 'Connect' : 'Change key'}
+          </Button>
+        )}
+        {account.addFunds && onAddFunds && (
+          <Button variant="outline" className="h-11 px-4" onClick={() => onAddFunds(account)} data-testid={`funds-${account.key}`}>
+            Add funds
+          </Button>
+        )}
+        {account.canVerify && !notConnected && (
           <Button variant="outline" className="h-11 px-4" onClick={() => onVerify(account)} disabled={checking} data-testid={`verify-${account.key}`} aria-label={`Check ${account.name} again`}>
             {checking ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <RefreshCw size={15} aria-hidden="true" />}
             Check again
@@ -207,7 +221,7 @@ export function AccountLine({ account, onVerify, checking }: { account: AccountV
         {account.kind !== 'after' && (
           <Button asChild variant="outline" className="h-11 px-4">
             <a href={account.url} target="_blank" rel="noreferrer" aria-label={`Open ${account.name} billing`}>
-              {account.kind === 'balance' ? 'Top up' : 'Open'}
+              {account.kind === 'balance' && !account.addFunds ? 'Top up' : 'Billing'}
               <ArrowUpRight size={15} aria-hidden="true" />
             </a>
           </Button>
