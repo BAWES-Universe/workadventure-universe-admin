@@ -3181,6 +3181,8 @@ model BrickComputer {
   restClaimedAt DateTime? @map("rest_claimed_at")
   // Set while the browser is being cleared after a job: a job that starts meanwhile waits for it, so it is never cleared under it
   cleanClaimedAt DateTime? @map("clean_claimed_at")
+  // Set while the files a finished job made are being handed over (the file card): the machine is not put to rest meanwhile, whoever asks. A claim a stopped server left expires.
+  filesClaimedAt DateTime? @map("files_claimed_at")
   // When the sweep last sent the machine a no-op command to keep it awake while a job holds it
   keptAwakeAt   DateTime? @map("kept_awake_at")
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again

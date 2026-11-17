@@ -26,3 +26,6 @@ CREATE INDEX "computer_job_files_job_id_idx" ON "computer_job_files"("job_id");
 CREATE INDEX "computer_job_files_storage_key_created_at_idx" ON "computer_job_files"("storage_key", "created_at");
 
 ALTER TABLE "computer_job_files" ADD CONSTRAINT "computer_job_files_job_id_fkey" FOREIGN KEY ("job_id") REFERENCES "computer_jobs"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- While a finished job's files are being handed over, its machine is not put to rest.
+ALTER TABLE "brick_computers" ADD COLUMN "files_claimed_at" TIMESTAMP(3);

@@ -11,7 +11,7 @@ import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provi
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
-import { handOverFiles, purgeCardsOfBot, purgeStaleCards } from '@/lib/computer-file-cards';
+import { HAND_OVER_BUDGET_MS, handOverFiles, purgeCardsOfBot, purgeStaleCards } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
 import {
   AFTER_TAKE_OVER,
@@ -576,6 +576,8 @@ async function restIfUnheld(botId: string, now: Date): Promise<boolean> {
   if (!row || !row.providerRef || !provider) return false;
   const holders = () => prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } });
   if ((await holders()) > 0) return false;
+  // Files of a job that just finished are being read off this machine: it is not put to rest under them (the job that reads them rests it when they are done)
+  if (row.filesClaimedAt && Date.now() - row.filesClaimedAt.getTime() < FILES_CLAIM_MS) return false;
   const claim = await prisma.brickComputer.updateMany({ where: { botId, machine: 'working' }, data: { machine: 'resting', restClaimedAt: now } });
   if (claim.count !== 1) return false;
   if ((await holders()) > 0) {
@@ -774,6 +776,9 @@ async function closeOutIfUnheld(botId: string): Promise<FilesList | null> {
   return taken;
 }
 
+/** How long a claim for handing over files is believed: the hand-over ends within its own time budget, so one older than this was left by a server that stopped. */
+const FILES_CLAIM_MS = HAND_OVER_BUDGET_MS + 2 * 60 * 1000;
+
 /** How long a cleanup claim is believed: the commands it runs end within 40 seconds, so one older than this was left by a server that stopped. */
 const CLEAN_CLAIM_STALE_MS = 90_000;
 
@@ -871,22 +876,34 @@ async function handOverJobFiles(job: { id: string; botId: string; startedAt: Dat
     const provider = providerFor(row);
     if (!row?.providerRef || !provider || row.machine !== 'working') return 0;
     const limits = await getBrickLimits();
-    const result = await handOverFiles({
-      jobId: job.id,
-      botId: job.botId,
-      startedAt: job.startedAt,
-      endedAt: now,
-      ref: row.providerRef,
-      provider,
-      limits: { count: limits.computerFiles, bytes: limits.computerFileMb * 1024 * 1024 },
-    });
-    const seconds = result.handed > 0 ? Math.round(result.ms / SECOND) : 0;
-    if (seconds > 0) await prisma.computerJob.updateMany({ where: { id: job.id }, data: { secondsRun: { increment: seconds } } });
-    return seconds;
+    // The machine is not put to rest while its files are read (the sweep rests a working machine nobody holds, and the job is already over)
+    const claimedAt = new Date();
+    const claim = await prisma.brickComputer.updateMany({ where: { botId: job.botId, machine: 'working', providerRef: row.providerRef }, data: { filesClaimedAt: claimedAt } });
+    if (claim.count !== 1) return 0;
+    try {
+      return await handOver(job, now, row.providerRef, provider, limits);
+    } finally {
+      await prisma.brickComputer.updateMany({ where: { botId: job.botId, filesClaimedAt: claimedAt }, data: { filesClaimedAt: null } }).catch(() => undefined);
+    }
   } catch (error) {
     console.error('[Computer] Could not hand over the files of a job:', error instanceof Error ? error.message : 'unknown');
     return 0;
   }
+}
+
+async function handOver(job: { id: string; botId: string; startedAt: Date | null }, now: Date, ref: string, provider: Provider, limits: Awaited<ReturnType<typeof getBrickLimits>>): Promise<number> {
+  const result = await handOverFiles({
+    jobId: job.id,
+    botId: job.botId,
+    startedAt: job.startedAt,
+    endedAt: now,
+    ref,
+    provider,
+    limits: { count: limits.computerFiles, bytes: limits.computerFileMb * 1024 * 1024 },
+  });
+  const seconds = result.handed > 0 ? Math.round(result.ms / SECOND) : 0;
+  if (seconds > 0) await prisma.computerJob.updateMany({ where: { id: job.id }, data: { secondsRun: { increment: seconds } } });
+  return seconds;
 }
 
 /**

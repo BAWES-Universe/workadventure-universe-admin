@@ -295,6 +295,43 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect((await mine([id]))[0].handed).toEqual([]);
   });
 
+  it('does not rest the machine under the files being read, even when the sweep finds it idle; the job that reads them rests it after', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    made_('a.pdf', 'a', 5);
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    provider.execAnswer = async (command) => {
+      if (command.includes('tail -c')) await gate;
+      return machine(command);
+    };
+    const finishing = finishJob(id, 'done', minutes(9));
+    // Wait until the files are being read
+    for (let tries = 0; tries < 200 && !(await prisma.brickComputer.findUnique({ where: { botId: sara.brickId } }))?.filesClaimedAt; tries++) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).filesClaimedAt).not.toBeNull();
+    // The machine looks idle to the sweep: nothing was written to its row for more than two minutes
+    await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = now() - interval '10 minutes' WHERE "bot_id" = ${sara.brickId}`;
+    await sweepComputers(new Date());
+    expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+    expect(provider.calls.filter((call) => call.name === 'rest')).toEqual([]);
+    release();
+    await finishing;
+    const after = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
+    expect(after.machine).toBe('resting');
+    expect(after.filesClaimedAt).toBeNull();
+    expect((await mine([id]))[0].handed.map((card) => card.name)).toEqual(['a.pdf']);
+  });
+
+  it('rests a machine whose hand-over claim a stopped server left behind', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    await finishJob(id, 'stopped' as never, minutes(1)).catch(() => undefined);
+    await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { machine: 'working', filesClaimedAt: new Date(Date.now() - 60 * 60 * 1000) } });
+    await prisma.$executeRaw`UPDATE "brick_computers" SET "updated_at" = now() - interval '10 minutes' WHERE "bot_id" = ${sara.brickId}`;
+    await sweepComputers(new Date());
+    expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
+  });
+
   it('deletes what was kept when the Brick is removed for good, and keeps the Brick for the next sweep when it cannot', async () => {
     const omar = await person('omar');
     const id = await started(omar);
