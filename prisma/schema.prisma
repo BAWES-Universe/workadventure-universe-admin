@@ -3183,6 +3183,13 @@ model BrickComputer {
   cleanClaimedAt DateTime? @map("clean_claimed_at")
   // When the sweep last sent the machine a no-op command to keep it awake while a job holds it
   keptAwakeAt   DateTime? @map("kept_awake_at")
+  // Who may act on the computer, one durable state for it (lib/computer-control.ts): agent, fencing, human_ready or returning. The epoch goes up with
+  // each transition that begins, the lease is the leader's (a transition whose leader is gone is finished by the next request), and humanInputUntil is how
+  // long the person's screen input, once authorized, may still be open: a hand back waits it out before Brick resumes.
+  controlState      String    @default("agent") @map("control_state") @db.VarChar(12)
+  controlEpoch      Int       @default(0) @map("control_epoch")
+  controlLeaseUntil DateTime? @map("control_lease_until")
+  humanInputUntil   DateTime? @map("human_input_until")
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again
   noticeDismissedJobId String? @map("notice_dismissed_job_id") @db.VarChar(40)
   createdAt     DateTime  @default(now()) @map("created_at")

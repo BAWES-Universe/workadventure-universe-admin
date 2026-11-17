@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { prisma } from '@/lib/db';
 import { isOver } from '@/lib/computer-values';
+import { agentMayAct } from '@/lib/computer-control';
 
 /**
  * The key a job's computer holds (build handoff v2, section 5). It is the computer's only credential, and it grants nothing by
@@ -34,11 +35,11 @@ export type Minted = { ok: true; token: string; expiresAt: Date } | { ok: false;
  * was made just before the take-over is ended again.
  */
 export async function mintJobToken(jobId: string, scope: TokenScope, now: Date = new Date(), under?: { generation: number }): Promise<Minted> {
-  const read = () => prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true, controlGeneration: true } });
+  const read = () => prisma.computerJob.findUnique({ where: { id: jobId }, select: { botId: true, status: true, controlGeneration: true } });
   const fits = (job: { status: string; controlGeneration: number }) => (under ? job.status === 'running' && job.controlGeneration === under.generation : live(job.status));
   const job = await read();
   if (!job) return { ok: false, reason: 'not_found' };
-  if (!fits(job)) return { ok: false, reason: 'not_running' };
+  if (!fits(job) || !(await agentMayAct(job.botId))) return { ok: false, reason: 'not_running' };
   const token = `${PREFIX}${randomBytes(32).toString('base64url')}`;
   const expiresAt = new Date(now.getTime() + TOKEN_LIFE_MS);
   const digest = digestOf(token);
@@ -46,7 +47,7 @@ export async function mintJobToken(jobId: string, scope: TokenScope, now: Date =
   if (under) {
     // A take-over that came between the look and the key ends this key too: the fence only revokes the keys that existed when it ran
     const again = await read();
-    if (!again || !fits(again)) {
+    if (!again || !fits(again) || !(await agentMayAct(again.botId))) {
       await prisma.computerJobToken.updateMany({ where: { digest, revokedAt: null }, data: { revokedAt: now } });
       return { ok: false, reason: 'not_running' };
     }
@@ -68,6 +69,8 @@ export async function verifyJobToken(token: string, scope: TokenScope, now: Date
   const row = await prisma.computerJobToken.findUnique({ where: { digest: digestOf(token) }, include: { job: { select: { id: true, botId: true, personId: true, status: true, controlGeneration: true } } } });
   if (!row || row.scope !== scope || row.revokedAt !== null || row.expiresAt <= now) return { ok: false, reason: 'refused' };
   if (isOver(row.job.status) || !live(row.job.status) || row.generation !== row.job.controlGeneration) return { ok: false, reason: 'refused' };
+  // Control is not Brick's while it changes hands (or while the person holds it): a key made earlier does nothing then
+  if (!(await agentMayAct(row.job.botId))) return { ok: false, reason: 'refused' };
   return { ok: true, jobId: row.job.id, botId: row.job.botId, personId: row.job.personId, tokenId: row.id, generation: row.generation };
 }
 
