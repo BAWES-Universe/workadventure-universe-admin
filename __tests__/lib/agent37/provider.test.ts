@@ -1,5 +1,5 @@
 import { Agent37Error, Agent37Unreached, type Agent37Client, type Instance } from '@/lib/agent37/client';
-import { Agent37ComputerProvider, Agent37FundsLow, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
+import { Agent37ComputerProvider, Agent37FundsLow, BRICK_NETWORK, DESKTOP_PORT, ImageNotReady } from '@/lib/agent37/provider';
 import type { ImageState } from '@/lib/agent37/image';
 import { awakeMicrosPerMinute, dayOfRunningMicros, BRICK_SHAPE } from '@/lib/agent37/rates';
 
@@ -20,7 +20,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       calls.push('list');
       return [...instances.values()];
     },
-    async createInstance(input: { metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean }) {
+    async createInstance(input: { metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }) {
       calls.push('create');
       if (refuse.create) {
         const error = refuse.create;
@@ -101,13 +101,30 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       found.template_revision = revisionAfterUpdate;
       return { id, status: 'running', template_revision: revisionAfterUpdate };
     },
+    async setNetwork(id: string, network: unknown) {
+      calls.push(`network:${id}`);
+      networks.push({ id, network });
+      if (refuse.network) {
+        const error = refuse.network;
+        refuse.network = undefined;
+        throw error;
+      }
+      instances.get(id)!.network = network as Instance['network'];
+      return instances.get(id)!;
+    },
+    async usageForDay(day: string) {
+      calls.push(`usage:${day}`);
+      return usage;
+    },
     async archive(url: string) {
       calls.push(`archive:${url}`);
       return { body: new ReadableStream() } as unknown as Response;
     },
   };
-  const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean }> = [];
-  return { client: client as unknown as Agent37Client, instances, calls, execs, created, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
+  const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }> = [];
+  const networks: Array<{ id: string; network: unknown }> = [];
+  const usage: { day: string; totalMicros: number; instances: Array<{ id: string; totalMicros: number; computeMicros: number; awakeMinutes: number }> } = { day: '2026-11-15', totalMicros: 0, instances: [] };
+  return { client: client as unknown as Agent37Client, instances, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
 }
 
 function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
@@ -133,6 +150,13 @@ describe('the Agent37 provider', () => {
     expect(w.created[0].budget).toEqual({ monthly_cap_micros: 0, credit_micros: 0 });
     expect(w.created[0].env).toBeUndefined();
     expect(w.created[0].auto_sleep).toBe(true);
+  });
+
+  it('makes a machine with the network rule written down: the public web, never a private range', async () => {
+    const w = world();
+    await provider(w).create('bot-1');
+    expect(w.created[0].network).toBe(BRICK_NETWORK);
+    expect(BRICK_NETWORK).toBe('allow-all');
   });
 
   it('adopts the machine a Brick already has instead of making a second one', async () => {
@@ -448,6 +472,60 @@ describe('the Agent37 provider', () => {
   });
 });
 
+describe("Agent37's bill for a day", () => {
+  it('says which machine of Agent37 is a Brick of ours, one that is not ours, and one that is gone, and what its published rates make of the awake minutes', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.instances.set('other1', { id: 'other1', status: 'stopped', url: 'https://other1.agent37.app', metadata: null });
+    w.usage.totalMicros = 30_000;
+    w.usage.instances.push(
+      { id: 'm1', totalMicros: 12_000, computeMicros: 11_000, awakeMinutes: 60 },
+      { id: 'other1', totalMicros: 400, computeMicros: 400, awakeMinutes: 0 },
+      { id: 'removed1', totalMicros: 300, computeMicros: 300, awakeMinutes: 10 },
+    );
+    const day = await p.dayUsage('2026-11-15');
+    expect(w.calls).toContain('usage:2026-11-15');
+    expect(day.totalMicros).toBe(30_000);
+    const byRef = Object.fromEntries(day.instances.map((entry) => [entry.ref, entry]));
+    expect(byRef.m1).toMatchObject({ kind: 'brick', botId: 'bot-1', totalMicros: 12_000, computeMicros: 11_000, awakeMinutes: 60 });
+    expect(byRef.other1).toMatchObject({ kind: 'other', botId: null });
+    expect(byRef.removed1).toMatchObject({ kind: 'gone', botId: null });
+    // 60 awake minutes at the published awake rate, the other 1380 minutes of the day at the disk's rate
+    const awake = awakeMicrosPerMinute(BRICK_SHAPE);
+    const rest = (BRICK_SHAPE.disk * 90_000) / (730 * 60);
+    expect(byRef.m1.expectedMicros).toBeCloseTo(60 * awake + 1380 * rest, 0);
+  });
+});
+
+describe("Agent37's bill for a day, when the list of machines does not hold them all", () => {
+  it('looks a billed machine up by its id before calling it gone, so a machine past the list is still a Brick of ours', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.usage.totalMicros = 1_300;
+    w.usage.instances.push({ id: 'm1', totalMicros: 1_000, computeMicros: 900, awakeMinutes: 10 }, { id: 'removed1', totalMicros: 300, computeMicros: 300, awakeMinutes: 10 });
+    // The list shows only the newest machines: m1 is not on it, although it exists
+    (w.client as unknown as { listInstances: () => Promise<Instance[]> }).listInstances = async () => [];
+    const day = await p.dayUsage('2026-11-15');
+    const byRef = Object.fromEntries(day.instances.map((entry) => [entry.ref, entry]));
+    expect(byRef.m1).toMatchObject({ kind: 'brick', botId: 'bot-1' });
+    expect(byRef.removed1).toMatchObject({ kind: 'gone' });
+  });
+
+  it('does not take a machine it could not look up for one that is gone: the day is not checked until Agent37 answers', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.usage.instances.push({ id: 'm1', totalMicros: 1_000, computeMicros: 900, awakeMinutes: 10 });
+    (w.client as unknown as { listInstances: () => Promise<Instance[]> }).listInstances = async () => [];
+    (w.client as unknown as { getInstance: (id: string) => Promise<Instance> }).getInstance = async () => {
+      throw new Agent37Error(503, 'unavailable', 'try later');
+    };
+    await expect(p.dayUsage('2026-11-15')).rejects.toBeInstanceOf(Agent37Error);
+  });
+});
+
 describe('getting a machine ready for a job', () => {
   const state = (over: Partial<ImageState> = {}): ImageState => ({ hash: 'h', state: 'ready', buildId: 'b', revision: 2, startedAt: new Date(0).toISOString(), failures: 0, error: null, ...over });
 
@@ -470,6 +548,43 @@ describe('getting a machine ready for a job', () => {
     expect(w.execs.map((entry) => entry.command)).toEqual(['universe-up', 'universe-mark']);
     expect(w.execs[1].options).toMatchObject({ user: 'root' });
     expect(w.calls.filter((call) => call.startsWith('stop:'))).toEqual([]);
+  });
+
+  describe('the network rule when a machine is made ready', () => {
+    it('sets it on a machine whose rule is not the one we want (a machine made before the rule, or one that drifted), once, before anything runs on it', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.instances.get('m1')!.network = 'deny-all';
+      w.setExec(() => 'ready=1 restart=0\n');
+      await p.ready('m1');
+      expect(w.networks).toEqual([{ id: 'm1', network: BRICK_NETWORK }]);
+      expect(w.calls.indexOf('network:m1')).toBeLessThan(w.calls.indexOf('exec:m1:universe-up'));
+    });
+
+    it('sets it when Agent37 does not say what the rule is, and leaves it when it already is the one we want', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.setExec(() => 'ready=1 restart=0\n');
+      delete w.instances.get('m1')!.network;
+      await p.ready('m1');
+      expect(w.networks).toHaveLength(1);
+      w.instances.get('m1')!.network = BRICK_NETWORK;
+      await p.ready('m1');
+      expect(w.networks).toHaveLength(1);
+    });
+
+    it('is not ready when the rule cannot be set: a machine whose reach is not known is never handed to a job', async () => {
+      const w = world();
+      const p = provider(w);
+      await p.create('bot-1');
+      w.setExec(() => 'ready=1 restart=0\n');
+      delete w.instances.get('m1')!.network;
+      w.refuse.network = new Agent37Error(400, 'invalid_request', 'no');
+      await expect(p.ready('m1')).rejects.toThrow('network rule');
+      expect(w.execs).toEqual([]);
+    });
   });
 
   it('is not ready when the note for the fence cannot be written: a computer that cannot be fenced is never handed to a job', async () => {

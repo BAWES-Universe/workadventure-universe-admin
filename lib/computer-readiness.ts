@@ -2,6 +2,7 @@ import { getComputerProvider, type Check } from '@/lib/computer-provider';
 import { getMeterSettings } from '@/lib/meter';
 import { missingSettings } from '@/lib/meter-values';
 import { isWindingDown } from '@/lib/computer';
+import { reconcileCheck } from '@/lib/computer-reconcile';
 
 export interface Readiness {
   /** Every check passed: a person's job can run now. */
@@ -25,6 +26,9 @@ export async function computerReadiness(): Promise<Readiness> {
   }
   const missing = missingSettings(await getMeterSettings());
   checks.push({ name: 'usage controls', ok: missing.length === 0, detail: missing.length === 0 ? 'The usage controls are set' : `These usage controls are not set yet: ${missing.join(', ')}` });
+  // The daily check of our books against the provider's bill: a mismatch is said here, so it is seen without looking in a log
+  const books = await reconcileCheck().catch(() => ({ name: 'books and bill', ok: false, detail: 'The check of the books against the provider’s bill could not be read' }));
+  if (books) checks.push(books);
   const winding = await isWindingDown();
   checks.push({ name: 'wind-down', ok: !winding, detail: winding ? 'A wind-down is on: no computer takes new work' : 'No wind-down is on' });
   return { ready: checks.every((check) => check.ok), checks };

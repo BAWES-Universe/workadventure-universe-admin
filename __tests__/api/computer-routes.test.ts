@@ -13,6 +13,7 @@ import { POST as dismissRoute } from '@/app/api/bricks/[id]/computer/dismiss/rou
 import { GET as stateRoute, POST as startRoute } from '@/app/api/bots/[id]/computer-jobs/route';
 import { GET as getJobRoute, POST as jobAction } from '@/app/api/bots/[id]/computer-jobs/[jobId]/route';
 import { POST as sweepRoute } from '@/app/api/computer/sweep/route';
+import { POST as reviewRoute } from '@/app/api/bots/[id]/computer-route-review/route';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { resolveUsagePerson } from '@/lib/usage-person';
@@ -225,6 +226,28 @@ describe('the bot server’s calls', () => {
     lib.startJob.mockResolvedValue({ ok: false, reason: 'off' });
     expect(await (await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x' } }), params)).json()).toEqual({ ok: false, reason: 'off' });
     expect((await startRoute(asBot('/x', { body: { title: 'x' } }), params)).status).toBe(400);
+  });
+
+  it('passes the way the Brick proposes to the start, and says which app to use instead when one would do it for less', async () => {
+    resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+    lib.startJob.mockResolvedValue({ ok: false, reason: 'cheaper_route', app: 'Notion' });
+    const plan = { app: 'Notion', steps: 3, appCannot: null };
+    expect(await (await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x', plan } }), params)).json()).toEqual({ ok: false, reason: 'cheaper_route', app: 'Notion' });
+    expect(lib.startJob).toHaveBeenCalledWith(expect.objectContaining({ plan }));
+    // A plan with something else in it, or a step count that is not a number, is not accepted
+    expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x', plan: { app: 'Notion', steps: 'many' } } }), params)).status).toBe(400);
+    expect((await startRoute(asBot('/x', { body: { userId: 'wa-sara', title: 'x', plan: { app: 'Notion', price: 1 } } }), params)).status).toBe(400);
+  });
+
+  it('answers the review at 20 app steps for the bot server only, for the person it resolves, and a guest never has one', async () => {
+    resolve.mockResolvedValue({ personId: 'u-sara', guest: false });
+    lib.reviewAppSteps.mockResolvedValue({ review: true });
+    expect((await reviewRoute(call('/x', { body: { userId: 'wa-sara', app: 'Notion', steps: 20 } }), params)).status).toBe(401);
+    expect(await (await reviewRoute(asBot('/x', { body: { userId: 'wa-sara', app: 'Notion', steps: 20 } }), params)).json()).toEqual({ review: true });
+    expect(lib.reviewAppSteps).toHaveBeenCalledWith(BRICK, 'u-sara', { app: 'Notion', steps: 20 });
+    expect((await reviewRoute(asBot('/x', { body: { userId: 'wa-sara', app: 'Notion', steps: 'many' } }), params)).status).toBe(400);
+    resolve.mockResolvedValue({ personId: null, guest: true });
+    expect(await (await reviewRoute(asBot('/x', { body: { userId: 'wa-guest', isGuest: true, app: 'Notion', steps: 20 } }), params)).json()).toEqual({ review: false });
   });
 
   it('reaches a job only through its own Brick', async () => {

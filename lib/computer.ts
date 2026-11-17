@@ -11,6 +11,8 @@ import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provi
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { recordKeptBytes } from '@/lib/computer-disk';
+import { reconcileComputers } from '@/lib/computer-reconcile';
+import { computerQuote, connectedApp, routeJob, stepsReview, type RoutePlan } from '@/lib/computer-route';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
 import {
   AFTER_TAKE_OVER,
@@ -309,6 +311,8 @@ export type Started =
   | { ok: true; job: JobView; restoredFrom: Date | null }
   /** Not the owner's Brick, or not theirs to ask: only the owner starts computer work on their Brick. */
   | { ok: false; reason: 'not_owner' | 'off' | 'not_open' | 'broken_start' | 'no_run' }
+  /** A connected app would do this for less than the computer: nothing is started, and the Brick is told which app to use. */
+  | { ok: false; reason: 'cheaper_route'; app: string }
   /** The meter's controls are not set up yet: a computer does not open before they do. */
   | { ok: false; reason: 'not_set' }
   /** A rule the person said in chat does not let this job take room: nothing is left behind, and the rule's own words come with it. */
@@ -320,11 +324,28 @@ const roomKey = (jobId: string, now: Date) => `computer:job:${jobId}:${now.getTi
 const queueReasonOf = (no: NoRoom): QueuedFor | null => (no.reason === 'allowance' ? 'allowance' : no.reason === 'busy' ? 'busy' : no.reason === 'pool' ? 'pool' : null);
 
 /**
+ * The review at 20 app steps (the bot server counts them): whether the steps an app has taken so far cost as much as the whole job is expected
+ * to cost on this Brick's computer, so the Brick should weigh moving the rest there. Advice only: it reads, never makes, wakes, reserves or
+ * writes anything, and says no where there is no computer to move to (not the owner, off, not open, or a wind-down).
+ */
+export async function reviewAppSteps(botId: string, personId: string, input: { app: string; steps: number }): Promise<{ review: boolean }> {
+  if (!(await brickOf(botId, personId))) return { review: false };
+  const row = await prisma.brickComputer.findUnique({ where: { botId } });
+  const provider = row?.enabled ? providerFor(row) : null;
+  if (!row || !provider || (await isWindingDown())) return { review: false };
+  // A name that matches no connected app (it was disconnected since, or the bot server names it differently) is still steps that were taken, at a
+  // rate we cannot read: it is priced at the dearest tier like any unknown rate, never as nothing. The only result is a line of advice.
+  const app = await connectedApp(botId, input.app);
+  const computer = computerQuote({ awakeMicrosPerMinute: provider.microsPerMinute() ?? null, hasMachine: !!row.providerRef });
+  return { review: stepsReview({ steps: input.steps, stepMicros: app ? app.stepMicros : null, computer }) };
+}
+
+/**
  * Starts a job on a Brick's computer. Only its owner starts work on it. The job is saved first and then tried: if another job
  * is writing it waits its turn, if the person's allowance or our room is used up it waits with its work saved (and the first
  * leads to "Ask for more"), and otherwise it runs and the machine is made or woken, here and nowhere else.
  */
-export async function startJob(input: { botId: string; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null }, now: Date = new Date()): Promise<Started> {
+export async function startJob(input: { botId: string; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null; plan?: RoutePlan | null }, now: Date = new Date()): Promise<Started> {
   const bot = await brickOf(input.botId, input.personId);
   if (!bot) return { ok: false, reason: 'not_owner' };
   const row = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
@@ -339,10 +360,13 @@ export async function startJob(input: { botId: string; personId: string; title: 
     const again = await reuseRunJob(input.botId, input.runId, now);
     if (again) return again;
   }
+  // The way: a connected app that would do this for less is used instead, before anything is made, woken or reserved
+  const routed = await routeJob({ botId: input.botId, plan: input.plan, awakeMicrosPerMinute: providerFor(row)?.microsPerMinute() ?? null, hasMachine: !!row.providerRef });
+  if (!routed.ok) return { ok: false, reason: 'cheaper_route', app: routed.app };
   let created;
   try {
     created = await prisma.computerJob.create({
-      data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null },
+      data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null, route: routed.route, expectedMicros: BigInt(routed.expectedMicros) },
     });
   } catch (error) {
     // Two asks for the same run at once: the first made the job, the second finds it
@@ -919,7 +943,7 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
  * settled to what ran, never left holding the envelope), room that nobody holds a job for is given back, and jobs in line are tried
  * again (the person's month turned, extra usage was given, another job ended). Safe to run twice at once.
  */
-export async function sweepComputers(now: Date = new Date(), batch: number = SWEEP_BATCH, pages: number = SWEEP_PAGES): Promise<{ stopped: number; released: number; started: number }> {
+export async function sweepComputers(now: Date = new Date(), batch: number = SWEEP_BATCH, pages: number = SWEEP_PAGES, reconcileWaitMs: number = RECONCILE_WAIT_MS): Promise<{ stopped: number; released: number; started: number }> {
   let stopped = 0;
   let released = 0;
   let started = 0;
@@ -1025,7 +1049,27 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
     }
     if (lines.length < batch) break;
   }
+  // Last, because it talks to the provider and what is above cannot wait for that: once a day, our books against the provider's bill for the
+  // day before (it only reads and reports; a bill that cannot be read is tried again later). The sweep waits for it a short while at most.
+  await settleWithin(reconcileWaitMs, reconcileComputers(now)).catch((error) => console.error('[Computer] The daily check of the books could not be made:', error instanceof Error ? error.message : 'unknown'));
   return { stopped, released, started };
+}
+
+/** How long a sweep waits for the daily check of the books before it goes on without it (the check goes on by itself). */
+export const RECONCILE_WAIT_MS = 30_000;
+
+/** The work's own answer, or nothing once the wait is over: the work is not stopped, and an error it ends in is still read. */
+async function settleWithin<T>(ms: number, work: Promise<T>): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), ms);
+  });
+  work.catch(() => undefined);
+  try {
+    return await Promise.race([work, late]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // ---------- Wind-down (the team's command, never a setting) ----------
