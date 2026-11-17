@@ -25,7 +25,7 @@ import { finishOutside, purgeBrick } from '@/lib/brick-purge';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { listDeletedBricks } from '@/lib/brick-default';
 import { computerReadiness } from '@/lib/computer-readiness';
-import { archiveById, markVerified, mintDownloadToken, setArchiveStoreForTests, storeArchive, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
+import { archiveById, markVerified, mintDownloadToken, pruneArchives, setArchiveStoreForTests, storeArchive, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
 import { GET as download } from '@/app/api/computer/archives/[id]/download/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -233,6 +233,23 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       } finally {
         heartbeat.ms = before;
       }
+    });
+
+    it('another server’s clean-up leaves a copy alone while its pack-away is still alive, however old the copy is, and removes it once the pack-away stopped', async () => {
+      const brick = await idleBrick();
+      const old = new Date(NOW.getTime() - 3 * 3_600_000);
+      const key = `computer-archives/${brick.botId}/1-test`;
+      bucket.objects.set(key, Buffer.from('half written'));
+      await prisma.computerArchive.create({ data: { botId: brick.botId, generation: 1, state: 'staging', objectKey: key, createdAt: old } });
+      // A pack-away that has been copying for hours but said it was alive a minute ago
+      await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'packing', packStage: 'claimed', packClaimedAt: new Date(NOW.getTime() - 60_000) } });
+      expect(await pruneArchives(brick.botId, null, NOW)).toBe(0);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(1);
+      expect(bucket.objects.has(key)).toBe(true);
+      // The same pack-away silent for longer than a server may be: the half written copy is left behind and goes
+      await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { packClaimedAt: new Date(NOW.getTime() - STUCK_MS - 60_000) } });
+      expect(await pruneArchives(brick.botId, null, NOW)).toBe(1);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
     });
 
     it('keeps the computer when it holds more outside its home folder than can be carried, and says why only by not packing it', async () => {

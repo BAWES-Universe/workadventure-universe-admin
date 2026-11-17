@@ -17,6 +17,8 @@ import { deleteSealed, openSealedStream, storeSealed, type Sealed } from '@/lib/
 export const KEEP_VERIFIED = 2;
 /** A copy still `staging`, or one that failed, is cleaned up after this long. */
 const STALE_MS = 60 * 60 * 1000;
+/** A pack-away that said it was alive within this long is still working (kept in step with the pack-away's own take-over time). */
+const LIVE_CLAIM_MS = 45 * 60 * 1000;
 /** How long a restore address works: one restore on one throwaway or new computer, retries included. */
 export const DOWNLOAD_LIFE_MS = 45 * 60 * 1000;
 
@@ -146,10 +148,14 @@ export async function pruneArchives(botId: string, keepId: string | null = null,
   const verified = rows.filter((row) => row.state === 'verified');
   const keep = new Set(verified.slice(0, keepVerified).map((row) => row.id));
   if (keepId) keep.add(keepId);
+  // A pack-away that is still saying it is alive owns the copy it is writing or proving, however long that takes (another server's sweep comes here too)
+  const packing = await prisma.brickComputer.findUnique({ where: { botId }, select: { machine: true, packStage: true, packClaimedAt: true } });
+  const working = !!packing && packing.machine === 'packing' && (packing.packStage === 'claimed' || packing.packStage === 'stored') && !!packing.packClaimedAt && now.getTime() - packing.packClaimedAt.getTime() < LIVE_CLAIM_MS;
   const drop = rows.filter((row) => {
     if (keep.has(row.id)) return false;
     if (row.state === 'verified' || row.state === 'superseded' || row.state === 'failed') return true;
     // staging or stored and not the one in progress: left behind by a pack-away that stopped
+    if (working) return false;
     return now.getTime() - row.createdAt.getTime() > STALE_MS;
   });
   let removed = 0;
