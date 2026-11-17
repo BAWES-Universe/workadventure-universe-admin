@@ -10,8 +10,8 @@ export async function OPTIONS(request: NextRequest) {
 }
 
 /**
- * GET /api/admin/github-app - whether Universe's GitHub App has been made yet (game #2041), for the "GitHub for Universe" row on
- * Orbit home. Nothing secret leaves: only whether it is made, which app it is (its number) and where it lives on GitHub. Super admins only. Whether it is made is read
+ * GET /api/admin/github-app - whether Universe's GitHub App has been made yet (game #2041), for the "GitHub for Universe" setup
+ * page, which waits for it while GitHub's window is open. Nothing secret leaves: only whether it is made, which app it is (its number) and where it lives on GitHub. Super admins only. Whether it is made is read
  * straight from the store, so a store that cannot be read answers 500 (the row stays away) and never "not made".
  */
 export async function GET(request: NextRequest) {
