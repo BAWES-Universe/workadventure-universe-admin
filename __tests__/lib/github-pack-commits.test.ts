@@ -127,6 +127,7 @@ describe('reading the commits of a pack', () => {
     const built = pack([whole(3, base), ...entries]);
     const started = Date.now();
     expect(readPackCommits(built)).not.toBeNull();
-    expect(Date.now() - started).toBeLessThan(8000);
+    // The copying version took about two minutes here, this one a few seconds (more on a busy CI machine): the bound is between them
+    expect(Date.now() - started).toBeLessThan(40_000);
   }, 120_000);
 });
