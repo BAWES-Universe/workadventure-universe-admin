@@ -3,6 +3,7 @@
  * ROLES_DB_TEST=yes and a DATABASE_URL to a migrated throwaway database. The provider is never called.
  */
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { NextRequest } from 'next/server';
 
 const mockUser: { current: { id: string; email?: string | null } | null } = { current: null };
@@ -15,7 +16,7 @@ import { linkReadyMade } from '@/lib/app-adapter/ready-made';
 import { saveReadyMadeApps } from '@/lib/app-adapter/settings';
 import { createConnection } from '@/lib/app-connections';
 import { createBrick } from '@/lib/brick-create';
-import { cancelCodeJob, getCodeJob, openOutput, startCodeJob, sweepCodeJobs, type Deps, type ReadRunner, type StartInput } from '@/lib/workbench/executor';
+import { PREPARE_OUT_DIR, cancelCodeJob, getCodeJob, openOutput, startCodeJob, sweepCodeJobs, type Deps, type ReadRunner, type StartInput } from '@/lib/workbench/executor';
 import { getCodeJobPause, resumeCodeJobs, saveCodeJobLimits } from '@/lib/workbench/state';
 import { setOutputStoreForTests, type OutputStore } from '@/lib/workbench/store';
 import { CODE_JOB_LIMITS_RECOMMENDED, type CodeJobLimits } from '@/lib/workbench/values';
@@ -50,6 +51,7 @@ function fakeProvider() {
     listFails: false,
     runs: [] as ((ctx: { sessionId: string; files: Map<string, Uint8Array>; signal?: AbortSignal; timeoutMs: number; code: string }) => Promise<WorkbenchRun> | WorkbenchRun)[],
     codes: [] as string[],
+    prepared: 0,
     opened: [] as string[],
   };
   const adapter = {
@@ -63,6 +65,11 @@ function fakeProvider() {
     run: jest.fn(async ({ sessionId, code, timeoutMs, signal }: { sessionId: string; code: string; timeoutMs: number; signal?: AbortSignal }): Promise<WorkbenchRun> => {
       const files = sessions.get(sessionId);
       if (!files) return { kind: 'gone' };
+      // The run that makes the folder for files is the executor's own: it takes no queued answer and is not one of the person's runs
+      if (code === PREPARE_OUT_DIR) {
+        state.prepared += 1;
+        return done('');
+      }
       state.codes.push(code);
       const next = state.runs.shift();
       return next ? next({ sessionId, files, signal, timeoutMs, code }) : done();
@@ -294,9 +301,10 @@ run('code jobs for Apps, in a real database', () => {
       expect(provider.state.opened[0]).not.toContain(sara);
       expect(provider.sessions.size).toBe(0);
       expect(provider.adapter.close).toHaveBeenCalledTimes(1);
-      // What was put in, and the one line that makes the folder for files, before the code
+      // What was put in, and the folder for files made by a run of its own, with the code sent exactly as written
       expect([...(await Promise.resolve(provider.adapter.put.mock.calls.map(([call]) => call.path)))].sort()).toEqual(['in/b.bin', 'in/in.txt']);
-      expect(provider.state.codes[0]).toBe('import os; os.makedirs("/mnt/files/out", exist_ok=True)\nprint("hello")');
+      expect(provider.state.prepared).toBe(1);
+      expect(provider.state.codes).toEqual(['print("hello")']);
       // Only plain names directly under out/ are kept
       expect(row.outputs.map((output) => output.name).sort()).toEqual(['chart.png', 'result.csv']);
       expect(row.outputs.find((output) => output.name === 'result.csv')).toMatchObject({ contentType: 'text/csv', sizeBytes: 8 });
@@ -316,6 +324,20 @@ run('code jobs for Apps, in a real database', () => {
       expect(row.capabilities).toMatchObject({ credentials: 'none', appTools: 'none', rawRequests: 'off', instant: 'off', network: 'provider-default' });
       expect(row.limits).toMatchObject({ maxSeconds: 10 });
       expect(row.expiresAt).not.toBeNull();
+    });
+
+    it('sends code that begins with a __future__ import exactly as written, so it still runs, and prepares the folder in a run of its own', async () => {
+      const code = 'from __future__ import annotations\nprint(1)';
+      provider.state.runs.push(() => done('1'));
+      const job = jobOf(await start({ code }));
+      await finishAll();
+      expect(provider.state.codes).toEqual([code]);
+      expect(provider.state.prepared).toBe(1);
+      expect((await rowOf(job.jobId)).cellsRun).toBe(1);
+      // Both are valid Python as sent (a line put before the import would not be)
+      const python = spawnSync('python3', ['-c', 'import sys; [compile(s, "x", "exec") for s in sys.argv[1:]]', PREPARE_OUT_DIR, code]);
+      if (!python.error) expect(python.status).toBe(0);
+      if (!python.error) expect(spawnSync('python3', ['-c', 'import sys; compile(sys.argv[1], "x", "exec")', `import os; os.makedirs("/x", exist_ok=True)\n${code}`]).status).not.toBe(0);
     });
 
     it('answers the same call id with the same job, never a second workspace or a second charge', async () => {
