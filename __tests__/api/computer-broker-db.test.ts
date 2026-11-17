@@ -125,9 +125,14 @@ run('the broker, the fence and keep-awake, in a real database', () => {
 
     it('says the job is not the runner’s to act on when the person took over while the key was being written', async () => {
       const { sara, jobId } = await running();
-      fake.execAnswer = async () => {
-        await takeOver(sara.brickId, sara.id, NOW);
-        return {};
+      let taken = false;
+      fake.execAnswer = async (command) => {
+        // Once, while the key is being written (the take over's own fence commands go through here too)
+        if (!taken && !command.startsWith('universe-fence')) {
+          taken = true;
+          await takeOver(sara.brickId, sara.id, NOW);
+        }
+        return command.startsWith('universe-fence --check') ? { stdout: 'remaining=0\n' } : {};
       };
       const done = await prepareJob(jobId, RELAY, NOW);
       expect(done).toMatchObject({ ok: false });

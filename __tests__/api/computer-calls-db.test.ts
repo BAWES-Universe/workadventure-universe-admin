@@ -124,11 +124,9 @@ run('what a computer may ask of Orbit, in a real database', () => {
       const before = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
       await takeOver(sara.brickId, sara.id, NOW);
       expect(await verifyJobToken(before.token, 'model', NOW)).toEqual({ ok: false, reason: 'refused' });
-      // A key made while the person has the machine is for an older number once they hand it back
-      const during = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
-      expect((await verifyJobToken(during.token, 'model', NOW)).ok).toBe(true);
+      // While the person has the machine Brick is not admitted: no key is made for it (audit F02: the agent and the person are never authorized together)
+      expect(await mintJobToken(jobId, 'model', NOW)).toEqual({ ok: false, reason: 'not_running' });
       await handBack(sara.brickId, sara.id);
-      expect(await verifyJobToken(during.token, 'model', NOW)).toEqual({ ok: false, reason: 'refused' });
       const after = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
       expect((await verifyJobToken(after.token, 'model', NOW)).ok).toBe(true);
       const job = await prisma.computerJob.findUniqueOrThrow({ where: { id: jobId } });

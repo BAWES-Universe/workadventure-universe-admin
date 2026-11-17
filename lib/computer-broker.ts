@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { providerFor, fenceMachine } from '@/lib/computer';
 import { mintJobToken, revokeJobTokens } from '@/lib/computer-token';
+import { agentMayAct } from '@/lib/computer-control';
 import { Agent37Error } from '@/lib/agent37/client';
 import type { TurnEvent } from '@/lib/agent37/turn-events';
 import { gitLoginCommand, jobGitAccess, NO_GIT_COMMAND, relayBase } from '@/lib/github/git-login';
@@ -24,6 +25,8 @@ async function liveJob(jobId: string): Promise<{ ok: true; job: Live; provider: 
   if (!job) return { ok: false, reason: 'not_found' };
   if (job.status === 'waiting' && job.control === 'person') return { ok: false, reason: 'person_has_it' };
   if (job.status !== 'running' || job.control !== 'brick') return { ok: false, reason: 'not_running' };
+  // Control is Brick's only once a change of hands is over: a hand back is still being completed, or a take over is being fenced, until then
+  if (!(await agentMayAct(job.botId))) return { ok: false, reason: 'person_has_it' };
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
   if (!row?.providerRef || !provider || row.machine !== 'working') return { ok: false, reason: 'no_machine' };

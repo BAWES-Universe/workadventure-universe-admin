@@ -68,6 +68,33 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
   await user('guest1', '2026-05-01T00:00:00Z', true);
   await prisma.$executeRawUnsafe(`INSERT INTO universes (id, slug, name, owner_id, updated_at) VALUES ('u1', 'acme', 'Acme', 'admin', now())`);
 
+  // ---------- A fresh deploy starts filled in (launch defaults migration), so nothing is refused for lack of a number ----------
+  {
+    const { getMeterSettings } = await import('@/lib/meter');
+    const { getInstantLimits } = await import('@/lib/instant/state');
+    const { missingSettings } = await import('@/lib/meter-values');
+    const { missingInstantLimits } = await import('@/lib/instant/values');
+    const now = new Date();
+    check('a fresh deploy has every computer Limit set', missingSettings(await getMeterSettings()).length === 0, await getMeterSettings());
+    check('a fresh deploy has every Instant limit set', missingInstantLimits(await getInstantLimits()).length === 0, await getInstantLimits());
+    const first = await issue.ensureIssued('sara', now);
+    const byCategory = Object.fromEntries(first.issued.map((lot) => [lot.programId, lot.amountMicros]));
+    check('a new member is given $0.10 of Instant Apps and $0.25 of computers by the default grants', first.issued.length === 2 && byCategory['seed-default-instant_apps'] === 100_000 && byCategory['seed-default-computers'] === 250_000 && first.skipped.length === 0, first);
+    check('issuing again gives nothing more', (await issue.ensureIssued('sara', now)).issued.length === 0);
+    const search = await spend.holdCredit({ holdKey: 'k-seed-search', personId: 'sara', category: 'instant_apps', amountMicros: 8_000, chargeClass: 'instant_run' }, now);
+    check('an Instant search fits in the starting credit', search.ok === true, search);
+    const tooMuch = await spend.holdCredit({ holdKey: 'k-seed-too-much', personId: 'sara', category: 'instant_apps', amountMicros: 100_000, chargeClass: 'instant_run' }, now);
+    check('a hold bigger than what is left is refused as used up, not as not set', !tooMuch.ok && tooMuch.reason !== 'not_set', tooMuch);
+    const job = await spend.holdCredit({ holdKey: 'k-seed-job', personId: 'sara', category: 'computers', amountMicros: 40_000, chargeClass: 'computer_job' }, now);
+    check('a computer job fits in the starting credit', job.ok === true, job);
+    // The scenarios below test the engine from a blank start: take the seeded start away again
+    await prisma.$executeRawUnsafe(`DELETE FROM credit_allocations`);
+    await prisma.$executeRawUnsafe(`DELETE FROM credit_holds`);
+    await prisma.$executeRawUnsafe(`DELETE FROM credit_lots`);
+    await prisma.$executeRawUnsafe(`DELETE FROM grant_programs WHERE id LIKE 'seed-default-%'`);
+    await prisma.$executeRawUnsafe(`DELETE FROM app_settings WHERE key IN ('meter', 'instant-limits')`);
+  }
+
   // ---------- Nothing is assumed: no budget, no credit ----------
   {
     const prog = await rules.saveDefault({ categoryId: 'instant_apps', amount: 2 * M, schedule: 'once', recipients: { kind: 'all' } }, root, T0).catch((e) => e);

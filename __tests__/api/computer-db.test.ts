@@ -30,6 +30,7 @@ import { recordGrant } from '@/lib/meter-grants';
 import { mintJobToken, TOKEN_LIFE_MS, TOKEN_RENEW_EVERY_SECONDS, verifyJobToken } from '@/lib/computer-token';
 import { CLAIM_MS, dbImageStore } from '@/lib/agent37/image';
 import { checkScreen, openScreen, screenTicket } from '@/lib/computer-screen';
+import { CONTROL_TIMING } from '@/lib/computer-control';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import {
   computerView,
@@ -101,6 +102,8 @@ run('a Brick’s computer, in a real database', () => {
     process.env.COMPUTER_PROVIDER = 'fake';
     // Screen tickets are signed with it
     process.env.BOT_SERVICE_TOKEN ||= 'a-test-service-token';
+    // The waits of a change of hands are short here: the order is what is tested, not real seconds
+    Object.assign(CONTROL_TIMING, { openLeaseMs: 60, inputLeaseMs: 60, pollMs: 10, joinMs: 4000 });
   });
   beforeEach(async () => {
     await wipe();
@@ -1143,33 +1146,42 @@ run('a Brick’s computer, in a real database', () => {
     it('a job that joins the person while they hand back is not left in their hands with nobody to hand it back', async () => {
       const { sara, jobId } = await waitingJob();
       await requestHandover(jobId, 'details', minutes(1));
-      const original = prisma.computerJob.count.bind(prisma.computerJob);
-      let calls = 0;
-      const spy = jest.spyOn(prisma.computerJob, 'count').mockImplementation(((...args: Parameters<typeof original>) => {
-        const where = (args[0]?.where ?? {}) as { status?: string; control?: string; id?: unknown };
-        const result = original(...args);
-        if (where.status !== 'waiting' || where.control !== 'person') return result;
-        calls++;
-        if (calls === 1) {
-          // The job has passed the first look: the person takes over now
-          return result.then(async (found) => {
-            await takeOver(sara.brickId, sara.id, minutes(2));
-            return found;
-          });
+      const originalCount = prisma.computerJob.count.bind(prisma.computerJob);
+      const originalUpdate = prisma.computerJob.updateMany.bind(prisma.computerJob);
+      // Only the job starting is looked at: the take over and the hand back the test makes in between look at the same rows themselves
+      let acting = false;
+      let tookOver = false;
+      const update = jest.spyOn(prisma.computerJob, 'updateMany').mockImplementation((async (...args: Parameters<typeof originalUpdate>) => {
+        const arg = args[0] as { where?: { status?: string }; data?: { status?: string } } | undefined;
+        // The job is just about to take its place on the machine: the person takes over now (so the job's own check for them came too early)
+        if (!acting && !tookOver && arg?.where?.status === 'queued' && arg?.data?.status === 'running') {
+          tookOver = true;
+          acting = true;
+          await takeOver(sara.brickId, sara.id, minutes(2));
+          acting = false;
         }
-        if (calls === 2) {
-          // It claimed its place and saw the person had the machine: the person hands back now
-          return result.then(async (found) => {
-            await handBack(sara.brickId, sara.id);
-            spy.mockRestore();
-            return found;
-          });
-        }
-        return result;
+        return originalUpdate(...args);
+      }) as unknown as typeof prisma.computerJob.updateMany);
+      let handedBack = false;
+      const count = jest.spyOn(prisma.computerJob, 'count').mockImplementation(((...args: Parameters<typeof originalCount>) => {
+        const where = (args[0]?.where ?? {}) as { status?: string; control?: string };
+        const result = originalCount(...args);
+        if (acting || !tookOver || handedBack || where.status !== 'waiting' || where.control !== 'person') return result;
+        handedBack = true;
+        // It claimed its place and saw the person had the machine: the person hands back now
+        return result.then(async (found) => {
+          acting = true;
+          await handBack(sara.brickId, sara.id);
+          acting = false;
+          count.mockRestore();
+          return found;
+        });
       }) as typeof prisma.computerJob.count);
       const reader = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Read', writes: false }, minutes(2));
-      spy.mockRestore();
+      update.mockRestore();
+      count.mockRestore();
       expect(reader.ok).toBe(true);
+      expect(handedBack).toBe(true);
       const jobs = await prisma.computerJob.findMany({ where: { botId: sara.brickId } });
       expect(jobs.filter((job) => job.status === 'waiting' && job.control === 'person')).toEqual([]);
       expect(jobs.filter((job) => job.status === 'running').length).toBe(2);

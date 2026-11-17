@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { prisma } from '@/lib/db';
 import { brickOf } from '@/lib/computer';
 import { getComputerProvider } from '@/lib/computer-provider';
+import { authorizeHumanInput, CONTROL_TIMING, humanInputAllowed, readControl } from '@/lib/computer-control';
 
 /**
  * The desktop gateway's half in Orbit (build handoff v2, section 4). The screen is shown through the bot server, which can hold a
@@ -14,8 +15,11 @@ import { getComputerProvider } from '@/lib/computer-provider';
  *    working, or the person handed the keyboard back, the answer is no and the socket is closed on both sides.
  *
  * Two modes. WATCH is the default; the bot server drops every key, pointer and clipboard message the viewer sends. INPUT is only for the
- * person who has taken over, and only for that take over: a new take over (or a hand back) moves the job's control generation, so an
- * old input ticket is dead. Nothing here ever wakes a machine: it only looks.
+ * person who has taken over, and only for that take over: it needs the computer's control to be `human_ready` (the fence was PROVED, not
+ * merely started) and the ticket's control epoch to be the current one, so a take over still fencing, a hand back, or a newer take over
+ * each leave an old input ticket dead. Every time the gateway opens or asks, authorizing input also records how long it is good for
+ * (one write, see computer-control.ts): a hand back waits that out before Brick resumes, so the gateway MUST close an input socket it
+ * has not had a yes for within `inputLeaseMs` (it asks every `checkEveryMs`). Nothing here ever wakes a machine: it only looks.
  */
 
 /** A ticket is worth this long for opening a socket. */
@@ -35,9 +39,8 @@ interface Payload {
   m: ScreenMode;
   /** Issued at, ms. */
   i: number;
-  /** For input: the job the person has taken over, and its control generation. */
-  j?: string;
-  g?: number;
+  /** For input: the control epoch of the take over the ticket was made under. */
+  e?: number;
 }
 
 const PREFIX = 'sct1';
@@ -65,7 +68,7 @@ function unseal(ticket: unknown): Payload | null {
   try {
     const value = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as Payload;
     if (typeof value.b !== 'string' || typeof value.p !== 'string' || (value.m !== 'watch' && value.m !== 'input') || typeof value.i !== 'number') return null;
-    if (value.m === 'input' && (typeof value.j !== 'string' || typeof value.g !== 'number')) return null;
+    if (value.m === 'input' && typeof value.e !== 'number') return null;
     return value;
   } catch {
     return null;
@@ -76,34 +79,41 @@ type Looked =
   | { ok: true; ref: string; mode: ScreenMode }
   | { ok: false; reason: 'not_found' | 'resting' | 'not_taken_over' };
 
-/** What is true now about a Brick's screen for this person and mode. Reads only. */
-async function look(botId: string, personId: string, mode: ScreenMode, input?: { jobId: string; generation: number }): Promise<Looked> {
+/**
+ * What is true now about a Brick's screen for this person and mode. Reads only, unless `authorize` is set: then input is also authorized
+ * and its lease recorded in one write, so there is no moment where input is allowed that a hand back cannot see.
+ */
+async function look(botId: string, personId: string, mode: ScreenMode, input?: { epoch: number }, authorize?: { leaseMs: number }): Promise<Looked> {
   if (!(await brickOf(botId, personId))) return { ok: false, reason: 'not_found' };
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   if (!row || !row.enabled || !row.providerRef || row.machine !== 'working') return { ok: false, reason: 'resting' };
   if (mode === 'input') {
-    const jobs = await prisma.computerJob.findMany({ where: { botId, status: 'waiting', control: 'person' }, select: { id: true, controlGeneration: true } });
-    const mine = input ? jobs.find((job) => job.id === input.jobId && job.controlGeneration === input.generation) : jobs[0];
-    return mine ? { ok: true, ref: row.providerRef, mode } : { ok: false, reason: 'not_taken_over' };
+    // The person's input needs the fence proved (human_ready) under the epoch the ticket was made for, and a job that is theirs
+    if (!input || row.controlState !== 'human_ready' || row.controlEpoch !== input.epoch) return { ok: false, reason: 'not_taken_over' };
+    if ((await prisma.computerJob.count({ where: { botId, status: 'waiting', control: 'person' } })) === 0) return { ok: false, reason: 'not_taken_over' };
+    if (authorize && !(await authorizeHumanInput(botId, input.epoch, authorize.leaseMs))) return { ok: false, reason: 'not_taken_over' };
+    return { ok: true, ref: row.providerRef, mode };
   }
   if ((await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } })) === 0) return { ok: false, reason: 'resting' };
   return { ok: true, ref: row.providerRef, mode };
 }
 
-export type Ticketed = { ok: true; ticket: string; mode: ScreenMode; expiresAt: Date } | { ok: false; reason: 'not_found' | 'resting' | 'not_taken_over' };
+/** `securing`: control is changing hands (the take over's fence is not proved yet, or a hand back is going), so there is no input to ask for yet. */
+export type Ticketed = { ok: true; ticket: string; mode: ScreenMode; expiresAt: Date } | { ok: false; reason: 'not_found' | 'resting' | 'not_taken_over' | 'securing' };
 
 /** A ticket for the owner's own Brick: watch by default, input only while they have taken over. */
 export async function screenTicket(botId: string, personId: string, mode: ScreenMode = 'watch', now: Date = new Date()): Promise<Ticketed> {
-  let jobId: string | undefined;
-  let generation: number | undefined;
+  let epoch: number | undefined;
   if (mode === 'input') {
-    const mine = await prisma.computerJob.findFirst({ where: { botId, status: 'waiting', control: 'person' }, orderBy: { createdAt: 'asc' }, select: { id: true, controlGeneration: true } });
-    jobId = mine?.id;
-    generation = mine?.controlGeneration;
+    const control = await readControl(botId);
+    // Only a take over whose fence is proved: while it is still being fenced (or being handed back) there is no input to ask for
+    if (control && (control.state === 'fencing' || control.state === 'returning')) return { ok: false, reason: 'securing' };
+    if (!control || control.state !== 'human_ready' || !(await humanInputAllowed(botId, control.epoch))) return { ok: false, reason: 'not_taken_over' };
+    epoch = control.epoch;
   }
-  const looked = await look(botId, personId, mode, jobId && generation !== undefined ? { jobId, generation } : undefined);
+  const looked = await look(botId, personId, mode, epoch !== undefined ? { epoch } : undefined);
   if (!looked.ok) return looked;
-  const payload: Payload = { b: botId, p: personId, m: mode, i: now.getTime(), ...(mode === 'input' ? { j: jobId, g: generation } : {}) };
+  const payload: Payload = { b: botId, p: personId, m: mode, i: now.getTime(), ...(mode === 'input' ? { e: epoch } : {}) };
   return { ok: true, ticket: seal(payload), mode, expiresAt: new Date(now.getTime() + TICKET_OPEN_MS) };
 }
 
@@ -114,7 +124,7 @@ export async function openScreen(ticket: unknown, now: Date = new Date()): Promi
   const payload = unseal(ticket);
   if (!payload) return { ok: false, reason: 'invalid' };
   if (now.getTime() - payload.i > TICKET_OPEN_MS || payload.i - now.getTime() > 5_000) return { ok: false, reason: 'expired' };
-  const looked = await look(payload.b, payload.p, payload.m, payload.m === 'input' ? { jobId: payload.j as string, generation: payload.g as number } : undefined);
+  const looked = await look(payload.b, payload.p, payload.m, payload.m === 'input' ? { epoch: payload.e as number } : undefined, payload.m === 'input' ? { leaseMs: CONTROL_TIMING.openLeaseMs } : undefined);
   if (!looked.ok) return looked;
   const provider = getComputerProvider();
   // Looking never wakes: a machine that is not running has no link
@@ -130,6 +140,6 @@ export async function checkScreen(ticket: unknown, now: Date = new Date()): Prom
   const payload = unseal(ticket);
   if (!payload) return { ok: false, reason: 'invalid' };
   if (now.getTime() - payload.i > TICKET_OPEN_MS + SCREEN_MAX_MS) return { ok: false, reason: 'too_long' };
-  const looked = await look(payload.b, payload.p, payload.m, payload.m === 'input' ? { jobId: payload.j as string, generation: payload.g as number } : undefined);
+  const looked = await look(payload.b, payload.p, payload.m, payload.m === 'input' ? { epoch: payload.e as number } : undefined, payload.m === 'input' ? { leaseMs: CONTROL_TIMING.inputLeaseMs } : undefined);
   return looked.ok ? { ok: true, mode: payload.m } : looked;
 }
