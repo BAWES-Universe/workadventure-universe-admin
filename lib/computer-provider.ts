@@ -6,7 +6,7 @@
  *  - Nothing here creates or wakes a machine unless a job needs it: only `create` and `wake` do, and Universe calls them from
  *    one place (starting a job). `watch` can only look: it returns nothing for a machine that is not awake.
  *  - There is no way to copy or reset a machine. A second job never gets a second computer, and nothing here forks one.
- *  - `rest` and `stop` keep the disk. Only `remove` takes a machine away, and only after the person's files were saved.
+ *  - `rest` and `stop` keep the disk. Only `remove` takes a machine away: when a Brick is deleted for good it goes without waiting for any copy.
  *  - What a minute costs is the provider's answer, never a number of ours.
  */
 
@@ -80,8 +80,13 @@ export interface ComputerProvider {
   rest(ref: string): Promise<void>;
   /** A stop of ours (usage used up, a safety stop, the Brick deleted). The disk is kept. */
   stop(ref: string): Promise<void>;
-  /** Takes the machine away for good. Only after the person's files were saved. */
+  /** Takes the machine away for good, its disk and everything on it. Never needs a saved copy first: a deleted Brick keeps nothing. */
   remove(ref: string): Promise<void>;
+  /**
+   * Takes away every machine made for this Brick, also one that was made and never written down (a make that was cut off). Asked after
+   * a Brick was purged, with the Brick's own rows already gone. Nothing there is not an error. Absent: this provider keeps none of its own.
+   */
+  removeAllFor?(botId: string): Promise<void>;
   /** Whether the machine is running or on its way up (billed). A machine that is gone, stopped or asleep is not. Used to prove a stop. */
   awake(ref: string): Promise<boolean>;
   /** The screen of a machine that is awake and working; null when it is not. Never wakes a machine. */
@@ -198,9 +203,18 @@ export class FakeComputerProvider implements ComputerProvider {
     this.awake_.delete(ref);
   }
 
+  /** Make the removing of a machine fail while this is on (a provider that is down). */
+  failRemove = false;
+
   async remove(ref: string): Promise<void> {
     this.note('remove', ref);
+    if (this.failRemove) throw new Error('The pretend provider failed on remove');
     this.awake_.delete(ref);
+  }
+
+  async removeAllFor(botId: string): Promise<void> {
+    this.note('removeAllFor', botId);
+    if (this.failRemove) throw new Error('The pretend provider failed on removeAllFor');
   }
 
   /** A test sets the machines that stay awake whatever is asked of them (a stop that did not take). */

@@ -179,6 +179,12 @@ export async function POST(request: NextRequest) {
     }
 
     // Debug: log what we're inserting
+    // Nothing is written for a Brick that was deleted for good (audit F08)
+    const purgedIds = new Set((await prisma.brickPurge.findMany({ where: { botId: { in: [...new Set(rowsToInsert.map((row) => row.botId))] } }, select: { botId: true } })).map((note) => note.botId));
+    if (purgedIds.size > 0) {
+      for (let at = rowsToInsert.length - 1; at >= 0; at--) if (purgedIds.has(rowsToInsert[at].botId)) rowsToInsert.splice(at, 1);
+    }
+
     const metricTypesInserted = new Set(rowsToInsert.map(r => r.metricType));
     console.log(`Inserting ${rowsToInsert.length} metric rows with types:`, Array.from(metricTypesInserted));
 

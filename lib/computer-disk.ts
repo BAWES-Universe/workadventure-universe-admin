@@ -19,6 +19,8 @@ export async function recordKeptBytes(input: {
   /** The size of the saved copy; when not given, the one on the Brick's computer record. */
   copyBytes?: number | null;
   now?: Date;
+  /** The Brick's owner, for a Brick whose row is already gone (a purge confirming its outside deletions): else read from the Brick. */
+  ownerId?: string | null;
 }): Promise<void> {
   try {
     const machine = input.machineBytes !== null && Number.isSafeInteger(input.machineBytes) && input.machineBytes > 0 ? input.machineBytes : 0;
@@ -37,15 +39,15 @@ export async function recordKeptBytes(input: {
     });
     // Nothing kept and nothing ever written: there is no level to say. The same level as the newest one is already the answer.
     if (newest ? Number(newest.quantity) === level : level === 0) return;
-    const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { ownerId: true } });
+    const ownerId = input.ownerId !== undefined ? input.ownerId : (await prisma.bot.findUnique({ where: { id: input.botId }, select: { ownerId: true } }))?.ownerId ?? null;
     const now = input.now ?? new Date();
     await recordMeterEvent({
       eventId: `computer:kept:${input.botId}:${input.reason}:${now.getTime()}:${level}`.slice(0, 255),
       kind: 'stored_bytes',
       pool: 'computer',
       occurredAt: now,
-      personKey: personKeyOf({ personId: bot?.ownerId ?? null }),
-      personId: bot?.ownerId ?? null,
+      personKey: personKeyOf({ personId: ownerId }),
+      personId: ownerId,
       botId: input.botId,
       brick: true,
       payerKind: 'universe',

@@ -3193,6 +3193,33 @@ model BrickComputer {
   @@map("brick_computers")
 }
 
+// What is left to do outside Orbit after a Brick was purged for good, and the proof that it was (audit F08). Written in the SAME
+// transaction that deletes the Brick, so a Brick that is gone always has this row, and a Brick that is not gone never does. It holds
+// no content, no name and no text: only where the machine is (so a failed deletion can be tried again after the Brick's own rows
+// are gone) and what is still to delete. It has no foreign key on purpose. After both outside deletions are confirmed the row stays
+// as a marker with `doneAt` set (the machine reference is cleared), so a bot server that still holds the Brick cannot write its
+// memory or chats back; the sweep removes the marker after a while.
+model BrickPurge {
+  botId          String    @id @map("bot_id") @db.VarChar(255)
+  // Whose Brick it was, only so the books can still say who the kept-storage lines belong to
+  ownerId        String?   @map("owner_id")
+  // Which provider holds the machine ("fake" or "real") and its reference there; null when there was none
+  provider       String?   @db.VarChar(10)
+  providerRef    String?   @map("provider_ref") @db.VarChar(255)
+  // Still to delete outside: the machine at its provider (also any made for this Brick that was never written down), the saved files in our bucket
+  machinePending Boolean   @default(false) @map("machine_pending")
+  copyPending    Boolean   @default(false) @map("copy_pending")
+  attempts       Int       @default(0)
+  nextTryAt      DateTime  @default(now()) @map("next_try_at")
+  lastTriedAt    DateTime? @map("last_tried_at")
+  purgedAt       DateTime  @default(now()) @map("purged_at")
+  // Set when nothing is left to delete outside
+  doneAt         DateTime? @map("done_at")
+
+  @@index([doneAt, nextTryAt])
+  @@map("brick_purges")
+}
+
 // One job on a Brick's computer (game #2000). Jobs for a Brick queue; the database holds at most one WRITING job running or
 // waiting for its person at a time (computer_jobs_one_writer), so two jobs started at the same moment can never both write.
 // Only work proven read-only (`writes` false) may overlap.

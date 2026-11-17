@@ -321,6 +321,11 @@ export class Agent37ComputerProvider implements ComputerProvider {
     this.brickOf.delete(ref);
   }
 
+  async removeAllFor(botId: string): Promise<void> {
+    const made = (await this.client.listInstances()).filter((instance) => instance.metadata?.creation_id === creationId(botId) && !gone(String(instance.status)));
+    for (const instance of made) await this.remove(instance.id);
+  }
+
   async awake(ref: string): Promise<boolean> {
     try {
       const status = String((await this.client.getInstance(ref)).status);
