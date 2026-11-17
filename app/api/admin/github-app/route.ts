@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
 import { corsHeaders } from '@/lib/cors';
-import { getGitHubApp, keptGitHubAppId } from '@/lib/github/app';
+import { forgetGitHubApp, getGitHubApp, keptGitHubAppId } from '@/lib/github/app';
 
 export const runtime = 'nodejs';
 
@@ -27,7 +27,14 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Could not tell whether GitHub is set up' }, { status: 500, headers });
   }
   if (kept === null) return NextResponse.json({ made: false }, { headers });
-  const app = await getGitHubApp();
+  // The address comes from this server's copy of the app (kept up to a minute); when it is not the app the store holds now (another
+  // server just made or replaced it), read it again, and never answer with another app's address next to this app's number
+  let app = await getGitHubApp();
+  if (app?.appId !== kept) {
+    forgetGitHubApp();
+    app = await getGitHubApp();
+  }
+  if (app?.appId !== kept) app = null;
   // The app's id is no secret: the setup page tells a newly made app from the one it replaces by it
   return NextResponse.json({ made: true, appId: kept, ...(app ? { slug: app.slug, url: app.htmlUrl } : {}) }, { headers });
 }

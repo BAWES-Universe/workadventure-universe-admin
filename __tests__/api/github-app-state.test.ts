@@ -8,8 +8,13 @@ const mockUser: { current: { id: string; isSuperAdmin?: boolean } | null } = { c
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => mockUser.current) }));
 const mockApp: { current: Record<string, unknown> | null } = { current: null };
 const mockKept: { current: number | null | Error } = { current: null };
+/** This server's copy of the app (up to a minute old): what getGitHubApp answers until it is told to forget it */
+const mockCopy: { current: Record<string, unknown> | null | 'fresh' } = { current: 'fresh' };
 jest.mock('@/lib/github/app', () => ({
-  getGitHubApp: jest.fn(async () => mockApp.current),
+  getGitHubApp: jest.fn(async () => (mockCopy.current === 'fresh' ? mockApp.current : mockCopy.current)),
+  forgetGitHubApp: jest.fn(() => {
+    mockCopy.current = 'fresh';
+  }),
   keptGitHubAppId: jest.fn(async () => {
     if (mockKept.current instanceof Error) throw mockKept.current;
     return mockKept.current;
@@ -24,6 +29,7 @@ beforeEach(() => {
   mockUser.current = null;
   mockApp.current = null;
   mockKept.current = null;
+  mockCopy.current = 'fresh';
 });
 
 describe('GET /api/admin/github-app', () => {
@@ -63,5 +69,21 @@ describe('GET /api/admin/github-app', () => {
     expect(response.status).toBe(500);
     expect(await response.json()).not.toHaveProperty('made');
     error.mockRestore();
+  });
+
+  it('never puts another app\'s address next to this app\'s number when this server\'s copy is out of date', async () => {
+    mockUser.current = { id: 'u1', isSuperAdmin: true };
+    // Another server just replaced app 1 with app 2: this one still holds app 1 until it is told to read again
+    mockKept.current = 2;
+    mockCopy.current = { appId: 1, slug: 'old-app', htmlUrl: 'https://github.com/apps/old-app' };
+    mockApp.current = { appId: 2, slug: 'new-app', htmlUrl: 'https://github.com/apps/new-app' };
+    expect(await (await ask()).json()).toEqual({ made: true, appId: 2, slug: 'new-app', url: 'https://github.com/apps/new-app' });
+  });
+
+  it('leaves the address out rather than show a wrong one when the app kept cannot be read back as that number', async () => {
+    mockUser.current = { id: 'u1', isSuperAdmin: true };
+    mockKept.current = 2;
+    mockApp.current = { appId: 1, slug: 'old-app', htmlUrl: 'https://github.com/apps/old-app' };
+    expect(await (await ask()).json()).toEqual({ made: true, appId: 2 });
   });
 });
