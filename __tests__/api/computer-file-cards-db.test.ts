@@ -18,7 +18,10 @@ import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
 import { keepReportTold, reportsToTell } from '@/lib/computer-report';
-import { deleteOwnResult, deleteResult, DELETED_BRICK_LABEL, markFileDelivered, orphanResultsOf, PIECE_BYTES, purgeStaleCards, readCard, readOwnResult, readResult, resultsOf, setCardStoreForTests, type CardStore } from '@/lib/computer-file-cards';
+import { deleteOwnResult, deleteResult, DELETED_BRICK_LABEL, markFileDelivered, orphanResultsOf, PIECE_BYTES, purgeStaleCards, readCard, readOwnResult, readResult, resultsOf } from '@/lib/computer-file-cards';
+import { setOutputStoreForTests, type OutputStore } from '@/lib/workbench/store';
+import { saveCodeJobLimits } from '@/lib/workbench/state';
+import { resultsOfSource } from '@/lib/owned-results';
 import { listBrickFiles } from '@/lib/brick-files';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -34,12 +37,12 @@ const env = process.env.COMPUTER_PROVIDER;
 
 /** What is on the pretend machine: path from home folder to its bytes and when it was made (seconds). */
 const machineFiles = new Map<string, { data: Buffer; at: number }>();
-/** What is kept in the bucket. */
-const kept = new Map<string, Buffer>();
+/** What is kept in the bucket (the one store every result is kept in: sealing is that store's own, tested there). */
+const kept = new Map<string, Uint8Array>();
 let removeFails = false;
-const store: CardStore = {
-  async put(key, sealed) {
-    kept.set(key, sealed);
+const store: OutputStore = {
+  async put(key, bytes) {
+    kept.set(key, bytes);
   },
   async get(key) {
     const found = kept.get(key);
@@ -93,6 +96,7 @@ const setUp = () =>
 const wipe = async () => {
   // A person's results do not go with their jobs or Bricks: they are cleared by owner
   await prisma.computerJobFile.deleteMany({ where: { ownerId: { in: people } } });
+  await prisma.ownedResult.deleteMany({ where: { ownerId: { in: people } } });
   await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
   await prisma.meterEvent.deleteMany({});
   await prisma.meterReservation.deleteMany({});
@@ -117,9 +121,10 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     process.env.COMPUTER_PROVIDER = 'fake';
     process.env.BOT_SERVICE_TOKEN ||= 'a-test-service-token';
     process.env.ENCRYPTION_KEY ||= 'a'.repeat(64);
-    setCardStoreForTests(store);
+    setOutputStoreForTests(store);
   });
   beforeEach(async () => {
+    await saveCodeJobLimits({ maxKeptBytesPerPerson: 1_073_741_824 }, 'admin');
     await wipe();
     await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
     machineFiles.clear();
@@ -133,7 +138,7 @@ run('The files a finished computer job made reach the chat as cards, in a real d
   afterAll(async () => {
     await wipe();
     setComputerProviderForTests(null);
-    setCardStoreForTests(null);
+    setOutputStoreForTests(undefined);
     process.env.COMPUTER_PROVIDER = env;
     await prisma.user.deleteMany({ where: { id: { in: people } } });
     await prisma.$disconnect();
@@ -166,9 +171,12 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect(done.files.sort()).toEqual(['new-notes.txt', 'theirs.pdf']);
     expect(JSON.stringify(done)).not.toContain('storage');
     expect(JSON.stringify(done)).not.toContain('Documents/');
-    // What waits in the bucket is encrypted, and comes back byte for byte
+    // The files are kept as the person's own results, in the one store every result is kept in, and come back byte for byte
     expect(kept.size).toBe(2);
-    for (const sealed of kept.values()) expect(sealed.includes(Buffer.from('visa receipt'))).toBe(false);
+    expect((await resultsOfSource('computer_job', id)).map((row) => [row.name, row.ownerId, row.makerBotId, row.access])).toEqual([
+      ['photo.png', sara.id, sara.brickId, 'owner'],
+      ['visa_receipt.pdf', sara.id, sara.brickId, 'owner'],
+    ]);
     const first = await readCard(id, done.handed[1].id);
     expect(first?.data.equals(receipt)).toBe(true);
     expect(first?.name).toBe('visa_receipt.pdf');
@@ -182,7 +190,7 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect((await readCard(id, done.handed[0].id))?.data.equals(big)).toBe(true);
     const rows = await prisma.computerJobFile.findMany({ where: { jobId: id } });
     expect(rows).toHaveLength(2);
-    expect(rows.every((row) => row.storageKey !== null && row.purgedAt === null && row.deliveredAt === null)).toBe(true);
+    expect(rows.every((row) => row.resultId !== null && row.deliveredAt === null)).toBe(true);
     // Only the job's own folder is the job's: the sensitive file (touched before, edited during), the old one, a new one elsewhere and another job's folder never were
     expect(rows.map((row) => row.path).sort()).toEqual([`Outputs/${id}/photo.png`, `Outputs/${id}/visa_receipt.pdf`]);
     // Each is an owned record: whose it is, which job and Brick made it, and what the job was called
@@ -349,7 +357,7 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     await finishJob(id, 'done', minutes(9));
     const job = await prisma.computerJob.findUniqueOrThrow({ where: { id } });
     expect(job.endClosedAt).not.toBeNull();
-    expect(await prisma.computerJobFile.count({ where: { jobId: id, storageKey: { not: null } } })).toBe(1);
+    expect(await prisma.computerJobFile.count({ where: { jobId: id, resultId: { not: null } } })).toBe(1);
   });
 
   it('hands over no more files than Limits say and none bigger, and names the rest', async () => {
@@ -378,6 +386,81 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect(done.handed).toEqual([]);
     expect(kept.size).toBe(0);
     expect(done.files).toEqual(['a.pdf']);
+  });
+
+  it('keeps a result inside what one person may keep (the same Limit a code job’s files count against), and names what did not fit', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    out(id, 'a.pdf', 'aaaa', 5);
+    out(id, 'b.pdf', 'bbbbbbbbbbbb', 6);
+    // 6 bytes may be kept: the newest (12 bytes) does not fit, the other (4) does
+    await saveCodeJobLimits({ maxKeptBytesPerPerson: 6 }, 'admin');
+    try {
+      await finishJob(id, 'done', minutes(9));
+    } finally {
+      await saveCodeJobLimits({ maxKeptBytesPerPerson: 1_073_741_824 }, 'admin');
+    }
+    const [done] = await mine([id]);
+    expect(done.handed.map((card) => card.name)).toEqual(['a.pdf']);
+    // What did not fit stays on the computer and is named
+    expect(done.files).toEqual(['b.pdf']);
+    expect(kept.size).toBe(1);
+  });
+
+  it('keeps nothing when what one person may keep is not set', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    out(id, 'a.pdf', 'a', 5);
+    await saveCodeJobLimits({ maxKeptBytesPerPerson: null }, 'admin');
+    try {
+      await finishJob(id, 'done', minutes(9));
+    } finally {
+      await saveCodeJobLimits({ maxKeptBytesPerPerson: 1_073_741_824 }, 'admin');
+    }
+    expect((await mine([id]))[0].handed).toEqual([]);
+    expect(kept.size).toBe(0);
+  });
+
+  it('keeps two files of the same name from different subfolders of the job’s folder, both', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    out(id, 'march/report.pdf', 'march', 5);
+    out(id, 'april/report.pdf', 'april', 6);
+    await finishJob(id, 'done', minutes(9));
+    const [done] = await mine([id]);
+    expect(done.handed.map((card) => card.name).sort()).toEqual(['report (2).pdf', 'report.pdf']);
+    const byName = new Map(await Promise.all(done.handed.map(async (card) => [card.name, (await readCard(id, card.id))?.data.toString()] as const)));
+    expect([...byName.values()].sort()).toEqual(['april', 'march']);
+  });
+
+  it('does not name a file as left on the computer once it was handed over: not after the chat took it, not after the person deleted it', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    out(id, 'a.pdf', 'a', 5);
+    out(id, 'b.pdf', 'b', 6);
+    await finishJob(id, 'done', minutes(9));
+    const [first] = await mine([id]);
+    expect(first.handed.map((card) => card.name)).toEqual(['b.pdf', 'a.pdf']);
+    expect(first.files).toEqual([]);
+    // The chat took one, the person deleted the other: the message is tried again, and neither is said to be left behind
+    await markFileDelivered(id, first.handed[0].id);
+    expect(await deleteResult(sara.brickId, sara.id, first.handed[1].id)).toBe(true);
+    const [retry] = await mine([id]);
+    expect(retry.handed).toEqual([]);
+    expect(retry.files).toEqual([]);
+  });
+
+  it('keeps a result the person made into an Artifact when the days in Limits are up', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    out(id, 'page.html', '<p>hi</p>', 5);
+    out(id, 'old.pdf', 'old', 4);
+    await finishJob(id, 'done', minutes(9));
+    await prisma.ownedResult.updateMany({ where: { sourceKind: 'computer_job', sourceId: id, name: 'page.html' }, data: { artifactId: randomUUID() } });
+    await prisma.computerJobFile.updateMany({ where: { jobId: id }, data: { createdAt: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000) } });
+    expect(await purgeStaleCards(new Date(), 7)).toBe(1);
+    expect((await resultsOfSource('computer_job', id)).map((row) => row.name)).toEqual(['page.html']);
+    expect((await resultsOf(sara.brickId, sara.id)).map((one) => one.name)).toEqual(['page.html']);
   });
 
   it('never hands over a file twice, and a later job hands over only what it made', async () => {
@@ -423,12 +506,11 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     const sara = await person('sara');
     const id = await started(sara);
     out(id, 'a.pdf', 'a', 5);
-    const failing: CardStore = { ...store, put: async () => { throw new Error('the bucket did not answer'); } };
-    setCardStoreForTests(failing);
+    setOutputStoreForTests({ ...store, put: async () => { throw new Error('the bucket did not answer'); } });
     try {
       await finishJob(id, 'done', minutes(9));
     } finally {
-      setCardStoreForTests(store);
+      setOutputStoreForTests(store);
     }
     expect((await mine([id]))[0].handed).toEqual([]);
     expect(await prisma.computerJobFile.count({ where: { jobId: id } })).toBe(0);
@@ -525,7 +607,7 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     // The job rows went with the Brick; the file did not: it keeps its owner and where it came from, and no job
     const row = await prisma.computerJobFile.findUniqueOrThrow({ where: { id: fileId } });
     expect(row).toMatchObject({ jobId: null, botId: omar.brickId, ownerId: omar.id, makerName: "omar's Brick", jobTitle: 'Visa form' });
-    expect(row.storageKey).not.toBeNull();
+    expect(row.resultId).not.toBeNull();
     const orphans = await orphanResultsOf(omar.id);
     expect(orphans.map((one) => [one.name, one.brick, one.jobId, one.delivery])).toEqual([['a.pdf', DELETED_BRICK_LABEL, null, 'not_delivered']]);
     // Only its owner opens or deletes it; the copy comes back whole

@@ -3317,12 +3317,11 @@ model ComputerJob {
   @@map("computer_jobs")
 }
 
-// A file a finished computer job made, handed over to the person's chat as a card. The bytes are kept ENCRYPTED in the bucket (`storageKey`) only until
-// they reach the chat, the Brick is deleted, or the days in Limits pass; then `storageKey` is emptied. The row stays as the record (name, path, time,
-// never the bytes) so the same file is never handed over twice, and goes with the job when the Brick is removed.
-// A file a computer made for a person: theirs, an owned record with its provenance (which job, which Brick, when), not a transfer copy. It is kept for the days in
-// Limits, or until they delete it, whether or not the chat took it, and it does not go with the job, the computer or the Brick that made it: deleting a Brick
-// deletes the job rows and the machine, and the person's files stay, under "A deleted Brick". Only an account being deleted takes its files with it.
+// The delivery ledger of the files a computer job made. The file itself is the person's own result in `owned_results` (the one place results are kept, the same as a
+// code job's; `resultId`): kept until they delete it or the days in Limits pass, whether or not the chat took it, and it does not go with the job, the computer or the
+// Brick that made it (deleting a Brick deletes the job rows and the machine, and the person's files stay, under "A deleted Brick"). This row is only what the job
+// knows about it: the path and time it was handed over from (so the same file is never handed over twice, even after the person deleted the result), the name and the
+// job's title then, and when the chat took it. `resultId` empties when the result is deleted; the row stays. Only an account being deleted takes its rows with it.
 model ComputerJobFile {
   id         String    @id @default(uuid())
   // The job that made it; null once that job is gone (its Brick was deleted)
@@ -3339,19 +3338,19 @@ model ComputerJobFile {
   modifiedAt DateTime  @map("modified_at")
   bytes      Int
   mimeType   String    @map("mime_type") @db.VarChar(100)
-  storageKey String?   @map("storage_key") @db.VarChar(255)
+  // The owned result this became; null once the person deleted it (or it was past Limits' days)
+  resultId   String?   @unique @map("result_id")
   createdAt  DateTime  @default(now()) @map("created_at")
-  purgedAt   DateTime? @map("purged_at")
   // When the chat took this file; null while it has not (it is still the person's, in Files)
   deliveredAt DateTime? @map("delivered_at")
 
-  job   ComputerJob? @relation(fields: [jobId], references: [id], onDelete: SetNull)
-  owner User         @relation("ComputerResultOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  job    ComputerJob? @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  owner  User         @relation("ComputerResultOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  result OwnedResult? @relation(fields: [resultId], references: [id], onDelete: SetNull)
 
   @@unique([botId, path, modifiedAt])
   @@index([jobId])
   @@index([ownerId, createdAt])
-  @@index([storageKey, createdAt])
   @@map("computer_job_files")
 }
 
@@ -3645,6 +3644,9 @@ model OwnedResult {
   // The Artifact the owner made from it, once they did
   artifactId  String?  @map("artifact_id")
   createdAt   DateTime @default(now()) @map("created_at")
+
+  // The ledger row of a computer job that handed this over to the chat, when it came from one
+  computerFile ComputerJobFile?
 
   @@unique([sourceKind, sourceId, name])
   @@index([ownerId, createdAt])

@@ -1,8 +1,7 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
-import { DeleteObjectsCommand, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { prisma } from '@/lib/db';
-import { artifactBucket } from '@/lib/artifact-storage';
-import { derivedKey } from '@/lib/encryption';
+import { deleteResult as deleteOwnedResult, keepResult, keptBytes, openResult, resultsOfSource } from '@/lib/owned-results';
+import { getCodeJobLimits } from '@/lib/workbench/state';
+import { getOutputStore } from '@/lib/workbench/store';
 import { parseFilesList, type FileEntry, type FilesList } from '@/lib/computer-files';
 import type { ComputerProvider } from '@/lib/computer-provider';
 
@@ -17,18 +16,16 @@ import type { ComputerProvider } from '@/lib/computer-provider';
  *      files or bigger files than Limits say;
  *   2. each is read through the machine's command channel in pieces (a command's answer is cut at 512 KB), after checking it is a plain file in the
  *      home folder and not a link to somewhere else, and checked again at the end that it did not change while it was read;
- *   3. it is kept in Universe's bucket ENCRYPTED, under a name of its own, as the person's own result: an owned record (owner, the job and Brick that made
- *      it, when) that is theirs alone (Files, owner only) and publishes nothing. The chat gets a copy (the bot server fetches it and says when the chat took
- *      it). The result stays whether or not the chat took it, whether or not the provider's copy or the computer is still there, until the person deletes it
- *      or `computerFileDays` pass. Deleting the Brick that made it does NOT delete it: it stays, under "A deleted Brick";
- *   4. a row stays behind with the file's name, path and time so the same file is never handed over twice, and with whether the chat took it.
+ *   3. it is kept as the person's own result in the one place every result is kept (`lib/owned-results.ts`, the same as a code job's): encrypted, an owned
+ *      record (owner, the job and Brick that made it, when) that is theirs alone (Files, owner only) and publishes nothing, inside the one Limit for what a
+ *      person keeps. The chat gets a copy (the bot server fetches it and says when the chat took it). The result stays whether or not the chat took it, whether
+ *      or not the provider's copy or the computer is still there, until the person deletes it or `computerFileDays` pass (a result made into an Artifact stays).
+ *      Deleting the Brick that made it does NOT delete it: it stays, under "A deleted Brick";
+ *   4. a row of this job's own (the delivery ledger) stays behind with the file's name, path and time so the same file is never handed over twice, with the
+ *      result it became, and with whether the chat took it. It outlives the result: a result the person deleted is never handed over again.
  * What cannot be handed over (too many, too big, unreadable, the time ran out) is still named in the message by the report, and stays on the computer.
  */
 
-const MAGIC = Buffer.from('UBF1');
-const NONCE = 12;
-const TAG = 16;
-const PURPOSE = 'universe-computer-file-card';
 /** A command's answer is cut at 512 KB; base64 makes 3 bytes into 4 characters, so this many bytes always fit. */
 export const PIECE_BYTES = 300_000;
 /** Pieces of one file asked at the same time. */
@@ -38,59 +35,6 @@ export const HAND_OVER_BUDGET_MS = 2 * 60_000;
 /** The longest handing over can still be running (the budget, and one last command that was already asked): after this its claim on the machine is stale, and nothing is written after it. */
 export const HAND_OVER_LATEST_MS = HAND_OVER_BUDGET_MS + 2 * 60_000;
 const NAME_MAX = 120;
-
-export const cardKey = (botId: string, fileId: string) => `computer-files/${botId}/${fileId}.ubf`;
-
-// ---------- Where the bytes are kept ----------
-
-export interface CardStore {
-  put(key: string, sealed: Buffer): Promise<void>;
-  get(key: string): Promise<Buffer>;
-  remove(keys: string[]): Promise<void>;
-}
-
-const bucketStore: CardStore = {
-  async put(key, sealed) {
-    const { s3, bucket } = artifactBucket();
-    await s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: sealed, ContentType: 'application/octet-stream', CacheControl: 'private, no-store' }));
-  },
-  async get(key) {
-    const { s3, bucket } = artifactBucket();
-    const found = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-    if (!found.Body) throw new Error('The file is not there');
-    return Buffer.from(await found.Body.transformToByteArray());
-  },
-  async remove(keys) {
-    const { s3, bucket } = artifactBucket();
-    for (let at = 0; at < keys.length; at += 1000) {
-      const part = keys.slice(at, at + 1000);
-      const answer = await s3.send(new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: part.map((Key) => ({ Key })), Quiet: true } }));
-      if (answer.Errors && answer.Errors.length > 0) throw new Error('Some files could not be deleted');
-    }
-  },
-};
-
-let store: CardStore = bucketStore;
-/** A test keeps the bytes in memory. Pass null to go back to the bucket. */
-export function setCardStoreForTests(replacement: CardStore | null): void {
-  store = replacement ?? bucketStore;
-}
-
-/** "UBF1", a 12-byte nonce, the encrypted file, a 16-byte tag. The key's own name is bound to it, so a copy swapped under another name is refused. */
-export function sealCard(key: string, data: Buffer): Buffer {
-  const nonce = randomBytes(NONCE);
-  const cipher = createCipheriv('aes-256-gcm', derivedKey(PURPOSE), nonce);
-  cipher.setAAD(Buffer.from(key));
-  return Buffer.concat([MAGIC, nonce, cipher.update(data), cipher.final(), cipher.getAuthTag()]);
-}
-
-export function openCard(key: string, file: Buffer): Buffer {
-  if (file.length < MAGIC.length + NONCE + TAG || !file.subarray(0, MAGIC.length).equals(MAGIC)) throw new Error('Not a kept file');
-  const decipher = createDecipheriv('aes-256-gcm', derivedKey(PURPOSE), file.subarray(MAGIC.length, MAGIC.length + NONCE));
-  decipher.setAAD(Buffer.from(key));
-  decipher.setAuthTag(file.subarray(file.length - TAG));
-  return Buffer.concat([decipher.update(file.subarray(MAGIC.length + NONCE, file.length - TAG)), decipher.final()]);
-}
 
 // ---------- Which files ----------
 
@@ -274,6 +218,20 @@ export interface HandOverLimits {
   bytes: number;
 }
 
+/** A name that is not one of `used` (a file of the same name in another subfolder of the job's folder gets " (2)" before its ending), never longer than a result's name may be. Pure. */
+export function uniqueName(name: string, used: ReadonlySet<string>): string {
+  if (!used.has(name)) return name;
+  const dot = name.lastIndexOf('.');
+  const ending = dot > 0 && name.length - dot <= 12 ? name.slice(dot) : '';
+  const base = ending ? name.slice(0, dot) : name;
+  for (let n = 2; n < 1000; n += 1) {
+    const suffix = ` (${n})`;
+    const candidate = `${base.slice(0, Math.max(1, NAME_MAX - ending.length - suffix.length)).trimEnd()}${suffix}${ending}`;
+    if (!used.has(candidate)) return candidate;
+  }
+  return `${name.slice(0, NAME_MAX - 9)} (${Date.now() % 100000})${ending}`.slice(0, NAME_MAX);
+}
+
 /**
  * Moves the files a job made from its machine into Universe, as far as the limits and the time allow. Never throws: a failure only means fewer files
  * (the message names the ones left). Returns how many were handed over and how long it took, which is machine time held for the job.
@@ -298,36 +256,42 @@ export async function handOverFiles(input: {
     const listed = await input.provider.exec(input.ref, outputListCommand(input.jobId), { timeoutMs: 20_000 });
     if (listed.exitCode !== 0 || listed.truncated) return { handed, ms: clock() - began };
     const list = parseFilesList(listed.stdout, new Date());
-    // What an earlier job already handed over (its row stays, without the bytes), so one file is never handed over twice
+    // What an earlier job already handed over (its row stays), so one file is never handed over twice
     const earlier = await prisma.computerJobFile.findMany({ where: { botId: input.botId }, select: { path: true, modifiedAt: true } });
     const known = new Set(earlier.map((row) => `${row.modifiedAt.toISOString()}\t${row.path}`));
     const picks = pickFiles(list, outputFolder(input.jobId), input.limits, (entry) => known.has(`${entry.modifiedAt}\t${entry.path}`));
+    if (picks.length === 0) return { handed, ms: Math.max(0, clock() - began) };
+    // What one person may keep is one Limit for every result they own (the same as a code job's): a file that would take them over it stays on the
+    // computer and is named. Not set reads as nothing may be kept.
+    const cap = (await getCodeJobLimits()).maxKeptBytesPerPerson;
+    let personKept = await keptBytes(input.ownerId);
+    const used = new Set((await resultsOfSource('computer_job', input.jobId)).map((row) => row.name));
+    const store = getOutputStore();
     const deadline = began + HAND_OVER_BUDGET_MS;
     for (const pick of picks) {
       if (clock() > deadline) break;
+      if (cap === null || personKept + pick.entry.bytes > cap) continue;
       try {
         const data = await readFile(input.provider, input.ref, pick.entry, deadline, clock);
         if (!data) continue;
-        const row = await prisma.computerJobFile.create({
-          data: { jobId: input.jobId, botId: input.botId, ownerId: input.ownerId, makerName: input.makerName, jobTitle: input.jobTitle, name: pick.name, path: pick.entry.path, modifiedAt: new Date(pick.entry.modifiedAt), bytes: data.length, mimeType: mimeOf(pick.name) },
-          select: { id: true },
-        }).catch((error: { code?: string }) => {
-          // The same file at the same time, handed over by a job at the same moment: that one has it
-          if (error?.code === 'P2002') return null;
-          throw error;
-        });
-        if (!row) continue;
-        const key = cardKey(input.botId, row.id);
-        try {
-          await store.put(key, sealCard(key, data));
-          await prisma.computerJobFile.update({ where: { id: row.id }, data: { storageKey: key } });
-          handed += 1;
-        } catch (error) {
-          // Not kept: the row would claim a file that is not there, so it goes (the file can be handed over by a later job)
-          await store.remove([key]).catch(() => undefined);
-          await prisma.computerJobFile.delete({ where: { id: row.id } }).catch(() => undefined);
-          throw error;
-        }
+        const name = uniqueName(pick.name, used);
+        // Kept first, claimed after: a crash in between leaves a result that is the person's own (never a claim on a file that is not there)
+        const result = await keepResult({ ownerId: input.ownerId, sourceKind: 'computer_job', sourceId: input.jobId, makerBotId: input.botId, makerName: input.makerName, name, contentType: mimeOf(name), bytes: data }, store);
+        const claimed = await prisma.computerJobFile
+          .create({
+            data: { jobId: input.jobId, botId: input.botId, ownerId: input.ownerId, makerName: input.makerName, jobTitle: input.jobTitle, name, path: pick.entry.path, modifiedAt: new Date(pick.entry.modifiedAt), bytes: data.length, mimeType: mimeOf(name), resultId: result.id },
+            select: { id: true },
+          })
+          .catch(async (error: { code?: string }) => {
+            // Not claimed (the same file at the same time was handed over by a job at the same moment, or the claim could not be written): the copy just kept goes
+            await deleteOwnedResult(result.id, input.ownerId, store).catch(() => undefined);
+            if (error?.code === 'P2002') return null;
+            throw error;
+          });
+        if (!claimed) continue;
+        used.add(name);
+        personKept += data.length;
+        handed += 1;
       } catch (error) {
         console.error('[Computer] Could not hand over a file:', error instanceof Error ? error.message : 'unknown');
       }
@@ -351,33 +315,33 @@ export interface Card {
 export async function cardsOfJobs(jobIds: string[]): Promise<Map<string, (Card & { path: string })[]>> {
   const out = new Map<string, (Card & { path: string })[]>();
   if (jobIds.length === 0) return out;
-  const rows = await prisma.computerJobFile.findMany({ where: { jobId: { in: jobIds }, storageKey: { not: null }, deliveredAt: null }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+  const rows = await prisma.computerJobFile.findMany({ where: { jobId: { in: jobIds }, resultId: { not: null }, deliveredAt: null }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
   for (const row of rows) if (row.jobId) out.set(row.jobId, [...(out.get(row.jobId) ?? []), { id: row.id, name: row.name, bytes: row.bytes, mime: row.mimeType, path: row.path }]);
   return out;
 }
 
-/** One kept file's bytes for the bot server, or null when it is not there (deleted, past Limits' days, or never the job's). */
-export async function readCard(jobId: string, fileId: string): Promise<{ name: string; mime: string; data: Buffer } | null> {
-  const row = await prisma.computerJobFile.findUnique({ where: { id: fileId } });
-  if (!row || row.jobId !== jobId || !row.storageKey) return null;
-  try {
-    return { name: row.name, mime: row.mimeType, data: openCard(row.storageKey, await store.get(row.storageKey)) };
-  } catch (error) {
-    console.error('[Computer] Could not read a kept file:', error instanceof Error ? error.message : 'unknown');
-    return null;
-  }
+/** The path of every file these jobs handed over, whether the chat took it or not and whether the person has deleted it since: none of them is "left on the computer". */
+export async function handedPathsOf(jobIds: string[]): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  if (jobIds.length === 0) return out;
+  const rows = await prisma.computerJobFile.findMany({ where: { jobId: { in: jobIds } }, select: { jobId: true, path: true } });
+  for (const row of rows) if (row.jobId) out.set(row.jobId, [...(out.get(row.jobId) ?? []), row.path]);
+  return out;
 }
 
-/**
- * Deletes the kept bytes of the rows given (the copy first, then the row's pointer to it, so a copy that could not be deleted is tried again). The
- * rows stay as the record that the file was handed over. Throws when a copy could not be deleted.
- */
-async function purge(rows: { id: string; storageKey: string | null }[]): Promise<number> {
-  const held = rows.filter((row): row is { id: string; storageKey: string } => !!row.storageKey);
-  if (held.length === 0) return 0;
-  await store.remove(held.map((row) => row.storageKey));
-  await prisma.computerJobFile.updateMany({ where: { id: { in: held.map((row) => row.id) } }, data: { storageKey: null, purgedAt: new Date() } });
-  return held.length;
+type Opened = { name: string; mime: string; data: Buffer };
+
+async function open(row: { resultId: string | null; ownerId: string; name: string; mimeType: string } | null): Promise<Opened | null> {
+  if (!row || !row.resultId) return null;
+  const opened = await openResult(row.resultId, row.ownerId);
+  return opened ? { name: row.name, mime: row.mimeType, data: Buffer.from(opened.bytes) } : null;
+}
+
+/** One kept file's bytes for the bot server, or null when it is not there (deleted, past Limits' days, or never the job's). */
+export async function readCard(jobId: string, fileId: string): Promise<Opened | null> {
+  const row = await prisma.computerJobFile.findUnique({ where: { id: fileId } });
+  if (!row || row.jobId !== jobId) return null;
+  return open(row);
 }
 
 /** The chat took this file: it is marked, so a restart never sends it again. A file of another job is never marked. Safe to say twice. False when there is no such file. */
@@ -445,7 +409,7 @@ function resultOf(row: ResultRow, brick: string): Result {
 /** A person's results from one of their Bricks, newest first: kept files that are still theirs to open, whether or not the chat took them. */
 export async function resultsOf(botId: string, personId: string, take = 100): Promise<Result[]> {
   const rows = await prisma.computerJobFile.findMany({
-    where: { botId, ownerId: personId, storageKey: { not: null } },
+    where: { botId, ownerId: personId, resultId: { not: null } },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take,
     include: RESULT_INCLUDE,
@@ -461,7 +425,7 @@ export async function resultsOf(botId: string, personId: string, take = 100): Pr
  */
 export async function orphanResultsOf(personId: string, take = 100): Promise<Result[]> {
   const rows = await prisma.computerJobFile.findMany({
-    where: { ownerId: personId, storageKey: { not: null } },
+    where: { ownerId: personId, resultId: { not: null } },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     take: 500,
     include: RESULT_INCLUDE,
@@ -475,18 +439,6 @@ export async function orphanResultsOf(personId: string, take = 100): Promise<Res
     .map((row) => resultOf(row, DELETED_BRICK_LABEL));
 }
 
-type Opened = { name: string; mime: string; data: Buffer };
-
-async function open(row: { storageKey: string | null; name: string; mimeType: string } | null): Promise<Opened | null> {
-  if (!row || !row.storageKey) return null;
-  try {
-    return { name: row.name, mime: row.mimeType, data: openCard(row.storageKey, await store.get(row.storageKey)) };
-  } catch (error) {
-    console.error('[Computer] Could not read a result:', error instanceof Error ? error.message : 'unknown');
-    return null;
-  }
-}
-
 /** One of a person's results, to open, from one of their Bricks: only when it is theirs and that Brick's. Null when it is not there or not theirs. */
 export async function readResult(botId: string, personId: string, fileId: string): Promise<Opened | null> {
   return open(await prisma.computerJobFile.findFirst({ where: { id: fileId, botId, ownerId: personId } }));
@@ -497,24 +449,40 @@ export async function readOwnResult(personId: string, fileId: string): Promise<O
   return open(await prisma.computerJobFile.findFirst({ where: { id: fileId, ownerId: personId } }));
 }
 
-/** The person deletes one of their results from one of their Bricks: the kept copy goes, and the row stays as the record that it was handed over (so it never comes back). False when it is not theirs. */
-export async function deleteResult(botId: string, personId: string, fileId: string): Promise<boolean> {
-  const row = await prisma.computerJobFile.findFirst({ where: { id: fileId, botId, ownerId: personId, storageKey: { not: null } }, select: { id: true, storageKey: true } });
-  if (!row) return false;
-  await purge([row]);
+/** The result of a row is deleted (the copy first, then its record, so one that could not be deleted is still listed and tried again). The ledger row stays, so the file never comes back. */
+async function removeResultOf(row: { resultId: string | null; ownerId: string }): Promise<boolean> {
+  if (!row.resultId) return false;
+  await deleteOwnedResult(row.resultId, row.ownerId);
   return true;
+}
+
+/** The person deletes one of their results from one of their Bricks. False when it is not theirs (or already gone). */
+export async function deleteResult(botId: string, personId: string, fileId: string): Promise<boolean> {
+  const row = await prisma.computerJobFile.findFirst({ where: { id: fileId, botId, ownerId: personId, resultId: { not: null } }, select: { resultId: true, ownerId: true } });
+  return row ? removeResultOf(row) : false;
 }
 
 /** The person deletes one of their own results, whichever Brick made it. False when it is not theirs. */
 export async function deleteOwnResult(personId: string, fileId: string): Promise<boolean> {
-  const row = await prisma.computerJobFile.findFirst({ where: { id: fileId, ownerId: personId, storageKey: { not: null } }, select: { id: true, storageKey: true } });
-  if (!row) return false;
-  await purge([row]);
-  return true;
+  const row = await prisma.computerJobFile.findFirst({ where: { id: fileId, ownerId: personId, resultId: { not: null } }, select: { resultId: true, ownerId: true } });
+  return row ? removeResultOf(row) : false;
 }
 
-/** Results older than the days in Limits are deleted (their rows stay as the record). */
+/**
+ * Results older than the days in Limits are deleted, except one the person made into an Artifact (that is theirs to keep). Their ledger rows stay as the record.
+ * Returns how many were deleted; throws when a copy could not be deleted (the record stays, so it is tried again).
+ */
 export async function purgeStaleCards(now: Date, days: number, batch = 500): Promise<number> {
   const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
-  return purge(await prisma.computerJobFile.findMany({ where: { storageKey: { not: null }, createdAt: { lte: cutoff } }, orderBy: { createdAt: 'asc' }, take: batch, select: { id: true, storageKey: true } }));
+  const rows = await prisma.computerJobFile.findMany({
+    where: { resultId: { not: null }, createdAt: { lte: cutoff }, result: { is: { artifactId: null } } },
+    orderBy: { createdAt: 'asc' },
+    take: batch,
+    select: { result: { select: { id: true, storageKey: true } } },
+  });
+  const held = rows.flatMap((row) => (row.result ? [row.result] : []));
+  if (held.length === 0) return 0;
+  await getOutputStore().remove(held.map((result) => result.storageKey));
+  await prisma.ownedResult.deleteMany({ where: { id: { in: held.map((result) => result.id) } } });
+  return held.length;
 }

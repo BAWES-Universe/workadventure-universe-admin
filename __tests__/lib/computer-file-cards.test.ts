@@ -7,32 +7,27 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, s
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { cardKey, cardName, insideFolder, madeInJob, mimeOf, openCard, outputFolder, outputListCommand, pickFiles, PIECE_BYTES, pieceCommand, probeCommand, readFile, sealCard, shellQuote } from '@/lib/computer-file-cards';
+import { cardName, insideFolder, madeInJob, mimeOf, outputFolder, outputListCommand, pickFiles, PIECE_BYTES, pieceCommand, probeCommand, readFile, shellQuote, uniqueName } from '@/lib/computer-file-cards';
 import type { FileEntry, FilesList } from '@/lib/computer-files';
 
 const run = promisify(execFile);
 process.env.ENCRYPTION_KEY ||= 'a'.repeat(64);
 
-describe('a kept file', () => {
-  const key = cardKey('bot-1', 'file-1');
-  it('is sealed so only Universe can open it, and only under its own name', () => {
-    const data = Buffer.from('passport scan'.repeat(1000));
-    const sealed = sealCard(key, data);
-    expect(sealed.includes(Buffer.from('passport'))).toBe(false);
-    expect(openCard(key, sealed).equals(data)).toBe(true);
-    // Another copy's name, a changed byte and a cut-short copy are all refused
-    expect(() => openCard(cardKey('bot-1', 'file-2'), sealed)).toThrow();
-    const changed = Buffer.from(sealed);
-    changed[20] ^= 1;
-    expect(() => openCard(key, changed)).toThrow();
-    expect(() => openCard(key, sealed.subarray(0, sealed.length - 3))).toThrow();
-    expect(() => openCard(key, Buffer.from('nonsense'))).toThrow();
+describe('the name a result is kept under', () => {
+  it('is the file’s own name when no other result of the job has it', () => {
+    expect(uniqueName('report.pdf', new Set())).toBe('report.pdf');
+    expect(uniqueName('report.pdf', new Set(['other.pdf']))).toBe('report.pdf');
   });
-  it('is sealed differently each time', () => {
-    expect(sealCard(key, Buffer.from('same')).equals(sealCard(key, Buffer.from('same')))).toBe(false);
+  it('gets a number before its ending when it is taken, and never repeats one', () => {
+    expect(uniqueName('report.pdf', new Set(['report.pdf']))).toBe('report (2).pdf');
+    expect(uniqueName('report.pdf', new Set(['report.pdf', 'report (2).pdf']))).toBe('report (3).pdf');
+    expect(uniqueName('notes', new Set(['notes']))).toBe('notes (2)');
   });
-  it('can be empty bytes', () => {
-    expect(openCard(key, sealCard(key, Buffer.alloc(0))).length).toBe(0);
+  it('stays within what a result’s name may be, keeping the ending', () => {
+    const long = `${'a'.repeat(115)}.xlsx`;
+    const next = uniqueName(long, new Set([long]));
+    expect(next.length).toBeLessThanOrEqual(120);
+    expect(next.endsWith(' (2).xlsx')).toBe(true);
   });
 });
 

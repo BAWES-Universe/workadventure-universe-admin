@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { readFilesList } from '@/lib/computer-files';
 import { silentEnding, type UndeliverableWhy, type WaitingFor } from '@/lib/computer-values';
-import { cardsOfJobs, HAND_OVER_LATEST_MS, madeInJob, type Card } from '@/lib/computer-file-cards';
+import { cardsOfJobs, handedPathsOf, HAND_OVER_LATEST_MS, madeInJob, type Card } from '@/lib/computer-file-cards';
 
 /**
  * Brick tells the person how a computer job went (the report back), in their own chat with it. Orbit never speaks in a chat: the bot server asks
@@ -229,7 +229,8 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
   const people = await prisma.user.findMany({ where: { id: { in: [...new Set(jobs.map((job) => job.personId))] } }, select: { id: true, matrixChatId: true } });
   const chatOf = new Map(people.map((person) => [person.id, person.matrixChatId ?? null]));
   const cardsOf = await cardsOfJobs(ended.filter((job) => job.status === 'done').map((job) => job.id));
-  const handedPaths = new Map([...cardsOf].map(([jobId, cards]) => [jobId, cards.map((card) => card.path)]));
+  // Every file a job handed over is not "left on the computer": the ones the chat already took, and the ones the person has deleted since, as much as the ones still to send
+  const handedPaths = await handedPathsOf(ended.filter((job) => job.status === 'done').map((job) => job.id));
 
   const reports: Report[] = [];
   for (const job of ended) {
