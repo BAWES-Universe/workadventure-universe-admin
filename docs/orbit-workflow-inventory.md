@@ -58,6 +58,7 @@ routes each page calls.
 | Bots | `/admin/bots` | super admin | full-screen view | Menu → Admin → Bots | none — needs one | preserve |
 | AI Providers | `/admin/ai-providers` | super admin | full-screen view | Menu → Admin → Universe AI | `__tests__/api/admin/ai-providers.test.ts` (validation only; always mocked as super admin) → **none — needs one** for the 403 | preserve |
 | AI Usage | `/admin/ai-providers/usage` | super admin | full-screen view | Menu → Admin → AI Usage | none — needs one | preserve |
+| GitHub for Universe (one-time GitHub App setup) | `/admin/github-app` | super admin | full-screen view | Opened by its link once (game #2041) | `__tests__/api/github-connect-db.test.ts` (403 for a non-super-admin) | new |
 | Bot Database | `/admin/bots/database` | super admin | full-screen view | Menu → Admin → Bot Database | `__tests__/api/authorisation-scope.test.ts` (#208) | fixed in 0A (#208) |
 | MCP Servers | `/admin/bots/mcp-servers` | super admin | full-screen view | Menu → Admin → MCP Servers | none — needs one (`/api/admin/mcp-servers`) | preserve |
 

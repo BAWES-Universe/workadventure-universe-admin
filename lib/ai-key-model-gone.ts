@@ -7,6 +7,7 @@ import { probeChat, type ModelFactsById, type ProbeFailure } from '@/lib/ai-key-
 import { addNotice } from '@/lib/notices';
 import { moveBotsOffKey } from '@/lib/ai-key-lend';
 import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, servedModel, type KeyForModels } from '@/lib/ai-key-model-list';
+import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
 
 /**
  * A provider stopped offering the model one bot replies with (#575). That says nothing about the key's other models, so the
@@ -20,6 +21,10 @@ import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, se
  * now (a reply sent before the bot moved to it, a passing hiccup), or no clear answer, moves nothing. One that answers is
  * returned as `'count'`: the reply's failure counts like any other, so a bot whose real replies keep failing while the
  * tiny one works still marks the key Down after a few, and its owner hears of it.
+ *
+ * A Brick (game #1992) stands in no universe, so no lend names its models: every model of its owner's key is allowed
+ * (lib/ai-key-pay.ts). It moves the same way, and when no model is left it alone moves to Universe AI. The key's owner
+ * owns the Brick and is the one told.
  *
  * Returns false when this can't be decided (the list can't be loaded, the provider has no list, or more models are allowed
  * than are asked): then the reply's failure counts against the key as before. When asking showed the key itself refused or
@@ -72,9 +77,13 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   if (!bot) return false;
   // The bot left this key while the reply was on its way: the report is about a key it isn't on, so it says nothing here
   if (bot.aiProviderRef !== key.providerId) return true;
-  const universe = bot.room.world.universe;
+  // A Brick (game #1992) stands in no universe: no lend names its models, so all of its owner's key are allowed. Its 404
+  // is about its own model like any bot's, and is never the key's failure for the room bots that share the key.
+  const universe = bot.room?.world.universe ?? null;
   const readLend = async () =>
-    lendModels((await prisma.aiKeyLend.findUnique({ where: { providerId_universeId: { providerId: key.providerId, universeId: universe.id } }, select: { models: true } }))?.models);
+    universe
+      ? lendModels((await prisma.aiKeyLend.findUnique({ where: { providerId_universeId: { providerId: key.providerId, universeId: universe.id } }, select: { models: true } }))?.models)
+      : null;
   const lend = await readLend();
   // The model the reply was asked of: the bot's own, or the one its lend falls back to
   const gone = servedModel(bot, key, lend);
@@ -118,6 +127,25 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
     // The owner changed the lend while the provider was asked: the lend change already moved these bots where it allows,
     // so nobody is pulled off the key on the old lend's say, and a later report is decided on the new one
     if (JSON.stringify(await readLend()) !== JSON.stringify(lend)) return true;
+    // A Brick is the only bot where it lives: it alone leaves the key, and its owner, whose key it is, is told
+    if (!universe) {
+      const left = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: key.providerId }, data: { aiProviderRef: UNIVERSE_AI_REF, aiModel: null } });
+      if (left.count > 0) {
+        try {
+          await addNotice({
+            userId: key.ownerId,
+            kind: 'ai-key-moved',
+            dedupeKey: `models-gone:${key.providerId}:brick:${bot.id}:${new Date().toISOString()}`,
+            title: `${bot.name} moved to Universe AI`,
+            body: `${label} no longer has a model ${bot.name} can reply with on ${key.name}, so ${bot.name} now replies on Universe AI.`,
+            href: '/admin/you/ai-keys',
+          });
+        } catch (error) {
+          console.error('[AiKeys] Could not tell the key owner:', error instanceof Error ? error.message : 'unknown');
+        }
+      }
+      return true;
+    }
     // Nothing allowed here is offered any more: the bots here can't run on this key, as if it were pulled
     const moved = await moveBotsOffKey(key.providerId, { universeId: universe.id, actor: { id: '', name: label }, why: 'models-gone' });
     // That tells the universe's owner. The key's owner made these bots, so they hear it too when it is someone else's universe.
@@ -157,7 +185,10 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
         kind: 'ai-key-moved',
         dedupeKey: `model-gone:${key.providerId}:${bot.id}:${new Date().toISOString()}`,
         title: `${bot.name} now replies with ${next}`,
-        body: `${label} ${listed ? 'doesn’t answer with' : 'no longer has'} ${gone}, so ${bot.name} in ${universe.name} moved to ${next} on ${key.name}. Pick another model for it on its bot page if you like.`,
+        // A Brick is in no universe, and its own model picker comes with Bricks: neither is named for it
+        body: `${label} ${listed ? 'doesn’t answer with' : 'no longer has'} ${gone}, so ${bot.name}${universe ? ` in ${universe.name}` : ''} moved to ${next} on ${key.name}.${
+          universe ? ' Pick another model for it on its bot page if you like.' : ''
+        }`,
         href: '/admin/you/ai-keys',
       });
     } catch (error) {

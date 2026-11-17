@@ -189,8 +189,13 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
     if (saved.count > 0 && from) {
       const lends = await tx.aiKeyLend.findMany({ where: { providerId: id }, select: { universeId: true, models: true } });
       const closed = lends.filter((lend) => !(lendModels(lend.models)?.includes(model) ?? true)).map((lend) => lend.universeId);
+      // A Brick (game #1992) stands in no universe, so no lend closes a model to it: it follows its owner's key
       await tx.bot.updateMany({
-        where: { aiProviderRef: id, aiModel: from, ...(closed.length > 0 ? { NOT: { room: { world: { universeId: { in: closed } } } } } : {}) },
+        where: {
+          aiProviderRef: id,
+          aiModel: from,
+          ...(closed.length > 0 ? { OR: [{ roomId: null }, { NOT: { room: { world: { universeId: { in: closed } } } } }] } : {}),
+        },
         data: { aiModel: model },
       });
     }

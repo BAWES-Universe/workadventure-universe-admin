@@ -11,7 +11,7 @@ import { Check, Plus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { VOICE_KEY_COMPANIES, companyJobs, voiceKeyCompanyInfo, type VoiceCompanyJobName } from '@/lib/voice-key-companies';
+import { VOICE_KEY_COMPANIES, companyJobs, voiceKeyCompanyInfo, voicesTiedToModels, type VoiceCompanyJobName } from '@/lib/voice-key-companies';
 import type { VoiceModel } from '@/lib/voice-providers';
 import { ProviderLogo } from '../../components/ds/provider-logo';
 
@@ -70,13 +70,15 @@ export function withStartingModel(models: VoiceModel[], job: VoiceJob, id: strin
 
 /**
  * What saving a company and model as Universe AI's default does to bots, for the line under the Change sheets. New bots start
- * with it. Bots already on that same provider move to the picked model (lib/bot-voice.ts followUniverseAi) and keep their voice;
- * bots on another of the server's providers that is on stay there, since a voice belongs to its company. Bots on one that is off
- * borrow Universe AI's current default (lib/bot-voice.ts borrowUniverseAi), so they use the new one while it is off.
+ * with it. Bots already on that same provider move to the picked model (lib/bot-voice.ts followUniverseAi) and keep their voice,
+ * except speaking on a company that ties each voice to its models (Groq's Orpheus, Polly, Rime, Smallest AI, Together): those bots
+ * keep the model and voice they have, since the voice can't go to another model. Bots on another of the server's providers that
+ * is on stay there, since a voice belongs to its company. Bots on one that is off borrow Universe AI's current default
+ * (lib/bot-voice.ts borrowUniverseAi), so they use the new one while it is off.
  */
 export function defaultChangeLine(
-  providers: Pick<ServerVoiceProvider, 'id' | 'name' | 'bots' | 'enabled'>[],
-  picked: Pick<ServerVoiceProvider, 'id' | 'name' | 'bots'> | null,
+  providers: Pick<ServerVoiceProvider, 'id' | 'adapter' | 'name' | 'bots' | 'enabled'>[],
+  picked: Pick<ServerVoiceProvider, 'id' | 'adapter' | 'name' | 'bots'> | null,
   job: VoiceJob,
   modelChanged: boolean,
 ): string {
@@ -84,8 +86,11 @@ export function defaultChangeLine(
   const lines = [start];
   const here = picked ? picked.bots[job] : 0;
   if (picked && here > 0 && modelChanged) {
-    const move = here === 1 ? 'moves' : 'move';
-    lines.push(job === 'recognition' ? `The ${bots(here)} listening with ${picked.name} ${move} to this model.` : `The ${bots(here)} speaking with ${picked.name} ${move} to this model and ${here === 1 ? 'keeps its voice' : 'keep their voices'}.`);
+    const one = here === 1;
+    if (job === 'recognition') lines.push(`The ${bots(here)} listening with ${picked.name} ${one ? 'moves' : 'move'} to this model.`);
+    else if (voicesTiedToModels(picked.adapter))
+      lines.push(`The ${bots(here)} speaking with ${picked.name} ${one ? 'keeps its model and voice' : 'keep their models and voices'}, since each ${picked.name} voice speaks only in its own models.`);
+    else lines.push(`The ${bots(here)} speaking with ${picked.name} ${one ? 'moves' : 'move'} to this model and ${one ? 'keeps its voice' : 'keep their voices'}.`);
   }
   const elsewhere = providers.filter((provider) => provider.id !== picked?.id && provider.bots[job] > 0);
   for (const provider of elsewhere) {

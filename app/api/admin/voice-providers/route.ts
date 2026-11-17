@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { VoiceProviderRefused, createVoiceProvider, createVoiceProviderSchema, listVoiceProviders, voiceProviderBotCounts, voiceProviderView } from '@/lib/voice-providers';
+import { prisma } from '@/lib/db';
+import { discoverVoiceModels } from '@/lib/voice-discovery';
 
 export const runtime = 'nodejs';
 
@@ -14,6 +16,8 @@ export async function GET(request: NextRequest) {
   const user = await getSessionUser(request);
   if (!user || !isSuperAdmin(user.email)) return NextResponse.json({ error: 'Unauthorized: Super admin access required' }, { status: 403 });
   try {
+    // The models fill in on their own from each provider's company before they are shown
+    await discoverVoiceModels(await prisma.voiceProvider.findMany({ where: { ownerId: null } }));
     const [rows, counts] = await Promise.all([listVoiceProviders(), voiceProviderBotCounts()]);
     return NextResponse.json({ providers: rows.map((row) => ({ ...voiceProviderView(row), bots: counts.get(row.id) ?? { recognition: 0, speech: 0, total: 0 } })) });
   } catch (error) {

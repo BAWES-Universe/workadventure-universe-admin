@@ -8,8 +8,8 @@ import { Input } from '@/components/ui/input';
 import { useToast } from '@/components/ui/toast';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import type { VoiceModel } from '@/lib/voice-providers';
-import { companyHost, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { lendModelId } from '@/lib/voice-lend-model';
+import { companyHost, listedModelJobs, voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 import { LoadError, LoadingRows, PageHeader, SettingSwitch, Settings } from '../../../components/ds';
 import { ProviderLogo } from '../../../components/ds/provider-logo';
 import { VoiceModelPicker } from '../../../components/ds/voice-model-picker';
@@ -200,7 +200,9 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
       }
     }
     setBusy(true);
-    const refused = await change({ models });
+    // The ones this page showed and no longer has are taken off and stay off; one the company's list added meanwhile is kept
+    const takenOff = provider!.models.map(lendModelId).filter((id) => !models.some((model) => lendModelId(model) === id));
+    const refused = await change({ models, takenOff });
     setBusy(false);
     if (refused) setProblem(refused);
     return !refused;
@@ -250,7 +252,9 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
     // not asked there.
     const ownAddress = Boolean(provider!.endpoint);
     if (!ownAddress) {
-      const asked = await callOrbit('POST', '/api/admin/voice-providers/check', { adapter: provider!.adapter, apiKey: key });
+      // A company whose keys are made per region (AWS, Azure AI Speech) is asked in the provider's saved region, as Check key does
+      const region = provider!.region;
+      const asked = await callOrbit('POST', '/api/admin/voice-providers/check', { adapter: provider!.adapter, apiKey: key, ...(region ? { region } : {}) });
       if (!asked.ok) return asked.error;
     }
     const refused = await change({ apiKey: key });
@@ -344,10 +348,13 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
       </section>
       <section className="grid gap-2">
         <Caption>Models</Caption>
-        <p className="-mt-1 text-[13px] text-muted-foreground">Bots on Universe AI, and people’s own {company} keys, can use only these.</p>
+        <p className="-mt-1 text-[13px] text-muted-foreground">
+          {listedModelJobs(provider).length > 0 && provider.hasKey ? `${company} lists these for this key, and new ones show up by themselves. A model you take off stays off. ` : ''}
+          Bots on Universe AI, and people’s own {company} keys, can use only these.
+        </p>
         {listed ? (
           <>
-            <p className={FIELD_HINT}>{company} lists these for this key, each with what {company} says about it. Tick more to let bots pick between them. The first ticked is what bots start on.</p>
+            <p className={FIELD_HINT}>{company} lists these for this key, each with what {company} says about it. Tick one to let bots pick it, untick one to take it off. The first ticked is what bots start on.</p>
             <VoiceModelPicker
               models={[...provider.models.filter(onList).map((model) => listed.find((entry) => lendModelId(entry) === lendModelId(model))!), ...listed.filter((entry) => !provider.models.some((model) => lendModelId(model) === lendModelId(entry)))]}
               mode="many"
