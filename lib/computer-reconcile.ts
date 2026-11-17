@@ -133,6 +133,13 @@ async function booksFor(day: string, now: Date): Promise<Books> {
     const held = job.endedAt ? job.secondsRun : job.secondsRun + (job.stretchStarted ? Math.max(0, (now.getTime() - job.stretchStarted.getTime()) / 1000) : 0);
     seconds.set(job.botId, (seconds.get(job.botId) ?? 0) + Math.min(overlap, held));
   }
+  // A pack-away holds a Brick's computer awake with no job on it: that time is the books' own (written in computer_cold_runs), so it is not "unbooked"
+  const packs = await prisma.computerColdRun.findMany({ where: { scratch: false, botId: { not: null }, startedAt: { lt: to }, OR: [{ endedAt: null }, { endedAt: { gt: from } }] }, select: { botId: true, startedAt: true, endedAt: true } });
+  for (const run of packs) {
+    const ended = run.endedAt ?? now;
+    const overlap = Math.max(0, (Math.min(ended.getTime(), to.getTime()) - Math.max(run.startedAt.getTime(), from.getTime())) / 1000);
+    if (run.botId) seconds.set(run.botId, (seconds.get(run.botId) ?? 0) + overlap);
+  }
   const minutesByBot = new Map<string, number>();
   // A machine cannot be awake for more than the day, however many read-only jobs overlapped on it
   for (const [botId, total] of seconds) minutesByBot.set(botId, Math.min(total / 60, 1440));

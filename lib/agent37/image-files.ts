@@ -796,6 +796,16 @@ apply)
     printf 'Acquire::http::Proxy "http://127.0.0.1:3128";\nAcquire::https::Proxy "http://127.0.0.1:3128";\n' > /etc/apt/apt.conf.d/99universe-egress 2>/dev/null
   fi
   git config --system http.proxy http://127.0.0.1:3128 2>/dev/null
+  # The forwarder runs as the computer's own user (it holds no secret of its own: it reads the settings above for each connection). A restore
+  # on a computer that universe-up never started needs it too, so it is started here when it is not running.
+  if ! pgrep -f universe-egress-forward >/dev/null 2>&1 && id node >/dev/null 2>&1; then
+    node_home="$(getent passwd node | cut -d: -f6)"
+    mkdir -p "$node_home/.universe/logs" 2>/dev/null && chown -R node:node "$node_home/.universe" 2>/dev/null
+    su -s /bin/sh node -c "nohup setsid python3 /usr/local/bin/universe-egress-forward >>$node_home/.universe/logs/egress.log 2>&1 </dev/null &" 2>/dev/null
+  fi
+  port="${"$"}{UNIVERSE_EGRESS_PORT:-3128}"
+  i=0
+  while [ "$i" -lt 50 ] && ! python3 -c 'import socket,sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 1).close()' "$port" 2>/dev/null; do sleep 0.2; i=$((i+1)); done
   hosts=0
   if [ -w /etc/hosts ]; then
     BEGIN="# universe-egress begin"

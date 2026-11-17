@@ -12,6 +12,7 @@ import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/li
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { recordKeptBytes } from '@/lib/computer-disk';
 import { reconcileComputers } from '@/lib/computer-reconcile';
+import { bringBackFromCold, coldStep, deleteColdCopies, dropColdCopiesIfNewer } from '@/lib/computer-cold';
 import { computerQuote, connectedApp, routeJob, stepsReview, type RoutePlan } from '@/lib/computer-route';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
 import {
@@ -85,6 +86,10 @@ export interface ComputerView {
   files: { bytes: number; savedAt: Date | null; /** What was on the computer when its last job ended; null until one has. */ list: FilesList | null };
   /** The day its files came from, after a restore from a backup. */
   restoredFrom: Date | null;
+  /** True after a return from cold storage that had to use the copy before the newest one: the person is told which day their files are from. */
+  olderCopyUsed: boolean;
+  /** The day the computer was packed away into cold storage; null unless it is cold now. */
+  packedAt: Date | null;
   /**
    * How the last job ended, when the person should be told: it waited for them and nobody answered in time, or this month's computer
    * time ran out. Only while it is the Brick's latest job and has not been dismissed: a newer job, or "dismiss", takes it away,
@@ -196,6 +201,8 @@ export async function computerView(botId: string, ownerId: string, now: Date = n
     month: row?.enabled ? await monthOfPerson(ownerId, now) : null,
     files: { bytes: toNumber(row?.filesBytes), savedAt: row?.filesSavedAt ?? null, list: readFilesList(row?.filesList) },
     restoredFrom: row?.restoredFrom ?? null,
+    olderCopyUsed: !!row && row.olderCopyUsed,
+    packedAt: row?.machine === 'cold' ? (row.packedAt ?? null) : null,
     notice: await noticeOf(botId, row?.noticeDismissedJobId ?? null),
   };
 }
@@ -259,7 +266,8 @@ export async function stopComputerWork(botId: string, why: 'off' | 'deleted', no
     for (const job of jobs) await endJob(job.id, 'stopped', why, now);
     const row = await prisma.brickComputer.findUnique({ where: { botId } });
     const provider = providerFor(row);
-    if (row && row.providerRef && provider && row.machine !== 'none' && row.machine !== 'stopped') {
+    // A computer being packed away or brought back is in the hands of that step, which also stops for a deleted Brick
+    if (row && row.providerRef && provider && row.machine !== 'none' && row.machine !== 'stopped' && row.machine !== 'packing' && row.packStage !== 'returning') {
       // Stopping keeps the disk, and the files are saved first so Files can show the last saved copy
       await saveCopy(botId, row.providerRef, provider);
       await stopMachine(botId, row.providerRef, provider);
@@ -279,6 +287,8 @@ async function saveCopy(botId: string, ref: string, provider: Provider): Promise
     await prisma.brickComputer.updateMany({ where: { botId }, data: { filesBytes: BigInt(Math.max(0, Math.trunc(copy.bytes))), filesSavedAt: copy.savedAt } });
     // The copy is kept in our own storage, beside the machine's disk: what is kept is written when its size changes
     await recordKeptBytes({ botId, reason: 'saved', machineBytes: provider.diskBytes?.() ?? null, copyBytes: Math.max(0, Math.trunc(copy.bytes)) });
+    // A plain copy newer than the cold-storage ones now exists, so those are not kept (they cost bucket space and say nothing newer)
+    await dropColdCopiesIfNewer(botId);
     return true;
   } catch (error) {
     console.error('[Computer] Could not save a copy of the files:', error instanceof Error ? error.message : 'unknown');
@@ -490,6 +500,12 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     return 'queued';
   }
 
+  // The computer is being packed away into cold storage: the job waits in line, and the sweep tries it again once it is cold (it is then brought back) or put back
+  if (row.machine === 'packing') {
+    await queue('busy');
+    return 'queued';
+  }
+
   // Another job is writing: wait for it.
   if (job.writes) {
     const writing = await prisma.computerJob.count({ where: { botId: job.botId, writes: true, status: { in: ['running', 'waiting'] } } });
@@ -575,6 +591,18 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     }
   }
 
+  // A pack-away may have taken the computer in the same moment: this job goes back in line with nothing held, and the pack-away (which checks for a
+  // running job before it removes anything) goes on; the job is brought a computer from cold storage when its turn comes
+  const taken = await prisma.brickComputer.findUnique({ where: { botId: job.botId }, select: { machine: true } });
+  if (taken?.machine === 'packing') {
+    const back = await prisma.computerJob.updateMany({ where: { id: job.id, status: 'running' }, data: { status: 'queued', queuedFor: 'busy', reservationKey: null, startedAt: null, stretchStarted: null } });
+    if (back.count === 1) {
+      await releaseRoom({ key }, now);
+      await dropDiskRoom();
+      return 'queued';
+    }
+  }
+
   // The Brick may have been deleted after the claim: deletion marks it first, then stops the jobs it can see, so this sees the mark
   const brick = await prisma.bot.findUnique({ where: { id: job.botId }, select: { deletedAt: true } });
   if (!brick || brick.deletedAt !== null) {
@@ -597,8 +625,9 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     const others = await prisma.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: { in: ['running', 'waiting'] } } });
     if (others === 0) {
       // A machine that was never made is not "broken": it is still just not made, and the next job tries again
-      await prisma.brickComputer.updateMany({ where: { botId: job.botId, NOT: { providerRef: null }, machine: { not: 'stopping' } }, data: { machine: 'broken' } });
-      await prisma.brickComputer.updateMany({ where: { botId: job.botId, providerRef: null }, data: { machine: 'none' } });
+      // A computer that is cold, being packed away or being brought back is in its own hands: a failed start does not rewrite it
+      await prisma.brickComputer.updateMany({ where: { botId: job.botId, NOT: { providerRef: null }, machine: { notIn: ['stopping', 'packing', 'cold'] }, OR: [{ packStage: null }, { packStage: { not: 'returning' } }] }, data: { machine: 'broken' } });
+      await prisma.brickComputer.updateMany({ where: { botId: job.botId, providerRef: null, machine: { notIn: ['cold', 'packing', 'restoring'] } }, data: { machine: 'none' } });
     }
     // The line does not move on from a start that broke: the jobs behind it stay queued for the next sweep, so one broken start is one
     // failed job and never every job in line failing one after another
@@ -663,6 +692,22 @@ async function bringUp(botId: string, provider: Provider, now: Date): Promise<vo
     await untilCleaned(botId);
     return;
   }
+  // A pack-away that was just starting is putting the computer back (a job is on it): wait for that, never wake it under the pack-away
+  for (let tries = 0; row.machine === 'packing' && tries < 40; tries++) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
+  }
+  if (row.machine === 'packing') throw new Error('The computer is being packed away');
+  // Cold storage: no computer exists. One is made again and the newest proved copy put on it (the one before it if that fails); this is measured, never promised
+  let cameBack: { from: Date; olderCopyUsed: boolean } | null = null;
+  let returnStarted: number | null = null;
+  if (row.machine === 'cold' || (row.machine === 'restoring' && row.packStage === 'returning')) {
+    returnStarted = row.machine === 'cold' ? Date.now() : null;
+    const back = await bringBackFromCold(botId, provider, now);
+    cameBack = { from: back.from, olderCopyUsed: back.olderCopyUsed };
+    row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
+    if (returnStarted !== null) await recordKeptBytes({ botId, reason: 'made', machineBytes: provider.diskBytes?.() ?? null, now });
+  }
   // A machine that was to be put to sleep and is not proved asleep is not woken on top of what may still run: it is stopped first
   if (row.machine === 'stopping' && row.providerRef && !(await stopMachine(botId, row.providerRef, provider, ['stopping']))) throw new Error('The computer could not be put to sleep yet');
   if (!row.providerRef) {
@@ -698,7 +743,12 @@ async function bringUp(botId: string, provider: Provider, now: Date): Promise<vo
     await stopMachine(botId, ref, provider, ['waking', 'restoring']);
     throw error;
   }
-  await prisma.brickComputer.update({ where: { botId }, data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: restoring ? (row.filesSavedAt ?? now) : null } });
+  // Back from cold storage on the older copy: the person is told which day their files are from (restoredFrom); the newest copy is no event to tell
+  const from = restoring ? (row.filesSavedAt ?? now) : cameBack?.olderCopyUsed ? cameBack.from : null;
+  await prisma.brickComputer.update({
+    where: { botId },
+    data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: from, olderCopyUsed: cameBack?.olderCopyUsed ?? false, ...(returnStarted !== null ? { returnMs: Date.now() - returnStarted } : {}) },
+  });
 }
 
 /** Progress a running job reports: step n of m. Only the job's own running or waiting state may report it. */
@@ -1049,6 +1099,9 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
     }
     if (lines.length < batch) break;
   }
+  // Cold storage: idle computers are packed away, restores are proved, and a pack-away or return that stopped half way is finished or put back. It
+  // talks to the provider for minutes, so the sweep waits a short while at most and it goes on by itself (one step at a time per server)
+  await settleWithin(COLD_WAIT_MS, coldStep(getComputerProvider(), now, await isWindingDown())).catch((error) => console.error('[Computer] Cold storage could not go on:', error instanceof Error ? error.message : 'unknown'));
   // Last, because it talks to the provider and what is above cannot wait for that: once a day, our books against the provider's bill for the
   // day before (it only reads and reports; a bill that cannot be read is tried again later). The sweep waits for it a short while at most.
   await settleWithin(reconcileWaitMs, reconcileComputers(now)).catch((error) => console.error('[Computer] The daily check of the books could not be made:', error instanceof Error ? error.message : 'unknown'));
@@ -1057,6 +1110,8 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
 
 /** How long a sweep waits for the daily check of the books before it goes on without it (the check goes on by itself). */
 export const RECONCILE_WAIT_MS = 30_000;
+/** How long a sweep waits for the cold storage step before it goes on without it. */
+export const COLD_WAIT_MS = 15_000;
 
 /** The work's own answer, or nothing once the wait is over: the work is not stopped, and an error it ends in is still read. */
 async function settleWithin<T>(ms: number, work: Promise<T>): Promise<T | undefined> {
@@ -1548,6 +1603,8 @@ export async function removeMachineBeforeDelete(botId: string, now: Date = new D
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')`);
   if (Number(unwritten[0]?.n ?? 0) > 0) return false;
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
+  // A pack-away or a return is under way (it stops for a deleted Brick by itself, or is finished by the sweep): the Brick is kept for the next try
+  if (row && (row.machine === 'packing' || row.packStage === 'returning')) return false;
   if (!row || !row.providerRef || row.machine === 'none') return true;
   const provider = providerFor(row);
   if (!provider) return false;
@@ -1575,6 +1632,13 @@ export async function removeMachineBeforeDelete(botId: string, now: Date = new D
  * removed, so nothing is dropped quietly. True when nothing is in the way, including a Brick that never had a copy.
  */
 export async function removeSavedCopyBeforeDelete(botId: string): Promise<boolean> {
+  // The copies cold storage keeps go too (a Brick that was never cold has none)
+  try {
+    await deleteColdCopies(botId);
+  } catch (error) {
+    console.error('[Computer] Could not delete the cold storage copies:', error instanceof Error ? error.message : 'unknown');
+    return false;
+  }
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   if (!row || (row.filesSavedAt === null && row.filesBytes === BigInt(0))) return true;
   const provider = providerFor(row);
