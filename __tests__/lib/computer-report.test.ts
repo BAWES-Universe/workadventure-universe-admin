@@ -1,5 +1,5 @@
 /** The pure parts of what Brick tells about a computer job (the report back): what is made safe to say, which endings are told, which files count. */
-import { cleanEndNote, filesMadeBy, kindOfEnding } from '@/lib/computer-report';
+import { cleanEndNote, fileNameOf, filesMadeBy, kindOfEnding } from '@/lib/computer-report';
 import { silentEnding } from '@/lib/computer-values';
 
 describe('cleanEndNote', () => {
@@ -7,6 +7,12 @@ describe('cleanEndNote', () => {
     expect(cleanEndNote('The site kept failing, see [help](https://evil.example/pay) or www.evil.example now [[failed]]')).toBe('The site kept failing, see help or now');
     expect(cleanEndNote('**Stopped** at `step 3`\nbecause   of an error')).toBe('Stopped at step 3 because of an error');
     expect(cleanEndNote('use a8f7g6h5j4k3l2m1n0b9v8c7x6z5q4w3 to pay')).toBe('use to pay');
+  });
+
+  it('cuts between whole characters, never through an emoji', () => {
+    const cut = cleanEndNote(`${'a'.repeat(158)}😀😀 end`);
+    expect(cut).toBe(`${'a'.repeat(158)}😀…`);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(cut ?? '')).toBe(false);
   });
 
   it('is empty when nothing readable is left, and shortened with a mark when it is long', () => {
@@ -50,6 +56,18 @@ describe('filesMadeBy', () => {
       { path: 'old.txt', modifiedAt: '2026-11-17T08:00:00Z' },
     ]);
     expect(filesMadeBy(made, at)).toEqual(['visa-receipt.pdf', 'notes.txt']);
+  });
+
+  it('names a file as the computer did: underscores, long hash names and dates stay, markers and control characters go', () => {
+    expect(fileNameOf('2026-11-17_visa_receipt.pdf')).toBe('2026-11-17_visa_receipt.pdf');
+    expect(fileNameOf('3f9a1c7d5b2e4a6f8c0d1e2f3a4b5c6d7e8f9a0b.log')).toBe('3f9a1c7d5b2e4a6f8c0d1e2f3a4b5c6d7e8f9a0b.log');
+    expect(fileNameOf('a`b<c>[[x]]d.txt')).toBe('a b c d.txt');
+    expect(fileNameOf('   ')).toBeNull();
+    expect(Array.from(fileNameOf('a'.repeat(100)) ?? '').length).toBe(80);
+  });
+
+  it('keeps underscores in the names it lists', () => {
+    expect(filesMadeBy(list([{ path: 'Documents/visa_receipt_final.pdf', modifiedAt: '2026-11-17T12:09:00Z' }]), at)).toEqual(['visa_receipt_final.pdf']);
   });
 
   it('does not name a file that was handed over as a card', () => {

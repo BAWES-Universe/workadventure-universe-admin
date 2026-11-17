@@ -3244,15 +3244,17 @@ model ComputerJob {
   // said, and set at once for the endings that are never said (the person's own Stop, turned off, deleted). Each time the job waits for its person
   // `handoverSeq` goes up and `handoverUntold` is true until that wait was said, so a second wait is a second message and a retry is none.
   endToldAt      DateTime? @map("ended_told_at")
+  // When everything an ending does was finished (its time written to the books, its files listed, its machine rested): an ending is told only after that, so
+  // a message never goes with a file list or a bill that is not written yet. One that never got there (a server stopped halfway) is told after a while.
+  endClosedAt    DateTime? @map("end_closed_at")
+  /// The files list taken as this job ended (what its report says it saved); null when none was taken.
+  endFiles       Json?     @map("end_files")
   handoverSeq    Int       @default(0) @map("handover_seq")
   handoverUntold Boolean   @default(false) @map("handover_untold")
   // What the computer said in one plain sentence when it could not go on, cleaned (no links, no markup), and what the job was waiting for
   // when nobody answered: the one thing the ending message needs that is gone once the job is over
   endNote       String? @map("end_note") @db.VarChar(200)
   endWaitingFor String? @map("end_waiting_for") @db.VarChar(10)
-  // When the files a finished job made were handed over (or it was decided there are none to hand over): its "done" message waits for this, so the
-  // file cards are never missed. Empty only while that is happening.
-  filesReadyAt  DateTime? @map("files_ready_at")
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]

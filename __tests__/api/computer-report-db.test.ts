@@ -121,15 +121,15 @@ run('Brick tells the person how a computer job went, in a real database', () => 
     const sara = await person('sara');
     const id = await started(sara);
     await finishJob(id, 'done', minutes(9));
-    // The list the end of a job takes is on the Brick's computer by the time it is told
-    await prisma.brickComputer.updateMany({
-      where: { botId: sara.brickId },
+    // The list the end of a job takes is kept on that job (the pretend machine here lists nothing, so it is written the way the end writes it)
+    await prisma.computerJob.update({
+      where: { id },
       data: {
-        filesList: {
+        endFiles: {
           listedAt: minutes(8).toISOString(),
           more: false,
           items: [
-            { path: 'Documents/visa-receipt.pdf', bytes: 5000, modifiedAt: minutes(7).toISOString() },
+            { path: 'Documents/2026-11-17_visa_receipt.pdf', bytes: 5000, modifiedAt: minutes(7).toISOString() },
             { path: '.hermes/state.db', bytes: 9, modifiedAt: minutes(7).toISOString() },
             { path: 'old/notes.txt', bytes: 4, modifiedAt: minutes(-600).toISOString() },
           ],
@@ -137,7 +137,20 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       },
     });
     const [done] = await mine([id]);
-    expect(done.files).toEqual(['visa-receipt.pdf']);
+    expect(done.files).toEqual(['2026-11-17_visa_receipt.pdf']);
+  });
+
+  it('never reads a later job’s files as this job’s: the computer’s latest list is not what a report uses', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    await finishJob(id, 'done', minutes(9));
+    // A later job on the same computer wrote its own list before this report was polled
+    await prisma.brickComputer.updateMany({
+      where: { botId: sara.brickId },
+      data: { filesList: { listedAt: minutes(20).toISOString(), more: false, items: [{ path: 'later-job.txt', bytes: 4, modifiedAt: minutes(19).toISOString() }] } },
+    });
+    const [done] = await mine([id]);
+    expect(done.files).toEqual([]);
   });
 
   it('tells nothing when the person pressed Stop, and nothing when the computer was turned off', async () => {
@@ -223,6 +236,28 @@ run('Brick tells the person how a computer job went, in a real database', () => 
     expect((await mine([id])).map((report) => report.seq)).toEqual([2]);
     await keepReportTold(id, 'needs', 2);
     expect(await mine([id])).toEqual([]);
+  });
+
+  it('tells an ending only once everything it does is finished, and tells one a stopped server left half done after a while', async () => {
+    const sara = await person('sara');
+    const justNow = new Date();
+    // Over, but its time is not yet in the books and its files not yet listed (the ending is still at work)
+    const open = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Open', status: 'done', startedAt: new Date(justNow.getTime() - 60_000), endedAt: justNow } });
+    expect((await reportsToTell(200, justNow)).filter((report) => report.jobId === open.id)).toEqual([]);
+    // Its work finishes: now it is told
+    await prisma.computerJob.update({ where: { id: open.id }, data: { endClosedAt: new Date() } });
+    expect((await reportsToTell(200, justNow)).filter((report) => report.jobId === open.id).map((report) => report.kind)).toEqual(['done']);
+    // One whose server stopped halfway is told as it stands, a few minutes later
+    const stuck = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Stuck', status: 'done', startedAt: new Date(justNow.getTime() - 60_000), endedAt: justNow } });
+    expect((await reportsToTell(200, justNow)).filter((report) => report.jobId === stuck.id)).toEqual([]);
+    expect((await reportsToTell(200, new Date(justNow.getTime() + 6 * 60_000))).filter((report) => report.jobId === stuck.id).map((report) => report.kind)).toEqual(['done']);
+  });
+
+  it('marks an ending closed when its own work is finished, so a real finish is told at once', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    await finishJob(id, 'done', minutes(5));
+    expect((await prisma.computerJob.findUniqueOrThrow({ where: { id } })).endClosedAt).toEqual(expect.any(Date));
   });
 
   it('does not tell a wait the person already took over, and tells nothing of a job that is over for a wait it never told', async () => {

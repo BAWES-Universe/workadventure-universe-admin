@@ -163,15 +163,25 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect(rows.every((row) => row.storageKey === null && row.purgedAt !== null)).toBe(true);
   });
 
-  it('keeps the message back until the files were handed over, and tells anyway when the server stopped in the middle', async () => {
+  it('keeps the message back until the ending is closed, which is after the files were handed over, and tells anyway when the server stopped in the middle', async () => {
     const sara = await person('sara');
     const id = await started(sara);
     await finishJob(id, 'done', minutes(9));
-    // As while it is happening: the job is done but its files are not handled yet
-    await prisma.computerJob.update({ where: { id }, data: { filesReadyAt: null, endedAt: minutes(9) } });
-    expect(await mine([id], minutes(10))).toEqual([]);
+    // As while the ending is happening: the job is done but its ending is not closed yet
+    await prisma.computerJob.update({ where: { id }, data: { endClosedAt: null, endedAt: new Date(Date.now() - 1000) } });
+    expect(await mine([id], new Date())).toEqual([]);
     // A server that stopped in the middle left it so: after a while the message goes out without cards
-    expect(await mine([id], minutes(25))).toHaveLength(1);
+    expect(await mine([id], new Date(Date.now() + 60 * 60 * 1000))).toHaveLength(1);
+  });
+
+  it('has the cards on the job before the ending is closed', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    made_('a.pdf', 'a', 5);
+    await finishJob(id, 'done', minutes(9));
+    const job = await prisma.computerJob.findUniqueOrThrow({ where: { id } });
+    expect(job.endClosedAt).not.toBeNull();
+    expect(await prisma.computerJobFile.count({ where: { jobId: id, storageKey: { not: null } } })).toBe(1);
   });
 
   it('hands over no more files than Limits say and none bigger, and names the rest', async () => {

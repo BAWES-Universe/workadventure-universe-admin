@@ -56,6 +56,8 @@ export interface Report {
   givenBack: boolean;
 }
 
+/** How long an ending that never finished its own work (its server stopped halfway) waits before it is told as it stands. Its own work takes well under a minute. */
+const UNFINISHED_ENDING_MS = 5 * 60 * 1000;
 const WHY_MAX = 160;
 const WHERE_MAX = 120;
 const FILE_NAME_MAX = 80;
@@ -82,7 +84,26 @@ export function cleanEndNote(text: string | null | undefined, max: number = WHY_
     .replace(/\s+([,.;:!?])/g, '$1')
     .trim();
   if (cleaned.length < 3) return null;
-  return cleaned.length > max ? `${cleaned.slice(0, max - 1).trimEnd()}…` : cleaned;
+  // Cut between whole characters, never through an emoji
+  const letters = Array.from(cleaned);
+  return letters.length > max ? `${letters.slice(0, max - 1).join('').trimEnd()}…` : cleaned;
+}
+
+/**
+ * A file's name as it is said: kept exactly as the computer named it (underscores, long hash names and all), minus only what could make the
+ * line say something else: markers, backticks and angle brackets, control characters. Cut between whole characters when long.
+ */
+export function fileNameOf(raw: string | null | undefined, max: number = FILE_NAME_MAX): string | null {
+  if (!raw) return null;
+  const cleaned = raw
+    .replace(/\[\[[^\]]*\]\]/g, ' ')
+    .replace(/[`<>]/g, ' ')
+    .replace(CONTROL, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return null;
+  const letters = Array.from(cleaned);
+  return letters.length > max ? `${letters.slice(0, max - 1).join('').trimEnd()}…` : cleaned;
 }
 
 const DETAILS_SEPARATOR = '\u001f';
@@ -136,7 +157,7 @@ function effectsOf(job: JobWithEffects): ReportEffect[] {
   return out;
 }
 
-/** Files that appeared while the job ran, from the list taken when a job ended: no hidden folder and no file older than the job. */
+/** Files that appeared while the job ran, from the list taken when THIS job ended (kept on the job, never the computer's latest list): no hidden folder and no file older than the job. */
 export function filesMadeBy(list: unknown, startedAt: Date | null, skip: ReadonlySet<string> = new Set()): string[] {
   const files = readFilesList(list);
   if (!files || !startedAt) return [];
@@ -148,7 +169,7 @@ export function filesMadeBy(list: unknown, startedAt: Date | null, skip: Readonl
     if (skip.has(entry.path)) continue;
     const parts = entry.path.split('/');
     if (parts.some((part) => part.startsWith('.'))) continue;
-    const name = cleanEndNote(parts[parts.length - 1], FILE_NAME_MAX);
+    const name = fileNameOf(parts[parts.length - 1]);
     if (name && !names.includes(name)) names.push(name);
     if (names.length >= FILES_SHOWN_MAX) break;
   }
@@ -167,9 +188,6 @@ async function givenBackIn(jobId: string, seconds: number): Promise<boolean> {
 }
 
 // In the order they were planned, so what is said reads in the order it happened
-/** How long a finished job's message waits for its files to be handed over: it takes seconds, so more than this means the server stopped in the middle of it. */
-const FILES_WAIT_MS = 10 * 60 * 1000;
-
 const EFFECTS = { select: { effectKey: true, kind: true, state: true, evidence: true }, orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }] };
 
 /**
@@ -178,17 +196,15 @@ const EFFECTS = { select: { effectKey: true, kind: true, state: true, evidence: 
  */
 export async function reportsToTell(limit = 50, now: Date = new Date()): Promise<Report[]> {
   const size = Math.max(1, Math.min(limit, 200));
+  // An ending is told once everything it does is finished; one a server left half done is told anyway after a while, never held for ever
+  const unfinishedBefore = new Date(now.getTime() - UNFINISHED_ENDING_MS);
   const ended = await prisma.computerJob.findMany({
     where: {
       status: { in: ['done', 'stopped', 'failed'] },
       endToldAt: null,
       startedAt: { not: null },
       bot: { deletedAt: null },
-      AND: [
-        { OR: [{ endedBy: null }, { endedBy: { notIn: ['person', 'off', 'deleted'] } }] },
-        // A finished job is told once its files were handed over for the chat; one whose server stopped before that is told anyway after a while
-        { OR: [{ status: { not: 'done' } }, { filesReadyAt: { not: null } }, { endedAt: { lte: new Date(now.getTime() - FILES_WAIT_MS) } }] },
-      ],
+      AND: [{ OR: [{ endedBy: null }, { endedBy: { notIn: ['person', 'off', 'deleted'] } }] }, { OR: [{ endClosedAt: { not: null } }, { endedAt: { lte: unfinishedBefore } }] }],
     },
     orderBy: [{ endedAt: 'asc' }, { id: 'asc' }],
     take: size,
@@ -205,8 +221,6 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
   if (jobs.length === 0) return [];
   const people = await prisma.user.findMany({ where: { id: { in: [...new Set(jobs.map((job) => job.personId))] } }, select: { id: true, matrixChatId: true } });
   const chatOf = new Map(people.map((person) => [person.id, person.matrixChatId ?? null]));
-  const computers = await prisma.brickComputer.findMany({ where: { botId: { in: [...new Set(ended.map((job) => job.botId))] } }, select: { botId: true, filesList: true } });
-  const filesOf = new Map(computers.map((row) => [row.botId, row.filesList]));
   const cardsOf = await cardsOfJobs(ended.filter((job) => job.status === 'done').map((job) => job.id));
   const handedPaths = new Map([...cardsOf].map(([jobId, cards]) => [jobId, cards.map((card) => card.path)]));
 
@@ -233,7 +247,7 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
       waitedFor: kind === 'unanswered' ? (job.endWaitingFor as WaitingFor | null) : null,
       why: kind === 'failed' || kind === 'rule' ? job.endNote : null,
       effects: effectsOf(job),
-      files: kind === 'done' ? filesMadeBy(filesOf.get(job.botId), job.startedAt, new Set(handedPaths.get(job.id) ?? [])) : [],
+      files: kind === 'done' ? filesMadeBy(job.endFiles, job.startedAt, new Set(handedPaths.get(job.id) ?? [])) : [],
       handed: kind === 'done' ? (cardsOf.get(job.id) ?? []).map((card) => ({ id: card.id, name: card.name, bytes: card.bytes, mime: card.mime })) : [],
       givenBack: kind === 'failed' ? await givenBackIn(job.id, job.secondsRun) : false,
     });

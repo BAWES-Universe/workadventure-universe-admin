@@ -2,11 +2,8 @@
 --
 -- `computer_job_files` has one row for each file handed over. The bytes are kept encrypted in the bucket under `storage_key` only until they reach the
 -- chat, the Brick is deleted, or the days set in Limits pass; then `storage_key` is emptied and the row stays (name, path, time: never the bytes) so
--- the same file is never handed over twice. `files_ready_at` is when a finished job's files were handed over, so its "done" message waits for the cards.
--- Every job that is already over is marked ready now, so nothing old waits.
-
-ALTER TABLE "computer_jobs" ADD COLUMN "files_ready_at" TIMESTAMP(3);
-UPDATE "computer_jobs" SET "files_ready_at" = COALESCE("ended_at", now()) WHERE "status" IN ('done', 'stopped', 'failed');
+-- the same file is never handed over twice. A finished job's message already waits for its ending to be closed (`end_closed_at`), and the files are handed over
+-- before that, so nothing else is needed to keep the message from going without its cards. Nothing is written for anyone by this migration.
 
 CREATE TABLE "computer_job_files" (
     "id" TEXT NOT NULL,
