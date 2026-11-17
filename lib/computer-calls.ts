@@ -134,10 +134,14 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
   // The sweep writes a call that never reported as unknown. A report that comes after it carries the real figure, which replaces the
   // unknown one (only an unknown figure is ever replaced: a figure that was written stays as it was)
   if (!written.recorded && cost !== null) {
-    await prisma.meterEvent.updateMany({
-      where: { eventId, costMicros: null },
-      data: { costMicros: BigInt(cost), basis: paidByOther ? 'paid_by_other' : facts.basis, route: facts.route, detail: { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}), ...givenBackDetail } },
-    });
+    // The detail is merged into what is stored, never replaced: a give-back that happened in the meantime (the job failed after this report
+    // read it as running) is kept. Only what this report says (its tokens and whether it was cut short) is taken from the old detail first.
+    const reported = JSON.stringify({ ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}), ...givenBackDetail });
+    await prisma.$executeRaw(Prisma.sql`
+      UPDATE meter_events
+      SET "cost_micros" = ${BigInt(cost)}, "basis" = ${paidByOther ? 'paid_by_other' : facts.basis}, "route" = ${facts.route},
+          "detail" = (COALESCE("detail", '{}'::jsonb) - 'tokens' - 'cutShort') || ${reported}::jsonb
+      WHERE "event_id" = ${eventId} AND "cost_micros" IS NULL`);
   }
   // The job may have failed while this call was being written: its calls are given back when it ends, and this one was written after that
   // looked. Look again (the answer is only ever "failed on our side" once, so this is cheap and settles the race either way)

@@ -892,7 +892,7 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
   for (const job of ended) {
     await recordComputerTime(job, job.secondsRun, job.endedAt ?? now, { endedBy: job.endedBy as EndedBy | null, status: job.status });
   }
-  await giveBackMissingModelCalls(batch, botId);
+  await giveBackMissingModelCalls(now, batch, botId);
 }
 
 /** How long after a job failed the sweep still looks for model calls of it that were written against the person (a give-back that did not go through). */
@@ -902,13 +902,14 @@ const GIVE_BACK_LOOKBACK_DAYS = 3;
  * A job that failed on our side has its model calls given back when it ends. If that write did not go through, or a call was recorded
  * in the same moment, the next sweep finds the call still written against the person and gives it back too. Never throws.
  */
-async function giveBackMissingModelCalls(batch: number, botId?: string): Promise<void> {
+async function giveBackMissingModelCalls(now: Date, batch: number, botId?: string): Promise<void> {
+  const since = new Date(now.getTime() - GIVE_BACK_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
   const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
   try {
     const jobs = await prisma.$queryRaw<Array<{ id: string; personId: string }>>(Prisma.sql`
       SELECT DISTINCT j."id", j."person_id" AS "personId"
       FROM "computer_jobs" j
-      WHERE (j."status" = 'failed' OR (j."status" = 'stopped' AND j."ended_by" = 'error')) AND j."ended_at" > NOW() - ${GIVE_BACK_LOOKBACK_DAYS} * INTERVAL '1 day' ${only}
+      WHERE (j."status" = 'failed' OR (j."status" = 'stopped' AND j."ended_by" = 'error')) AND j."ended_at" > ${since} ${only}
         AND EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
       LIMIT ${batch}`);
     for (const job of jobs) await giveBackModelCalls(job.id, job.personId);

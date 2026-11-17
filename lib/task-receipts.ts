@@ -5,6 +5,7 @@ import { paidBy, payerFromRow, payerOf, payerToRow, type PaidBy, type Payer } fr
 import {
   activityIdOf,
   categoryOf,
+  givenBackCall,
   givenBackTime,
   jobActivityIdOf,
   receiptLines,
@@ -248,8 +249,8 @@ async function eventsFor(headers: readonly Header[]): Promise<Map<string, LineEv
   const bots = [...new Set(headers.map((header) => header.botId))];
   const runs = [...new Set(headers.map((header) => header.runId).filter((run): run is string => !!run))];
   const [rows, opened] = await Promise.all([
-    prisma.$queryRaw<Array<{ kind: string; route: string | null; quantity: bigint; costMicros: bigint | null; detail: unknown; jobId: string | null; botId: string | null }>>(Prisma.sql`
-    SELECT "kind", "route", "quantity", "cost_micros" AS "costMicros", "detail", "job_id" AS "jobId", "bot_id" AS "botId"
+    prisma.$queryRaw<Array<{ kind: string; route: string | null; payerKind: string | null; quantity: bigint; costMicros: bigint | null; detail: unknown; jobId: string | null; botId: string | null }>>(Prisma.sql`
+    SELECT "kind", "route", "payer_kind" AS "payerKind", "quantity", "cost_micros" AS "costMicros", "detail", "job_id" AS "jobId", "bot_id" AS "botId"
     FROM meter_events
     WHERE "job_id" = ANY(${keys}::text[])
        OR ("job_id" IS NULL AND "bot_id" = ANY(${bots}::text[]) AND "detail"->>'taskKey' = ANY(${keys}::text[]))
@@ -277,7 +278,7 @@ async function eventsFor(headers: readonly Header[]): Promise<Map<string, LineEv
     );
     out.set(
       header.id,
-      mine.map((row) => ({ kind: row.kind, route: row.route, quantity: Number(row.quantity), costMicros: row.costMicros === null ? null : Number(row.costMicros), detail: row.detail })),
+      mine.map((row) => ({ kind: row.kind, route: row.route, payerKind: row.payerKind, quantity: Number(row.quantity), costMicros: row.costMicros === null ? null : Number(row.costMicros), detail: row.detail })),
     );
   }
   return out;
@@ -368,12 +369,18 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
   const [events, bots] = await Promise.all([eventsFor(all), prisma.bot.findMany({ where: { id: { in: [...new Set(all.map((header) => header.botId))] } }, select: { id: true, name: true } })]);
   const names = new Map(bots.map((bot) => [bot.id, bot.name]));
   // Failed on our side: the same endings `recordComputerTime` gives back
-  const failedJobs = new Set(jobs.filter((job) => givenBackJob(job.status, job.endedBy)).map((job) => jobActivityIdOf(job.id)));
+  // (by bot and task key: a job with a receipt of its own is shown as that receipt, whose id is not the job's)
+  const failedJobs = new Set(jobs.filter((job) => givenBackJob(job.status, job.endedBy)).map((job) => `${job.botId}:${job.id}`));
   const items = all.map((header) => {
     const forHeader = events.get(header.id) ?? [];
     // A computer job that failed is "refunded, nothing taken" only when the books show nothing was taken: a price not known yet is not "nothing"
-    const mayHaveTaken = forHeader.some((event) => event.kind === 'computer_time' && !givenBackTime(event) && (event.costMicros === null || event.costMicros > 0));
-    const state: ReceiptState = failedJobs.has(header.id) && !mayHaveTaken ? 'refunded' : header.state;
+    // (the platform's model calls count too: one still written against the person is something taken; a call on their own key never was)
+    const mayHaveTaken = forHeader.some(
+      (event) =>
+        ((event.kind === 'computer_time' && !givenBackTime(event)) || (event.kind === 'model_call' && event.payerKind === 'universe' && !givenBackCall(event))) &&
+        (event.costMicros === null || event.costMicros > 0),
+    );
+    const state: ReceiptState = failedJobs.has(`${header.botId}:${header.taskKey}`) && !mayHaveTaken ? 'refunded' : header.state;
     return itemOf({ ...header, state }, forHeader, names.get(header.botId) ?? 'Brick', personId);
   });
   return items.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : -1)).slice(0, limit);

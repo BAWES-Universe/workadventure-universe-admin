@@ -381,6 +381,25 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect(event.detail).toMatchObject({ givenBack: true });
     });
 
+    it('a report that read the job as still running does not wipe a give-back made in the meantime, and still drops what the sweep guessed', async () => {
+      const { sara, jobId } = await running();
+      const { token } = (await mintJobToken(jobId, 'model', NOW)) as { token: string };
+      await authorizeModelCall({ token, callId: 'lost', estimateMicros: 9_000, payer: 'universe' }, NOW);
+      await sweepComputers(minutes(60));
+      // The sweep wrote it as unknown, cut short, and given back
+      expect((await callEvent(jobId, 'lost')).detail).toMatchObject({ givenBack: true, cutShort: true });
+      // A report that read the job while it still ran (so it carries no give-back of its own) comes after
+      const real = prisma.computerJob.findUnique.bind(prisma.computerJob);
+      const spy = jest.spyOn(prisma.computerJob, 'findUnique').mockImplementationOnce(((args: never) => real({ ...(args as object), where: { id: jobId } }).then((job: unknown) => ({ ...(job as object), status: 'running', endedBy: null }))) as never);
+      await settleModelCall(jobId, 'lost', { ...facts(4_000), tokens: { input: 10, output: 2 } }, minutes(61));
+      spy.mockRestore();
+      const event = await callEvent(jobId, 'lost');
+      expect(event).toMatchObject({ personKey: 'unknown', personId: null, costMicros: BigInt(4_000), basis: 'measured' });
+      expect(event.detail).toMatchObject({ givenBack: true, forPersonId: sara.id, tokens: { input: 10, output: 2 } });
+      // This report was not cut short, so the sweep's own mark is gone
+      expect(event.detail).not.toHaveProperty('cutShort');
+    });
+
     it('stay the person’s when the job ran fine or the person stopped it', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
@@ -410,16 +429,42 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect(await callEvent(jobId, 'k1')).toMatchObject({ payerKind: 'person', payerPersonId: sara.id, personKey: `person:${sara.id}` });
     });
 
-    it('are found by a later sweep when the give-back at the end did not go through', async () => {
+    it('are found by a later sweep when the give-back at the end did not go through, and Activity does not say refunded until then', async () => {
       const { sara, jobId } = await running();
       await settledCall(jobId, 'c1', 1_200);
       await finishJob(jobId, 'failed', minutes(5));
       // Put it back as it would be had the give-back write failed
       await prisma.meterEvent.updateMany({ where: { eventId: `computer:${jobId}:call:c1` }, data: { personKey: `person:${sara.id}`, personId: sara.id, detail: {} } });
       expect((await computerView(sara.brickId, sara.id, minutes(6)))?.month?.leftFraction).toBeLessThan(1);
+      // A call that still draws from the month is something taken: not "nothing taken"
+      expect((await activityFor(sara.id))[0].state).not.toBe('refunded');
       await sweepComputers(minutes(7));
       expect(await callEvent(jobId, 'c1')).toMatchObject({ personKey: 'unknown', personId: null, costMicros: BigInt(1_200) });
       expect((await computerView(sara.brickId, sara.id, minutes(7)))?.month?.leftFraction).toBe(1);
+      expect((await activityFor(sara.id))[0]).toMatchObject({ state: 'refunded', spentMicros: null });
     });
+
+    it('are looked for only in the days before the sweep’s own time, not the database’s clock', async () => {
+      const { sara, jobId } = await running();
+      await settledCall(jobId, 'c1', 1_200);
+      await finishJob(jobId, 'failed', minutes(5));
+      await prisma.meterEvent.updateMany({ where: { eventId: `computer:${jobId}:call:c1` }, data: { personKey: `person:${sara.id}`, personId: sara.id, detail: {} } });
+      // A sweep four days after the job ended is past the window, whatever the real date is
+      await sweepComputers(minutes(5 + 4 * 24 * 60));
+      expect((await callEvent(jobId, 'c1')).personKey).toBe(`person:${sara.id}`);
+      // And one inside it finds it
+      await sweepComputers(minutes(5 + 2 * 24 * 60));
+      expect((await callEvent(jobId, 'c1')).personKey).toBe('unknown');
+    });
+
+    it('is the receipt’s own state too: a job with a receipt of its own whose time was given back shows as refunded, not with the charge the receipt stored', async () => {
+      const { sara, jobId } = await running();
+      await finishJob(jobId, 'failed', minutes(5));
+      await prisma.taskReceipt.create({ data: { botId: sara.brickId, personId: sara.id, taskKey: jobId, title: 'Visa form', category: 'computer', state: 'done', chargedMicros: BigInt(30_000), payerKind: 'person', payerPersonId: sara.id, startedAt: NOW, endedAt: minutes(5) } });
+      const items = await activityFor(sara.id);
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({ title: 'Visa form', state: 'refunded', spentMicros: null });
+    });
+
   });
 });
