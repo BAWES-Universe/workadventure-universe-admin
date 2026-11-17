@@ -105,6 +105,11 @@ async function timed<T>(kind: 'pack' | 'drill', botId: string | null, ref: strin
 async function closeRun(id: string, run: { kind: string; botId: string | null; scratch: boolean }, provider: ComputerProvider, started: Date, ended: Date, outcome: 'ok' | 'failed', detail: string | null): Promise<void> {
   const seconds = Math.max(0, Math.round((ended.getTime() - started.getTime()) / 1000));
   await prisma.computerColdRun.update({ where: { id }, data: { endedAt: ended, seconds, outcome, detail } }).catch(() => undefined);
+  await bookRun(id, run, provider, seconds, ended, outcome);
+}
+
+/** The line of a finished run in the books. The same event id is never written twice, so a sweep may write it again whenever it is missing (never throws). */
+async function bookRun(id: string, run: { kind: string; botId: string | null; scratch: boolean }, provider: ComputerProvider, seconds: number, ended: Date, outcome: string): Promise<void> {
   const cost = costOfSeconds(seconds, provider.microsPerMinute());
   await recordMeterEvent({
     eventId: `computer:cold:${id}:time`,
@@ -129,6 +134,23 @@ async function closeRun(id: string, run: { kind: string; botId: string | null; s
 }
 
 /**
+ * A run that ended whose line never reached the books (the write failed, or the server stopped between the two writes) is written now, oldest first.
+ * The run's own row says how long it took, so nothing is worked out again; a run that ended a moment ago may still be writing its own line, so it is left a minute.
+ */
+async function bookMissingRuns(provider: ComputerProvider, now: Date): Promise<number> {
+  const cutoff = new Date(now.getTime() - 60 * 1000);
+  const missing = await prisma.$queryRaw<Array<{ id: string; botId: string | null; kind: string; scratch: boolean; seconds: number; endedAt: Date; outcome: string | null }>>(Prisma.sql`
+    SELECT r."id", r."bot_id" AS "botId", r."kind", r."scratch", r."seconds", r."ended_at" AS "endedAt", r."outcome"
+    FROM "computer_cold_runs" r
+    WHERE r."ended_at" IS NOT NULL AND r."ended_at" <= ${cutoff} AND r."seconds" IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:cold:' || r."id" || ':time')
+    ORDER BY r."ended_at" ASC
+    LIMIT 50`);
+  for (const run of missing) await bookRun(run.id, run, provider, run.seconds, run.endedAt, run.outcome ?? 'failed');
+  return missing.length;
+}
+
+/**
  * A run whose server stopped before it wrote its end is closed here, at the longest a run may last: its time is booked once, up to that end, and the
  * daily check of the books never counts it as open on every later day.
  */
@@ -140,7 +162,7 @@ async function closeInterruptedRuns(provider: ComputerProvider, now: Date): Prom
     // Only the run that is still open: one that finished since keeps what it wrote
     const took = await prisma.computerColdRun.updateMany({ where: { id: run.id, endedAt: null }, data: { endedAt: ended, seconds: Math.round(COLD_RUN_MAX_MS / 1000), outcome: 'failed', detail: 'stopped before it was written down' } });
     if (took.count !== 1) continue;
-    await closeRun(run.id, run, provider, run.startedAt, ended, 'failed', 'stopped before it was written down');
+    await bookRun(run.id, run, provider, Math.round(COLD_RUN_MAX_MS / 1000), ended, 'failed');
     closed++;
   }
   return closed;
@@ -630,6 +652,7 @@ export async function coldStep(provider: ComputerProvider | null, now: Date = ne
     out.resumed = done.resumed;
     out.recovered = done.recovered;
     await closeInterruptedRuns(cold, now).catch((error) => console.error('[Computer] Could not close cold storage runs that stopped:', words(error)));
+    await bookMissingRuns(cold, now).catch((error) => console.error('[Computer] Could not write cold storage time that was missing:', words(error)));
     // Old copies that could not be deleted before, and ones left half written
     for (const row of await prisma.computerArchive.findMany({ where: { state: { in: ['superseded', 'failed', 'staging'] } }, distinct: ['botId'], select: { botId: true }, take: 50 })) {
       await pruneArchives(row.botId, null, now);

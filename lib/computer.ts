@@ -943,8 +943,10 @@ async function untilCleaned(botId: string): Promise<void> {
  * Ends a job once. Whatever it ran is worked out from the seconds the machine was held for it, recorded in the meter's books as
  * one event under the job's id, and its reserved room is settled to that. Then the machine rests if no other job holds it, and
  * the next job in line is tried. A job that is already over is left exactly as it ended.
+ * `outside` false writes only our own tables (the Brick's purge ends its jobs this way, so a slow provider or backup never holds the purge):
+ * the machine, its browser and the agent's turn are left to the purge's own removal of the machine.
  */
-async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string): Promise<void> {
+async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', endedBy: EndedBy | null, now: Date, advance = true, only?: string, outside = true): Promise<void> {
   const job = await prisma.computerJob.findUnique({ where: { id: jobId } });
   if (!job || isOver(job.status)) return;
   // A caller that saw the job in line ends it only while it still is: another try may have put it on the machine in between
@@ -961,7 +963,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   // The job's computer holds no key from here on: a call it makes after this is refused
   await revokeJobTokens(jobId, now).catch((error) => console.error('[Computer] Could not revoke a job’s keys:', error instanceof Error ? error.message : 'unknown'));
   // A turn the agent was still running is cancelled, so it does not go on working (and spending) for a job that is over
-  if (held && job.agentResponseId) await cancelAgentTurn(job.botId, job.agentResponseId);
+  if (outside && held && job.agentResponseId) await cancelAgentTurn(job.botId, job.agentResponseId);
 
   try {
     if (job.reservationKey) {
@@ -984,11 +986,13 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
 
   if (held) {
     // Where the computer's browser went during the job is read before anything can clear it (the browser is cleared below once no job holds the machine)
-    await recordJobVisits(job, now);
+    if (outside) await recordJobVisits(job, now);
     // The person's hold on the computer ends with their last job: control goes back to Brick's so the next job can start
     await releaseIfUnheld(job.botId).catch((error) => console.error('[Computer] Could not release control:', error instanceof Error ? error.message : 'unknown'));
-    await closeOutIfUnheld(job.botId);
-    await restIfUnheld(job.botId, now);
+    if (outside) {
+      await closeOutIfUnheld(job.botId);
+      await restIfUnheld(job.botId, now);
+    }
   }
   // The turn passes to the next job in line, except while a Stop is ending everything
   if (advance && endedBy !== 'off' && endedBy !== 'deleted') await startNext(job.botId, now);
@@ -1913,7 +1917,7 @@ export async function computerTimeInBooks(botId: string, now: Date = new Date())
   // A job still queued, running or waiting (the delete could not end it: that step never throws) is ended first, and the Brick waits until none is
   // left: a job that is deleted with the Brick before its time is written is time the books never had
   const active = await prisma.computerJob.findMany({ where: { botId, status: { in: ['queued', 'running', 'waiting'] } }, select: { id: true } });
-  for (const job of active) await endJob(job.id, 'stopped', 'deleted', now).catch((error) => console.error('[Computer] Could not end a job of a Brick being purged:', error instanceof Error ? error.message : 'unknown'));
+  for (const job of active) await endJob(job.id, 'stopped', 'deleted', now, false, undefined, false).catch((error) => console.error('[Computer] Could not end a job of a Brick being purged:', error instanceof Error ? error.message : 'unknown'));
   if (active.length > 0 && (await prisma.computerJob.count({ where: { botId, status: { in: ['queued', 'running', 'waiting'] } } })) > 0) return false;
   await recordMissingComputerTime(now, SWEEP_BATCH, botId);
   const unwritten = await prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`

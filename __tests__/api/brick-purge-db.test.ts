@@ -356,6 +356,22 @@ run('purging a deleted Brick, in a real database', () => {
       expect(await prisma.meterEvent.count({ where: { eventId: `computer:${job.id}:time` } })).toBe(1);
       expect(await owned(brick.id)).toEqual(NOTHING);
     });
+
+    it('ends that job in our own tables only: no turn is cancelled, no browser is read or cleared and no machine is rested before the purge removes it', async () => {
+      const sara = await person('sara');
+      const brick = await fullBrick(sara, 'Slow provider Brick', { computer: true });
+      await deleteBrick(brick.id, sara.id, NOW);
+      const job = await prisma.computerJob.findFirstOrThrow({ where: { botId: brick.id } });
+      await prisma.meterEvent.deleteMany({ where: { eventId: `computer:${job.id}:time` } });
+      // A job still running on a machine that is awake, with the agent's turn open
+      await prisma.brickComputer.update({ where: { botId: brick.id }, data: { machine: 'working', providerRef: `fake-${brick.id}` } });
+      await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'running', endedAt: null, endedBy: null, agentResponseId: 'resp-1', startedAt: new Date(NOW.getTime() - 300_000), stretchStarted: new Date(NOW.getTime() - 300_000), secondsRun: 0 } });
+      provider.calls.length = 0;
+      expect(await purgeBrick(brick.id, later(8))).toBe('purged');
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${job.id}:time` } })).toBe(1);
+      // Only the purge's own clean-up reached the provider
+      expect(provider.calls.filter((call) => !['remove', 'removeAllFor', 'deleteSavedCopy', 'confirmRemoved'].includes(call.name))).toEqual([]);
+    });
   });
 
   it('keeps a Brick whole while a failed job\u2019s model calls are still written against the person: the jobs go with the Brick, and nothing could find those calls to give them back after', async () => {

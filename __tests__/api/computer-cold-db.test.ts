@@ -301,14 +301,17 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       const brick = await idleBrick();
       const put = bucket.store.put.bind(bucket.store);
       bucket.store.put = async (finalKey, stagingKey, stream) => {
-        const sealed = await put(finalKey, stagingKey, stream);
-        // The purge runs while the upload is out: marker first, then it deletes every row it can see
+        // The purge runs while the upload is out: marker first, then it deletes every row it can see (the copy's own row, whose object has not landed yet)
         await prisma.brickPurge.create({ data: { botId: brick.botId, machinePending: false, copyPending: true } });
         await deleteAllArchives(brick.botId);
+        expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+        // The upload lands after the purge, and the bucket stops answering before the copy can take it back out
+        const sealed = await put(finalKey, stagingKey, stream);
+        failRemoval = true;
         return sealed;
       };
       const remove = bucket.store.remove.bind(bucket.store);
-      let failRemoval = true;
+      let failRemoval = false;
       bucket.store.remove = async (keys) => {
         if (failRemoval) throw new Error('the bucket did not answer');
         return remove(keys);
@@ -353,6 +356,19 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       // Asked again it is the same line
       await coldStep(provider, NOW);
       expect(await prisma.meterEvent.count({ where: { eventId: `computer:cold:${run.id}:time` } })).toBe(1);
+    });
+
+    it('writes the line of a run that ended but never reached the books (the write failed), once, and leaves one that ended a moment ago to write its own', async () => {
+      const brick = await idleBrick();
+      const ended = new Date(NOW.getTime() - 5 * 60_000);
+      const lost = await prisma.computerColdRun.create({ data: { kind: 'pack', botId: brick.botId, machineRef: brick.ref, scratch: false, startedAt: new Date(ended.getTime() - 120_000), endedAt: ended, seconds: 120, outcome: 'ok' } });
+      const justNow = await prisma.computerColdRun.create({ data: { kind: 'pack', botId: brick.botId, machineRef: brick.ref, scratch: false, startedAt: new Date(NOW.getTime() - 40_000), endedAt: new Date(NOW.getTime() - 10_000), seconds: 30, outcome: 'ok' } });
+      await coldStep(provider, NOW);
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:cold:${lost.id}:time` } })).toMatchObject({ quantity: BigInt(120), botId: brick.botId });
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:cold:${justNow.id}:time` } })).toBe(0);
+      // Asked again it is the same line
+      await coldStep(provider, NOW);
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:cold:${lost.id}:time` } })).toBe(1);
     });
 
     it('keeps the computer when it holds more outside its home folder than can be carried, and says why only by not packing it', async () => {
