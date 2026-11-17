@@ -59,6 +59,7 @@ export async function saveServerLimits(change: ServerChange, userId: string): Pr
       guard: change.guard ?? now.guard,
       fairUsage: { ...now.fairUsage, ...change.fairUsage },
       files: { ...now.files, ...change.files },
+      bricks: { ...now.bricks, ...change.bricks },
     };
     const next = readServerLimits(kept);
     const problem = replyLimitsProblem(next.universeAi, change.universeAi);
@@ -80,6 +81,44 @@ export async function saveServerLimits(change: ServerChange, userId: string): Pr
 export async function getUniverseAiReplyLimits(): Promise<{ signedIn: number; guest: number; guestPool: number; windowHours: number }> {
   const { fairUsage } = await getServerLimits();
   return { ...fairUsage, windowHours: FAIR_USAGE_WINDOW_HOURS };
+}
+
+/**
+ * A person's own Bricks (game #1996): how many days a deleted Brick can be brought back, and how often the same kind of
+ * job has to come back before a Brick suggests a Brick for it. 7 and 3 until a super admin changes them.
+ * The Brick for guests (game #1997) has its own two: replies one guest gets from it, and replies all guests together get
+ * from it in one universe, 10 and 200 until changed. They are apart from fair usage: a guest's replies from it never count
+ * toward the replies a host's bot gives them.
+ */
+export async function getBrickLimits(): Promise<ServerLimits['bricks']> {
+  return (await getServerLimits()).bricks;
+}
+
+/** The most Apps one bot or Brick can use at once (5 until a super admin changes it), the same number for Apps added by hand and lent ones. */
+export async function maxAppsPerBot(): Promise<number> {
+  return (await getBrickLimits()).appsPerBot;
+}
+
+/** The line a person reads when a bot is full of Apps; every way of adding one says it the same. */
+export class AppsFull extends Error {
+  constructor(readonly max: number) {
+    super(`Maximum of ${max} apps per bot reached`);
+  }
+}
+
+/** Holds the bot's row until the caller's transaction ends: everything that changes which Apps a bot has takes it first, so they go one at a time. */
+export async function lockBotForApps(tx: Prisma.TransactionClient, botId: string): Promise<void> {
+  await tx.$queryRaw`SELECT "id" FROM "bots" WHERE "id" = ${botId} FOR UPDATE`;
+}
+
+/**
+ * Makes room for one more App on a bot, inside the caller's transaction, or throws AppsFull. The bot's row is held while the
+ * count is taken, so two Apps added at the same moment, by hand or lent, cannot both slip in past the limit.
+ */
+export async function claimAppSlot(tx: Prisma.TransactionClient, botId: string): Promise<void> {
+  const max = await maxAppsPerBot();
+  await lockBotForApps(tx, botId);
+  if ((await tx.botMcpServer.count({ where: { botId } })) >= max) throw new AppsFull(max);
 }
 
 /** A key's reply limits: what its owner changed, the recommended value for the rest. */

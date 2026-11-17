@@ -7,6 +7,8 @@ import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
 import { z } from 'zod';
 import { corsHeaders } from '@/lib/cors';
 import { isAllowedServerUrl } from '@/lib/mcp/outbound-guard';
+import { headerProblem } from '@/lib/mcp/header-text';
+import { endApprovalsForServers } from '@/lib/bot-actions';
 
 export const runtime = 'nodejs';
 
@@ -107,7 +109,7 @@ const updateMcpServerSchema = z.object({
 async function getAuthorizedBot(botId: string, actorUserId: string): Promise<{ id: string }> {
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
-    select: { id: true, createdById: true, roomId: true },
+    select: { id: true, createdById: true, roomId: true, ownerId: true, deletedAt: true },
   });
 
   if (!bot) {
@@ -193,11 +195,33 @@ export async function PATCH(
     });
 
     if (!existing || existing.botId !== botId) {
-      return NextResponse.json({ error: 'MCP server not found' }, { status: 404, headers: corsHeaders(request) });
+      return NextResponse.json({ error: 'App not found' }, { status: 404, headers: corsHeaders(request) });
     }
 
     const body = await request.json();
     const validatedData = updateMcpServerSchema.parse(body);
+
+    // A key, token or extra header with text that cannot be sent is named here, in words (the sign-in kind is the one in the save, or the stored one)
+    const unsendable = headerProblem({
+      authType: validatedData.authType ?? existing.authType,
+      authValue: validatedData.authConfig,
+      headers: validatedData.headers,
+    });
+    if (unsendable) {
+      return NextResponse.json({ error: unsendable }, { status: 400, headers: corsHeaders(request) });
+    }
+
+    // A Brick's grant on a person's connection (game #2001) keeps only what is the Brick's own: its switch. The app's name,
+    // link, sign-in, key and headers are changed on the app's own page, for every Brick at once.
+    if (existing.connectionId) {
+      const own = Object.keys(validatedData).filter((key) => (validatedData as Record<string, unknown>)[key] !== undefined);
+      if (own.some((key) => key !== 'enabled')) {
+        return NextResponse.json(
+          { error: 'This app is changed on its own page in Apps, for every Brick that uses it' },
+          { status: 409, headers: corsHeaders(request) }
+        );
+      }
+    }
 
     // Build update data
     const updateData: Record<string, unknown> = {};
@@ -426,7 +450,7 @@ export async function PATCH(
       }
       updated = await prisma.botMcpServer.findUnique({ where: { id: serverId } });
       if (!updated) {
-        return NextResponse.json({ error: 'MCP server not found' }, { status: 404, headers: corsHeaders(request) });
+        return NextResponse.json({ error: 'App not found' }, { status: 404, headers: corsHeaders(request) });
       }
     } else {
       updated = await prisma.botMcpServer.update({
@@ -524,12 +548,20 @@ export async function DELETE(
     });
 
     if (!existing || existing.botId !== botId) {
-      return NextResponse.json({ error: 'MCP server not found' }, { status: 404, headers: corsHeaders(request) });
+      return NextResponse.json({ error: 'App not found' }, { status: 404, headers: corsHeaders(request) });
     }
 
-    await prisma.botMcpServer.delete({
-      where: { id: serverId },
-    });
+    if (existing.connectionId) {
+      // Taking a grant away ends every approval given for it and closes its open cards, in the same step (game #2001)
+      await prisma.$transaction(async (tx) => {
+        await endApprovalsForServers(tx, [serverId]);
+        await tx.botMcpServer.delete({ where: { id: serverId } });
+      });
+    } else {
+      await prisma.botMcpServer.delete({
+        where: { id: serverId },
+      });
+    }
 
     // A card about a connection that is gone has nothing left to reconnect (game #1819)
     await syncToolSignInNotices(botId);

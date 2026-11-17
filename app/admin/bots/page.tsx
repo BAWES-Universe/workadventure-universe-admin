@@ -148,7 +148,7 @@ export default function BotsPage() {
             <Button variant="outline" asChild>
               <Link href="/admin/bots/mcp-servers">
                 <Server aria-hidden="true" />
-                MCP servers
+                Apps
               </Link>
             </Button>
           </>

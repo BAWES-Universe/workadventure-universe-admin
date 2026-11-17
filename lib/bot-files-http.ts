@@ -3,13 +3,14 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { validateServiceToken } from '@/lib/service-tokens';
 import { CHAT_KINDS } from '@/lib/artifacts';
-import { BotFileError, FILE_KINDS, FILE_SOURCES, MAX_FILE_NAME_LENGTH, TEXT_PIECE_CHARS, type Context } from '@/lib/bot-files';
+import { BotFileError, FILE_KINDS, FILE_SOURCES, MAX_FILE_NAME_LENGTH, MAX_PEOPLE_THERE, TEXT_PIECE_CHARS, type Context } from '@/lib/bot-files';
 import { getServerLimits } from '@/lib/bot-limits';
 import { LIMIT_RANGES } from '@/lib/bot-limit-values';
 
 /**
  * The routes of files in bot chats (game #1508) are called only by the bot server (BOT_SERVICE_TOKEN, or the admin token
- * it falls back to). No browser and no manager's session reaches them, so no Orbit page can list a person's files.
+ * it falls back to). No browser and no manager's session reaches them. The one list a person can read is their own Brick's
+ * files, from their own session, in lib/brick-files.ts (game #2003).
  */
 function hasAdminToken(request: NextRequest): boolean {
   const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '').trim();
@@ -90,6 +91,12 @@ const storeSchema = z.union([
   z.object({ url: z.string().min(1).max(2048) }).strict(),
 ]);
 
+/**
+ * People, by the ids the bot server names them by: everyone else in a bubble or meeting room (game #1993). An entry of
+ * one character stands for someone it cannot name.
+ */
+const peopleThere = z.array(z.string().max(320)).max(MAX_PEOPLE_THERE).nullish();
+
 export const addSchema = z
   .object({
     ...botCall,
@@ -105,12 +112,20 @@ export const addSchema = z
     madePrompt: z.string().max(TEXT_PIECE_CHARS).nullish(),
     lengthSeconds: z.number().int().min(0).max(2147483647).nullish(),
     pages: z.number().int().min(0).max(2147483647).nullish(),
+    // Everyone else who was in the bubble or meeting room when it was put in the chat (game #1993)
+    others: peopleThere,
   })
   .strict();
 
 const shortId = z.string().trim().min(2).max(12);
 
-export const getSchema = z.object({ ...botCall, ref: shortId }).strict();
+/**
+ * Yes when the file is for a reply other people in this chat read too (game #1993): then only one that everyone who reads
+ * it was there for, the person and `others`.
+ */
+const everyoneHere = z.boolean().nullish();
+
+export const getSchema = z.object({ ...botCall, ref: shortId, everyoneHere, others: peopleThere }).strict();
 
 export const keepTextSchema = z
   .object({
@@ -137,6 +152,9 @@ export const findSchema = z
     page: z.number().int().min(1).max(100_000).nullish(),
     // The "Files found in one search" setting's range
     limit: z.number().int().min(LIMIT_RANGES.reply.results.min).max(LIMIT_RANGES.reply.results.max),
+    // What is found goes into a reply other people in this chat read (game #1993)
+    everyoneHere,
+    others: peopleThere,
   })
   .strict();
 
@@ -147,5 +165,7 @@ export const readSchema = z
     at: z.number().int().min(0).max(2147483647).nullish(),
     // The "Reads from an earlier file" setting's range
     chars: z.number().int().min(1).max(LIMIT_RANGES.reply.part.max),
+    everyoneHere,
+    others: peopleThere,
   })
   .strict();
