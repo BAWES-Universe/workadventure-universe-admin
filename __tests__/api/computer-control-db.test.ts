@@ -415,7 +415,7 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
           return authorizeHumanInput(sara.brickId, epoch, 60_000).then(() => real(...args));
         }
         return real(...args);
-      }) as typeof prisma.brickComputer.updateMany);
+      }) as unknown as typeof prisma.brickComputer.updateMany);
       try {
         await releaseIfUnheld(sara.brickId);
       } finally {
