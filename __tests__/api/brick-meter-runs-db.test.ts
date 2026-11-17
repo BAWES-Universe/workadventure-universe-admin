@@ -15,7 +15,7 @@ import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { claimDueRuns, createItem, runOfBrick } from '@/lib/brick-items';
 import { recordModelCall, runCallEventId } from '@/lib/meter';
-import { saveMeterSettings } from '@/lib/meter';
+import { setUpComputerCredit, wipeComputerCredit } from '../helpers/computer-credit-setup';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, startJob } from '@/lib/computer';
 
@@ -70,7 +70,8 @@ run('money and the run, in a real database', () => {
   });
   beforeEach(async () => {
     setComputerProviderForTests(new FakeComputerProvider());
-    await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+    await wipeComputerCredit();
+    await setUpComputerCredit();
   });
   afterAll(async () => {
     const bots = (await prisma.bot.findMany({ where: { ownerId: { in: people } }, select: { id: true } })).map((bot) => bot.id);

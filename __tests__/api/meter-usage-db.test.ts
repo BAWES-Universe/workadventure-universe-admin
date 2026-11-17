@@ -16,7 +16,10 @@ jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: jest.fn((email: string | n
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { createBrick } from '@/lib/brick-create';
-import { recordMeterEvent, saveMeterSettings } from '@/lib/meter';
+import { recordMeterEvent } from '@/lib/meter';
+import { holdCredit, settleHold } from '@/lib/credit-spend';
+import { root, setUpComputerCredit, wipeComputerCredit } from '../helpers/computer-credit-setup';
+import { saveComputerAllowance } from '@/lib/grants-admin';
 import { GrantRefused, changeGrant, endGrantNow, markGrantBilled, recordGrant, runningExtra } from '@/lib/meter-grants';
 import { answerRequests, askForMore, openRequests } from '@/lib/meter-requests';
 import { memberUsage } from '@/lib/meter-usage';
@@ -55,19 +58,20 @@ const event = (over: Partial<Record<keyof MeterEventInput, unknown>> = {}): Mete
 };
 
 /** The usual allowance is 1,000 millionths: small, so a test can use it up with one event. */
-const setUp = (over: Record<string, number | null> = {}) =>
-  saveMeterSettings({ memberAllowanceMicros: 1_000, poolCeilingMicros: 1_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10, ...over }, 'admin');
+const setUp = (over: Record<string, number | null> = {}) => setUpComputerCredit({ memberAllowanceMicros: 1_000, poolCeilingMicros: 1_000_000, ...over }, NOW);
 
-const spendComputer = (who: { id: string; brickId: string }, micros: number, at: Date = NOW) =>
-  recordMeterEvent(event({ personKey: `person:${who.id}`, personId: who.id, botId: who.brickId, brick: true, costMicros: micros, occurredAt: at }));
+/** What a computer job did: the provider's cost is in the meter's books, and the person's credit is charged for it (a settled hold, as a finished job leaves). */
+const spendComputer = async (who: { id: string; brickId: string }, micros: number, at: Date = NOW) => {
+  await recordMeterEvent(event({ personKey: `person:${who.id}`, personId: who.id, botId: who.brickId, brick: true, costMicros: micros, occurredAt: at }));
+  const holdKey = `spent-${randomUUID()}`;
+  const held = await holdCredit({ holdKey, personId: who.id, category: 'computers', amountMicros: micros, chargeClass: 'computer_job' }, at);
+  if (held.ok) await settleHold({ holdKey, customerMicros: micros }, at);
+};
 
 const wipe = async () => {
-  await prisma.meterEvent.deleteMany({});
-  await prisma.meterReservation.deleteMany({});
-  await prisma.meterGrant.deleteMany({});
+  await wipeComputerCredit();
   await prisma.meterRequest.deleteMany({});
   await prisma.guestBrickReply.deleteMany({});
-  await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
 };
 
 const addUsage = async (who: { id: string; uuid: string; brickId: string }, count: number, extra: object = {}) => {
@@ -176,14 +180,18 @@ run('usage for people, and cost for us, in a real database', () => {
       expect(await memberUsage(omar.id, NOW)).toMatchObject({ computer: null, storage: null });
     });
 
-    it('counts room held for steps in progress, as admission does, in what is left (a hold that ran out and is not settled still counts)', async () => {
+    it('counts credit held for steps in progress, as admission does: it is not available, and it shows as in progress', async () => {
       await setUp();
       const sara = await person('sara');
       await spendComputer(sara, 300);
-      await prisma.meterReservation.create({ data: { reservationKey: `live-${tag}`, personKey: `person:${sara.id}`, personId: sara.id, amountMicros: BigInt(400), state: 'held', expiresAt: hours(0.1), createdAt: hours(-0.02) } });
-      await prisma.meterReservation.create({ data: { reservationKey: `lapsed-${tag}`, personKey: `person:${sara.id}`, personId: sara.id, amountMicros: BigInt(200), state: 'held', expiresAt: hours(-0.5), createdAt: hours(-1) } });
+      for (const [holdKey, amountMicros] of [[`live-${tag}`, 400], [`other-${tag}`, 200]] as const) {
+        expect((await holdCredit({ holdKey, personId: sara.id, category: 'computers', amountMicros, chargeClass: 'computer_job' }, NOW)).ok).toBe(true);
+      }
       const computer = (await memberUsage(sara.id, NOW)).computer;
-      expect(computer).toMatchObject({ availableMicros: 100, inProgressMicros: 400, left: 0.1, words: 'low' });
+      expect(computer).toMatchObject({ availableMicros: 100, inProgressMicros: 600, totalMicros: 1_000, canAskForMore: false });
+      // A step that ends gives back what it did not use
+      await settleHold({ holdKey: `live-${tag}`, customerMicros: 100 }, NOW);
+      expect((await memberUsage(sara.id, NOW)).computer).toMatchObject({ availableMicros: 400, inProgressMicros: 200 });
     });
 
     it('says low, then out, and only offers "Ask for more" when it is out', async () => {
@@ -195,10 +203,20 @@ run('usage for people, and cost for us, in a real database', () => {
       expect((await memberUsage(sara.id, NOW)).computer).toMatchObject({ left: 0, words: 'out', canAskForMore: true });
     });
 
-    it('shows nothing about the computer allowance until a super admin has set it', async () => {
+    it('shows nothing about the computer credit while a default is given but the budget that funds it is not set', async () => {
       const sara = await person('sara');
       await spendComputer(sara, 300);
+      await setUp();
+      await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
+      await saveComputerAllowance(1_000, root, NOW);
       expect((await memberUsage(sara.id, NOW)).computer).toBeNull();
+    });
+
+    it('shows "out", with a way to ask for more, to someone with no computer credit in force', async () => {
+      const sara = await person('sara');
+      await spendComputer(sara, 300);
+      await setUp({ memberAllowanceMicros: null });
+      expect((await memberUsage(sara.id, NOW)).computer).toMatchObject({ words: 'out', totalMicros: 0, canAskForMore: true });
     });
 
     it('answers the person asking only, and a person who is not signed in gets nothing', async () => {

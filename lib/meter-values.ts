@@ -162,7 +162,11 @@ export function monthOf(now: Date): { start: Date; end: Date } {
  * never opens before its controls do. Only how long a running job's room is held has a recommended value.
  */
 export interface MeterSettings {
-  /** Computer allowance for each member, a month, in millionths of a dollar. */
+  /**
+   * Computer allowance for each member, a month, in millionths of a dollar: the mirror of the computers default in the credit books (the
+   * default is the rule; computer jobs are held to the credit lots, not to this). Empty when there is no every-member monthly default.
+   * Not needed to open anything, so it is not among the settings room is refused without.
+   */
   memberAllowanceMicros: number | null;
   /** The most our own computer pool may carry in a month: spent, reserved, not yet settled and kept storage, with the reserve. */
   poolCeilingMicros: number | null;
@@ -218,10 +222,10 @@ export const METER_RANGES: Record<keyof MeterSettings, MeterRange> = {
   renewMinutes: { min: 1, max: 1_440 },
 };
 
-const NEEDED: (keyof MeterSettings)[] = ['memberAllowanceMicros', 'poolCeilingMicros', 'reserveMicros', 'storageMicrosPerGbMonth', 'atOnceMember', 'atOnceAll'];
+const NEEDED: (keyof MeterSettings)[] = ['poolCeilingMicros', 'reserveMicros', 'storageMicrosPerGbMonth', 'atOnceMember', 'atOnceAll'];
 
 /** Settings that may be emptied again but that nothing is refused without (see `missingSettings`). */
-const OPTIONAL_MONEY: (keyof MeterSettings)[] = ['appUseMicros', 'rolloutBudgetMicros'];
+const OPTIONAL_MONEY: (keyof MeterSettings)[] = ['memberAllowanceMicros', 'appUseMicros', 'rolloutBudgetMicros'];
 
 const fits = (value: unknown, range: MeterRange): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= range.min && value <= range.max;
 

@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { recordMeterEvent } from '@/lib/meter';
 import { releaseRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
+import { creditCheck, holdForJob, prepareComputerCredit, releaseCreditHold, settleCallCredit } from '@/lib/computer-credit';
 import { verifyJobToken } from '@/lib/computer-token';
 
 /**
@@ -10,8 +11,8 @@ import { verifyJobToken } from '@/lib/computer-token';
  * Orbit decides and keeps the books; the call itself runs where the AI providers already are (the bot server, which has every
  * provider's way of talking, its price list and its key). That side asks here first:
  *  1. `authorizeModelCall`: the computer's key is checked against Orbit's records (the job still holds the machine, the key is
- *     for models, it is from the current control generation), and the room for this one call is reserved from the person's
- *     computer allowance, inside the pool. No room: the call is refused with the reason, and nothing was sent anywhere.
+ *     for models, it is from the current control generation), and the room for this one call is reserved inside the pool and held from
+ *     the person's computer credit (the same lots Usage shows). No room: the call is refused with the reason, and nothing was sent anywhere.
  *  2. The call runs.
  *  3. `settleModelCall`: the figures go to the books once (a retry adds nothing) and the room is settled to what it cost. A call
  *     whose price is unknown settles at the room that was held, never at 0.
@@ -51,12 +52,25 @@ export async function authorizeModelCall(
     return still.ok && still.generation === verified.generation ? { ok: true, ...base, reservedMicros: null } : { ok: false, reason: 'refused' };
   }
   if (!Number.isSafeInteger(input.estimateMicros) || input.estimateMicros <= 0 || input.estimateMicros > MAX_MICROS) return { ok: false, reason: 'refused' };
-  const room = await reserveRoom({ key: callRoomKey(base.jobId, input.callId), personId: base.personId, amountMicros: input.estimateMicros, botId: base.botId, jobId: base.jobId, newJob: false }, now);
+  const key = callRoomKey(base.jobId, input.callId);
+  const prepared = await prepareComputerCredit(base.personId, now);
+  const reserved = await reserveRoom({ key, personId: base.personId, amountMicros: input.estimateMicros, botId: base.botId, jobId: base.jobId, newJob: false, personal: creditCheck(base.personId, now, prepared) }, now);
+  let room = reserved;
+  if (reserved.ok && reserved.created) {
+    // A model call inside a job is charged once, to the job's computer credit, as a computer_model charge under the job's own hold
+    const job = await prisma.computerJob.findUnique({ where: { id: base.jobId }, select: { reservationKey: true } });
+    const held = await holdForJob({ key, personId: base.personId, amountMicros: input.estimateMicros, botId: base.botId, jobId: base.jobId, chargeClass: 'computer_model', parentKey: job?.reservationKey ?? null }, now, prepared);
+    if (!held.ok) {
+      await releaseRoom({ key }, now);
+      room = held.reason === 'allowance' ? { ok: false, reason: 'allowance', leftMicros: 0 } : held.reason === 'not_set' ? { ok: false, reason: 'not_set', missing: ['rolloutBudgetMicros'] } : { ok: false, reason: 'closed' };
+    }
+  }
   if (room.ok) {
     // The room may have waited for the pool's lock while the person took the machine: the key must still be good after it, or the room goes back
     const still = await verifyJobToken(input.token, 'model', now);
     if (!still.ok || still.generation !== verified.generation) {
-      await releaseRoom({ key: callRoomKey(base.jobId, input.callId) }, now);
+      await releaseRoom({ key }, now);
+      await releaseCreditHold(key, now);
       return { ok: false, reason: 'refused' };
     }
     return { ok: true, ...base, reservedMicros: room.reservation.amountMicros };
@@ -121,7 +135,11 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
     });
   }
   // A price that is not known settles at the room that was held (never 0); one that is settles at what it was, at least 1
-  if (reservation) await settleRoom({ key: reservation.reservationKey, settledMicros: Math.max(1, cost ?? Number(reservation.amountMicros)) }, now);
+  if (reservation) {
+    await settleRoom({ key: reservation.reservationKey, settledMicros: Math.max(1, cost ?? Number(reservation.amountMicros)) }, now);
+    // The person's credit settles to the same figure, once; what the provider really billed stays in the hold's provider cost
+    await settleCallCredit(reservation.reservationKey, cost, facts.basis === 'measured', now);
+  }
   return { ok: true };
 }
 
@@ -129,4 +147,5 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
 export async function releaseModelCall(jobId: string, callId: string, now: Date = new Date()): Promise<void> {
   if (!CALL_ID.test(callId)) return;
   await releaseRoom({ key: callRoomKey(jobId, callId) }, now);
+  await releaseCreditHold(callRoomKey(jobId, callId), now);
 }

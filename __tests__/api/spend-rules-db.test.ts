@@ -15,7 +15,7 @@ jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { getSessionUser } from '@/lib/auth-session';
-import { saveMeterSettings } from '@/lib/meter';
+import { setUpComputerCredit, wipeComputerCredit } from '../helpers/computer-credit-setup';
 import { releaseRoom, renewRoom, reserveRoom } from '@/lib/meter-allowance';
 import { memberUsage } from '@/lib/meter-usage';
 import { changeRule, checkSpend, endRule, listRules, ownerSpendAllowed, proposeRule } from '@/lib/spend-rules';
@@ -120,12 +120,13 @@ const wipe = async () => {
   await prisma.creditHold.deleteMany({ where: { personId: { in: ids } } });
   await prisma.creditLot.deleteMany({ where: { personId: { in: ids } } });
   await prisma.fundingAccount.deleteMany({ where: { kind: 'person', ownerKey: { in: ids } } });
+  await prisma.appSetting.deleteMany({ where: { key: 'computer-credit-books' } });
 };
 
 run('rules said in chat and task receipts, in a real database', () => {
   beforeEach(async () => {
     await wipe();
-    await saveMeterSettings({ memberAllowanceMicros: 100_000_000, poolCeilingMicros: 1_000_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+    await setUpComputerCredit({ memberAllowanceMicros: 100_000_000, poolCeilingMicros: 1_000_000_000 });
   });
   afterAll(async () => {
     await wipe();

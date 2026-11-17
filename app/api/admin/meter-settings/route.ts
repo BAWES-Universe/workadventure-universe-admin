@@ -3,6 +3,8 @@ import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { getMeterSettings, saveMeterSettings } from '@/lib/meter';
 import { METER_RANGES, checkMeterSettings, missingSettings } from '@/lib/meter-values';
+import { GrantsRefused, saveComputerAllowance } from '@/lib/grants-admin';
+import { isCreditRefused } from '@/lib/credit-values';
 
 export const runtime = 'nodejs';
 
@@ -36,9 +38,13 @@ export async function PATCH(request: NextRequest) {
   const checked = checkMeterSettings(body);
   if (!checked.ok) return NextResponse.json({ error: checked.error }, { status: 400 });
   try {
-    const settings = await saveMeterSettings(checked.value, user.id);
+    // The computer allowance is the computers default of the credit books (one rule, also on the Grants page): it is saved there, which keeps this setting as its mirror
+    const { memberAllowanceMicros, ...rest } = checked.value;
+    if (memberAllowanceMicros !== undefined) await saveComputerAllowance(memberAllowanceMicros, { userId: user.id, superAdmin: true });
+    const settings = await saveMeterSettings(rest, user.id);
     return NextResponse.json({ settings, missing: missingSettings(settings), ranges: METER_RANGES });
   } catch (error) {
+    if (isCreditRefused(error) || error instanceof GrantsRefused) return NextResponse.json({ error: error.message }, { status: 400 });
     console.error('[Meter] Could not save the settings:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }

@@ -1,7 +1,7 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
-import { allowanceNow, missingSettings, monthOf, type AllowanceState, type MeterSettings } from '@/lib/meter-values';
+import { missingSettings, monthOf, type MeterSettings } from '@/lib/meter-values';
 import { checkSpend, exposureOf } from '@/lib/spend-rules';
 import type { ChargeClass } from '@/lib/spend-rules-values';
 
@@ -15,8 +15,10 @@ import type { ChargeClass } from '@/lib/spend-rules-values';
  *  - Room is reserved before a paid step, and a job that keeps running renews it. A reservation ends as settled or released, never gone.
  *  - What is committed, reserved and not yet settled, kept storage and a reserve are one envelope. Nothing new is admitted past it.
  *  - Chat's money is kept apart: this reads the computer pool only, so using it up never takes from what chat has.
- *  - Two different "out"s: the member's own allowance is used up ("allowance": they can ask for more), or our pool or every computer is
- *    taken ("pool", "busy": the job waits, and more for one person would not help).
+ *  - Two different "out"s: the member's own credit is used up ("allowance": they can ask for more), or our pool or every computer is
+ *    taken ("pool", "busy": the job waits, and more for one person would not help). The member's own credit is not kept here any more: it
+ *    is the credit lots (lib/computer-credit.ts), asked through the `personal` check a caller passes, in the same place in the order
+ *    the old allowance was (after what the person said in chat, before jobs at once and the pool). This file is our side only.
  *  - Settings that are not set yet refuse room ("not_set"): a computer does not open before its controls do.
  */
 
@@ -70,26 +72,6 @@ const viewOf = (row: { reservationKey: string; personKey: string; botId: string 
 });
 
 const asNumber = (value: bigint | number | null | undefined): number => (value === null || value === undefined ? 0 : Number(value));
-
-/** One member's computer month: what they spent in order and the extra usage they were given, worked into what is left. */
-export async function memberAllowance(personId: string, now: Date, settings: MeterSettings, db: Pick<Tx, 'meterEvent' | 'meterGrant'> = prisma): Promise<AllowanceState | null> {
-  if (settings.memberAllowanceMicros === null) return null;
-  const month = monthOf(now);
-  const [events, grants] = await Promise.all([
-    // What a member spends from the computer allowance: computer-pool work we pay for, tied to them. Their chat is another allowance.
-    db.meterEvent.findMany({
-      where: { pool: 'computer', payerKind: 'universe', personKey: `person:${personId}`, costMicros: { not: null }, occurredAt: { gte: month.start, lt: month.end } },
-      select: { occurredAt: true, costMicros: true },
-    }),
-    db.meterGrant.findMany({ where: { personId, endsAt: { gt: month.start }, startsAt: { lt: month.end } }, select: { grantKey: true, startsAt: true, endsAt: true, multiplier: true, noLimit: true } }),
-  ]);
-  return allowanceNow(
-    settings.memberAllowanceMicros,
-    events.map((event) => ({ at: event.occurredAt, micros: asNumber(event.costMicros) })),
-    grants.map((grant) => ({ key: grant.grantKey, startsAt: grant.startsAt, endsAt: grant.endsAt, multiplier: grant.noLimit ? null : grant.multiplier })),
-    now,
-  );
-}
 
 export interface Envelope {
   /** Spent this month on computer work, and settled by the provider. */
@@ -179,20 +161,19 @@ async function lockPool(tx: Tx): Promise<void> {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${POOL_LOCK}))`;
 }
 
-/** Whether `extra` more fits for this member and the pool; the reason it does not, or null. The member's own allowance comes first: a member who used theirs up asks for more, whatever the pool holds. */
-/** Room held for a person's steps that still counts against what they can start: held and in time, or ran out and not yet settled or released. */
-export async function heldRoom(personId: string, now: Date, db: Pick<Tx, 'meterReservation'> = prisma): Promise<number> {
-  const held = await db.meterReservation.aggregate({ where: { personKey: `person:${personId}`, ...stillCounts(now) }, _sum: { amountMicros: true } });
-  return asNumber(held._sum.amountMicros);
-}
+/**
+ * A caller's check of the member's own credit, asked inside the pool's lock: the refusal, or null to go on. Computers pass the credit
+ * lots' check (lib/computer-credit.ts); nothing here knows how much a member has.
+ */
+export type PersonalCheck = (tx: Tx, extraMicros: number) => Promise<NoRoom | null>;
 
-async function fits(tx: Tx, personId: string, extraMicros: number, now: Date, settings: MeterSettings, opts: { newJob: boolean }): Promise<NoRoom | null> {
+/** Whether `extra` more fits for this member and the pool; the reason it does not, or null. The member's own credit comes first: a member who used theirs up asks for more, whatever the pool holds. */
+async function fits(tx: Tx, personId: string, extraMicros: number, now: Date, settings: MeterSettings, opts: { newJob: boolean; personal?: PersonalCheck }): Promise<NoRoom | null> {
   const missing = missingSettings(settings);
   if (missing.length > 0) return { ok: false, reason: 'not_set', missing };
-  const allowance = await memberAllowance(personId, now, settings, tx);
-  if (allowance && !allowance.unlimited) {
-    const left = (allowance.leftMicros ?? 0) - (await heldRoom(personId, now, tx));
-    if (left < extraMicros) return { ok: false, reason: 'allowance', leftMicros: Math.max(0, left) };
+  if (opts.personal) {
+    const no = await opts.personal(tx, extraMicros);
+    if (no) return no;
   }
   const envelope = await envelopeIn(tx, now, settings);
   if (opts.newJob) {
@@ -213,7 +194,7 @@ const wholeMicros = (value: number, what: string): void => {
  * the envelope keeps counting until it is settled or released. Never throws for "no room": that is an answer.
  */
 export async function reserveRoom(
-  input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass; /** False for a step inside a job that already holds its place (a model call): it is not another job at once. */ newJob?: boolean },
+  input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass; /** False for a step inside a job that already holds its place (a model call): it is not another job at once. */ newJob?: boolean; /** The member's own credit, asked in its place in the order (see `PersonalCheck`). */ personal?: PersonalCheck },
   now: Date = new Date(),
 ): Promise<Room> {
   wholeMicros(input.amountMicros, 'amountMicros');
@@ -230,7 +211,7 @@ export async function reserveRoom(
     const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.jobId ?? null, chargeClass: input.chargeClass ?? 'computer', amountMicros: input.amountMicros }, now, tx);
     if (!ruled.ok) return { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
     const settings = await getMeterSettings(tx);
-    const no = await fits(tx, input.personId, input.amountMicros, now, settings, { newJob: input.newJob !== false });
+    const no = await fits(tx, input.personId, input.amountMicros, now, settings, { newJob: input.newJob !== false, personal: input.personal });
     if (no) return no;
     const row = await tx.meterReservation.create({
       data: {
@@ -250,10 +231,10 @@ export async function reserveRoom(
 
 /**
  * A job that keeps running renews its room: held for another `renewMinutes`, and `moreMicros` more when the next stretch needs
- * it. The extra passes the same checks as new room (the member's allowance and the pool); if it does not, nothing changes and the
+ * it. The extra passes the same checks as new room (the member's credit and the pool); if it does not, nothing changes and the
  * job saves its work and stops safely. A reservation that already lapsed, was settled or released is not renewed.
  */
-export async function renewRoom(input: { key: string; moreMicros?: number }, now: Date = new Date()): Promise<Room> {
+export async function renewRoom(input: { key: string; moreMicros?: number; personal?: PersonalCheck }, now: Date = new Date()): Promise<Room> {
   const more = input.moreMicros ?? 0;
   if (more !== 0) wholeMicros(more, 'moreMicros');
   return prisma.$transaction(async (tx): Promise<Room> => {
@@ -274,7 +255,7 @@ export async function renewRoom(input: { key: string; moreMicros?: number }, now
         tx,
       );
       if (!ruled.ok) return { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
-      const no = await fits(tx, row.personId ?? '', more, now, settings, { newJob: false });
+      const no = await fits(tx, row.personId ?? '', more, now, settings, { newJob: false, personal: input.personal });
       if (no) return no;
     }
     const next = await tx.meterReservation.update({

@@ -11,7 +11,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
-import { saveMeterSettings } from '@/lib/meter';
+import { setUpComputerCredit, wipeComputerCredit } from '../helpers/computer-credit-setup';
 import { currentEnvelope } from '@/lib/meter-allowance';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, handBack, renewJob, startJob, sweepComputers, takeOver } from '@/lib/computer';
@@ -36,14 +36,11 @@ async function person(name: string) {
 }
 
 /** A pretend minute costs 6,000 millionths; 10 minutes of room is 60,000. */
-const setUp = (over: Record<string, number | null> = {}) =>
-  saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10, ...over }, 'admin');
+const setUp = (over: Record<string, number | null> = {}) => setUpComputerCredit(over, NOW);
 
 const wipe = async () => {
   await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
-  await prisma.meterEvent.deleteMany({});
-  await prisma.meterReservation.deleteMany({});
-  await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits'] } } });
+  await wipeComputerCredit();
 };
 
 /** A person with a Brick that has a job running on the pretend machine. */

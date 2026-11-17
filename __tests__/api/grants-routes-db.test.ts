@@ -159,17 +159,18 @@ run('the grants routes, on the real books', () => {
     expect(readMeterSettings((await prisma.appSetting.findUnique({ where: { key: 'meter' } }))?.value, later).memberAllowanceMicros).toBe(6 * MILLION);
   });
 
-  it('refuses a computers default that the monthly allowance could not follow, rather than saving one that does nothing', async () => {
+  it('saves a computers default of any shape now that computer jobs draw from the credit lots, and the monthly allowance only mirrors an every-member monthly one', async () => {
     await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 4 * MILLION, interval: 'monthly', recipients: { kind: 'all' }, startsOn: 'now' } }, ctx({ category: 'computers' }));
     expect((await getMeterSettings()).memberAllowanceMicros).toBe(4 * MILLION);
+    // A one-off, or monthly for some people, is the whole rule: it is saved, and the mirror does not say a number that is not the rule
     const once = await call<any>(putDefault, '/x', { method: 'PUT', body: { amountMicros: 5 * MILLION, interval: 'once', recipients: { kind: 'all' } } }, ctx({ category: 'computers' }));
-    expect(once.status).toBe(400);
-    expect((await once.json()).error).toMatch(/every month to everyone/);
-    const fromDate = await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 5 * MILLION, interval: 'monthly', recipients: { kind: 'new_from', from: new Date().toISOString() } } }, ctx({ category: 'computers' }));
-    expect(fromDate.status).toBe(400);
-    // The refused saves changed nothing: the default and the allowance the meter follows still agree
-    expect((await overview()).money.computers).toMatchObject({ amountMicros: 4 * MILLION, interval: 'monthly' });
-    expect((await getMeterSettings()).memberAllowanceMicros).toBe(4 * MILLION);
+    expect(once.status).toBe(200);
+    expect((await overview()).money.computers).toMatchObject({ amountMicros: 5 * MILLION, interval: 'once' });
+    expect((await getMeterSettings()).memberAllowanceMicros).toBeNull();
+    const fromDate = await call(putDefault, '/x', { method: 'PUT', body: { amountMicros: 6 * MILLION, interval: 'monthly', recipients: { kind: 'new_from', from: new Date().toISOString() } } }, ctx({ category: 'computers' }));
+    expect(fromDate.status).toBe(200);
+    expect((await overview()).money.computers).toMatchObject({ amountMicros: 6 * MILLION, interval: 'monthly' });
+    expect((await getMeterSettings()).memberAllowanceMicros).toBeNull();
   });
 
   it('refuses things the books refuse, with the books’ own line and the right status', async () => {

@@ -15,7 +15,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
-import { saveMeterSettings } from '@/lib/meter';
+import { setUpComputerCredit, wipeComputerCredit } from '../helpers/computer-credit-setup';
 import { FakeComputerProvider, setComputerProviderForTests, type TurnEvent } from '@/lib/computer-provider';
 import { Agent37Error } from '@/lib/agent37/client';
 import { fenceMachine, giveComputer, handBack, runnableJobs, runnableJobsPage, startJob, stopJobFor, sweepComputers, takeOver } from '@/lib/computer';
@@ -40,14 +40,11 @@ async function person(name: string) {
   return { id: user.id, brickId: brick.id };
 }
 
-const setUp = () =>
-  saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+const setUp = () => setUpComputerCredit({}, NOW);
 
 const wipe = async () => {
   await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
-  await prisma.meterEvent.deleteMany({});
-  await prisma.meterReservation.deleteMany({});
-  await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits'] } } });
+  await wipeComputerCredit();
 };
 
 async function running(name = 'sara') {

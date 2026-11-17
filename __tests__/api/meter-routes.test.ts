@@ -10,11 +10,13 @@ import { resolveUsagePerson } from '@/lib/usage-person';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
+import { saveComputerAllowance } from '@/lib/grants-admin';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/usage-person', () => ({ resolveUsagePerson: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: jest.fn() }));
+jest.mock('@/lib/grants-admin', () => ({ ...jest.requireActual('@/lib/grants-admin'), saveComputerAllowance: jest.fn(async () => undefined) }));
 jest.mock('@/lib/meter', () => ({
   recordMeterEvent: jest.fn(),
   describeBot: jest.fn(),
@@ -128,16 +130,24 @@ describe('the meter’s settings', () => {
   it('show what is set and what is still missing before room can be taken', async () => {
     const body = await (await get()).json();
     expect(body.settings).toEqual(empty);
-    expect(body.missing).toEqual(['memberAllowanceMicros', 'poolCeilingMicros', 'reserveMicros', 'storageMicrosPerGbMonth', 'atOnceMember', 'atOnceAll']);
+    expect(body.missing).toEqual(['poolCeilingMicros', 'reserveMicros', 'storageMicrosPerGbMonth', 'atOnceMember', 'atOnceAll']);
     expect(body.ranges.renewMinutes).toEqual({ min: 1, max: 1440 });
   });
 
   it('save only what a change names, checked, and say what is still missing', async () => {
-    const response = await patch({ memberAllowanceMicros: 5_000_000 });
-    expect(save).toHaveBeenCalledWith({ memberAllowanceMicros: 5_000_000 }, 'admin-1');
+    const response = await patch({ poolCeilingMicros: 5_000_000 });
+    expect(save).toHaveBeenCalledWith({ poolCeilingMicros: 5_000_000 }, 'admin-1');
+    expect(saveComputerAllowance).not.toHaveBeenCalled();
     const body = await response.json();
-    expect(body.settings.memberAllowanceMicros).toBe(5_000_000);
-    expect(body.missing).not.toContain('memberAllowanceMicros');
+    expect(body.settings.poolCeilingMicros).toBe(5_000_000);
+    expect(body.missing).not.toContain('poolCeilingMicros');
+  });
+
+  it('save the computer allowance as the computers default of the credit books, the one rule, never a second number', async () => {
+    const response = await patch({ memberAllowanceMicros: 5_000_000, renewMinutes: 5 });
+    expect(response.status).toBe(200);
+    expect(saveComputerAllowance).toHaveBeenCalledWith(5_000_000, { userId: 'admin-1', superAdmin: true });
+    expect(save).toHaveBeenCalledWith({ renewMinutes: 5 }, 'admin-1');
   });
 
   it('turn down a value that is not one, with the line that says why', async () => {
