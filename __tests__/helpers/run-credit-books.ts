@@ -449,6 +449,43 @@ async function run(database: Awaited<ReturnType<typeof startTestDatabase>>, onCl
     await setMeter({ rolloutBudgetMicros: 10_000 * M, renewMinutes: 10 });
   }
 
+  // ---------- P8: a default allowance is backed by the budget of its area; gifts keep the funded budget ----------
+  {
+    await user('p8a', '2027-02-11T00:00:00Z');
+    await user('p8b', '2027-02-11T00:00:00Z');
+    await user('p8c', '2027-02-11T00:00:00Z');
+    const baseOf = async (id: string) => (await lotsOf(id)).filter((lot) => lot.slotKey === 'base:instant_apps');
+    const def = await rules.saveDefault({ categoryId: 'instant_apps', amount: 2 * M, schedule: 'once', recipients: { kind: 'all' } }, root, G);
+    // Nothing backs it: Instant has no exposure ceiling, so the rollout budget still guards the default (nothing is promised on an empty budget)
+    await prisma.$executeRawUnsafe(`DELETE FROM app_settings WHERE key = 'instant-limits'`);
+    await setMeter({ rolloutBudgetMicros: 0, renewMinutes: 10 });
+    const bare = await issue.ensureIssued('p8a', G);
+    check('P8: with no budget of its area backing it, the default is still held to the rollout budget', (await baseOf('p8a')).length === 0 && bare.skipped.some((x) => x.reason === 'over_budget'), bare);
+    // The area's shared budget is set (Instant's exposure ceiling): the default reaches the member whatever the rollout budget says
+    await prisma.$executeRawUnsafe(`INSERT INTO app_settings (key, value, updated_at) VALUES ('instant-limits', '{"exposureCeilingMicros": 1000000000}'::jsonb, now()) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
+    const backed = await issue.ensureIssued('p8a', G);
+    check('P8: with the shared budget of its area set, the default reaches the member even with no room in the rollout budget', (await baseOf('p8a')).length === 1 && !backed.skipped.some((x) => x.reason === 'over_budget' || x.reason === 'not_set'), backed);
+    await setMeter({ renewMinutes: 10 });
+    const unset = await issue.ensureIssued('p8b', G);
+    check('P8: even with the rollout budget empty the backed default is issued, once, to everyone', (await baseOf('p8b')).length === 1 && (await issue.ensureIssued('p8b', G)).issued.length === 0, unset);
+    // A default allowance is not counted against what gifts may use of the funded budget
+    const issuedAll = await funding.issuedInMonth(prisma, 'funding-platform', G);
+    const issuedForBudget = await funding.issuedAgainstBudget(prisma, 'funding-platform', G);
+    const defaults = await prisma.creditLot.aggregate({ where: { slotKey: 'base:instant_apps', fundingAccountId: 'funding-platform', issuedAt: { gte: at('2027-01-01T00:00:00Z') } }, _sum: { amountMicros: true } });
+    check('P8: the funded budget counts what is promised, never a default allowance', issuedForBudget < issuedAll && issuedAll - issuedForBudget >= 2 * M && Number(defaults._sum.amountMicros ?? 0) >= issuedAll - issuedForBudget, { issuedAll, issuedForBudget });
+    // Gifts keep their backing check: with no room they are not issued
+    const giftId = (await rules.createGift({ categoryId: 'instant_apps', amount: 1 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['p8c'] } }, root, G).catch(() => null))?.programId;
+    await setMeter({ rolloutBudgetMicros: 0, renewMinutes: 10 });
+    const gift = await issue.ensureIssued('p8c', G);
+    check('P8: a gift keeps its backing check: no room in the funded budget issues nothing', !giftId || (!gift.issued.some((l) => l.programId === giftId) && gift.skipped.some((x) => x.programId === giftId && x.reason === 'over_budget')), { giftId, gift });
+    await setMeter({ rolloutBudgetMicros: 10_000 * M, renewMinutes: 10 });
+    // What a member is told: the default line depends on the shared budget, an exception does not say so
+    const line = await usage.moneyLine('p8a', 'instant_apps', G);
+    check('P8: the default line says it depends on the shared budget', !!line && !('unavailable' in line && line.unavailable) && (line as { dependsOnSharedBudget?: boolean }).dependsOnSharedBudget === true, line);
+    await rules.endProgram(def.programId, root, G);
+    await prisma.$executeRawUnsafe(`DELETE FROM app_settings WHERE key = 'instant-limits'`);
+  }
+
   // ---------- The preview: three parts, never one number ----------
   {
     const bounded = await rules.previewGrant('gift', { categoryId: 'instant_apps', amount: 5 * M, schedule: 'once', recipients: { kind: 'people', userIds: ['g1', 'g2', 'g3'] } }, G);

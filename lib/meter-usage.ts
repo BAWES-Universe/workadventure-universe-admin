@@ -49,6 +49,8 @@ export interface ComputerBar {
   asked: boolean;
   /** "Ask for more" is only offered when the allowance ran out. */
   canAskForMore: boolean;
+  /** The allowance reaches every member and what it can spend comes out of the shared Computers budget (P8). */
+  dependsOnSharedBudget: true;
   /** The same allowance in dollars (omitted while extra usage lifts the member's own limit). */
   kind?: 'monthly';
   availableMicros?: number;
@@ -158,6 +160,7 @@ export async function memberUsage(personId: string, now: Date = new Date()): Pro
         unlimited: allowance.unlimited,
         asked,
         canAskForMore: words === 'out',
+        dependsOnSharedBudget: true,
         ...(allowance.unlimited ? {} : { kind: 'monthly' as const, availableMicros: available, totalMicros: total, inProgressMicros: Number(inProgress._sum.amountMicros ?? 0), renewsAt: nextMonthStart(now).toISOString(), unavailable: false as const }),
       };
     }

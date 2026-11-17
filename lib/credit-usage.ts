@@ -26,6 +26,8 @@ export interface MoneyLine {
   asked: boolean;
   /** "Ask for more" is offered when this is used up. */
   canAskForMore: boolean;
+  /** True for a default allowance: it reaches every member, and what it can spend comes out of the shared budget of its area (P8). Absent for an exception. */
+  dependsOnSharedBudget?: true;
   unavailable: false;
 }
 
@@ -73,6 +75,7 @@ export async function moneyLine(personId: string, category: MoneyCategory, now: 
       asked,
       // Used up means nothing spendable is left for this category at all: a gift or shared amount that covers it counts, not only the line
       canAskForMore: lots.every((lot) => lot.availableMicros + lot.balance.heldMicros <= 0),
+      ...(sorted[0].lot.source === 'default' ? { dependsOnSharedBudget: true as const } : {}),
       unavailable: false,
     };
   } catch (error) {
