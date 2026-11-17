@@ -9,6 +9,8 @@
  *   universe-proxy    the model address on 127.0.0.1:8650. It reads the relay's address and the job's key from a file on EVERY call, so a new
  *                     key never needs Hermes restarted. Hermes holds no real key at all.
  *   universe-supervise brings a part back that stopped.
+ *   universe-visits   the record of where the browser went (R06): listens to the browser's DevTools and keeps host and path of every page it opened
+ *                     and every post it sent, never a query string or a body; Orbit reads it back when a job ends.
  *   universe-fence    take-over fence: stops every process the agent started (the screen, the browser and the gateway stay).
  *   universe-clean    clears the browser's sign-in state between jobs.
  *   universe-mark     run by Orbit as root once a computer is ready: records the moment from which everything that runs is the agent's (see the fence).
@@ -36,8 +38,8 @@ USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify chromium x11-utils procps python3 fonts-liberation fonts-noto-color-emoji ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-COPY universe-up universe-supervise universe-proxy universe-fence universe-clean universe-files universe-mark /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/universe-up /usr/local/bin/universe-supervise /usr/local/bin/universe-proxy /usr/local/bin/universe-fence /usr/local/bin/universe-clean /usr/local/bin/universe-files /usr/local/bin/universe-mark
+COPY universe-up universe-supervise universe-proxy universe-fence universe-clean universe-files universe-mark universe-visits /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/universe-up /usr/local/bin/universe-supervise /usr/local/bin/universe-proxy /usr/local/bin/universe-fence /usr/local/bin/universe-clean /usr/local/bin/universe-files /usr/local/bin/universe-mark /usr/local/bin/universe-visits
 # Hermes' browser tool drives the visible Chromium that the screen shows
 ENV DISPLAY=:99 BROWSER_CDP_URL=http://127.0.0.1:9222 AGENT37_SCREEN_GEOMETRY=1440x900
 USER node
@@ -153,6 +155,10 @@ if ! pgrep -x chromium >/dev/null 2>&1; then
 fi
 if ! pgrep -f universe-proxy >/dev/null 2>&1; then
   nohup setsid python3 /usr/local/bin/universe-proxy >>"$LOGS/proxy.log" 2>&1 </dev/null &
+fi
+# The record of where the browser went listens to the browser's DevTools and waits for it, so it may start before or after the browser
+if ! pgrep -f "universe-visits run" >/dev/null 2>&1; then
+  nohup setsid python3 /usr/local/bin/universe-visits run >>"$LOGS/visits.log" 2>&1 </dev/null &
 fi
 
 # The parts must answer before this says ready (the browser's DevTools and the model address)
@@ -286,6 +292,413 @@ if __name__ == "__main__":
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
 `.replace(/__PORT__/g, String(LOCAL_MODEL_PORT));
 
+export const UNIVERSE_VISITS = String.raw`#!/usr/bin/env python3
+# The record of where the browser went. It listens to the browser's DevTools (loopback only, port 9222) and writes one line for each page the
+# browser opened and each post it sent: the kind, the time, the host and the path. NEVER the query string, the fragment, a sign-in name in the
+# address, a header, a cookie or a body: the address is cut down to host and path here, and Orbit cuts it again when it reads it back, so the
+# machine's word is never trusted as it comes. The agent's own stream drops what a tool was given on purpose; this is where a visit or a form
+# post that it made can still be looked at later.
+#
+#   universe-visits run          the listener (universe-up starts it, universe-supervise brings it back)
+#   universe-visits read SINCE   what was recorded from SINCE (milliseconds on this machine's clock) on, for Orbit to take at the end of a job: the
+#                                 machine's clock now, the last connection line before SINCE, whether the listener runs, and then the lines
+#
+# A line is a JSON object: {"k": "visit"|"post"|"on"|"off"|"cut", "at": ms, "m": method, "h": host, "p": path, "n": times in a row, "f": 1 if
+# the page did not load, "form": 1 if the post was a page's own form}. "on" and "off" say when the listener was connected to the browser, and
+# "cut" says older lines were dropped to keep the file small, so a gap in the record can be told from a quiet browser.
+import base64
+import hashlib
+import http.client
+import json
+import os
+import re
+import select
+import socket
+import struct
+import sys
+import time
+import urllib.parse
+
+HOME = os.environ.get("HOME") or "/home/node"
+STATE = os.path.join(HOME, ".universe")
+LOG = os.path.join(STATE, "visits.jsonl")
+PORT = int(os.environ.get("UNIVERSE_DEVTOOLS_PORT") or 9222)
+# The file stays small: past this size the oldest lines go (and a "cut" line says so), keeping the newest ones and the last connection line
+MAX_BYTES = 512 * 1024
+KEEP_LINES = 1500
+# A read gives at most this many lines (the oldest first); "more=N" says how many were left out
+READ_LINES = 1200
+PATH_MAX = 300
+HOST_MAX = 255
+# The same page or post again within this long is one line with a count
+JOIN_MS = 3000
+PLAIN = {"GET", "HEAD", "OPTIONS"}
+HEX = re.compile(r"^[0-9a-fA-F-]{20,}$")
+TOKEN = re.compile(r"^[A-Za-z0-9_-]{24,}$")
+
+
+def now_ms():
+    return int(time.time() * 1000)
+
+
+def segment(part):
+    # An address can carry a one-time code or a private link in its path (a reset or share link): a part that looks like one is not kept
+    if HEX.match(part):
+        return "…"
+    if TOKEN.match(part) and re.search(r"[A-Z]", part) and re.search(r"[a-z]", part) and re.search(r"[0-9]", part):
+        return "…"
+    return part
+
+
+def cut(url):
+    # (host, path) of a web address, or None for anything that is not a plain http or https page
+    try:
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            return None
+        host = parts.hostname.lower()
+        if ":" in host:
+            host = "[" + host + "]"
+        port = parts.port
+        if port and not ((parts.scheme == "http" and port == 80) or (parts.scheme == "https" and port == 443)):
+            host = "%s:%d" % (host, port)
+        path = "/".join(segment(part) for part in (parts.path or "/").split("/"))
+        if len(host) > HOST_MAX:
+            return None
+        return host, path[:PATH_MAX]
+    except Exception:
+        return None
+
+
+def last_state(lines):
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except Exception:
+            continue
+        if entry.get("k") in ("on", "off"):
+            return entry["k"]
+    return None
+
+
+def alive():
+    # Whether the listener is running: a process that is this script with "run"
+    me = os.getpid()
+    for name in os.listdir("/proc"):
+        if not name.isdigit() or int(name) == me:
+            continue
+        try:
+            with open("/proc/%s/cmdline" % name, "rb") as handle:
+                args = handle.read().split(b"\0")
+        except Exception:
+            continue
+        if len(args) >= 3 and args[1].endswith(b"/universe-visits") and args[2] == b"run":
+            return True
+    return False
+
+
+def read(since):
+    try:
+        with open(LOG, "r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.read().splitlines()
+    except Exception:
+        lines = []
+    before, wanted = [], []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+            at = int(entry.get("at"))
+        except Exception:
+            continue
+        (wanted if at >= since else before).append(line)
+    print("now=%d" % now_ms())
+    print("state=%s" % (last_state(before) or "none"))
+    print("alive=%d" % (1 if alive() else 0))
+    for line in wanted[:READ_LINES]:
+        print("line=" + line)
+    if len(wanted) > READ_LINES:
+        print("more=%d" % (len(wanted) - READ_LINES))
+    print("end=1")
+
+
+class Socket:
+    # The smallest WebSocket client that DevTools needs: text messages, both ways, nothing else
+    def __init__(self, url):
+        parts = urllib.parse.urlsplit(url)
+        self.sock = socket.create_connection((parts.hostname, parts.port), timeout=5)
+        key = base64.b64encode(os.urandom(16)).decode()
+        request = "GET %s HTTP/1.1\r\nHost: %s:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" % (parts.path, parts.hostname, parts.port, key)
+        self.sock.sendall(request.encode())
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise IOError("closed")
+            head += chunk
+            if len(head) > 65536:
+                raise IOError("bad answer")
+        head, self.buffer = head.split(b"\r\n\r\n", 1)
+        expect = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+        if b" 101 " not in head.split(b"\r\n")[0] + b" " or expect.lower().encode() not in head.lower():
+            raise IOError("not accepted")
+        self.sock.settimeout(None)
+        self.message = b""
+
+    def send(self, data):
+        payload = data.encode()
+        mask = os.urandom(4)
+        size = len(payload)
+        head = b"\x81"
+        if size < 126:
+            head += bytes([0x80 | size])
+        elif size < 65536:
+            head += bytes([0x80 | 126]) + struct.pack(">H", size)
+        else:
+            head += bytes([0x80 | 127]) + struct.pack(">Q", size)
+        self.sock.sendall(head + mask + bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload)))
+
+    def need(self, count):
+        while len(self.buffer) < count:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise IOError("closed")
+            self.buffer += chunk
+        taken, self.buffer = self.buffer[:count], self.buffer[count:]
+        return taken
+
+    def frame(self):
+        first, second = self.need(2)
+        opcode = first & 0x0F
+        size = second & 0x7F
+        if size == 126:
+            size = struct.unpack(">H", self.need(2))[0]
+        elif size == 127:
+            size = struct.unpack(">Q", self.need(8))[0]
+        mask = self.need(4) if second & 0x80 else None
+        payload = self.need(size)
+        if mask:
+            payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        return first & 0x80, opcode, payload
+
+    def ready(self, seconds):
+        return bool(self.buffer) or bool(select.select([self.sock], [], [], seconds)[0])
+
+    def receive(self):
+        # The next whole text message; None when only a ping or pong came
+        fin, opcode, payload = self.frame()
+        if opcode == 8:
+            raise IOError("closed")
+        if opcode == 9:
+            # A ping is answered with the same bytes (a masked pong), which a short payload makes simple
+            if len(payload) < 126:
+                mask = os.urandom(4)
+                self.sock.sendall(b"\x8a" + bytes([0x80 | len(payload)]) + mask + bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload)))
+            return None
+        if opcode == 10:
+            return None
+        if opcode in (1, 0):
+            self.message += payload
+            if fin:
+                text, self.message = self.message, b""
+                return text.decode("utf-8", "replace")
+        return None
+
+
+class Log:
+    def __init__(self):
+        self.pending = None
+        os.makedirs(STATE, exist_ok=True)
+
+    def write(self, entry):
+        line = json.dumps(entry, separators=(",", ":"))
+        try:
+            with open(LOG, "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+            if os.path.getsize(LOG) > MAX_BYTES:
+                self.trim()
+        except Exception:
+            pass
+
+    def trim(self):
+        with open(LOG, "r", encoding="utf-8", errors="replace") as handle:
+            lines = handle.read().splitlines()
+        state = None
+        for line in reversed(lines):
+            try:
+                if json.loads(line).get("k") in ("on", "off"):
+                    state = line
+                    break
+            except Exception:
+                continue
+        kept = lines[-KEEP_LINES:]
+        head = [json.dumps({"k": "cut", "at": now_ms()}, separators=(",", ":"))]
+        if state and state not in kept:
+            head.append(state)
+        with open(LOG + ".new", "w", encoding="utf-8") as handle:
+            handle.write("\n".join(head + kept) + "\n")
+        os.replace(LOG + ".new", LOG)
+
+    def add(self, kind, method, host, path, failed=False, form=False):
+        # One line for the same thing again within a moment: the count goes up
+        at = now_ms()
+        key = (kind, method, host, path, failed, form)
+        if self.pending and self.pending["key"] == key and at - self.pending["last"] <= JOIN_MS:
+            self.pending["n"] += 1
+            self.pending["last"] = at
+            return
+        self.flush()
+        self.pending = {"key": key, "at": at, "last": at, "n": 1}
+
+    def flush(self, force=True):
+        if not self.pending:
+            return
+        kind, method, host, path, failed, form = self.pending["key"]
+        entry = {"k": kind, "at": self.pending["at"], "m": method, "h": host, "p": path, "n": self.pending["n"]}
+        if failed:
+            entry["f"] = 1
+        if form:
+            entry["form"] = 1
+        self.pending = None
+        self.write(entry)
+
+    def tick(self):
+        if self.pending and now_ms() - self.pending["last"] > JOIN_MS:
+            self.flush()
+
+
+def browser_address():
+    connection = http.client.HTTPConnection("127.0.0.1", PORT, timeout=3)
+    try:
+        connection.request("GET", "/json/version")
+        answer = json.loads(connection.getresponse().read().decode())
+        url = urllib.parse.urlsplit(answer["webSocketDebuggerUrl"])
+        # Only the browser on this machine's own loopback: whatever address it names, the path is used on the loopback port
+        return "ws://127.0.0.1:%d%s" % (PORT, url.path)
+    finally:
+        connection.close()
+
+
+def listen(log):
+    link = Socket(browser_address())
+    ids = [0]
+    sessions = {}
+    targets = set()
+    mains = {}
+
+    def command(method, params=None, session=None):
+        ids[0] += 1
+        message = {"id": ids[0], "method": method, "params": params or {}}
+        if session:
+            message["sessionId"] = session
+        link.send(json.dumps(message))
+
+    def attach(session, info, waiting):
+        kind = info.get("type")
+        sessions[session] = kind
+        targets.add(info.get("targetId"))
+        # Every kind of target is watched for posts; only a page's own frame says where the browser went
+        command("Network.enable", {}, session)
+        if kind in ("page", "iframe"):
+            command("Page.enable", {}, session)
+        command("Target.setAutoAttach", {"autoAttach": True, "waitForDebuggerOnStart": True, "flatten": True}, session)
+        # A target that was started paused is let go at once, whatever else happened
+        if waiting:
+            command("Runtime.runIfWaitingForDebugger", {}, session)
+
+    command("Target.setAutoAttach", {"autoAttach": True, "waitForDebuggerOnStart": True, "flatten": True})
+    command("Target.setDiscoverTargets", {"discover": True})
+    command("Target.getTargets")
+    log.write({"k": "on", "at": now_ms()})
+    started = time.time()
+    swept = False
+    while True:
+        if not link.ready(1.0):
+            log.tick()
+            continue
+        text = link.receive()
+        log.tick()
+        if text is None:
+            continue
+        try:
+            message = json.loads(text)
+        except Exception:
+            continue
+        method = message.get("method")
+        params = message.get("params") or {}
+        session = message.get("sessionId")
+        if method is None and message.get("result") is not None and "targetInfos" in message["result"]:
+            # The tabs that were open before this listener came: any not attached by now is attached
+            if not swept:
+                swept = True
+                time.sleep(0.3)
+                for info in message["result"]["targetInfos"]:
+                    if info.get("type") == "page" and info.get("targetId") not in targets:
+                        targets.add(info["targetId"])
+                        command("Target.attachToTarget", {"targetId": info["targetId"], "flatten": True})
+            continue
+        if method is None and message.get("result") is not None and "sessionId" in message["result"]:
+            # The answer to attachToTarget: the event below carries the same session, so nothing is done twice
+            continue
+        if method == "Target.attachedToTarget":
+            attach(params["sessionId"], params.get("targetInfo") or {}, params.get("waitingForDebugger"))
+        elif method == "Target.detachedFromTarget":
+            sessions.pop(params.get("sessionId"), None)
+            mains.pop(params.get("sessionId"), None)
+        elif method == "Network.requestWillBeSent":
+            request = params.get("request") or {}
+            verb = str(request.get("method") or "GET").upper()
+            if verb in PLAIN:
+                continue
+            address = cut(request.get("url") or "")
+            if address:
+                log.add("post", verb[:8], address[0], address[1], form=(params.get("type") == "Document"))
+        elif method == "Page.frameNavigated" and sessions.get(session) == "page":
+            frame = params.get("frame") or {}
+            if frame.get("parentId"):
+                continue
+            mains.setdefault(session, set()).add(frame.get("id"))
+            failed = bool(frame.get("unreachableUrl"))
+            address = cut(frame.get("unreachableUrl") or frame.get("url") or "")
+            if address:
+                log.add("visit", "GET", address[0], address[1], failed=failed)
+        elif method == "Page.navigatedWithinDocument" and sessions.get(session) == "page":
+            if params.get("frameId") in mains.get(session, set()):
+                address = cut(params.get("url") or "")
+                if address:
+                    log.add("visit", "GET", address[0], address[1])
+
+
+def run():
+    log = Log()
+    while True:
+        try:
+            listen(log)
+        except Exception:
+            pass
+        log.flush()
+        # Said when the browser was not there to listen to (a crash, or the cleanup between jobs)
+        log.write({"k": "off", "at": now_ms()})
+        # Waits for the browser to answer again
+        while True:
+            time.sleep(1)
+            try:
+                browser_address()
+                break
+            except Exception:
+                continue
+
+
+if __name__ == "__main__":
+    command = sys.argv[1] if len(sys.argv) > 1 else ""
+    if command == "run":
+        run()
+    elif command == "read" and len(sys.argv) == 3 and re.match(r"^[0-9]{1,16}$", sys.argv[2]):
+        read(int(sys.argv[2]))
+    else:
+        sys.stderr.write("usage: universe-visits run | read SINCE\n")
+        sys.exit(2)
+`;
+
 export const UNIVERSE_SUPERVISE = String.raw`#!/bin/sh
 # Brings a part back that stopped (the browser crashing): runs universe-up again every few seconds.
 # Every program it runs is the system's own, whatever PATH it was started with: the fence keeps what this script starts, so a program the
@@ -325,7 +738,7 @@ SCRIPTS_DIR = "/usr/local/bin"
 # universe-up starts it with. The screen's own server and window manager are the base image's, so only the program is checked.
 DESKTOP_PROGRAMS = {"Xvfb", "openbox"}
 INTERPRETERS = re.compile(r"^(python3(\.\d+)?|sh|dash|bash)$")
-OWN_SCRIPTS = {os.path.join(SCRIPTS_DIR, name) for name in ("universe-proxy", "universe-supervise", "universe-up", "universe-fence")}
+OWN_SCRIPTS = {os.path.join(SCRIPTS_DIR, name) for name in ("universe-proxy", "universe-supervise", "universe-up", "universe-fence", "universe-visits")}
 X11VNC_ARGS = ["-display", ":99", "-rfbport", "5900", "-localhost", "-forever", "-shared", "-nopw", "-quiet"]
 WEBSOCKIFY_ARGS = ["--web", "/usr/share/novnc", "6901", "127.0.0.1:5900"]
 CHROMIUM_FLAGS = ["--user-data-dir=" + PROFILE, "--remote-debugging-port=9222", "--remote-debugging-address=127.0.0.1"]
@@ -676,5 +1089,6 @@ export function imageFiles(): Array<{ name: string; mode: number; text: string }
     { name: 'universe-clean', mode: 0o755, text: UNIVERSE_CLEAN },
     { name: 'universe-files', mode: 0o755, text: UNIVERSE_FILES },
     { name: 'universe-mark', mode: 0o755, text: UNIVERSE_MARK },
+    { name: 'universe-visits', mode: 0o755, text: UNIVERSE_VISITS },
   ];
 }
