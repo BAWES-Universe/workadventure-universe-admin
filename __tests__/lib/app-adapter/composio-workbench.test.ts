@@ -135,7 +135,7 @@ describe('the provider’s workspace for a code job, as its docs and a live chec
       await expect(bench.put({ sessionId: 's', path: 'in/a.txt', bytes: new Uint8Array(1), timeoutMs: 1000 })).rejects.toThrow('would not take the file (403)');
     });
 
-    it('lists the files under a prefix, page by page, without folders, and says so when a size is missing', async () => {
+    it('lists the files under a prefix, page by page, without folders, and passes a missing size on as null', async () => {
       const pages = [
         json({ items: [{ mount_relative_path: 'out/a.txt', size: 3 }, { mount_relative_path: 'out/dir/', size: 0 }], next_cursor: 'c2' }),
         json({ items: [{ mount_relative_path: 'out/b.txt', size: 5 }] }),
@@ -147,7 +147,26 @@ describe('the provider’s workspace for a code job, as its docs and a live chec
       ]);
       expect(calls[0].url).toContain('/mounts/files/items?mount_relative_prefix=out%2F&limit=500');
       expect(calls[1].url).toContain('cursor=c2');
-      await expect(make(() => json({ items: [{ mount_relative_path: 'out/a.txt' }] })).list({ sessionId: 's', prefix: 'out/', timeoutMs: 1 })).rejects.toThrow('without a size');
+      // One entry with no readable size does not hide the others
+      expect(await make(() => json({ items: [{ mount_relative_path: 'out/a.txt' }, { mount_relative_path: 'out/b.txt', size: 2 }] })).list({ sessionId: 's', prefix: 'out/', timeoutMs: 1 })).toEqual([
+        { path: 'out/a.txt', bytes: null },
+        { path: 'out/b.txt', bytes: 2 },
+      ]);
+    });
+
+    it('stops paging once it has the files asked for, so a folder of thousands is still listed', async () => {
+      let page = 0;
+      const bench = make(() => {
+        page += 1;
+        return json({ items: Array.from({ length: 500 }, (_, n) => ({ mount_relative_path: `out/p${page}-${n}.txt`, size: 1 })), next_cursor: `c${page + 1}` });
+      });
+      // 2,600 files stand behind the cursor; 60 are wanted
+      const files = await bench.list({ sessionId: 's', prefix: 'out/', timeoutMs: 1, limit: 60 });
+      expect(files).toHaveLength(60);
+      expect(page).toBe(1);
+      // With no limit, a listing that never ends still is not called complete
+      page = 0;
+      await expect(bench.list({ sessionId: 's', prefix: 'out/', timeoutMs: 1 })).rejects.toThrow('could not be listed in full');
     });
 
     it('does not call a listing complete when the pages never end', async () => {

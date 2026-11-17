@@ -120,8 +120,11 @@ export interface WorkbenchAdapter {
   run(input: { sessionId: string; code: string; timeoutMs: number; signal?: AbortSignal }): Promise<WorkbenchRun>;
   /** Puts a file in the workspace at `path` (under in/). Throws when it could not be put there. */
   put(input: { sessionId: string; path: string; bytes: Uint8Array; timeoutMs: number }): Promise<void>;
-  /** The files under a folder of the workspace, with the sizes the provider states. Throws when it cannot be listed in full. */
-  list(input: { sessionId: string; prefix: string; timeoutMs: number }): Promise<{ path: string; bytes: number }[]>;
+  /**
+   * The files under a folder of the workspace, with the sizes the provider states (null when it states none: such a file cannot be bounded,
+   * so the caller names it and does not keep it). Stops paging once `limit` files are in hand. Throws when it cannot be listed in full.
+   */
+  list(input: { sessionId: string; prefix: string; timeoutMs: number; limit?: number }): Promise<{ path: string; bytes: number | null }[]>;
   /** One file's bytes, never reading past `maxBytes` (a file that is bigger is `too_big` and is not read). Throws when it cannot be read. */
   read(input: { sessionId: string; path: string; maxBytes: number; timeoutMs: number }): Promise<WorkbenchFile>;
   /** Deletes the session: `closed` when the provider says it did, `gone` when it had no such session. Throws when the provider cannot be asked (said again later). */

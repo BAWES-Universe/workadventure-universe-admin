@@ -72,11 +72,12 @@ function fakeProvider() {
       if (!files) throw new Error('gone');
       files.set(path, bytes);
     }),
-    list: jest.fn(async ({ sessionId, prefix }: { sessionId: string; prefix: string }) => {
+    list: jest.fn(async ({ sessionId, prefix, limit }: { sessionId: string; prefix: string; limit?: number }) => {
       if (state.listFails) throw new Error('list down');
       const files = sessions.get(sessionId);
       if (!files) throw new Error('gone');
-      return [...files.entries()].filter(([path]) => path.startsWith(prefix)).map(([path, bytes]) => ({ path, bytes: bytes.byteLength }));
+      const found = [...files.entries()].filter(([path]) => path.startsWith(prefix)).map(([path, bytes]) => ({ path, bytes: bytes.byteLength }));
+      return limit === undefined ? found : found.slice(0, limit);
     }),
     read: jest.fn(async ({ sessionId, path, maxBytes }: { sessionId: string; path: string; maxBytes: number }) => {
       const bytes = sessions.get(sessionId)?.get(path);
@@ -508,6 +509,22 @@ run('code jobs for Apps, in a real database', () => {
       const result = row.result as { notKept: { name: string; why: string }[] };
       expect(result.notKept.map((entry) => entry.name).sort()).toEqual(['.hidden', 'bad name.txt', 'c.txt']);
       expect(result.notKept.find((entry) => entry.name === 'c.txt')?.why).toMatch(/number of files/);
+    });
+
+    it('keeps the allowed number from a job that left thousands of files, and says more were left', async () => {
+      await saveCodeJobLimits({ maxOutputFiles: 3 }, boss);
+      provider.state.runs.push(({ files }) => {
+        for (let n = 0; n < 2_600; n += 1) files.set(`out/f${String(n).padStart(4, '0')}.txt`, text('x'));
+        return done();
+      });
+      const job = jobOf(await start({ code: 'x' }));
+      await finishAll();
+      const row = await rowOf(job.jobId);
+      expect(row.state).toBe('succeeded');
+      expect(row.outputs).toHaveLength(3);
+      const notKept = (row.result as { notKept: { name: string; why: string }[] }).notKept;
+      expect(notKept.some((entry) => entry.name === '(more files)')).toBe(true);
+      expect(notKept.some((entry) => entry.name === '(all)')).toBe(false);
     });
 
     it('does not keep a file bigger than what is left, and does not fail the job over a listing it cannot read', async () => {

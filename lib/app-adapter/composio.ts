@@ -350,9 +350,9 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
       if (!response.ok) throw new AdapterError('provider', `Provider would not take the file (${response.status})`);
     },
 
-    async list({ sessionId, prefix, timeoutMs }) {
+    async list({ sessionId, prefix, timeoutMs, limit }) {
       void timeoutMs;
-      const files: { path: string; bytes: number }[] = [];
+      const files: { path: string; bytes: number | null }[] = [];
       let cursor: string | null = null;
       for (let page = 0; page < MOUNT_PAGES; page += 1) {
         const query = new URLSearchParams({ mount_relative_prefix: prefix, limit: String(MOUNT_PAGE) });
@@ -363,10 +363,11 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
           if (!isObject(item)) continue;
           const path = str(item.mount_relative_path);
           const size = readCount(item.size);
-          // A folder entry (a trailing slash) is not a file; a size that cannot be read is not a file we can bound
+          // A folder entry (a trailing slash) is not a file. A size that cannot be read is passed on as null: one odd entry must not hide the rest
           if (!path || path.endsWith('/')) continue;
-          if (size === null) throw new AdapterError('provider', 'Provider listed a file without a size');
           files.push({ path, bytes: size });
+          // Enough to decide which files are kept and to name some that are not: there is no need to page through the rest
+          if (limit !== undefined && files.length >= limit) return files;
         }
         const next = str(json.next_cursor);
         if (!next || items.length === 0) return files;

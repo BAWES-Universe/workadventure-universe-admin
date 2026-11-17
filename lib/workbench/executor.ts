@@ -419,11 +419,14 @@ function shape(cell: { ok: boolean; stdout: string; stderr: string; results: str
   return { run: { n, ok: cell.ok, printed, errors, value, error }, left, clipped };
 }
 
+/** How many files past the number kept are listed, so some of the ones left out can be named. */
+const LISTED_PAST_KEPT = 50;
+
 /** The files the code left under out/, copied into Universe's storage within the Limits. One that is over a Limit is named and not kept. */
 async function keepFiles(job: Row, wb: WorkbenchAdapter, sessionId: string, limits: FilledLimits, ctx: Ctx, out: Collected, budget: number): Promise<void> {
-  let listed: { path: string; bytes: number }[];
+  let listed: { path: string; bytes: number | null }[];
   try {
-    listed = await wb.list({ sessionId, prefix: `${OUT_DIR}/`, timeoutMs: REQUEST_MS });
+    listed = await wb.list({ sessionId, prefix: `${OUT_DIR}/`, timeoutMs: REQUEST_MS, limit: limits.maxOutputFiles + LISTED_PAST_KEPT });
   } catch (error) {
     console.error('[CodeJob] The files could not be listed:', error instanceof Error ? error.message : 'unknown');
     out.notKept.push({ name: '(all)', why: 'could not be read from the workspace' });
@@ -432,6 +435,8 @@ async function keepFiles(job: Row, wb: WorkbenchAdapter, sessionId: string, limi
   const candidates = listed
     .map((file) => ({ ...file, name: file.path.startsWith(`${OUT_DIR}/`) ? file.path.slice(OUT_DIR.length + 1) : '' }))
     .sort((a, b) => a.name.localeCompare(b.name));
+  // A listing that stopped at its limit has more behind it: say so instead of pretending those files were never there
+  if (listed.length >= limits.maxOutputFiles + LISTED_PAST_KEPT) out.notKept.push({ name: '(more files)', why: 'over the number of files a job keeps' });
   let kept = 0;
   let keptBytes = 0;
   let previewBudget = Math.floor(budget);
@@ -446,6 +451,10 @@ async function keepFiles(job: Row, wb: WorkbenchAdapter, sessionId: string, limi
     }
     if (kept >= limits.maxOutputFiles) {
       out.notKept.push({ name, why: 'over the number of files a job keeps' });
+      continue;
+    }
+    if (file.bytes === null) {
+      out.notKept.push({ name, why: 'its size could not be read, so it cannot be kept within a limit' });
       continue;
     }
     if (keptBytes + file.bytes > limits.maxOutputBytes) {
