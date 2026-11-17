@@ -11,6 +11,7 @@ import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provi
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
+import { cleanEndNote } from '@/lib/computer-report';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
@@ -18,6 +19,7 @@ import {
   costOfSeconds,
   isOver,
   roomFor,
+  silentEnding,
   type EffectKind,
   type EndedBy,
   type MachineState,
@@ -686,6 +688,9 @@ export async function renewJob(
   }
   if (room.reason === 'rule') {
     // A rule the person said in chat stops it here, saying so: not "our room is used up", and nothing to ask more credit for
+    // Its words are kept for the message that tells the person (the report back)
+    const kept = cleanEndNote(room.words);
+    if (kept) await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] } }, data: { endNote: kept } });
     await endJob(jobId, 'stopped', 'rule', now);
     return { ok: false, reason: 'rule', words: room.words };
   }
@@ -695,10 +700,15 @@ export async function renewJob(
 }
 
 /** The job finished: its machine is saved and rests, what it cost is counted, and the next job in line starts. Safe to say twice. */
-export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date()): Promise<JobView | null> {
+export async function finishJob(jobId: string, outcome: 'done' | 'failed', now: Date = new Date(), why?: string | null): Promise<JobView | null> {
   // A job that never started (still in line) did not finish: it is stopped by the person or starts, never "done"
   const current = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { status: true } });
-  if (current && current.status !== 'queued') await endJob(jobId, outcome, outcome === 'failed' ? 'error' : null, now);
+  if (current && current.status !== 'queued') {
+    // The computer's own sentence about why it could not go on is kept before the job ends, for the message that tells the person
+    const note = outcome === 'failed' ? cleanEndNote(why) : null;
+    if (note) await prisma.computerJob.updateMany({ where: { id: jobId, status: { in: ['running', 'waiting'] } }, data: { endNote: note } });
+    await endJob(jobId, outcome, outcome === 'failed' ? 'error' : null, now);
+  }
   const job = await prisma.computerJob.findUnique({ where: { id: jobId }, include: JOB_INCLUDE });
   return job ? jobView(job) : null;
 }
@@ -787,7 +797,25 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   const seconds = job.secondsRun + stretch;
   const ended = await prisma.computerJob.updateMany({
     where: { id: jobId, status: job.status },
-    data: { status, endedBy, endedAt: now, queuedFor: null, waitingFor: null, readyWhat: null, readyWhere: null, control: 'brick', stretchStarted: null, secondsRun: seconds, agentResponseId: null, brief: null },
+    data: {
+      status,
+      endedBy,
+      endedAt: now,
+      queuedFor: null,
+      waitingFor: null,
+      readyWhat: null,
+      readyWhere: null,
+      control: 'brick',
+      stretchStarted: null,
+      secondsRun: seconds,
+      agentResponseId: null,
+      brief: null,
+      // What it waited for is kept when nobody answered, so Brick can say which step it waited at; no wait is left to tell about
+      endWaitingFor: endedBy === 'unanswered' ? job.waitingFor : null,
+      handoverUntold: false,
+      // The person's own Stop, a computer turned off and a Brick deleted are never told: they just did it
+      endToldAt: silentEnding(endedBy) ? now : null,
+    },
   });
   // Someone else ended it between the read and the write: that one counts and settles
   if (ended.count === 0) return;
@@ -1101,7 +1129,11 @@ export async function requestHandover(jobId: string, waitingFor: WaitingFor, now
   if (job.status === 'running') {
     // The stretch so far is counted, and the machine stays awake for them
     const stretch = job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
-    await prisma.computerJob.updateMany({ where: { id: jobId, status: 'running' }, data: { status: 'waiting', waitingFor, control: 'brick', secondsRun: job.secondsRun + stretch, stretchStarted: now, ...readyData } });
+    await prisma.computerJob.updateMany({
+      where: { id: jobId, status: 'running' },
+      // A new wait is one more thing to tell the person, once (the report back); asked again while it waits it is the same wait
+      data: { status: 'waiting', waitingFor, control: 'brick', secondsRun: job.secondsRun + stretch, stretchStarted: now, handoverSeq: { increment: 1 }, handoverUntold: true, ...readyData },
+    });
   } else if (job.status === 'waiting') {
     await prisma.computerJob.updateMany({ where: { id: jobId, status: 'waiting', control: 'brick' }, data: { waitingFor, ...readyData } });
   }

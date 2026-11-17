@@ -3240,6 +3240,17 @@ model ComputerJob {
   // What the person asked for in more words than the title, for the agent only: never shown, never sent anywhere else, and cleared when the job ends
   brief             String? @db.VarChar(4000)
 
+  // Brick tells the person how a job went, in their chat with it (the report back). Each ending is said once: `endToldAt` is empty until it was
+  // said, and set at once for the endings that are never said (the person's own Stop, turned off, deleted). Each time the job waits for its person
+  // `handoverSeq` goes up and `handoverUntold` is true until that wait was said, so a second wait is a second message and a retry is none.
+  endToldAt      DateTime? @map("ended_told_at")
+  handoverSeq    Int       @default(0) @map("handover_seq")
+  handoverUntold Boolean   @default(false) @map("handover_untold")
+  // What the computer said in one plain sentence when it could not go on, cleaned (no links, no markup), and what the job was waiting for
+  // when nobody answered: the one thing the ending message needs that is gone once the job is over
+  endNote       String? @map("end_note") @db.VarChar(200)
+  endWaitingFor String? @map("end_waiting_for") @db.VarChar(10)
+
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]
   tokens  ComputerJobToken[]
@@ -3247,6 +3258,7 @@ model ComputerJob {
   @@unique([botId, runId])
   @@index([botId, status])
   @@index([personId, status])
+  @@index([status, endToldAt])
   @@map("computer_jobs")
 }
 
