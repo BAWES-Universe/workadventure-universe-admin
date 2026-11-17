@@ -213,7 +213,7 @@ export class FakeComputerProvider implements ComputerProvider {
   scratches: string[] = [];
   /** The machines that were made, in order, with the Brick (made) or the pretend throwaway name. */
   made: string[] = [];
-  /** `confirmRemoved` says "still there" this many times before it says gone. */
+  /** `confirmRemoved` says "still there" this many times (for a Brick's own computer) before it says gone. */
   stillThere = 0;
   /** What the pretend wake time is, in milliseconds (a return from cold storage reads it). */
   restoreMs = 1_200;
@@ -286,7 +286,8 @@ export class FakeComputerProvider implements ComputerProvider {
   async confirmRemoved(ref: string): Promise<'gone' | 'still_there'> {
     this.note('confirmRemoved', ref);
     if (this.coldFail.confirm) throw new Error('The pretend provider failed on confirmRemoved');
-    if (this.stillThere > 0) {
+    // A throwaway computer's removal is confirmed at once: `stillThere` is about the Brick's own computer
+    if (this.stillThere > 0 && !ref.startsWith('scratch-')) {
       this.stillThere--;
       return 'still_there';
     }

@@ -62,6 +62,7 @@ const quiet = (day: string, ref: string, botId: string, over: Partial<ProviderDa
 });
 
 const wipe = async () => {
+  await prisma.computerColdRun.deleteMany({});
   await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
   await prisma.computerReconcile.deleteMany({});
   await prisma.appSetting.deleteMany({ where: { key: 'computer-reconcile-tried' } });
@@ -110,6 +111,17 @@ run('the daily check of our books against the provider’s bill, in a real datab
     expect(result.drift).toEqual([]);
     const row = await prisma.computerReconcile.findUniqueOrThrow({ where: { day: '2026-11-15' } });
     expect(row).toMatchObject({ ourMinutes: 120, agentMinutes: 130, status: 'ok' });
+  });
+
+  it('counts the awake time of a pack-away as booked (it is ours, with no job on the machine), and never the throwaway computer’s', async () => {
+    const botId = await brickWithMachine('m1');
+    // The Brick's computer was awake 50 minutes on the 15th for a pack-away; the throwaway computer 40 minutes more
+    await prisma.computerColdRun.create({ data: { kind: 'pack', botId, machineRef: 'm1', scratch: false, startedAt: new Date('2026-11-15T03:00:00Z'), endedAt: new Date('2026-11-15T03:50:00Z'), seconds: 3000, outcome: 'ok' } });
+    await prisma.computerColdRun.create({ data: { kind: 'pack', botId, machineRef: null, scratch: true, startedAt: new Date('2026-11-15T03:05:00Z'), endedAt: new Date('2026-11-15T03:45:00Z'), seconds: 2400, outcome: 'ok' } });
+    const { provider } = billing((day) => ({ ...quiet(day, 'm1', botId, { awakeMinutes: 50 }), instances: [...quiet(day, 'm1', botId, { awakeMinutes: 50 }).instances, { ref: 'scratch-x', kind: 'scratch', botId: null, totalMicros: 300, computeMicros: 300, awakeMinutes: 40, expectedMicros: null }] }));
+    const result = await reconcileComputers(NOW, provider);
+    expect(result.drift).toEqual([]);
+    expect(await prisma.computerReconcile.findUniqueOrThrow({ where: { day: '2026-11-15' } })).toMatchObject({ ourMinutes: 50, agentMinutes: 50, status: 'ok' });
   });
 
   it('writes the findings as drift, keeps them with the day, and tells Sentry once', async () => {

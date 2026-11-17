@@ -49,3 +49,12 @@ CREATE TABLE "computer_cold_runs" (
 );
 CREATE INDEX "computer_cold_runs_bot_id_started_at_idx" ON "computer_cold_runs"("bot_id", "started_at");
 CREATE INDEX "computer_cold_runs_kind_started_at_idx" ON "computer_cold_runs"("kind", "started_at");
+
+-- The words each column may hold (the code checks them first; the database is the last word). `packing` is the state of a computer while it is packed away.
+ALTER TABLE "brick_computers" DROP CONSTRAINT "brick_computers_machine_check";
+ALTER TABLE "brick_computers" ADD CONSTRAINT "brick_computers_machine_check" CHECK ("machine" IN ('none', 'waking', 'resting', 'working', 'cold', 'broken', 'restoring', 'stopped', 'stopping', 'packing'));
+ALTER TABLE "brick_computers" ADD CONSTRAINT "brick_computers_pack_stage_check" CHECK ("pack_stage" IS NULL OR "pack_stage" IN ('claimed', 'stored', 'verified', 'removing', 'returning'));
+ALTER TABLE "computer_archives" ADD CONSTRAINT "computer_archives_state_check" CHECK ("state" IN ('staging', 'stored', 'verified', 'failed', 'superseded'));
+ALTER TABLE "computer_archives" ADD CONSTRAINT "computer_archives_bytes_check" CHECK ("bytes" >= 0);
+ALTER TABLE "computer_cold_runs" ADD CONSTRAINT "computer_cold_runs_kind_check" CHECK ("kind" IN ('pack', 'return', 'drill'));
+ALTER TABLE "computer_cold_runs" ADD CONSTRAINT "computer_cold_runs_outcome_check" CHECK ("outcome" IN ('open', 'ok', 'failed'));
