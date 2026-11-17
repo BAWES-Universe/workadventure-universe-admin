@@ -363,23 +363,25 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
               picked={provider.models.filter(onList).map(lendModelId)}
               onChange={busy ? undefined : tick}
             />
-            {/* Models the company doesn't list for this key (typed, or for a job it has no list for) stay as rows */}
-            <ModelRows
-              models={provider.models.filter((model) => !onList(model))}
-              alsoListed={provider.models.filter(onList)}
-              jobs={jobs}
-              onChange={(next) => changeModels([...provider.models.filter((model) => onList(model) || next.includes(model)), ...next.filter((model) => !provider.models.includes(model))])}
-              disabled={busy}
-            />
           </>
         ) : (
-          <>
-            {provider.hasKey && !provider.endpoint && jobs.some((job) => voiceKeyCompanyInfo(provider.adapter)?.jobs[job]?.modelList) && (
-              <p className={FIELD_HINT}>Check the key to tick models from {company}’s own list for it.</p>
-            )}
-            <ModelRows models={provider.models} jobs={jobs} onChange={changeModels} disabled={busy} />
-          </>
+          provider.hasKey && !provider.endpoint && jobs.some((job) => voiceKeyCompanyInfo(provider.adapter)?.jobs[job]?.modelList) && (
+            <p className={FIELD_HINT}>Check the key to tick models from {company}’s own list for it.</p>
+          )
         )}
+        {/* One ModelRows in both views, so what is typed in its form survives the company's list arriving (Check key) or going (key
+            replaced). With the list, the models the company doesn't list for this key (typed, or for a job it has no list for) stay as rows */}
+        <ModelRows
+          models={listed ? provider.models.filter((model) => !onList(model)) : provider.models}
+          alsoListed={listed ? provider.models.filter(onList) : undefined}
+          jobs={jobs}
+          onChange={
+            listed
+              ? (next) => changeModels([...provider.models.filter((model) => onList(model) || next.includes(model)), ...next.filter((model) => !provider.models.includes(model))])
+              : changeModels
+          }
+          disabled={busy}
+        />
       </section>
       <section className="grid gap-2">
         <Caption>Address</Caption>

@@ -944,6 +944,16 @@ describe('A voice provider\u2019s models, from the company\u2019s own list for i
     expect(patches()).toHaveLength(0);
   });
 
+  it('keeps what is being typed in Add a model when Check key brings the company\u2019s list in', async () => {
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }] } };
+    const check = await open('v-eleven');
+    fireEvent.click(screen.getByRole('button', { name: 'Add a model' }));
+    fireEvent.change(screen.getByLabelText('Model id'), { target: { value: 'half_typed_model' } });
+    fireEvent.click(check);
+    await screen.findByText('ElevenLabs knows this key and lists 1 model for it. Checked just now, nothing paid.');
+    expect((screen.getByLabelText('Model id') as HTMLInputElement).value).toBe('half_typed_model');
+  });
+
   it('keeps the rows when the company has no list or it can\u2019t be read', async () => {
     fireEvent.click(await open('v-eleven'));
     expect(await screen.findByText('ElevenLabs knows this key. Checked just now, nothing paid.')).toBeTruthy();
