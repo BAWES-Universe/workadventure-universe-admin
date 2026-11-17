@@ -17,6 +17,8 @@ interface Upstream {
   port: number;
   received: Buffer[];
   connections: number;
+  /** Sockets to this server that are open right now. */
+  open: number;
   close(): Promise<void>;
 }
 
@@ -42,6 +44,9 @@ async function upstreamServer(options: { banner?: string; echo?: boolean } = {})
     get connections() {
       return state.connections;
     },
+    get open() {
+      return sockets.size;
+    },
     close: () => {
       for (const socket of sockets) socket.destroy();
       return new Promise<void>((done) => server.close(() => done()));
@@ -49,6 +54,9 @@ async function upstreamServer(options: { banner?: string; echo?: boolean } = {})
   } as Upstream;
 }
 
+let big: net.Server;
+let bigPort = 0;
+const BIG_BYTES = 6_000_000;
 let web: Upstream;
 let banner: Upstream;
 let httpUp: http.Server;
@@ -76,6 +84,13 @@ const basic = (k: { user: string; pass: string }) => `Basic ${Buffer.from(`${k.u
 beforeAll(async () => {
   web = await upstreamServer();
   banner = await upstreamServer({ banner: 'SSH-2.0-testserver\r\n' });
+  // A server that sends a lot at once and closes: what a computer that reads slowly must still receive whole
+  big = net.createServer((socket) => {
+    socket.on('error', () => undefined);
+    socket.end(Buffer.alloc(BIG_BYTES, 7));
+  });
+  await new Promise<void>((done) => big.listen(0, '127.0.0.1', done));
+  bigPort = (big.address() as net.AddressInfo).port;
   httpUp = http.createServer((req, res) => {
     httpSeen.push({ method: req.method, url: req.url, headers: req.headers });
     res.writeHead(200, { 'content-type': 'text/plain' });
@@ -87,6 +102,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await web.close();
   await banner.close();
+  await new Promise<void>((done) => big.close(() => done()));
   httpUp.closeAllConnections();
   await new Promise<void>((done) => httpUp.close(() => done()));
 });
@@ -109,7 +125,7 @@ beforeEach(async () => {
     },
     connect: (address, port) => {
       opened.push({ address, port });
-      return net.connect({ host: '127.0.0.1', port: port === 22 ? banner.port : port === 8080 ? httpUpPort : web.port });
+      return net.connect({ host: '127.0.0.1', port: port === 22 ? banner.port : port === 2222 ? bigPort : port === 8080 ? httpUpPort : web.port });
     },
     helloWaitMs: 400,
     connectTimeoutMs: 1_000,
@@ -487,6 +503,41 @@ describe('limits', () => {
     const other = await connectTo('allowed.test:22', basic(key('quiet-machine')));
     expect(other.status).toBe(200);
     for (const socket of [...open, other.socket]) socket.destroy();
+  });
+});
+
+describe('a tunnel ends cleanly', () => {
+  it('closes the socket to the internet when the computer goes away, so a freed slot has nothing open behind it', async () => {
+    const answer = await connectTo('allowed.test:22', basic(key('leaver')));
+    expect(answer.status).toBe(200);
+    expect(banner.open).toBe(1);
+    // A reset, not a polite end
+    answer.socket.resetAndDestroy();
+    for (let tries = 0; tries < 40 && banner.open > 0; tries++) await new Promise((done) => setTimeout(done, 50));
+    expect(banner.open).toBe(0);
+    // And the slot is free again
+    const again = await connectTo('allowed.test:22', basic(key('leaver')));
+    expect(again.status).toBe(200);
+    again.socket.destroy();
+  });
+
+  it('gives a slow reader everything a server sent before it closed (nothing waiting is thrown away)', async () => {
+    const answer = await connectTo('allowed.test:2222', basic(key('slow-reader')));
+    expect(answer.status).toBe(200);
+    // The computer says its first bytes as any client does, then reads slowly
+    answer.socket.write('hello');
+    let received = answer.rest.length;
+    answer.socket.pause();
+    await new Promise((done) => setTimeout(done, 400));
+    const finished = new Promise<void>((done) => {
+      answer.socket.on('data', (data) => (received += data.length));
+      answer.socket.on('end', () => done());
+      answer.socket.on('close', () => done());
+      answer.socket.on('error', () => done());
+    });
+    answer.socket.resume();
+    await finished;
+    expect(received).toBe(BIG_BYTES);
   });
 });
 

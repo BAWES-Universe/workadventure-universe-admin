@@ -204,8 +204,13 @@ export function createGateway(options: GatewayOptions): Gateway {
         give(auth.machine);
       }
     };
-    client.once('close', release);
     let upstream: net.Socket | null = null;
+    // A computer that goes away (closed, reset, timed out) takes its way out with it: the slot is freed and the socket to the internet is closed too,
+    // so a freed slot never has a socket still open behind it
+    client.once('close', () => {
+      release();
+      upstream?.destroy();
+    });
     const close = () => {
       client.destroy();
       upstream?.destroy();
@@ -227,7 +232,12 @@ export function createGateway(options: GatewayOptions): Gateway {
         }
         upstream.on('error', close);
         upstream.setTimeout(idleMs, close);
-        upstream.once('close', close);
+        // A server that finished (its end is passed to the computer by the pipe, which sends what is still waiting first) is not cut off from the
+        // computer's unread bytes: only a failed connection closes the computer's side at once. The computer's idle timer closes what is left.
+        upstream.once('close', (hadError: boolean) => {
+          if (hadError || client.destroyed) close();
+          else client.end();
+        });
         client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         // Whatever the server says first (SSH, a mail banner) goes straight to the computer; what the computer says first is read before it is sent on
         count(upstream, 'bytesFromInternet');
