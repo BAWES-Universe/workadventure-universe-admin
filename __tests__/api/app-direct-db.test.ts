@@ -235,6 +235,29 @@ run('key apps, in a real database', () => {
     expect((await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true } })).tries).toBe(5);
   });
 
+  it('settles a refusal that was owed once, however many calls settle it at the same moment', async () => {
+    const id = await open();
+    await prisma.appKeyRequest.update({ where: { id }, data: { tries: 3 } });
+    const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const original = prisma.$executeRaw.bind(prisma);
+    let calls = 0;
+    const spy = jest.spyOn(prisma, '$executeRaw').mockImplementation(((...args: unknown[]) => {
+      calls += 1;
+      if (calls > 1) return Promise.reject(new Error('connection lost'));
+      return (original as (...a: unknown[]) => Promise<number>)(...args);
+    }) as never);
+    try {
+      await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(401).deps)).rejects.toMatchObject({ code: 'rejected' });
+    } finally {
+      spy.mockRestore();
+      quiet.mockRestore();
+    }
+    expect((await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true } })).tries).toBe(3);
+    // Five looks at the form at the same moment: the one refusal is written once
+    await Promise.all([1, 2, 3, 4, 5].map(() => readKeyForm(id, sara)));
+    expect((await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true } })).tries).toBe(4);
+  });
+
   it('counts a try only when the service refuses the key: a refusal uses one, an answer that is not a refusal uses none', async () => {
     const id = await open();
     await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(401).deps)).rejects.toMatchObject({ code: 'rejected' });

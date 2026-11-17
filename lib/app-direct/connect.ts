@@ -156,19 +156,24 @@ function readDefinition(row: { definition: unknown; definitionHash: string }): D
 /** A reserved try lapses this long after the longest a call can take (the form's call limit), if it was never released. */
 const RESERVATION_GRACE_SECONDS = 30;
 
-/** Refusals the service gave that could not be written yet (the database failed at that moment), by form: written before the form is read or used again. */
+/**
+ * Refusals the service gave that could not be written yet (the database failed at that moment), by form: written before the form is
+ * read or used again. This is best effort by design: it lives in this process, because the database was down when it was needed, so
+ * nothing durable can hold it. Another instance does not see it, and it is lost on a restart; the worst case is one extra guess per
+ * database failure that hits exactly that write.
+ */
 const owedRefusals = new Map<string, number>();
 
 async function settleOwedRefusals(requestId: string): Promise<void> {
+  // Taken out of the map BEFORE it is written, so two calls that settle at the same moment cannot both write it
   const owed = owedRefusals.get(requestId);
   if (!owed) return;
+  owedRefusals.delete(requestId);
   try {
     await prisma.appKeyRequest.updateMany({ where: { id: requestId }, data: { tries: { increment: owed } } });
-    // What was owed while that write ran is still owed (it is added to the map, not replaced)
-    const left = (owedRefusals.get(requestId) ?? 0) - owed;
-    if (left > 0) owedRefusals.set(requestId, left);
-    else owedRefusals.delete(requestId);
   } catch (error) {
+    // Not written: owed again (once), added to whatever was owed meanwhile
+    owedRefusals.set(requestId, (owedRefusals.get(requestId) ?? 0) + owed);
     console.error('[AppDirect] Could not write a refused try:', error instanceof Error ? error.message : 'unknown');
   }
 }
