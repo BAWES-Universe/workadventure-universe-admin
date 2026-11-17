@@ -561,7 +561,11 @@ export async function ownerOkPage(connection: AppConnection, organization: strin
   const personId = connection.ownerId;
   if (!app || !personId) return { status: 'unavailable' };
   if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(organization)) return { status: 'not_org' };
-  const who = await gitHubRequest<{ id?: number; type?: string }>(null, `/users/${encodeURIComponent(organization)}`, {}, fetchImpl).catch(() => null);
+  // With the person's own sign-in when they have one (GitHub counts it against them, not against our one address's 60 an hour); a lapsed
+  // sign-in still gets the card, the organization's name is public.
+  const signedIn = await gitHubToken(connection.id, fetchImpl).catch(() => null);
+  const token = signedIn?.status === 'ok' ? signedIn.token : null;
+  const who = await gitHubRequest<{ id?: number; type?: string }>(token, `/users/${encodeURIComponent(organization)}`, {}, fetchImpl).catch(() => null);
   if (!who) return { status: 'unavailable' };
   if (!who.ok || who.data.type !== 'Organization' || typeof who.data.id !== 'number') return { status: who.status === 404 || who.ok ? 'not_org' : 'unavailable' };
   // The ticket the return is finished with, once (a newer one replaces it: only the latest page can finish)

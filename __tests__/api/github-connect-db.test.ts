@@ -397,13 +397,21 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(page.origin + page.pathname).toBe('https://github.com/apps/bawes-universe/installations/new/permissions');
     expect(page.searchParams.get('target_id')).toBe('4242');
     expect(body.ownKeyPage).toContain('https://github.com/settings/tokens/new');
-    // No sign-in of Sara's goes to GitHub for this: it is a public page of an organization
+    // The lookup of the organization goes with Sara's own sign-in, so GitHub counts it for her and not for our one address
     expect(calls).toHaveLength(1);
-    expect(new Headers(calls[0].init.headers as Record<string, string>).get('authorization')).toBeNull();
+    expect(new Headers(calls[0].init.headers as Record<string, string>).get('authorization')).toBe('Bearer ghu_first');
 
     // GitHub sends her back after the request (no code: an owner's OK is awaited): the window closes on the game
     const back = await callback(request(`/api/github/callback?setup_action=request&state=${encodeURIComponent(page.searchParams.get('state') as string)}`));
     expect(back.headers.get('location')).toBe('https://play.example.com/oauth-popup-callback.html?oauth=success');
+
+    // A sign-in that has lapsed still gets the card: the organization's name is public
+    const keptAuth = (await prisma.appConnection.findUniqueOrThrow({ where: { id } })).authConfig;
+    await prisma.appConnection.update({ where: { id }, data: { authConfig: null } });
+    const lapsed = await ask('acme-corp');
+    await prisma.appConnection.update({ where: { id }, data: { authConfig: keptAuth } });
+    expect(lapsed.status).toBe(200);
+    expect(new Headers(calls[calls.length - 1].init.headers as Record<string, string>).get('authorization')).toBeNull();
 
     // A person's own account is not an organization to ask; a name that does not exist neither
     expect((await ask('sara')).status).toBe(404);
