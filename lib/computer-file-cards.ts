@@ -419,6 +419,12 @@ export async function resultsOf(botId: string, personId: string, take = 100): Pr
   return rows.map((row) => resultOf(row, brick));
 }
 
+/** How many results a person has from one of their Bricks, and how many bytes: all of them, not only the latest ones listed. */
+export async function resultTotalsOf(botId: string, personId: string): Promise<{ count: number; bytes: number }> {
+  const { _count, _sum } = await prisma.computerJobFile.aggregate({ where: { botId, ownerId: personId, resultId: { not: null } }, _count: { _all: true }, _sum: { bytes: true } });
+  return { count: _count._all, bytes: _sum.bytes ?? 0 };
+}
+
 /**
  * A person's results whose Brick is gone (deleted, waiting out its Undo days, or removed for good), newest first. They are theirs and stay: only the Brick's name on
  * them is "A deleted Brick". Results of a Brick that is still there are listed on that Brick's own Files instead.
