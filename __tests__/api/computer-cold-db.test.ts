@@ -20,7 +20,7 @@ import { COLD_RUN_MAX_MS } from '@/lib/computer-values';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { coldStatus, coldStep, heartbeat, packAway, restoreDrill, STUCK_MS } from '@/lib/computer-cold';
+import { bringBackFromCold, coldStatus, coldStep, heartbeat, packAway, restoreDrill, STUCK_MS } from '@/lib/computer-cold';
 import { computerView, giveComputer, startJob, sweepComputers } from '@/lib/computer';
 import { finishOutside, purgeBrick } from '@/lib/brick-purge';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
@@ -616,6 +616,43 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       await sweepComputers(new Date(NOW.getTime() + 10 * 60_000));
       expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
       expect(bucket.objects.size).toBe(0);
+    });
+
+    it('says it is alive while a copy is being restored for a return, so a slow return is not taken for a stopped server', async () => {
+      const brick = await idleBrick();
+      await packAway(brick.botId, provider, NOW);
+      const before = heartbeat.ms;
+      heartbeat.ms = 25;
+      try {
+        const original = provider.restoreInto.bind(provider);
+        let claimedAtStart: Date | null = null;
+        let claimedAtEnd: Date | null = null;
+        provider.restoreInto = async (ref, source) => {
+          claimedAtStart = (await row(brick.botId)).packClaimedAt;
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          claimedAtEnd = (await row(brick.botId)).packClaimedAt;
+          return original(ref, source);
+        };
+        await bringBackFromCold(brick.botId, provider, NOW);
+        expect(claimedAtStart).not.toBeNull();
+        expect((claimedAtEnd as unknown as Date).getTime()).toBeGreaterThan((claimedAtStart as unknown as Date).getTime());
+      } finally {
+        heartbeat.ms = before;
+      }
+    });
+
+    it('a return that was taken over while it restored changes nothing: the Brick is not marked awake on a computer the other run removed', async () => {
+      const brick = await idleBrick();
+      await packAway(brick.botId, provider, NOW);
+      const original = provider.restoreInto.bind(provider);
+      provider.restoreInto = async (ref, source) => {
+        const result = await original(ref, source);
+        // The sweep took the return over (a new claim id), removed this computer and put the Brick back to cold, before this run finished
+        await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'cold', packStage: null, providerRef: null, packClaimId: 'took-over' } });
+        return result;
+      };
+      await expect(bringBackFromCold(brick.botId, provider, NOW)).rejects.toMatchObject({ why: 'busy' });
+      expect(await row(brick.botId)).toMatchObject({ machine: 'cold', providerRef: null, packStage: null, packClaimId: 'took-over' });
     });
 
     it('cleans up a return a stopped server left: the half-restored computer is removed and the Brick is cold again', async () => {

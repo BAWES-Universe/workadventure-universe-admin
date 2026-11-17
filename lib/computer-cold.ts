@@ -242,10 +242,10 @@ async function giveUp(botId: string, row: PackRow, why: string, options: { awake
   return 'failed';
 }
 
-/** Says the claim is alive every `heartbeat.ms` while `work` runs, only while the row is still at `stage` (the holder of the claim is the one that moves it on). */
-async function alive<T>(botId: string, claimId: string, stage: string, work: () => Promise<T>): Promise<T> {
+/** Says the claim is alive every `heartbeat.ms` while `work` runs, only while the row is still at `stage` (the holder of the claim is the one that moves it on). A return says it too (`machine` 'restoring'). */
+async function alive<T>(botId: string, claimId: string, stage: string, work: () => Promise<T>, machine: 'packing' | 'restoring' = 'packing'): Promise<T> {
   const timer = setInterval(() => {
-    void prisma.brickComputer.updateMany({ where: { botId, machine: 'packing', packClaimId: claimId, packStage: stage }, data: { packClaimedAt: new Date() } }).catch(() => undefined);
+    void prisma.brickComputer.updateMany({ where: { botId, machine, packClaimId: claimId, packStage: stage }, data: { packClaimedAt: new Date() } }).catch(() => undefined);
   }, heartbeat.ms);
   try {
     return await work();
@@ -436,7 +436,9 @@ export interface Returned {
 export async function bringBackFromCold(botId: string, provider: ComputerProvider, now: Date = new Date()): Promise<Returned> {
   const cold = coldProvider(provider);
   if (!cold) throw new ColdError('This provider cannot bring a computer back from cold storage', 'setup');
-  const claimed = await prisma.brickComputer.updateMany({ where: { botId, machine: 'cold', providerRef: null }, data: { machine: 'restoring', packStage: 'returning', packClaimedAt: now } });
+  // The return has a claim of its own, like a pack-away: a sweep that takes a stopped return over gives it a new id, and this run then changes nothing
+  const claimId = randomUUID();
+  const claimed = await prisma.brickComputer.updateMany({ where: { botId, machine: 'cold', providerRef: null }, data: { machine: 'restoring', packStage: 'returning', packClaimedAt: now, packClaimId: claimId } });
   if (claimed.count !== 1) {
     // Another job is bringing it back: wait for it, then use what it made
     const until = Date.now() + RETURN_WAIT_MS;
@@ -452,7 +454,7 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
   }
   const started = Date.now();
   const giveBack = async (error: ColdError): Promise<never> => {
-    await prisma.brickComputer.updateMany({ where: { botId, machine: 'restoring', packStage: 'returning' }, data: { machine: 'cold', packStage: null, packClaimedAt: null } });
+    await prisma.brickComputer.updateMany({ where: { botId, machine: 'restoring', packStage: 'returning', packClaimId: claimId }, data: { machine: 'cold', packStage: null, packClaimedAt: null } });
     throw error;
   };
   const archives = (await verifiedArchives(botId)).slice(0, 2);
@@ -469,19 +471,27 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
       return giveBack(new ColdError(`A computer could not be made: ${words(error)}`, 'restore'));
     }
     // Written at once, so a server that stops here leaves a reference to find and remove
-    await prisma.brickComputer.updateMany({ where: { botId, machine: 'restoring' }, data: { providerRef: made.ref, madeAt: new Date(), packClaimedAt: new Date() } });
+    const noted = await prisma.brickComputer.updateMany({ where: { botId, machine: 'restoring', packStage: 'returning', packClaimId: claimId }, data: { providerRef: made.ref, madeAt: new Date(), packClaimedAt: new Date() } });
+    if (noted.count !== 1) {
+      // Taken over while the computer was being made: the run that took over knows of no computer of this one's, so it is removed here
+      await cold.remove(made.ref).catch((error) => console.error('[Computer] Could not remove a computer of a return that was taken over:', words(error)));
+      throw new ColdError('The return was taken over', 'busy');
+    }
     let result: RestoreResult;
     try {
-      result = await cold.restoreInto(made.ref, { url: downloadUrl(archive.id) ?? url, token: mintDownloadToken(archive.id, made.ref), sha256: archive.sha256 ?? '' });
+      // Says it is alive while the copy is fetched and checked, so a long restore is never taken for a stopped server
+      result = await alive(botId, claimId, 'returning', () => cold.restoreInto(made.ref, { url: downloadUrl(archive.id) ?? url, token: mintDownloadToken(archive.id, made.ref), sha256: archive.sha256 ?? '' }), 'restoring');
     } catch (error) {
       result = { ok: false, reason: words(error), ms: 0 };
     }
     if (result.ok) {
       const ms = Date.now() - started;
-      await prisma.brickComputer.update({
-        where: { botId },
+      // Only while this run still holds the claim: one that was taken over (its computer removed meanwhile) must not mark the Brick awake on a computer that is gone
+      const done = await prisma.brickComputer.updateMany({
+        where: { botId, machine: 'restoring', packStage: 'returning', packClaimId: claimId },
         data: { machine: 'waking', packStage: null, packClaimedAt: null, olderCopyUsed: at > 0, restoredFrom: at > 0 ? archive.createdAt : null, returnedAt: new Date(), returnMs: ms },
       });
+      if (done.count !== 1) throw new ColdError('The return was taken over', 'busy');
       if (at > 0) {
         Sentry.captureMessage('A computer came back from the older copy', { level: 'warning', tags: { area: 'computer', step: 'cold_return' }, extra: { botId, newest: archives[0].id, used: archive.id, reason: lastReason } });
       }
@@ -493,7 +503,7 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
     try {
       await cold.remove(made.ref);
       if ((await cold.confirmRemoved(made.ref)) !== 'gone') throw new Error('still listed');
-      await prisma.brickComputer.updateMany({ where: { botId, machine: 'restoring' }, data: { providerRef: null } });
+      await prisma.brickComputer.updateMany({ where: { botId, machine: 'restoring', packClaimId: claimId }, data: { providerRef: null } });
     } catch (error) {
       // It cannot be removed now: it stays recorded (stage `returning`), and the sweep removes it and puts the Brick back to cold
       console.error('[Computer] Could not remove a half-restored computer:', words(error));
@@ -594,7 +604,8 @@ async function recover(provider: Cold, now: Date): Promise<{ resumed: number; re
     await runPack(row.botId, provider, claimId);
   }
   for (const row of await prisma.brickComputer.findMany({ where: { machine: 'restoring', packStage: 'returning', packClaimedAt: { lte: stale } }, select: { botId: true, providerRef: true, packClaimedAt: true }, take: 20 })) {
-    const took = await prisma.brickComputer.updateMany({ where: { botId: row.botId, machine: 'restoring', packStage: 'returning', packClaimedAt: row.packClaimedAt }, data: { packClaimedAt: now } });
+    // A new claim id: the return that stopped (or is only slow) can change nothing from here on
+    const took = await prisma.brickComputer.updateMany({ where: { botId: row.botId, machine: 'restoring', packStage: 'returning', packClaimedAt: row.packClaimedAt }, data: { packClaimedAt: now, packClaimId: randomUUID() } });
     if (took.count !== 1) continue;
     try {
       // The computer a return was making is half restored: it is removed and the Brick is cold again (the next job brings it back whole)
