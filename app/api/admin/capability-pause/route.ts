@@ -3,6 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
+import { windDownWords } from '@/lib/capability-pause-words';
 import { CAPABILITIES, getCapabilityPauses, pauseCapability, pauseReasonWords, resumeCapability, type Capability } from '@/lib/capability-pause';
 import { liftWindDown, windDownStatus } from '@/lib/computer';
 
@@ -42,7 +43,7 @@ async function answer() {
       name: NAMES[key],
       paused,
       reason,
-      words: windDownOn && !pause.paused ? 'Wound down: every job ended and every machine stopped' : pauseReasonWords(key, pause.reason),
+      words: windDownOn && !pause.paused ? windDownWords(wind.jobsLeft, wind.machinesLeft) : pauseReasonWords(key, pause.reason),
       at: pause.paused ? pause.at : windDownOn ? wind.since : null,
       ...(key === 'computers' ? { jobsLeft: wind.jobsLeft, machinesLeft: wind.machinesLeft } : {}),
     };

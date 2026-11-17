@@ -16,3 +16,10 @@ export const PAUSED_LINE: Record<Capability, string> = {
   apps: 'Apps are paused for a while, so that was not done.',
   computers: 'Computers are paused for a while, so that was not started.',
 };
+
+/** The wind-down is "on" the moment it starts; it is only done when nothing is left, and until then the words say what is. */
+export function windDownWords(jobsLeft: number, machinesLeft: number): string {
+  if (jobsLeft <= 0 && machinesLeft <= 0) return 'Wound down: every job ended and every machine stopped';
+  const left = [jobsLeft > 0 ? `${jobsLeft} ${jobsLeft === 1 ? 'job' : 'jobs'} still ending` : null, machinesLeft > 0 ? `${machinesLeft} ${machinesLeft === 1 ? 'machine' : 'machines'} still stopping` : null].filter(Boolean);
+  return `Winding down: ${left.join(', ')}`;
+}

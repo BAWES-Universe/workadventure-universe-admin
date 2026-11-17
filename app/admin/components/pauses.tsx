@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/components/ui/toast';
@@ -69,8 +69,12 @@ export function CapabilityPauses() {
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [ending, setEnding] = useState(false);
+  // One count for every read and every command: an answer is only shown when nothing newer was started after it, so a slow read that began
+  // before a command can never put back what that command changed
+  const latest = useRef(0);
 
   async function load() {
+    const mine = ++latest.current;
     setFailed(false);
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
@@ -78,9 +82,9 @@ export function CapabilityPauses() {
       if (!response.ok) throw new Error('load');
       const next = readPauses(await response.json());
       if (!next) throw new Error('shape');
-      setRows(next);
+      if (mine === latest.current) setRows(next);
     } catch {
-      setFailed(true);
+      if (mine === latest.current) setFailed(true);
     }
   }
 
@@ -90,6 +94,7 @@ export function CapabilityPauses() {
 
   async function change(row: PauseRow, action: 'pause' | 'resume') {
     setBusy(row.key);
+    const mine = ++latest.current;
     const result = await send('/api/admin/capability-pause', { capability: row.key, action });
     setBusy(null);
     if (!result.ok) {
@@ -97,12 +102,13 @@ export function CapabilityPauses() {
       return;
     }
     const next = readPauses(result.data);
-    if (next) setRows(next);
+    if (next && mine === latest.current) setRows(next);
     addToast({ description: `${row.name} ${action === 'pause' ? 'paused' : 'resumed'}`, variant: 'success', duration: 2500 });
   }
 
   async function endRunning() {
     setBusy('computers');
+    latest.current++;
     const result = await send('/api/admin/computer/wind-down', { action: 'start' });
     setBusy(null);
     setEnding(false);
