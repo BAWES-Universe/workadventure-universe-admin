@@ -1276,13 +1276,13 @@ export const VOICE_KEY_COMPANIES: VoiceKeyCompanyInfo[] = [
           { id: 'gpt-realtime-2.1-mini', label: 'GPT Realtime 2.1 mini' },
         ],
         // GET /v1/models lists every model the key may use with nothing on what each does: the talking ones are named for realtime.
-        // gpt-realtime-whisper only listens, so it stays out
+        // The realtime models that only listen (whisper, transcribe) or translate (translate) are not conversational, so they stay out
         modelList: {
           url: 'https://api.openai.com/v1/models',
           list: 'data',
           id: 'id',
           keepStarting: ['gpt-realtime', 'gpt-4o-realtime', 'gpt-4o-mini-realtime'],
-          leaveOut: ['gpt-realtime-whisper'],
+          leaveOut: ['gpt-realtime-whisper', 'gpt-realtime-transcribe', 'gpt-realtime-translate'],
         },
         // OpenAI has no call that lists voices: these are the realtime voices its docs list
         fixedVoices: [

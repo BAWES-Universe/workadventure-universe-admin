@@ -194,7 +194,7 @@ describe('lists of companies that say little about each model', () => {
     expect(fetchMock).toHaveBeenCalledWith('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000', expect.objectContaining({ headers: expect.objectContaining({ 'x-goog-api-key': 'k' }) }));
   });
 
-  it('OpenAI: only the realtime models, without the one that only listens', async () => {
+  it('OpenAI: only the conversational realtime models, without the ones that only listen or translate', async () => {
     reply({
       object: 'list',
       data: [
@@ -202,6 +202,8 @@ describe('lists of companies that say little about each model', () => {
         { id: 'gpt-realtime-2.1-mini', object: 'model' },
         { id: 'gpt-4o-realtime-preview-2025-06-03', object: 'model' },
         { id: 'gpt-realtime-whisper', object: 'model' },
+        { id: 'gpt-realtime-translate', object: 'model' },
+        { id: 'gpt-realtime-transcribe', object: 'model' },
         { id: 'gpt-5.5', object: 'model' },
         { id: 'tts-1', object: 'model' },
       ],
