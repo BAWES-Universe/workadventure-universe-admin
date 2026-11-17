@@ -3030,7 +3030,6 @@ model BotActionAttempt {
   leaseExpiresAt    DateTime  @map("lease_expires_at")
   finishedAt        DateTime? @map("finished_at")
   // When its meter line was written; null until then, so the sweep writes a line a failed or crashed settle left out
-  meteredAt         DateTime? @map("metered_at")
 
   request BotActionRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
 
