@@ -16,6 +16,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
+import { COLD_RUN_MAX_MS } from '@/lib/computer-values';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
@@ -25,7 +26,7 @@ import { finishOutside, purgeBrick } from '@/lib/brick-purge';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { listDeletedBricks } from '@/lib/brick-default';
 import { computerReadiness } from '@/lib/computer-readiness';
-import { archiveById, markVerified, mintDownloadToken, pruneArchives, setArchiveStoreForTests, storeArchive, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
+import { archiveById, deleteAllArchives, markVerified, mintDownloadToken, pruneArchives, setArchiveStoreForTests, storeArchive, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
 import { GET as download } from '@/app/api/computer/archives/[id]/download/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -250,6 +251,108 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { packClaimedAt: new Date(NOW.getTime() - STUCK_MS - 60_000) } });
       expect(await pruneArchives(brick.botId, null, NOW)).toBe(1);
       expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+    });
+
+    it('a run whose claim was taken over during its proof changes nothing of the run that took over: the copy is not failed, the computer is not stopped', async () => {
+      const brick = await idleBrick();
+      provider.restoreInto = async () => {
+        // Recovery took the claim over (a new id) while this run was still proving, and this run's proof then fails
+        await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { packClaimId: 'taken-over', packClaimedAt: new Date() } });
+        // Only what this run does from here on is looked at (the computer was put to sleep for the proof before it)
+        provider.calls.length = 0;
+        return { ok: false, reason: 'late_failure', ms: 10 };
+      };
+      expect(await packAway(brick.botId, provider, NOW)).toBe('busy');
+      expect(await row(brick.botId)).toMatchObject({ machine: 'packing', packStage: 'stored', packClaimId: 'taken-over', packFailures: 0 });
+      expect((await prisma.computerArchive.findFirstOrThrow({ where: { botId: brick.botId } })).state).toBe('stored');
+      expect(names().filter((call) => call.startsWith('stop:'))).toEqual([]);
+    });
+
+    it('a pack-away whose computer is already being removed finishes when a job arrives: the Brick goes cold and the job brings it back from the copy', async () => {
+      const brick = await idleBrick();
+      const removeComputer = provider.remove.bind(provider);
+      let broken = true;
+      provider.remove = async (ref) => {
+        if (broken && ref === brick.ref) throw new Error('the provider did not answer');
+        return removeComputer(ref);
+      };
+      // The removal stops half way: the row stays at "removing" for the sweep
+      expect(await packAway(brick.botId, provider, NOW)).toBe('busy');
+      expect(await row(brick.botId)).toMatchObject({ machine: 'packing', packStage: 'removing' });
+      broken = false;
+      // A job arrives, and the sweep resumes the pack-away later
+      await prisma.computerJob.create({ data: { botId: brick.botId, personId: brick.personId, title: 'arrived', status: 'running', startedAt: NOW, stretchStarted: NOW } });
+      await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { packClaimedAt: new Date(NOW.getTime() - STUCK_MS - 60_000) } });
+      const out = await coldStep(provider, NOW);
+      expect(out.resumed).toBe(1);
+      expect(await row(brick.botId)).toMatchObject({ machine: 'cold', providerRef: null, packStage: null });
+    });
+
+    it('a copy of a Brick purged while it was being written is not kept: no row and no object stay', async () => {
+      const brick = await idleBrick();
+      // The purge marker is written first, before the purge reads or deletes any copy
+      await prisma.brickPurge.create({ data: { botId: brick.botId, machinePending: false, copyPending: true } });
+      await expect(storeArchive(brick.botId, Readable.toWeb(Readable.from([Buffer.from('home')])) as ReadableStream<Uint8Array>)).rejects.toThrow();
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+      expect(bucket.objects.size).toBe(0);
+    });
+
+    it('a copy that lands after the purge read its rows is deleted by the copy itself, and an object that cannot be deleted keeps a row so the clean-up finds it', async () => {
+      const brick = await idleBrick();
+      const put = bucket.store.put.bind(bucket.store);
+      bucket.store.put = async (finalKey, stagingKey, stream) => {
+        const sealed = await put(finalKey, stagingKey, stream);
+        // The purge runs while the upload is out: marker first, then it deletes every row it can see
+        await prisma.brickPurge.create({ data: { botId: brick.botId, machinePending: false, copyPending: true } });
+        await deleteAllArchives(brick.botId);
+        return sealed;
+      };
+      const remove = bucket.store.remove.bind(bucket.store);
+      let failRemoval = true;
+      bucket.store.remove = async (keys) => {
+        if (failRemoval) throw new Error('the bucket did not answer');
+        return remove(keys);
+      };
+      await expect(storeArchive(brick.botId, Readable.toWeb(Readable.from([Buffer.from('home')])) as ReadableStream<Uint8Array>)).rejects.toThrow();
+      // The object is still there, and so is a row that names it
+      expect(bucket.objects.size).toBe(1);
+      const left = await prisma.computerArchive.findMany({ where: { botId: brick.botId } });
+      expect(left).toHaveLength(1);
+      expect(left[0].state).toBe('superseded');
+      // The next try (the Brick has no computer record, so the clean-up takes it) deletes the object and the row
+      failRemoval = false;
+      await deleteAllArchives(brick.botId);
+      expect(bucket.objects.size).toBe(0);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+    });
+
+    it('the purge deletes only the rows whose objects it deleted: a copy that began meanwhile keeps its row', async () => {
+      const brick = await idleBrick();
+      const first = await storeArchive(brick.botId, Readable.toWeb(Readable.from([Buffer.from('one')])) as ReadableStream<Uint8Array>);
+      const remove = bucket.store.remove.bind(bucket.store);
+      bucket.store.remove = async (keys) => {
+        await remove(keys);
+        // A writer's row appears while the objects are being deleted
+        await prisma.computerArchive.create({ data: { botId: brick.botId, generation: 99, state: 'staging', objectKey: `computer-cold/${brick.botId}/99.late.ubc` } });
+      };
+      await deleteAllArchives(brick.botId);
+      const rowsLeft = await prisma.computerArchive.findMany({ where: { botId: brick.botId } });
+      expect(rowsLeft.map((row) => row.generation)).toEqual([99]);
+      expect(first.generation).toBe(1);
+    });
+
+    it('a run that was open when its server stopped is closed at the longest a run may last, and its time is booked once', async () => {
+      const brick = await idleBrick();
+      const started = new Date(NOW.getTime() - 9 * 3_600_000);
+      const run = await prisma.computerColdRun.create({ data: { kind: 'pack', botId: brick.botId, machineRef: brick.ref, scratch: false, startedAt: started } });
+      await coldStep(provider, NOW);
+      const closed = await prisma.computerColdRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect(closed.endedAt?.getTime()).toBe(started.getTime() + COLD_RUN_MAX_MS);
+      expect(closed).toMatchObject({ outcome: 'failed', seconds: COLD_RUN_MAX_MS / 1000 });
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:cold:${run.id}:time` } })).toBe(1);
+      // Asked again it is the same line
+      await coldStep(provider, NOW);
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:cold:${run.id}:time` } })).toBe(1);
     });
 
     it('keeps the computer when it holds more outside its home folder than can be carried, and says why only by not packing it', async () => {
@@ -617,10 +720,13 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       await packAway(brick.botId, provider, NOW);
       provider.restoreResults = [{ ok: false, reason: 'damaged', ms: 1 }];
       expect(await restoreDrill(provider, new Date(Date.now() + 8 * DAY))).toBe('failed');
-      expect(await prisma.computerColdRun.count({ where: { kind: 'drill', outcome: 'failed' } })).toBe(0);
+      // The run is written down as failed (not as a run that went fine), and the readiness page is not ready
+      expect(await prisma.computerColdRun.count({ where: { kind: 'drill', outcome: 'failed' } })).toBe(1);
+      expect((await coldStatus()).lastDrill).toMatchObject({ ok: false });
       const readiness = await computerReadiness();
       const cold = readiness.checks.find((check) => check.name === 'cold storage');
-      expect(cold).toMatchObject({ ok: true });
+      expect(cold).toMatchObject({ ok: false });
+      expect(cold?.detail).toContain('FAILED');
       expect(cold?.detail).toContain('1 computer packed away');
     });
 

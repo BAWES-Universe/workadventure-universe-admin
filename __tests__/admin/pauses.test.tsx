@@ -64,4 +64,37 @@ describe('the pause screen', () => {
     });
     expect(screen.getByTestId('pause-computers').getAttribute('data-paused')).toBe('no');
   });
+
+  it('reads again when a Resume fails after “End them now”, so the screen is not left with the ended job and its button', async () => {
+    const slowRead = later();
+    let reads = 0;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/api/admin/computer/wind-down') return Promise.resolve(reply({}));
+      // The Resume never reaches the server
+      if (init?.method === 'POST') return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'That didn’t work. Try again.' }) });
+      reads++;
+      if (reads === 1) return Promise.resolve(reply({ capabilities: rows(true).capabilities.map((row) => (row.key === 'computers' ? { ...row, jobsLeft: 1 } : row)) }));
+      // The read after “End them now” is slow and is dropped when the Resume is sent; the read after the failed Resume says the job is over
+      if (reads === 2) return slowRead.promise;
+      return Promise.resolve(reply(rows(true)));
+    });
+    render(<CapabilityPauses />);
+    await waitFor(() => expect(screen.getByTestId('pause-end-running')).toBeTruthy());
+    fireEvent.click(screen.getByText('End them now'));
+    const sheetButton = within(await screen.findByRole('dialog')).getByRole('button', { name: 'End them now' });
+    await act(async () => {
+      fireEvent.click(sheetButton);
+    });
+    await waitFor(() => expect(reads).toBe(2));
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Resume Computers'));
+    });
+    await waitFor(() => expect(reads).toBe(3));
+    await waitFor(() => expect(screen.queryByTestId('pause-end-running')).toBeNull());
+    // The dropped read arrives last and changes nothing
+    await act(async () => {
+      slowRead.resolve(reply({ capabilities: rows(true).capabilities.map((row) => (row.key === 'computers' ? { ...row, jobsLeft: 1 } : row)) }));
+    });
+    expect(screen.queryByTestId('pause-end-running')).toBeNull();
+  });
 });

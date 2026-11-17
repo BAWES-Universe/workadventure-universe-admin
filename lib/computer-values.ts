@@ -69,3 +69,6 @@ export function costOfSeconds(seconds: number, microsPerMinute: number | null): 
 export function roomFor(minutes: number, microsPerMinute: number | null): number {
   return Math.max(1, Math.ceil(minutes * (microsPerMinute ?? 0)));
 }
+
+/** The longest one cold-storage run (a pack-away, a proof, a drill) may last: a run still open after this long was stopped with its server, and is closed at this length. */
+export const COLD_RUN_MAX_MS = 6 * 60 * 60 * 1000;

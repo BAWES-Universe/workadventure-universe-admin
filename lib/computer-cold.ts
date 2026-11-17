@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import * as Sentry from '@sentry/nextjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
@@ -5,7 +6,7 @@ import { getBrickLimits } from '@/lib/bot-limits';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { storageMonthMicros } from '@/lib/meter-allowance';
 import { recordKeptBytes } from '@/lib/computer-disk';
-import { costOfSeconds } from '@/lib/computer-values';
+import { COLD_RUN_MAX_MS, costOfSeconds } from '@/lib/computer-values';
 import type { ComputerProvider, MachineInfo, PackInventory, RestoreResult } from '@/lib/computer-provider';
 import {
   archiveById,
@@ -76,43 +77,73 @@ const backoffMs = (failures: number) => Math.min(DAY, 30 * MIN * 2 ** Math.min(M
  * Runs `work` and writes down how long it took, as awake time that is the Brick's (a pack-away) or the throwaway computer's (a proof, a drill). A return is not written here: the job that asked for it holds the computer while it comes back, so its own time counts it.
  * The daily check of the books counts the first kind so it is not "unbooked time"; both are written to the books as the computer pool's spend.
  */
-async function timed<T>(kind: 'pack' | 'drill', botId: string | null, ref: string | null, scratch: boolean, provider: ComputerProvider, work: () => Promise<T>): Promise<T> {
+async function timed<T>(kind: 'pack' | 'drill', botId: string | null, ref: string | null, scratch: boolean, provider: ComputerProvider, work: () => Promise<T>, failedBy?: (result: T) => string | null): Promise<T> {
   const started = new Date();
   const run = await prisma.computerColdRun.create({ data: { kind, botId, machineRef: ref, scratch, startedAt: started } });
   let outcome: 'ok' | 'failed' = 'ok';
   let detail: string | null = null;
   try {
-    return await work();
+    const result = await work();
+    // A work that returns "did not work" (a restore that did not check out) is a failed run too, not only one that throws
+    const bad = failedBy ? failedBy(result) : null;
+    if (bad !== null) {
+      outcome = 'failed';
+      detail = bad.replace(/\s+/g, ' ').slice(0, 180);
+    }
+    return result;
   } catch (error) {
     outcome = 'failed';
     detail = words(error);
     throw error;
   } finally {
     const ended = new Date();
-    const seconds = Math.max(0, Math.round((ended.getTime() - started.getTime()) / 1000));
-    await prisma.computerColdRun.update({ where: { id: run.id }, data: { endedAt: ended, seconds, outcome, detail } }).catch(() => undefined);
-    const cost = costOfSeconds(seconds, provider.microsPerMinute());
-    await recordMeterEvent({
-      eventId: `computer:cold:${run.id}:time`,
-      kind: 'computer_time',
-      pool: 'computer',
-      occurredAt: ended,
-      personKey: 'unknown',
-      personId: null,
-      botId,
-      brick: true,
-      payerKind: 'universe',
-      payerPersonId: null,
-      route: 'computer',
-      jobId: null,
-      quantity: seconds,
-      unit: 'second',
-      costMicros: cost,
-      basis: cost === null ? 'unknown' : provider.kind === 'real' ? 'measured' : 'estimated',
-      sourceRef: `computer_cold_runs:${run.id}`,
-      detail: { kind, scratch, outcome },
-    }).catch((error) => console.error('[Computer] Could not record cold storage time:', words(error)));
+    await closeRun(run.id, { kind, botId, scratch }, provider, started, ended, outcome, detail);
   }
+}
+
+/** Writes down how long a run took and what it cost, once: the run's row and its line in the books (the same line is never written twice). */
+async function closeRun(id: string, run: { kind: string; botId: string | null; scratch: boolean }, provider: ComputerProvider, started: Date, ended: Date, outcome: 'ok' | 'failed', detail: string | null): Promise<void> {
+  const seconds = Math.max(0, Math.round((ended.getTime() - started.getTime()) / 1000));
+  await prisma.computerColdRun.update({ where: { id }, data: { endedAt: ended, seconds, outcome, detail } }).catch(() => undefined);
+  const cost = costOfSeconds(seconds, provider.microsPerMinute());
+  await recordMeterEvent({
+    eventId: `computer:cold:${id}:time`,
+    kind: 'computer_time',
+    pool: 'computer',
+    occurredAt: ended,
+    personKey: 'unknown',
+    personId: null,
+    botId: run.botId,
+    brick: true,
+    payerKind: 'universe',
+    payerPersonId: null,
+    route: 'computer',
+    jobId: null,
+    quantity: seconds,
+    unit: 'second',
+    costMicros: cost,
+    basis: cost === null ? 'unknown' : provider.kind === 'real' ? 'measured' : 'estimated',
+    sourceRef: `computer_cold_runs:${id}`,
+    detail: { kind: run.kind, scratch: run.scratch, outcome },
+  }).catch((error) => console.error('[Computer] Could not record cold storage time:', words(error)));
+}
+
+/**
+ * A run whose server stopped before it wrote its end is closed here, at the longest a run may last: its time is booked once, up to that end, and the
+ * daily check of the books never counts it as open on every later day.
+ */
+async function closeInterruptedRuns(provider: ComputerProvider, now: Date): Promise<number> {
+  const open = await prisma.computerColdRun.findMany({ where: { endedAt: null, startedAt: { lte: new Date(now.getTime() - COLD_RUN_MAX_MS) } }, take: 50 });
+  let closed = 0;
+  for (const run of open) {
+    const ended = new Date(run.startedAt.getTime() + COLD_RUN_MAX_MS);
+    // Only the run that is still open: one that finished since keeps what it wrote
+    const took = await prisma.computerColdRun.updateMany({ where: { id: run.id, endedAt: null }, data: { endedAt: ended, seconds: Math.round(COLD_RUN_MAX_MS / 1000), outcome: 'failed', detail: 'stopped before it was written down' } });
+    if (took.count !== 1) continue;
+    await closeRun(run.id, run, provider, run.startedAt, ended, 'failed', 'stopped before it was written down');
+    closed++;
+  }
+  return closed;
 }
 
 // ---------- Proof on a throwaway computer ----------
@@ -123,11 +154,19 @@ async function proveOnScratch(provider: Cold, archive: ArchiveRow, kind: 'pack' 
   if (!url || !archive.sha256) throw new ColdError('The address copies are fetched from is not set', 'setup');
   let scratch: MachineInfo | null = null;
   try {
-    return await timed(kind, botId, null, true, provider, async () => {
-      scratch = await provider.makeScratch();
-      const result = await provider.restoreInto(scratch.ref, { url, token: mintDownloadToken(archive.id, scratch.ref), sha256: archive.sha256 as string });
-      return result;
-    });
+    return await timed(
+      kind,
+      botId,
+      null,
+      true,
+      provider,
+      async () => {
+        scratch = await provider.makeScratch();
+        const result = await provider.restoreInto(scratch.ref, { url, token: mintDownloadToken(archive.id, scratch.ref), sha256: archive.sha256 as string });
+        return result;
+      },
+      (result) => (result.ok ? null : `the restore did not check out (${result.reason ?? 'unknown'})`),
+    );
   } finally {
     const made = scratch as MachineInfo | null;
     if (made) {
@@ -150,20 +189,23 @@ async function activeJobs(botId: string): Promise<number> {
   return prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } });
 }
 
-/** Moves the claim forward and says it is alive; only the holder of the claim can. */
-async function advance(botId: string, from: string, to: string, extra: Prisma.BrickComputerUpdateManyMutationInput = {}): Promise<boolean> {
-  const moved = await prisma.brickComputer.updateMany({ where: { botId, machine: 'packing', packStage: from }, data: { packStage: to, packClaimedAt: new Date(), ...extra } });
+/** Moves the claim forward and says it is alive; only the holder of the claim (its own id, new at every take-over) can. */
+async function advance(botId: string, claimId: string, from: string, to: string, extra: Prisma.BrickComputerUpdateManyMutationInput = {}): Promise<boolean> {
+  const moved = await prisma.brickComputer.updateMany({ where: { botId, machine: 'packing', packClaimId: claimId, packStage: from }, data: { packStage: to, packClaimedAt: new Date(), ...extra } });
   return moved.count === 1;
 }
 
 /** Gives the computer back as it was. `awake` leaves it as it is (a job is arriving for it); otherwise it is put to sleep and proved so. */
-async function giveUp(botId: string, row: PackRow, why: string, options: { awake: boolean; count: boolean; provider?: Cold; stage?: string }): Promise<'failed'> {
+async function giveUp(botId: string, row: PackRow, why: string, options: { awake: boolean; count: boolean; provider?: Cold; stage?: string; claimId: string }): Promise<'failed' | 'busy'> {
   const previous = row.packPrevious === 'stopped' ? 'stopped' : 'resting';
-  await prisma.brickComputer.updateMany({
-    // `stage`: a run that only holds an earlier step gives up only while the row is still at that step (another run may be past it)
-    where: { botId, machine: 'packing', ...(options.stage ? { packStage: options.stage } : {}) },
-    data: { machine: options.awake ? previous : 'stopping', packStage: null, packClaimedAt: null, packArchiveId: null, packPrevious: null, ...(options.count ? { packTriedAt: new Date(), packFailures: { increment: 1 } } : {}) },
+  const given = await prisma.brickComputer.updateMany({
+    // Only the run that holds the claim (a run that was taken over changes nothing of the one that took over), and `stage`: a run that only holds
+    // an earlier step gives up only while the row is still at that step (another run may be past it)
+    where: { botId, machine: 'packing', packClaimId: options.claimId, ...(options.stage ? { packStage: options.stage } : {}) },
+    data: { machine: options.awake ? previous : 'stopping', packStage: null, packClaimedAt: null, packClaimId: null, packArchiveId: null, packPrevious: null, ...(options.count ? { packTriedAt: new Date(), packFailures: { increment: 1 } } : {}) },
   });
+  // Not given up here (the claim is someone else's now): nothing is stopped, nothing is reported, the one that holds it goes on
+  if (given.count !== 1) return 'busy';
   if (!options.awake && row.providerRef && options.provider) {
     // Asleep and proved, as everywhere else: a stop that did not take stays `stopping` and every sweep goes on until it does
     const ref = row.providerRef;
@@ -179,9 +221,9 @@ async function giveUp(botId: string, row: PackRow, why: string, options: { awake
 }
 
 /** Says the claim is alive every `heartbeat.ms` while `work` runs, only while the row is still at `stage` (the holder of the claim is the one that moves it on). */
-async function alive<T>(botId: string, stage: string, work: () => Promise<T>): Promise<T> {
+async function alive<T>(botId: string, claimId: string, stage: string, work: () => Promise<T>): Promise<T> {
   const timer = setInterval(() => {
-    void prisma.brickComputer.updateMany({ where: { botId, machine: 'packing', packStage: stage }, data: { packClaimedAt: new Date() } }).catch(() => undefined);
+    void prisma.brickComputer.updateMany({ where: { botId, machine: 'packing', packClaimId: claimId, packStage: stage }, data: { packClaimedAt: new Date() } }).catch(() => undefined);
   }, heartbeat.ms);
   try {
     return await work();
@@ -190,19 +232,20 @@ async function alive<T>(botId: string, stage: string, work: () => Promise<T>): P
   }
 }
 
-/** Takes an idle computer for packing. False when it is not idle any more (a job, a wake, another sweep took it first). */
-async function claim(row: PackRow, now: Date): Promise<boolean> {
+/** Takes an idle computer for packing and returns the id of the claim. Null when it is not idle any more (a job, a wake, another sweep took it first). */
+async function claim(row: PackRow, now: Date): Promise<string | null> {
+  const claimId = randomUUID();
   const claimed = await prisma.brickComputer.updateMany({
     where: { botId: row.botId, machine: row.machine, providerRef: row.providerRef, packStage: null, updatedAt: row.updatedAt },
-    data: { machine: 'packing', packStage: 'claimed', packPrevious: row.machine, packClaimedAt: now },
+    data: { machine: 'packing', packStage: 'claimed', packPrevious: row.machine, packClaimedAt: now, packClaimId: claimId },
   });
-  if (claimed.count !== 1) return false;
+  if (claimed.count !== 1) return null;
   // A job that started in the same moment keeps the computer
   if ((await activeJobs(row.botId)) > 0) {
-    await giveUp(row.botId, { ...row, packPrevious: row.machine }, 'a job started', { awake: true, count: false });
-    return false;
+    await giveUp(row.botId, { ...row, packPrevious: row.machine }, 'a job started', { awake: true, count: false, claimId });
+    return null;
   }
-  return true;
+  return claimId;
 }
 
 /**
@@ -220,24 +263,30 @@ async function mustStop(botId: string): Promise<{ why: string; awake: boolean } 
  * Goes through the steps from where `packStage` says. Safe to call again for the same claim (a sweep that found it stuck): each step checks what
  * the one before wrote. Returns 'packed' only when the computer is gone and the provider confirmed it.
  */
-async function runPack(botId: string, provider: Cold): Promise<'packed' | 'failed' | 'busy'> {
+async function runPack(botId: string, provider: Cold, claimId: string): Promise<'packed' | 'failed' | 'busy'> {
   let row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
   if (row.machine !== 'packing' || !row.providerRef) return 'failed';
+  // Taken over since it was started: the run that holds the claim now goes on, this one touches nothing
+  if (row.packClaimId !== claimId) return 'busy';
   const ref = row.providerRef;
-  const abort = async (why: string, awake: boolean, count = true) => giveUp(botId, row, why, { awake, count, provider });
+  const abort = async (why: string, awake: boolean, count = true) => giveUp(botId, row, why, { awake, count, provider, claimId });
   try {
-    const stop = await mustStop(botId);
-    if (stop) return await abort(stop.why, stop.awake, false);
+    // Before the copy is made the pack-away may still be given up for a job or a purge. Once the computer is being removed it is finished, whatever
+    // arrived: a job that arrives then finds the Brick cold and brings it back from the copy (it never wakes a machine that is gone)
+    if (row.packStage === 'claimed') {
+      const stop = await mustStop(botId);
+      if (stop) return await abort(stop.why, stop.awake, false);
+    }
 
     if (row.packStage === 'claimed') {
       // Awake, so it can be looked at and its folder read; nothing else is started on it
-      await alive(botId, 'claimed', () => timed('pack', botId, ref, false, provider, async () => {
+      await alive(botId, claimId, 'claimed', () => timed('pack', botId, ref, false, provider, async () => {
         await provider.wake(ref);
         const inventory: PackInventory = await provider.prepack(ref);
         if (inventory.blocked) throw new ColdError(inventory.blocked, 'blocked');
         const stream = await provider.streamFiles(ref);
         const archive = await storeArchive(botId, stream, { manifest: { inventory, from: ref, at: new Date().toISOString() } });
-        if (!(await advance(botId, 'claimed', 'stored', { packArchiveId: archive.id }))) throw new ColdError('The pack-away was taken over', 'busy');
+        if (!(await advance(botId, claimId, 'claimed', 'stored', { packArchiveId: archive.id }))) throw new ColdError('The pack-away was taken over', 'busy');
         // The copy is whole: the computer sleeps while it is proved (it only has to exist until the proof passes)
         await provider.stop(ref).catch((error) => console.error('[Computer] Could not put a computer to sleep during its proof:', words(error)));
       }));
@@ -250,20 +299,24 @@ async function runPack(botId: string, provider: Cold): Promise<'packed' | 'faile
       const archive = row.packArchiveId ? await archiveById(row.packArchiveId) : null;
       // The copy is gone or is not whole: start again from the beginning next time
       if (!archive || archive.state !== 'stored') {
-        await prisma.brickComputer.updateMany({ where: { botId, machine: 'packing', packStage: 'stored' }, data: { packStage: 'claimed', packArchiveId: null } });
+        await prisma.brickComputer.updateMany({ where: { botId, machine: 'packing', packClaimId: claimId, packStage: 'stored' }, data: { packStage: 'claimed', packArchiveId: null } });
         return await abort('the stored copy was not found', false);
       }
-      const result = await alive(botId, 'stored', () => proveOnScratch(provider, archive, 'pack', botId));
+      const result = await alive(botId, claimId, 'stored', () => proveOnScratch(provider, archive, 'pack', botId));
       if (!result.ok) {
         // Only while this run still holds the step: a proof that ran so long that its claim was taken over must not fail (and so delete) a copy
         // the other run has proved since, with the computer perhaps already gone
-        const failed = await markFailed(archive.id, `restore proof failed: ${result.reason ?? 'unknown'}`, ['stored']);
-        if (!failed) return 'busy';
+        // One statement: the copy fails only while this run still holds the claim at this step, so a run that was taken over cannot fail the copy the new holder is proving
+        const failed = await prisma.$executeRaw(Prisma.sql`
+          UPDATE "computer_archives" SET "state" = 'failed', "failure" = ${`restore proof failed: ${result.reason ?? 'unknown'}`.slice(0, 200)}
+          WHERE "id" = ${archive.id} AND "state" = 'stored'
+            AND EXISTS (SELECT 1 FROM "brick_computers" c WHERE c."bot_id" = ${botId} AND c."machine" = 'packing' AND c."pack_stage" = 'stored' AND c."pack_claim_id" = ${claimId})`);
+        if (failed !== 1) return 'busy';
         await pruneArchives(botId, null);
-        return await giveUp(botId, row, `the copy did not restore cleanly (${result.reason ?? 'unknown'})`, { awake: false, count: true, provider, stage: 'stored' });
+        return await giveUp(botId, row, `the copy did not restore cleanly (${result.reason ?? 'unknown'})`, { awake: false, count: true, provider, stage: 'stored', claimId });
       }
       await markVerified(archive.id, result.ms);
-      if (!(await advance(botId, 'stored', 'verified'))) return 'busy';
+      if (!(await advance(botId, claimId, 'stored', 'verified'))) return 'busy';
       row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
     }
 
@@ -271,7 +324,7 @@ async function runPack(botId: string, provider: Cold): Promise<'packed' | 'faile
       // The one step that cannot be undone is claimed here, and only when no job is on the computer (checked in the same statement)
       const removing = await prisma.$executeRaw(Prisma.sql`
         UPDATE "brick_computers" SET "pack_stage" = 'removing', "pack_claimed_at" = ${new Date()}
-        WHERE "bot_id" = ${botId} AND "machine" = 'packing' AND "pack_stage" = 'verified'
+        WHERE "bot_id" = ${botId} AND "machine" = 'packing' AND "pack_stage" = 'verified' AND "pack_claim_id" = ${claimId}
           AND NOT EXISTS (SELECT 1 FROM "computer_jobs" j WHERE j."bot_id" = ${botId} AND j."status" IN ('running', 'waiting'))
           AND EXISTS (SELECT 1 FROM "bots" b WHERE b."id" = ${botId} AND (b."gone_at" IS NULL OR b."gone_at" > ${new Date()}))`);
       if (removing !== 1) {
@@ -288,14 +341,15 @@ async function runPack(botId: string, provider: Cold): Promise<'packed' | 'faile
       // Gone means the provider no longer lists it; until it says so, the computer is not cold and nothing is claimed
       if ((await provider.confirmRemoved(ref)) !== 'gone') throw new ColdError('The provider still lists the computer', 'busy');
       const now = new Date();
-      await prisma.brickComputer.update({
-        where: { botId },
+      const cold = await prisma.brickComputer.updateMany({
+        where: { botId, machine: 'packing', packStage: 'removing', packClaimId: claimId },
         data: {
           machine: 'cold',
           providerRef: null,
           packedAt: now,
           packStage: null,
           packClaimedAt: null,
+          packClaimId: null,
           packArchiveId: null,
           packPrevious: null,
           packFailures: 0,
@@ -307,6 +361,8 @@ async function runPack(botId: string, provider: Cold): Promise<'packed' | 'faile
           filesSavedAt: archive.createdAt,
         },
       });
+      // The claim was taken over while the computer was being removed: the holder of it finishes (every step above is the same again)
+      if (cold.count !== 1) return 'busy';
       // The two newest proved copies stay; the plain saved copy is replaced by them
       await pruneArchives(botId, null, now);
       await provider.deleteSavedCopy?.(botId).catch((error) => console.error('[Computer] Could not delete the old saved copy:', words(error)));
@@ -333,8 +389,9 @@ export async function packAway(botId: string, provider: ComputerProvider | null,
   if (!cold) return 'skipped';
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   if (!row || !row.providerRef || row.provider !== cold.kind || (row.machine !== 'resting' && row.machine !== 'stopped') || row.packStage !== null) return 'skipped';
-  if (!(await claim(row, now))) return 'skipped';
-  return runPack(botId, cold);
+  const claimId = await claim(row, now);
+  if (!claimId) return 'skipped';
+  return runPack(botId, cold, claimId);
 }
 
 // ---------- Coming back ----------
@@ -503,11 +560,13 @@ async function recover(provider: Cold, now: Date): Promise<{ resumed: number; re
   let recovered = 0;
   const stale = new Date(now.getTime() - STUCK_MS);
   for (const row of await prisma.brickComputer.findMany({ where: { machine: 'packing', packClaimedAt: { lte: stale } }, select: { botId: true, packClaimedAt: true }, take: 20 })) {
-    // One sweep resumes it: the claim is moved to now, and only the sweep that moved it goes on
-    const took = await prisma.brickComputer.updateMany({ where: { botId: row.botId, machine: 'packing', packClaimedAt: row.packClaimedAt }, data: { packClaimedAt: now } });
+    // One sweep resumes it: the claim is moved to now with an id of its own, and only the sweep that moved it goes on (the run it took over can no
+    // longer change anything: every step it takes names the old id)
+    const claimId = randomUUID();
+    const took = await prisma.brickComputer.updateMany({ where: { botId: row.botId, machine: 'packing', packClaimedAt: row.packClaimedAt }, data: { packClaimedAt: now, packClaimId: claimId } });
     if (took.count !== 1) continue;
     resumed++;
-    await runPack(row.botId, provider);
+    await runPack(row.botId, provider, claimId);
   }
   for (const row of await prisma.brickComputer.findMany({ where: { machine: 'restoring', packStage: 'returning', packClaimedAt: { lte: stale } }, select: { botId: true, providerRef: true, packClaimedAt: true }, take: 20 })) {
     const took = await prisma.brickComputer.updateMany({ where: { botId: row.botId, machine: 'restoring', packStage: 'returning', packClaimedAt: row.packClaimedAt }, data: { packClaimedAt: now } });
@@ -570,6 +629,7 @@ export async function coldStep(provider: ComputerProvider | null, now: Date = ne
     const done = await recover(cold, now);
     out.resumed = done.resumed;
     out.recovered = done.recovered;
+    await closeInterruptedRuns(cold, now).catch((error) => console.error('[Computer] Could not close cold storage runs that stopped:', words(error)));
     // Old copies that could not be deleted before, and ones left half written
     for (const row of await prisma.computerArchive.findMany({ where: { state: { in: ['superseded', 'failed', 'staging'] } }, distinct: ['botId'], select: { botId: true }, take: 50 })) {
       await pruneArchives(row.botId, null, now);

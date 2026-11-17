@@ -99,6 +99,8 @@ export function CapabilityPauses() {
     setBusy(null);
     if (!result.ok) {
       addToast({ description: result.error, variant: 'error' });
+      // The count moved on when this was sent, so a read that was still on its way is dropped: read again, or the screen keeps what that read was to show
+      void load();
       return;
     }
     const next = readPauses(result.data);
@@ -114,6 +116,7 @@ export function CapabilityPauses() {
     setEnding(false);
     if (!result.ok) {
       addToast({ description: result.error, variant: 'error' });
+      void load();
       return;
     }
     addToast({ description: 'Ending every job on computers now', variant: 'success', duration: 2500 });

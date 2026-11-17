@@ -6,6 +6,7 @@ ALTER TABLE "brick_computers"
   ADD COLUMN "pack_claimed_at" TIMESTAMP(3),
   ADD COLUMN "pack_stage" VARCHAR(10),
   ADD COLUMN "pack_archive_id" VARCHAR(40),
+  ADD COLUMN "pack_claim_id" VARCHAR(36),
   ADD COLUMN "pack_previous" VARCHAR(10),
   ADD COLUMN "pack_tried_at" TIMESTAMP(3),
   ADD COLUMN "pack_failures" INTEGER NOT NULL DEFAULT 0,

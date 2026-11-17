@@ -31,6 +31,7 @@ What a computer may SPEND is decided somewhere else, in Orbit:
 4. Lifecycle: create, adopt, reboot, restore, image update and drift keep the network rule and the zero budget.
 5. A restored computer carries no old authority: job key dropped, no stale proxy settings (`universe-cold finish` removes them).
 6. Cold storage: real archive size, restore time, whether the archive download is charged, and whether a deleted instance can be recovered for 7 days or 1 hour.
+7. Cold storage, files outside the home folder: a file counts as added on this computer when its modification time or its change time is newer than the image marker (`/usr/local/share/universe/built`). Check on a real machine that the image's own files are not newer than that marker (if they were, packing would be refused as `outside_too_big`, never lose data), and that a file unpacked with `tar x` or copied with `cp -p` into `/opt` is found.
 
 ## A design that was dropped
 

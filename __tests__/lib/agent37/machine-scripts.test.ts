@@ -22,6 +22,7 @@ let serverPort = 0;
 let archive = Buffer.alloc(0);
 let token = 'download-token';
 let served = 0;
+let altered: { from: number; body: Buffer } | null = null;
 
 function writeTree(root: string) {
   const put = (name: string, content: string | Buffer) => {
@@ -80,8 +81,10 @@ beforeAll(async () => {
       return res.end();
     }
     served++;
-    res.writeHead(200, { 'content-length': archive.length, 'content-type': 'application/gzip' });
-    res.end(archive);
+    // `altered`: from that request on, another copy is served (the restore reads the copy three times: its first names, the unpack, the comparison)
+    const body = altered && served >= altered.from ? altered.body : archive;
+    res.writeHead(200, { 'content-length': body.length, 'content-type': 'application/gzip' });
+    res.end(body);
   });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
   serverPort = (server.address() as net.AddressInfo).port;
@@ -113,6 +116,55 @@ describe('restoring a copy on a computer', () => {
     expect(tree(target)).toEqual(tree(source));
     expect(fs.readFileSync(path.join(target, 'projects/app/data.bin')).equals(fs.readFileSync(path.join(source, 'projects/app/data.bin')))).toBe(true);
     expect(fs.readlinkSync(path.join(target, 'plan-link'))).toBe('notes/plan.md');
+  });
+
+  it('compares every file with the copy for real: a file that differs from the copy when it is read again fails the restore', async () => {
+    const source = path.join(dir, 'source-compare', 'home', 'node');
+    fs.mkdirSync(source, { recursive: true });
+    writeTree(source);
+    const other = path.join(dir, 'source-compare-other', 'home', 'node');
+    fs.mkdirSync(other, { recursive: true });
+    writeTree(other);
+    fs.writeFileSync(path.join(other, 'projects/app/index.js'), 'console.log("changed")\n');
+    const target = path.join(dir, 'target-compare');
+    fs.mkdirSync(target, { recursive: true });
+    archive = makeArchive(source, 'relative', target);
+    altered = { from: served + 3, body: makeArchive(other, 'relative', target) };
+    try {
+      const done = await runCold(target, 'restore', { url: url(), token, sha256: sha(archive) });
+      expect(done.stdout).toMatch(/restored=0 reason=differs_\d+/);
+      expect(done.status).toBe(1);
+    } finally {
+      altered = null;
+    }
+  });
+
+  it('counts a file as outside the image when its change time is newer than the image, even if it kept an old modification time', () => {
+    // cp -p, tar x and rsync -a keep the old modification time; the change time is the day the file arrived
+    const file = path.join(dir, 'kept-old-time');
+    fs.writeFileSync(file, 'a tool unpacked into /opt');
+    fs.utimesSync(file, new Date('2000-01-01'), new Date('2000-01-01'));
+    const reference = Date.now() / 1000 - 3600;
+    const ran = spawnSync(
+      'python3',
+      [
+        '-c',
+        [
+          'import importlib.machinery, importlib.util, os, sys',
+          'loader = importlib.machinery.SourceFileLoader("universe_cold", sys.argv[1])',
+          'spec = importlib.util.spec_from_loader("universe_cold", loader)',
+          'module = importlib.util.module_from_spec(spec)',
+          'loader.exec_module(module)',
+          'info = os.lstat(sys.argv[2])',
+          'print(info.st_mtime < float(sys.argv[3]), module.newer_than(info, float(sys.argv[3])))',
+        ].join('\n'),
+        path.join(scripts, 'universe-cold'),
+        file,
+        String(reference),
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(ran.stdout.trim()).toBe('True True');
   });
 
   it('does not carry a job\'s key over from the copy', async () => {

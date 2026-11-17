@@ -1180,6 +1180,10 @@ def home_stats():
                 pass
     return files, size
 
+def newer_than(info, reference):
+    # True when a file was written or changed after the reference time: its modification time or its change time (which a copy cannot set back)
+    return max(info.st_mtime, info.st_ctime) > reference
+
 def prepack():
     if os.getuid() != 0:
         print("prepack=" + json.dumps({"blocked": "not_root", "home_files": 0, "home_bytes": 0, "outside_files": 0, "outside_bytes": 0, "packages": []}))
@@ -1211,7 +1215,9 @@ def prepack():
                         info = os.lstat(path)
                     except OSError:
                         continue
-                    if info.st_mtime <= reference:
+                    # A file the image did not have: written or changed here after the image was built. Its change time too, because a file that was
+                    # copied or unpacked with its old time kept (cp -p, tar x, rsync -a) has an old modification time but a change time of the day it arrived
+                    if not newer_than(info, reference):
                         continue
                     found.append(path)
                     total += info.st_size if not os.path.islink(path) else 0
@@ -1332,7 +1338,8 @@ def restore():
         resp = fetch()
         compare = subprocess.Popen(
             ["tar", "-dzf", "-", "-C", base, "--wildcards", "--exclude=*.universe/logs*", "--exclude=*.universe/up.lock*", "--exclude=*.universe/relay*", "--exclude=*.universe/restart.pending", "--exclude=*.cache/*"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        fed = {"whole": False}
         def pour():
             try:
                 while True:
@@ -1341,6 +1348,7 @@ def restore():
                         break
                     compare.stdin.write(chunk)
                 compare.stdin.close()
+                fed["whole"] = True
             except Exception:
                 try:
                     compare.kill()
@@ -1353,10 +1361,12 @@ def restore():
         code = compare.wait()
     except Exception:
         return fail("compare")
-    if code > 1:
+    # Only a comparison that was given the whole copy and ended by itself counts: tar ends with 0 (all alike) or 1 (some differ); a signal (negative) or
+    # 2 and above means it did not finish, and a restore is never called good on a comparison that did not
+    if not fed["whole"] or code < 0 or code > 1:
         return fail("compare")
-    if differing > 0:
-        return fail("differs_%d" % min(differing, 99999))
+    if differing > 0 or code == 1:
+        return fail("differs_%d" % max(1, min(differing, 99999)))
     # The job's key is never carried over: the new computer gets its own
     for name in ("relay.json", "relay.json.new", "relay.gen", "relay.lock"):
         try:

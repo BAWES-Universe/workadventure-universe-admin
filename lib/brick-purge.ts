@@ -138,6 +138,8 @@ export async function finishOutside(botId: string, now: Date = new Date()): Prom
     let coldGone = true;
     try {
       await deleteAllArchives(botId);
+      // A copy that began being written while these were deleted has its own row: the Brick is not clear of copies until none is left
+      if ((await prisma.computerArchive.count({ where: { botId } })) > 0) throw new Error('a copy was still being written');
     } catch (error) {
       coldGone = false;
       console.error('[Brick purge] Cold storage copies could not be deleted:', error instanceof Error ? error.message : 'unknown');

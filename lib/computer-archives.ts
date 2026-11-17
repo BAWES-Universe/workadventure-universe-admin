@@ -79,6 +79,10 @@ const stagingKeyOf = (botId: string, generation: number, id: string) => `compute
  * not finish: nothing then stands as a copy, and what was written is deleted. Returns the copy, `stored` (not yet proved).
  */
 export async function storeArchive(botId: string, archive: ReadableStream<Uint8Array>, details: { imageRevision?: number | null; manifest?: unknown } = {}): Promise<ArchiveRow> {
+  // The purge writes its marker before it reads or deletes any copy, and this copy's row is written before the marker is read again: a Brick purged
+  // before the row is seen here, and one purged after is seen by the purge, which finds the row. The marker is looked at again after the upload.
+  const purged = async () => (await prisma.brickPurge.count({ where: { botId } })) > 0;
+  if (await purged()) throw new Error('The Brick was deleted while its files were being copied');
   // Two writers can pick one generation: the unique index refuses the second, which tries the next number
   for (let attempt = 0; ; attempt++) {
     const newest = await prisma.computerArchive.aggregate({ where: { botId }, _max: { generation: true } });
@@ -94,12 +98,21 @@ export async function storeArchive(botId: string, archive: ReadableStream<Uint8A
       throw error;
     }
     try {
+      if (await purged()) throw new Error('The Brick was deleted while its files were being copied');
       const sealed = await store.put(row.objectKey, stagingKeyOf(botId, generation, id), archive);
+      // A Brick purged while the copy was written: it must not stand (its row may be gone already, and the object is not to stay without one)
+      if (await purged()) throw new Error('The Brick was deleted while its files were being copied');
       const stored = await prisma.computerArchive.update({ where: { id }, data: { state: 'stored', bytes: BigInt(sealed.bytes), sha256: sealed.sha256 } });
       return view(stored);
     } catch (error) {
       await markFailed(id, 'The copy could not be written whole').catch(() => undefined);
-      await store.remove([row.objectKey, stagingKeyOf(botId, generation, id)]).catch(() => undefined);
+      const removed = await store.remove([row.objectKey, stagingKeyOf(botId, generation, id)]).then(() => true, () => false);
+      // An object that could not be deleted keeps a row that says so (made again if a purge deleted it), so the clean-up finds it and tries again
+      if (!removed) {
+        await prisma.computerArchive
+          .upsert({ where: { id }, create: { id, botId, generation, state: 'superseded', objectKey: row.objectKey }, update: { state: 'superseded' } })
+          .catch(() => undefined);
+      }
       throw error;
     }
   }
@@ -178,7 +191,8 @@ export async function deleteAllArchives(botId: string): Promise<void> {
   const rows = await prisma.computerArchive.findMany({ where: { botId } });
   if (rows.length === 0) return;
   await store.remove(rows.flatMap((row) => [row.objectKey, `${row.objectKey}.new`]));
-  await prisma.computerArchive.deleteMany({ where: { botId } });
+  // Only the rows whose objects were just deleted: a copy that began being written meanwhile keeps its row, so the next try finds and deletes it
+  await prisma.computerArchive.deleteMany({ where: { id: { in: rows.map((row) => row.id) } } });
 }
 
 /** Opens a stored copy decrypted, as a stream, for the download route. */

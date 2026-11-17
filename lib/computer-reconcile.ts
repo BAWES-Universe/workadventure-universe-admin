@@ -2,6 +2,7 @@ import * as Sentry from '@sentry/nextjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getComputerProvider, type ComputerProvider, type ProviderDay } from '@/lib/computer-provider';
+import { COLD_RUN_MAX_MS } from '@/lib/computer-values';
 
 /**
  * The daily check of our books against the computer provider's own bill (build handoff v2, section 8: "Reconciliation: daily, against
@@ -146,7 +147,8 @@ async function booksFor(day: string, now: Date): Promise<Books> {
   // It goes on the same line as the jobs, so a pack-away that overlaps a job is counted once too
   for (const run of packs) {
     const begin = Math.max(run.startedAt.getTime(), from.getTime());
-    const finish = Math.min((run.endedAt ?? now).getTime(), to.getTime());
+    // A run still open is one whose server stopped: it counts only up to the longest a run may last (the sweep closes it at that length), never to now
+    const finish = Math.min((run.endedAt ?? new Date(Math.min(now.getTime(), run.startedAt.getTime() + COLD_RUN_MAX_MS))).getTime(), to.getTime());
     if (!run.botId || finish <= begin) continue;
     const list = spans.get(run.botId) ?? [];
     list.push([begin, finish]);

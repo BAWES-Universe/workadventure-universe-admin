@@ -3202,6 +3202,8 @@ model BrickComputer {
   // claimed, stored (the copy is written whole), verified (restored on a clean computer and checked), removing (the computer is being deleted)
   packStage     String?   @map("pack_stage") @db.VarChar(10)
   packArchiveId String?   @map("pack_archive_id") @db.VarChar(40)
+  // Who holds the pack-away: one value per claim, new at each take-over, so a run that was taken over can change nothing of the run that replaced it
+  packClaimId   String?   @map("pack_claim_id") @db.VarChar(36)
   // What the stored state was before the pack-away took the machine, so a pack-away that gives up puts it back as it was
   packPrevious  String?   @map("pack_previous") @db.VarChar(10)
   // A pack-away that failed is not tried again at once: when it was last tried and how many times in a row it failed
