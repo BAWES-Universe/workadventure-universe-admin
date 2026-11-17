@@ -5,7 +5,7 @@ import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { createMcpServerSchema } from '@/lib/mcp/server-input';
 import { createConnection } from '@/lib/app-connections';
 import { getGitHubApp } from '@/lib/github/app';
-import { connectGitHub, GITHUB_CATALOG_KEY, GITHUB_ROW_KEY } from '@/lib/github/connection';
+import { connectGitHub, GITHUB_BLURB, GITHUB_CATALOG_KEY, GITHUB_ROW_KEY } from '@/lib/github/connection';
 
 /**
  * The apps a person can connect with one tap (game #2001, "Connect another"): a list a super admin keeps in Orbit, never
@@ -169,7 +169,7 @@ export async function listCatalogForPerson(ownerId: string, query?: string): Pro
   const rows = entries.map((entry) => ({ key: entry.key, name: entry.name, blurb: entry.blurb, icon: entry.icon, connectionId: connected.get(entry.key) ?? null }));
   // GitHub, through Universe's own GitHub App (game #2041), once a super admin has made it: always first, for everyone
   if (!(await getGitHubApp())) return rows;
-  const github: CatalogRow = { key: GITHUB_ROW_KEY, name: 'GitHub', blurb: 'Code, pull requests, issues and CI', icon: 'github', connectionId: connected.get(GITHUB_CATALOG_KEY) ?? null };
+  const github: CatalogRow = { key: GITHUB_ROW_KEY, name: 'GitHub', blurb: GITHUB_BLURB, icon: 'github', connectionId: connected.get(GITHUB_CATALOG_KEY) ?? null };
   const wanted = !q || [github.name, github.blurb, github.key].some((field) => field.toLowerCase().includes(q.toLowerCase()));
   return [...(wanted ? [github] : []), ...rows.filter((row) => row.key !== GITHUB_ROW_KEY)];
 }
