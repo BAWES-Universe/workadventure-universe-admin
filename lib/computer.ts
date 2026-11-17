@@ -334,6 +334,8 @@ export type Started =
   | { ok: false; reason: 'rule'; words: string };
 
 /** Room is asked for once for each try to run a job: room that was released stays closed, so a later try asks under a new key. */
+/** The longest a disk's room is kept for a job that is still starting its machine (the job's own room renews each few minutes, this one does not). */
+const DISK_ROOM_MAX_HOLD_MS = 30 * 60 * 1000;
 const roomKey = (jobId: string, now: Date) => `computer:job:${jobId}:${now.getTime()}`;
 
 const queueReasonOf = (no: NoRoom): QueuedFor | null => (no.reason === 'allowance' ? 'allowance' : no.reason === 'busy' ? 'busy' : no.reason === 'pool' ? 'pool' : null);
@@ -1037,6 +1039,11 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   // the room is given back instead of staying in the pool's envelope until the month ends
   const lapsedDisks = await prisma.meterReservation.findMany({ where: { state: 'held', expiresAt: { lte: now }, reservationKey: { startsWith: DISK_ROOM_PREFIX } }, take: 200 });
   for (const reservation of lapsedDisks) {
+    // The room lasts a few minutes and is not renewed while the machine is being made: a machine that takes longer is still being made, and its
+    // room is kept while its job is still starting (the key says which job), up to a hard stop so a job that died in the making never keeps it for good
+    const [botId, jobId] = reservation.reservationKey.slice(DISK_ROOM_PREFIX.length).split(':');
+    const job = jobId ? await prisma.computerJob.findFirst({ where: { id: jobId, botId }, select: { status: true } }) : null;
+    if (job && !isOver(job.status) && now.getTime() - reservation.createdAt.getTime() < DISK_ROOM_MAX_HOLD_MS) continue;
     await releaseRoom({ key: reservation.reservationKey }, now);
     released++;
   }

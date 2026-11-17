@@ -1749,6 +1749,30 @@ run('a Brick’s computer, in a real database', () => {
       expect(await prisma.meterReservation.findUnique({ where: { reservationKey: diskRoomKey(sara.brickId, 'fresh') } })).toMatchObject({ state: 'held' });
     });
 
+    it('keeps a disk room that lapsed while its job is still starting the machine, and gives it back once the job is over or the hard stop has passed', async () => {
+      const sara = await person('sara');
+      await setUp({ poolCeilingMicros: 10_000_000, storageMicrosPerGbMonth: 90_000 });
+      await giveComputer(sara.brickId, sara.id);
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+      if (!started.ok) throw new Error('no');
+      const hold = (key: string, createdAt: Date) =>
+        prisma.meterReservation.create({ data: { reservationKey: key, personKey: 'system:disk', personId: null, botId: sara.brickId, jobId: null, amountMicros: BigInt(360_000), state: 'held', expiresAt: new Date(NOW.getTime() - 60_000), createdAt } });
+      const mine = diskRoomKey(sara.brickId, started.job.id, NOW.getTime());
+      await hold(mine, new Date(NOW.getTime() - 10 * 60_000));
+      // The machine is still being made (the job runs): the room lapsed by its own clock but is kept
+      await sweepComputers(NOW);
+      expect(await prisma.meterReservation.findUnique({ where: { reservationKey: mine } })).toMatchObject({ state: 'held' });
+      // Held for longer than the hard stop: given back whatever the job does
+      await sweepComputers(minutes(40));
+      expect(await prisma.meterReservation.findUnique({ where: { reservationKey: mine } })).toMatchObject({ state: 'released' });
+      // The job is over: its room goes at the next sweep
+      const other = diskRoomKey(sara.brickId, started.job.id, NOW.getTime() + 1);
+      await hold(other, new Date(minutes(50).getTime() - 60_000));
+      await prisma.computerJob.update({ where: { id: started.job.id }, data: { status: 'done', endedAt: minutes(50) } });
+      await sweepComputers(minutes(50));
+      expect(await prisma.meterReservation.findUnique({ where: { reservationKey: other } })).toMatchObject({ state: 'released' });
+    });
+
     it('does not count the disk room as a job running, or against the person’s allowance, and gives it back when the making fails', async () => {
       const sara = await person('sara');
       provider.disk = 4_000_000_000;
