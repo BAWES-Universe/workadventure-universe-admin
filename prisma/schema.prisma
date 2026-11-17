@@ -1088,6 +1088,11 @@ model BrickItem {
   timeZone      String    @map("time_zone") @db.VarChar(64)
   // When it is next due; empty when nothing is due (done, paused, or a goal that waits for something)
   nextDueAt     DateTime? @map("next_due_at")
+  // Snooze moves one occurrence and never the recurrence. While a repeating item has a snoozed occurrence, `nextDueAt` is that one
+  // (`snoozedUntil` names it) and `regularDueAt` is where the recurrence itself comes next, so the rule never drifts: an hourly task
+  // due at 08:00 and snoozed to 08:10 still runs at 09:00 after it. Both are empty when nothing is snoozed, and only an item that is on has them.
+  regularDueAt  DateTime? @map("regular_due_at")
+  snoozedUntil  DateTime? @map("snoozed_until")
   // What a goal with no timed check waits for, in a line
   waitingFor    String?   @map("waiting_for") @db.VarChar(300)
   // A goal's one status line and its steps ([{ text, state: todo | doing | done }])
@@ -1155,8 +1160,12 @@ model BrickItemRun {
   late       Boolean   @default(false)
   // A watch or goal check run after an outage: one fresh check, never the missed ones
   fresh      Boolean   @default(false)
-  // claimed, done, failed, dropped (the item changed before it ran)
+  // queued (Run now was asked and the bot server has not been handed it yet), claimed, done, failed, dropped (the item changed before it ran)
   state      String    @default("claimed") @db.VarChar(8)
+  // Run now: an extra run the owner asked for, outside the recurrence. It never moves the item's next due time, and `requestKey` is its
+  // own idempotency key (the owner's tap): asking again with the same key finds the same run.
+  manual     Boolean   @default(false)
+  requestKey String?   @map("request_key") @db.VarChar(64)
   // What it came to: quiet, spoke, waiting, or empty while it runs
   outcome    String?   @db.VarChar(10)
   // The result in a line, for "Everything Brick did"

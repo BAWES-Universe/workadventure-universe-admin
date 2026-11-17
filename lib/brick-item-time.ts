@@ -182,6 +182,29 @@ export function nextDue(cadence: Cadence, timeZone: string, dueAt: Date, now: Da
   }
 }
 
+/**
+ * Snooze on a repeating cadence (`every`, `daily`): it moves ONE occurrence and never the rule. The upcoming occurrence is
+ * `upcoming` (when the item is next due, or null); the regular one after it is what the recurrence says, never counted from the snoozed
+ * moment, so an hourly task due at 08:00 and snoozed to 08:10 still runs 09:00 after it (and a daily one keeps its time of day).
+ *
+ * Collision: the snoozed occurrence only ever comes before the next regular one. When `now + minutes` would reach it or pass it
+ * (a 90 minute snooze of an hourly task) the two are one run, at the regular time: nothing is snoozed (`snoozed` false) and the
+ * recurrence is untouched, so the run is never doubled and never later than the rule says.
+ *
+ * Minutes are real minutes, so a clock change or travelling never moves a snoozed occurrence; a daily rule is read on its own zone.
+ * Null for a cadence that does not repeat (a one-off moves itself).
+ */
+export function snoozePlan(cadence: Cadence, timeZone: string, upcoming: Date | null, now: Date, minutes: number): { nextDueAt: Date; regularDueAt: Date | null; snoozed: boolean } | null {
+  if (cadence.type !== 'every' && cadence.type !== 'daily') return null;
+  // The regular occurrence that comes next: the upcoming one if it is still ahead, otherwise (it is due and not yet run, which this
+  // snooze moves) the first one after it that is still to come, the same as when it is run
+  const regular = upcoming && upcoming.getTime() > now.getTime() ? upcoming : upcoming ? nextDue(cadence, timeZone, upcoming, now) : firstDue(cadence, timeZone, now);
+  const later = new Date(now.getTime() + minutes * MINUTE);
+  if (!regular) return { nextDueAt: later, regularDueAt: null, snoozed: true };
+  if (later.getTime() < regular.getTime()) return { nextDueAt: later, regularDueAt: regular, snoozed: true };
+  return { nextDueAt: regular, regularDueAt: null, snoozed: false };
+}
+
 /** The shortest gap between two runs of a cadence, in minutes, to compare with "shortest repeat". Null when it does not repeat. */
 export function repeatMinutes(cadence: Cadence): number | null {
   if (cadence.type === 'every') return cadence.minutes;

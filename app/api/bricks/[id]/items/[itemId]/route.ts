@@ -33,11 +33,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 const tapSchema = itemActionSchema.omit({ userId: true });
 
 /**
- * PATCH /api/bricks/:id/items/:itemId   { action: pause | resume | done | reopen | snooze | delete, result? }
- * The owner's own tap on their Goals and tasks screen (game #2002): Pause, Resume, Mark done, Reopen, Snooze, Delete. The same rules as when
+ * PATCH /api/bricks/:id/items/:itemId   { action: pause | resume | done | reopen | snooze | run | delete, result?, key? (run) }
+ * The owner's own tap on their Goals and tasks screen (game #2002): Pause, Resume, Mark done, Reopen, Snooze, Run now, Delete. The same rules as when
  * their Brick does it in chat: every change raises the item's revision, so nothing new starts once it is saved. Changing what it says or
  * when happens in the Brick's chat, in the person's own words (there is no form), so `change` is not taken here.
- * Answers { item }, or a refusal with a `code` (wrong_state, off).
+ * Run now (`run`, with the tap as its own `key`) starts one extra run and answers { item, run: { runId, state, replay } }; the item and its next time are not changed.
+ * Answers { item }, or a refusal with a `code` (wrong_state, off, needs_setup, needs_goal, busy, no_room with `until`, runs_a_day with `limit`).
  */
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string; itemId: string }> }) {
   try {
@@ -47,8 +48,8 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     const parsed = tapSchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success || parsed.data.action === 'change' || parsed.data.change) return brickJson(request, { error: 'Invalid input data', details: parsed.success ? undefined : parsed.error.issues }, 400);
     const answer = await changeFromScreen(owner.userId, id, itemId, parsed.data);
-    if (answer.ok) return brickJson(request, { item: answer.item });
-    return brickJson(request, { error: answer.error, ...(answer.code ? { code: answer.code } : {}) }, answer.status);
+    if (answer.ok) return brickJson(request, { item: answer.item, ...(answer.run ? { run: answer.run } : {}) });
+    return brickJson(request, { error: answer.error, ...(answer.code ? { code: answer.code } : {}), ...(answer.until ? { until: answer.until } : {}), ...(answer.limit !== undefined ? { limit: answer.limit } : {}) }, answer.status);
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'brick-items' } });
     console.error('Error changing a goal or task:', error);

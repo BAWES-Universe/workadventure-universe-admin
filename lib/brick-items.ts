@@ -9,7 +9,7 @@ import { runningExtra } from '@/lib/meter-grants';
 import { windowStart } from '@/lib/reply-limits';
 import { ownerAskingThrough } from '@/lib/brick-make';
 import { templateRoutineGate } from '@/lib/brick-template-use';
-import { TIME_ZONE_KEY, WORKWEEK_KEY, firstDue, isTimeZone, ownZone, nextDue, readCadence, readWorkweek, repeatMinutes, type Cadence } from '@/lib/brick-item-time';
+import { TIME_ZONE_KEY, WORKWEEK_KEY, firstDue, isTimeZone, ownZone, nextDue, readCadence, readWorkweek, repeatMinutes, snoozePlan, type Cadence } from '@/lib/brick-item-time';
 
 /**
  * Goals and tasks (game #2002, Brick 11): Universe's own scheduler.
@@ -89,7 +89,7 @@ export const itemChangeSchema = z
   })
   .strict();
 
-export const ITEM_ACTIONS = ['pause', 'resume', 'done', 'reopen', 'delete', 'change', 'snooze', 'keep'] as const;
+export const ITEM_ACTIONS = ['pause', 'resume', 'done', 'reopen', 'delete', 'change', 'snooze', 'keep', 'run'] as const;
 
 /** What a goal can ask its person once: it is not sure it reached its outcome, or the date it cared about has passed. */
 export const GOAL_ASKS = ['unsure', 'date_passed'] as const;
@@ -101,6 +101,8 @@ export const itemActionSchema = z
     /** done: the result in a line. */
     result: line(1000).nullish(),
     change: itemChangeSchema.optional(),
+    /** run (Run now): the owner's tap as its own idempotency key. Asking again with the same key finds the same run, whatever has happened since. */
+    key: z.string().trim().min(1).max(64).optional(),
   })
   .strict();
 
@@ -113,7 +115,12 @@ export interface ItemView {
   outcome: string | null;
   cadence: Cadence;
   timeZone: string;
+  /** When it next runs: the snoozed occurrence while one is snoozed, otherwise the next regular one. */
   nextDueAt: string | null;
+  /** Where the recurrence itself comes next, whether or not an occurrence is snoozed (the same as `nextDueAt` when none is). */
+  nextRegularAt: string | null;
+  /** The snoozed occurrence that is still to run (it is `nextDueAt`), or null when nothing is snoozed. */
+  snoozedUntil: string | null;
   waitingFor: string | null;
   statusLine: string | null;
   steps: { text: string; state: 'todo' | 'doing' | 'done' }[];
@@ -147,6 +154,8 @@ export function viewOf(row: ItemRow): ItemView {
     cadence: readCadence(row.cadence) ?? { type: 'none' },
     timeZone: row.timeZone,
     nextDueAt: row.nextDueAt?.toISOString() ?? null,
+    nextRegularAt: (row.regularDueAt ?? row.nextDueAt)?.toISOString() ?? null,
+    snoozedUntil: row.snoozedUntil && row.nextDueAt ? row.nextDueAt.toISOString() : null,
     waitingFor: row.waitingFor,
     statusLine: row.statusLine,
     steps: steps.success ? steps.data : [],
@@ -169,9 +178,11 @@ export type Refused = {
   status: 400 | 404 | 409 | 422;
   error: string;
   /** What the bot server can say to the person, as a code: needs_time_zone, too_often, too_many, past, off. */
-  code?: 'needs_time_zone' | 'too_often' | 'too_many' | 'past' | 'off' | 'needs_wait' | 'needs_goal' | 'wrong_state' | 'needs_setup';
+  code?: 'needs_time_zone' | 'too_often' | 'too_many' | 'past' | 'off' | 'needs_wait' | 'needs_goal' | 'wrong_state' | 'needs_setup' | 'busy' | 'no_room' | 'runs_a_day';
   /** The setting that decided it, when there is one. */
   limit?: number;
+  /** no_room: when the usage that held it back is there again. */
+  until?: string;
 };
 
 /** The person's own settings the Brick reads before it sets anything: their zone and the days they work. Never guessed. */
@@ -343,7 +354,7 @@ async function moveChecks(tx: Tx, goalId: string, from: ItemState[], data: Prism
     const cadence = readCadence(check.cadence);
     // A one-off check whose moment passed while its goal was paused is due now, once, like a one-off that is resumed on its own
     const due = recompute && cadence ? (firstDue(cadence, check.timeZone, now) ?? (cadence.type === 'once' ? now : null)) : null;
-    await tx.brickItem.update({ where: { id: check.id }, data: { ...data, ...NOT_HELD, nextDueAt: due, revision: { increment: 1 } } });
+    await tx.brickItem.update({ where: { id: check.id }, data: { ...data, ...NOT_HELD, ...NOT_SNOOZED, nextDueAt: due, revision: { increment: 1 } } });
     // A check that is over has no card that can still be said yes to
     if (data.state === 'done' || data.state === 'deleted') await endTaskCards(tx, check.botId, check.id, now);
   }
@@ -356,6 +367,9 @@ async function goalIsOn(tx: Tx, goalId: string): Promise<boolean> {
 
 /** Whatever changes an item's state or time ends a wait for usage: nothing is held or owed any more, and a new wait starts from nothing. */
 const NOT_HELD = { heldSince: null, heldToldAt: null, heldNoticeAt: null } as const;
+
+/** Whatever takes an item out of "on", or sets its time afresh, ends a snoozed occurrence: nothing is snoozed and the recurrence stands alone. */
+const NOT_SNOOZED = { regularDueAt: null, snoozedUntil: null } as const;
 
 /** What the person's answer, or the end of the goal, does to its open question: none is open, none is owed. */
 const NOT_ASKING = { askKind: null, askRunId: null, askToldAt: null } as const;
@@ -384,16 +398,96 @@ async function comingBackProblem(tx: Prisma.TransactionClient, row: ItemRow, own
   return null;
 }
 
+/** What Run now answers with: the run it asked for (or found), so a screen or the Brick can say it started and look it up in "Everything Brick did". */
+export interface RunNowInfo {
+  runId: string;
+  /** queued: waiting for the bot server to take it; claimed: it has it. After that, how it ended. */
+  state: 'queued' | 'claimed' | 'done' | 'failed' | 'dropped';
+  /** True when this key (or this still waiting run) had already been asked: nothing new was made. */
+  replay: boolean;
+}
+
+const runInfo = (run: { id: string; state: string }, replay: boolean): RunNowInfo => ({ runId: run.id, state: run.state as RunNowInfo['state'], replay });
+
+/** Whether a Run now request, or a run already queued, may use this item as it is: on, or paused by the owner themselves. */
+const manualMayRun = (item: { state: string; pausedBy: string | null }): boolean => item.state === 'on' || (item.state === 'paused' && (item.pausedBy === 'owner' || item.pausedBy === null));
+
+/**
+ * Run now: one extra run of this item, when the owner asks for it. A run like any other (the same claim hands it to the bot server, with
+ * the same usage, runs a day and funding checks, the same lease, effect approvals and delivery), asked for by a tap instead of by the clock.
+ * What makes it different is only what it does NOT touch: the recurrence is not moved (the next scheduled time stays), it ends no
+ * one-off, and a pause the owner chose is not undone. It is never made by editing the next due time or by switching the item on.
+ *
+ * Allowed on an item that is on, or one the owner paused (an individual pause keeps nothing from running when they ask for it). Refused while
+ * the Brick is off or deleted (there is no bot-wide hold in Universe yet: this is the one place it would be added, beside the Brick), for
+ * a routine that came with a template and is not turned on, for a check whose goal is paused, for one that is done, and while a run of
+ * this item is running (`busy`). Asked with the same `key`, or again while its run still waits, it is the same run: never two.
+ */
+async function requestRun(tx: Tx, row: ItemRow, ownerId: string, key: string | null, now: Date, roomSettings: RoomSettings): Promise<{ ok: true; item: ItemView; run: RunNowInfo } | Refused> {
+  const view = viewOf(row);
+  // The same tap again finds the run it made, whatever has happened to it or the item since
+  if (key) {
+    const same = await tx.brickItemRun.findFirst({ where: { itemId: row.id, requestKey: key }, select: { id: true, state: true } });
+    if (same) return { ok: true, item: view, run: runInfo(same, true) };
+  }
+  if (row.state === 'paused') {
+    if (row.pausedBy === 'brick_deleted') return { ok: false, status: 409, code: 'off', error: 'This Brick is switched off' };
+    if (row.pausedBy === 'template') return { ok: false, status: 409, code: 'needs_setup', error: 'It came with a template and is not turned on yet' };
+    if (row.pausedBy === 'goal') return { ok: false, status: 409, code: 'needs_goal', error: 'A check runs only while its goal is on' };
+  } else if (row.state !== 'on') {
+    return wrongState(row.state);
+  }
+  // Only a Brick that is on and still its owner's runs anything
+  const bot = await tx.bot.findUnique({ where: { id: row.botId }, select: { enabled: true, deletedAt: true, roomId: true, ownerId: true, aiProviderRef: true } });
+  if (!bot?.enabled || bot.deletedAt || bot.roomId !== null || bot.ownerId !== row.ownerId) return { ok: false, status: 409, code: 'off', error: 'This Brick is switched off' };
+  // One run of an item at a time: while one is running it is busy, and while one that was asked for still waits, that is the answer
+  const open = await tx.brickItemRun.findFirst({ where: { itemId: row.id, OR: [{ state: 'queued' }, { state: 'claimed', leaseUntil: { gt: now } }] }, orderBy: { claimedAt: 'desc' }, select: { id: true, state: true } });
+  if (open?.state === 'queued') return { ok: true, item: view, run: runInfo(open, true) };
+  if (open) return { ok: false, status: 409, code: 'busy', error: 'It is running right now' };
+
+  // The usage and the runs a day a watch, briefing or goal takes, checked as a scheduled run is (a reminder is fixed text and takes none)
+  if (row.kind !== 'reminder') {
+    const limits = await getBrickLimits();
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-runs:${row.ownerId}`}))`;
+    const room = bot.aiProviderRef === UNIVERSE_AI_REF ? await goalsRoom(row.ownerId, now, tx, roomSettings) : ({ ok: true } as const);
+    if (!room.ok) return { ok: false, status: 409, code: 'no_room', until: room.resumesAt.toISOString(), error: 'Your usage for goals and tasks is used up for now' };
+    const since = new Date(now.getTime() - DAY);
+    const ofOwner = { item: { ownerId: row.ownerId, kind: { not: 'reminder' } } };
+    const [today, waiting] = await Promise.all([
+      tx.brickItemRun.count({ where: { ...ofOwner, state: { not: 'queued' }, claimedAt: { gt: since } } }),
+      tx.brickItemRun.count({ where: { ...ofOwner, state: 'queued' } }),
+    ]);
+    if (today + waiting >= limits.runsPerDay) return { ok: false, status: 422, code: 'runs_a_day', limit: limits.runsPerDay, error: `${limits.runsPerDay} runs a day is the most` };
+  }
+
+  // The run waits "queued" until the bot server asks for work: the claim makes it the person's run with its lease, after the same checks
+  // again. Its own time is when it was asked for; two asked in the same millisecond are told apart by a millisecond.
+  for (let step = 0; step < 5; step++) {
+    const dueAt = new Date(now.getTime() + step);
+    const made = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+      INSERT INTO "brick_item_runs" ("id", "item_id", "due_at", "revision", "claimed_at", "lease_until", "state", "manual", "request_key")
+      VALUES (${randomUUID()}, ${row.id}, ${dueAt}, ${row.revision}, ${now}, ${now}, 'queued', true, ${key})
+      ON CONFLICT ("item_id", "due_at") DO NOTHING
+      RETURNING "id"`);
+    if (made.length) return { ok: true, item: view, run: { runId: made[0].id, state: 'queued', replay: false } };
+  }
+  return { ok: false, status: 409, code: 'busy', error: 'It is starting right now' };
+}
+
 /**
  * The owner's change to one item: pause, resume, done (with its result), reopen, delete, or change what it says or when.
  * Every one raises the revision, so a run that already started is dropped at its next outside step, and nothing new starts
  * once the change is saved. Pausing, finishing or deleting a goal does the same to the checks it set, and only those.
  * Asked twice (a double tap) the second answer is the item as it is now.
  */
-export async function changeItem(viaBrickId: string, itemId: string, input: z.infer<typeof itemActionSchema>, now: Date = new Date()): Promise<{ ok: true; item: ItemView } | Refused> {
+export async function changeItem(viaBrickId: string, itemId: string, input: z.infer<typeof itemActionSchema>, now: Date = new Date()): Promise<{ ok: true; item: ItemView; run?: RunNowInfo } | Refused> {
   const ownerId = await ownerAskingThrough(viaBrickId, input.userId);
   if (!ownerId) return { ok: false, status: 404, error: 'Brick not found' };
+  if (input.key !== undefined && input.action !== 'run') return { ok: false, status: 400, error: 'key is only for run' };
   const limits = await getBrickLimits();
+  // Read before the transaction opens, so the usage check inside it never takes another connection from the pool
+  const universe = input.action === 'run' ? await getUniverseAiReplyLimits() : null;
+  const roomSettings: RoomSettings | undefined = universe ? { signedIn: universe.signedIn, windowHours: universe.windowHours, goalsShare: limits.goalsShare } : undefined;
   return prisma.$transaction(async (tx) => {
     // The person's lock comes first, before any row, the same order as setting one (createItem): so a change, a reopen and a new check
     // under the same goal can never wait on each other in a circle
@@ -409,7 +503,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (row.state === 'paused') return { ok: true as const, item: viewOf(row) };
         if (row.state !== 'on') return wrongState(row.state);
         await moveChecks(tx, row.id, ['on'], { state: 'paused', pausedBy: 'goal' }, now, false);
-        return finish({ state: 'paused', pausedBy: 'owner', nextDueAt: null, ...bump });
+        return finish({ state: 'paused', pausedBy: 'owner', nextDueAt: null, ...NOT_SNOOZED, ...bump });
       }
       case 'resume': {
         if (row.state === 'on') return { ok: true as const, item: viewOf(row) };
@@ -432,7 +526,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         const due = cadence.type === 'once' ? (firstDue(cadence, zone, now) ?? now) : firstDue(cadence, zone, now);
         // Only the checks its own pause (or the deleted Brick) stopped: one the person paused by itself stays paused
         await moveChecks(tx, row.id, ['paused'], { state: 'on', pausedBy: null }, now, true, ['goal', 'brick_deleted']);
-        return finish({ state: 'on', pausedBy: null, nextDueAt: due, timeZone: zone, ...bump });
+        return finish({ state: 'on', pausedBy: null, nextDueAt: due, timeZone: zone, ...NOT_SNOOZED, ...bump });
       }
       case 'done': {
         if (row.state === 'done') return { ok: true as const, item: viewOf(row) };
@@ -440,7 +534,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         await endTaskCards(tx, row.botId, row.id, now);
         // A routine that came with a template and was never turned on stays marked so while done: coming back (Reopen, Snooze) goes through
         // the same gate as Resume, so Done is not a way around it
-        return finish({ state: 'done', pausedBy: row.pausedBy === 'template' ? 'template' : null, nextDueAt: null, doneAt: now, result: input.result ?? row.result, ...NOT_ASKING, ...bump });
+        return finish({ state: 'done', pausedBy: row.pausedBy === 'template' ? 'template' : null, nextDueAt: null, ...NOT_SNOOZED, doneAt: now, result: input.result ?? row.result, ...NOT_ASKING, ...bump });
       }
       case 'reopen': {
         if (row.state === 'on') return { ok: true as const, item: viewOf(row) };
@@ -457,12 +551,12 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         }
         // Starts again from the new revision, counted from now: a one-off that has passed is due now, once
         const due = cadence.type === 'once' ? (firstDue(cadence, zone, now) ?? now) : firstDue(cadence, zone, now);
-        return finish({ state: 'on', pausedBy: null, timeZone: zone, doneAt: null, result: null, nextDueAt: due, failuresInRow: 0, failureTold: false, tellRunId: null, ...NOT_ASKING, askKept: null, ...bump });
+        return finish({ state: 'on', pausedBy: null, timeZone: zone, doneAt: null, result: null, nextDueAt: due, ...NOT_SNOOZED, failuresInRow: 0, failureTold: false, tellRunId: null, ...NOT_ASKING, askKept: null, ...bump });
       }
       case 'delete': {
         await moveChecks(tx, row.id, ['on', 'paused', 'done'], { state: 'deleted', pausedBy: null }, now, false);
         await endTaskCards(tx, row.botId, row.id, now);
-        return finish({ state: 'deleted', pausedBy: null, nextDueAt: null, ...NOT_ASKING, ...bump });
+        return finish({ state: 'deleted', pausedBy: null, nextDueAt: null, ...NOT_SNOOZED, ...NOT_ASKING, ...bump });
       }
       case 'snooze': {
         // Snooze is for a reminder or a briefing, on the person's tap on the message it just sent (or before it comes)
@@ -471,6 +565,9 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (cadence.type === 'none') return wrongState(row.state);
         // A repeating one the person marked Done stays done (Reopen is how it comes back); only a delivered one-off comes back by Snooze
         if (row.state === 'done' && cadence.type !== 'once') return wrongState(row.state);
+        // One occurrence is snoozed once: a second tap (a double tap, or the same message tapped again) while it is still waiting is the item as
+        // it is, never later again. It comes back to being snoozable the moment that occurrence has run.
+        if (row.state === 'on' && row.snoozedUntil) return { ok: true as const, item: viewOf(row) };
         // A done one coming back takes its place again, so it keeps to the same limits as a reopen: the Brick on, the goal on, the most
         let zone = row.timeZone;
         if (row.state === 'done') {
@@ -482,13 +579,23 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
             zone = gate.timeZone;
           }
         }
-        // A one-off that is not due yet moves from the moment it was due (an early or stale tap only ever puts it later, never earlier);
-        // anything else comes back this much after the tap, a repeating one then carrying on from there
-        const from = cadence.type === 'once' && row.state === 'on' && row.nextDueAt && row.nextDueAt > now ? row.nextDueAt : now;
-        const later = new Date(from.getTime() + limits.snooze * MINUTE);
-        // A one-off comes back at the new time (done ones too: they have just been delivered); a repeating one is moved once and carries on from there
-        const moved: Cadence = cadence.type === 'once' ? { type: 'once', at: later.toISOString() } : cadence;
-        return finish({ state: 'on', pausedBy: null, timeZone: zone, doneAt: null, result: null, cadence: moved as unknown as Prisma.InputJsonValue, nextDueAt: later, ...(row.state === 'done' ? { failuresInRow: 0, failureTold: false, tellRunId: null } : {}), ...bump });
+        if (cadence.type === 'once') {
+          // A one-off that is not due yet moves from the moment it was due (an early or stale tap only ever puts it later, never earlier);
+          // a delivered one comes back this much after the tap. It has no recurrence, so it is the one occurrence that moves.
+          const from = row.state === 'on' && row.nextDueAt && row.nextDueAt > now ? row.nextDueAt : now;
+          const later = new Date(from.getTime() + limits.snooze * MINUTE);
+          const moved: Cadence = { type: 'once', at: later.toISOString() };
+          return finish({ state: 'on', pausedBy: null, timeZone: zone, doneAt: null, result: null, cadence: moved as unknown as Prisma.InputJsonValue, nextDueAt: later, regularDueAt: null, snoozedUntil: later, ...(row.state === 'done' ? { failuresInRow: 0, failureTold: false, tellRunId: null } : {}), ...bump });
+        }
+        // A repeating one moves THIS occurrence, never the recurrence: the next regular one stays where the rule puts it (an hourly task due at
+        // 8:00 and snoozed to 8:10 still runs at 9:00 after it). When the snooze would reach that next regular run, the two are one run at the
+        // regular time and nothing is snoozed (see snoozePlan).
+        const plan = snoozePlan(cadence, zone, row.nextDueAt, now, limits.snooze);
+        if (!plan || !plan.snoozed) return { ok: true as const, item: viewOf(row) };
+        return finish({ state: 'on', pausedBy: null, timeZone: zone, nextDueAt: plan.nextDueAt, regularDueAt: plan.regularDueAt, snoozedUntil: plan.nextDueAt, ...bump });
+      }
+      case 'run': {
+        return requestRun(tx, row, ownerId, input.key ?? null, now, roomSettings!);
       }
       case 'change': {
         const change = input.change;
@@ -524,6 +631,8 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
           cadence: settled as unknown as Prisma.InputJsonValue,
           timeZone,
           nextDueAt: due,
+          // A new time is a new recurrence: a snoozed occurrence of the old one goes with it
+          ...(rescheduled ? NOT_SNOOZED : {}),
           waitingFor: settled.type === 'none' ? waitingFor ?? null : null,
           statusLine: change.statusLine === undefined ? row.statusLine : change.statusLine,
           steps: (change.steps ?? row.steps) as Prisma.InputJsonValue,
@@ -554,7 +663,7 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
 export async function pauseItemsOfDeletedBrick(db: Tx, botId: string): Promise<number> {
   const { count } = await db.brickItem.updateMany({
     where: { botId, state: 'on' },
-    data: { state: 'paused', pausedBy: 'brick_deleted', nextDueAt: null, ...NOT_HELD, revision: { increment: 1 } },
+    data: { state: 'paused', pausedBy: 'brick_deleted', nextDueAt: null, ...NOT_SNOOZED, ...NOT_HELD, revision: { increment: 1 } },
   });
   return count;
 }
@@ -648,8 +757,10 @@ export interface ClaimedRun {
   steps: ItemView['steps'];
   statusLine: string | null;
   timeZone: string;
-  /** The occurrence this run is for; a late one still says when it was due. */
+  /** The occurrence this run is for; a late one still says when it was due. For Run now, the moment it was asked for. */
   dueAt: string;
+  /** Run now: an extra run the owner asked for. It is never late, and it changes nothing about when the item comes next. */
+  manual: boolean;
   revision: number;
   /** A reminder or briefing that comes after an outage: Brick says so in its own words ("I ran the 8:00 check now, 20 minutes late"). */
   late: boolean;
@@ -683,6 +794,7 @@ const claimedOf = (run: Prisma.BrickItemRunGetPayload<{ include: { item: { inclu
     statusLine: run.item.statusLine,
     timeZone: run.item.timeZone,
     dueAt: run.dueAt.toISOString(),
+    manual: run.manual,
     revision: run.revision,
     late: run.late,
     fresh: run.fresh,
@@ -700,7 +812,7 @@ function endsOnFailure(item: { kind: string; cadence: Prisma.JsonValue }): boole
   return item.kind !== 'goal' && readCadence(item.cadence)?.type === 'once';
 }
 function endedOneOff(now: Date): Prisma.BrickItemUpdateInput {
-  return { state: 'done', nextDueAt: null, doneAt: now, ...NOT_HELD, revision: { increment: 1 } };
+  return { state: 'done', nextDueAt: null, ...NOT_SNOOZED, doneAt: now, ...NOT_HELD, revision: { increment: 1 } };
 }
 
 /**
@@ -745,7 +857,8 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
         if (!locked.length) return null;
         const run = await tx.brickItemRun.findUniqueOrThrow({ where: { id }, include: RUN_INCLUDE });
         // Only while the item is still the same and still on: a run for something that changed is dropped, not retried
-        const stillOn = !!item && item.state === 'on' && item.revision === run.revision;
+        // A run the owner asked for (Run now) may also be on an item they paused themselves
+        const stillOn = !!item && (item.state === 'on' || (run.manual && manualMayRun(item))) && item.revision === run.revision;
         if (!stillOn) {
           await tx.brickItemRun.update({ where: { id }, data: { state: 'dropped', finishedAt: now } });
           return null;
@@ -755,12 +868,13 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
         const bot = await tx.bot.findUnique({ where: { id: run.item.botId }, select: { enabled: true, deletedAt: true } });
         if (!bot?.enabled || bot.deletedAt) {
           await tx.brickItemRun.update({ where: { id }, data: { state: 'dropped', finishedAt: now } });
-          if (readCadence(item.cadence)?.type === 'once') await tx.brickItem.update({ where: { id: item.id }, data: { nextDueAt: now } });
+          // (A run that was asked for was extra: the item's own time is not touched)
+          if (!run.manual && readCadence(item.cadence)?.type === 'once') await tx.brickItem.update({ where: { id: item.id }, data: { nextDueAt: now } });
           return null;
         }
         if (run.attempts >= MAX_TRIES) {
           await tx.brickItemRun.update({ where: { id }, data: { state: 'failed', error: 'It did not finish in time', finishedAt: now } });
-          await tx.brickItem.update({ where: { id: run.itemId }, data: { failuresInRow: { increment: 1 }, lastRunAt: now, ...(endsOnFailure(item) ? endedOneOff(now) : {}) } });
+          await tx.brickItem.update({ where: { id: run.itemId }, data: { failuresInRow: { increment: 1 }, lastRunAt: now, ...(!run.manual && endsOnFailure(item) ? endedOneOff(now) : {}) } });
           return null;
         }
         return tx.brickItemRun.update({ where: { id }, data: { attempts: { increment: 1 }, leaseUntil: lease }, include: RUN_INCLUDE });
@@ -770,6 +884,49 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
       // One run that could not be taken (a deadlock Postgres broke, a dropped connection) never discards what is already claimed:
       // it stays claimed and is looked at again by the next ask
       console.error('[BrickItems] Could not hand a run out again:', error instanceof Error ? error.message : 'unknown');
+    }
+  }
+
+  // Runs the owner asked for (Run now), waiting to be handed to the bot server. Each is made the person's run by the same checks a scheduled
+  // one passes (the Brick on, the item as it was asked, the room in their usage, their runs a day, one at a time per person), then handed out
+  // with the same lease. One that cannot start is dropped, with why: it never waits for later, so a tap is never run unexpectedly hours after
+  // it. Before the scheduled ones, so a person's tap is never behind a full batch.
+  const queued = await prisma.brickItemRun.findMany({ where: { state: 'queued', ...(kindList ? { item: { kind: { in: kindList } } } : {}) }, orderBy: [{ claimedAt: 'asc' }, { id: 'asc' }], take: limit, select: { id: true, itemId: true } });
+  for (const { id, itemId } of queued) {
+    try {
+      const claimed = await prisma.$transaction(async (tx) => {
+        // The item first, then its run: the same order as every other writer
+        const item = await lockedItem(tx, { id: itemId });
+        const locked = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT "id" FROM "brick_item_runs" WHERE "id" = ${id} AND "state" = 'queued' FOR UPDATE SKIP LOCKED`);
+        if (!locked.length) return null;
+        const run = await tx.brickItemRun.findUniqueOrThrow({ where: { id }, include: RUN_INCLUDE });
+        const drop = async (why: string) => {
+          await tx.brickItemRun.update({ where: { id }, data: { state: 'dropped', error: why, finishedAt: now } });
+          return null;
+        };
+        // Only while the item is the one that was asked: a pause, a change or a delete since the tap stops it
+        if (!item || item.revision !== run.revision || !manualMayRun(item)) return drop('It changed before it ran');
+        if (now.getTime() - run.claimedAt.getTime() > LATE_GRACE) return drop('It was not taken up in time');
+        const bot = await tx.bot.findUnique({ where: { id: item.botId }, select: { enabled: true, deletedAt: true, roomId: true, ownerId: true, aiProviderRef: true } });
+        if (!bot?.enabled || bot.deletedAt || bot.roomId !== null || bot.ownerId !== item.ownerId) return drop('Its Brick is switched off');
+        let onUniverse = false;
+        if (item.kind !== 'reminder') {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`brick-runs:${item.ownerId}`}))`;
+          onUniverse = bot.aiProviderRef === UNIVERSE_AI_REF;
+          const room = onUniverse ? await goalsRoom(item.ownerId, now, tx, roomSettings) : ({ ok: true } as const);
+          if (!room.ok) return drop('There was no room in the usage for goals and tasks');
+          const today = await tx.brickItemRun.count({ where: { state: { not: 'queued' }, claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' } } } });
+          if (today >= limits.runsPerDay) return drop('The runs a day were used up');
+        }
+        // It is the person's run now. The item's own time, held wait and state are not touched: it was extra.
+        const handed = await tx.brickItemRun.update({ where: { id }, data: { state: 'claimed', claimedAt: now, leaseUntil: lease, attempts: 1, late: false, fresh: false }, include: RUN_INCLUDE });
+        if (onUniverse) await windowStart(`ua:person:${item.ownerId}`, roomSettings.windowHours, now, tx);
+        return handed;
+      });
+      if (claimed) out.push(claimedOf(claimed));
+    } catch (error) {
+      // One that could not be taken (a deadlock Postgres broke, a dropped connection) stays queued and is looked at again by the next ask
+      console.error('[BrickItems] Could not hand out a run that was asked for:', error instanceof Error ? error.message : 'unknown');
     }
   }
 
@@ -815,7 +972,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
       -- A person who is at their runs a day is left out here, so what they hold back never fills the batch ahead of everyone else
       AND (i."kind" = 'reminder' OR (
         SELECT count(*) FROM "brick_item_runs" r JOIN "brick_items" j ON j."id" = r."item_id"
-        WHERE j."owner_id" = i."owner_id" AND j."kind" <> 'reminder' AND r."claimed_at" > ${new Date(now.getTime() - DAY)}
+        WHERE j."owner_id" = i."owner_id" AND j."kind" <> 'reminder' AND r."state" <> 'queued' AND r."claimed_at" > ${new Date(now.getTime() - DAY)}
       ) < ${limits.runsPerDay})
     ORDER BY i."next_due_at" ASC, i."id" ASC
     LIMIT ${limit}`);
@@ -869,7 +1026,7 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
 
         // Runs a day: watches, schedules and goals together, per person. A reminder is fixed text with no AI and never uses them.
         if (item.kind !== 'reminder') {
-          const today = await tx.brickItemRun.count({ where: { claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' } } } });
+          const today = await tx.brickItemRun.count({ where: { state: { not: 'queued' }, claimedAt: { gt: new Date(now.getTime() - DAY) }, item: { ownerId: item.ownerId, kind: { not: 'reminder' } } } });
           if (today >= limits.runsPerDay) return null;
         }
 
@@ -879,10 +1036,20 @@ export async function claimWork(now: Date = new Date(), limit = CLAIM_BATCH, wai
           VALUES (${randomUUID()}, ${id}, ${dueAt}, ${item.revision}, ${now}, ${lease}, ${overdue && reminderLike}, ${overdue && !reminderLike})
           ON CONFLICT ("item_id", "due_at") DO NOTHING
           RETURNING "id"`);
-        // The next one is the first still to come: after an outage everything missed but this one is skipped, never replayed
-        const next = cadence ? nextDue(cadence, item.timeZone, dueAt, now) : null;
-        // A run is being made, so nothing is waiting any more
-        await tx.brickItem.update({ where: { id }, data: { nextDueAt: next, heldSince: null, heldToldAt: null, heldNoticeAt: null } });
+        // The next one is the first still to come: after an outage everything missed but this one is skipped, never replayed. A snoozed
+        // occurrence that is being run now leaves the recurrence where it was (`regularDueAt`): the next regular one is still to come, or,
+        // when that too has fallen due meanwhile, the first one after it that is, so it is never run twice and never replayed.
+        const next = item.regularDueAt
+          ? item.regularDueAt.getTime() > now.getTime()
+            ? item.regularDueAt
+            : cadence
+              ? nextDue(cadence, item.timeZone, item.regularDueAt, now)
+              : null
+          : cadence
+            ? nextDue(cadence, item.timeZone, dueAt, now)
+            : null;
+        // A run is being made, so nothing is waiting any more, and nothing is snoozed any more
+        await tx.brickItem.update({ where: { id }, data: { nextDueAt: next, ...NOT_SNOOZED, heldSince: null, heldToldAt: null, heldNoticeAt: null } });
         if (!made.length) return null;
         // A run on Universe AI is the person's first use of the window when none is running, exactly as their first chat reply is: it
         // starts the window, so what goals and tasks use is counted in it and held against their share, never left outside any window
@@ -969,7 +1136,8 @@ export async function checkRun(runId: string, attempt: number, now: Date = new D
   // been handed the run yet. Its report is still taken while it is the latest try, so what it already did is on record, never done twice.
   if (run.leaseUntil <= now) return { ok: false, reason: 'expired' };
   const { item } = run;
-  if (item.state === 'paused') return { ok: false, reason: 'paused' };
+  // A run the owner asked for on an item they paused themselves may go on: they asked for it. Any other pause stops it, as does a change.
+  if (item.state === 'paused' && !(run.manual && manualMayRun(item))) return { ok: false, reason: 'paused' };
   if (item.state === 'done') return { ok: false, reason: 'done' };
   if (item.state === 'deleted') return { ok: false, reason: 'deleted' };
   if (!item.bot.enabled || item.bot.deletedAt) return { ok: false, reason: 'off' };
@@ -1001,7 +1169,7 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
       data: { state: report.state, outcome: report.outcome ?? null, result: report.result ?? null, error: report.state === 'failed' ? report.error ?? 'It did not work' : null, finishedAt: now },
     });
     // Whether the item is still what the run was claimed for
-    const applied = item.revision === run.revision && item.state === 'on';
+    const applied = item.revision === run.revision && (item.state === 'on' || (run.manual && manualMayRun(item)));
     const failuresInRow = report.state === 'failed' ? item.failuresInRow + 1 : 0;
     if (!applied) {
       // The one change since the claim was a pause, and the run it stopped had already done its work: a reminder that was sent, or a watch
@@ -1013,7 +1181,7 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
       if (pausedOnly && workDone) {
         const ended = await tx.brickItem.update({
           where: { id: item.id },
-          data: { state: 'done', pausedBy: null, nextDueAt: null, doneAt: now, lastRunAt: now, result: report.result ?? item.result, ...NOT_HELD, revision: { increment: 1 } },
+          data: { state: 'done', pausedBy: null, nextDueAt: null, ...NOT_SNOOZED, doneAt: now, lastRunAt: now, result: report.result ?? item.result, ...NOT_HELD, revision: { increment: 1 } },
         });
         return { ok: true as const, item: viewOf(ended), applied: false, failuresInRow: item.failuresInRow, tellPerson: false, askPerson: null };
       }
@@ -1036,7 +1204,8 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
     // A one-off ends with its one run: once it was sent, or when that run failed (it has no next time to come back on, so left on
     // it would sit there forever and count against the person's limit). The failed run stays in "Everything Brick did".
     // A goal is never a one-off: it lasts until the outcome is reached (goalReached below), whatever its first check was.
-    const oneOffSent = kind !== 'goal' && cadence?.type === 'once' && (report.state === 'done' || report.state === 'failed');
+    // A run that was asked for (Run now) is extra: it never ends a one-off, whose own time still comes
+    const oneOffSent = !run.manual && kind !== 'goal' && cadence?.type === 'once' && (report.state === 'done' || report.state === 'failed');
     // A watch speaks only when its condition is met, says so once, then moves to Done (Reopen starts it again)
     const watchSpoke = kind === 'watch' && report.state === 'done' && report.outcome === 'spoke';
     const goalReached = kind === 'goal' && report.state === 'done' && report.reached === true;
@@ -1051,7 +1220,7 @@ export async function finishRun(runId: string, report: z.infer<typeof runReportS
       }
     }
     if (oneOffSent || watchSpoke || goalReached) {
-      Object.assign(data, { state: 'done', nextDueAt: null, doneAt: now, result: report.result ?? item.result, ...NOT_HELD, ...(goalReached ? NOT_ASKING : {}), revision: { increment: 1 } });
+      Object.assign(data, { state: 'done', pausedBy: null, nextDueAt: null, ...NOT_SNOOZED, doneAt: now, result: report.result ?? item.result, ...NOT_HELD, ...(goalReached ? NOT_ASKING : {}), revision: { increment: 1 } });
       if (goalReached) await moveChecks(tx, item.id, ['on', 'paused'], { state: 'done', pausedBy: null, doneAt: now }, now, false);
       await endTaskCards(tx, item.botId, item.id, now);
     }

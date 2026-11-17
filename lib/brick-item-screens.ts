@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
-import { changeItem, itemActionSchema, readItem, viewOf, type ItemKind, type ItemView, type Refused } from '@/lib/brick-items';
+import { changeItem, itemActionSchema, readItem, viewOf, type ItemKind, type ItemView, type Refused, type RunNowInfo } from '@/lib/brick-items';
 import type { z } from 'zod';
 
 /**
@@ -61,6 +61,8 @@ export interface DidRun {
   error: string | null;
   late: boolean;
   fresh: boolean;
+  /** Run now: an extra run the owner asked for, not one the clock set off. Its `dueAt` is when they asked. */
+  manual: boolean;
 }
 
 const PAGE = 50;
@@ -80,6 +82,8 @@ export async function didByBrick(ownerId: string, brickId: string, before?: { at
   const rows = await prisma.brickItemRun.findMany({
     where: {
       item: { ownerId, botId: brickId },
+      // A run that was asked for and has not been handed to the bot server yet has not started: it is not something Brick did
+      state: { not: 'queued' },
       ...(before ? { OR: [{ claimedAt: { lt: before.at } }, { claimedAt: before.at, id: { lt: before.id } }] } : {}),
     },
     orderBy: [{ claimedAt: 'desc' }, { id: 'desc' }],
@@ -102,6 +106,7 @@ export async function didByBrick(ownerId: string, brickId: string, before?: { at
       error: run.error,
       late: run.late,
       fresh: run.fresh,
+      manual: run.manual,
     })),
     next: rows.length > PAGE ? `${page[page.length - 1].claimedAt.toISOString()}|${page[page.length - 1].id}` : null,
   };
@@ -114,10 +119,10 @@ export async function ownsBrickNow(brickId: string, userId: string): Promise<boo
 }
 
 /**
- * The owner's own tap on a screen: Pause, Resume, Mark done, Reopen, Snooze, Delete, or a change. The same rules as the Brick's own
+ * The owner's own tap on a screen: Pause, Resume, Mark done, Reopen, Snooze, Run now, Delete, or a change. The same rules as the Brick's own
  * (revision, nothing new starts once it is saved), asked over the person's session instead of by the bot server.
  */
-export async function changeFromScreen(ownerId: string, brickId: string, itemId: string, input: Omit<z.infer<typeof itemActionSchema>, 'userId'>): Promise<{ ok: true; item: ItemView } | Refused> {
+export async function changeFromScreen(ownerId: string, brickId: string, itemId: string, input: Omit<z.infer<typeof itemActionSchema>, 'userId'>): Promise<{ ok: true; item: ItemView; run?: RunNowInfo } | Refused> {
   const owner = await prisma.user.findUnique({ where: { id: ownerId }, select: { uuid: true } });
   if (!owner) return { ok: false, status: 404, error: 'Brick not found' };
   return changeItem(brickId, itemId, { ...input, userId: owner.uuid });
