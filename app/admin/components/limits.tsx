@@ -1151,8 +1151,8 @@ export type CodeJobLimitView = {
 export type CodeJobLimitViews = Record<string, CodeJobLimitView>;
 
 const CODE_JOB_COUNT_WORDS: Record<string, string> = { maxCells: 'runs', maxOutputFiles: 'files', maxResultChars: 'characters', maxReads: 'reads', atOncePerPerson: 'jobs', atOnceAll: 'jobs', jobsPerPersonPerDay: 'jobs' };
-const codeJobScale = (key: string, unit: CodeJobLimitView['unit']) => (unit === 'micros' ? 1_000_000 : unit === 'bytes' ? (key === 'maxCodeBytes' ? 1024 : 1_048_576) : 1);
-const codeJobUnit = (key: string, unit: CodeJobLimitView['unit']) => (unit === 'micros' ? 'dollars' : unit === 'bytes' ? (key === 'maxCodeBytes' ? 'KB' : 'MB') : unit === 'count' ? (CODE_JOB_COUNT_WORDS[key] ?? 'times') : unit);
+const codeJobScale = (key: string, unit: CodeJobLimitView['unit']) => (unit === 'micros' ? 1_000_000 : unit === 'bytes' ? (key === 'maxCodeBytes' || key === 'maxAnswerBytes' ? 1024 : 1_048_576) : 1);
+const codeJobUnit = (key: string, unit: CodeJobLimitView['unit']) => (unit === 'micros' ? 'dollars' : unit === 'bytes' ? (key === 'maxCodeBytes' || key === 'maxAnswerBytes' ? 'KB' : 'MB') : unit === 'count' ? (CODE_JOB_COUNT_WORDS[key] ?? 'times') : unit);
 
 /** The limits of an answer from /api/admin/workbench, or null when it is not that answer (each one needs its words and range). */
 export function readCodeJobLimits(answer: unknown): CodeJobLimitViews | null {
@@ -1176,7 +1176,7 @@ export function codeJobLimits(views: CodeJobLimitViews): Limit[] {
       recommended: view.recommended === null ? -1 : view.recommended / scale,
       unset,
       options: [],
-      note: unset ? (view.required ? 'Not set yet. Code jobs do not run until you set it.' : 'Not set yet. Files are kept until they are deleted.') : undefined,
+      note: unset ? (view.required ? 'Not set yet. Code jobs do not run until you set it.' : key === 'maxAnswerBytes' ? 'Not set yet. Every App answer is passed on whole.' : 'Not set yet. Files are kept until they are deleted.') : undefined,
       range: { min: view.range.min / scale, max: view.range.max / scale },
     };
   });

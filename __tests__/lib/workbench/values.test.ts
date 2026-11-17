@@ -31,6 +31,7 @@ const LIMITS: FilledLimits = {
   exposureCeilingMicros: 1_000_000,
   keepDays: null,
   waitSeconds: 40,
+  maxAnswerBytes: null,
 };
 
 describe('the Limits of a code job', () => {
@@ -38,6 +39,8 @@ describe('the Limits of a code job', () => {
     expect(filledLimits(CODE_JOB_LIMITS_EMPTY)).toBeNull();
     expect(missingCodeJobLimits(CODE_JOB_LIMITS_EMPTY)).toEqual(CODE_JOB_NEEDED);
     expect(CODE_JOB_NEEDED).not.toContain('keepDays');
+    // An empty largest answer means every answer is passed on whole, so it never stops a job from starting
+    expect(CODE_JOB_NEEDED).not.toContain('maxAnswerBytes');
   });
 
   it('read back only what is there and fits its range', () => {

@@ -639,6 +639,51 @@ export async function cancelCodeJob(input: { jobId: string; botId: string; perso
   return { status: 'ok', job: await viewOf(fresh ?? row) };
 }
 
+const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+function headline(state: JobView['state'], reason: CodeJobReason | null): string {
+  if (state === 'running') return 'The job is still running.';
+  if (state === 'succeeded') return 'The job finished.';
+  return reason ? REASON_WORDS[reason] : 'The job ended.';
+}
+
+/**
+ * Which steps really ran, said plainly and never more than is known: how many of the runs of code started, which one did not work, which
+ * did not run, how many App reads were done, and what was kept. A run that was cut short (cancelled, out of time, lost) is said to have
+ * started, not to have finished, because nobody saw it end.
+ */
+function whatRan(row: Row, result: Record<string, unknown>, files: JobView['files']): string {
+  const runs = (Array.isArray(result.runs) ? result.runs : []) as JobView['runs'];
+  const reads = (Array.isArray(result.reads) ? result.reads : []) as JobView['reads'];
+  const caps = isObject(row.capabilities) ? row.capabilities : {};
+  const plannedReads = Array.isArray(caps.reads) ? caps.reads.length : 0;
+  const notKept = Array.isArray(result.notKept) ? (result.notKept as unknown[]).length : 0;
+  const parts: string[] = [];
+  if (plannedReads > 0) {
+    const done = reads.filter((read) => read.ok).length;
+    parts.push(done === plannedReads ? `All ${plural(plannedReads, 'App read')} were done.` : `${done} of ${plural(plannedReads, 'App read')} were done${done < plannedReads ? ', so the code did not run' : ''}.`);
+  }
+  const ended = ACTIVE.includes(row.state) ? 'running' : row.state;
+  const started = Math.max(row.cellsRun, runs.length);
+  const finished = runs.length;
+  if (started === 0) {
+    parts.push(ended === 'running' ? 'No step has started yet.' : `None of the ${plural(row.steps, 'step')} ran.`);
+  } else {
+    const failed = runs.find((run) => !run.ok);
+    const cutShort = started > finished;
+    const sentence = [`${started} of ${plural(row.steps, 'step')} ${ended === 'running' ? 'have started' : cutShort ? 'started' : 'ran'}`];
+    if (failed) sentence.push(`step ${failed.n} did not work`);
+    if (cutShort && ended !== 'running') sentence.push(`step ${started} was stopped before it finished, so what it did is not known`);
+    const never = ended === 'running' ? 0 : row.steps - started;
+    if (never > 0) sentence.push(`${plural(never, 'step')} did not run`);
+    parts.push(`${sentence.join('; ')}.`);
+  }
+  if (ended !== 'running') {
+    if (files.length > 0 || notKept > 0) parts.push(`${plural(files.length, 'file')} kept${notKept > 0 ? `, ${notKept} not kept` : ''}.`);
+  }
+  return parts.join(' ');
+}
+
 async function viewOf(row: Row): Promise<JobView> {
   const result = isObject(row.result) ? row.result : {};
   const state = ACTIVE.includes(row.state) ? 'running' : (row.state as JobView['state']);
@@ -649,14 +694,7 @@ async function viewOf(row: Row): Promise<JobView> {
     jobId: row.id,
     state,
     reason,
-    message:
-      state === 'running'
-        ? 'The job is still running.'
-        : state === 'succeeded'
-          ? 'The job finished.'
-          : reason
-            ? REASON_WORDS[reason]
-            : 'The job ended.',
+    message: `${headline(state, reason)} ${whatRan(row, result, files)}`,
     deadlineAt: row.deadlineAt.toISOString(),
     runsUsed: row.cellsRun,
     runs: Array.isArray(result.runs) ? (result.runs as JobView['runs']) : [],

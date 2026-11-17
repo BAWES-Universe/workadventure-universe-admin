@@ -30,6 +30,20 @@ Every limit is a setting in **Limits → Apps: code jobs** (nothing is assumed i
 - Sweep (every 30 s, in the Orbit process): ends a job past its deadline or with no heartbeat, retries deleting a workspace the provider would not delete (never "closed" on a guess), and removes results and files after the days kept.
 - After each job the provider's log for its session is read; any run that was not our code pauses code jobs (`provider_ran_tools`) until a super admin resumes them.
 
+## Big App answers
+
+Verified live (17 Nov 2026, Composio, throwaway sessions). With the provider's sandbox ON, an App answer past a threshold between about 37 KB and 85 KB is not returned: the Brick gets a short `data_preview` and an instruction to read the saved file with the sandbox, which an App link no longer offers. With the sandbox OFF (what App links now have) the provider returns every answer whole and ignores `sync_response_to_workbench`; 6 MB came back complete, with nothing offloaded or cut.
+
+So the size is bounded by Orbit, by the Limit "Largest App answer given to a Brick" (200 KB when seeded; empty passes every answer on whole). An answer over it is never cut and never half passed on: the Brick gets `answer_too_large` saying the call ran and was counted once, how big the answer was, the Limit, and what to do (ask for less, or have a code job read all of it with `reads`; do not run it again). The job's own data Limit still applies to what a read brings in.
+
+## No computer
+
+A code job is not a computer and never makes, turns on or pays for one. When code jobs cannot run at all (not set, paused, ceiling reached, provider unavailable) the refusal tells a Brick with a computer to use it, and a Brick without one to tell the person the task needs a computer and that they can give the Brick one. Giving a computer stays the person's own step. A job is paid by the universe like any App step.
+
+## What a result says
+
+The result message says how many steps ran, which did not work, which never ran, how many App reads were done and what was kept. A run that was cut short is "started", never "ran", because nobody saw it end.
+
 ## Money
 
 An estimate is reserved when the job starts and the meter event `codejob:<id>` is settled once, at what was used. A job whose meter line did not get written (the meter did not answer, or the process stopped between the two) has no `metered_at`, and the sweep writes it a minute after the job ended; the event id makes that safe to repeat. The sandbox is not billed by the provider today; the price is the saved App price or the built-in per-run figure, and the ceiling guards a future bill.

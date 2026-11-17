@@ -10,7 +10,7 @@ import { priceCall } from '@/lib/composio-rates';
 import { readComposioBilling } from '@/lib/composio-billing';
 import { truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
 import { linkJson } from '@/lib/app-adapter/link-json';
-import { answerCodeJobCall, isCodeJobTool, sandboxRefusal, withCodeJobTools } from '@/lib/workbench/link';
+import { answerCodeJobCall, boundAppAnswer, isCodeJobTool, sandboxRefusal, withCodeJobTools } from '@/lib/workbench/link';
 import { touchesSandbox } from '@/lib/workbench/values';
 import { getGitHubApp } from '@/lib/github/app';
 import { routeForRun, type RunRoute } from '@/lib/app-routes';
@@ -267,7 +267,8 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
     // The list of tools: the provider's sandbox tools come out (a link made before code jobs may still list them) and the code job tools go in
     const answer = method === 'tools/list' ? await withCodeJobTools(sent, input.message.id, !(isObject(input.message.params) && typeof (input.message.params as { cursor?: unknown }).cursor === 'string')) : sent;
     if (written) await recordOutcome(written.eventId, toolkit, written.provider, answer.status < 400 && !rpcError(answer.body, typeof input.message.id === 'number' || typeof input.message.id === 'string' ? input.message.id : undefined) && !/"isError"\s*:\s*true/.test(answer.body));
-    return { status: 'done', answer };
+    // A big answer is never cut and never passed on half: the Brick is told it ran, how big it was, and what to do (already counted above)
+    return { status: 'done', answer: callParams ? await boundAppAnswer(answer, input.message.id, callParams.name, callParams.arguments) : answer };
   } catch (error) {
     console.error('[ReadyMade] Link failed:', error instanceof AdapterError ? error.message : error instanceof Error ? error.message : 'unknown');
     if (written) await recordOutcome(written.eventId, toolkit, written.provider, false);

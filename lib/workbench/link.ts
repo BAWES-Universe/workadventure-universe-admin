@@ -1,9 +1,10 @@
+import { prisma } from '@/lib/db';
 import { getAdapter } from '@/lib/app-adapter';
 import { linkJson } from '@/lib/app-adapter/link-json';
 import type { LinkAnswer } from '@/lib/app-adapter/types';
 import { cancelCodeJob, getCodeJob, startCodeJob, type JobView, type ReadRunner } from '@/lib/workbench/executor';
 import { getCodeJobLimits, getCodeJobPause } from '@/lib/workbench/state';
-import { CODE_JOB_TOOLS, SANDBOX_TOOLS, TOOL_CANCEL, TOOL_RESULT, TOOL_START, filledLimits } from '@/lib/workbench/values';
+import { BATCH_TOOL, type CodeJobReason, CODE_JOB_TOOLS, SANDBOX_TOOLS, TOOL_CANCEL, TOOL_RESULT, TOOL_START, filledLimits } from '@/lib/workbench/values';
 
 /**
  * Code jobs on an App's link. The bot server only knows how to list an App's tools and call one, so a code job is offered the same way:
@@ -28,7 +29,7 @@ export function codeJobTools(): { name: string; description: string; inputSchema
         'Run a short Python script in a separate, temporary workspace, to transform or analyse data and to make files. It answers at once with a jobId; ask UNIVERSE_CODE_JOB_RESULT for the outcome. ' +
         'The workspace has no access to anyone’s Apps or accounts, so give it the data it needs: pass files in `inputs` (read them from /mnt/files/in/<name>), or ask for App data with `reads` (tools of this App, run for you and saved as /mnt/files/in/<as>). ' +
         `${FILES} Everything else in the workspace is deleted when the job ends. It stops at its time limit, and a job may make only a few runs of code (use \`steps\` to split longer work into runs that share the workspace; one run stops at 3 minutes). ` +
-        'The workspace can reach the internet.',
+        'The workspace can reach the internet. It is not a computer: nothing stays after the job. If the task needs a lasting computer (installed tools, a running app, files kept between tasks) and this Brick has none, say so to the person and that they can give the Brick a computer; never try to set one up yourself.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -107,6 +108,57 @@ export async function withCodeJobTools(answer: LinkAnswer, id: unknown, firstPag
   return { ...answer, contentType: 'application/json', body: JSON.stringify({ ...parsed, result: { ...result, tools } }) };
 }
 
+/**
+ * An App answer too big to hand to a Brick whole. With the provider's sandbox off (the one thing that made it save big answers into a
+ * workspace the Brick could not read) the provider returns every answer in full, even many megabytes, so the size is bounded here, by a
+ * Limit, and said plainly: the call ran and was counted once, nothing was cut or half-passed on, and a code job can read all of it. Never
+ * a silent cut. An answer inside the Limit, an error answer and a Limit left empty are passed on as they are.
+ */
+export async function boundAppAnswer(answer: LinkAnswer, id: unknown, name: string, args: unknown): Promise<LinkAnswer> {
+  if (answer.status >= 400) return answer;
+  const max = (await getCodeJobLimits()).maxAnswerBytes;
+  const size = Buffer.byteLength(answer.body, 'utf8');
+  if (max === null || size <= max) return answer;
+  const batch = name.trim().toUpperCase() === BATCH_TOOL && isObject(args) && Array.isArray(args.tools) ? args.tools : null;
+  const tools = batch ? batch.map((entry) => (isObject(entry) && typeof entry.tool_slug === 'string' ? entry.tool_slug : '')).filter(Boolean) : [name];
+  const kb = (bytes: number) => `${Math.max(1, Math.round(bytes / 1024)).toLocaleString('en')} KB`;
+  const canRead = await codeJobsAvailable();
+  const advice =
+    `Ask for less: fewer fields, a smaller page or a filter. ` +
+    (canRead ? `Or, if it only looks something up, have a code job read all of it and print only what you need: ${TOOL_START} with reads: [{ "tool": "<the tool>", "arguments": { ... } }] (a read brings the whole answer into the job as a file, within the job's data Limit). ` : '') +
+    'Do not run it again just to see the answer: it already ran.';
+  return toolText(
+    id,
+    {
+      status: 'answer_too_large',
+      ran: true,
+      counted: 'once',
+      tools,
+      answerBytes: size,
+      limitBytes: max,
+      message: `The App ran ${tools.length > 1 ? 'these tools' : 'this tool'} and answered ${kb(size)}, which is more than the ${kb(max)} a Brick is given in one answer. Nothing was cut and nothing was passed on. ${advice}`,
+    },
+    false,
+  );
+}
+
+/** Reasons that mean code jobs cannot run at all right now (not "wait a moment", and not a mistake in the request). */
+const NO_CODE_JOBS: ReadonlySet<CodeJobReason> = new Set(['not_set', 'paused', 'exposure_full', 'unavailable']);
+
+/**
+ * When code jobs cannot run, what the Brick does next depends on whether it has a computer, and it is told honestly: use it, or say that the
+ * task needs one and that the person can give the Brick one. Nothing here makes, turns on or pays for a computer: that stays the person's own step.
+ */
+async function withoutCodeJobs(reason: CodeJobReason, botId: string): Promise<{ next?: string }> {
+  if (!NO_CODE_JOBS.has(reason)) return {};
+  const computer = await prisma.brickComputer.findUnique({ where: { botId }, select: { enabled: true } }).catch(() => null);
+  return {
+    next: computer?.enabled
+      ? 'This Brick has a computer. If the task needs code to run, use the computer, as you would for any task on it.'
+      : 'This Brick has no computer. If the task needs code to run, tell the person that it needs a computer and that they can give the Brick one. Do not try to set one up yourself.',
+  };
+}
+
 export interface CodeJobCall {
   botId: string;
   personId: string;
@@ -126,7 +178,7 @@ export async function answerCodeJobCall(input: CodeJobCall): Promise<LinkAnswer>
   const args = isObject(input.args) ? input.args : {};
   if (input.name === TOOL_START) {
     const outcome = await startCodeJob({ botId: input.botId, personId: input.personId, connectionId: input.connectionId, toolkit: input.toolkit, callId: input.callId, args: input.args ?? {}, read: input.read });
-    if (outcome.status === 'refused') return toolText(input.messageId, { status: 'refused', reason: outcome.reason, message: outcome.message }, true);
+    if (outcome.status === 'refused') return toolText(input.messageId, { status: 'refused', reason: outcome.reason, message: outcome.message, ...(await withoutCodeJobs(outcome.reason, input.botId)) }, true);
     return toolText(input.messageId, { status: outcome.job.state, ...OK_VIEW(outcome.job), hint: outcome.job.state === 'running' ? `Ask ${TOOL_RESULT} with this jobId for the outcome.` : undefined }, false);
   }
   const jobId = typeof args.jobId === 'string' ? args.jobId : '';

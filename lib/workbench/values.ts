@@ -65,6 +65,8 @@ export interface CodeJobLimits {
   keepDays: number | null;
   /** How long asking for a job's result waits before saying "still running". */
   waitSeconds: number | null;
+  /** The largest answer of an App tool that is handed to a Brick whole. A bigger one is not cut: the Brick is told, and can have a code job read all of it. Empty passes every answer on whole. */
+  maxAnswerBytes: number | null;
 }
 
 export const CODE_JOB_LIMITS_EMPTY: CodeJobLimits = {
@@ -82,6 +84,7 @@ export const CODE_JOB_LIMITS_EMPTY: CodeJobLimits = {
   exposureCeilingMicros: null,
   keepDays: null,
   waitSeconds: null,
+  maxAnswerBytes: null,
 };
 
 export const CODE_JOB_LIMIT_RANGES: Record<keyof CodeJobLimits, { min: number; max: number }> = {
@@ -100,6 +103,7 @@ export const CODE_JOB_LIMIT_RANGES: Record<keyof CodeJobLimits, { min: number; m
   keepDays: { min: 1, max: 36_500 },
   // The bot server gives up on one call to an App link at 60 seconds, so a wait may never be that long
   waitSeconds: { min: 1, max: 55 },
+  maxAnswerBytes: { min: 10_000, max: 524_288_000 },
 };
 
 /** Suggested starting values, shown beside each Limit and seeded by the migration. They are never read as an enforced value. */
@@ -118,6 +122,7 @@ export const CODE_JOB_LIMITS_RECOMMENDED: Partial<Record<keyof CodeJobLimits, nu
   exposureCeilingMicros: 1_000_000,
   keepDays: 30,
   waitSeconds: 40,
+  maxAnswerBytes: 204_800,
 };
 
 /** What each Limit is called and what it does, in the words the Limits screen shows. */
@@ -135,11 +140,15 @@ export const CODE_JOB_LIMIT_LABELS: Record<keyof CodeJobLimits, { label: string;
   jobsPerPersonPerDay: { label: 'Jobs a person may start in a day', help: 'A person asking for more waits until tomorrow.', unit: 'count' },
   exposureCeilingMicros: { label: 'Most code jobs may cost us in a month', help: 'The provider charges nothing for its workspace today. If that changes, new jobs stop at this amount for the month.', unit: 'micros' },
   keepDays: { label: 'Days a job is kept', help: 'How long a job’s result and files are kept before they are removed. Empty keeps them until the person deletes them.', unit: 'days' },
+  maxAnswerBytes: { label: 'Largest App answer given to a Brick', help: 'An App answer bigger than this is not cut and not passed on: the Brick is told how big it was and that a code job can read all of it. Empty passes every answer on whole.', unit: 'bytes' },
   waitSeconds: { label: 'How long to wait for a result', help: 'When the Brick asks for a result that is not ready, it waits this long before hearing "still running".', unit: 'seconds' },
 };
 
-/** Every Limit except "days kept" (empty keeps for good) is needed: a job does not start while one is empty, so nothing is ever assumed in code. */
-export const CODE_JOB_NEEDED: (keyof CodeJobLimits)[] = (Object.keys(CODE_JOB_LIMIT_RANGES) as (keyof CodeJobLimits)[]).filter((key) => key !== 'keepDays');
+/** Limits that may stay empty: "days kept" (empty keeps for good) and the largest App answer (empty passes every answer on whole). */
+export const CODE_JOB_OPTIONAL = ['keepDays', 'maxAnswerBytes'] as const;
+
+/** Every other Limit is needed: a job does not start while one is empty, so nothing is ever assumed in code. */
+export const CODE_JOB_NEEDED: (keyof CodeJobLimits)[] = (Object.keys(CODE_JOB_LIMIT_RANGES) as (keyof CodeJobLimits)[]).filter((key) => !(CODE_JOB_OPTIONAL as readonly string[]).includes(key));
 
 const fitsRange = (value: unknown, range: { min: number; max: number }): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= range.min && value <= range.max;
@@ -178,7 +187,7 @@ export function missingCodeJobLimits(limits: CodeJobLimits): (keyof CodeJobLimit
 }
 
 /** The Limits of a job as they were when it started (every needed one is there), or null when one is missing. */
-export type FilledLimits = { [K in keyof CodeJobLimits]: K extends 'keepDays' ? number | null : number };
+export type FilledLimits = { [K in keyof CodeJobLimits]: K extends (typeof CODE_JOB_OPTIONAL)[number] ? number | null : number };
 
 export function filledLimits(limits: CodeJobLimits): FilledLimits | null {
   return missingCodeJobLimits(limits).length > 0 ? null : (limits as FilledLimits);

@@ -344,6 +344,58 @@ run('code jobs for Apps, in a real database', () => {
       expect((await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } }))[0]).toMatchObject({ quantity: BigInt(2), costMicros: BigInt(200) });
     });
 
+    it('says which steps really ran, which did not work and which never ran, never more than is known', async () => {
+      const failing: WorkbenchRun = { kind: 'done', cell: { ok: false, stdout: '', stderr: 'err', results: '', error: 'ValueError', logId: null } };
+      provider.state.runs.push(() => done('one'), () => failing);
+      const job = jobOf(await start({ steps: ['a = 1', 'raise ValueError', 'never'] }));
+      await finishAll();
+      const view = await getCodeJob({ jobId: job.jobId, botId: saraBrick, personId: sara }, deps());
+      if (view.status !== 'ok') throw new Error('not ok');
+      expect(view.job.message).toContain('2 of 3 steps ran; step 2 did not work; 1 step did not run.');
+      expect(view.job.message).not.toContain('finished');
+
+      // All of them ran: said as that, with what was kept
+      provider.state.runs.push(({ files }) => {
+        files.set('out/a.txt', text('x'));
+        return done('ok');
+      });
+      const good = jobOf(await start({ code: 'print(1)' }));
+      await finishAll();
+      const goodView = await getCodeJob({ jobId: good.jobId, botId: saraBrick, personId: sara }, deps());
+      if (goodView.status !== 'ok') throw new Error('not ok');
+      expect(goodView.job.message).toBe('The job finished. 1 of 1 step ran. 1 file kept.');
+
+      // A read that did not work: the code did not run, and that is said
+      const read: ReadRunner = jest.fn(async () => null);
+      const noRead = jobOf(await start({ code: 'x', reads: [{ tool: `${KEY.toUpperCase()}_LIST` }] }, { read }));
+      await finishAll();
+      const noReadView = await getCodeJob({ jobId: noRead.jobId, botId: saraBrick, personId: sara }, deps());
+      if (noReadView.status !== 'ok') throw new Error('not ok');
+      expect(noReadView.job.message).toContain('0 of 1 App read were done, so the code did not run. None of the 1 step ran.');
+
+      // Cut short: "started", never "ran", because nobody saw it end
+      provider.state.runs.push(provider.hang);
+      const hung = jobOf(await start({ steps: ['while True: pass', 'later'] }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const running = await getCodeJob({ jobId: hung.jobId, botId: saraBrick, personId: sara, waitSeconds: 0 }, deps());
+      if (running.status !== 'ok') throw new Error('not ok');
+      expect(running.job.message).toBe('The job is still running. 1 of 2 steps have started.');
+      const cancelled = await cancelCodeJob({ jobId: hung.jobId, botId: saraBrick, personId: sara }, deps());
+      if (cancelled.status !== 'ok') throw new Error('not ok');
+      await finishAll();
+      expect(cancelled.job.message).toContain('1 of 2 steps started; step 1 was stopped before it finished, so what it did is not known; 1 step did not run.');
+    });
+
+    it('never makes a computer, takes none and bills the universe as it does any App step', async () => {
+      const before = await prisma.brickComputer.count({ where: { botId: saraBrick } });
+      jobOf(await start({ code: 'print(1)' }));
+      await finishAll();
+      expect(before).toBe(0);
+      expect(await prisma.brickComputer.count({ where: { botId: saraBrick } })).toBe(0);
+      const line = await prisma.meterEvent.findFirstOrThrow({ where: { personId: sara, kind: 'app_use' } });
+      expect(line).toMatchObject({ payerKind: 'universe', payerPersonId: null, botId: saraBrick });
+    });
+
     it('clips what the code printed to the Limit, across all its runs', async () => {
       await saveCodeJobLimits({ maxResultChars: 100 }, boss);
       provider.state.runs.push(() => done('x'.repeat(5000)));
@@ -771,6 +823,70 @@ run('code jobs for Apps, in a real database', () => {
       expect(missing).toMatchObject({ isError: true, body: { reason: 'bad_request' } });
       const nothing = await toolResult(await link(message('UNIVERSE_CODE_JOB_RESULT', { jobId: randomUUID() })));
       expect(nothing).toMatchObject({ isError: true, body: { reason: 'not_found' } });
+    });
+
+    describe('an App answer too big for a Brick', () => {
+      const bigAnswer = (bytes: number) => provider200({ jsonrpc: '2.0', id: 2, result: { content: [{ type: 'text', text: 'x'.repeat(bytes) }], isError: false } });
+
+      it('is never cut or half passed on: the Brick is told it ran, how big it was, and that a code job can read all of it', async () => {
+        await saveCodeJobLimits({ maxAnswerBytes: 10_000 }, boss);
+        bridge.callLink.mockResolvedValueOnce(bigAnswer(30_000));
+        const result = await toolResult(await link(message('COMPOSIO_MULTI_EXECUTE_TOOL', { tools: [{ tool_slug: 'CRM_THING', arguments: {} }, { tool_slug: 'CRM_OTHER', arguments: {} }] })));
+        expect(result.isError).toBe(false);
+        expect(result.body).toMatchObject({ status: 'answer_too_large', ran: true, counted: 'once', tools: ['CRM_THING', 'CRM_OTHER'], limitBytes: 10_000 });
+        expect(result.body.answerBytes as number).toBeGreaterThan(30_000);
+        const words = String(result.body.message);
+        expect(words).toContain('Nothing was cut and nothing was passed on');
+        expect(words).toContain('UNIVERSE_CODE_JOB_START');
+        expect(words).toContain('it already ran');
+        expect(JSON.stringify(result.body)).not.toContain('xxxxxxxxxx');
+        // The provider was asked once and the meter has one line: telling the Brick does not run it or count it again
+        expect(bridge.callLink).toHaveBeenCalledTimes(1);
+        expect(await prisma.meterEvent.count({ where: { personId: sara, kind: 'app_use' } })).toBe(1);
+      });
+
+      it('names the one tool, and offers no code job when code jobs cannot run', async () => {
+        await saveCodeJobLimits({ maxAnswerBytes: 10_000, maxCells: null }, boss);
+        bridge.callLink.mockResolvedValueOnce(bigAnswer(30_000));
+        const result = await toolResult(await link(message('CRM_THING', {})));
+        expect(result.body).toMatchObject({ status: 'answer_too_large', tools: ['CRM_THING'] });
+        expect(String(result.body.message)).toContain('Ask for less');
+        expect(String(result.body.message)).not.toContain('UNIVERSE_CODE_JOB_START');
+      });
+
+      it('passes on whole an answer inside the Limit, an error answer, and every answer while the Limit is empty', async () => {
+        await saveCodeJobLimits({ maxAnswerBytes: 10_000 }, boss);
+        bridge.callLink.mockResolvedValueOnce(bigAnswer(5_000));
+        const small = await answerOf(await link(message('CRM_THING', {})));
+        expect(small.result?.content?.[0].text).toHaveLength(5_000);
+        bridge.callLink.mockResolvedValueOnce({ status: 500, contentType: 'text/plain', sessionId: null, body: 'e'.repeat(30_000) });
+        const failed = await link(message('CRM_THING', {}));
+        expect(failed).toMatchObject({ status: 'done', answer: { status: 500 } });
+        await saveCodeJobLimits({ maxAnswerBytes: null }, boss);
+        bridge.callLink.mockResolvedValueOnce(bigAnswer(300_000));
+        const whole = await answerOf(await link(message('CRM_THING', {})));
+        expect(whole.result?.content?.[0].text).toHaveLength(300_000);
+      });
+    });
+
+    it('tells a Brick with no computer that it needs one when code jobs cannot run, and never sets one up', async () => {
+      await prisma.appSetting.upsert({ where: { key: 'code-job-state' }, create: { key: 'code-job-state', value: { paused: true, reason: 'manual' } }, update: { value: { paused: true, reason: 'manual' } } });
+      const none = await toolResult(await link(message('UNIVERSE_CODE_JOB_START', { code: 'print(1)' })));
+      expect(none).toMatchObject({ isError: true, body: { status: 'refused', reason: 'paused' } });
+      expect(String(none.body.next)).toContain('has no computer');
+      expect(String(none.body.next)).toContain('they can give the Brick one');
+      expect(await prisma.brickComputer.count({ where: { botId: saraBrick } })).toBe(0);
+      // With a computer it is pointed to it, and a "wait a moment" refusal says nothing about computers
+      await prisma.brickComputer.create({ data: { botId: saraBrick, enabled: true } });
+      try {
+        const has = await toolResult(await link(message('UNIVERSE_CODE_JOB_START', { code: 'print(1)' })));
+        expect(String(has.body.next)).toContain('has a computer');
+      } finally {
+        await prisma.brickComputer.deleteMany({ where: { botId: saraBrick } });
+      }
+      await resumeCodeJobs(boss);
+      const bad = await toolResult(await link(message('UNIVERSE_CODE_JOB_START', { code: 'x', bogus: true })));
+      expect(bad.body.next).toBeUndefined();
     });
 
     it('lets only the Brick it was made for ask about a job, and cancels one that is running', async () => {

@@ -75,10 +75,11 @@ ALTER TABLE "code_job_outputs" ADD CONSTRAINT "code_job_outputs_job_id_fkey" FOR
 --   exposureCeilingMicros 1000000   $1.00 a month the provider's sandbox may cost us (it costs nothing today; this holds if it starts)
 --   keepDays              30        days a job's result and files are kept
 --   waitSeconds           40        how long asking for the result waits (the bot server gives up on a call at 60 seconds)
+--   maxAnswerBytes        204800    200 KB: the largest App answer handed to a Brick whole (bigger ones are not cut: the Brick is told and a code job can read all of it)
 INSERT INTO "app_settings" ("key", "value", "updated_at")
 VALUES (
   'code-job-limits',
-  '{"maxSeconds":300,"maxCells":5,"maxCodeBytes":65536,"maxInputBytes":10485760,"maxOutputBytes":26214400,"maxOutputFiles":10,"maxResultChars":20000,"maxReads":3,"atOncePerPerson":1,"atOnceAll":3,"jobsPerPersonPerDay":20,"exposureCeilingMicros":1000000,"keepDays":30,"waitSeconds":40}'::jsonb,
+  '{"maxSeconds":300,"maxCells":5,"maxCodeBytes":65536,"maxInputBytes":10485760,"maxOutputBytes":26214400,"maxOutputFiles":10,"maxResultChars":20000,"maxReads":3,"atOncePerPerson":1,"atOnceAll":3,"jobsPerPersonPerDay":20,"exposureCeilingMicros":1000000,"keepDays":30,"waitSeconds":40,"maxAnswerBytes":204800}'::jsonb,
   now()
 )
 ON CONFLICT ("key") DO UPDATE SET "value" = CASE
