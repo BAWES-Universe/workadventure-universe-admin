@@ -367,7 +367,24 @@ async function work(job: Row, limits: FilledLimits, plan: Plan, ctx: Ctx, signal
     }
   }
 
-  // The runs of code, in order, in the same workspace. The first makes sure the folder for files exists (one line, before the code).
+  // The folder for files is made by a run of its own, never by a line put in front of the person's code: a line before the code would be
+  // a syntax error for code that begins with `from __future__ import ...`, and would shift the line numbers in its errors.
+  const ended = async (run: { kind: 'timeout' | 'gone' }): Promise<{ state: 'failed' | 'cancelled' | 'timed_out' | 'interrupted'; reason: CodeJobReason }> => {
+    // Whoever ended the job (a cancel, the sweep) says how; otherwise the wait ending is the job running out of time, and a session the provider no longer has is a failure
+    const elsewhere = await endedElsewhere(job.id);
+    if (elsewhere) return { state: elsewhere, reason: elsewhere };
+    if (signal.aborted) return { state: 'cancelled', reason: 'cancelled' };
+    return run.kind === 'timeout' ? { state: 'timed_out', reason: 'timed_out' } : { state: 'failed', reason: 'unavailable' };
+  };
+  {
+    const halt = await stopped();
+    if (halt) return halt;
+    const prepared = await wb.run({ sessionId, code: PREPARE_OUT_DIR, timeoutMs: Math.max(1, Math.min(remainingMs(job, ctx), (PREPARE_SECONDS + CELL_WAIT_GRACE_SECONDS) * SECOND)), signal });
+    if (prepared.kind === 'timeout' || prepared.kind === 'gone') return ended(prepared);
+    if (prepared.kind === 'failed' || !prepared.cell.ok) return { state: 'failed', reason: 'unavailable' };
+  }
+
+  // The runs of code, in order, in the same workspace
   let budget = limits.maxResultChars;
   for (const [index, code] of plan.request.steps.entries()) {
     const halt = await stopped();
@@ -376,16 +393,9 @@ async function work(job: Row, limits: FilledLimits, plan: Plan, ctx: Ctx, signal
     // Counted before it goes out: a run that may have started is a run that was used
     await prisma.codeJob.update({ where: { id: job.id }, data: { cellsRun: { increment: 1 } } });
     const timeoutMs = Math.max(1, Math.min(left, (PROVIDER_CELL_SECONDS + CELL_WAIT_GRACE_SECONDS) * SECOND));
-    const source = index === 0 ? `import os; os.makedirs("/mnt/files/${OUT_DIR}", exist_ok=True)\n${code}` : code;
     // Cancelling in this process ends the wait at once; deleting the session (below) is what ends the code itself
-    const run = await wb.run({ sessionId, code: source, timeoutMs, signal });
-    if (run.kind === 'timeout' || run.kind === 'gone') {
-      // Whoever ended the job (a cancel, the sweep) says how; otherwise the wait ending is the job running out of time, and a session the provider no longer has is a failure
-      const elsewhere = await endedElsewhere(job.id);
-      if (elsewhere) return { state: elsewhere, reason: elsewhere };
-      if (signal.aborted) return { state: 'cancelled', reason: 'cancelled' };
-      return run.kind === 'timeout' ? { state: 'timed_out', reason: 'timed_out' } : { state: 'failed', reason: 'unavailable' };
-    }
+    const run = await wb.run({ sessionId, code, timeoutMs, signal });
+    if (run.kind === 'timeout' || run.kind === 'gone') return ended(run);
     if (run.kind === 'failed') return { state: 'failed', reason: 'unavailable' };
     const shaped = shape(run.cell, index + 1, budget);
     budget = shaped.left;
@@ -418,6 +428,10 @@ function shape(cell: { ok: boolean; stdout: string; stderr: string; results: str
   const error = cell.error === null ? null : take(cell.error);
   return { run: { n, ok: cell.ok, printed, errors, value, error }, left, clipped };
 }
+
+/** The run that makes the folder for files, before any of the person's code. */
+export const PREPARE_OUT_DIR = `import os\nos.makedirs("/mnt/files/${OUT_DIR}", exist_ok=True)`;
+const PREPARE_SECONDS = 30;
 
 /** How many files past the number kept are listed, so some of the ones left out can be named. */
 const LISTED_PAST_KEPT = 50;
