@@ -1,13 +1,15 @@
 import { prisma } from '@/lib/db';
 import { readFilesList } from '@/lib/computer-files';
 import { silentEnding, type WaitingFor } from '@/lib/computer-values';
+import { cardsOfJobs, purgeCardsOfJob, type Card } from '@/lib/computer-file-cards';
 
 /**
  * Brick tells the person how a computer job went (the report back), in their own chat with it. Orbit never speaks in a chat: the bot server asks
  * this list now and then, says each item once under its own transaction id, and tells Orbit it was said. What is here is only what the
  * database proves about the job:
  *  - what reached a site, from the job's own effect rows (written before each try, and settled with where it went), never the computer's words;
- *  - the files that appeared on the computer while the job ran, from the list taken when it ended;
+ *  - the files that appeared on the computer while the job ran, from the list taken when it ended, and the ones handed over for the chat as cards (a
+ *    "done" report waits until that was done, so the cards are never missed);
  *  - whether the try was given back, from the meter's books (the minutes written against nobody), never assumed;
  *  - the one sentence the computer gave for why it could not go on, cleaned, kept apart from the facts and only on a failure.
  * Nothing here says "done" on the computer's word alone beyond the ending the runner reported, and nothing says a thing was NOT sent unless
@@ -46,8 +48,10 @@ export interface Report {
   /** `failed` and `rule`: one cleaned sentence about why. */
   why: string | null;
   effects: ReportEffect[];
-  /** `done`: files that appeared while the job ran, newest first. */
+  /** `done`: names of files that appeared while the job ran and were not handed over (too many, too big, unreadable), newest first. */
   files: string[];
+  /** `done`: files handed over for the chat as cards. The bot server fetches each at /api/computer/jobs/:jobId/files/:id. */
+  handed: Card[];
   /** The minutes of this try do not count against the person's month (proved in the books, or none were used). */
   givenBack: boolean;
 }
@@ -133,13 +137,15 @@ function effectsOf(job: JobWithEffects): ReportEffect[] {
 }
 
 /** Files that appeared while the job ran, from the list taken when a job ended: no hidden folder and no file older than the job. */
-export function filesMadeBy(list: unknown, startedAt: Date | null): string[] {
+export function filesMadeBy(list: unknown, startedAt: Date | null, skip: ReadonlySet<string> = new Set()): string[] {
   const files = readFilesList(list);
   if (!files || !startedAt) return [];
   const since = startedAt.getTime() - 60_000;
   const names: string[] = [];
   for (const entry of files.items) {
     if (new Date(entry.modifiedAt).getTime() < since) continue;
+    // A file handed over as a card is not named again
+    if (skip.has(entry.path)) continue;
     const parts = entry.path.split('/');
     if (parts.some((part) => part.startsWith('.'))) continue;
     const name = cleanEndNote(parts[parts.length - 1], FILE_NAME_MAX);
@@ -161,13 +167,16 @@ async function givenBackIn(jobId: string, seconds: number): Promise<boolean> {
 }
 
 // In the order they were planned, so what is said reads in the order it happened
-const EFFECTS = { select: { effectKey: true, kind: true, state: true, evidence: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } as const;
+/** How long a finished job's message waits for its files to be handed over: it takes seconds, so more than this means the server stopped in the middle of it. */
+const FILES_WAIT_MS = 10 * 60 * 1000;
+
+const EFFECTS = { select: { effectKey: true, kind: true, state: true, evidence: true }, orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }] };
 
 /**
  * What Brick is to tell now, oldest first: endings not told yet, then waits for the person not told yet. A job whose person has no chat is still
  * listed (with no chat id) so the bot server can say it cannot and Orbit stops offering it.
  */
-export async function reportsToTell(limit = 50): Promise<Report[]> {
+export async function reportsToTell(limit = 50, now: Date = new Date()): Promise<Report[]> {
   const size = Math.max(1, Math.min(limit, 200));
   const ended = await prisma.computerJob.findMany({
     where: {
@@ -175,7 +184,11 @@ export async function reportsToTell(limit = 50): Promise<Report[]> {
       endToldAt: null,
       startedAt: { not: null },
       bot: { deletedAt: null },
-      OR: [{ endedBy: null }, { endedBy: { notIn: ['person', 'off', 'deleted'] } }],
+      AND: [
+        { OR: [{ endedBy: null }, { endedBy: { notIn: ['person', 'off', 'deleted'] } }] },
+        // A finished job is told once its files were handed over for the chat; one whose server stopped before that is told anyway after a while
+        { OR: [{ status: { not: 'done' } }, { filesReadyAt: { not: null } }, { endedAt: { lte: new Date(now.getTime() - FILES_WAIT_MS) } }] },
+      ],
     },
     orderBy: [{ endedAt: 'asc' }, { id: 'asc' }],
     take: size,
@@ -194,6 +207,8 @@ export async function reportsToTell(limit = 50): Promise<Report[]> {
   const chatOf = new Map(people.map((person) => [person.id, person.matrixChatId ?? null]));
   const computers = await prisma.brickComputer.findMany({ where: { botId: { in: [...new Set(ended.map((job) => job.botId))] } }, select: { botId: true, filesList: true } });
   const filesOf = new Map(computers.map((row) => [row.botId, row.filesList]));
+  const cardsOf = await cardsOfJobs(ended.filter((job) => job.status === 'done').map((job) => job.id));
+  const handedPaths = new Map([...cardsOf].map(([jobId, cards]) => [jobId, cards.map((card) => card.path)]));
 
   const reports: Report[] = [];
   for (const job of ended) {
@@ -218,7 +233,8 @@ export async function reportsToTell(limit = 50): Promise<Report[]> {
       waitedFor: kind === 'unanswered' ? (job.endWaitingFor as WaitingFor | null) : null,
       why: kind === 'failed' || kind === 'rule' ? job.endNote : null,
       effects: effectsOf(job),
-      files: kind === 'done' ? filesMadeBy(filesOf.get(job.botId), job.startedAt) : [],
+      files: kind === 'done' ? filesMadeBy(filesOf.get(job.botId), job.startedAt, new Set(handedPaths.get(job.id) ?? [])) : [],
+      handed: kind === 'done' ? (cardsOf.get(job.id) ?? []).map((card) => ({ id: card.id, name: card.name, bytes: card.bytes, mime: card.mime })) : [],
       givenBack: kind === 'failed' ? await givenBackIn(job.id, job.secondsRun) : false,
     });
   }
@@ -239,6 +255,7 @@ export async function reportsToTell(limit = 50): Promise<Report[]> {
       why: null,
       effects: effectsOf(job),
       files: [],
+      handed: [],
       givenBack: false,
     });
   }
@@ -260,5 +277,9 @@ export async function keepReportTold(jobId: string, kind: ReportKind, seq?: numb
   const found = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true } });
   if (!found) return false;
   await prisma.computerJob.updateMany({ where: { id: jobId, endToldAt: null, status: { in: ['done', 'stopped', 'failed'] } }, data: { endToldAt: now } });
+  // The files reached the chat (or never can): the copies kept in Universe go now. One that cannot be deleted is deleted by the sweep once Limits' days are up
+  if (kind === 'done') {
+    await purgeCardsOfJob(jobId).catch((error) => console.error('[Computer] Could not delete the files that reached the chat:', error instanceof Error ? error.message : 'unknown'));
+  }
   return true;
 }

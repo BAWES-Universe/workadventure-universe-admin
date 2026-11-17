@@ -52,6 +52,14 @@ describe('filesMadeBy', () => {
     expect(filesMadeBy(made, at)).toEqual(['visa-receipt.pdf', 'notes.txt']);
   });
 
+  it('does not name a file that was handed over as a card', () => {
+    const made = list([
+      { path: 'Documents/visa-receipt.pdf', modifiedAt: '2026-11-17T12:09:00Z' },
+      { path: 'notes.txt', modifiedAt: '2026-11-17T12:03:00Z' },
+    ]);
+    expect(filesMadeBy(made, at, new Set(['Documents/visa-receipt.pdf']))).toEqual(['notes.txt']);
+  });
+
   it('gives nothing when there is no list or the job never started', () => {
     expect(filesMadeBy(null, at)).toEqual([]);
     expect(filesMadeBy(list([{ path: 'a.txt', modifiedAt: '2026-11-17T12:09:00Z' }]), null)).toEqual([]);

@@ -1031,6 +1031,45 @@ export function brickLimits(values: BrickLimits): Limit[] {
         { value: 20, label: '20 templates', meaning: 'For a busy shelf.' },
       ],
     },
+    {
+      id: 'computerFiles',
+      label: 'Files a finished computer job hands over',
+      hint: 'When a job on a Brick’s computer finishes, Brick puts the files it made in the chat as cards, newest first. This is how many. Any others are named in the message and stay on the computer. 0 hands over none.',
+      unit: 'files',
+      value: values.computerFiles,
+      recommended: recommended.computerFiles,
+      options: [
+        { value: 1, label: '1 file', meaning: 'Only the newest.' },
+        { value: 5, label: '5 files', meaning: 'Enough for most jobs.' },
+        { value: 10, label: '10 files', meaning: 'For jobs that make a few.' },
+      ],
+    },
+    {
+      id: 'computerFileMb',
+      label: 'Largest file a computer job hands over',
+      hint: 'A file bigger than this is not copied into the chat. Brick names it in the message and it stays on the computer. Every file handed over is kept in Universe until it reaches the chat, so this also limits storage.',
+      unit: 'megabytes',
+      value: values.computerFileMb,
+      recommended: recommended.computerFileMb,
+      options: [
+        { value: 10, label: '10 MB', meaning: 'Documents and pictures.' },
+        { value: 25, label: '25 MB', meaning: 'Most receipts, reports and slides.' },
+        { value: 100, label: '100 MB', meaning: 'Large files; slower to hand over.' },
+      ],
+    },
+    {
+      id: 'computerFileDays',
+      label: 'How long a file waits if it could not reach the chat',
+      hint: 'A file that reached the chat is deleted from Universe at once. One that could not be put there is tried again, and deleted after this many days.',
+      unit: 'days',
+      value: values.computerFileDays,
+      recommended: recommended.computerFileDays,
+      options: [
+        { value: 1, label: '1 day', meaning: 'Frees the space sooner.' },
+        { value: 3, label: '3 days', meaning: 'Time for the chat to come back.' },
+        { value: 7, label: '7 days', meaning: 'For a long outage.' },
+      ],
+    },
   ], LIMIT_RANGES.bricks);
 }
 

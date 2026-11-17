@@ -11,6 +11,7 @@ import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provi
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
+import { handOverFiles, purgeCardsOfBot, purgeStaleCards } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
 import {
   AFTER_TAKE_OVER,
@@ -794,7 +795,7 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   if (only !== undefined && job.status !== only) return;
   const held = job.status === 'running' || job.status === 'waiting';
   const stretch = held && job.stretchStarted ? Math.max(0, Math.round((now.getTime() - job.stretchStarted.getTime()) / SECOND)) : 0;
-  const seconds = job.secondsRun + stretch;
+  let seconds = job.secondsRun + stretch;
   const ended = await prisma.computerJob.updateMany({
     where: { id: jobId, status: job.status },
     data: {
@@ -824,6 +825,10 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   // A turn the agent was still running is cancelled, so it does not go on working (and spending) for a job that is over
   if (held && job.agentResponseId) await cancelAgentTurn(job.botId, job.agentResponseId);
 
+  // A job that finished well hands over the files it made while its machine is still awake for it (the file card). The time that takes is the machine held for the
+  // job, so it is counted with the job's; one that cannot be handed over is only named in the message. It never holds up the end of the job for long: it is limited by time.
+  if (held && status === 'done') seconds += await handOverJobFiles(job, now);
+
   try {
     if (job.reservationKey) {
       if (held) {
@@ -845,6 +850,38 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   }
   // The turn passes to the next job in line, except while a Stop is ending everything
   if (advance && endedBy !== 'off' && endedBy !== 'deleted') await startNext(job.botId, now);
+}
+
+/**
+ * The files a finished job made are moved off its machine for the person's chat (lib/computer-file-cards). Always ends by marking the job's files as
+ * handled, so the message about it (which waits for this) is never held back by a machine that could not be read. Returns the whole seconds it took,
+ * already added to the job's time. Never throws.
+ */
+async function handOverJobFiles(job: { id: string; botId: string; startedAt: Date | null; endedAt?: Date | null }, now: Date): Promise<number> {
+  let seconds = 0;
+  try {
+    const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
+    const provider = providerFor(row);
+    if (row?.providerRef && provider && row.machine === 'working') {
+      const limits = await getBrickLimits();
+      const result = await handOverFiles({
+        jobId: job.id,
+        botId: job.botId,
+        startedAt: job.startedAt,
+        endedAt: now,
+        ref: row.providerRef,
+        provider,
+        limits: { count: limits.computerFiles, bytes: limits.computerFileMb * 1024 * 1024 },
+      });
+      seconds = result.handed > 0 ? Math.round(result.ms / SECOND) : 0;
+      if (seconds > 0) await prisma.computerJob.updateMany({ where: { id: job.id }, data: { secondsRun: { increment: seconds } } });
+    }
+  } catch (error) {
+    console.error('[Computer] Could not hand over the files of a job:', error instanceof Error ? error.message : 'unknown');
+  } finally {
+    await prisma.computerJob.updateMany({ where: { id: job.id, filesReadyAt: null }, data: { filesReadyAt: new Date() } }).catch((error) => console.error('[Computer] Could not mark a job’s files as handled:', error instanceof Error ? error.message : 'unknown'));
+  }
+  return seconds;
 }
 
 /**
@@ -929,7 +966,9 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   // A job that asked its person to take over and got no answer within the wait a super admin set ends, so it does not hold the
   // machine and the allowance for nobody. Read each sweep, so a changed setting counts at once, jobs already waiting included. Once the
   // person has taken over the job is theirs and is not ended here.
-  const { computerWait } = await getBrickLimits();
+  const { computerWait, computerFileDays } = await getBrickLimits();
+  // Files handed over for a chat that never took them are deleted once the days in Limits are up (the ones that reached the chat went at once)
+  await purgeStaleCards(now, computerFileDays).catch((error) => console.error('[Computer] Could not delete the files that waited too long:', error instanceof Error ? error.message : 'unknown'));
   const unanswered = await prisma.computerJob.findMany({ where: { status: 'waiting', control: 'brick', stretchStarted: { lte: new Date(now.getTime() - computerWait * 60 * 1000) } }, select: { id: true }, orderBy: { stretchStarted: 'asc' }, take: batch });
   for (const job of unanswered) {
     await endJob(job.id, 'stopped', 'unanswered', now);
@@ -1499,6 +1538,13 @@ export async function removeMachineBeforeDelete(botId: string, now: Date = new D
     WHERE j."bot_id" = ${botId} AND j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')`);
   if (Number(unwritten[0]?.n ?? 0) > 0) return false;
+  // The files its jobs handed over for the chat go first: deleting a Brick deletes everything that was kept for it. One that cannot be deleted keeps the Brick for the next sweep
+  try {
+    await purgeCardsOfBot(botId);
+  } catch (error) {
+    console.error('[Computer] Could not delete the files kept for a Brick:', error instanceof Error ? error.message : 'unknown');
+    return false;
+  }
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   if (!row || !row.providerRef || row.machine === 'none') return true;
   const provider = providerFor(row);
