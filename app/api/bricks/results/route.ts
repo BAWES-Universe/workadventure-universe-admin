@@ -14,7 +14,7 @@ export async function OPTIONS(request: NextRequest) {
 /**
  * GET /api/bricks/results
  * What a person's Bricks' computers made for them that no Brick of theirs is left to show: its Brick was deleted (waiting out its Undo days, or removed for good). The
- * files are theirs and stay for the days in Limits or until they delete them; only the Brick's name on them is "A deleted Brick". Results of a Brick that is still
+ * files are theirs and stay until they delete them; only the Brick's name on them is "A deleted Brick". Results of a Brick that is still
  * there are on that Brick's own Files. Only the signed-in person's own.
  */
 export async function GET(request: NextRequest) {

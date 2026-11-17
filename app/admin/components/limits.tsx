@@ -1070,19 +1070,6 @@ export function brickLimits(values: BrickLimits): Limit[] {
         { value: 50, label: '50 MB', meaning: 'The most the chat takes; slower to hand over.' },
       ],
     },
-    {
-      id: 'computerFileDays',
-      label: 'How long a file a computer made stays in Files',
-      hint: 'Every file a finished computer job hands over is kept encrypted in Universe as its owner\'s own result, in Files, whether or not the chat took it, and deleted after this many days (or when its owner deletes it, or the Brick is deleted). This also limits storage.',
-      unit: 'days',
-      value: values.computerFileDays,
-      recommended: recommended.computerFileDays,
-      options: [
-        { value: 3, label: '3 days', meaning: 'Frees the space sooner.' },
-        { value: 7, label: '7 days', meaning: 'Time to come back for it.' },
-        { value: 30, label: '30 days', meaning: 'The longest; uses the most storage.' },
-      ],
-    },
   ], LIMIT_RANGES.bricks);
 }
 

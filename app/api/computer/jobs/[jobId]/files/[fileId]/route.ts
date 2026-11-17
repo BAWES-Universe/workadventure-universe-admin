@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
 
 /**
  * GET /api/computer/jobs/:jobId/files/:fileId - the bytes of one file a finished computer job made, for the bot server to put in the person's chat as a file
- * card (the file card). The file is the person's own result and stays for as long as Limits' days say (or until they delete it, or the Brick is deleted),
+ * card (the file card). The file is the person's own result and stays until they delete it (a Brick being deleted does not delete it),
  * whether or not the chat took it; after that this answers 404. Auth: service token only. Never cached.
  */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ jobId: string; fileId: string }> }) {

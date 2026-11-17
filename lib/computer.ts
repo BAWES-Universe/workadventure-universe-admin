@@ -11,7 +11,7 @@ import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provi
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
-import { HAND_OVER_LATEST_MS, handOverFiles, purgeStaleCards } from '@/lib/computer-file-cards';
+import { HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
 import {
   AFTER_TAKE_OVER,
@@ -1016,9 +1016,7 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   // A job that asked its person to take over and got no answer within the wait a super admin set ends, so it does not hold the
   // machine and the allowance for nobody. Read each sweep, so a changed setting counts at once, jobs already waiting included. Once the
   // person has taken over the job is theirs and is not ended here.
-  const { computerWait, computerFileDays } = await getBrickLimits();
-  // Files handed over for a chat that never took them are deleted once the days in Limits are up (the ones that reached the chat went at once)
-  await purgeStaleCards(now, computerFileDays).catch((error) => console.error('[Computer] Could not delete the files that waited too long:', error instanceof Error ? error.message : 'unknown'));
+  const { computerWait } = await getBrickLimits();
   const unanswered = await prisma.computerJob.findMany({ where: { status: 'waiting', control: 'brick', stretchStarted: { lte: new Date(now.getTime() - computerWait * 60 * 1000) } }, select: { id: true }, orderBy: { stretchStarted: 'asc' }, take: batch });
   for (const job of unanswered) {
     await endJob(job.id, 'stopped', 'unanswered', now);
@@ -1588,7 +1586,7 @@ export async function removeMachineBeforeDelete(botId: string, now: Date = new D
     WHERE j."bot_id" = ${botId} AND j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')`);
   if (Number(unwritten[0]?.n ?? 0) > 0) return false;
-  // What its jobs made is NOT deleted with it: those files are the person's own (owned records with the job and Brick that made them), and stay, under "A deleted Brick", for the days in Limits or until they delete them
+  // What its jobs made is NOT deleted with it: those files are the person's own (owned records with the job and Brick that made them), and stay, under "A deleted Brick", until they delete them
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   if (!row || !row.providerRef || row.machine === 'none') return true;
   const provider = providerFor(row);

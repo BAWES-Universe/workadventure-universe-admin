@@ -18,7 +18,7 @@ import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
 import { keepReportTold, reportsToTell } from '@/lib/computer-report';
-import { deleteOwnResult, deleteResult, DELETED_BRICK_LABEL, markFileDelivered, orphanResultsOf, PIECE_BYTES, purgeStaleCards, readCard, readOwnResult, readResult, resultsOf } from '@/lib/computer-file-cards';
+import { deleteOwnResult, deleteResult, DELETED_BRICK_LABEL, markFileDelivered, orphanResultsOf, PIECE_BYTES, readCard, readOwnResult, readResult, resultsOf } from '@/lib/computer-file-cards';
 import { setOutputStoreForTests, type OutputStore } from '@/lib/workbench/store';
 import { saveCodeJobLimits } from '@/lib/workbench/state';
 import { resultsOfSource } from '@/lib/owned-results';
@@ -274,11 +274,15 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     out(id, 'a.pdf', 'a', 5);
     await finishJob(id, 'done', minutes(9));
     await keepReportTold(id, 'done', null, { delivered: false, why: 'refused' });
-    // The sweep (the days in Limits not yet passed) deletes nothing
-    expect(await purgeStaleCards(new Date(), 7)).toBe(0);
+    // No expiry: a result is the person's own until they delete it, however long ago it was made and however many sweeps have run
+    await prisma.computerJobFile.updateMany({ where: { jobId: id }, data: { createdAt: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000) } });
+    await prisma.ownedResult.updateMany({ where: { sourceKind: 'computer_job', sourceId: id }, data: { createdAt: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000) } });
+    await sweepComputers(new Date());
     expect(kept.size).toBe(1);
-    // Past the days it does
-    expect(await purgeStaleCards(new Date(Date.now() + 8 * 24 * 60 * 60 * 1000), 7)).toBe(1);
+    expect((await resultsOf(sara.brickId, sara.id)).map((one) => one.name)).toEqual(['a.pdf']);
+    // Only the owner deleting it removes it
+    const [only] = await resultsOf(sara.brickId, sara.id);
+    expect(await deleteResult(sara.brickId, sara.id, only.id)).toBe(true);
     expect(kept.size).toBe(0);
   });
 
@@ -450,19 +454,6 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect(retry.files).toEqual([]);
   });
 
-  it('keeps a result the person made into an Artifact when the days in Limits are up', async () => {
-    const sara = await person('sara');
-    const id = await started(sara);
-    out(id, 'page.html', '<p>hi</p>', 5);
-    out(id, 'old.pdf', 'old', 4);
-    await finishJob(id, 'done', minutes(9));
-    await prisma.ownedResult.updateMany({ where: { sourceKind: 'computer_job', sourceId: id, name: 'page.html' }, data: { artifactId: randomUUID() } });
-    await prisma.computerJobFile.updateMany({ where: { jobId: id }, data: { createdAt: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000) } });
-    expect(await purgeStaleCards(new Date(), 7)).toBe(1);
-    expect((await resultsOfSource('computer_job', id)).map((row) => row.name)).toEqual(['page.html']);
-    expect((await resultsOf(sara.brickId, sara.id)).map((one) => one.name)).toEqual(['page.html']);
-  });
-
   it('never hands over a file twice, and a later job hands over only what it made', async () => {
     const sara = await person('sara');
     const first = await started(sara, 'First');
@@ -631,22 +622,5 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect(await undoBrickDelete(sara.brickId, sara.id, NOW)).not.toBeNull();
     expect(await orphanResultsOf(sara.id)).toEqual([]);
     expect((await resultsOf(sara.brickId, sara.id))[0]).toMatchObject({ name: 'a.pdf', brick: "sara's Brick" });
-  });
-
-  it('deletes what waited for a chat that never took it, when the days in Limits are up', async () => {
-    const sara = await person('sara');
-    await saveServerLimits({ bricks: { computerFileDays: 2 } }, 'admin');
-    const id = await started(sara);
-    out(id, 'a.pdf', 'a', 5);
-    await finishJob(id, 'done', minutes(9));
-    expect(kept.size).toBe(1);
-    await prisma.computerJobFile.updateMany({ where: { jobId: id }, data: { createdAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000) } });
-    await sweepComputers(new Date());
-    expect(kept.size).toBe(1);
-    await prisma.computerJobFile.updateMany({ where: { jobId: id }, data: { createdAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) } });
-    await sweepComputers(new Date());
-    expect(kept.size).toBe(0);
-    // The message that is still to be told then names the file instead of carrying a card that is gone
-    expect((await mine([id], new Date()))[0].handed).toEqual([]);
   });
 });

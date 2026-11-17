@@ -19,7 +19,7 @@ import type { ComputerProvider } from '@/lib/computer-provider';
  *   3. it is kept as the person's own result in the one place every result is kept (`lib/owned-results.ts`, the same as a code job's): encrypted, an owned
  *      record (owner, the job and Brick that made it, when) that is theirs alone (Files, owner only) and publishes nothing, inside the one Limit for what a
  *      person keeps. The chat gets a copy (the bot server fetches it and says when the chat took it). The result stays whether or not the chat took it, whether
- *      or not the provider's copy or the computer is still there, until the person deletes it or `computerFileDays` pass (a result made into an Artifact stays).
+ *      or not the provider's copy or the computer is still there, until the person deletes it: there is no expiry (a result is the person's own, the same as a code job's, and counts against the same per-person Limit).
  *      Deleting the Brick that made it does NOT delete it: it stays, under "A deleted Brick";
  *   4. a row of this job's own (the delivery ledger) stays behind with the file's name, path and time so the same file is never handed over twice, with the
  *      result it became, and with whether the chat took it. It outlives the result: a result the person deleted is never handed over again.
@@ -337,7 +337,7 @@ async function open(row: { resultId: string | null; ownerId: string; name: strin
   return opened ? { name: row.name, mime: row.mimeType, data: Buffer.from(opened.bytes) } : null;
 }
 
-/** One kept file's bytes for the bot server, or null when it is not there (deleted, past Limits' days, or never the job's). */
+/** One kept file's bytes for the bot server, or null when it is not there (deleted, or never the job's). */
 export async function readCard(jobId: string, fileId: string): Promise<Opened | null> {
   const row = await prisma.computerJobFile.findUnique({ where: { id: fileId } });
   if (!row || row.jobId !== jobId) return null;
@@ -472,23 +472,4 @@ export async function deleteResult(botId: string, personId: string, fileId: stri
 export async function deleteOwnResult(personId: string, fileId: string): Promise<boolean> {
   const row = await prisma.computerJobFile.findFirst({ where: { id: fileId, ownerId: personId, resultId: { not: null } }, select: { resultId: true, ownerId: true } });
   return row ? removeResultOf(row) : false;
-}
-
-/**
- * Results older than the days in Limits are deleted, except one the person made into an Artifact (that is theirs to keep). Their ledger rows stay as the record.
- * Returns how many were deleted; throws when a copy could not be deleted (the record stays, so it is tried again).
- */
-export async function purgeStaleCards(now: Date, days: number, batch = 500): Promise<number> {
-  const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
-  const rows = await prisma.computerJobFile.findMany({
-    where: { resultId: { not: null }, createdAt: { lte: cutoff }, result: { is: { artifactId: null } } },
-    orderBy: { createdAt: 'asc' },
-    take: batch,
-    select: { result: { select: { id: true, storageKey: true } } },
-  });
-  const held = rows.flatMap((row) => (row.result ? [row.result] : []));
-  if (held.length === 0) return 0;
-  await getOutputStore().remove(held.map((result) => result.storageKey));
-  await prisma.ownedResult.deleteMany({ where: { id: { in: held.map((result) => result.id) } } });
-  return held.length;
 }
