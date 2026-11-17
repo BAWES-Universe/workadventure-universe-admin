@@ -18,7 +18,7 @@ const version = (tags, ageDays, name) => ({
 const idsOf = (items) => items.map(({ version: v }) => v.id).sort((a, b) => a - b);
 
 export function defineTests({ lib }) {
-  const { classifyTag, planTagged, planUntagged, prunePackage, sanitizeBranch, tagRules, DEFAULT_KEEP, OPEN_PR_KEEP } = lib;
+  const { classifyTag, lineageOf, planTagged, planUntagged, prunePackage, sanitizeBranch, tagRules, DEFAULT_KEEP, OPEN_PR_KEEP } = lib;
   const orbit = tagRules({ prodBranch: 'main', devBranch: 'develop' });
   const game = tagRules({ prodBranch: 'universe', devBranch: 'universe-develop' });
   const plan = (versions, extra = {}) => planTagged({ versions, rules: orbit, now: NOW, ...extra });
@@ -39,6 +39,20 @@ export function defineTests({ lib }) {
       assert.deepEqual(classifyTag('claude-project-thread-4y14p9-abc1234', orbit), { kind: 'dev', lineage: 'claude-project-thread-4y14p9' });
       assert.deepEqual(classifyTag('claude-project-thread-4y14p9', orbit), { kind: 'dev', lineage: 'claude-project-thread-4y14p9' });
       assert.deepEqual(classifyTag('develop-abc1234', orbit), { kind: 'dev', lineage: 'develop' });
+    });
+    it('keeps a branch named like a sha tag apart from the branch it resembles', () => {
+      // `issue-1234567` the branch: its build is tagged `issue-1234567` and `issue-1234567-<sha>` together
+      assert.equal(lineageOf(['issue-1234567', 'issue-1234567-abcdef0'], orbit), 'issue-1234567');
+      assert.equal(lineageOf(['issue-1234567-abcdef0'], orbit), 'issue-1234567');
+      // `issue`'s own build `issue-1234567` has no longer sibling
+      assert.equal(lineageOf(['issue-1234567'], orbit), 'issue');
+      assert.equal(lineageOf(['issue', 'issue-1234567'], orbit), 'issue');
+    });
+    it('clears the right branch when two branches look alike', () => {
+      const lookalike = version(['issue-1234567', 'issue-1234567-abcdef0'], 0);
+      const plain = version(['issue-7654321'], 0);
+      const result = plan([lookalike, plain], { closedBranch: 'issue' });
+      assert.deepEqual(idsOf(result.remove), [plain.id]);
     });
     it('tags a branch the way the dev server does', () => {
       assert.equal(sanitizeBranch('claude/project-thread-4y14p9'), 'claude-project-thread-4y14p9');

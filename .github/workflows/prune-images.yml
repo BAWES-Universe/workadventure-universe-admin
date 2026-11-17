@@ -25,9 +25,11 @@ on:
         type: boolean
         default: false
 
-# One clean-up at a time: a weekly run and a closing PR must not plan from the same list.
+# Runs do not queue behind each other (a queue keeps only its newest waiting run, which would drop a closing PR's
+# clean-up). Two at once is safe: each plans from the current list and a version that is already gone is skipped.
+# Only the same PR closing twice shares a group, and waits.
 concurrency:
-  group: prune-images
+  group: prune-images-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: false
 
 permissions:

@@ -58,6 +58,16 @@ export function classifyTag(tag, rules) {
   return { kind: 'dev', lineage: sha ? sha[1] : tag };
 }
 
+/**
+ * The branch a dev build belongs to. A build is tagged `<branch>` and `<branch>-<sha>` together, so a tag that has a
+ * sibling extending it by a sha is the branch itself (this keeps a branch called `issue-1234567` apart from the
+ * `issue` branch's build `issue-1234567`). A tag on its own is read as `<branch>-<sha>`.
+ */
+export function lineageOf(tags, rules) {
+  const bare = tags.find((tag) => tags.some((other) => other !== tag && new RegExp(`^${escapeRe(tag)}-[0-9a-f]{7,40}$`).test(other)));
+  return bare ?? classifyTag(tags[0], rules).lineage;
+}
+
 const tagsOf = (version) => version?.metadata?.container?.tags ?? [];
 const createdAt = (version) => Date.parse(version.created_at);
 const newestFirst = (a, b) => createdAt(b) - createdAt(a);
@@ -95,7 +105,7 @@ export function planTagged({ versions, rules, keep = DEFAULT_KEEP, openBranches 
     } else if (tags.some((tag) => running.has(tag))) {
       kept.push({ version, reason: 'dev runs it now' });
     } else {
-      const lineage = kinds[0].lineage;
+      const lineage = lineageOf(tags, rules);
       if (!candidates.has(lineage)) candidates.set(lineage, []);
       candidates.get(lineage).push(version);
     }
