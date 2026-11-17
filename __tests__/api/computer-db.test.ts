@@ -250,7 +250,8 @@ run('a Brick’s computer, in a real database', () => {
       if (!job.ok) throw new Error('no');
       await finishJob(job.job.id, 'done', minutes(1));
       expect((await computerView(sara.brickId, sara.id))?.machine).toBe('resting');
-      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake', 'exec', 'exec', 'saveFiles', 'rest']);
+      // The job's end reads where its browser went, lists the files, then clears the browser: three commands before the copy is saved
+      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake', 'exec', 'exec', 'exec', 'saveFiles', 'rest']);
       // A second job wakes the SAME machine: never a second one
       await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(2));
       expect(provider.calls.filter((call) => call.name === 'create')).toHaveLength(1);

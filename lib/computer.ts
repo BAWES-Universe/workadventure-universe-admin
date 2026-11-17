@@ -29,6 +29,7 @@ import { reconcileComputers } from '@/lib/computer-reconcile';
 import { computerQuote, connectedApp, routeJob, stepsReview, type RoutePlan } from '@/lib/computer-route';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
 import { computersArePaused } from '@/lib/capability-pause';
+import { noteHands, recordVisits } from '@/lib/computer-visits';
 import {
   AFTER_TAKE_OVER,
   HOLDS_MACHINE,
@@ -816,6 +817,24 @@ export async function stopJobFor(botId: string, ownerId: string, now: Date = new
 }
 
 /**
+ * Reads where the browser on a job's computer went while the job held it, and keeps that under the job (R06). Only an awake machine is read (a
+ * command would wake it); one that is not leaves the record "unread". Best effort and quick, never holds up the end of the job.
+ */
+async function recordJobVisits(job: { id: string; botId: string; startedAt: Date | null }, endedAt: Date): Promise<void> {
+  try {
+    const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
+    const provider = providerFor(row);
+    if (!row?.providerRef || !provider || row.machine !== 'working') {
+      await prisma.computerJob.updateMany({ where: { id: job.id, visitsState: null }, data: { visitsState: 'unread' } });
+      return;
+    }
+    await recordVisits(job, provider, row.providerRef, endedAt);
+  } catch (error) {
+    console.error('[Computer] Could not record where a job’s computer browsed:', error instanceof Error ? error.message : 'unknown');
+  }
+}
+
+/**
  * Once no job holds an awake machine: what is on it is listed for the Files list, then the browser is cleared (the image's
  * `universe-clean`), so a page one job was signed in to never carries into the next and a screen link left open goes dead. Best
  * effort and quick: a machine that is not awake is left alone (a command would wake it), and a step that fails never holds up the end of
@@ -914,6 +933,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
   }
 
   if (held) {
+    // Where the computer's browser went during the job is read before anything can clear it (the browser is cleared below once no job holds the machine)
+    await recordJobVisits(job, now);
     // The person's hold on the computer ends with their last job: control goes back to Brick's so the next job can start
     await releaseIfUnheld(job.botId).catch((error) => console.error('[Computer] Could not release control:', error instanceof Error ? error.message : 'unknown'));
     await closeOutIfUnheld(job.botId);
@@ -1459,6 +1480,8 @@ async function leadFence(botId: string, epoch: number | null, now: Date): Promis
       return 'unproved';
     }
   }
+  // From here the person has the computer: a page opened from now until it goes back is theirs, never Brick's (the record of where it browsed)
+  await noteHands(botId, 'person');
   if (epoch === null) return 'ready';
   return (await finishTransition(botId, 'fencing', epoch, 'human_ready')) ? 'ready' : 'lost';
 }
@@ -1555,6 +1578,7 @@ async function finishReturn(botId: string, epoch: number | null): Promise<'back'
     if (back.count === 0) break;
   }
   if (!(await mine())) return 'lost';
+  await noteHands(botId, 'brick');
   // Keys made before the hand back stay refused, whether or not this pass moved a job (a pass that died after the move still needs them ended)
   await fenceControl(botId);
   await wakeIfStopped(botId);
