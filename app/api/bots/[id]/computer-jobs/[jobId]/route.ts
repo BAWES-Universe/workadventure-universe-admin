@@ -6,6 +6,8 @@ import { WAITING_FOR, EFFECT_KINDS } from '@/lib/computer-values';
 import { finishJob, getJob, planEffect, renewJob, reportProgress, requestHandover, settleEffect } from '@/lib/computer';
 
 export const runtime = 'nodejs';
+// Finishing a job hands its files over before it answers (limited by time: a few minutes), so a host that limits how long a request may run is told how long this one may
+export const maxDuration = 300;
 
 const actionSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('progress'), stepDone: z.number().int().min(0), stepTotal: z.number().int().min(1).nullable().optional(), label: z.string().max(200).nullable().optional() }),

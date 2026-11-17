@@ -425,24 +425,45 @@ export async function resultTotalsOf(botId: string, personId: string): Promise<{
   return { count: _count._all, bytes: _sum.bytes ?? 0 };
 }
 
+/** Where a page of results starts: the moment and id of the last result of the page before. Opaque to the caller. */
+const resultCursor = (row: { createdAt: Date; id: string }): string => Buffer.from(`${row.createdAt.getTime()}:${row.id}`).toString('base64url');
+
+function readResultCursor(cursor: string): { at: Date; id: string } | null {
+  if (!/^[A-Za-z0-9_-]{1,200}$/.test(cursor)) return null;
+  const match = /^(\d{1,16}):([^:\u0000]{1,100})$/.exec(Buffer.from(cursor, 'base64url').toString('utf8'));
+  if (!match) return null;
+  const at = new Date(Number(match[1]));
+  return Number.isNaN(at.getTime()) ? null : { at, id: match[2] };
+}
+
 /**
- * A person's results whose Brick is gone (deleted, waiting out its Undo days, or removed for good), newest first. They are theirs and stay: only the Brick's name on
- * them is "A deleted Brick". Results of a Brick that is still there are listed on that Brick's own Files instead.
+ * A page of a person's results whose Brick is gone (deleted, waiting out its Undo days, or removed for good), newest first. They are theirs and stay: only the
+ * Brick's name on them is "A deleted Brick". Results of a Brick that is still there are listed on that Brick's own Files instead. The database picks them (a result
+ * whose Brick is not one of the person's live ones), so none is missed however many results the person has; `next` starts the next page. Null for a cursor that is not ours.
  */
-export async function orphanResultsOf(personId: string, take = 100): Promise<Result[]> {
+export async function orphanResultsPage(personId: string, options: { limit?: number; cursor?: string | null } = {}): Promise<{ results: Result[]; next: string | null } | null> {
+  const limit = Math.min(Math.max(Math.floor(options.limit ?? 100), 1), 200);
+  const after = options.cursor ? readResultCursor(options.cursor) : null;
+  if (options.cursor && !after) return null;
+  const alive = (await prisma.bot.findMany({ where: { ownerId: personId, deletedAt: null }, select: { id: true } })).map((bot) => bot.id);
   const rows = await prisma.computerJobFile.findMany({
-    where: { ownerId: personId, resultId: { not: null } },
+    where: {
+      ownerId: personId,
+      resultId: { not: null },
+      ...(alive.length > 0 ? { botId: { notIn: alive } } : {}),
+      ...(after ? { OR: [{ createdAt: { lt: after.at } }, { createdAt: after.at, id: { lt: after.id } }] } : {}),
+    },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    take: 500,
+    take: limit + 1,
     include: RESULT_INCLUDE,
   });
-  if (rows.length === 0) return [];
-  const bots = await prisma.bot.findMany({ where: { id: { in: [...new Set(rows.map((row) => row.botId))] } }, select: { id: true, deletedAt: true } });
-  const alive = new Set(bots.filter((bot) => !bot.deletedAt).map((bot) => bot.id));
-  return rows
-    .filter((row) => !alive.has(row.botId))
-    .slice(0, take)
-    .map((row) => resultOf(row, DELETED_BRICK_LABEL));
+  const page = rows.slice(0, limit);
+  return { results: page.map((row) => resultOf(row, DELETED_BRICK_LABEL)), next: rows.length > limit ? resultCursor(page[page.length - 1]) : null };
+}
+
+/** The first page of the same. */
+export async function orphanResultsOf(personId: string, take = 100): Promise<Result[]> {
+  return (await orphanResultsPage(personId, { limit: take }))?.results ?? [];
 }
 
 /** One of a person's results, to open, from one of their Bricks: only when it is theirs and that Brick's. Null when it is not there or not theirs. */

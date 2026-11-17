@@ -70,12 +70,18 @@ describe('results whose Brick is gone (the person’s own, whichever Brick made 
   const ownReq = (method: 'GET' | 'DELETE', path = 'file-1') => new NextRequest(`http://localhost:3333/api/bricks/results/${path}`, { method });
 
   it('lists them with "A deleted Brick" on them, for the signed-in person only', async () => {
-    lib.orphanResultsOf.mockResolvedValue([
-      { id: 'r1', jobId: null, name: 'visa.pdf', bytes: 5000, mime: 'application/pdf', jobTitle: 'Visa form', brick: 'A deleted Brick', brickId: 'brick-9', at: new Date('2026-11-12T08:00:00Z'), delivery: 'not_delivered' },
-    ]);
+    lib.orphanResultsPage.mockResolvedValue({
+      results: [{ id: 'r1', jobId: null, name: 'visa.pdf', bytes: 5000, mime: 'application/pdf', jobTitle: 'Visa form', brick: 'A deleted Brick', brickId: 'brick-9', at: new Date('2026-11-12T08:00:00Z'), delivery: 'not_delivered' }],
+      next: 'abc',
+    });
     const response = await listOwn(new NextRequest('http://localhost:3333/api/bricks/results'));
-    expect(await response.json()).toEqual({ results: [{ id: 'r1', name: 'visa.pdf', sizeBytes: 5000, job: 'Visa form', brick: 'A deleted Brick', at: '2026-11-12T08:00:00.000Z', delivery: 'not_delivered' }] });
-    expect(lib.orphanResultsOf).toHaveBeenCalledWith('u-sara');
+    expect(await response.json()).toEqual({ next: 'abc', results: [{ id: 'r1', name: 'visa.pdf', sizeBytes: 5000, job: 'Visa form', brick: 'A deleted Brick', at: '2026-11-12T08:00:00.000Z', delivery: 'not_delivered' }] });
+    expect(lib.orphanResultsPage).toHaveBeenCalledWith('u-sara', { cursor: null });
+    // The next page is asked for with the cursor the last one gave; one that is not ours is a 400
+    await listOwn(new NextRequest('http://localhost:3333/api/bricks/results?cursor=abc'));
+    expect(lib.orphanResultsPage).toHaveBeenLastCalledWith('u-sara', { cursor: 'abc' });
+    lib.orphanResultsPage.mockResolvedValueOnce(null);
+    expect((await listOwn(new NextRequest('http://localhost:3333/api/bricks/results?cursor=nonsense'))).status).toBe(400);
     (getSessionUser as jest.Mock).mockResolvedValueOnce(null);
     expect((await listOwn(new NextRequest('http://localhost:3333/api/bricks/results'))).status).toBe(401);
     db.user.findUnique.mockResolvedValueOnce({ isGuest: true });

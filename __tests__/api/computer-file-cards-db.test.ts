@@ -18,7 +18,7 @@ import { saveServerLimits } from '@/lib/bot-limits';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
 import { keepReportTold, reportsToTell } from '@/lib/computer-report';
-import { deleteOwnResult, deleteResult, DELETED_BRICK_LABEL, markFileDelivered, orphanResultsOf, PIECE_BYTES, readCard, readOwnResult, readResult, resultsOf } from '@/lib/computer-file-cards';
+import { deleteOwnResult, deleteResult, DELETED_BRICK_LABEL, markFileDelivered, orphanResultsOf, orphanResultsPage, PIECE_BYTES, readCard, readOwnResult, readResult, resultsOf } from '@/lib/computer-file-cards';
 import { setOutputStoreForTests, type OutputStore } from '@/lib/workbench/store';
 import { saveCodeJobLimits } from '@/lib/workbench/state';
 import { resultsOfSource } from '@/lib/owned-results';
@@ -563,6 +563,31 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect((await mine([id]))[0].handed.map((card) => card.name)).toEqual(['a.pdf']);
   });
 
+  it('leaves another hand-over’s claim on the machine alone: a second job finishing meanwhile hands over nothing and never lets go of it', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    out(id, 'a.pdf', 'a', 5);
+    // Another hand-over is reading files on this machine right now
+    const theirs = new Date();
+    await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: theirs } });
+    await finishJob(id, 'done', minutes(9));
+    const [done] = await mine([id]);
+    expect(done.handed).toEqual([]);
+    // What it made is only named, and the other claim is still there, untouched
+    expect(done.files).toEqual(['a.pdf']);
+    expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).filesClaimedAt?.getTime()).toBe(theirs.getTime());
+  });
+
+  it('takes over a hand-over claim that is long past, and lets go of its own', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    out(id, 'a.pdf', 'a', 5);
+    await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: new Date(Date.now() - 60 * 60 * 1000) } });
+    await finishJob(id, 'done', minutes(9));
+    expect((await mine([id]))[0].handed.map((card) => card.name)).toEqual(['a.pdf']);
+    expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).filesClaimedAt).toBeNull();
+  });
+
   it('rests a machine whose hand-over claim a stopped server left behind', async () => {
     const sara = await person('sara');
     const id = await started(sara);
@@ -610,6 +635,31 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect(await deleteOwnResult(omar.id, fileId)).toBe(true);
     expect(kept.size).toBe(0);
     expect(await readOwnResult(omar.id, fileId)).toBeNull();
+  });
+
+  it('lists every result of deleted Bricks, however many results a person has, a page at a time', async () => {
+    const sara = await person('sara');
+    const gone = await createBrick({ ownerId: sara.id, name: 'Gone' });
+    // 120 results of the deleted Brick (older), then 520 newer ones from the Brick that stays: the old ones are not lost behind the newer
+    const rows = (botId: string, count: number, from: number, jobTitle: string) =>
+      Array.from({ length: count }, (_, n) => ({ botId, ownerId: sara.id, makerName: 'x', jobTitle, name: `f${from + n}.pdf`, path: `Outputs/${randomUUID()}/f${from + n}.pdf`, modifiedAt: new Date(NOW.getTime() + n), bytes: 1, mimeType: 'application/pdf', createdAt: new Date(NOW.getTime() - (1000 - from - n) * 1000) }));
+    await prisma.computerJobFile.createMany({ data: [...rows(gone.id, 120, 0, 'old'), ...rows(sara.brickId, 520, 120, 'new')].map((row) => ({ ...row })) });
+    // Only rows with a result are listed: give each a result record
+    const files = await prisma.computerJobFile.findMany({ where: { ownerId: sara.id }, select: { id: true, name: true, bytes: true, botId: true } });
+    for (const file of files) {
+      const kept = await prisma.ownedResult.create({ data: { ownerId: sara.id, sourceKind: 'computer_job', sourceId: file.id, makerBotId: file.botId, makerName: 'x', name: file.name, contentType: 'application/pdf', sizeBytes: 1, sha256: 'a'.repeat(64), storageKey: `test/${file.id}` } });
+      await prisma.computerJobFile.update({ where: { id: file.id }, data: { resultId: kept.id } });
+    }
+    await deleteBrick(gone.id, sara.id, NOW);
+    const first = await orphanResultsPage(sara.id, { limit: 100 });
+    expect(first?.results).toHaveLength(100);
+    expect(first?.next).not.toBeNull();
+    const second = await orphanResultsPage(sara.id, { limit: 100, cursor: first?.next });
+    expect(second?.results).toHaveLength(20);
+    expect(second?.next).toBeNull();
+    expect(new Set([...(first?.results ?? []), ...(second?.results ?? [])].map((one) => one.id)).size).toBe(120);
+    expect([...(first?.results ?? []), ...(second?.results ?? [])].every((one) => one.brick === DELETED_BRICK_LABEL && one.jobTitle === 'old')).toBe(true);
+    expect(await orphanResultsPage(sara.id, { cursor: 'nonsense' })).toBeNull();
   });
 
   it('gives the results back to the Brick’s own Files when Undo brings it back', async () => {

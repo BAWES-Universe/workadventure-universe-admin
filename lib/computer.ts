@@ -903,8 +903,13 @@ async function handOverJobFiles(job: { id: string; botId: string; personId: stri
     if (!row?.providerRef || !provider || row.machine !== 'working') return 0;
     const limits = await getBrickLimits();
     // The machine is not put to rest while its files are read (the sweep rests a working machine nobody holds, and the job is already over)
+    // Only when no other hand-over holds it (none, or one that is long past): two at once would let the first to finish let go of the machine under the other.
+    // One that is held is left to finish, and what this job made is only named in its message.
     const claimedAt = new Date();
-    const claim = await prisma.brickComputer.updateMany({ where: { botId: job.botId, machine: 'working', providerRef: row.providerRef }, data: { filesClaimedAt: claimedAt } });
+    const claim = await prisma.brickComputer.updateMany({
+      where: { botId: job.botId, machine: 'working', providerRef: row.providerRef, OR: [{ filesClaimedAt: null }, { filesClaimedAt: { lt: new Date(claimedAt.getTime() - FILES_CLAIM_MS) } }] },
+      data: { filesClaimedAt: claimedAt },
+    });
     if (claim.count !== 1) return 0;
     try {
       return await handOver(job, now, row.providerRef, provider, limits);
