@@ -53,7 +53,7 @@ jobs:
       - name: Prune workadventure-universe-admin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # What dev and production run now stays. A server that is not configured protects nothing.
+          # What dev and production run now stays. A missing uuid, address or token stops the run before anything is deleted.
           DEV_COOLIFY_BASE: ${{ vars.DEV_COOLIFY_BASE }}
           DEV_COOLIFY_TOKEN: ${{ secrets.DEV_COOLIFY_TOKEN }}
           DEV_APPS: |

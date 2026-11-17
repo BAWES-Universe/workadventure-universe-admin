@@ -4,8 +4,8 @@
 //
 //   node prune-images-cli.mjs --package play-universe --prod-branch universe --dev-branch universe-develop [--keep 10] [--live] [--closed-branch <head ref>]
 //
-// Environment: GITHUB_TOKEN, GITHUB_REPOSITORY (owner/repo), and, to protect what dev and production run now (optional):
-//   DEV_COOLIFY_BASE, DEV_COOLIFY_TOKEN, DEV_APPS and PROD_COOLIFY_BASE, PROD_COOLIFY_TOKEN, PROD_APPS ("<package> <uuid>" per line).
+// Environment: GITHUB_TOKEN, GITHUB_REPOSITORY (owner/repo), and, to protect what dev and production run now (read before anything is deleted; missing settings stop the run):
+//   DEV_COOLIFY_BASE, DEV_COOLIFY_TOKEN, DEV_APPS and PROD_COOLIFY_BASE, PROD_COOLIFY_TOKEN, PROD_APPS ("<package> <uuid|none>" per line).
 import { appendFileSync } from 'node:fs';
 import { DEFAULT_KEEP, isProtectedBranch, prunePackage, sanitizeBranch, tagRules } from './prune-images.mjs';
 
@@ -71,21 +71,29 @@ const api = {
     const open = await pages(`/repos/${owner}/${repo}/pulls?state=open`);
     return new Set(open.map((pull) => sanitizeBranch(pull.head.ref)));
   },
-  // The tags dev and production run for this package, read from Coolify. An environment with no server configured runs nothing.
+  // The tags dev and production run for this package, read from Coolify. Fails closed: a package listed for a
+  // server but with no uuid, or a server with no address or token, deletes nothing. A package that is not listed
+  // for a server has none there; `none` as the uuid says so on purpose (an optional server that is not set up).
   runningTags: async () => {
     const tags = new Set();
     for (const side of ['DEV', 'PROD']) {
-      const base = process.env[`${side}_COOLIFY_BASE`];
-      const coolifyToken = process.env[`${side}_COOLIFY_TOKEN`];
-      const apps = String(process.env[`${side}_APPS`] ?? '')
+      const lines = String(process.env[`${side}_APPS`] ?? '')
         .split('\n')
         .map((line) => line.trim().split(/\s+/))
-        .filter(([name, uuid]) => name === packageName && uuid);
-      if (!coolifyToken || !base || apps.length === 0) {
-        console.log(`${packageName}: no ${side.toLowerCase()} server to ask, so no build is protected there.`);
+        .filter(([name]) => name === packageName);
+      if (lines.length === 0) {
+        console.log(`${packageName}: not run on ${side.toLowerCase()}.`);
         continue;
       }
-      for (const [, uuid] of apps) {
+      for (const [, uuid] of lines) {
+        if (!uuid) throw new Error(`${packageName} has no ${side.toLowerCase()} app uuid configured (use "none" if it has no ${side.toLowerCase()} server); nothing was deleted`);
+        if (uuid === 'none') {
+          console.log(`${packageName}: no ${side.toLowerCase()} server.`);
+          continue;
+        }
+        const base = process.env[`${side}_COOLIFY_BASE`];
+        const coolifyToken = process.env[`${side}_COOLIFY_TOKEN`];
+        if (!base || !coolifyToken) throw new Error(`${side}_COOLIFY_BASE and ${side}_COOLIFY_TOKEN are needed to see which build ${side.toLowerCase()} runs for ${packageName}; nothing was deleted`);
         const response = await fetch(`${base}/api/v1/applications/${uuid}`, { headers: { Authorization: `Bearer ${coolifyToken}` }, signal: AbortSignal.timeout(30_000) });
         if (!response.ok) throw new Error(`Coolify answered ${response.status} when asked which build ${side.toLowerCase()} runs for ${packageName}; nothing was deleted`);
         const tag = (await response.json()).docker_registry_image_tag;
