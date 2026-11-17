@@ -457,6 +457,17 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect((await callEvent(jobId, 'c1')).personKey).toBe('unknown');
     });
 
+    it('a receipt already stored as refunded does not read as refunded while a platform-paid call of the job is still on the person', async () => {
+      const { sara, jobId } = await running();
+      await settledCall(jobId, 'c1', 1_200);
+      await finishJob(jobId, 'failed', minutes(5));
+      await prisma.taskReceipt.create({ data: { botId: sara.brickId, personId: sara.id, taskKey: jobId, title: 'Visa form', category: 'computer', state: 'refunded', payerKind: 'person', payerPersonId: sara.id, startedAt: NOW, endedAt: minutes(5) } });
+      await prisma.meterEvent.updateMany({ where: { eventId: `computer:${jobId}:call:c1` }, data: { personKey: `person:${sara.id}`, personId: sara.id, detail: {} } });
+      expect((await activityFor(sara.id))[0].state).toBe('done');
+      await sweepComputers(minutes(7));
+      expect((await activityFor(sara.id))[0]).toMatchObject({ state: 'refunded', spentMicros: null });
+    });
+
     it('is the receipt’s own state too: a job with a receipt of its own whose time was given back shows as refunded, not with the charge the receipt stored', async () => {
       const { sara, jobId } = await running();
       await finishJob(jobId, 'failed', minutes(5));

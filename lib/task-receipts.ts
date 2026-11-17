@@ -380,7 +380,9 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
         ((event.kind === 'computer_time' && !givenBackTime(event)) || (event.kind === 'model_call' && event.payerKind === 'universe' && !givenBackCall(event))) &&
         (event.costMicros === null || event.costMicros > 0),
     );
-    const state: ReceiptState = failedJobs.has(`${header.botId}:${header.taskKey}`) && !mayHaveTaken ? 'refunded' : header.state;
+    // A receipt already stored as refunded does not hold either while something is still on the person: until it is given back it reads as done
+    const failed = failedJobs.has(`${header.botId}:${header.taskKey}`);
+    const state: ReceiptState = failed ? (!mayHaveTaken ? 'refunded' : header.state === 'refunded' ? 'done' : header.state) : header.state;
     return itemOf({ ...header, state }, forHeader, names.get(header.botId) ?? 'Brick', personId);
   });
   return items.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : -1)).slice(0, limit);
