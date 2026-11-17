@@ -180,6 +180,8 @@ export function shapeVisits(input: { back: ReadBack; startedAt: Date; endedAt: D
       continue;
     }
     if (at < from || at > to) continue;
+    // Only a page or a post is left here (the connection lines were handled above)
+    if (line.kind !== 'visit' && line.kind !== 'post') continue;
     let by: 'brick' | 'person' = 'brick';
     for (const note of hands) {
       if (note.at.getTime() > at) break;
