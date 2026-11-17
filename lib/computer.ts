@@ -527,7 +527,7 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
   // carry it makes no machine, and this job waits in line with its work saved, as for any other room the pool lacks
   const diskBytes = !row.providerRef ? provider.diskBytes?.() ?? null : null;
   if (diskBytes !== null && diskBytes > 0) {
-    const disk = await reserveDiskRoom({ botId: job.botId, jobId: job.id, bytes: diskBytes }, now);
+    const disk = await reserveDiskRoom({ botId: job.botId, jobId: job.id, bytes: diskBytes, attempt: now.getTime() }, now);
     if (!disk.ok) {
       await releaseRoom({ key }, now);
       if (disk.reason === 'not_set') return 'not_set';
@@ -536,7 +536,7 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     }
   }
   const dropDiskRoom = async () => {
-    if (diskBytes !== null && diskBytes > 0) await releaseRoom({ key: diskRoomKey(job.botId, job.id) }, now);
+    if (diskBytes !== null && diskBytes > 0) await releaseRoom({ key: diskRoomKey(job.botId, job.id, now.getTime()) }, now);
   };
 
   // Take the writer's place. The database lets only one writing job hold it; a second one arriving at the same moment queues.
@@ -550,6 +550,7 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
       const holder = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { reservationKey: true } });
       if (holder?.reservationKey !== key) {
         await releaseRoom({ key }, now);
+        // The disk's room is this try's own (it carries the try's moment), and when the winner shares the moment it shares the room too: given back only with it
         await dropDiskRoom();
       }
       return 'gone';

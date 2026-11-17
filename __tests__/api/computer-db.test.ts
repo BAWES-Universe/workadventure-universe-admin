@@ -1611,6 +1611,12 @@ run('a Brick’s computer, in a real database', () => {
       await reserveDiskRoom({ botId: sara.brickId, jobId: 'job-b', bytes: 4_000_000_000 }, NOW);
       await releaseRoom({ key: diskRoomKey(sara.brickId, 'job-b') }, NOW);
       expect(await prisma.meterReservation.findUnique({ where: { reservationKey: diskRoomKey(sara.brickId, 'job-a') } })).toMatchObject({ state: 'held' });
+      // Two tries to start the same job's machine (Sentry): the one that lost gives back its own room, never the one the winner is making a machine under
+      await reserveDiskRoom({ botId: sara.brickId, jobId: 'job-c', bytes: 4_000_000_000, attempt: 1 }, NOW);
+      await reserveDiskRoom({ botId: sara.brickId, jobId: 'job-c', bytes: 4_000_000_000, attempt: 2 }, NOW);
+      await releaseRoom({ key: diskRoomKey(sara.brickId, 'job-c', 2) }, NOW);
+      expect(await prisma.meterReservation.findUnique({ where: { reservationKey: diskRoomKey(sara.brickId, 'job-c', 1) } })).toMatchObject({ state: 'held' });
+      expect(await prisma.meterReservation.findUnique({ where: { reservationKey: diskRoomKey(sara.brickId, 'job-c', 2) } })).toMatchObject({ state: 'released' });
     });
 
     it('lets the sweep give back a disk room that lapsed (the server stopped between taking it and giving it back), and leaves one still good alone', async () => {

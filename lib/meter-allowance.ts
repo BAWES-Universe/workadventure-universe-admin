@@ -59,7 +59,8 @@ export const CALL_ROOM_PREFIX = 'computer:call:';
 /** The room held for the disk of a machine that is about to be made: it is not a job running either, and it belongs to no person's allowance. */
 export const DISK_ROOM_PREFIX = 'computer:diskroom:';
 /** One room for each try of a job: a try that loses the writer's place gives back only its own, never the room of the one that won. */
-export const diskRoomKey = (botId: string, jobId: string) => `${DISK_ROOM_PREFIX}${botId}:${jobId}`;
+/** One room for the disk of one try to start a job's machine: `attempt` (the try's own moment, as for the job's room) keeps two tries of the same job from giving each other's room back. */
+export const diskRoomKey = (botId: string, jobId: string, attempt?: number) => `${DISK_ROOM_PREFIX}${botId}:${jobId}${attempt === undefined ? '' : `:${attempt}`}`;
 const isNoJob = (key: string) => key.startsWith(CALL_ROOM_PREFIX) || key.startsWith(DISK_ROOM_PREFIX);
 
 const viewOf = (row: { reservationKey: string; personKey: string; botId: string | null; jobId: string | null; amountMicros: bigint; state: string; expiresAt: Date; renewals: number; settledMicros: bigint | null }): Reservation => ({
@@ -262,9 +263,9 @@ export async function reserveRoom(
  * Limit. The room belongs to no person (a disk is Universe's, not a member's allowance) and is released once the machine is made and its disk is
  * in the books as kept storage, or when the making fails. Asked again for the same job it is the same room (two jobs of one Brick starting together each hold their own: the pool counts both for a moment, the safe way round). Never throws for "no room".
  */
-export async function reserveDiskRoom(input: { botId: string; jobId: string; bytes: number }, now: Date = new Date()): Promise<{ ok: true } | NoRoom> {
+export async function reserveDiskRoom(input: { botId: string; jobId: string; bytes: number; attempt?: number }, now: Date = new Date()): Promise<{ ok: true } | NoRoom> {
   if (!Number.isSafeInteger(input.bytes) || input.bytes <= 0) return { ok: true };
-  const key = diskRoomKey(input.botId, input.jobId);
+  const key = diskRoomKey(input.botId, input.jobId, input.attempt);
   return prisma.$transaction(async (tx): Promise<{ ok: true } | NoRoom> => {
     await lockPool(tx);
     const settings = await getMeterSettings(tx);
