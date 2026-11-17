@@ -13,7 +13,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { deleteBrick, removeGoneBricks } from '@/lib/brick-delete';
-import { saveMeterSettings } from '@/lib/meter';
+import { setUpComputerCredit, wipeComputerCredit } from '../helpers/computer-credit-setup';
 import { CONTROL_TIMING } from '@/lib/computer-control';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { HANDS_MAX, VISITS_MAX, visitsFor } from '@/lib/computer-visits';
@@ -37,14 +37,12 @@ async function person(name: string): Promise<{ id: string; brickId: string }> {
   return { id: user.id, brickId: brick.id };
 }
 
-const setUp = () => saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+const setUp = () => setUpComputerCredit({}, NOW);
 
 const wipe = async () => {
   await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
-  await prisma.meterEvent.deleteMany({});
-  await prisma.meterReservation.deleteMany({});
-  await prisma.meterGrant.deleteMany({});
-  await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits', 'computer-wind-down'] } } });
+  await wipeComputerCredit();
+  await prisma.appSetting.deleteMany({ where: { key: { in: ['bot-limits'] } } });
 };
 
 /** What the computer's `universe-visits read` prints. The machine's clock is this one, so a line at NOW + n seconds is the job's own time. */

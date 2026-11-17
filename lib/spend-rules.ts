@@ -259,24 +259,14 @@ async function unpricedCallRoom(db: Db, events: Prisma.MeterEventWhereInput[]): 
 }
 
 /**
- * What held room can still cost, for a rule. A job that keeps running renews its room every part of a stretch and each renewal holds one
- * more stretch (so the room held grows faster than the computer is used: that is how the allowance stays safe). A rule is about what a
- * task can really cost, so it counts the time already used plus the one stretch the lease still covers, never the whole of what was
- * stacked up: a cap of $1 must not stop a job at $0.40. Room taken once (a model call, a first stretch) has no renewals and counts whole.
+ * What held room can still cost, for a rule. A job that keeps running renews its room so that it always holds the time already used plus one
+ * more stretch (lib/meter-allowance.ts `renewRoom`, R9: a renewal adds only what is not held yet), so the room IS what the task can still cost
+ * and counts whole, whether it was taken once (a model call, a first stretch) or renewed. `renewMinutes`, `now` and the dates stay in the
+ * signature for callers; they no longer change the figure.
  */
-export function exposureOf(rows: ReadonlyArray<{ amountMicros: bigint; renewals: number; createdAt: Date; expiresAt: Date }>, renewMinutes: number, now: Date): number {
-  const stretchMs = renewMinutes * 60_000;
+export function exposureOf(rows: ReadonlyArray<{ amountMicros: bigint; renewals: number; createdAt: Date; expiresAt: Date }>, _renewMinutes: number, _now: Date): number {
   let total = 0;
-  for (const row of rows) {
-    const amount = toNumber(row.amountMicros);
-    if (row.renewals <= 0 || !(stretchMs > 0)) {
-      total += amount;
-      continue;
-    }
-    const oneStretch = amount / (row.renewals + 1);
-    const usedMs = Math.max(0, Math.min(now.getTime(), row.expiresAt.getTime()) - row.createdAt.getTime());
-    total += Math.min(amount, Math.ceil(oneStretch * (1 + usedMs / stretchMs)));
-  }
+  for (const row of rows) total += toNumber(row.amountMicros);
   return total;
 }
 

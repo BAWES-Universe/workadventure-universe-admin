@@ -36,7 +36,7 @@ import { finishOutside, isPurged, purgeBrick, confirmChatPurges, DELETED_MAKER_N
 import { GET as listChatPurges, POST as confirmChatPurgesRoute } from '@/app/api/brick-chat-purges/route';
 import { giveComputer, startJob, finishJob } from '@/lib/computer';
 import * as meter from '@/lib/meter';
-import { saveMeterSettings } from '@/lib/meter';
+import { setUpComputerCredit, wipeComputerCredit } from '../helpers/computer-credit-setup';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { POST as saveMemory } from '@/app/api/bots/memory/[id]/route';
 import { POST as saveConversation } from '@/app/api/bots/[id]/conversations/route';
@@ -130,8 +130,9 @@ run('purging a deleted Brick, in a real database', () => {
   beforeEach(async () => {
     provider = new FakeComputerProvider();
     setComputerProviderForTests(provider);
-    await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits'] } } });
-    await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+    await wipeComputerCredit();
+    await prisma.appSetting.deleteMany({ where: { key: { in: ['bot-limits'] } } });
+    await setUpComputerCredit({}, NOW);
     (Sentry.captureMessage as jest.Mock).mockClear();
   });
   afterAll(async () => {

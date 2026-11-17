@@ -243,7 +243,7 @@ run('the meter, in a real database', () => {
       expect(await reserveRoom({ key: `c-${tag}`, personId: sara.id, amountMicros: 10 }, minutes(11))).toEqual({ ok: false, reason: 'closed' });
     });
 
-    it('keeps room that lapsed counting through its own month, and never into the next one', async () => {
+    it('keeps room that lapsed counting until it is settled or released, across the month (R4: an unknown cost never leaves the pool)', async () => {
       const sara = await person('sara');
       await setUp({ poolCeilingMicros: 10_000 });
       // A job that crashed on 14 November and was never settled or released
@@ -252,6 +252,11 @@ run('the meter, in a real database', () => {
       expect((await currentEnvelope(NOW)).unsettledMicros).toBe(900);
       const december = new Date('2026-12-02T09:00:00Z');
       expect((await reserveRoom({ key: `next-month-${tag}`, personId: sara.id, amountMicros: 1_000 }, december)).ok).toBe(true);
+      // What it spent is not known, so it still counts in the next month; settling or releasing it is what ends that
+      // (the December room has lapsed by 10:00 too: 1,000 of its own)
+      expect((await currentEnvelope(new Date('2026-12-02T10:00:00Z'))).unsettledMicros).toBe(1_900);
+      await releaseRoom({ key: `crashed-${tag}` }, december);
+      await releaseRoom({ key: `next-month-${tag}` }, december);
       expect((await currentEnvelope(new Date('2026-12-02T10:00:00Z'))).unsettledMicros).toBe(0);
     });
 

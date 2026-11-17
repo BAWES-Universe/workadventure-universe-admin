@@ -36,6 +36,8 @@ let made = 0;
 let provider: FakeComputerProvider;
 const env = process.env.COMPUTER_PROVIDER;
 const STRETCH = 60_000;
+/** The fake provider's price of one minute of machine time, in millionths of a dollar. */
+const RATE = 6_000;
 
 /** `computer: false` leaves giving the computer to the test: reading a computer issues what is due, so a rule saved after that comes after a lot was issued (credit already given stays). */
 async function person(name: string, computer = true) {
@@ -109,9 +111,9 @@ run('computer jobs are paid from the credit lots, in a real database', () => {
       expect(Number(held[0].amountMicros)).toBe(STRETCH);
       // The next stretch is more than is left: it is refused, as used up, and the platform's room is not left taken for it
       const renewed = await renewJob(started.job.id, minutes(8));
-      expect(renewed).toMatchObject({ ok: false, reason: 'allowance' });
-      // The job ends as used up, and what it held settles for what it used: nothing stays held, and nothing is taken that the gift did not fund
-      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'stopped' });
+      expect(renewed).toMatchObject({ ok: false, reason: 'allowance', paused: true });
+      // The job is saved and paused (R2), not stopped, and what it held settles for what it used: nothing stays held, and nothing is taken that the gift did not fund
+      expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: started.job.id } })).toMatchObject({ status: 'queued', queuedFor: 'allowance', pausedFor: 'allowance', endedBy: null });
       expect(await prisma.creditHold.count({ where: { jobKey: started.job.id, state: 'held' } })).toBe(0);
       expect((await credit(sara.id, minutes(9))).availableMicros).toBeGreaterThanOrEqual(0);
       expect((await currentEnvelope(minutes(9))).reservedMicros).toBe(0);
@@ -148,7 +150,8 @@ run('computer jobs are paid from the credit lots, in a real database', () => {
       const started = await startJob({ botId: faisal.brickId, personId: faisal.id, title: 'Wide' }, NOW);
       if (!started.ok) throw new Error('not started');
       expect(await renewJob(started.job.id, minutes(8))).toMatchObject({ ok: true });
-      expect(await credit(faisal.id, minutes(8))).toMatchObject({ totalMicros: 400_000, inProgressMicros: 2 * STRETCH });
+      // R9: the credit holds the time used so far (8 minutes) plus one stretch, not a whole second stretch on top of the first
+      expect(await credit(faisal.id, minutes(8))).toMatchObject({ totalMicros: 400_000, inProgressMicros: 8 * RATE + STRETCH });
     });
 
     it('is debited once: from the lots only, never also from the old allowance', async () => {
@@ -286,7 +289,7 @@ run('computer jobs are paid from the credit lots, in a real database', () => {
       expect(Number(call.customerMicros)).toBe(4_000);
     });
 
-    it('two renewals at the same moment each hold their own stretch: no stretch of machine time goes uncharged', async () => {
+    it('two renewals at the same moment hold the time used plus one stretch once: the second adds nothing, for the member or the pool', async () => {
       const faisal = await person('faisal', false);
       await exception([faisal.id], { mode: 'own', amountMicros: 400_000, interval: 'monthly' });
       await giveComputer(faisal.brickId, faisal.id);
@@ -295,11 +298,11 @@ run('computer jobs are paid from the credit lots, in a real database', () => {
       const answers = await Promise.all([renewJob(started.job.id, minutes(8)), renewJob(started.job.id, minutes(8))]);
       expect(answers.every((answer) => answer.ok)).toBe(true);
       const holds = await holdsOf(started.job.id);
-      expect(holds).toHaveLength(3);
-      expect(new Set(holds.map((hold) => hold.holdKey)).size).toBe(3);
-      expect(holds.reduce((sum, hold) => sum + Number(hold.amountMicros), 0)).toBe(3 * STRETCH);
+      expect(holds).toHaveLength(2);
+      expect(new Set(holds.map((hold) => hold.holdKey)).size).toBe(2);
+      expect(holds.reduce((sum, hold) => sum + Number(hold.amountMicros), 0)).toBe(8 * RATE + STRETCH);
       // What the room holds and what the credit holds agree
-      expect(Number((await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).amountMicros)).toBe(3 * STRETCH);
+      expect(Number((await prisma.meterReservation.findFirstOrThrow({ where: { jobId: started.job.id } })).amountMicros)).toBe(8 * RATE + STRETCH);
     });
 
     it('a job that was already running when the lots took over is charged for what it used, from its first stretch', async () => {

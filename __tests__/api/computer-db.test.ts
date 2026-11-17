@@ -340,16 +340,18 @@ run('a Brick’s computer, in a real database', () => {
       expect(waiting.ok && waiting.job).toMatchObject({ status: 'queued', queuedFor: 'busy' });
     });
 
-    it('stops a running job safely when its room cannot be renewed: what ran is counted, nothing new starts', async () => {
+    it('saves and pauses a running job when its room cannot be renewed (R2): what ran is counted, nothing new starts, and it is not stopped', async () => {
       const sara = await person('sara');
       await setUp({ memberAllowanceMicros: 70_000 });
       await giveComputer(sara.brickId, sara.id);
       const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!job.ok) throw new Error('no');
-      expect(await renewJob(job.job.id, minutes(5))).toEqual({ ok: false, reason: 'allowance' });
+      expect(await renewJob(job.job.id, minutes(5))).toEqual({ ok: false, reason: 'allowance', paused: true });
       const after = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.job.id } });
-      expect(after).toMatchObject({ status: 'stopped', endedBy: 'allowance' });
-      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${job.job.id}:time` } })).toBe(1);
+      expect(after).toMatchObject({ status: 'queued', queuedFor: 'allowance', endedBy: null, pausedFor: 'allowance', reservationKey: null, secondsRun: 300, pausedSeconds: 300 });
+      // What ran is written to the books as the time of this segment, once, and the job's own end has nothing left to write for it
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${job.job.id}:time:p0` } })).toBe(1);
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${job.job.id}:time` } })).toBe(0);
       expect((await computerView(sara.brickId, sara.id))?.machine).toBe('resting');
     });
 
@@ -1471,7 +1473,9 @@ run('a Brick’s computer, in a real database', () => {
       const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!job.ok) throw new Error('no');
       await renewJob(job.job.id, minutes(5));
-      expect((await computerView(sara.brickId, sara.id, minutes(6)))?.notice).toMatchObject({ jobId: job.job.id, how: 'month' });
+      // The job is paused, not over: it waits for the person's credit ("Ask for more"), saved, and says so in its own state
+      const view = await computerView(sara.brickId, sara.id, minutes(6));
+      expect(view?.queued).toEqual([expect.objectContaining({ id: job.job.id, status: 'queued', queuedFor: 'allowance', paused: true })]);
     });
 
     it('says nothing for a job that finished, failed or was stopped by the person', async () => {

@@ -327,7 +327,7 @@ export interface GiveBackLimits {
   goodwillBudgetMicros?: number | null;
 }
 
-export async function refundHold(input: { holdKey: string; refundKey: string; amountMicros: number; reason: 'platform_failure' | 'goodwill' | 'redelivery'; limits?: GiveBackLimits }, now: Date = new Date()): Promise<Refunded> {
+export async function refundHold(input: { holdKey: string; refundKey: string; amountMicros: number; reason: 'platform_failure' | 'goodwill' | 'redelivery' | 'correction'; limits?: GiveBackLimits }, now: Date = new Date()): Promise<Refunded> {
   wholeMicros(input.amountMicros, 'amountMicros');
   if (!input.refundKey || input.refundKey.length > 240) throw new RangeError('refundKey is required (up to 240 characters)');
   const head = await prisma.creditHold.findUnique({ where: { holdKey: input.holdKey }, select: { id: true, personId: true } });

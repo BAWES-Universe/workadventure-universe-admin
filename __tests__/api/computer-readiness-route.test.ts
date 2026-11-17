@@ -1,5 +1,6 @@
 /** The team's readiness check: super admins only, and what it says comes from the provider and the controls. */
 import { NextRequest } from 'next/server';
+import { prisma } from '@/lib/db';
 import { GET } from '@/app/api/admin/computer/readiness/route';
 import { computerReadiness } from '@/lib/computer-readiness';
 import { getSessionUser } from '@/lib/auth-session';
@@ -53,7 +54,33 @@ describe('the readiness check', () => {
     provider.mockReturnValue(real([{ name: 'agent37 key', ok: true, detail: 'The Agent37 key works' }]));
     const answer = await computerReadiness();
     expect(answer.ready).toBe(true);
-    expect(answer.checks.map((check) => check.name)).toEqual(['provider', 'agent37 key', 'usage controls', 'books and bill', 'wind-down', 'pause']);
+    expect(answer.checks.map((check) => check.name)).toEqual(['provider', 'agent37 key', 'usage controls', 'books and bill', 'model prices', 'wind-down', 'pause']);
+  });
+
+  it('names a model Universe pays for that was seen with no price (R10), and not one on the owner’s own key or one priced since', async () => {
+    provider.mockReturnValue(real([{ name: 'agent37 key', ok: true, detail: 'ok' }]));
+    await prisma.computerModelSeen.deleteMany({});
+    await prisma.computerModelSeen.createMany({
+      data: [
+        { route: 'universe-ai', model: 'readiness-unpriced-model', priced: false },
+        { route: 'own-key', model: 'readiness-own-key-model', priced: false },
+        { route: 'provider', model: 'readiness-priced-model', priced: true },
+      ],
+    });
+    try {
+      const answer = await computerReadiness();
+      const prices = answer.checks.find((check) => check.name === 'model prices');
+      expect(answer.ready).toBe(false);
+      expect(prices?.ok).toBe(false);
+      expect(prices?.detail).toContain('readiness-unpriced-model (universe-ai)');
+      expect(prices?.detail).not.toContain('readiness-own-key-model');
+      expect(prices?.detail).not.toContain('readiness-priced-model');
+      // Priced since: no longer named
+      await prisma.computerModelSeen.updateMany({ where: { model: 'readiness-unpriced-model' }, data: { priced: true } });
+      expect((await computerReadiness()).checks.find((check) => check.name === 'model prices')?.ok).toBe(true);
+    } finally {
+      await prisma.computerModelSeen.deleteMany({});
+    }
   });
 
   it('says when the books did not match the provider’s bill, and when that check could not be read', async () => {

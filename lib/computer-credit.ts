@@ -6,6 +6,7 @@ import { lockAll, lockOfPerson, usableLots, type Tx } from '@/lib/credit-store';
 import { PLATFORM_ACCOUNT_ID } from '@/lib/credit-funding';
 import { asNumber } from '@/lib/credit-values';
 import { givenBackJob } from '@/lib/computer-values';
+import { checkSpend } from '@/lib/spend-rules';
 import { pickRunning } from '@/lib/meter-grants';
 import type { NoRoom } from '@/lib/meter-allowance';
 
@@ -325,12 +326,110 @@ export async function giveBackJobCredit(jobId: string, now: Date): Promise<numbe
 /**
  * One model call inside a job was made: its hold settles to what it cost, never more than was held (the rest is ours and stays in the
  * provider cost). A price that is not known settles at what was held, as the meter's room does.
+ * Version 1 settles at least 1 (a call that cost "0" still took its room). Version 2 passes `exact`: a measured zero stays zero, and
+ * `providerCostMicros` (what the provider billed, which may be more than what the person is charged) is kept beside the charge, never merged.
  */
-export async function settleCallCredit(callKey: string, costMicros: number | null, real: boolean, now: Date): Promise<void> {
+export async function settleCallCredit(
+  callKey: string,
+  costMicros: number | null,
+  real: boolean,
+  now: Date,
+  opts: { exact?: boolean; providerCostMicros?: number | null; providerReal?: boolean } = {},
+): Promise<void> {
   const hold = await prisma.creditHold.findUnique({ where: { holdKey: callKey }, select: { amountMicros: true, state: true } });
   if (!hold || hold.state !== 'held') return;
   const held = asNumber(hold.amountMicros);
-  await settleHold({ holdKey: callKey, customerMicros: Math.min(held, Math.max(1, costMicros ?? held)), provider: { costMicros, basis: costBasisOf(costMicros, real) } }, now);
+  const charged = opts.exact ? Math.min(held, Math.max(0, costMicros ?? held)) : Math.min(held, Math.max(1, costMicros ?? held));
+  const provider = opts.providerCostMicros === undefined ? costMicros : opts.providerCostMicros;
+  await settleHold({ holdKey: callKey, customerMicros: charged, provider: { costMicros: provider, basis: costBasisOf(provider, opts.providerReal ?? real) } }, now);
+}
+
+/** What the rules the person said leave for a step's extra, clamped: a rule that counts in a cap that is nearly used leaves less, one that allows only some accounts leaves none. */
+async function ruleLeft(personId: string, botId: string | null, jobId: string, extraMicros: number, now: Date): Promise<number> {
+  const ruled = await checkSpend({ payerPersonId: personId, botId, taskKey: jobId, chargeClass: 'computer', amountMicros: extraMicros }, now);
+  if (ruled.ok) return extraMicros;
+  return Math.max(0, Math.min(extraMicros, ruled.leftMicros ?? 0));
+}
+
+/**
+ * R7: a step that cost more than what was set aside for the member takes the rest only from funds that are eligible, still free and inside
+ * what was authorised: the person's own credit lots (never past what is available), and inside the rules they said (a cap, "only my own
+ * accounts"). The extra reservation is made explicit FIRST, as its own hold under the step's key with `:x`, and then settled to what it took;
+ * whatever it could not take is not charged to the person and stays Universe's, in the provider cost. Never more than `wantedMicros`.
+ * Returns what was captured. A person whose extra usage has no limit is not held back, and nothing is held for them at all.
+ */
+export async function captureExtraCredit(
+  step: { callKey: string; personId: string; botId: string | null; jobId: string },
+  wantedMicros: number,
+  now: Date,
+  prepared: Prepared,
+): Promise<number> {
+  if (wantedMicros <= 0 || prepared.unlimited) return 0;
+  const key = `${step.callKey}:x`;
+  const existing = await prisma.creditHold.findUnique({ where: { holdKey: key }, select: { state: true, amountMicros: true, customerMicros: true } });
+  if (existing) return existing.state === 'settled' ? asNumber(existing.customerMicros) : 0;
+  const left = await computerCreditLeft(prisma, step.personId, now, false, prepared.notSet);
+  const allowed = await ruleLeft(step.personId, step.botId, step.jobId, Math.min(wantedMicros, Math.floor(left.availableMicros)), now);
+  if (allowed <= 0) return 0;
+  const held = await holdForJob({ key, personId: step.personId, amountMicros: allowed, botId: step.botId, jobId: step.jobId, chargeClass: 'computer_model', parentKey: step.callKey }, now, prepared);
+  // The credit was there at the check and not at the hold (another step took it): nothing is captured
+  if (!held.ok || !held.held) return 0;
+  await settleHold({ holdKey: key, customerMicros: allowed }, now);
+  return allowed;
+}
+
+/** When a lot ends: its own end, or the end of the UTC month it was issued for (a month's lot ends with the month); null for one that never ends. */
+function periodEndOf(expiresAt: Date | null, periodKey: string): string | null {
+  if (expiresAt) return expiresAt.toISOString();
+  const month = /^(\d{4})-(\d{2})$/.exec(periodKey);
+  return month ? new Date(Date.UTC(Number(month[1]), Number(month[2]), 1)).toISOString() : null;
+}
+
+export type PayerKind = 'owner' | 'visitor' | 'schedule' | 'teammate';
+
+export interface Funding {
+  payerKind: PayerKind;
+  /** The account whose lot pays first (earliest ending first, as the hold takes them); null when no lot is in force (extra usage with no limit, or none left). */
+  fundingAccountId: string | null;
+  /** The limits recorded for the step. A limit that does not apply is null. */
+  limits: { taskMicros: number | null; botMicros: number | null; grantId: string | null; periodEnds: string | null; fixedPriceMicros: number | null };
+}
+
+/**
+ * D2: who pays for a step and what bounds it, resolved before the step is sent and recorded with it. A job is its owner's: it rides on the
+ * standing rule the owner disclosed (their computers credit, their rules). A run of a schedule is recorded as a schedule's. What bounds it is
+ * read from what exists, never made up: the cap of a rule the owner said for this task or this Brick (the strictest), the gift or shared pool
+ * the first lot comes from, and the day that lot ends (the month's end for a monthly one).
+ */
+export async function resolveFunding(job: { id: string; botId: string; personId: string; runId: string | null }, now: Date): Promise<Funding> {
+  let payerKind: PayerKind = 'owner';
+  if (job.runId) {
+    const run = await prisma.brickItemRun.findUnique({ where: { id: job.runId }, select: { item: { select: { kind: true } } } });
+    if (run?.item.kind === 'schedule') payerKind = 'schedule';
+  }
+  const lots = (await usableLots(prisma, job.personId, 'computers', now)).filter((lot) => lot.availableMicros > 0);
+  // The order the hold takes them: earliest ending first, a lot that never ends last
+  lots.sort((a, b) => (a.expiresAt?.getTime() ?? Infinity) - (b.expiresAt?.getTime() ?? Infinity));
+  const first = lots[0];
+  const rules = await prisma.spendRule.findMany({
+    where: { ownerPersonId: job.personId, state: 'active', capMicros: { not: null }, OR: [{ scope: 'bot', botId: job.botId }, { scope: 'task', taskKey: job.id }] },
+    select: { scope: true, capMicros: true },
+  });
+  const strictest = (scope: string): number | null => {
+    const caps = rules.filter((rule) => rule.scope === scope && rule.capMicros !== null).map((rule) => Number(rule.capMicros));
+    return caps.length === 0 ? null : Math.min(...caps);
+  };
+  return {
+    payerKind,
+    fundingAccountId: first ? first.lot.fundingAccountId : null,
+    limits: {
+      taskMicros: strictest('task'),
+      botMicros: strictest('bot'),
+      grantId: first && (first.lot.subjectKey.startsWith('pool:') || first.source === 'gift') ? first.lot.programId : null,
+      periodEnds: first ? periodEndOf(first.expiresAt, first.lot.periodKey) : null,
+      fixedPriceMicros: null,
+    },
+  };
 }
 
 /** A hold that was never used (a call that was never sent, a start that did not happen) goes back whole. Safe to say twice; a hold that does not exist is nothing. */

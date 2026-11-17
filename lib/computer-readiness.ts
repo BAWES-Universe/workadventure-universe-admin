@@ -1,3 +1,4 @@
+import { prisma } from '@/lib/db';
 import { getComputerProvider, type Check } from '@/lib/computer-provider';
 import { getMeterSettings } from '@/lib/meter';
 import { missingSettings } from '@/lib/meter-values';
@@ -44,6 +45,13 @@ export async function computerReadiness(): Promise<Readiness> {
       const sized = `${Math.round(cold.storedBytes / 1_000_000)} MB of copies kept (${money}); last 30 days awake for cold storage: ${awake.packSeconds + awake.returnSeconds} s on Bricks’ computers, ${awake.scratchSeconds} s on throwaway ones, over ${awake.runs} run${awake.runs === 1 ? '' : 's'}`;
       checks.push({ name: 'cold storage', ok: cold.lastDrill ? cold.lastDrill.ok : true, detail: `${cold.cold} computer${cold.cold === 1 ? '' : 's'} packed away, ${cold.packing} being packed, ${cold.failing} could not be packed yet; ${drill}; ${slow}; ${sized}` });
     }
+  }
+  // R10: a model Universe pays for that the relay last saw with no price is named here, so it is seen before a paid wake. Free models and routes on
+  // the owner's own key carry on: only the routes Universe pays are listed, and a model priced since is no longer unpriced
+  const unpriced = await prisma.computerModelSeen.findMany({ where: { priced: false, route: { not: 'own-key' } }, select: { route: true, model: true }, orderBy: [{ route: 'asc' }, { model: 'asc' }], take: 20 }).catch(() => null);
+  if (unpriced) {
+    const names = unpriced.map((row) => (row.model ? `${row.model} (${row.route})` : `an unnamed model (${row.route})`));
+    checks.push({ name: 'model prices', ok: names.length === 0, detail: names.length === 0 ? 'Every model Universe pays for has a price' : `No price is known for ${names.join(', ')}: nothing is sent to ${names.length === 1 ? 'it' : 'them'} until one is set` });
   }
   const winding = await isWindingDown();
   checks.push({ name: 'wind-down', ok: !winding, detail: winding ? 'A wind-down is on: no computer takes new work' : 'No wind-down is on' });
