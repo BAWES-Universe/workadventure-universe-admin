@@ -168,6 +168,27 @@ async function closeInterruptedRuns(provider: ComputerProvider, now: Date): Prom
   return closed;
 }
 
+/**
+ * A computer packed away stops counting as a kept disk in the books when its removal is confirmed. If that line could not be written then, the
+ * newest line still counts a disk that is gone, and nothing else would change it while the Brick stays cold: the sweep writes it now, oldest first,
+ * and asks again each sweep until the books take it (a level is only written when it changed, so asking twice writes once).
+ */
+async function settleColdLevels(now: Date): Promise<number> {
+  const stale = await prisma.$queryRaw<Array<{ botId: string }>>(Prisma.sql`
+    SELECT c."bot_id" AS "botId" FROM "brick_computers" c
+    WHERE c."machine" = 'cold' AND c."provider_ref" IS NULL
+      AND COALESCE((
+        SELECT (e."detail"->>'machineBytes')::bigint FROM "meter_events" e
+        WHERE e."kind" = 'stored_bytes' AND e."payer_kind" = 'universe' AND e."bot_id" = c."bot_id"
+        ORDER BY e."occurred_at" DESC, e."recorded_at" DESC LIMIT 1), 0) > 0
+    LIMIT 50`);
+  let written = 0;
+  for (const row of stale) {
+    if (await recordKeptBytes({ botId: row.botId, reason: 'gone', machineBytes: null, copyBytes: await archiveBytes(row.botId), now })) written++;
+  }
+  return written;
+}
+
 // ---------- Proof on a throwaway computer ----------
 
 /** Restores one copy on a throwaway computer, checks it, and removes the computer (and says so when it could not). Never leaves the computer behind knowingly. */
@@ -673,6 +694,7 @@ export async function coldStep(provider: ComputerProvider | null, now: Date = ne
     out.recovered = done.recovered;
     await closeInterruptedRuns(cold, now).catch((error) => console.error('[Computer] Could not close cold storage runs that stopped:', words(error)));
     await bookMissingRuns(cold, now).catch((error) => console.error('[Computer] Could not write cold storage time that was missing:', words(error)));
+    await settleColdLevels(now).catch((error) => console.error('[Computer] Could not write what a cold computer keeps:', words(error)));
     // Old copies that could not be deleted before, and ones left half written
     for (const row of await prisma.computerArchive.findMany({ where: { state: { in: ['superseded', 'failed', 'staging'] } }, distinct: ['botId'], select: { botId: true }, take: 50 })) {
       await pruneArchives(row.botId, null, now);

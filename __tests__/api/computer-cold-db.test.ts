@@ -13,11 +13,18 @@ import { NextRequest } from 'next/server';
 
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
+// The books' write path, wrapped so a test can make it refuse one kind of line
+const actualRecord = jest.requireActual('@/lib/meter').recordMeterEvent;
+jest.mock('@/lib/meter', () => {
+  const actual = jest.requireActual('@/lib/meter');
+  return { ...actual, recordMeterEvent: jest.fn(actual.recordMeterEvent) };
+});
 
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { COLD_RUN_MAX_MS } from '@/lib/computer-values';
 import { saveServerLimits } from '@/lib/bot-limits';
+import * as meter from '@/lib/meter';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { bringBackFromCold, coldStatus, coldStep, heartbeat, packAway, restoreDrill, STUCK_MS } from '@/lib/computer-cold';
@@ -677,6 +684,59 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       } finally {
         heartbeat.ms = before;
       }
+    });
+
+    it('keeps the disk room of a computer made for a return while the books would not take its disk, until the sweep has written it', async () => {
+      const brick = await idleBrick();
+      provider.disk = 4_000_000_000;
+      await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 90_000, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+      expect(await packAway(brick.botId, provider, NOW)).toBe('packed');
+      const heldDisk = () => prisma.meterReservation.count({ where: { state: 'held', reservationKey: { startsWith: 'computer:diskroom:' } } });
+      // A job brings it back, and the books refuse the line for the new computer's disk: the job is not failed for that, and the disk's room stays held
+      (meter.recordMeterEvent as jest.Mock).mockImplementation(async (event: { kind: string }, ...rest: unknown[]) => {
+        if (event.kind === 'stored_bytes') throw new Error('The books are down');
+        return (actualRecord as (...args: unknown[]) => unknown)(event, ...rest);
+      });
+      try {
+        const started = await startJob({ botId: brick.botId, personId: brick.personId, title: 'Back' }, NOW);
+        expect(started.ok && started.job.status).toBe('running');
+        expect(await heldDisk()).toBe(1);
+      } finally {
+        (meter.recordMeterEvent as jest.Mock).mockImplementation(actualRecord);
+      }
+      // The books work again: the sweep writes the line first, then gives the room back
+      await sweepComputers(new Date(NOW.getTime() + 21 * 60_000));
+      expect(await prisma.meterEvent.count({ where: { botId: brick.botId, kind: 'stored_bytes' } })).toBeGreaterThanOrEqual(1);
+      expect(await heldDisk()).toBe(0);
+    });
+
+    it('writes the line that says a packed-away computer’s disk is gone when the books refused it at the time, and only once', async () => {
+      const brick = await idleBrick();
+      provider.disk = 4_000_000_000;
+      // The disk is in the books as kept storage
+      const { recordKeptBytes } = await import('@/lib/computer-disk');
+      expect(await recordKeptBytes({ botId: brick.botId, reason: 'made', machineBytes: 4_000_000_000, copyBytes: 0, now: new Date(NOW.getTime() - 60_000) })).toBe(true);
+      (meter.recordMeterEvent as jest.Mock).mockImplementation(async (event: { kind: string }, ...rest: unknown[]) => {
+        if (event.kind === 'stored_bytes') throw new Error('The books are down');
+        return (actualRecord as (...args: unknown[]) => unknown)(event, ...rest);
+      });
+      try {
+        // Packed and removed, but the line saying the disk is gone could not be written
+        expect(await packAway(brick.botId, provider, NOW)).toBe('packed');
+        await coldStep(provider, NOW);
+      } finally {
+        (meter.recordMeterEvent as jest.Mock).mockImplementation(actualRecord);
+      }
+      const level = () => prisma.meterEvent.findMany({ where: { botId: brick.botId, kind: 'stored_bytes' }, orderBy: [{ occurredAt: 'asc' }, { recordedAt: 'asc' }] });
+      expect(await level()).toHaveLength(1);
+      // The books work again: the next sweep writes the level, which is the copy only
+      await coldStep(provider, new Date(NOW.getTime() + 60_000));
+      const lines = await level();
+      expect(lines).toHaveLength(2);
+      expect(Number(lines[1].quantity)).toBe(Number((await prisma.computerArchive.findFirstOrThrow({ where: { botId: brick.botId } })).bytes));
+      // Asked again it is not written twice
+      await coldStep(provider, new Date(NOW.getTime() + 120_000));
+      expect(await level()).toHaveLength(2);
     });
 
     it('a return that was taken over while it restored changes nothing: the Brick is not marked awake on a computer the other run removed', async () => {

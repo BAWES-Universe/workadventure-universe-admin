@@ -721,6 +721,19 @@ async function restIfUnheld(botId: string, now: Date): Promise<boolean> {
 }
 
 /**
+ * A machine that was just made (new, or brought back from cold storage) costs from now on: its disk goes into the books as kept storage, tried a few
+ * times. When the books will not take it the caller is told (`kept.ok` false) and keeps the room it held for the disk until the sweep has written it.
+ */
+async function writeKeptDisk(botId: string, provider: Provider, now: Date, kept?: { ok: boolean }): Promise<void> {
+  let written = false;
+  for (let tries = 0; tries < 3 && !written; tries++) {
+    if (tries > 0) await new Promise((resolve) => setTimeout(resolve, 200));
+    written = await recordKeptBytes({ botId, reason: 'made', machineBytes: provider.diskBytes?.() ?? null, now });
+  }
+  if (!written && kept) kept.ok = false;
+}
+
+/**
  * Makes the machine if this Brick has none yet, and wakes it. Asked while it already works, it does nothing more. The making is
  * claimed in one write before the provider is called, so two jobs starting at the same moment make ONE computer, never two.
  */
@@ -745,7 +758,8 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
     const back = await bringBackFromCold(botId, provider, now);
     cameBack = { from: back.from, olderCopyUsed: back.olderCopyUsed };
     row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
-    if (returnStarted !== null) await recordKeptBytes({ botId, reason: 'made', machineBytes: provider.diskBytes?.() ?? null, now });
+    // The computer made for the return costs from now on, like any new one: its disk goes into the books the same way (tried a few times, and the room held for it kept when the books will not take it)
+    if (returnStarted !== null) await writeKeptDisk(botId, provider, now, kept);
   }
   // A machine that was to be put to sleep and is not proved asleep is not woken on top of what may still run: it is stopped first
   if (row.machine === 'stopping' && row.providerRef && !(await stopMachine(botId, row.providerRef, provider, ['stopping']))) throw new Error('The computer could not be put to sleep yet');
@@ -757,12 +771,7 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
         row = await prisma.brickComputer.update({ where: { botId }, data: { providerRef: info.ref, madeAt: now, machine: 'waking' } });
         // The machine exists and costs from now on: its disk goes into the books as kept storage, tried a few times. When the books will not take it the
         // caller is told, and keeps the room it held for the disk until the sweep has written it (the job is not failed for the books)
-        let written = false;
-        for (let tries = 0; tries < 3 && !written; tries++) {
-          if (tries > 0) await new Promise((resolve) => setTimeout(resolve, 200));
-          written = await recordKeptBytes({ botId, reason: 'made', machineBytes: provider.diskBytes?.() ?? null, now });
-        }
-        if (!written && kept) kept.ok = false;
+        await writeKeptDisk(botId, provider, now, kept);
       } catch (error) {
         await prisma.brickComputer.updateMany({ where: { botId, providerRef: null }, data: { machine: 'none' } });
         throw error;
