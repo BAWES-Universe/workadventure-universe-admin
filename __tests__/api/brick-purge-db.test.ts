@@ -32,7 +32,8 @@ import * as computerCalls from '@/lib/computer-calls';
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
-import { isPurged, purgeBrick, DELETED_MAKER_NAME } from '@/lib/brick-purge';
+import { isPurged, purgeBrick, confirmChatPurges, DELETED_MAKER_NAME } from '@/lib/brick-purge';
+import { GET as listChatPurges, POST as confirmChatPurgesRoute } from '@/app/api/brick-chat-purges/route';
 import { giveComputer, startJob, finishJob } from '@/lib/computer';
 import * as meter from '@/lib/meter';
 import { saveMeterSettings } from '@/lib/meter';
@@ -63,6 +64,10 @@ async function person(name: string) {
 
 function asBotServer(path: string, body: unknown) {
   return new NextRequest(`http://localhost${path}`, { method: 'POST', headers: { authorization: `Bearer ${SERVICE_TOKEN}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+}
+
+function asBotServerGet(path: string, token: string | null = SERVICE_TOKEN) {
+  return new NextRequest(`http://localhost${path}`, { method: 'GET', headers: token ? { authorization: `Bearer ${token}` } : {} });
 }
 
 /** A Brick with a bit of everything it can own, so a purge that forgets a table shows. */
@@ -193,7 +198,10 @@ run('purging a deleted Brick, in a real database', () => {
       expect(provider.calls.filter((call) => call.name === 'saveFiles')).toHaveLength(saves);
       expect(provider.calls.filter((call) => call.name === 'remove').map((call) => call.ref)).toEqual([`fake-${brick.id}`]);
       expect(provider.calls.filter((call) => call.name === 'deleteSavedCopy').map((call) => call.ref)).toEqual([brick.id]);
-      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ machinePending: false, copyPending: false, doneAt: expect.any(Date), providerRef: null });
+      // Its chat rooms are cleared by the bot server, which says so: until then the purge is not finished
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ machinePending: false, copyPending: false, chatPending: true, doneAt: null });
+      expect(await confirmChatPurges([brick.id], later(8))).toBe(1);
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ machinePending: false, copyPending: false, chatPending: false, doneAt: expect.any(Date), providerRef: null });
       // A file a person sent is taken out of the uploader by the bot server (the list that already exists for it); what the Brick made is the person's
       expect(await prisma.botFileRemoval.findMany({ where: { botId: brick.id } })).toEqual([expect.objectContaining({ bucket: 'chat', fileId: `up-${tag}-${brick.id}` })]);
 
@@ -227,6 +235,7 @@ run('purging a deleted Brick, in a real database', () => {
       await deleteBrick(plain.id, sara.id, NOW);
       expect(await removeGoneBricks(later(8), sara.id)).toEqual([plain.id]);
       expect(provider.calls).toEqual([]);
+      await confirmChatPurges([plain.id], later(8));
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: plain.id } })).toMatchObject({ machinePending: false, copyPending: false, doneAt: expect.any(Date) });
 
       // A computer record with no machine written down (a make that was cut off): nothing is skipped, any machine made for this Brick is removed
@@ -235,6 +244,7 @@ run('purging a deleted Brick, in a real database', () => {
       await deleteBrick(cut.id, sara.id, NOW);
       expect(await removeGoneBricks(later(8), sara.id)).toEqual([cut.id]);
       expect(provider.calls.filter((call) => call.name === 'removeAllFor').map((call) => call.ref)).toEqual([cut.id]);
+      await confirmChatPurges([cut.id], later(8));
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: cut.id } })).toMatchObject({ doneAt: expect.any(Date) });
     });
   });
@@ -269,7 +279,10 @@ run('purging a deleted Brick, in a real database', () => {
       provider.failDeleteCopy = false;
       const sixth = await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } });
       await removeGoneBricks(sixth.nextTryAt);
-      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ machinePending: false, copyPending: false, doneAt: expect.any(Date), providerRef: null });
+      // The provider side is done, but the chat rooms are not cleared yet: not finished
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ machinePending: false, copyPending: false, chatPending: true, doneAt: null });
+      await confirmChatPurges([brick.id], sixth.nextTryAt);
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ machinePending: false, copyPending: false, chatPending: false, doneAt: expect.any(Date), providerRef: null });
     });
 
     it('is not done while the books cannot say that nothing is kept any more: the provider side is already finished, and the next try writes the line', async () => {
@@ -287,7 +300,7 @@ run('purging a deleted Brick, in a real database', () => {
       expect(note).toMatchObject({ machinePending: false, copyPending: false, doneAt: null, attempts: 1 });
       const newest = async () => Number((await prisma.meterEvent.findFirstOrThrow({ where: { botId: brick.id, kind: 'stored_bytes' }, orderBy: [{ occurredAt: 'desc' }, { recordedAt: 'desc' }] })).quantity);
       expect(await newest()).toBeGreaterThan(0);
-      await removeGoneBricks(note.nextTryAt);
+      await confirmChatPurges([brick.id], note.nextTryAt);
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ doneAt: expect.any(Date) });
       expect(await newest()).toBe(0);
       // The machine was not asked to go a second time
@@ -305,6 +318,7 @@ run('purging a deleted Brick, in a real database', () => {
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ machinePending: true, copyPending: true, providerRef: `fake-${brick.id}`, attempts: 1 });
       process.env.COMPUTER_PROVIDER = 'fake';
       setComputerProviderForTests(provider);
+      await confirmChatPurges([brick.id], later(9));
       await removeGoneBricks(later(9));
       expect(provider.calls.filter((call) => call.name === 'remove').map((call) => call.ref)).toContain(`fake-${brick.id}`);
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ doneAt: expect.any(Date) });
@@ -356,6 +370,96 @@ run('purging a deleted Brick, in a real database', () => {
     expect(await owned(brick.id)).toEqual(NOTHING);
   });
 
+  describe('chat rooms: a deleted Brick keeps nothing in chat (R29)', () => {
+    it('writes that its chat rooms are still to clear with the purge, for every purged Brick, and keeps no content in that note', async () => {
+      const sara = await person('sara');
+      const brick = await fullBrick(sara, 'Chatty Brick');
+      await deleteBrick(brick.id, sara.id, NOW);
+      expect(await prisma.brickPurge.count({ where: { botId: brick.id } })).toBe(0);
+      await removeGoneBricks(later(8), sara.id);
+      const note = await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } });
+      expect(note).toMatchObject({ chatPending: true, doneAt: null });
+      expect(Object.keys(note).sort()).toEqual(['attempts', 'botId', 'chatPending', 'copyPending', 'doneAt', 'lastTriedAt', 'machinePending', 'nextTryAt', 'ownerId', 'provider', 'providerRef', 'purgedAt']);
+    });
+
+    it('lists, to the bot server only, the Bricks whose chats are to clear (the id and nothing else), and a Brick Undo gave back is never on it', async () => {
+      const sara = await person('sara');
+      const gone = await fullBrick(sara, 'Listed Brick');
+      const back = await fullBrick(sara, 'Undone Brick');
+      await deleteBrick(gone.id, sara.id, NOW);
+      await deleteBrick(back.id, sara.id, NOW);
+      await undoBrickDelete(back.id, sara.id, later(3));
+      await removeGoneBricks(later(8), sara.id);
+
+      expect((await listChatPurges(asBotServerGet('/api/brick-chat-purges', null))).status).toBe(401);
+      expect((await listChatPurges(asBotServerGet('/api/brick-chat-purges', 'wrong-token'))).status).toBe(401);
+      const listed = await listChatPurges(asBotServerGet('/api/brick-chat-purges'));
+      expect(listed.status).toBe(200);
+      const { purges } = await listed.json();
+      expect(purges).toContainEqual({ botId: gone.id });
+      expect(purges.map((one: { botId: string }) => one.botId)).not.toContain(back.id);
+      expect(purges.every((one: object) => Object.keys(one).join() === 'botId')).toBe(true);
+    });
+
+    it('stops listing a Brick once the bot server confirms it, finishes a purge that waited only for the chat at once, and ignores ids it does not know or twice', async () => {
+      const sara = await person('sara');
+      const brick = await fullBrick(sara, 'Confirmed Brick');
+      await deleteBrick(brick.id, sara.id, NOW);
+      await removeGoneBricks(later(8), sara.id);
+
+      const bad = await confirmChatPurgesRoute(asBotServer('/api/brick-chat-purges', { botIds: [] }));
+      expect(bad.status).toBe(400);
+      expect((await confirmChatPurgesRoute(asBotServer('/api/brick-chat-purges', { botIds: [brick.id], extra: 1 }))).status).toBe(400);
+      const unauthorised = new NextRequest('http://localhost/api/brick-chat-purges', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ botIds: [brick.id] }) });
+      expect((await confirmChatPurgesRoute(unauthorised)).status).toBe(401);
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ chatPending: true, doneAt: null });
+
+      const done = await confirmChatPurgesRoute(asBotServer('/api/brick-chat-purges', { botIds: [brick.id, `unknown-${tag}`] }));
+      expect(done.status).toBe(200);
+      expect(await done.json()).toEqual({ confirmed: 1 });
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ chatPending: false, doneAt: expect.any(Date) });
+      const { purges } = await (await listChatPurges(asBotServerGet('/api/brick-chat-purges'))).json();
+      expect(purges.map((one: { botId: string }) => one.botId)).not.toContain(brick.id);
+      expect(await (await confirmChatPurgesRoute(asBotServer('/api/brick-chat-purges', { botIds: [brick.id] }))).json()).toEqual({ confirmed: 0 });
+    });
+
+    it('does not hurry a machine that is still waiting for its own retry: confirming the chat leaves that schedule alone', async () => {
+      const sara = await person('sara');
+      const brick = await fullBrick(sara, 'Machine first Brick', { computer: true });
+      await deleteBrick(brick.id, sara.id, NOW);
+      provider.failRemove = true;
+      await removeGoneBricks(later(8), sara.id);
+      const before = await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } });
+      const removes = provider.calls.filter((call) => call.name === 'remove').length;
+      await confirmChatPurges([brick.id], later(8));
+      const after = await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } });
+      expect(after).toMatchObject({ chatPending: false, machinePending: true, doneAt: null, attempts: before.attempts, nextTryAt: before.nextTryAt });
+      expect(provider.calls.filter((call) => call.name === 'remove')).toHaveLength(removes);
+    });
+
+    it('tells the team when the chat rooms are still not cleared after five tries, and keeps the marker after they are confirmed', async () => {
+      const sara = await person('sara');
+      const brick = await fullBrick(sara, 'Never cleared Brick');
+      await deleteBrick(brick.id, sara.id, NOW);
+      await removeGoneBricks(later(8), sara.id);
+      let at = later(8);
+      for (let i = 0; i < 4; i++) {
+        at = (await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).nextTryAt;
+        await removeGoneBricks(at);
+      }
+      // Other Bricks' notes in a shared test database are swept too: only this Brick's message counts here
+      const told = (Sentry.captureMessage as jest.Mock).mock.calls.filter((call) => call[1]?.tags?.botId === brick.id);
+      expect(told).toHaveLength(1);
+      expect(told[0][0]).toContain('chat rooms');
+      // A year on, the note is still there and still waiting for its chats; once they are confirmed the marker stays for good
+      await removeGoneBricks(later(8 + 400));
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ chatPending: true, doneAt: null });
+      await confirmChatPurges([brick.id], later(8 + 400));
+      await removeGoneBricks(later(8 + 800));
+      expect(await isPurged(brick.id)).toBe(true);
+    });
+  });
+
   describe('nothing is written back (A31)', () => {
     it('a bot server that still holds the purged Brick gets its saves answered as done and nothing comes back: memory, chats and metrics', async () => {
       const sara = await person('sara');
@@ -397,9 +501,10 @@ run('purging a deleted Brick, in a real database', () => {
       await deleteBrick(stuck.id, sara.id, NOW);
       provider.failRemove = true;
       await removeGoneBricks(later(8));
+      await confirmChatPurges([done.id], later(8));
       expect(await isPurged(done.id)).toBe(true);
       // The marker holds no content: an id, the owner for the books, dates and what is pending
-      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: done.id } })).toMatchObject({ providerRef: null, machinePending: false, copyPending: false });
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: done.id } })).toMatchObject({ providerRef: null, machinePending: false, copyPending: false, chatPending: false });
       await removeGoneBricks(later(8 + 400));
       expect(await isPurged(done.id)).toBe(true);
       expect(await isPurged(stuck.id)).toBe(true);

@@ -15,6 +15,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
+import { confirmChatPurges } from '@/lib/brick-purge';
 import { saveServerLimits } from '@/lib/bot-limits';
 import * as meter from '@/lib/meter';
 
@@ -1609,6 +1610,8 @@ run('a Brick’s computer, in a real database', () => {
       expect(await newest()).toBe(5_000_000_000);
       const saves = provider.calls.filter((call) => call.name === 'saveFiles').length;
       expect(await purge(sara.brickId, sara.id, minutes(3))).toEqual([sara.brickId]);
+      // The purge is finished, and the line that nothing is kept written, when the bot server has also cleared the Brick's chat rooms
+      await confirmChatPurges([sara.brickId], minutes(3));
       // No new copy of the files was made to erase them
       expect(provider.calls.filter((call) => call.name === 'saveFiles')).toHaveLength(saves);
       expect(provider.calls.filter((call) => call.name === 'remove')).toEqual([expect.objectContaining({ ref: `fake-${sara.brickId}` })]);
@@ -1649,6 +1652,7 @@ run('a Brick’s computer, in a real database', () => {
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machinePending: false, copyPending: true, attempts: 2, doneAt: null });
       expect(await newest()).toBe(5_000_000_000);
       provider.failDeleteCopy = false;
+      await confirmChatPurges([sara.brickId], minutes(10));
       await removeGoneBricks(minutes(60));
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machinePending: false, copyPending: false, doneAt: expect.any(Date), providerRef: null });
       expect(await newest()).toBe(0);
@@ -1680,6 +1684,7 @@ run('a Brick’s computer, in a real database', () => {
       // The Brick is deleted for good: the disk and the copy are both gone, and the line says so once, when the provider and the bucket have confirmed it
       await deleteBrick(sara.brickId, sara.id, minutes(7));
       expect(await purge(sara.brickId, sara.id, minutes(8))).toEqual([sara.brickId]);
+      await confirmChatPurges([sara.brickId], minutes(8));
       expect((await kept()).map((event) => Number(event.quantity))).toEqual([4_000_000_000, 5_000_000_000, 0]);
       expect(await envelope()).toBe(0);
       // Asked again, nothing is written twice
@@ -1797,6 +1802,7 @@ run('a Brick’s computer, in a real database', () => {
       provider.failSaves = true;
       provider.failNext.saveFiles = true;
       expect(await purge(sara.brickId, sara.id, minutes(3))).toEqual([sara.brickId]);
+      await confirmChatPurges([sara.brickId], minutes(3));
       expect(provider.calls.filter((call) => call.name === 'remove')).toHaveLength(1);
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machinePending: false, copyPending: false, doneAt: expect.any(Date) });
     });
