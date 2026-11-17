@@ -19,7 +19,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveServerLimits } from '@/lib/bot-limits';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { coldStatus, coldStep, packAway, restoreDrill, STUCK_MS } from '@/lib/computer-cold';
+import { coldStatus, coldStep, heartbeat, packAway, restoreDrill, STUCK_MS } from '@/lib/computer-cold';
 import { computerView, giveComputer, startJob, sweepComputers } from '@/lib/computer';
 import { finishOutside, purgeBrick } from '@/lib/brick-purge';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
@@ -193,6 +193,46 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(provider.calls.some((call) => call.name === 'prepack')).toBe(false);
       // After the wait it is tried again, and this time it passes
       expect((await coldStep(provider, new Date(Date.now() + 2 * 60 * 60_000))).packed).toBe(1);
+    });
+
+    it('a proof that ran so long its claim was taken over cannot fail the copy another run has proved since: the proved copy and the removal stay', async () => {
+      const brick = await idleBrick();
+      const original = provider.restoreInto.bind(provider);
+      provider.restoreInto = async (ref, source) => {
+        void original;
+        // Meanwhile the other run proved the same copy and moved the row on to the removal
+        const archive = (await prisma.computerArchive.findFirstOrThrow({ where: { botId: brick.botId } }));
+        await markVerified(archive.id, 5);
+        await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { packStage: 'removing' } });
+        return { ok: false, reason: 'late_failure', ms: 10 };
+      };
+      expect(await packAway(brick.botId, provider, NOW)).toBe('busy');
+      const archive = await prisma.computerArchive.findFirstOrThrow({ where: { botId: brick.botId } });
+      expect(archive.state).toBe('verified');
+      expect(bucket.objects.size).toBeGreaterThan(0);
+      expect(await row(brick.botId)).toMatchObject({ machine: 'packing', packStage: 'removing' });
+    });
+
+    it('says it is alive while a copy is being proved, so a slow proof is not taken for a stopped server', async () => {
+      const brick = await idleBrick();
+      const before = heartbeat.ms;
+      heartbeat.ms = 25;
+      try {
+        const original = provider.restoreInto.bind(provider);
+        let claimedAtStart: Date | null = null;
+        let claimedAtEnd: Date | null = null;
+        provider.restoreInto = async (ref, source) => {
+          claimedAtStart = (await row(brick.botId)).packClaimedAt;
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          claimedAtEnd = (await row(brick.botId)).packClaimedAt;
+          return original(ref, source);
+        };
+        expect(await packAway(brick.botId, provider, NOW)).toBe('packed');
+        expect(claimedAtStart).not.toBeNull();
+        expect((claimedAtEnd as unknown as Date).getTime()).toBeGreaterThan((claimedAtStart as unknown as Date).getTime());
+      } finally {
+        heartbeat.ms = before;
+      }
     });
 
     it('keeps the computer when it holds more outside its home folder than can be carried, and says why only by not packing it', async () => {

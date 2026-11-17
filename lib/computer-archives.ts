@@ -110,9 +110,13 @@ export async function markVerified(id: string, proofMs: number, now: Date = new 
   return archiveById(id);
 }
 
-/** A check failed: this copy is never restored from, and is deleted by the next clean-up. */
-export async function markFailed(id: string, failure: string): Promise<void> {
-  await prisma.computerArchive.updateMany({ where: { id, state: { in: ['staging', 'stored', 'verified'] } }, data: { state: 'failed', failure: failure.slice(0, 200) } });
+/**
+ * A check failed: this copy is never restored from, and is deleted by the next clean-up. `from` says which states it may be failed from: a proof that
+ * ran too long to still be the one in charge fails only a copy that is still just `stored`, never one another run has since proved.
+ */
+export async function markFailed(id: string, failure: string, from: Array<'staging' | 'stored' | 'verified'> = ['staging', 'stored', 'verified']): Promise<boolean> {
+  const done = await prisma.computerArchive.updateMany({ where: { id, state: { in: from } }, data: { state: 'failed', failure: failure.slice(0, 200) } });
+  return done.count === 1;
 }
 
 export async function archiveById(id: string): Promise<ArchiveRow | null> {
