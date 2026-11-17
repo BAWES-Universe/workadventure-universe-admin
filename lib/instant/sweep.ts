@@ -7,6 +7,7 @@ import { denyInstantOnSessions, type SessionSweep } from '@/lib/instant/sessions
 import { pauseInstant } from '@/lib/instant/state';
 import { settleCheckingReceipts } from '@/lib/task-receipts';
 import { instantListedPrices, usdToMicros } from '@/lib/instant/values';
+import { reconcileSpeech, type ReconcileReport } from '@/lib/speech-status';
 
 /**
  * The bot server asks for this now and then (like the computer sweep). It looks unfinished runs up by their own id and settles what
@@ -68,6 +69,8 @@ export interface SweepResult {
   paused: boolean;
   sessions: SessionSweep;
   drift: DriftReport | null;
+  /** The speech reconcile pass that runs with this sweep (docs/speech-admission-contract.md, section 6); null when it could not run. */
+  speech: ReconcileReport | null;
 }
 
 export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: ReadyMadeAdapter | null; now?: Date; forceDrift?: boolean } = {}): Promise<SweepResult> {
@@ -110,7 +113,12 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
     // The clock starts only when the check finished and Composio answered for every tool (and any pause it needed was made): a failed or partial check is tried again by the next sweep
     if (drift && drift.unreachable.length === 0) lastDriftAt = Date.now();
   }
-  return { looked: open.length, receipts, paused, sessions, drift };
+  // Speech holds are reconciled by the same call the bot server already makes now and then: nothing new for it to schedule
+  const speech = await reconcileSpeech(now).catch((error) => {
+    console.error('[Speech] The reconcile pass failed:', error instanceof Error ? error.message : 'unknown');
+    return null;
+  });
+  return { looked: open.length, receipts, paused, sessions, drift, speech };
 }
 
 /** For tests. */

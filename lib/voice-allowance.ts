@@ -3,8 +3,10 @@ import { resolveUsagePerson } from '@/lib/usage-person';
 import { ReplyAllowanceError, windowStart } from '@/lib/reply-limits';
 import { servedVoiceLimits } from '@/lib/voice-limits';
 import { runningExtra, type RunningExtra } from '@/lib/meter-grants';
-import { checkSpeechCap } from '@/lib/speech-cap';
+import { checkSpeechCap, type SpeechStop } from '@/lib/speech-cap';
 import { lockSpeech, speechReserved, SPEECH_LOCK } from '@/lib/speech-reserved';
+import { planReply, type SpeechReason } from '@/lib/speech-admission';
+import { monthOf } from '@/lib/meter-values';
 
 /**
  * Voice replies inside the Universe AI allowance (game #1669), decided by Khalid 29 Oct 2026: a spoken reply comes out of the
@@ -15,9 +17,27 @@ import { lockSpeech, speechReserved, SPEECH_LOCK } from '@/lib/speech-reserved';
  * the turn the bot server names it by, so asking again for the same reply (a retry, a reconnect) never counts it twice.
  */
 export type VoiceAllowance =
-  /** `left`: spoken replies still possible after this one; `resetsAt`: when the person's window ends. Both are missing for a person nobody could name. */
-  | { allowed: true; left?: number; resetsAt?: string }
-  | { allowed: false; resetsAt: string };
+  /**
+   * `left`: spoken replies still possible after this one; `resetsAt`: when the person's window ends. Both are missing for a person nobody could name.
+   * `admission` is there for a game that asked with `contract: 2` (docs/speech-admission-contract.md): what Orbit set aside for this reply.
+   */
+  | { allowed: true; left?: number; resetsAt?: string; admission?: ReplyAdmission }
+  /** `stoppedBy` says which of the five stops it was (person, budget, hold, provider, capacity); `retryAfterSeconds` only where waiting helps. */
+  | { allowed: false; resetsAt: string; stoppedBy: SpeechReason; retryAfterSeconds?: number };
+
+/** What admitting a reply set aside, as the game sees it. The receipt of the reply carries its `turnId`, and Orbit releases this when it arrives. */
+export interface ReplyAdmission {
+  contract: 2;
+  turnId: string;
+  rateVersion: number;
+  provider: string | null;
+  /** The member estimate, in seconds: the usual length of a reply. */
+  admittedSeconds: number;
+  /** The enforceable longest reply, in seconds. */
+  maxSeconds: number;
+  /** Universe's exposure for this reply, in millionths of a dollar, at `rateVersion`. */
+  admittedMicros: number;
+}
 
 /** What a person has left, for the line at the bottom of the Voice menu. `resetsAt` is null while no window is running (nothing used yet). */
 export interface VoiceLeft {
@@ -59,6 +79,9 @@ const extraFor = (person: { personId: string | null }, now: Date) => (person.per
 /** An allowed answer; no `left` when there is no limit to count down from. */
 const withLeft = (left: number | null, resetsAt: string): VoiceAllowance => (left === null ? { allowed: true, resetsAt } : { allowed: true, left, resetsAt });
 
+/** The same answer with what was set aside for the reply, for a game that asked with `contract: 2`. */
+const withAdmission = (answer: VoiceAllowance, admission: ReplyAdmission | undefined): VoiceAllowance => (admission && answer.allowed ? { ...answer, admission } : answer);
+
 /** The Universe AI replies a person got in a window, from any bot, as the text limit counts them (lib/reply-limits.ts). */
 const usedReplies = (db: Pick<typeof prisma, 'botsAiUsage'>, person: { personId: string | null }, userId: string, since: Date) =>
   db.botsAiUsage.count({
@@ -72,13 +95,58 @@ const usedReplies = (db: Pick<typeof prisma, 'botsAiUsage'>, person: { personId:
     },
   });
 
+const refused = (stop: Pick<SpeechStop, 'reason' | 'resetsAt' | 'retryAfterSeconds'>): VoiceAllowance => ({ allowed: false, resetsAt: stop.resetsAt, stoppedBy: stop.reason, ...(stop.retryAfterSeconds !== undefined ? { retryAfterSeconds: stop.retryAfterSeconds } : {}) });
+
+type Admitted = { turnId: string; contract: number; rateVersion: number | null; provider: string | null; memberSeconds: number | null; seconds: number | null; holdMicros: bigint | null };
+
+/** What a reply that was admitted already is, as the game is told: the admission it was given, never a new one. */
+function admissionOf(row: Admitted): ReplyAdmission | undefined {
+  if (row.contract < 2 || row.rateVersion === null || row.seconds === null || row.holdMicros === null) return undefined;
+  return { contract: 2, turnId: row.turnId, rateVersion: row.rateVersion, provider: row.provider, admittedSeconds: row.memberSeconds ?? row.seconds, maxSeconds: row.seconds, admittedMicros: Number(row.holdMicros) };
+}
+
+/**
+ * The speech admission of one reply, inside the transaction that holds the speech lock: what it sets aside (the usual length for the person, the
+ * enforceable longest in money for Universe, at the rate card as it is now), checked against the person's entitlement and the Speech budget,
+ * and written as the row that holds it until its receipt arrives (contract 2) or for the saved time (contract 1, a game that cannot name the
+ * reply on its receipt: it holds the longest reply for the person too, as before). Nothing is written for a reply that is turned down.
+ */
+async function admitSpeech(
+  tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0],
+  a: { botId: string; turnId: string; personKey: string; personId: string | null; now: Date; contract: number; provider: unknown; model: unknown; replySeconds: number; replyCharacters: number },
+): Promise<{ ok: true; admission?: ReplyAdmission } | { ok: false; refusal: VoiceAllowance }> {
+  const resetsAt = monthOf(a.now).end.toISOString();
+  const planned = await planReply(tx, { provider: a.provider, model: a.model, replySeconds: a.replySeconds, replyCharacters: a.replyCharacters });
+  if (!planned.ok) return { ok: false, refusal: refused({ reason: planned.stop === 'provider' ? 'provider' : 'budget', resetsAt }) };
+  const { plan } = planned;
+  const memberSeconds = a.contract >= 2 ? plan.memberSeconds : plan.maxSeconds;
+  const held = await speechReserved(tx, { personKey: a.personKey.startsWith('anon:') ? null : a.personKey, replySeconds: a.replySeconds, now: a.now });
+  const stop = await checkSpeechCap({ personId: a.personId, memberSeconds, exposureMicros: plan.price.micros, held }, a.now, tx);
+  if (stop) return { ok: false, refusal: refused(stop) };
+  const row = await tx.voiceReplyUse.create({
+    data: {
+      botId: a.botId,
+      turnId: a.turnId,
+      personKey: a.personKey,
+      seconds: plan.maxSeconds,
+      createdAt: a.now,
+      contract: a.contract >= 2 ? 2 : 1,
+      memberSeconds,
+      holdMicros: BigInt(plan.price.micros),
+      rateVersion: plan.price.rateVersion,
+      provider: plan.company.adapter,
+    },
+  });
+  return { ok: true, admission: a.contract >= 2 ? admissionOf(row) : undefined };
+}
+
 /**
  * May this reply be spoken? Asked by the bot server just before it says one that Universe AI pays for. A person the bot can't
  * name yet (no id) is never stopped: there is nobody to count. A reply that was allowed once is allowed again.
  */
 export async function checkVoiceAllowance(
   botId: string,
-  input: { userId?: unknown; isGuest?: unknown; turnId?: unknown },
+  input: { userId?: unknown; isGuest?: unknown; turnId?: unknown; contract?: unknown; provider?: unknown; model?: unknown },
   now: Date = new Date(),
 ): Promise<VoiceAllowance> {
   const turnId = typeof input.turnId === 'string' && input.turnId ? input.turnId : null;
@@ -87,17 +155,18 @@ export async function checkVoiceAllowance(
   if (!bot) throw new ReplyAllowanceError('Bot not found', 404);
 
   const userId = typeof input.userId === 'string' && input.userId ? input.userId.slice(0, 255) : null;
+  // Version 2 only when the game says so: it then promises to send the receipt that names this reply (docs/speech-admission-contract.md)
+  const contract = input.contract === 2 ? 2 : 1;
   if (!userId) {
-    // Nobody to count, but the month's speech for everyone together still has its stop (lib/speech-cap.ts), and the reply holds its seconds
-    // like any other (under `anon:<bot>`, so asking again for the same reply is the same reply, and releasing it frees them)
-    const replySeconds = (await servedVoiceLimits()).limits.replySeconds;
+    // Nobody to count, but the Speech budget for everyone together still has its stop (lib/speech-cap.ts), and the reply holds what it may cost
+    // like any other (under `anon:<bot>`, so asking again for the same reply is the same reply, and releasing it frees it)
+    const { limits } = await servedVoiceLimits();
     return prisma.$transaction(async (tx): Promise<VoiceAllowance> => {
       await lockSpeech(tx);
-      if (await tx.voiceReplyUse.findUnique({ where: { botId_turnId: { botId, turnId } }, select: { id: true } })) return { allowed: true };
-      const stop = await checkSpeechCap({ personId: null, seconds: replySeconds, inFlight: await speechReserved(tx, { personKey: null, replySeconds, now }) }, now, tx);
-      if (stop) return { allowed: false, resetsAt: stop.resetsAt };
-      await tx.voiceReplyUse.create({ data: { botId, turnId, personKey: `anon:${botId}`, seconds: replySeconds, createdAt: now } });
-      return { allowed: true };
+      const already = await tx.voiceReplyUse.findUnique({ where: { botId_turnId: { botId, turnId } } });
+      if (already) return { allowed: true, ...(contract >= 2 && admissionOf(already) ? { admission: admissionOf(already) } : {}) };
+      const done = await admitSpeech(tx, { botId, turnId, personKey: `anon:${botId}`, personId: null, now, contract, provider: input.provider, model: input.model, replySeconds: limits.replySeconds, replyCharacters: limits.replyCharacters });
+      return done.ok ? { allowed: true, ...(done.admission ? { admission: done.admission } : {}) } : done.refusal;
     }, SPEECH_LOCK);
   }
 
@@ -115,27 +184,26 @@ export async function checkVoiceAllowance(
   // can't both take the last place, nothing is written for a reply that is turned down, and nothing has to be taken back
   return prisma.$transaction(async (tx): Promise<VoiceAllowance> => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${personKey}))`;
-    const already = await tx.voiceReplyUse.findUnique({ where: { botId_turnId: { botId, turnId } }, select: { id: true } });
+    const already = await tx.voiceReplyUse.findUnique({ where: { botId_turnId: { botId, turnId } } });
     const spoken = await tx.voiceReplyUse.count({ where: { personKey, createdAt: { gte: since } } });
     const used = await usedReplies(tx, person, userId, since);
     // A reply asked for again was counted already, so what is left now is what is left
-    if (already) return withLeft(repliesLeft(served, guest, spoken, used, extra), resetsAt);
+    if (already) return withAdmission(withLeft(repliesLeft(served, guest, spoken, used, extra), resetsAt), contract >= 2 ? admissionOf(already) : undefined);
     // A place is only for a reply when the replies kept for text stay kept: typed replies take places from the same window. The text of
     // this reply is counted as ever, and the bot server may have sent it before this is asked or not yet, so it is not counted twice:
     // `used` may already hold it, which is why the window only has to leave 0 places, not 1, and why what is left after this reply
     // is taken from `used` as it stands
     const { byVoice, byText } = places(served, guest, spoken, used, extra);
-    if (byVoice < 1 || byText < 0) return { allowed: false, resetsAt };
-    // The month's spending stop on the speech Universe AI pays for, asked with the longest a reply may be, before it is spoken (lib/speech-cap.ts).
-    // Under the lock every speech reservation is made under, with what notes and replies already admitted hold and the books do not show yet,
-    // so replies asked for one after the other (or at once, by different people) never all pass the last seconds of a Limit
+    // The person's own window of replies: theirs, so the reason is `person`
+    if (byVoice < 1 || byText < 0) return { allowed: false, resetsAt, stoppedBy: 'person' };
+    // The Speech budget and the person's own speech entitlement (lib/speech-cap.ts), asked before the reply is spoken, under the lock every
+    // speech admission is made under, with what is already set aside and the books do not show yet, so replies asked for one after the other
+    // (or at once, by different people) never all pass the last of what is allowed
     await lockSpeech(tx);
-    const inFlight = await speechReserved(tx, { personKey, replySeconds: served.limits.replySeconds, now });
-    const stop = await checkSpeechCap({ personId: person.personId, seconds: served.limits.replySeconds, inFlight }, now, tx);
-    if (stop) return { allowed: false, resetsAt: stop.resetsAt };
-    await tx.voiceReplyUse.create({ data: { botId, turnId, personKey, seconds: served.limits.replySeconds, createdAt: now } });
+    const done = await admitSpeech(tx, { botId, turnId, personKey, personId: person.personId, now, contract, provider: input.provider, model: input.model, replySeconds: served.limits.replySeconds, replyCharacters: served.limits.replyCharacters });
+    if (!done.ok) return done.refusal;
     const left = Math.min(byVoice - 1, byText);
-    return withLeft(Number.isFinite(left) ? Math.max(0, Math.floor(left)) : null, resetsAt);
+    return withAdmission(withLeft(Number.isFinite(left) ? Math.max(0, Math.floor(left)) : null, resetsAt), done.admission);
   }, SPEECH_LOCK);
 }
 
@@ -177,6 +245,7 @@ export async function releaseVoiceReply(botId: string, input: { turnId?: unknown
   if (!turnId || turnId.length > 255) throw new ReplyAllowanceError('turnId is required (up to 255 characters)', 400);
   const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { id: true } });
   if (!bot) throw new ReplyAllowanceError('Bot not found', 404);
-  const { count } = await prisma.voiceReplyUse.deleteMany({ where: { botId, turnId } });
+  // A reply whose receipt already arrived is spent, not given back: only a hold is released here
+  const { count } = await prisma.voiceReplyUse.deleteMany({ where: { botId, turnId, settledAt: null } });
   return { released: count > 0 };
 }

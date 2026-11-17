@@ -3,13 +3,14 @@ import { requireServiceToken } from '@/lib/service-tokens';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import { describeBot, recordMeterEvent } from '@/lib/meter';
 import { personKeyOf, readMeterEvent } from '@/lib/meter-values';
+import { isFundedSpeech, readSpeechFields, recordSpeechReceipt, type ReceiptLink } from '@/lib/speech-receipts';
 
 export const runtime = 'nodejs';
 
 /** The most events one request may carry. */
 const MAX_EVENTS = 100;
 
-export type EventResult = { eventId: string | null; status: 'recorded' | 'duplicate' | 'conflict' | 'invalid' | 'unknown_bot'; error?: string };
+export type EventResult = { eventId: string | null; status: 'recorded' | 'duplicate' | 'conflict' | 'invalid' | 'unknown_bot'; error?: string; admission?: ReceiptLink };
 
 async function write(raw: unknown): Promise<EventResult> {
   const body = typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
@@ -33,6 +34,13 @@ async function write(raw: unknown): Promise<EventResult> {
   const payerPersonId = body.kind === 'speech' && body.route === 'own-key' && body.payerKind === 'person' && !body.payerPersonId && bot?.ownerId ? bot.ownerId : body.payerPersonId;
   const checked = readMeterEvent({ ...body, personKey: personKeyOf({ personId, guestId }), personId, payerPersonId, brick: bot ? bot.brick : null });
   if (!checked.ok) return { eventId, status: 'invalid', error: checked.error };
+  // Speech Universe AI paid for carries the id that links it to what was set aside for it (docs/speech-admission-contract.md): priced, and it
+  // releases the hold of its reply or uses up its window of hearing
+  if (isFundedSpeech(checked.value)) {
+    const fields = readSpeechFields(body);
+    const result = await recordSpeechReceipt(checked.value, fields);
+    return { eventId: result.eventId, status: result.recorded ? 'recorded' : result.conflict ? 'conflict' : 'duplicate', admission: result.admission };
+  }
   const result = await recordMeterEvent(checked.value);
   return { eventId: checked.value.eventId, status: result.recorded ? 'recorded' : result.conflict ? 'conflict' : 'duplicate' };
 }

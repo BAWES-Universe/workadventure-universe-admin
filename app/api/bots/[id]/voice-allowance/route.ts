@@ -9,9 +9,10 @@ export const runtime = 'nodejs';
 /**
  * POST /api/bots/:id/voice-allowance
  * May this reply be spoken (game #1669)? Asked by the bot server just before it says a reply that Universe AI pays for.
- * Body: { userId: their WorkAdventure uuid or email, isGuest: boolean, turnId: the reply's id }.
- * Response: { allowed: true }, or { allowed: false, resetsAt } when the person's spoken replies in this window are used up
- * (the reply stays in text). The same turnId is counted once, however often it is asked. See lib/voice-allowance.ts.
+ * Body: { userId: their WorkAdventure uuid or email, isGuest: boolean, turnId: the reply's id, contract?: 2, provider?, model? }.
+ * Response: { allowed: true, admission? } (`admission` for contract 2: what was set aside, see docs/speech-admission-contract.md), or
+ * { allowed: false, resetsAt, stoppedBy, retryAfterSeconds? } when the reply stays in text; `stoppedBy` is person, budget, hold, provider or
+ * capacity. The same turnId is counted once, however often it is asked. See lib/voice-allowance.ts.
  *
  * Auth: service token only.
  */

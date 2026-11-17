@@ -73,6 +73,8 @@ import { saveMeterSettings } from '@/lib/meter';
 import { leaseVoiceNoteStage, recordVoiceNote, reserveVoiceNote, sweepStaleReservations, type Reservation } from '@/lib/voice-note-turns';
 import { checkVoiceAllowance, releaseVoiceReply } from '@/lib/voice-allowance';
 import { speechReserved } from '@/lib/speech-reserved';
+import { speechSpent } from '@/lib/speech-cap';
+import { getRateCard } from '@/lib/speech-rates';
 import { addVoiceNoteCleanup, claimVoiceNoteCleanups, settleVoiceNoteCleanup } from '@/lib/voice-note-cleanups';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -102,27 +104,22 @@ const turnOf = (reservation: Reservation) => {
 const today = () => new Date(new Date().toISOString().slice(0, 10));
 const botDay = async (id = botId) => (await prisma.voiceListenUse.findUnique({ where: { botId_day: { botId: id, day: today() } } }))?.seconds ?? 0;
 
-// What the month's speech Limits must still hold: notes not heard yet (a note stays held after its lease runs out, until it is heard or given
-// back) and replies admitted a moment ago. The Limits in the cases below are set above what is held, so each case counts only its own
+// What the month's Speech budget must still count, in millionths of a dollar: money spent (and what is counted unknown) plus what notes not heard
+// yet and replies admitted a moment ago have set aside. The budgets in the cases below are set above that, so each case counts only its own
+const NOTE = 2_000; // a 60 s note at the saved hearing rate (0.12 dollars an hour)
+const REPLY = 21_334; // a reply at its longest (600 characters) at the saved speaking rate
 const monthStartNow = () => new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1));
-const inFlightSeconds = async () => {
-  const now = new Date();
-  const notes = await prisma.voiceNoteTurn.aggregate({
-    _sum: { seconds: true },
-    where: {
-      payer: 'universe-ai',
-      released: false,
-      heardSeconds: null,
-      createdAt: { gte: monthStartNow() },
-      OR: [{ state: 'reserved', createdAt: { gt: new Date(now.getTime() - 120_000) } }, { state: { in: ['hearing', 'uncertain', 'failed'] } }],
-    },
-  });
-  const replies = await prisma.voiceReplyUse.aggregate({ _sum: { seconds: true }, _count: { _all: true }, where: { createdAt: { gt: new Date(now.getTime() - 10 * 60_000), gte: monthStartNow() } } });
-  const unkept = await prisma.voiceReplyUse.count({ where: { createdAt: { gt: new Date(now.getTime() - 10 * 60_000), gte: monthStartNow() }, seconds: null } });
-  return (notes._sum.seconds ?? 0) + (replies._sum.seconds ?? 0) + unkept * 60;
+const heldMicros = async () => {
+  const held = await prisma.$transaction((tx) => speechReserved(tx, { personKey: null, replySeconds: 60, now: new Date() }));
+  return held.all.openMicros + held.all.unknownMicros;
 };
-const spentSeconds = async () =>
-  Number((await prisma.meterEvent.aggregate({ where: { kind: 'speech', payerKind: 'universe', occurredAt: { gte: monthStartNow() } }, _sum: { quantity: true } }))._sum.quantity ?? 0);
+const spentMicros = async () => (await speechSpent(prisma, await getRateCard(prisma), new Date())).micros;
+// Earlier cases leave notes and replies set aside; a case that needs the budget to be exactly full starts with none
+const clearHolds = async () => {
+  await prisma.voiceNoteTurn.updateMany({ where: { payer: 'universe-ai', released: false, heardSeconds: null }, data: { released: true } });
+  await prisma.voiceReplyUse.deleteMany({ where: { createdAt: { gte: monthStartNow() } } });
+};
+const usedMicros = async () => (await spentMicros()) + (await heldMicros());
 
 async function newBot(name: string) {
   const roomId = (await prisma.room.findFirstOrThrow({ where: { world: { universeId: universes[0] } }, select: { id: true } })).id;
@@ -154,7 +151,7 @@ run('voice notes for every bot, in a real database', () => {
     await saveVoiceLimits({ noteMinutesPerPerson: 3, listenMinutesPerDay: 60, guestNoteMinutesPerGuest: 2, guestNoteMinutesPerUniverse: 3, notesAtOnce: 1_000, noteMinutesPerHour: 100_000 }, makerId);
     // The month's speech Limits are wide open, so only the per-person and per-bot numbers above stop a note; the case on the speech Limits sets its own
     meterBefore = await prisma.appSetting.findUnique({ where: { key: 'meter' }, select: { value: true } });
-    await saveMeterSettings({ speechCeilingSeconds: 1_000_000_000, speechMemberCeilingSeconds: 100_000_000 }, makerId);
+    await saveMeterSettings({ speechBudgetMicros: 1_000_000_000_000, speechMemberCeilingSeconds: 100_000_000 }, makerId);
   });
 
   afterAll(async () => {
@@ -185,26 +182,25 @@ run('voice notes for every bot, in a real database', () => {
 
     it('holds a note back whole, before it is heard, when the month\'s speech Universe AI pays for would pass a Limit (seconds, all people and one person)', async () => {
       const before = await prisma.appSetting.findUnique({ where: { key: 'meter' } });
-      const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1));
-      const spent = Number((await prisma.meterEvent.aggregate({ where: { kind: 'speech', payerKind: 'universe', occurredAt: { gte: monthStart } }, _sum: { quantity: true } }))._sum.quantity ?? 0);
-      const waiting = await inFlightSeconds();
+      await clearHolds();
+      const used = await usedMicros();
       const speech = (id: string, seconds: number, personId: string | null) =>
         prisma.meterEvent.create({
           data: { eventId: `speech:test:${id}`, kind: 'speech', pool: 'chat', occurredAt: new Date(), personKey: personId ? `person:${personId}` : 'unknown', personId, payerKind: 'universe', quantity: BigInt(seconds), unit: 'second', basis: 'unknown', brick: true },
         });
       try {
         // Room for one more 60 s note in the month, everyone together
-        await saveMeterSettings({ speechCeilingSeconds: spent + waiting + 100, speechMemberCeilingSeconds: 1_000_000 }, makerId);
+        await saveMeterSettings({ speechBudgetMicros: used + NOTE + 1_000, speechMemberCeilingSeconds: 1_000_000 }, makerId);
         const first = await reserve(`sam-${randomUUID()}`);
         expect(first).toMatchObject({ ok: true });
         await speech(randomUUID(), 60, null);
         const held = await reserve(`sam-${randomUUID()}`);
-        expect(held).toMatchObject({ ok: false, reason: 'note-minutes', limit: 'universe' });
+        expect(held).toMatchObject({ ok: false, reason: 'note-minutes', limit: 'universe', stoppedBy: 'budget', transcribed: false });
         expect(new Date((held as { resetsAt: string }).resetsAt).getTime()).toBe(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 1));
         // Empty stops it, 0 pauses it
-        await saveMeterSettings({ speechCeilingSeconds: null }, makerId);
+        await saveMeterSettings({ speechBudgetMicros: null }, makerId);
         expect(await reserve(`sam-${randomUUID()}`)).toMatchObject({ ok: false, reason: 'note-minutes' });
-        await saveMeterSettings({ speechCeilingSeconds: 0 }, makerId);
+        await saveMeterSettings({ speechBudgetMicros: 0 }, makerId);
         expect(await reserve(`sam-${randomUUID()}`)).toMatchObject({ ok: false, reason: 'note-minutes' });
       } finally {
         await prisma.meterEvent.deleteMany({ where: { eventId: { startsWith: 'speech:test:' } } });
@@ -215,16 +211,15 @@ run('voice notes for every bot, in a real database', () => {
 
     it('counts the notes reserved and not heard yet against the month\'s speech Limits, so the last minutes are never given to two notes (all people, and one person)', async () => {
       const before = await prisma.appSetting.findUnique({ where: { key: 'meter' } });
-      const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1));
-      const spent = Number((await prisma.meterEvent.aggregate({ where: { kind: 'speech', payerKind: 'universe', occurredAt: { gte: monthStart } }, _sum: { quantity: true } }))._sum.quantity ?? 0);
+      await clearHolds();
       try {
         // Room for one 60 s note and a little more, everyone together: the second note, reserved right after the first with nothing heard between, does not fit
-        const waiting = await inFlightSeconds();
-        await saveMeterSettings({ speechCeilingSeconds: spent + waiting + 100, speechMemberCeilingSeconds: 1_000_000 }, makerId);
+        await saveMeterSettings({ speechBudgetMicros: (await usedMicros()) + NOTE + 1_000, speechMemberCeilingSeconds: 1_000_000 }, makerId);
         expect(await reserve(`tia-${randomUUID()}`)).toMatchObject({ ok: true });
-        expect(await reserve(`tom-${randomUUID()}`)).toMatchObject({ ok: false, reason: 'note-minutes', limit: 'universe' });
+        // What is only set aside would free when the first note is heard: waiting helps, so it is "busy", and not the budget
+        expect(await reserve(`tom-${randomUUID()}`)).toMatchObject({ ok: false, reason: 'busy', stoppedBy: 'hold' });
         // The same for one person: room for one note of theirs only
-        await saveMeterSettings({ speechCeilingSeconds: 1_000_000_000, speechMemberCeilingSeconds: 100 }, makerId);
+        await saveMeterSettings({ speechBudgetMicros: 1_000_000_000_000, speechMemberCeilingSeconds: 100 }, makerId);
         const sol = `sol-${randomUUID()}`;
         await prisma.user.create({ data: { uuid: sol, email: `${sol}@example.test`, name: 'Sol' } });
         expect(await reserve(sol, { isGuest: false })).toMatchObject({ ok: true });
@@ -240,12 +235,12 @@ run('voice notes for every bot, in a real database', () => {
     });
 
     describe('the month\'s speech Limits, notes and replies together (audit review)', () => {
-      // Runs `body` with a month's Limit that leaves room for `room` more seconds than everything already spent or held; puts the settings back
+      // Runs `body` with a month's Speech budget that leaves room for `room` more millionths of a dollar than everything already spent or held; puts the settings back
       const withRoom = async (room: number, body: () => Promise<void>) => {
         const before = await prisma.appSetting.findUnique({ where: { key: 'meter' } });
+        await clearHolds();
         try {
-          const base = (await spentSeconds()) + (await inFlightSeconds());
-          await saveMeterSettings({ speechCeilingSeconds: base + room, speechMemberCeilingSeconds: 1_000_000 }, makerId);
+          await saveMeterSettings({ speechBudgetMicros: (await usedMicros()) + room, speechMemberCeilingSeconds: 1_000_000 }, makerId);
           await body();
         } finally {
           if (before) await prisma.appSetting.update({ where: { key: 'meter' }, data: { value: before.value as never } });
@@ -253,10 +248,12 @@ run('voice notes for every bot, in a real database', () => {
         }
       };
       const reply = (turn: string = `reply-${randomUUID()}`, who: string | null = `rep-${randomUUID()}`) => ({ ...(who ? { userId: who, isGuest: true } : {}), turnId: turn });
-      const heldBack = { ok: false, reason: 'note-minutes', limit: 'universe' };
+      // Money that is only set aside for something still going on: waiting helps ("busy"); money spent or counted unknown: the budget ("used up")
+      const heldBack = { ok: false, reason: 'busy', stoppedBy: 'hold' };
+      const spentOut = { ok: false, reason: 'note-minutes', limit: 'universe', stoppedBy: 'budget' };
 
       it('keeps a note\'s seconds held after its lease runs out, until it is heard or given back: a late hearing is still accepted, so another note never takes its place', async () => {
-        await withRoom(100, async () => {
+        await withRoom(NOTE + 1_000, async () => {
           const a = turnOf(await reserve(`lea-${randomUUID()}`));
           await leaseVoiceNoteStage(a.id, { stage: 'hearing', adapters: ADAPTERS });
           await prisma.voiceNoteTurn.update({ where: { id: a.id }, data: { leaseUntil: new Date(Date.now() - 1_000), providerRefs: { transcription: 't-1' } } });
@@ -264,18 +261,18 @@ run('voice notes for every bot, in a real database', () => {
           // The late hearing still ends well, and is in the books once
           await recordVoiceNote(a.id, { event: 'heard', generation: 1, transcript: 'late', seconds: 60 });
           expect(await prisma.meterEvent.count({ where: { eventId: `speech:note:${a.id}` } })).toBe(1);
-          expect(await reserve(`lec-${randomUUID()}`)).toMatchObject(heldBack);
+          expect(await reserve(`lec-${randomUUID()}`)).toMatchObject(spentOut);
         });
       });
 
       it('keeps the seconds of a hearing that failed with a charge or was lost, and gives back one that was never charged', async () => {
-        await withRoom(100, async () => {
+        await withRoom(NOTE + 1_000, async () => {
           const charged = turnOf(await reserve(`chg-${randomUUID()}`));
           await leaseVoiceNoteStage(charged.id, { stage: 'hearing', adapters: ADAPTERS });
           await recordVoiceNote(charged.id, { event: 'hearing-failed', generation: 1, charged: 'unknown' });
-          expect(await reserve(`chh-${randomUUID()}`)).toMatchObject(heldBack);
+          expect(await reserve(`chh-${randomUUID()}`)).toMatchObject(spentOut);
         });
-        await withRoom(100, async () => {
+        await withRoom(NOTE + 1_000, async () => {
           const free = turnOf(await reserve(`fre-${randomUUID()}`));
           await leaseVoiceNoteStage(free.id, { stage: 'hearing', adapters: ADAPTERS });
           expect(await reserve(`frf-${randomUUID()}`)).toMatchObject(heldBack);
@@ -285,7 +282,7 @@ run('voice notes for every bot, in a real database', () => {
       });
 
       it('counts a note once as it moves from waiting to heard: it holds its seconds, then its event does, never both', async () => {
-        await withRoom(130, async () => {
+        await withRoom(2 * NOTE + 500, async () => {
           const a = turnOf(await reserve(`one-${randomUUID()}`));
           await leaseVoiceNoteStage(a.id, { stage: 'hearing', adapters: ADAPTERS });
           await recordVoiceNote(a.id, { event: 'heard', generation: 1, transcript: 'x', seconds: 60 });
@@ -309,7 +306,7 @@ run('voice notes for every bot, in a real database', () => {
       it('holds the seconds of a spoken reply when it is let through, so replies asked for one after the other never all pass the last seconds (a person, a guest, nobody)', async () => {
         const made: string[] = [];
         try {
-          await withRoom(100, async () => {
+          await withRoom(REPLY + 1_000, async () => {
             const first = reply();
             made.push(first.turnId);
             expect(await checkVoiceAllowance(botId, first)).toMatchObject({ allowed: true });
@@ -341,7 +338,7 @@ run('voice notes for every bot, in a real database', () => {
             await prisma.voiceReplyUse.create({ data: { botId, turnId, personKey: key, seconds } });
           }
           // The setting is 30 now: the two replies admitted at 60 still hold 60 each, and the one from before the seconds were kept holds the setting as it is
-          expect((await speechReserved(prisma, { personKey: key, replySeconds: 30, now: new Date() })).mine).toBe(60 + 60 + 30);
+          expect((await prisma.$transaction((tx) => speechReserved(tx, { personKey: key, replySeconds: 30, now: new Date() }))).mine.mineSeconds).toBe(60 + 60 + 30);
           // And a reply let through now keeps what the setting was then
           const fresh = reply(undefined, null);
           made.push(fresh.turnId);
@@ -355,13 +352,15 @@ run('voice notes for every bot, in a real database', () => {
       it('sees notes still being heard when it lets a reply through, and a reply\'s seconds when it reserves a note', async () => {
         const made: string[] = [];
         try {
-          await withRoom(100, async () => {
+          // Room for the note and not for a reply on top of it
+          await withRoom(NOTE + 3_000, async () => {
             turnOf(await reserve(`mix-${randomUUID()}`));
             const blocked = reply();
             made.push(blocked.turnId);
             expect(await checkVoiceAllowance(botId, blocked)).toMatchObject({ allowed: false });
           });
-          await withRoom(100, async () => {
+          // Room for a reply and not for a note on top of it
+          await withRoom(REPLY + 1_000, async () => {
             const spoken = reply();
             made.push(spoken.turnId);
             expect(await checkVoiceAllowance(botId, spoken)).toMatchObject({ allowed: true });
@@ -375,7 +374,8 @@ run('voice notes for every bot, in a real database', () => {
       it('lets only as many replies and notes through as there is room for when they all come at the same moment', async () => {
         const made: string[] = [];
         try {
-          await withRoom(130, async () => {
+          const before = await usedMicros();
+          await withRoom(REPLY + NOTE + 500, async () => {
             const asks = [
               ...Array.from({ length: 4 }, () => {
                 const ask = reply();
@@ -385,8 +385,10 @@ run('voice notes for every bot, in a real database', () => {
               ...Array.from({ length: 4 }, () => reserve(`rush-${randomUUID()}`).then((answer) => answer.ok)),
             ];
             const passed = (await Promise.all(asks)).filter(Boolean);
-            // Room for two 60 s uses and not three
-            expect(passed).toHaveLength(2);
+            // Everything let through fits the room together, and not all eight come to be: no two ask for the same money
+            expect(passed.length).toBeGreaterThanOrEqual(1);
+            expect(passed.length).toBeLessThan(8);
+            expect((await usedMicros()) - before).toBeLessThanOrEqual(REPLY + NOTE + 500);
           });
         } finally {
           await prisma.voiceReplyUse.deleteMany({ where: { botId, turnId: { in: made } } });
@@ -693,7 +695,7 @@ run('voice notes for every bot, in a real database', () => {
       await recordVoiceNote(turn.id, { event: 'heard', generation: 1, transcript: 'Hello', seconds: 12 }).catch(() => undefined);
       const events = await prisma.meterEvent.findMany({ where: { kind: 'speech', eventId: `speech:note:${turn.id}` } });
       expect(events).toHaveLength(1);
-      expect(events[0]).toMatchObject({ kind: 'speech', pool: 'chat', unit: 'second', quantity: BigInt(12), payerKind: 'universe', costMicros: null, basis: 'unknown', sourceRef: `voice_note_turns:${turn.id}` });
+      expect(events[0]).toMatchObject({ kind: 'speech', pool: 'chat', unit: 'second', quantity: BigInt(12), payerKind: 'universe', costMicros: BigInt(400), basis: 'estimated', sourceRef: `voice_note_turns:${turn.id}` });
       const priced = await fresh();
       await leaseVoiceNoteStage(priced.id, { stage: 'hearing', adapters: ADAPTERS });
       await recordVoiceNote(priced.id, { event: 'heard', generation: 1, transcript: 'Hi', seconds: 5, costMicros: 450 });
