@@ -282,6 +282,103 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(await finished.json()).toEqual({ id });
   });
 
+  describe('install and sign-in as one step (D5: "sign in during install" on)', () => {
+    /** Sign in first as the separate way does (no install yet), and take the install page's state from the answer. */
+    async function toInstallPage() {
+      await makeApp();
+      mockUser.current = { id: sara };
+      const { id } = await (await connectApp(request('/api/me/apps', { method: 'POST', body: { catalogKey: 'github' } }))).json();
+      const started = await (await signIn(request(`/api/me/apps/${id}/sign-in?redirectUrl=${encodeURIComponent(OPENER)}`), params({ connectionId: id }))).json();
+      pretendGitHub({
+        'POST https://github.com/login/oauth/access_token': { body: { access_token: 'ghu_1', refresh_token: 'ghr_1', expires_in: 28800 } },
+        'GET https://api.github.com/user': { body: { login: 'sara-gh', id: 501 } },
+        'GET https://api.github.com/user/installations': { body: { total_count: 0 } },
+      });
+      const back = await callback(request(`/api/github/callback?code=abc&state=${encodeURIComponent(new URL(started.authorizeUrl).searchParams.get('state') as string)}`));
+      const answer = await (await finishFrom(back)).json();
+      return { id, installState: new URL(answer.installUrl).searchParams.get('state') as string };
+    }
+
+    it('GitHub comes back from the install page with a code and the page’s state: it is finished like a sign-in, without PKCE, by the same person only, once', async () => {
+      const { id, installState } = await toInstallPage();
+      const calls = pretendGitHub({
+        'POST https://github.com/login/oauth/access_token': { body: { access_token: 'ghu_2', refresh_token: 'ghr_2', expires_in: 28800 } },
+        'GET https://api.github.com/user': { body: { login: 'sara-gh', id: 501 } },
+        'GET https://api.github.com/user/installations': { body: { total_count: 1 } },
+      });
+      const back = await callback(request(`/api/github/callback?code=xyz&installation_id=9&setup_action=install&state=${encodeURIComponent(installState)}`));
+      const page = new URL(back.headers.get('location') as string);
+      expect(page.origin + page.pathname).toBe('https://play.example.com/oauth-popup-callback.html');
+      expect(page.searchParams.get('oauth')).toBe('github');
+      // Still nothing exchanged at the return itself
+      expect(calls).toHaveLength(0);
+
+      const other = await prisma.user.create({ data: { uuid: `someone-else-${tag}`, email: `someone-else-${tag}@example.test`, name: 'Someone else' } });
+      const stranger = await finishFrom(back, other.id);
+      await prisma.user.delete({ where: { id: other.id } });
+      expect(stranger.status).toBe(404);
+      expect(calls).toHaveLength(0);
+
+      const finished = await finishFrom(back);
+      expect(finished.status).toBe(200);
+      // Installed now: no second install page
+      expect(await finished.json()).toEqual({ id });
+      const exchange = new URLSearchParams(String(calls[0].init.body));
+      expect(Object.fromEntries(exchange)).toMatchObject({ client_secret: 'app-secret', grant_type: 'authorization_code', code: 'xyz' });
+      expect(exchange.get('code_verifier')).toBeNull();
+      const row = await prisma.appConnection.findUniqueOrThrow({ where: { id } });
+      expect(readGitHubAuth(row)).toMatchObject({ accessToken: 'ghu_2', login: 'sara-gh', githubId: 501 });
+
+      // The same return again: the ticket was used, so GitHub is not asked
+      const asked = calls.length;
+      const again = await finishFrom(back);
+      expect(again.status).toBe(400);
+      expect(await again.json()).toMatchObject({ code: 'sign_in_expired' });
+      expect(calls).toHaveLength(asked);
+    });
+
+    it('asks again for where it works when GitHub signed the person in but the app is still on no account of theirs', async () => {
+      const { id, installState } = await toInstallPage();
+      pretendGitHub({
+        'POST https://github.com/login/oauth/access_token': { body: { access_token: 'ghu_3', expires_in: 28800 } },
+        'GET https://api.github.com/user': { body: { login: 'sara-gh', id: 501 } },
+        'GET https://api.github.com/user/installations': { body: { total_count: 0 } },
+      });
+      const finished = await finishFrom(await callback(request(`/api/github/callback?code=xyz&state=${encodeURIComponent(installState)}`)));
+      const answer = await finished.json();
+      expect(answer.id).toBe(id);
+      expect(new URL(answer.installUrl).pathname).toBe('/apps/bawes-universe/installations/new');
+    });
+
+    it('closes the window with nothing to finish when an owner’s OK is awaited, or when the install page had no ticket of ours', async () => {
+      const { installState } = await toInstallPage();
+      // A member who asked their organization's owner for the app: no code comes, and that is no error
+      const asked = await callback(request(`/api/github/callback?setup_action=request&state=${encodeURIComponent(installState)}`));
+      expect(asked.headers.get('location')).toBe('https://play.example.com/oauth-popup-callback.html?oauth=success');
+      // "Add a place" and "Ask an owner" open the install page with no state: a code may come back, and none is spent
+      const calls = pretendGitHub({});
+      const bare = await callback(request('/api/github/callback?code=abc&installation_id=9&setup_action=install'));
+      expect(new URL(bare.headers.get('location') as string).searchParams.get('oauth')).toBe('success');
+      expect(calls).toHaveLength(0);
+      // No state and no sign of an install: still turned away
+      const nothing = await callback(request('/api/github/callback?code=abc'));
+      expect(new URL(nothing.headers.get('location') as string).searchParams.get('message')).toBe('sign_in_expired');
+    });
+
+    it('an install state made before this change (no person or ticket in it) can close the window and never finish a sign-in', async () => {
+      await makeApp();
+      const old = encryptApiKey(JSON.stringify({ kind: 'github-install', connectionId: randomUUID(), redirectUrl: OPENER, exp: Math.floor(Date.now() / 1000) + 600 }));
+      const calls = pretendGitHub({});
+      const back = await callback(request(`/api/github/callback?code=abc&setup_action=install&state=${encodeURIComponent(old)}`));
+      expect(back.headers.get('location')).toBe('https://play.example.com/oauth-popup-callback.html?oauth=success');
+      expect(calls).toHaveLength(0);
+      mockUser.current = { id: sara };
+      const tried = await finish(request('/api/me/apps/github/finish', { method: 'POST', body: { state: old, code: 'abc' } }));
+      expect(tried.status).toBe(400);
+      expect(calls).toHaveLength(0);
+    });
+  });
+
   it('a Brick gets GitHub through Orbit: no token is handed out, the tools are listed, a call runs once', async () => {
     await makeApp();
     const id = await signedIn();

@@ -20,14 +20,14 @@ function fakeGitHub(routes: [string, string, number, unknown, Record<string, str
 describe("the form GitHub's Create page is filled in with", () => {
   const manifest = buildManifest('https://orbit.example');
 
-  it('sends people back to Orbit, signs in on its own (not at install) and asks about installs on update too', () => {
+  it('sends people back to Orbit and signs them in at the end of the install (one step), with no Setup URL GitHub would ignore', () => {
     expect(manifest.name).toBe('BAWES Universe');
     expect(manifest.public).toBe(true);
     expect(manifest.callback_urls).toEqual(['https://orbit.example/api/github/callback']);
-    expect(manifest.setup_url).toBe('https://orbit.example/api/github/installed');
+    expect(manifest).not.toHaveProperty('setup_url');
+    expect(manifest).not.toHaveProperty('setup_on_update');
     expect(manifest.redirect_url).toBe('https://orbit.example/api/admin/github-app/created');
-    expect(manifest.request_oauth_on_install).toBe(false);
-    expect(manifest.setup_on_update).toBe(true);
+    expect(manifest.request_oauth_on_install).toBe(true);
     expect(manifest.hook_attributes).toEqual({ url: 'https://orbit.example/api/github/webhook', active: true });
   });
 

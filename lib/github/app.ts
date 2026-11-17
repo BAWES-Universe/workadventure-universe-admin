@@ -149,9 +149,11 @@ export function buildManifest(base: string) {
     public: true,
     redirect_url: `${base}${GITHUB_CREATED_PATH}`,
     callback_urls: [`${base}${GITHUB_CALLBACK_PATH}`],
-    setup_url: `${base}${GITHUB_SETUP_PATH}`,
-    setup_on_update: true,
-    request_oauth_on_install: false,
+    // Install and sign-in are one step for the person (design 14 Nov, D5): GitHub sends them back to the callback address with the
+    // sign-in code once they pressed Install & Authorize. GitHub does not use a Setup URL when this is on, so none is sent; the
+    // callback also finishes the older two-step way (sign in first, pick where it works after), which still returns to
+    // GITHUB_SETUP_PATH for an app set up that way by hand.
+    request_oauth_on_install: true,
     hook_attributes: { url: `${base}${GITHUB_WEBHOOK_PATH}`, active: true },
     default_permissions: {
       contents: 'write',
