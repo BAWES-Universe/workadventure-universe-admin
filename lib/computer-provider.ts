@@ -57,6 +57,26 @@ export interface Check {
   detail: string;
 }
 
+/** One machine in the provider's bill for a day. `ref` is the provider's own id; `kind` says whose machine it is (a Brick's, another one on the same account, or one that is gone). */
+export interface ProviderDayInstance {
+  ref: string;
+  kind: 'brick' | 'other' | 'gone';
+  /** The Brick it was made for, from what we wrote on it when we made it; null for `other` and `gone`. */
+  botId: string | null;
+  totalMicros: number;
+  computeMicros: number;
+  awakeMinutes: number;
+  /** What the provider's own published rates make of this machine's awake minutes and resting disk for the day; null when they cannot say. */
+  expectedMicros: number | null;
+}
+
+/** What the provider billed for one UTC day (`YYYY-MM-DD`). */
+export interface ProviderDay {
+  day: string;
+  totalMicros: number;
+  instances: ProviderDayInstance[];
+}
+
 export interface ComputerProvider {
   readonly kind: 'fake' | 'real';
   /** What an awake minute costs, in millionths of a dollar, as the provider says; null when it has not said. */
@@ -74,6 +94,8 @@ export interface ComputerProvider {
   ready(ref: string): Promise<void>;
   /** What a job needs from the provider right now (the key works, the wallet carries a job, the image is built). Reads only; never throws. */
   checkup(): Promise<Check[]>;
+  /** What the provider billed for a UTC day, by machine, for the daily check of our books against its bill. Reads only. Absent for a provider with no bill. */
+  dayUsage?(day: string): Promise<ProviderDay>;
   /** Whatever the provider keeps up between jobs (the real one builds its image). Asked by the sweep; never throws. */
   maintain(): Promise<void>;
   /** Lets it rest after a job: the disk is kept, nothing else is billed. */
@@ -88,6 +110,8 @@ export interface ComputerProvider {
   watch(ref: string): Promise<WatchSession | null>;
   /** Saves a copy of its home folder and says how big it is. */
   saveFiles(ref: string): Promise<SavedCopy>;
+  /** Deletes the saved copy of a Brick's folder from our own storage for good (a Brick that was deleted keeps nothing). A copy that is not there is no error. Absent: this provider keeps no copy of its own. */
+  deleteSavedCopy?(botId: string): Promise<void>;
   /**
    * Runs a shell command on the machine. Only for a machine a job holds: a sleeping machine is woken by it. A non-zero exit is an
    * answer, not an error; a command that could not be asked at all throws.
@@ -213,6 +237,14 @@ export class FakeComputerProvider implements ComputerProvider {
     // Only a machine that is awake has a screen: looking never wakes it
     if (!this.awake_.has(ref)) return null;
     return { url: `https://computer.pretend.invalid/screen/${encodeURIComponent(ref)}`, expiresAt: new Date(Date.now() + 5 * 60_000) };
+  }
+
+  /** Make the deleting of a saved copy fail while this is on. */
+  failDeleteCopy = false;
+
+  async deleteSavedCopy(botId: string): Promise<void> {
+    this.note('deleteSavedCopy', botId);
+    if (this.failDeleteCopy) throw new Error('The pretend provider failed on deleteSavedCopy');
   }
 
   async saveFiles(ref: string): Promise<SavedCopy> {

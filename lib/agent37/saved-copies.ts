@@ -132,3 +132,12 @@ export async function savedCopyOf(botId: string): Promise<SavedCopyInfo | null> 
     throw error;
   }
 }
+
+/**
+ * Deletes the saved copy of a Brick's folder for good (a Brick that was deleted keeps nothing of its computer in our storage). Asked for a
+ * copy that is not there it is also fine: deleting is the same answer either way. Throws when the bucket would not do it.
+ */
+export async function deleteSavedCopy(botId: string): Promise<void> {
+  const { s3, bucket } = artifactBucket();
+  await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId) }));
+}

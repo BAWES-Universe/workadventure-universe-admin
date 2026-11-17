@@ -3,22 +3,47 @@ import { recordMeterEvent } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
 
 /**
- * The disk of a Brick's computer goes into the books (audit F4). The provider bills a machine's whole disk for as long as the machine
- * exists, awake or asleep, and the computer pool's envelope counts the disks kept (lib/meter-allowance.ts reads the newest `stored_bytes` of
- * each Brick). Nothing wrote that size, so a kept disk counted as nothing and the pool's ceiling did not see it. A disk is a level, not an
- * amount that adds up: one line when the machine is made (its disk), one with 0 when it is taken away, and the newest line stands.
+ * What Universe keeps for a Brick's computer goes into the books as one level (audit F4): the machine's disk (the provider bills a whole disk for
+ * as long as the machine exists, awake or asleep) and the saved copy of its files (kept in our own bucket, lib/agent37/saved-copies.ts). The
+ * computer pool's envelope counts the newest level of each Brick (lib/meter-allowance.ts) and the Costs page shows it as "Files we keep", so
+ * what is kept costs the ceiling its place. A level is not an amount that adds up: a line is written when it changes (a machine made, taken
+ * away, or a new copy saved), and the newest line stands. Nothing is written when the level did not change.
  * Never throws and never holds a job: the books are not a reason a computer fails.
  */
-export async function recordKeptDisk(input: { botId: string; ref: string; bytes: number | null; gone?: boolean; now?: Date }): Promise<void> {
-  const bytes = input.gone ? 0 : input.bytes;
-  if (bytes === null || !Number.isSafeInteger(bytes) || bytes < 0) return;
+export async function recordKeptBytes(input: {
+  botId: string;
+  /** What made this write, only to keep the lines apart and to read them later. */
+  reason: 'made' | 'gone' | 'saved';
+  /** The disk of the machine that exists now, in bytes; null or 0 when there is none. */
+  machineBytes: number | null;
+  /** The size of the saved copy; when not given, the one on the Brick's computer record. */
+  copyBytes?: number | null;
+  now?: Date;
+}): Promise<void> {
   try {
+    const machine = input.machineBytes !== null && Number.isSafeInteger(input.machineBytes) && input.machineBytes > 0 ? input.machineBytes : 0;
+    let copy = 0;
+    if (input.copyBytes !== undefined) {
+      copy = input.copyBytes !== null && Number.isSafeInteger(input.copyBytes) && input.copyBytes > 0 ? input.copyBytes : 0;
+    } else {
+      const row = await prisma.brickComputer.findUnique({ where: { botId: input.botId }, select: { filesBytes: true, filesSavedAt: true } });
+      copy = row?.filesSavedAt ? Number(row.filesBytes) : 0;
+    }
+    const level = machine + copy;
+    const newest = await prisma.meterEvent.findFirst({
+      where: { kind: 'stored_bytes', payerKind: 'universe', botId: input.botId },
+      orderBy: [{ occurredAt: 'desc' }, { recordedAt: 'desc' }],
+      select: { quantity: true },
+    });
+    // Nothing kept and nothing ever written: there is no level to say. The same level as the newest one is already the answer.
+    if (newest ? Number(newest.quantity) === level : level === 0) return;
     const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { ownerId: true } });
+    const now = input.now ?? new Date();
     await recordMeterEvent({
-      eventId: `computer:disk:${input.ref}:${input.gone ? 'gone' : 'made'}`.slice(0, 255),
+      eventId: `computer:kept:${input.botId}:${input.reason}:${now.getTime()}:${level}`.slice(0, 255),
       kind: 'stored_bytes',
       pool: 'computer',
-      occurredAt: input.now ?? new Date(),
+      occurredAt: now,
       personKey: personKeyOf({ personId: bot?.ownerId ?? null }),
       personId: bot?.ownerId ?? null,
       botId: input.botId,
@@ -27,15 +52,15 @@ export async function recordKeptDisk(input: { botId: string; ref: string; bytes:
       payerPersonId: null,
       route: 'computer',
       jobId: null,
-      quantity: bytes,
+      quantity: level,
       unit: 'byte',
-      // A disk's cost is worked out from its size and the storage price when the books are read, not written on the line
+      // What is kept costs by its size and the storage Limit when the books are read, not on the line
       costMicros: 0,
       basis: 'estimated',
       sourceRef: `brick_computers:${input.botId}`,
-      detail: { ref: input.ref },
+      detail: { reason: input.reason, machineBytes: machine, copyBytes: copy },
     });
   } catch (error) {
-    console.error('[Computer] Could not write the disk to the books:', error instanceof Error ? error.message : 'unknown');
+    console.error('[Computer] Could not write what is kept to the books:', error instanceof Error ? error.message : 'unknown');
   }
 }

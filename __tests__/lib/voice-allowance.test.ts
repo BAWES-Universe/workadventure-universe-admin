@@ -5,11 +5,15 @@
 import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db';
 import { checkVoiceAllowance, releaseVoiceReply, voiceRepliesLeft } from '@/lib/voice-allowance';
+import { checkSpeechCap } from '@/lib/speech-cap';
+
+const speechCap = checkSpeechCap as jest.Mock;
 import { POST } from '@/app/api/bots/[id]/voice-allowance/route';
 import { POST as RELEASE } from '@/app/api/bots/[id]/voice-allowance/release/route';
 import { POST as LEFT } from '@/app/api/bots/[id]/voice-allowance/left/route';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
+jest.mock('@/lib/speech-cap', () => ({ checkSpeechCap: jest.fn() }));
 jest.mock('@/lib/db', () => ({
   prisma: {
     $queryRaw: jest.fn(),
@@ -45,6 +49,8 @@ const SARA = { userId: 'wa-sara', isGuest: false, turnId: 'bot-1-player-4-aaa' }
 const GUEST = { userId: 'wa-guest', isGuest: true, turnId: 'bot-1-player-5-bbb' };
 
 beforeEach(() => {
+  // The month's speech stop lets everything through unless a test says so
+  speechCap.mockReset().mockResolvedValue(null);
   db.appSetting.findUnique.mockReset().mockResolvedValue(null);
   db.$queryRaw.mockReset().mockResolvedValue([{ started_at: STARTED }]);
   db.bot.findUnique.mockReset().mockResolvedValue({ id: 'bot-1' });
@@ -136,6 +142,38 @@ describe('counting', () => {
   it('never stops someone the bot cannot name yet', async () => {
     expect(await checkVoiceAllowance('bot-1', { turnId: 't1' }, NOW)).toEqual({ allowed: true });
     expect(db.voiceReplyUse.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('the month’s spending stop on speech', () => {
+  const STOP = { stopped: 'month', resetsAt: '2026-12-01T00:00:00.000Z' };
+
+  it('holds a reply back before it is spoken, asked with the longest a reply may be, for the person it is for, and counts nothing', async () => {
+    speechCap.mockResolvedValue(STOP);
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toEqual({ allowed: false, resetsAt: '2026-12-01T00:00:00.000Z' });
+    expect(speechCap).toHaveBeenCalledWith({ personId: 'u-sara', seconds: 60 }, NOW, db);
+    expect(db.voiceReplyUse.create).not.toHaveBeenCalled();
+  });
+
+  it('holds back a guest’s reply too, and a reply for someone the bot cannot name: the month for everyone together has its stop', async () => {
+    speechCap.mockResolvedValue(STOP);
+    expect(await checkVoiceAllowance('bot-1', GUEST, NOW)).toMatchObject({ allowed: false });
+    expect(speechCap).toHaveBeenLastCalledWith({ personId: null, seconds: 60 }, NOW, db);
+    expect(await checkVoiceAllowance('bot-1', { turnId: 't1' }, NOW)).toEqual({ allowed: false, resetsAt: '2026-12-01T00:00:00.000Z' });
+    expect(speechCap).toHaveBeenLastCalledWith({ personId: null, seconds: 60 }, expect.any(Date));
+  });
+
+  it('never takes back a reply that was allowed: asked again, it is still counted as it was', async () => {
+    db.voiceReplyUse.findUnique.mockResolvedValue({ id: 'x' });
+    speechCap.mockResolvedValue(STOP);
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toMatchObject({ allowed: true });
+    expect(speechCap).not.toHaveBeenCalled();
+  });
+
+  it('is not asked for a reply the window already refuses', async () => {
+    db.voiceReplyUse.count.mockResolvedValue(25);
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toMatchObject({ allowed: false });
+    expect(speechCap).not.toHaveBeenCalled();
   });
 });
 

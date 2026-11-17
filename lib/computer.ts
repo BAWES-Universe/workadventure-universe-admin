@@ -4,13 +4,15 @@ import { prisma } from '@/lib/db';
 import { ownsBrick } from '@/lib/brick';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { getBrickLimits } from '@/lib/bot-limits';
-import { memberAllowance, releaseRoom, renewRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
+import { DISK_ROOM_PREFIX, diskRoomKey, memberAllowance, releaseRoom, renewRoom, reserveDiskRoom, reserveRoom, settleRoom, type NoRoom } from '@/lib/meter-allowance';
 import { monthOf } from '@/lib/meter-values';
 import { checkSpend } from '@/lib/spend-rules';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
-import { recordKeptDisk } from '@/lib/computer-disk';
+import { recordKeptBytes } from '@/lib/computer-disk';
+import { reconcileComputers } from '@/lib/computer-reconcile';
+import { computerQuote, connectedApp, routeJob, stepsReview, type RoutePlan } from '@/lib/computer-route';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
 import {
   AFTER_TAKE_OVER,
@@ -275,6 +277,8 @@ async function saveCopy(botId: string, ref: string, provider: Provider): Promise
   try {
     const copy = await provider.saveFiles(ref);
     await prisma.brickComputer.updateMany({ where: { botId }, data: { filesBytes: BigInt(Math.max(0, Math.trunc(copy.bytes))), filesSavedAt: copy.savedAt } });
+    // The copy is kept in our own storage, beside the machine's disk: what is kept is written when its size changes
+    await recordKeptBytes({ botId, reason: 'saved', machineBytes: provider.diskBytes?.() ?? null, copyBytes: Math.max(0, Math.trunc(copy.bytes)) });
     return true;
   } catch (error) {
     console.error('[Computer] Could not save a copy of the files:', error instanceof Error ? error.message : 'unknown');
@@ -307,6 +311,8 @@ export type Started =
   | { ok: true; job: JobView; restoredFrom: Date | null }
   /** Not the owner's Brick, or not theirs to ask: only the owner starts computer work on their Brick. */
   | { ok: false; reason: 'not_owner' | 'off' | 'not_open' | 'broken_start' | 'no_run' }
+  /** A connected app would do this for less than the computer: nothing is started, and the Brick is told which app to use. */
+  | { ok: false; reason: 'cheaper_route'; app: string }
   /** The meter's controls are not set up yet: a computer does not open before they do. */
   | { ok: false; reason: 'not_set' }
   /** A rule the person said in chat does not let this job take room: nothing is left behind, and the rule's own words come with it. */
@@ -318,11 +324,28 @@ const roomKey = (jobId: string, now: Date) => `computer:job:${jobId}:${now.getTi
 const queueReasonOf = (no: NoRoom): QueuedFor | null => (no.reason === 'allowance' ? 'allowance' : no.reason === 'busy' ? 'busy' : no.reason === 'pool' ? 'pool' : null);
 
 /**
+ * The review at 20 app steps (the bot server counts them): whether the steps an app has taken so far cost as much as the whole job is expected
+ * to cost on this Brick's computer, so the Brick should weigh moving the rest there. Advice only: it reads, never makes, wakes, reserves or
+ * writes anything, and says no where there is no computer to move to (not the owner, off, not open, or a wind-down).
+ */
+export async function reviewAppSteps(botId: string, personId: string, input: { app: string; steps: number }): Promise<{ review: boolean }> {
+  if (!(await brickOf(botId, personId))) return { review: false };
+  const row = await prisma.brickComputer.findUnique({ where: { botId } });
+  const provider = row?.enabled ? providerFor(row) : null;
+  if (!row || !provider || (await isWindingDown())) return { review: false };
+  // A name that matches no connected app (it was disconnected since, or the bot server names it differently) is still steps that were taken, at a
+  // rate we cannot read: it is priced at the dearest tier like any unknown rate, never as nothing. The only result is a line of advice.
+  const app = await connectedApp(botId, input.app);
+  const computer = computerQuote({ awakeMicrosPerMinute: provider.microsPerMinute() ?? null, hasMachine: !!row.providerRef });
+  return { review: stepsReview({ steps: input.steps, stepMicros: app ? app.stepMicros : null, computer }) };
+}
+
+/**
  * Starts a job on a Brick's computer. Only its owner starts work on it. The job is saved first and then tried: if another job
  * is writing it waits its turn, if the person's allowance or our room is used up it waits with its work saved (and the first
  * leads to "Ask for more"), and otherwise it runs and the machine is made or woken, here and nowhere else.
  */
-export async function startJob(input: { botId: string; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null }, now: Date = new Date()): Promise<Started> {
+export async function startJob(input: { botId: string; personId: string; title: string; brief?: string | null; writes?: boolean; runId?: string | null; plan?: RoutePlan | null }, now: Date = new Date()): Promise<Started> {
   const bot = await brickOf(input.botId, input.personId);
   if (!bot) return { ok: false, reason: 'not_owner' };
   const row = await prisma.brickComputer.findUnique({ where: { botId: input.botId } });
@@ -337,10 +360,13 @@ export async function startJob(input: { botId: string; personId: string; title: 
     const again = await reuseRunJob(input.botId, input.runId, now);
     if (again) return again;
   }
+  // The way: a connected app that would do this for less is used instead, before anything is made, woken or reserved
+  const routed = await routeJob({ botId: input.botId, plan: input.plan, awakeMicrosPerMinute: providerFor(row)?.microsPerMinute() ?? null, hasMachine: !!row.providerRef });
+  if (!routed.ok) return { ok: false, reason: 'cheaper_route', app: routed.app };
   let created;
   try {
     created = await prisma.computerJob.create({
-      data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null },
+      data: { botId: input.botId, personId: input.personId, title: input.title.trim().slice(0, 200) || 'A job', brief: input.brief?.trim().slice(0, 4000) || null, writes: input.writes !== false, runId: input.runId ?? null, route: routed.route, expectedMicros: BigInt(routed.expectedMicros) },
     });
   } catch (error) {
     // Two asks for the same run at once: the first made the job, the second finds it
@@ -497,6 +523,22 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     return 'queued';
   }
 
+  // A machine that is not made yet takes its disk's room in the pool first (a disk is bought whole the moment it is made): a pool that cannot
+  // carry it makes no machine, and this job waits in line with its work saved, as for any other room the pool lacks
+  const diskBytes = !row.providerRef ? provider.diskBytes?.() ?? null : null;
+  if (diskBytes !== null && diskBytes > 0) {
+    const disk = await reserveDiskRoom({ botId: job.botId, jobId: job.id, bytes: diskBytes }, now);
+    if (!disk.ok) {
+      await releaseRoom({ key }, now);
+      if (disk.reason === 'not_set') return 'not_set';
+      await queue('pool');
+      return 'queued';
+    }
+  }
+  const dropDiskRoom = async () => {
+    if (diskBytes !== null && diskBytes > 0) await releaseRoom({ key: diskRoomKey(job.botId, job.id) }, now);
+  };
+
   // Take the writer's place. The database lets only one writing job hold it; a second one arriving at the same moment queues.
   try {
     const claimed = await prisma.computerJob.updateMany({
@@ -506,15 +548,20 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     if (claimed.count === 0) {
       // Two tries in the same millisecond share one room: it is given back only when the job that won did not take it
       const holder = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { reservationKey: true } });
-      if (holder?.reservationKey !== key) await releaseRoom({ key }, now);
+      if (holder?.reservationKey !== key) {
+        await releaseRoom({ key }, now);
+        await dropDiskRoom();
+      }
       return 'gone';
     }
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
       await releaseRoom({ key }, now);
+      await dropDiskRoom();
       await queue('turn');
       return 'queued';
     }
+    await dropDiskRoom();
     throw error;
   }
 
@@ -532,13 +579,17 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
   const brick = await prisma.bot.findUnique({ where: { id: job.botId }, select: { deletedAt: true } });
   if (!brick || brick.deletedAt !== null) {
     await endJob(job.id, 'stopped', 'deleted', now);
+    await dropDiskRoom();
     return 'gone';
   }
 
   // The machine: made once, here, or woken. A start that breaks leaves the job over, its room given back and the machine "broken".
   try {
     await bringUp(job.botId, provider, now);
+    // The disk is in the books as kept storage now: the room held for it is given back
+    await dropDiskRoom();
   } catch (error) {
+    await dropDiskRoom();
     console.error('[Computer] A machine did not start:', error instanceof Error ? error.message : 'unknown');
     // Another job holds this machine (it is waking it, or working on it): its state is theirs, and this failure does not rewrite it.
     // Only when this job was the only one asking is the machine marked, so a failed second start never breaks a machine that works
@@ -620,7 +671,7 @@ async function bringUp(botId: string, provider: Provider, now: Date): Promise<vo
       try {
         const info = await provider.create(botId);
         row = await prisma.brickComputer.update({ where: { botId }, data: { providerRef: info.ref, madeAt: now, machine: 'waking' } });
-        await recordKeptDisk({ botId, ref: info.ref, bytes: provider.diskBytes?.() ?? null, now });
+        await recordKeptBytes({ botId, reason: 'made', machineBytes: provider.diskBytes?.() ?? null, now });
       } catch (error) {
         await prisma.brickComputer.updateMany({ where: { botId, providerRef: null }, data: { machine: 'none' } });
         throw error;
@@ -892,7 +943,7 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
  * settled to what ran, never left holding the envelope), room that nobody holds a job for is given back, and jobs in line are tried
  * again (the person's month turned, extra usage was given, another job ended). Safe to run twice at once.
  */
-export async function sweepComputers(now: Date = new Date(), batch: number = SWEEP_BATCH, pages: number = SWEEP_PAGES): Promise<{ stopped: number; released: number; started: number }> {
+export async function sweepComputers(now: Date = new Date(), batch: number = SWEEP_BATCH, pages: number = SWEEP_PAGES, reconcileWaitMs: number = RECONCILE_WAIT_MS): Promise<{ stopped: number; released: number; started: number }> {
   let stopped = 0;
   let released = 0;
   let started = 0;
@@ -929,6 +980,13 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
       await releaseRoom({ key: reservation.reservationKey }, now);
       released++;
     }
+  }
+  // Room held for a disk whose making was cut off (the server stopped between taking it and giving it back): nobody is making that machine now, so
+  // the room is given back instead of staying in the pool's envelope until the month ends
+  const lapsedDisks = await prisma.meterReservation.findMany({ where: { state: 'held', expiresAt: { lte: now }, reservationKey: { startsWith: DISK_ROOM_PREFIX } }, take: 200 });
+  for (const reservation of lapsedDisks) {
+    await releaseRoom({ key: reservation.reservationKey }, now);
+    released++;
   }
   // Room held for a model call that never reported back (the bot server stopped, the call was lost): what it cost is not known, so it
   // is written as unknown and settled at the room held, never at 0
@@ -991,7 +1049,27 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
     }
     if (lines.length < batch) break;
   }
+  // Last, because it talks to the provider and what is above cannot wait for that: once a day, our books against the provider's bill for the
+  // day before (it only reads and reports; a bill that cannot be read is tried again later). The sweep waits for it a short while at most.
+  await settleWithin(reconcileWaitMs, reconcileComputers(now)).catch((error) => console.error('[Computer] The daily check of the books could not be made:', error instanceof Error ? error.message : 'unknown'));
   return { stopped, released, started };
+}
+
+/** How long a sweep waits for the daily check of the books before it goes on without it (the check goes on by itself). */
+export const RECONCILE_WAIT_MS = 30_000;
+
+/** The work's own answer, or nothing once the wait is over: the work is not stopped, and an error it ends in is still read. */
+async function settleWithin<T>(ms: number, work: Promise<T>): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), ms);
+  });
+  work.catch(() => undefined);
+  try {
+    return await Promise.race([work, late]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // ---------- Wind-down (the team's command, never a setting) ----------
@@ -1481,11 +1559,34 @@ export async function removeMachineBeforeDelete(botId: string, now: Date = new D
     return false;
   }
   // The machine is gone: say so at once, so a later try (if the Brick's own delete fails) does not save a copy of a machine that is not there
-  await recordKeptDisk({ botId, ref: row.providerRef, bytes: null, gone: true });
+  await recordKeptBytes({ botId, reason: 'gone', machineBytes: null });
   try {
     await prisma.brickComputer.update({ where: { botId }, data: { providerRef: null, machine: 'none' } });
   } catch (error) {
     console.error('[Computer] A machine was removed but its record was not cleared:', error instanceof Error ? error.message : 'unknown');
   }
+  return true;
+}
+
+/**
+ * When a Brick is removed for good, so is what is kept of its computer in our own storage: the saved copy of its files, which the pool
+ * counts as kept storage (audit F4). Asked after the machine is gone and before the Brick's rows are cleared: a copy that could not be
+ * deleted (its provider is off or changed, or the bucket refused) leaves the Brick for the next sweep, like a machine that could not be
+ * removed, so nothing is dropped quietly. True when nothing is in the way, including a Brick that never had a copy.
+ */
+export async function removeSavedCopyBeforeDelete(botId: string): Promise<boolean> {
+  const row = await prisma.brickComputer.findUnique({ where: { botId } });
+  if (!row || (row.filesSavedAt === null && row.filesBytes === BigInt(0))) return true;
+  const provider = providerFor(row);
+  if (!provider?.deleteSavedCopy) return false;
+  try {
+    await provider.deleteSavedCopy(botId);
+  } catch (error) {
+    console.error('[Computer] Could not delete a saved copy:', error instanceof Error ? error.message : 'unknown');
+    return false;
+  }
+  await prisma.brickComputer.update({ where: { botId }, data: { filesBytes: BigInt(0), filesSavedAt: null } });
+  // Nothing of it is kept now: the level in the books goes to 0
+  await recordKeptBytes({ botId, reason: 'gone', machineBytes: null, copyBytes: 0 });
   return true;
 }

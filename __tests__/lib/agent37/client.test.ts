@@ -131,6 +131,40 @@ describe('the Agent37 client', () => {
     });
   });
 
+  describe('what Agent37 billed', () => {
+    it('reads one UTC day of spend by instance, in micros', async () => {
+      const { api, calls } = client([
+        json(200, {
+          from: '2026-11-15',
+          to: '2026-11-15',
+          total_micros: 9000,
+          instances: [
+            { id: 'abc', total_micros: 8000, compute_micros: 7000, llm_micros: 500, brave_micros: 0, composio_micros: 500, perflo_micros: 0, awake_minutes: 60 },
+            { id: 'def', total_micros: 1000, compute_micros: 1000, awake_minutes: 0 },
+            { total_micros: 5 },
+          ],
+        }),
+      ]);
+      const day = await api.usageForDay('2026-11-15');
+      expect(calls[0].url).toBe('https://api.agent37.com/v1/usage?from=2026-11-15&to=2026-11-15');
+      expect((calls[0].init.headers as Record<string, string>).Authorization).toBe('Bearer sk_live_secret');
+      expect(day).toEqual({
+        day: '2026-11-15',
+        totalMicros: 9000,
+        instances: [
+          { id: 'abc', totalMicros: 8000, computeMicros: 7000, awakeMinutes: 60 },
+          { id: 'def', totalMicros: 1000, computeMicros: 1000, awakeMinutes: 0 },
+        ],
+      });
+    });
+
+    it('refuses a day that is not a date, and an answer with no total', async () => {
+      const { api } = client([json(200, { instances: [] })]);
+      await expect(api.usageForDay('yesterday')).rejects.toThrow('date');
+      await expect(api.usageForDay('2026-11-15')).rejects.toBeInstanceOf(Agent37Error);
+    });
+  });
+
   describe('templates', () => {
     it('makes a build with its size and port, uploads the context with no account key, starts it, and reads where it stands', async () => {
       const { api, calls } = client([

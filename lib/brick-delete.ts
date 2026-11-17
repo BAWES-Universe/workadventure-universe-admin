@@ -5,7 +5,7 @@ import { endAllApprovals } from '@/lib/bot-actions';
 import { pauseItemsOfDeletedBrick } from '@/lib/brick-items';
 import { deleteWithHiddenBotData } from '@/lib/bot-privacy';
 import { syncToolSignInNotices } from '@/lib/tool-signin';
-import { stopComputerWork, removeMachineBeforeDelete } from '@/lib/computer';
+import { stopComputerWork, removeMachineBeforeDelete, removeSavedCopyBeforeDelete } from '@/lib/computer';
 import { listBricks, listDeletedBricks, type BrickCard, type DeletedBrickCard } from '@/lib/brick-default';
 
 /**
@@ -118,6 +118,13 @@ export async function removeGoneBricks(now: Date = new Date(), ownerId?: string,
       if (!(await removeMachineBeforeDelete(id, now))) {
         // Kept for the next sweep, and said so: a computer that cannot be saved or removed (its provider is off or changed) is looked at, not lost quietly
         console.warn(`[Brick delete] Brick ${id} waits: its computer's files could not be saved, its machine could not be removed or what it ran is not in the books yet`);
+        waiting.push(id);
+        await markWaiting(id, now);
+        continue;
+      }
+      // What is kept of its computer in our own storage goes with it: a copy that could not be deleted keeps the Brick for the next sweep
+      if (!(await removeSavedCopyBeforeDelete(id))) {
+        console.warn(`[Brick delete] Brick ${id} waits: the saved copy of its computer's files could not be deleted`);
         waiting.push(id);
         await markWaiting(id, now);
         continue;

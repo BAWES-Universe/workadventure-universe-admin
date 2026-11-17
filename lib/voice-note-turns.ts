@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { Prisma, type VoiceNoteTurn } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { recordSpeechHeard } from '@/lib/meter-speech';
+import { checkSpeechCap } from '@/lib/speech-cap';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { VOICE_RANGES, savedVoiceKeyLimits } from '@/lib/voice-limit-values';
 import { checkReplyAllowance, type ReplyAllowance } from '@/lib/reply-limits';
@@ -286,6 +287,9 @@ export async function reserveVoiceNote(
     const fits = (used: number, minutes: number) => used + seconds <= minutes * 60;
 
     if (universeAi) {
+      // The month's spending stop on speech Universe AI pays for (lib/speech-cap.ts): a note is held back whole, before it is heard
+      const stop = await checkSpeechCap({ personId: personKey.startsWith('person:') ? personKey.slice('person:'.length) : null, seconds }, now, tx);
+      if (stop) return { ok: false, reason: 'note-minutes', limit: stop.stopped === 'person' ? 'person' : 'universe', resetsAt: stop.resetsAt };
       if (scope === 'bot') {
         if (!fits(await sum({ scope: 'bot', personKey, payer: 'universe-ai', createdAt: { gte: day } }), limits.noteMinutesPerPerson)) return { ok: false, reason: 'note-minutes', limit: 'person', resetsAt: tomorrow };
       } else {
