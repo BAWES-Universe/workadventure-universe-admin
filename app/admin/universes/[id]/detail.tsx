@@ -44,6 +44,8 @@ interface Universe {
   thumbnailUrl: string | null;
   /** Bot chat telemetry is off (#435); stored as hide-conversations. */
   hideBotConversations?: boolean;
+  /** People may bring their own Brick along here (game #2005). */
+  allowVisitingBricks?: boolean;
   createdAt: string;
   canEdit?: boolean;
   /** Owns it (a super admin can edit and delete without owning it). */
@@ -113,6 +115,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
     featured: false,
     thumbnailUrl: '',
     hideBotConversations: false,
+    allowVisitingBricks: true,
   });
 
   useEffect(() => {
@@ -161,6 +164,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
         featured: data.featured,
         thumbnailUrl: data.thumbnailUrl || '',
         hideBotConversations: data.hideBotConversations === true,
+        allowVisitingBricks: data.allowVisitingBricks !== false,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load universe');
@@ -212,6 +216,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
           isPublic: formData.isPublic,
           featured: formData.featured,
           hideBotConversations: formData.hideBotConversations,
+          allowVisitingBricks: formData.allowVisitingBricks,
           // ownerId is not included - it belongs to the owner and cannot be changed
         }),
       });
@@ -419,6 +424,13 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
                   onChange={(checked) => setFormData({ ...formData, featured: checked })}
                 />
               )}
+              <SettingSwitch
+                id="allowVisitingBricks"
+                label="Visiting Bricks"
+                hint="People can bring their own Brick along. It walks beside them and anyone here can talk to it. Off: their Brick still answers them in direct messages."
+                checked={formData.allowVisitingBricks}
+                onChange={(checked) => setFormData({ ...formData, allowVisitingBricks: checked })}
+              />
             </Settings>
 
             <UniverseAdvanced

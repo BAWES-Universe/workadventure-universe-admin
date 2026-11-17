@@ -252,7 +252,7 @@ describe('editSavedKey', () => {
     ]);
     await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
     expect(db.bot.updateMany).toHaveBeenCalledWith({
-      where: { aiProviderRef: 'key-2', aiModel: 'gpt-4o-mini', NOT: { room: { world: { universeId: { in: ['u-old-only'] } } } } },
+      where: { aiProviderRef: 'key-2', aiModel: 'gpt-4o-mini', OR: [{ roomId: null }, { NOT: { room: { world: { universeId: { in: ['u-old-only'] } } } } }] },
       data: { aiModel: 'gpt-4.1' },
     });
   });

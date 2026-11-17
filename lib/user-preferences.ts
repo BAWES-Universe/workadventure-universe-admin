@@ -1,3 +1,4 @@
+import { isTimeZone, readWorkweek } from './brick-item-time';
 import { HIDE_LOCATION_KEY, SHARE_PASSPORT_KEY, SHARE_ROOM_KEY, isAudience, isPeopleSettingKey, isValidPeopleSetting } from './people-settings';
 
 /**
@@ -18,6 +19,9 @@ const FIXED_PREFERENCE_KEYS = new Set([
   HIDE_LOCATION_KEY,
   SHARE_ROOM_KEY,
   SHARE_PASSPORT_KEY,
+  // The zone the person's own device is in, sent by the game, and the days they work (game #2002): what a Brick's reminders and briefings are read on
+  'timeZone',
+  'workweek',
 ]);
 
 /** `guidance.dismissed.<id>`: id is 1-64 chars of letters, digits, `_` or `-`. */
@@ -35,6 +39,8 @@ export function isAllowedPreferenceKey(key: unknown): key is string {
 export function isAllowedPreferenceValue(key: string, value: unknown): boolean {
   if (key === HIDE_LOCATION_KEY) return typeof value === 'boolean';
   if (key === SHARE_ROOM_KEY || key === SHARE_PASSPORT_KEY) return isAudience(value);
+  if (key === 'timeZone') return isTimeZone(value);
+  if (key === 'workweek') return readWorkweek(value) !== null;
   return isPeopleSettingKey(key) ? isValidPeopleSetting(key, value) : true;
 }
 

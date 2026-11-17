@@ -4,6 +4,8 @@ import { getUniverseAiReplyLimits } from '@/lib/bot-limits';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { textReserve } from '@/lib/voice-limit-values';
 import { resolveUsagePerson } from '@/lib/usage-person';
+import { runningExtra } from '@/lib/meter-grants';
+import { repliesPerWindowFor } from '@/lib/credit-replies';
 
 /**
  * Reply limits (game #1159), decided by Khalid 19 Oct and 26 Oct 2026:
@@ -13,7 +15,8 @@ import { resolveUsagePerson } from '@/lib/usage-person';
  *   - A bot's own limit per person (`dailyReplyCap`, set by whoever manages the bot): that bot only, whatever it runs
  *     on, in a 24-hour window. No limit when it is empty.
  * A window starts at the first reply asked for once the last one has ended, so the end time a person sees is fixed.
- * Replies are counted from usage rows (one per reply, failed ones left out). A super admin changes the three Universe AI
+ * Replies are counted from usage rows (one per reply, failed ones and greetings left out: a greeting the bot makes on its own
+ * is free for the person, the usage of whoever's key the bot runs on). A super admin changes the three Universe AI
  * numbers on the Universe AI page (#666), read through getUniverseAiReplyLimits.
  */
 export const BOT_LIMIT_WINDOW_HOURS = 24;
@@ -41,11 +44,12 @@ export class ReplyAllowanceError extends Error {
 
 /**
  * When the window under `key` started, starting a new one now when there is none or the last has ended. One statement,
- * so two replies asked for at the same moment agree on the same start.
+ * so two replies asked for at the same moment agree on the same start. `db` is the caller's transaction when it has one, so the start
+ * commits or rolls back with it.
  */
-export async function windowStart(key: string, hours: number, now: Date): Promise<Date> {
+export async function windowStart(key: string, hours: number, now: Date, db: Pick<typeof prisma, '$queryRaw'> = prisma): Promise<Date> {
   const endedBefore = new Date(now.getTime() - hours * HOUR);
-  const rows = await prisma.$queryRaw<{ started_at: Date }[]>(Prisma.sql`
+  const rows = await db.$queryRaw<{ started_at: Date }[]>(Prisma.sql`
     INSERT INTO "reply_windows" ("key", "started_at") VALUES (${key}, ${now})
     ON CONFLICT ("key") DO UPDATE SET "started_at" =
       CASE WHEN "reply_windows"."started_at" <= ${endedBefore} THEN EXCLUDED."started_at" ELSE "reply_windows"."started_at" END
@@ -99,21 +103,28 @@ export async function checkReplyAllowance(
   if (source !== 'own-key') {
     const limits = await getUniverseAiReplyLimits();
     const room = (window: number) => (greeting ? window - textReserve(window, kept) : window);
-    checks.push({
-      kind: guest ? 'guest' : 'universe-ai',
-      key: `ua:${personKey}`,
-      hours: limits.windowHours,
-      limit: room(guest ? limits.guest : limits.signedIn),
-      // Every Universe AI reply this person got, from any bot: a reply no personal key paid for
-      where: (since) => ({ ...personRows, keyOwnerId: null, error: false, timestamp: { gte: since } }),
-    });
+    // Extra usage a super admin gave (game #1999) raises a signed-in person's window while it runs: a multiple of the usual,
+    // or no limit. It ends by itself, and a guest never has it
+    const extra = guest || !person.personId ? null : await runningExtra(person.personId, now);
+    // A super admin's exception can change how many replies a signed-in person has in a window (or give none); otherwise it is Limits' number
+    const signedIn = guest || !person.personId ? limits.signedIn : await repliesPerWindowFor(person.personId, limits.signedIn, now);
+    if (!extra?.noLimit) {
+      checks.push({
+        kind: guest ? 'guest' : 'universe-ai',
+        key: `ua:${personKey}`,
+        hours: limits.windowHours,
+        limit: room(guest ? limits.guest : signedIn) * (extra?.multiplier ?? 1),
+        // Every Universe AI reply this person got, from any bot: a reply no personal key paid for
+        where: (since) => ({ ...personRows, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } }),
+      });
+    }
     if (guest) {
       checks.push({
         kind: 'guests',
         key: `ua:guests:${bot.id}`,
         hours: limits.windowHours,
         limit: limits.guestPool,
-        where: (since) => ({ botId: bot.id, talkedGuest: true, keyOwnerId: null, error: false, timestamp: { gte: since } }),
+        where: (since) => ({ botId: bot.id, talkedGuest: true, keyOwnerId: null, error: false, greeting: false, timestamp: { gte: since } }),
       });
     }
   }
@@ -123,7 +134,7 @@ export async function checkReplyAllowance(
       key: `bot:${bot.id}:${personKey}`,
       hours: BOT_LIMIT_WINDOW_HOURS,
       limit: bot.dailyReplyCap,
-      where: (since) => ({ ...personRows, botId: bot.id, error: false, timestamp: { gte: since } }),
+      where: (since) => ({ ...personRows, botId: bot.id, error: false, greeting: false, timestamp: { gte: since } }),
     });
   }
 

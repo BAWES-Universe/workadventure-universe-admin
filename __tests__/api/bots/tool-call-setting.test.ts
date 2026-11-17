@@ -56,6 +56,17 @@ test('sets and clears one bot atomically, preserving its other JSON and the othe
   expect(snapshots[1][0].behavior_config.moves).toBe('route');
 });
 
+test('never writes to a Brick: it is its owner’s, and this is the super admin’s switch for room bots (game #1992)', async () => {
+  await save({ showToolCalls: true }, 'brick-c');
+  const queries = (prisma.$queryRaw as jest.Mock).mock.calls.map(([query]) => ({ text: query.text, values: query.values }));
+  const output = execFileSync(process.execPath, [path.join(__dirname, '../../helpers/run-bot-tool-call-setting.mjs'), 'brick'], {
+    input: JSON.stringify(queries),
+    encoding: 'utf8',
+  });
+  const [afterSave] = JSON.parse(output);
+  expect(afterSave.find((row: { id: string }) => row.id === 'brick-c')).toMatchObject({ behavior_config: {}, updated_at: null, updated_by_id: null });
+});
+
 test.each([
   {},
   { showToolCalls: 'true' },

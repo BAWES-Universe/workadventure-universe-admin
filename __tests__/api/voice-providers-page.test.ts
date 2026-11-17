@@ -194,6 +194,62 @@ describe('the voices of a server provider', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('https://api.elevenlabs.io/v2/voices?page_size=100');
   });
 
+  it('are only Groq\'s voices whose own model the provider lists, each with that model, and nothing is asked', async () => {
+    const groq = row({ adapter: 'groq', name: 'Groq', models: [{ id: 'canopylabs/orpheus-arabic-saudi', kind: 'speech' }] });
+    db.findFirst.mockResolvedValue(groq);
+    const list = (await (await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx())).json()).voices;
+    expect(list.map((voice: Row) => voice.voiceId)).toEqual(['abdullah', 'fahad', 'sultan', 'lulwa', 'noura', 'aisha']);
+    expect(list.every((voice: Row) => voice.model === 'canopylabs/orpheus-arabic-saudi')).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('are only the fixed voices of the starting model being picked (Groq, Sarvam), so a new starting model never keeps the old voice', async () => {
+    const ENGLISH = { id: 'canopylabs/orpheus-v1-english', kind: 'speech' };
+    const ARABIC = { id: 'canopylabs/orpheus-arabic-saudi', kind: 'speech' };
+    db.findFirst.mockResolvedValue(row({ adapter: 'groq', name: 'Groq', models: [ENGLISH, ARABIC] }));
+    const saved = (await (await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx())).json()).voices;
+    expect(saved.map((voice: Row) => voice.voiceId)).toEqual(['autumn', 'diana', 'hannah', 'austin', 'daniel', 'troy']);
+    const picking = (await (await listVoices(new NextRequest(`http://localhost:3333/api/x?model=${encodeURIComponent(ARABIC.id)}`), ctx())).json()).voices;
+    expect(picking.map((voice: Row) => voice.voiceId)).toEqual(['abdullah', 'fahad', 'sultan', 'lulwa', 'noura', 'aisha']);
+    expect(picking.every((voice: Row) => voice.model === ARABIC.id)).toBe(true);
+    db.findFirst.mockResolvedValue(row({ adapter: 'sarvam', name: 'Sarvam AI', models: [{ id: 'bulbul:v3', kind: 'speech' }, { id: 'bulbul:v4-flash', kind: 'speech' }] }));
+    const flash = (await (await listVoices(new NextRequest('http://localhost:3333/api/x?model=bulbul%3Av4-flash'), ctx())).json()).voices;
+    expect(flash.length).toBeGreaterThan(0);
+    expect(flash.every((voice: Row) => voice.model === 'bulbul:v4-flash')).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('are only the Rime voices that speak in the provider\'s starting model, which a borrowed starting voice uses', async () => {
+    fetchMock.mockResolvedValue(
+      json([
+        { speaker: 'astra', modelId: 'mistv2', lang: 'eng' },
+        { speaker: 'astra', modelId: 'coda', lang: 'eng' },
+        { speaker: 'layla', modelId: 'mistv3', lang: 'ara' },
+      ]),
+    );
+    db.findFirst.mockResolvedValue(row({ adapter: 'rime', name: 'Rime', models: [{ id: 'coda', kind: 'speech' }, { id: 'mistv3', kind: 'speech' }] }));
+    const list = (await (await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx())).json()).voices;
+    expect(list.map((voice: Row) => [voice.voiceId, voice.model])).toEqual([['astra', 'coda']]);
+    // The starting model being picked on the page, before it is saved: its voices, when the provider lists it
+    const picking = (model: string) => listVoices(new NextRequest(`http://localhost:3333/api/x?model=${model}`), ctx()).then((answer) => answer.json());
+    expect((await picking('mistv3')).voices.map((voice: Row) => [voice.voiceId, voice.model])).toEqual([['layla', 'mistv3']]);
+    expect((await picking('mistv2')).voices.map((voice: Row) => [voice.voiceId, voice.model])).toEqual([['astra', 'coda']]);
+  });
+
+  it('are only the Polly voices that speak with the provider\'s starting engine, which a borrowed starting voice uses', async () => {
+    fetchMock.mockResolvedValue(
+      json({
+        Voices: [
+          { Id: 'Hala', Name: 'Hala', LanguageCode: 'ar-AE', SupportedEngines: ['neural'] },
+          { Id: 'Joanna', Name: 'Joanna', LanguageCode: 'en-US', SupportedEngines: ['generative', 'neural'] },
+        ],
+      }),
+    );
+    db.findFirst.mockResolvedValue(row({ adapter: 'aws', name: 'AWS', region: 'us-east-1', apiKeyEncrypted: encryptApiKey('AKIAIOSFODNN7EXAMPLE:secret'), models: [{ id: 'generative', kind: 'speech' }, { id: 'neural', kind: 'speech' }] }));
+    const list = (await (await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx())).json()).voices;
+    expect(list.map((voice: Row) => voice.voiceId)).toEqual(['Joanna']);
+  });
+
   it('are not listed for a provider that isn\'t there, doesn\'t speak, or is somebody\'s own key', async () => {
     expect((await listVoices(new NextRequest('http://localhost:3333/api/x'), ctx('other'))).status).toBe(404);
     expect(fetchMock).not.toHaveBeenCalled();
