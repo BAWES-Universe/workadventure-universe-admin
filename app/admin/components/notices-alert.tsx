@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
-import { Bell, ChevronRight, KeyRound, LogIn, Loader2, Unplug, X } from 'lucide-react';
+import { Bell, ChevronRight, KeyRound, LogIn, Loader2, Unplug, Wallet, X } from 'lucide-react';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { announceAttentionChanged } from './shell/attention-badge';
 import { describeToolSignIn, type ToolSignInNoticeData } from '@/lib/tool-signin-words';
@@ -18,9 +18,10 @@ interface Notice {
   data?: ToolSignInNoticeData | null;
 }
 
-/** AI key notices (#374) wear the key; anything else a plain bell. */
+/** AI key notices (#374) wear the key, budget notices the wallet; anything else a plain bell. */
 function glyphOf(kind: string) {
   if (kind === 'tool-signin') return Unplug;
+  if (kind === 'budget') return Wallet;
   return kind.startsWith('ai-key') ? KeyRound : Bell;
 }
 

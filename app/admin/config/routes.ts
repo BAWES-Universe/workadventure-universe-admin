@@ -92,6 +92,7 @@ export const ROUTES: RouteDefinition[] = [
   // The one-time setup of Universe's GitHub App (game #2041): a super admin opens it once and presses Create on GitHub
   { pattern: '/admin/github-app', title: 'GitHub for Universe', parent: '/admin' },
   { pattern: '/admin/ai-providers/new', title: 'New provider', parent: '/admin/ai-providers' },
+  { pattern: '/admin/ai-providers/budget', title: 'Budget', parent: '/admin/ai-providers' },
   { pattern: '/admin/ai-providers/usage', title: 'AI usage', parent: '/admin/ai-providers' },
   { pattern: '/admin/ai-providers/grants', title: 'Grants', parent: '/admin/ai-providers' },
   { pattern: '/admin/ai-providers/voice/new', title: 'New voice provider', parent: '/admin/ai-providers' },

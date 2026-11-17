@@ -2024,6 +2024,26 @@ model MeterEvent {
   @@map("meter_events")
 }
 
+// Every change to a number on the Budget page (and to any money, limit or warning setting the page shows): who, when, which number, the
+// old value and the new one. Written in the same transaction as the save, so a number never changes without a line here.
+model BudgetChange {
+  id         String   @id @default(uuid())
+  // Which store the number lives in ("meter", "instant" or "budget") and its name there
+  store      String   @db.VarChar(20)
+  key        String   @db.VarChar(80)
+  // Empty means "not set" (before or after). Whole numbers in the number's own unit (millionths of a dollar, seconds, a count)
+  oldValue   BigInt?  @map("old_value")
+  newValue   BigInt?  @map("new_value")
+  changedById String? @map("changed_by_id")
+  changedAt  DateTime @default(now()) @map("changed_at")
+  // A few words when the change is not a plain edit (a computer allowance saved to start on the 1st)
+  note       String?  @db.VarChar(200)
+
+  @@index([changedAt])
+  @@index([store, key, changedAt])
+  @@map("budget_changes")
+}
+
 // Room kept for a paid step before it is taken (game #1998): against the member's allowance and our own pool. A long job renews
 // it while it runs. One row per key, so asking again for the same step finds the same room. A reservation never goes away; it
 // ends as settled (the step ran) or released (it never ran), so what happened stays in the books.
