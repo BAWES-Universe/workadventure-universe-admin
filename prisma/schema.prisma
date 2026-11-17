@@ -3601,6 +3601,8 @@ model CodeJob {
   providerState     String    @default("none") @map("provider_state") @db.VarChar(8)
   // Provider executions of this session beyond our own cells (there should be none: the session has no tools)
   nestedCalls       Int       @default(0) @map("nested_calls")
+  // When the provider's log of the session was read after it was confirmed deleted and found clean (null until then: the sweep reads it again)
+  nestedCheckedAt   DateTime? @map("nested_checked_at")
   // What the code printed and returned, clipped, and the files that were kept
   result            Json?
   deadlineAt        DateTime  @map("deadline_at")

@@ -133,7 +133,7 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
       redirect: 'error',
     }));
     const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-    if (!response.ok || !json) throw new AdapterError('provider', `Provider answered ${response.status}`);
+    if (!response.ok || !json) throw new AdapterError('provider', `Provider answered ${response.status}`, response.status);
     return json;
   }
 

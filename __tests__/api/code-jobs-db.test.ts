@@ -11,6 +11,8 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => moc
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: (email: string | null) => email === 'boss@example.test' }));
 
 import { prisma } from '@/lib/db';
+import { AdapterError } from '@/lib/app-adapter/types';
+import { readCodeJobsBudget } from '@/lib/workbench/budget';
 import { setAdapterForTests, type ReadyMadeAdapter, type WorkbenchAdapter, type WorkbenchRun } from '@/lib/app-adapter';
 import { linkReadyMade } from '@/lib/app-adapter/ready-made';
 import { saveReadyMadeApps } from '@/lib/app-adapter/settings';
@@ -946,6 +948,104 @@ run('code jobs for Apps, in a real database', () => {
       expect((await sweepCodeJobs(deps())).closed).toBe(0);
     });
 
+    it('reads the provider’s log even while the delete is not confirmed, and again once it is, until a read has worked after it', async () => {
+      provider.state.closeFails = 3;
+      provider.state.nested = 2;
+      provider.state.runs.push(() => done());
+      const job = jobOf(await start({ code: 'x' }));
+      await finishAll();
+      // The delete was not confirmed, and a run that was not ours is already known and already stops new jobs
+      expect(await rowOf(job.jobId)).toMatchObject({ providerState: 'unknown', nestedCalls: 2, nestedCheckedAt: null });
+      expect((await getCodeJobPause()).reason).toBe('provider_ran_tools');
+      // Once the delete is confirmed the log is read again, and only a read after that counts as checked
+      provider.state.nested = null;
+      expect((await sweepCodeJobs(deps())).closed).toBe(1);
+      expect(await rowOf(job.jobId)).toMatchObject({ providerState: 'closed', nestedCheckedAt: null });
+      provider.state.nested = 3;
+      await sweepCodeJobs(deps());
+      const checked = await rowOf(job.jobId);
+      expect(checked.nestedCheckedAt).not.toBeNull();
+      expect(checked.nestedCalls).toBe(3);
+      // Nothing more to read
+      provider.adapter.nestedRuns.mockClear();
+      await sweepCodeJobs(deps());
+      expect(provider.adapter.nestedRuns).not.toHaveBeenCalled();
+    });
+
+    it('counts a workspace that may still be running as a job running and as owed at what was held, until its delete is confirmed', async () => {
+      await saveCodeJobLimits({ atOnceAll: 1, atOncePerPerson: 1 }, boss);
+      // Both the cancel and the worker's own end try to delete the workspace, each CLOSE_RETRIES times
+      provider.state.closeFails = 6;
+      // Cancelled at once: settles at nothing, but the workspace was not confirmed deleted
+      provider.state.runs.push(provider.hang);
+      const first = jobOf(await start({ code: 'while True: pass' }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await cancelCodeJob({ jobId: first.jobId, botId: saraBrick, personId: sara }, deps());
+      await finishAll();
+      expect(await rowOf(first.jobId)).toMatchObject({ state: 'cancelled', providerState: 'unknown' });
+      // It is not running as far as the job goes, yet a second job waits: its workspace may still be running code
+      expect(await start({ code: 'print(1)' })).toMatchObject({ status: 'refused', reason: 'busy' });
+      expect(await readCodeJobsBudget()).toMatchObject({ running: 0, workspacesNotConfirmedDeleted: 1, owedWhileUncertainMicros: 200, settledMicros: 0 });
+      // Confirmed gone: it counts at what it settled at, and the next job may start
+      expect((await sweepCodeJobs(deps())).closed).toBe(1);
+      expect(await readCodeJobsBudget()).toMatchObject({ workspacesNotConfirmedDeleted: 0, owedWhileUncertainMicros: 0 });
+      provider.state.runs.push(() => done());
+      jobOf(await start({ code: 'print(1)' }));
+      await finishAll();
+    });
+
+    it('holds the ceiling at what was held, not at what a job settled at, while its delete is unconfirmed', async () => {
+      await saveCodeJobLimits({ atOnceAll: 5, atOncePerPerson: 5, exposureCeilingMicros: 300 }, boss);
+      // A job that ended and settled at nothing, whose workspace could not be confirmed deleted
+      const id = randomUUID();
+      const session = await provider.adapter.open({ jobUserId: `codejob-${id}` });
+      const earlier = new Date(Date.now() - 60_000);
+      await prisma.codeJob.create({
+        data: {
+          id,
+          jobKey: `unsure-${tag}`,
+          botId: saraBrick,
+          personId: sara,
+          state: 'cancelled',
+          reason: 'cancelled',
+          capabilities: {},
+          limits: LIMITS as unknown as object,
+          reservedMicros: BigInt(200),
+          settledMicros: BigInt(0),
+          codeHash: 'x',
+          steps: 1,
+          providerUserId: `codejob-${id}`,
+          providerSessionId: session.sessionId,
+          providerState: 'unknown',
+          deadlineAt: earlier,
+          heartbeatAt: earlier,
+          finishedAt: earlier,
+          meteredAt: earlier,
+          createdAt: earlier,
+        },
+      });
+      // Still held at 200: another job needs 200 more, and 400 is over 300
+      expect(await start({ code: 'print(2)' })).toMatchObject({ status: 'refused', reason: 'exposure_full' });
+      // Confirmed gone, it counts at what it settled at (nothing) and there is room again
+      expect((await sweepCodeJobs(deps())).closed).toBe(1);
+      provider.state.runs.push(() => done());
+      jobOf(await start({ code: 'print(2)' }));
+      await finishAll();
+    });
+
+    it('says it is the provider’s own limit when the provider will not make a workspace, and charges nothing', async () => {
+      provider.adapter.open.mockRejectedValueOnce(new AdapterError('provider', 'Provider answered 429', 429));
+      const job = jobOf(await start({ code: 'print(1)' }));
+      await finishAll();
+      expect(await rowOf(job.jobId)).toMatchObject({ state: 'failed', reason: 'provider_limit', cellsRun: 0, preparedRuns: 0, settledMicros: BigInt(0), providerState: 'none' });
+      const view = await getCodeJob({ jobId: job.jobId, botId: saraBrick, personId: sara, waitSeconds: 0 }, deps());
+      expect(view).toMatchObject({ status: 'ok', job: { reason: 'provider_limit' } });
+      provider.adapter.open.mockRejectedValueOnce(new AdapterError('provider', 'Provider answered 500', 500));
+      const other = jobOf(await start({ code: 'print(2)' }));
+      await finishAll();
+      expect(await rowOf(other.jobId)).toMatchObject({ state: 'failed', reason: 'unavailable' });
+    });
+
     it('stops new jobs when the provider ran something that was not ours in a workspace that has no tools', async () => {
       provider.state.nested = 2;
       const job = jobOf(await start({ code: 'x' }));
@@ -1134,6 +1234,25 @@ run('code jobs for Apps, in a real database', () => {
     });
   });
 
+  describe('code jobs as an Apps line of the Budget', () => {
+    it('adds up what is settled, held and owed while a workspace is unconfirmed, and looks ahead from this month with its sample', async () => {
+      provider.state.runs.push(() => done());
+      jobOf(await start({ code: 'print(1)' }));
+      await finishAll();
+      const line = await readCodeJobsBudget();
+      expect(line).toMatchObject({ line: 'code_jobs', settledMicros: 200, heldMicros: 0, owedWhileUncertainMicros: 0, countedMicros: 200, runsThisMonth: 2, running: 0, runPriceMicros: 100, logsNotYetChecked: 0 });
+      expect(line.forecast?.sample.jobs).toBe(1);
+      expect(line.forecast?.monthMicros).toBeGreaterThanOrEqual(200);
+      // Held while it goes
+      provider.state.runs.push(provider.hang);
+      const going = jobOf(await start({ code: 'while True: pass' }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(await readCodeJobsBudget()).toMatchObject({ heldMicros: 200, running: 1, countedMicros: 400 });
+      await cancelCodeJob({ jobId: going.jobId, botId: saraBrick, personId: sara }, deps());
+      await finishAll();
+    });
+  });
+
   describe('the Limits screen’s own route', () => {
     const patch = (body: unknown) => adminPatch(new NextRequest('http://localhost/api/admin/workbench', { method: 'PATCH', body: JSON.stringify(body) }));
 
@@ -1147,6 +1266,8 @@ run('code jobs for Apps, in a real database', () => {
       expect(shown.limits.maxSeconds).toMatchObject({ value: 10, recommended: 300, unit: 'seconds', required: true });
       expect(shown.limits.keepDays.required).toBe(false);
       expect(shown.missing).toEqual([]);
+      // The third Apps line of the Budget page, under the Limits' own keys: the ceiling, jobs at once, and what is counted against the ceiling
+      expect(shown.budget).toMatchObject({ line: 'code_jobs', budgetMicros: LIMITS.exposureCeilingMicros, atOnceAll: LIMITS.atOnceAll, atOncePerPerson: LIMITS.atOncePerPerson, countedMicros: 0, owedWhileUncertainMicros: 0, paused: false, forecast: null });
       expect((await patch({ maxSeconds: 5 })).status).toBe(400);
       expect((await patch({ waitSeconds: 60 })).status).toBe(400);
       expect((await patch({ madeUp: 1 })).status).toBe(400);

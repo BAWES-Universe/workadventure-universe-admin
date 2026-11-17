@@ -44,7 +44,7 @@ export async function saveCodeJobLimits(change: Partial<Record<keyof CodeJobLimi
 
 export interface CodeJobPause {
   paused: boolean;
-  /** A fixed word for why: provider_ran_tools, close_failing or manual. */
+  /** A fixed word for why: provider_ran_tools or manual. */
   reason: string | null;
   at: string | null;
 }

@@ -50,6 +50,18 @@ The person's code is sent exactly as written. The folder for files is made by a 
 
 An estimate is reserved when the job starts and the meter event `codejob:<id>` is settled once, at what was used. A job whose meter line did not get written (the meter did not answer, or the process stopped between the two) has no `metered_at`, and the sweep writes it a minute after the job ended; the event id makes that safe to repeat. The sandbox is not billed by the provider today; the price is the saved App price or the built-in per-run figure, and the ceiling guards a future bill.
 
+## The gate before it opens, and what is owed while a delete is unsure
+
+Three things are checked before code jobs are offered and again on every job (Brief I of the final billing consensus):
+
+- **The provider's own limits.** A job's workspace is made restricted and read back so; if it does not match, nothing runs and the workspace is deleted. When the provider refuses to make one because of its own limit (429 too many requests, 402 no funds) the job ends `provider_limit`, nothing ran, nothing is charged, and the Brick is told it is the provider's limit, not a failure of the code.
+- **Nested runs.** After each job the provider's log for its session is read for runs that were not ours; any run pauses code jobs (`provider_ran_tools`). The log is read **even when the delete is not confirmed** (a workspace that would not be deleted may still be running something), and read again once the delete is confirmed. `nested_checked_at` is set only by a read after the delete was confirmed; until then the sweep keeps trying. A pause limits further loss but cannot undo a fee already incurred, which is why the next point exists.
+- **A workspace whose delete is not confirmed** (`provider_state` open or unknown) may still be running code. It counts as a job running (against jobs at once, for the person and in all) and as owed at what was **held**, not at what the job settled at, until the delete is confirmed. With a failing provider the jobs-at-once Limit therefore stops new work by itself.
+
+## Apps line of the Budget
+
+Code jobs are the third Apps line (with connected Apps and Instant Apps). The Budget page only shows and saves what is enforced here, under the keys the Limits already have: the month's ceiling is `exposureCeilingMicros`, jobs at once are `atOnceAll` and `atOncePerPerson`, jobs a day `jobsPerPersonPerDay`. Nothing is renamed. `readCodeJobsBudget()` (`lib/workbench/budget.ts`, also under `budget` in `GET /api/admin/workbench`) gives the money side for the page: settled, held, owed while a delete is unconfirmed, what counts against the ceiling, jobs running, workspaces not confirmed deleted, logs not yet checked, the price of a run, runs this month, paused and why, and a straight-line forecast with its sample period and time (a burst can still reach the ceiling sooner). Whichever of this PR and the Budget page merges second adds the line to the page.
+
 ## Kept files (owned results)
 
 A file a job leaves is kept as a durable result the person owns, in the shared store `lib/owned-results.ts` (table `owned_results`; the computer-job report-back work can use the same module). Each one records its owner, where it came from (`code_job` or `computer_job` plus the job id), the Brick that made it and the name it had, type, size, SHA-256 and access (`owner` only).

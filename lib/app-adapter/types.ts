@@ -161,6 +161,8 @@ export class AdapterError extends Error {
   constructor(
     readonly kind: 'off' | 'provider',
     message: string,
+    /** The provider's HTTP status when it answered with one (429 and 402 are its own limits). */
+    readonly status?: number,
   ) {
     super(message);
   }

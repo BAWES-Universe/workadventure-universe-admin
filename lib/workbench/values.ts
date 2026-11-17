@@ -303,6 +303,7 @@ export type CodeJobReason =
   | 'daily_limit' // the person's jobs for the day are used
   | 'exposure_full' // the month's ceiling is reached
   | 'unavailable' // the provider cannot be used right now
+  | 'provider_limit' // the provider's own limit (rate or funds) stopped it before anything ran
   | 'read_failed' // an App read for the job did not work
   | 'code_failed' // the code ran and did not work
   | 'timed_out' // it ran out of time
@@ -321,6 +322,7 @@ export const REASON_WORDS: Record<CodeJobReason, string> = {
   daily_limit: 'The code jobs for today are used up.',
   exposure_full: 'Code jobs are not available right now.',
   unavailable: 'Code jobs cannot run right now.',
+  provider_limit: 'The provider that runs code has reached its own limit, so nothing ran. Try again later.',
   read_failed: 'I could not read the data from the App for the job.',
   code_failed: 'The code ran and did not work.',
   timed_out: 'The job ran out of time and was stopped.',
