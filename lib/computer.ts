@@ -23,7 +23,7 @@ import {
   resumeTransition,
   sleep,
 } from '@/lib/computer-control';
-import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
+import { callRoomKey, giveBackModelCalls, settleModelCall } from '@/lib/computer-calls';
 import { recordKeptBytes } from '@/lib/computer-disk';
 import { reconcileComputers } from '@/lib/computer-reconcile';
 import { computerQuote, connectedApp, routeJob, stepsReview, type RoutePlan } from '@/lib/computer-route';
@@ -33,6 +33,7 @@ import {
   HOLDS_MACHINE,
   PERSON_ONLY,
   costOfSeconds,
+  givenBackJob,
   isOver,
   roomFor,
   type EffectKind,
@@ -884,6 +885,10 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     // The job is over either way: the machine still rests and the line still moves, and the sweep gives the room back
     console.error('[Computer] Could not settle a job’s room:', error instanceof Error ? error.message : 'unknown');
   }
+  // A job that failed on our side takes nothing from the person's month, and neither do the model calls it made (the sweep tries again if this fails)
+  if (givenBackJob(status, endedBy)) {
+    await giveBackModelCalls(job.id, job.personId).catch((error) => console.error('[Computer] Could not give back a job’s model calls:', error instanceof Error ? error.message : 'unknown'));
+  }
 
   if (held) {
     // The person's hold on the computer ends with their last job: control goes back to Brick's so the next job can start
@@ -903,13 +908,17 @@ async function recordComputerTime(job: { id: string; botId: string; personId: st
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
   const cost = costOfSeconds(seconds, provider ? provider.microsPerMinute() : null);
+  // A job that failed on our side (the machine would not start or could not be reached, the agent's turn broke, the worker was lost) is not
+  // the person's: what it ran stays in the books as our own cost (the provider still bills it), but is not written against them, so it
+  // never draws from their month. A job that ran and ended any other way (done, stopped by them, out of room, nobody answered) is theirs.
+  const givenBack = givenBackJob(why.status, why.endedBy);
   await recordMeterEvent({
     eventId: `computer:${job.id}:time`,
     kind: 'computer_time',
     pool: 'computer',
     occurredAt: at,
-    personKey: `person:${job.personId}`,
-    personId: job.personId,
+    personKey: givenBack ? 'unknown' : `person:${job.personId}`,
+    personId: givenBack ? null : job.personId,
     botId: job.botId,
     brick: true,
     payerKind: 'universe',
@@ -923,7 +932,7 @@ async function recordComputerTime(job: { id: string; botId: string; personId: st
     basis: cost === null ? 'unknown' : provider && provider.kind === 'real' ? 'measured' : 'estimated',
     sourceRef: `computer_jobs:${job.id}`,
     // The run of a goal or task that started the job, when one did, so its computer time is on the books with its model calls
-    detail: { endedBy: why.endedBy, status: why.status, ...(job.runId ? { runId: job.runId } : {}) },
+    detail: { endedBy: why.endedBy, status: why.status, ...(job.runId ? { runId: job.runId } : {}), ...(givenBack ? { givenBack: true, forPersonId: job.personId } : {}) },
   }).catch((error) => console.error('[Computer] Could not record computer time:', error instanceof Error ? error.message : 'unknown'));
   return cost;
 }
@@ -958,6 +967,26 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
     LIMIT ${batch}`);
   for (const job of ended) {
     await recordComputerTime(job, job.secondsRun, job.endedAt ?? now, { endedBy: job.endedBy as EndedBy | null, status: job.status });
+  }
+  await giveBackMissingModelCalls(batch, botId);
+}
+
+/**
+ * A job that failed on our side has its model calls given back when it ends. If that write did not go through, or a call was recorded
+ * in the same moment, the next sweep finds the call still written against the person and gives it back too. Never throws.
+ */
+async function giveBackMissingModelCalls(batch: number, botId?: string): Promise<void> {
+  const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
+  try {
+    const jobs = await prisma.$queryRaw<Array<{ id: string; personId: string }>>(Prisma.sql`
+      SELECT DISTINCT j."id", j."person_id" AS "personId"
+      FROM "computer_jobs" j
+      WHERE (j."status" = 'failed' OR (j."status" = 'stopped' AND j."ended_by" = 'error')) ${only}
+        AND EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
+      LIMIT ${batch}`);
+    for (const job of jobs) await giveBackModelCalls(job.id, job.personId);
+  } catch (error) {
+    console.error('[Computer] Could not look for a failed job’s model calls:', error instanceof Error ? error.message : 'unknown');
   }
 }
 

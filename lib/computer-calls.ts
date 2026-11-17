@@ -1,4 +1,6 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
+import { givenBackJob } from '@/lib/computer-values';
 import { recordMeterEvent } from '@/lib/meter';
 import { releaseRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
 import { verifyJobToken } from '@/lib/computer-token';
@@ -81,10 +83,24 @@ export interface CallFacts {
   cutShort?: boolean;
 }
 
+/**
+ * A job that failed on our side (see `givenBackJob`) takes nothing from the person's month, and that includes the model calls it made:
+ * they ran and the provider bills them, so each stays in the books as our own cost (the pool and the envelope still count it), but is
+ * written against nobody, like the job's minutes. Calls on the owner's own key cost the platform nothing and are not touched.
+ * Safe to say twice (a call already given back no longer matches), and for a job that ran fine or that the person stopped it is never called.
+ */
+export async function giveBackModelCalls(jobId: string, personId: string): Promise<void> {
+  await prisma.$executeRaw(Prisma.sql`
+    UPDATE meter_events
+    SET "person_key" = 'unknown', "person_id" = NULL,
+        "detail" = COALESCE("detail", '{}'::jsonb) || jsonb_build_object('givenBack', true, 'forPersonId', ${personId}::text)
+    WHERE "job_id" = ${jobId} AND "kind" = 'model_call' AND "pool" = 'computer' AND "payer_kind" = 'universe' AND "person_key" = ${`person:${personId}`}`);
+}
+
 /** The figures of a finished call go to the books once, and its room is settled. Safe to say twice. Not for a call nobody authorized. */
 export async function settleModelCall(jobId: string, callId: string, facts: CallFacts, now: Date = new Date()): Promise<{ ok: true } | { ok: false; reason: 'unknown_call' }> {
   if (!CALL_ID.test(callId)) return { ok: false, reason: 'unknown_call' };
-  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true, botId: true, personId: true } });
+  const job = await prisma.computerJob.findUnique({ where: { id: jobId }, select: { id: true, botId: true, personId: true, status: true, endedBy: true } });
   if (!job) return { ok: false, reason: 'unknown_call' };
   const reservation = await prisma.meterReservation.findUnique({ where: { reservationKey: callRoomKey(job.id, callId) } });
   // A call on the owner's own key took no room, so there is none to find: it is still recorded. Anything else with no room was never authorized
@@ -97,14 +113,17 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
   // and the pool's room at once, so the next call is held against it (audit F9)
   const overrun = reservation && !paidByOther && cost !== null && cost > Number(reservation.amountMicros) ? cost - Number(reservation.amountMicros) : 0;
   if (overrun > 0) console.warn(`[Computer] A model call cost ${overrun} millionths of a dollar more than the room held for it`);
-  const detail = { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}), ...(overrun > 0 ? { overrunMicros: overrun } : {}) };
+  // A call that reports after its job failed on our side is written against nobody from the start (a call on the owner's own key is not the person's to give back)
+  const givenBack = !paidByOther && givenBackJob(job.status, job.endedBy);
+  const givenBackDetail = givenBack ? { givenBack: true, forPersonId: job.personId } : {};
+  const reportedDetail = { ...(facts.tokens ? { tokens: facts.tokens } : {}), ...(facts.cutShort ? { cutShort: true } : {}), ...(overrun > 0 ? { overrunMicros: overrun } : {}), ...givenBackDetail };
   const written = await recordMeterEvent({
     eventId,
     kind: 'model_call',
     pool: 'computer',
     occurredAt: now,
-    personKey: `person:${job.personId}`,
-    personId: job.personId,
+    personKey: givenBack ? 'unknown' : `person:${job.personId}`,
+    personId: givenBack ? null : job.personId,
     botId: job.botId,
     brick: true,
     payerKind: paidByOther ? 'person' : 'universe',
@@ -116,15 +135,25 @@ export async function settleModelCall(jobId: string, callId: string, facts: Call
     costMicros: cost,
     basis: paidByOther ? 'paid_by_other' : cost === null ? 'unknown' : facts.basis,
     sourceRef: `computer_jobs:${job.id}`,
-    detail,
+    detail: reportedDetail,
   });
   // The sweep writes a call that never reported as unknown. A report that comes after it carries the real figure, which replaces the
   // unknown one (only an unknown figure is ever replaced: a figure that was written stays as it was)
   if (!written.recorded && cost !== null) {
-    await prisma.meterEvent.updateMany({
-      where: { eventId, costMicros: null },
-      data: { costMicros: BigInt(cost), basis: paidByOther ? 'paid_by_other' : facts.basis, route: facts.route, detail },
-    });
+    // The detail is merged into what is stored, never replaced: a give-back that happened in the meantime (the job failed after this report
+    // read it as running) is kept. Only what this report says (its tokens, whether it was cut short and any overrun) is taken from the old detail first.
+    const reported = JSON.stringify(reportedDetail);
+    await prisma.$executeRaw(Prisma.sql`
+      UPDATE meter_events
+      SET "cost_micros" = ${BigInt(cost)}, "basis" = ${paidByOther ? 'paid_by_other' : facts.basis}, "route" = ${facts.route},
+          "detail" = (COALESCE("detail", '{}'::jsonb) - 'tokens' - 'cutShort' - 'overrunMicros') || ${reported}::jsonb
+      WHERE "event_id" = ${eventId} AND "cost_micros" IS NULL`);
+  }
+  // The job may have failed while this call was being written: its calls are given back when it ends, and this one was written after that
+  // looked. Look again (the answer is only ever "failed on our side" once, so this is cheap and settles the race either way)
+  if (!givenBack && !paidByOther) {
+    const now2 = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { status: true, endedBy: true } });
+    if (now2 && givenBackJob(now2.status, now2.endedBy)) await giveBackModelCalls(job.id, job.personId);
   }
   // A price that is not known settles at the room that was held (never 0); one that is settles at what it was, at least 1
   if (reservation) await settleRoom({ key: reservation.reservationKey, settledMicros: Math.max(1, cost ?? Number(reservation.amountMicros)) }, now);
