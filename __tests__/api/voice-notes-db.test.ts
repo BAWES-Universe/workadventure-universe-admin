@@ -85,6 +85,17 @@ const turnOf = (reservation: Reservation) => {
 const today = () => new Date(new Date().toISOString().slice(0, 10));
 const botDay = async (id = botId) => (await prisma.voiceListenUse.findUnique({ where: { botId_day: { botId: id, day: today() } } }))?.seconds ?? 0;
 
+// What notes reserved and not heard yet may still take of the month's speech Limits (the cap counts them, so the Limits in the cases below are set above them)
+const inFlightSeconds = async () => {
+  const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1));
+  const now = new Date();
+  const sum = await prisma.voiceNoteTurn.aggregate({
+    _sum: { seconds: true },
+    where: { payer: 'universe-ai', released: false, createdAt: { gte: monthStart }, OR: [{ state: 'reserved', createdAt: { gt: new Date(now.getTime() - 120_000) } }, { state: 'hearing', leaseUntil: { gt: now } }] },
+  });
+  return sum._sum.seconds ?? 0;
+};
+
 async function newBot(name: string) {
   const roomId = (await prisma.room.findFirstOrThrow({ where: { world: { universeId: universes[0] } }, select: { id: true } })).id;
   return (await prisma.bot.create({ data: { roomId, name, createdById: makerId } })).id;
@@ -148,13 +159,14 @@ run('voice notes for every bot, in a real database', () => {
       const before = await prisma.appSetting.findUnique({ where: { key: 'meter' } });
       const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1));
       const spent = Number((await prisma.meterEvent.aggregate({ where: { kind: 'speech', payerKind: 'universe', occurredAt: { gte: monthStart } }, _sum: { quantity: true } }))._sum.quantity ?? 0);
+      const waiting = await inFlightSeconds();
       const speech = (id: string, seconds: number, personId: string | null) =>
         prisma.meterEvent.create({
           data: { eventId: `speech:test:${id}`, kind: 'speech', pool: 'chat', occurredAt: new Date(), personKey: personId ? `person:${personId}` : 'unknown', personId, payerKind: 'universe', quantity: BigInt(seconds), unit: 'second', basis: 'unknown', brick: true },
         });
       try {
         // Room for one more 60 s note in the month, everyone together
-        await saveMeterSettings({ speechCeilingSeconds: spent + 100, speechMemberCeilingSeconds: 1_000_000 }, makerId);
+        await saveMeterSettings({ speechCeilingSeconds: spent + waiting + 100, speechMemberCeilingSeconds: 1_000_000 }, makerId);
         const first = await reserve(`sam-${randomUUID()}`);
         expect(first).toMatchObject({ ok: true });
         await speech(randomUUID(), 60, null);
@@ -168,6 +180,32 @@ run('voice notes for every bot, in a real database', () => {
         expect(await reserve(`sam-${randomUUID()}`)).toMatchObject({ ok: false, reason: 'note-minutes' });
       } finally {
         await prisma.meterEvent.deleteMany({ where: { eventId: { startsWith: 'speech:test:' } } });
+        if (before) await prisma.appSetting.update({ where: { key: 'meter' }, data: { value: before.value as never } });
+        else await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
+      }
+    });
+
+    it('counts the notes reserved and not heard yet against the month\'s speech Limits, so the last minutes are never given to two notes (all people, and one person)', async () => {
+      const before = await prisma.appSetting.findUnique({ where: { key: 'meter' } });
+      const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1));
+      const spent = Number((await prisma.meterEvent.aggregate({ where: { kind: 'speech', payerKind: 'universe', occurredAt: { gte: monthStart } }, _sum: { quantity: true } }))._sum.quantity ?? 0);
+      try {
+        // Room for one 60 s note and a little more, everyone together: the second note, reserved right after the first with nothing heard between, does not fit
+        const waiting = await inFlightSeconds();
+        await saveMeterSettings({ speechCeilingSeconds: spent + waiting + 100, speechMemberCeilingSeconds: 1_000_000 }, makerId);
+        expect(await reserve(`tia-${randomUUID()}`)).toMatchObject({ ok: true });
+        expect(await reserve(`tom-${randomUUID()}`)).toMatchObject({ ok: false, reason: 'note-minutes', limit: 'universe' });
+        // The same for one person: room for one note of theirs only
+        await saveMeterSettings({ speechCeilingSeconds: 1_000_000_000, speechMemberCeilingSeconds: 100 }, makerId);
+        const sol = `sol-${randomUUID()}`;
+        await prisma.user.create({ data: { uuid: sol, email: `${sol}@example.test`, name: 'Sol' } });
+        expect(await reserve(sol, { isGuest: false })).toMatchObject({ ok: true });
+        expect(await reserve(sol, { isGuest: false })).toMatchObject({ ok: false, reason: 'note-minutes', limit: 'person' });
+        // Someone else still has theirs
+        const ula = `ula-${randomUUID()}`;
+        await prisma.user.create({ data: { uuid: ula, email: `${ula}@example.test`, name: 'Ula' } });
+        expect(await reserve(ula, { isGuest: false })).toMatchObject({ ok: true });
+      } finally {
         if (before) await prisma.appSetting.update({ where: { key: 'meter' }, data: { value: before.value as never } });
         else await prisma.appSetting.deleteMany({ where: { key: 'meter' } });
       }
