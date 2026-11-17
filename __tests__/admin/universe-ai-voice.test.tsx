@@ -916,7 +916,21 @@ describe('A voice provider\u2019s models, from the company\u2019s own list for i
         { id: 'eleven_multilingual_v2', label: 'Multilingual v2', kind: 'speech' },
         { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' },
       ],
+      // Nothing was taken off by this tick, so nothing is kept off the company's list
+      takenOff: [],
     });
+  });
+
+  it('keeps a model off the company\u2019s list when it is unticked, so it does not come back by itself', async () => {
+    savedCheckAnswer = {
+      ok: true,
+      body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }, { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] },
+    };
+    fireEvent.click(await open('v-eleven'));
+    await screen.findByText('ElevenLabs knows this key and lists 2 models for it. Checked just now, nothing paid.');
+    fireEvent.click(screen.getByRole('checkbox', { name: /^Eleven Flash v2\.5/ }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect((patches()[0].body as { takenOff: string[] }).takenOff).toEqual(['speech:eleven_flash_v2_5']);
   });
 
   it('catches a model typed again that is already ticked on the company\u2019s list', async () => {
