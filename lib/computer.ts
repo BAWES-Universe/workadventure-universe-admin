@@ -804,9 +804,10 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
   let older = cameBack?.olderCopyUsed ?? false;
   if (!restoring && cameBack === null) {
     // This call restored nothing: a second job that came in while the machine was waking after a return keeps what that return said, as the files on the machine are still those.
-    // It is cleared only when a newer saved copy of the files makes it out of date.
-    const kept = await prisma.brickComputer.findUniqueOrThrow({ where: { botId }, select: { restoredFrom: true, olderCopyUsed: true, filesSavedAt: true } });
-    const outOfDate = !!kept.restoredFrom && !!kept.filesSavedAt && kept.filesSavedAt.getTime() > kept.restoredFrom.getTime();
+    // It is cleared only when the files were saved after the return finished: the saved-copy date that stood when the return began (the newest copy's, which an older-copy
+    // return leaves in place) is not a save made since.
+    const kept = await prisma.brickComputer.findUniqueOrThrow({ where: { botId }, select: { restoredFrom: true, olderCopyUsed: true, filesSavedAt: true, returnedAt: true } });
+    const outOfDate = !!kept.returnedAt && !!kept.filesSavedAt && kept.filesSavedAt.getTime() > kept.returnedAt.getTime();
     if (!outOfDate) {
       from = kept.restoredFrom;
       older = kept.olderCopyUsed;
