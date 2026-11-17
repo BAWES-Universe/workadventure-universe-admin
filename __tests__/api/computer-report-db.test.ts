@@ -121,15 +121,15 @@ run('Brick tells the person how a computer job went, in a real database', () => 
     const sara = await person('sara');
     const id = await started(sara);
     await finishJob(id, 'done', minutes(9));
-    // The list the end of a job takes is on the Brick's computer by the time it is told
-    await prisma.brickComputer.updateMany({
-      where: { botId: sara.brickId },
+    // The list the end of a job takes is kept on that job (the pretend machine here lists nothing, so it is written the way the end writes it)
+    await prisma.computerJob.update({
+      where: { id },
       data: {
-        filesList: {
+        endFiles: {
           listedAt: minutes(8).toISOString(),
           more: false,
           items: [
-            { path: 'Documents/visa-receipt.pdf', bytes: 5000, modifiedAt: minutes(7).toISOString() },
+            { path: 'Documents/2026-11-17_visa_receipt.pdf', bytes: 5000, modifiedAt: minutes(7).toISOString() },
             { path: '.hermes/state.db', bytes: 9, modifiedAt: minutes(7).toISOString() },
             { path: 'old/notes.txt', bytes: 4, modifiedAt: minutes(-600).toISOString() },
           ],
@@ -137,7 +137,20 @@ run('Brick tells the person how a computer job went, in a real database', () => 
       },
     });
     const [done] = await mine([id]);
-    expect(done.files).toEqual(['visa-receipt.pdf']);
+    expect(done.files).toEqual(['2026-11-17_visa_receipt.pdf']);
+  });
+
+  it('never reads a later job’s files as this job’s: the computer’s latest list is not what a report uses', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    await finishJob(id, 'done', minutes(9));
+    // A later job on the same computer wrote its own list before this report was polled
+    await prisma.brickComputer.updateMany({
+      where: { botId: sara.brickId },
+      data: { filesList: { listedAt: minutes(20).toISOString(), more: false, items: [{ path: 'later-job.txt', bytes: 4, modifiedAt: minutes(19).toISOString() }] } },
+    });
+    const [done] = await mine([id]);
+    expect(done.files).toEqual([]);
   });
 
   it('tells nothing when the person pressed Stop, and nothing when the computer was turned off', async () => {

@@ -1,5 +1,5 @@
 /** The pure parts of what Brick tells about a computer job (the report back): what is made safe to say, which endings are told, which files count. */
-import { cleanEndNote, filesMadeBy, kindOfEnding } from '@/lib/computer-report';
+import { cleanEndNote, fileNameOf, filesMadeBy, kindOfEnding } from '@/lib/computer-report';
 import { silentEnding } from '@/lib/computer-values';
 
 describe('cleanEndNote', () => {
@@ -56,6 +56,18 @@ describe('filesMadeBy', () => {
       { path: 'old.txt', modifiedAt: '2026-11-17T08:00:00Z' },
     ]);
     expect(filesMadeBy(made, at)).toEqual(['visa-receipt.pdf', 'notes.txt']);
+  });
+
+  it('names a file as the computer did: underscores, long hash names and dates stay, markers and control characters go', () => {
+    expect(fileNameOf('2026-11-17_visa_receipt.pdf')).toBe('2026-11-17_visa_receipt.pdf');
+    expect(fileNameOf('3f9a1c7d5b2e4a6f8c0d1e2f3a4b5c6d7e8f9a0b.log')).toBe('3f9a1c7d5b2e4a6f8c0d1e2f3a4b5c6d7e8f9a0b.log');
+    expect(fileNameOf('a`b<c>[[x]]d.txt')).toBe('a b c d.txt');
+    expect(fileNameOf('   ')).toBeNull();
+    expect(Array.from(fileNameOf('a'.repeat(100)) ?? '').length).toBe(80);
+  });
+
+  it('keeps underscores in the names it lists', () => {
+    expect(filesMadeBy(list([{ path: 'Documents/visa_receipt_final.pdf', modifiedAt: '2026-11-17T12:09:00Z' }]), at)).toEqual(['visa_receipt_final.pdf']);
   });
 
   it('gives nothing when there is no list or the job never started', () => {

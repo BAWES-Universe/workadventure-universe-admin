@@ -733,14 +733,15 @@ export async function stopJobFor(botId: string, ownerId: string, now: Date = new
  * effort and quick: a machine that is not awake is left alone (a command would wake it), and a step that fails never holds up the end of
  * the job (it is logged for the one who looks; the list from the last job stays).
  */
-async function closeOutIfUnheld(botId: string): Promise<void> {
+async function closeOutIfUnheld(botId: string): Promise<FilesList | null> {
   let claimedAt: Date | null = null;
+  let taken: FilesList | null = null;
   try {
     const row = await prisma.brickComputer.findUnique({ where: { botId } });
     const provider = providerFor(row);
-    if (!row?.providerRef || !provider || row.machine !== 'working') return;
+    if (!row?.providerRef || !provider || row.machine !== 'working') return null;
     const holders = () => prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } });
-    if ((await holders()) > 0) return;
+    if ((await holders()) > 0) return null;
     // The cleanup is claimed first (one at a time, a claim that was never let go is taken over after a while), and the holders are counted
     // again after: a job that took the machine before the claim is seen here, and one that comes after it waits for the cleanup in bringUp
     const now = new Date();
@@ -748,18 +749,19 @@ async function closeOutIfUnheld(botId: string): Promise<void> {
       where: { botId, machine: 'working', OR: [{ cleanClaimedAt: null }, { cleanClaimedAt: { lte: new Date(now.getTime() - CLEAN_CLAIM_STALE_MS) } }] },
       data: { cleanClaimedAt: now },
     });
-    if (claim.count !== 1) return;
+    if (claim.count !== 1) return null;
     claimedAt = now;
-    if ((await holders()) > 0) return;
+    if ((await holders()) > 0) return null;
     try {
       const listed = await provider.exec(row.providerRef, 'universe-files', { timeoutMs: 20_000 });
       if (listed.exitCode === 0 && !listed.truncated) {
-        await prisma.brickComputer.updateMany({ where: { botId, providerRef: row.providerRef }, data: { filesList: parseFilesList(listed.stdout, new Date()) as unknown as Prisma.InputJsonValue } });
+        taken = parseFilesList(listed.stdout, new Date());
+        await prisma.brickComputer.updateMany({ where: { botId, providerRef: row.providerRef }, data: { filesList: taken as unknown as Prisma.InputJsonValue } });
       }
     } catch (error) {
       console.error('[Computer] Could not list the files after a job:', error instanceof Error ? error.message : 'unknown');
     }
-    if ((await holders()) > 0) return;
+    if ((await holders()) > 0) return taken;
     const cleaned = await provider.exec(row.providerRef, 'universe-clean', { timeoutMs: 20_000 });
     // A profile that could not be removed stays marked on the machine, and the next start-up removes it before any job can use it
     if (cleaned.exitCode !== 0 || !/(^|\n)cleaned=1\s*$/.test(cleaned.stdout)) console.error('[Computer] The browser could not be cleared after a job; it is cleared before the next one');
@@ -768,6 +770,7 @@ async function closeOutIfUnheld(botId: string): Promise<void> {
   } finally {
     if (claimedAt) await prisma.brickComputer.updateMany({ where: { botId, cleanClaimedAt: claimedAt }, data: { cleanClaimedAt: null } }).catch(() => undefined);
   }
+  return taken;
 }
 
 /** How long a cleanup claim is believed: the commands it runs end within 40 seconds, so one older than this was left by a server that stopped. */
@@ -839,12 +842,14 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     console.error('[Computer] Could not settle a job’s room:', error instanceof Error ? error.message : 'unknown');
   }
 
+  // The list taken as THIS job ended is kept on the job, so a later job's list can never be read as this one's; none taken (another job still held the machine) says no files
+  let endFiles: FilesList | null = null;
   if (held) {
-    await closeOutIfUnheld(job.botId);
+    endFiles = await closeOutIfUnheld(job.botId);
     await restIfUnheld(job.botId, now);
   }
   // Everything this ending does is finished: only now may Brick tell the person how it went (its time is in the books, its files are listed)
-  await prisma.computerJob.updateMany({ where: { id: jobId }, data: { endClosedAt: new Date() } }).catch((error) => console.error('[Computer] Could not mark an ending closed:', error instanceof Error ? error.message : 'unknown'));
+  await prisma.computerJob.updateMany({ where: { id: jobId }, data: { endClosedAt: new Date(), ...(endFiles ? { endFiles: endFiles as unknown as Prisma.InputJsonValue } : {}) } }).catch((error) => console.error('[Computer] Could not mark an ending closed:', error instanceof Error ? error.message : 'unknown'));
   // The turn passes to the next job in line, except while a Stop is ending everything
   if (advance && endedBy !== 'off' && endedBy !== 'deleted') await startNext(job.botId, now);
 }

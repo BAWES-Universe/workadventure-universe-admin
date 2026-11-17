@@ -3247,6 +3247,8 @@ model ComputerJob {
   // When everything an ending does was finished (its time written to the books, its files listed, its machine rested): an ending is told only after that, so
   // a message never goes with a file list or a bill that is not written yet. One that never got there (a server stopped halfway) is told after a while.
   endClosedAt    DateTime? @map("end_closed_at")
+  /// The files list taken as this job ended (what its report says it saved); null when none was taken.
+  endFiles       Json?     @map("end_files")
   handoverSeq    Int       @default(0) @map("handover_seq")
   handoverUntold Boolean   @default(false) @map("handover_untold")
   // What the computer said in one plain sentence when it could not go on, cleaned (no links, no markup), and what the job was waiting for

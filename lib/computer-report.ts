@@ -85,6 +85,23 @@ export function cleanEndNote(text: string | null | undefined, max: number = WHY_
   return letters.length > max ? `${letters.slice(0, max - 1).join('').trimEnd()}…` : cleaned;
 }
 
+/**
+ * A file's name as it is said: kept exactly as the computer named it (underscores, long hash names and all), minus only what could make the
+ * line say something else: markers, backticks and angle brackets, control characters. Cut between whole characters when long.
+ */
+export function fileNameOf(raw: string | null | undefined, max: number = FILE_NAME_MAX): string | null {
+  if (!raw) return null;
+  const cleaned = raw
+    .replace(/\[\[[^\]]*\]\]/g, ' ')
+    .replace(/[`<>]/g, ' ')
+    .replace(CONTROL, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return null;
+  const letters = Array.from(cleaned);
+  return letters.length > max ? `${letters.slice(0, max - 1).join('').trimEnd()}…` : cleaned;
+}
+
 const DETAILS_SEPARATOR = '\u001f';
 
 /** Where an effect went, as one short clean phrase. For details the evidence is "what, separator, where": only where is said. */
@@ -136,7 +153,7 @@ function effectsOf(job: JobWithEffects): ReportEffect[] {
   return out;
 }
 
-/** Files that appeared while the job ran, from the list taken when a job ended: no hidden folder and no file older than the job. */
+/** Files that appeared while the job ran, from the list taken when THIS job ended (kept on the job, never the computer's latest list): no hidden folder and no file older than the job. */
 export function filesMadeBy(list: unknown, startedAt: Date | null): string[] {
   const files = readFilesList(list);
   if (!files || !startedAt) return [];
@@ -146,7 +163,7 @@ export function filesMadeBy(list: unknown, startedAt: Date | null): string[] {
     if (new Date(entry.modifiedAt).getTime() < since) continue;
     const parts = entry.path.split('/');
     if (parts.some((part) => part.startsWith('.'))) continue;
-    const name = cleanEndNote(parts[parts.length - 1], FILE_NAME_MAX);
+    const name = fileNameOf(parts[parts.length - 1]);
     if (name && !names.includes(name)) names.push(name);
     if (names.length >= FILES_SHOWN_MAX) break;
   }
@@ -198,8 +215,6 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
   if (jobs.length === 0) return [];
   const people = await prisma.user.findMany({ where: { id: { in: [...new Set(jobs.map((job) => job.personId))] } }, select: { id: true, matrixChatId: true } });
   const chatOf = new Map(people.map((person) => [person.id, person.matrixChatId ?? null]));
-  const computers = await prisma.brickComputer.findMany({ where: { botId: { in: [...new Set(ended.map((job) => job.botId))] } }, select: { botId: true, filesList: true } });
-  const filesOf = new Map(computers.map((row) => [row.botId, row.filesList]));
 
   const reports: Report[] = [];
   for (const job of ended) {
@@ -224,7 +239,7 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
       waitedFor: kind === 'unanswered' ? (job.endWaitingFor as WaitingFor | null) : null,
       why: kind === 'failed' || kind === 'rule' ? job.endNote : null,
       effects: effectsOf(job),
-      files: kind === 'done' ? filesMadeBy(filesOf.get(job.botId), job.startedAt) : [],
+      files: kind === 'done' ? filesMadeBy(job.endFiles, job.startedAt) : [],
       givenBack: kind === 'failed' ? await givenBackIn(job.id, job.secondsRun) : false,
     });
   }
