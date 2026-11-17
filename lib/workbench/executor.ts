@@ -170,7 +170,8 @@ export async function startCodeJob(input: StartInput, deps: Deps = {}): Promise<
 
   const price = await runPriceMicros();
   const steps = request.value.steps.length;
-  const reserved = steps * price;
+  // Every step, and the run that makes the folder for files
+  const reserved = (steps + PREPARE_RUNS) * price;
   const started = now();
   const id = crypto.randomUUID();
   const codeHash = sha256Hex(request.value.steps.join('\n\u0000\n'));
@@ -379,6 +380,8 @@ async function work(job: Row, limits: FilledLimits, plan: Plan, ctx: Ctx, signal
   {
     const halt = await stopped();
     if (halt) return halt;
+    // Counted before it goes out, like a step: a run that may have started is a run that was used
+    await prisma.codeJob.update({ where: { id: job.id }, data: { preparedRuns: PREPARE_RUNS } });
     const prepared = await wb.run({ sessionId, code: PREPARE_OUT_DIR, timeoutMs: Math.max(1, Math.min(remainingMs(job, ctx), (PREPARE_SECONDS + CELL_WAIT_GRACE_SECONDS) * SECOND)), signal });
     if (prepared.kind === 'timeout' || prepared.kind === 'gone') return ended(prepared);
     if (prepared.kind === 'failed' || !prepared.cell.ok) return { state: 'failed', reason: 'unavailable' };
@@ -429,6 +432,10 @@ function shape(cell: { ok: boolean; stdout: string; stderr: string; results: str
   return { run: { n, ok: cell.ok, printed, errors, value, error }, left, clipped };
 }
 
+/** What a run was priced at when the job was admitted: the reserve covers every step and the run that makes the folder for files. */
+const PREPARE_RUNS = 1;
+const priceOfJob = (row: { steps: number; reservedMicros: bigint }): number => Math.max(1, Math.floor(asNumber(row.reservedMicros) / (Math.max(row.steps, 1) + PREPARE_RUNS)));
+
 /** The run that makes the folder for files, before any of the person's code. */
 export const PREPARE_OUT_DIR = `import os\nos.makedirs("/mnt/files/${OUT_DIR}", exist_ok=True)`;
 const PREPARE_SECONDS = 30;
@@ -440,17 +447,21 @@ const LISTED_PAST_KEPT = 50;
 async function keepFiles(job: Row, wb: WorkbenchAdapter, sessionId: string, limits: FilledLimits, ctx: Ctx, out: Collected, budget: number): Promise<void> {
   let listed: { path: string; bytes: number | null }[];
   try {
-    listed = await wb.list({ sessionId, prefix: `${OUT_DIR}/`, timeoutMs: REQUEST_MS, limit: limits.maxOutputFiles + LISTED_PAST_KEPT });
+    listed = await wb.list({ sessionId, prefix: `${OUT_DIR}/`, timeoutMs: REQUEST_MS, limit: limits.maxOutputFiles + LISTED_PAST_KEPT + 1 });
   } catch (error) {
     console.error('[CodeJob] The files could not be listed:', error instanceof Error ? error.message : 'unknown');
     out.notKept.push({ name: '(all)', why: 'could not be read from the workspace' });
     return;
   }
+  // One more than is looked at was asked for, so there is a way to tell "that was all of them" from "there are more"
+  const looked = limits.maxOutputFiles + LISTED_PAST_KEPT;
+  const more = listed.length > looked;
   const candidates = listed
+    .slice(0, looked)
     .map((file) => ({ ...file, name: file.path.startsWith(`${OUT_DIR}/`) ? file.path.slice(OUT_DIR.length + 1) : '' }))
     .sort((a, b) => a.name.localeCompare(b.name));
   // A listing that stopped at its limit has more behind it: say so instead of pretending those files were never there
-  if (listed.length >= limits.maxOutputFiles + LISTED_PAST_KEPT) out.notKept.push({ name: '(more files)', why: 'over the number of files a job keeps' });
+  if (more) out.notKept.push({ name: '(more files)', why: 'over the number of files a job keeps' });
   let kept = 0;
   let keptBytes = 0;
   let previewBudget = Math.floor(budget);
@@ -531,7 +542,8 @@ async function finishJob(jobId: string, end: End, collected: Collected, limits: 
   const now = ctx.now();
   const row = await prisma.codeJob.findUnique({ where: { id: jobId } });
   if (!row) return false;
-  const used = Math.max(row.cellsRun, end.state === 'interrupted' ? row.steps : 0);
+  // A job nobody saw end is charged as if every run was used, the folder run included
+  const used = Math.max(row.cellsRun, end.state === 'interrupted' ? row.steps : 0) + (end.state === 'interrupted' ? PREPARE_RUNS : row.preparedRuns);
   const settled = Math.min(asNumber(row.reservedMicros), Math.max(used, 0) * price);
   const result = {
     runs: collected.runs,
@@ -596,7 +608,8 @@ async function closeSession(jobId: string, ctx: Ctx): Promise<void> {
 async function settle(jobId: string, now: () => Date): Promise<void> {
   const row = await prisma.codeJob.findUnique({ where: { id: jobId } });
   if (!row) return;
-  const cells = row.cellsRun;
+  // Every run at the provider, the folder run included
+  const cells = row.cellsRun + row.preparedRuns;
   const cost = asNumber(row.settledMicros);
   await recordMeterEvent({
     eventId: `codejob:${row.id}`,
@@ -617,7 +630,7 @@ async function settle(jobId: string, now: () => Date): Promise<void> {
     basis: 'estimated',
     sourceRef: `codejob:${row.id}`,
     // What ran, never what it was given or printed
-    detail: { kind: 'code_job', provider: CODE_JOB_PROVIDER, state: row.state, runs: cells, steps: row.steps, nestedCalls: row.nestedCalls, listMicrosPerRun: cells > 0 ? Math.round(cost / cells) : null },
+    detail: { kind: 'code_job', provider: CODE_JOB_PROVIDER, state: row.state, runs: cells, stepRuns: row.cellsRun, steps: row.steps, nestedCalls: row.nestedCalls, listMicrosPerRun: cells > 0 ? Math.round(cost / cells) : null },
   });
   await prisma.codeJob.updateMany({ where: { id: jobId, meteredAt: null }, data: { meteredAt: now() } });
 }
@@ -658,7 +671,7 @@ export async function cancelCodeJob(input: { jobId: string; botId: string; perso
   if (ACTIVE.includes(row.state) && adapter) {
     const ctx: Ctx = { adapter, store: deps.store ?? getOutputStore(), now: deps.now ?? (() => new Date()) };
     const limits = row.limits as unknown as FilledLimits;
-    const price = Math.max(1, row.steps > 0 ? Math.floor(asNumber(row.reservedMicros) / row.steps) : 1);
+    const price = priceOfJob(row);
     live.get(row.id)?.abort();
     await finishJob(row.id, { state: 'cancelled', reason: 'cancelled' }, { runs: [], reads: [], files: [], notKept: [], clipped: false }, limits, price, ctx);
   }
@@ -774,7 +787,7 @@ export async function sweepCodeJobs(deps: Deps = {}): Promise<SweepResult> {
       const lost = at.getTime() - job.heartbeatAt.getTime() > STALE_MS && !live.has(job.id);
       if (!late && !lost) continue;
       const limits = job.limits as unknown as FilledLimits;
-      const price = Math.max(1, job.steps > 0 ? Math.floor(asNumber(job.reservedMicros) / job.steps) : 1);
+      const price = priceOfJob(job);
       live.get(job.id)?.abort();
       const won = await finishJob(job.id, late ? { state: 'timed_out', reason: 'timed_out' } : { state: 'interrupted', reason: 'interrupted' }, { runs: [], reads: [], files: [], notKept: [], clipped: false }, limits, price, ctx);
       if (won) result.stopped += 1;

@@ -15,6 +15,7 @@ CREATE TABLE "code_jobs" (
     "code_hash" VARCHAR(64) NOT NULL,
     "steps" INTEGER NOT NULL,
     "cells_run" INTEGER NOT NULL DEFAULT 0,
+    "prepared_runs" INTEGER NOT NULL DEFAULT 0,
     "provider_user_id" VARCHAR(120) NOT NULL,
     "provider_session_id" VARCHAR(120),
     "provider_state" VARCHAR(8) NOT NULL DEFAULT 'none',
