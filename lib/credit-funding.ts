@@ -125,6 +125,20 @@ export async function issuedInMonth(db: Pick<Db, 'creditLot'>, accountId: string
   return asNumber(sum._sum.amountMicros);
 }
 
+/**
+ * What an account issued this month that counts against its funded budget (P8). A DEFAULT allowance is not counted: it reaches every member whatever
+ * the rollout budget says, because what it can spend is held where it is spent, by the shared budget of its area (the Computers budget, the Instant
+ * exposure ceiling). Gifts, exceptions and credit promised as funded keep counting, so a promise is never made that nothing backs.
+ */
+export async function issuedAgainstBudget(db: Pick<Db, 'creditLot' | 'grantProgram'>, accountId: string, now: Date): Promise<number> {
+  const defaults = (await db.grantProgram.findMany({ where: { kind: 'default' }, select: { id: true } })).map((program) => program.id);
+  const sum = await db.creditLot.aggregate({
+    where: { fundingAccountId: accountId, issuedAt: { gte: monthStart(now), lt: monthEnd(now) }, ...(defaults.length > 0 ? { OR: [{ programId: null }, { programId: { notIn: defaults } }] } : {}) },
+    _sum: { amountMicros: true },
+  });
+  return asNumber(sum._sum.amountMicros);
+}
+
 export interface Exposure {
   accountId: string;
   /** The month's funded budget; null when none is set. */

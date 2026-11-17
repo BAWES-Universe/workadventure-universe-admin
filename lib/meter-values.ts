@@ -180,7 +180,13 @@ export interface MeterSettings {
   appUseCeilingMicros: number | null;
   /** The most of that one person's Bricks may use in a calendar month. */
   appUseMemberCeilingMicros: number | null;
-  /** The most seconds of speech Universe AI pays for in a calendar month, all people together: audio heard and voice spoken, in live calls and voice notes (lib/speech-cap.ts). Empty stops that speech; 0 pauses it. */
+  /**
+   * The Speech budget: the most Universe AI's speech may cost in a calendar month (UTC), all people together, in millionths of a dollar, at the
+   * rates of lib/speech-rates.ts: audio heard and voice spoken, in live calls and voice notes, what was spent plus what is set aside for
+   * speech that is certain to happen (lib/speech-cap.ts). Empty stops that speech; 0 pauses it. A change is used by the next admission.
+   */
+  speechBudgetMicros: number | null;
+  /** Hours of speech, as information only since the Speech budget is in money: no longer a stop (#981's 100 hours became `speechBudgetMicros` at the most expensive rate). */
   speechCeilingSeconds: number | null;
   /** The most of that for one person in a calendar month. */
   speechMemberCeilingSeconds: number | null;
@@ -206,6 +212,7 @@ export const METER_SETTINGS_EMPTY: MeterSettings = {
   appUseMicros: null,
   appUseCeilingMicros: null,
   appUseMemberCeilingMicros: null,
+  speechBudgetMicros: null,
   speechCeilingSeconds: null,
   speechMemberCeilingSeconds: null,
   rolloutBudgetMicros: null,
@@ -228,6 +235,7 @@ export const METER_RANGES: Record<keyof MeterSettings, MeterRange> = {
   appUseMicros: { min: 0, max: 1_000_000_000 },
   appUseCeilingMicros: { min: 0, max: 1_000_000_000_000_000 },
   appUseMemberCeilingMicros: { min: 0, max: 1_000_000_000_000 },
+  speechBudgetMicros: { min: 0, max: 1_000_000_000_000_000 },
   speechCeilingSeconds: { min: 0, max: 1_000_000_000 },
   speechMemberCeilingSeconds: { min: 0, max: 100_000_000 },
   rolloutBudgetMicros: { min: 0, max: 1_000_000_000_000_000 },
@@ -237,7 +245,7 @@ export const METER_RANGES: Record<keyof MeterSettings, MeterRange> = {
 const NEEDED: (keyof MeterSettings)[] = ['memberAllowanceMicros', 'poolCeilingMicros', 'reserveMicros', 'storageMicrosPerGbMonth', 'atOnceMember', 'atOnceAll'];
 
 /** Settings that may be emptied again but that nothing is refused without (see `missingSettings`). */
-const OPTIONAL_MONEY: (keyof MeterSettings)[] = ['appUseMicros', 'appUseCeilingMicros', 'appUseMemberCeilingMicros', 'speechCeilingSeconds', 'speechMemberCeilingSeconds', 'rolloutBudgetMicros'];
+const OPTIONAL_MONEY: (keyof MeterSettings)[] = ['appUseMicros', 'appUseCeilingMicros', 'appUseMemberCeilingMicros', 'speechBudgetMicros', 'speechCeilingSeconds', 'speechMemberCeilingSeconds', 'rolloutBudgetMicros'];
 
 const fits = (value: unknown, range: MeterRange): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= range.min && value <= range.max;
 

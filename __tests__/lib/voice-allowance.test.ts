@@ -7,15 +7,21 @@ import { prisma } from '@/lib/db';
 import { checkVoiceAllowance, releaseVoiceReply, voiceRepliesLeft } from '@/lib/voice-allowance';
 import { checkSpeechCap } from '@/lib/speech-cap';
 import { speechReserved } from '@/lib/speech-reserved';
+import { planReply } from '@/lib/speech-admission';
 
 const speechCap = checkSpeechCap as jest.Mock;
 const reserved = speechReserved as jest.Mock;
+const plan = planReply as jest.Mock;
+const NOTHING_HELD = { mineSeconds: 0, openMicros: 0, unknownMicros: 0, nextEndsInSeconds: null, parts: { notes: { open: 0, unknown: 0 }, replies: { open: 0, unknown: 0 }, hearing: { open: 0, unknown: 0 } } };
+const PRICE = { micros: 32_000, rateVersion: 7 };
 import { POST } from '@/app/api/bots/[id]/voice-allowance/route';
 import { POST as RELEASE } from '@/app/api/bots/[id]/voice-allowance/release/route';
 import { POST as LEFT } from '@/app/api/bots/[id]/voice-allowance/left/route';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/speech-cap', () => ({ checkSpeechCap: jest.fn() }));
+// What admitting a reply sets aside comes from the rate card and the saved terms (the real figures are in __tests__/api/speech-admission-db.test.ts)
+jest.mock('@/lib/speech-admission', () => ({ ...jest.requireActual('@/lib/speech-admission'), planReply: jest.fn() }));
 // What admitted notes and replies hold is read from the database (the real figures are in __tests__/api/voice-notes-db.test.ts)
 jest.mock('@/lib/speech-reserved', () => ({ ...jest.requireActual('@/lib/speech-reserved'), speechReserved: jest.fn() }));
 jest.mock('@/lib/db', () => ({
@@ -55,7 +61,9 @@ const GUEST = { userId: 'wa-guest', isGuest: true, turnId: 'bot-1-player-5-bbb' 
 beforeEach(() => {
   // The month's speech stop lets everything through unless a test says so
   speechCap.mockReset().mockResolvedValue(null);
-  reserved.mockReset().mockResolvedValue({ all: 0, mine: 0 });
+  reserved.mockReset().mockResolvedValue({ all: NOTHING_HELD, mine: NOTHING_HELD });
+  // The longest a reply may be is the voice limit asked for; its usual length is 12 seconds; it costs at most $0.032 at rate version 7
+  plan.mockReset().mockImplementation(async (_db: unknown, input: { replySeconds: number }) => ({ ok: true, plan: { price: PRICE, maxSeconds: input.replySeconds, memberSeconds: 12, company: { adapter: 'elevenlabs', talk: false }, card: {}, terms: {} } }));
   db.appSetting.findUnique.mockReset().mockResolvedValue(null);
   db.$queryRaw.mockReset().mockResolvedValue([{ started_at: STARTED }]);
   db.bot.findUnique.mockReset().mockResolvedValue({ id: 'bot-1' });
@@ -79,7 +87,7 @@ describe('the numbers', () => {
     db.voiceReplyUse.count.mockResolvedValue(24);
     expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toEqual({ allowed: true, left: 0, resetsAt: '2026-11-02T13:00:00.000Z' });
     db.voiceReplyUse.count.mockResolvedValue(25);
-    expect(await checkVoiceAllowance('bot-1', { ...SARA, turnId: 'next' }, NOW)).toEqual({ allowed: false, resetsAt: '2026-11-02T13:00:00.000Z' });
+    expect(await checkVoiceAllowance('bot-1', { ...SARA, turnId: 'next' }, NOW)).toEqual({ allowed: false, resetsAt: '2026-11-02T13:00:00.000Z', stoppedBy: 'person' });
   });
 
   it('give a guest 3, never more, however large the window is', async () => {
@@ -113,7 +121,10 @@ describe('counting', () => {
   it('counts a signed-in person by their account, in the same window as their Universe AI replies', async () => {
     await checkVoiceAllowance('bot-1', SARA, NOW);
     expect(db.$queryRaw.mock.calls[0][0].values).toEqual(expect.arrayContaining(['ua:person:u-sara']));
-    expect(db.voiceReplyUse.create).toHaveBeenCalledWith({ data: { botId: 'bot-1', turnId: SARA.turnId, personKey: 'person:u-sara', seconds: 60, createdAt: NOW } });
+    // A game that does not say `contract: 2` holds the longest reply for the person too, as before, and its hold ends on the saved time
+    expect(db.voiceReplyUse.create).toHaveBeenCalledWith({
+      data: { botId: 'bot-1', turnId: SARA.turnId, personKey: 'person:u-sara', seconds: 60, createdAt: NOW, contract: 1, memberSeconds: 60, holdMicros: BigInt(32_000), rateVersion: 7, provider: 'elevenlabs' },
+    });
     expect(db.voiceReplyUse.count).toHaveBeenCalledWith({ where: { personKey: 'person:u-sara', createdAt: { gte: STARTED } } });
   });
 
@@ -152,44 +163,46 @@ describe('counting', () => {
   });
 });
 
-describe('the month’s spending stop on speech', () => {
-  const STOP = { stopped: 'month', resetsAt: '2026-12-01T00:00:00.000Z' };
+describe('the speech budget and the person’s own entitlement', () => {
+  const STOP = { stopped: 'budget', reason: 'budget', resetsAt: '2026-12-01T00:00:00.000Z' };
+  const ASK = (personId: string | null, memberSeconds = 60) => ({ personId, memberSeconds, exposureMicros: 32_000, held: { all: NOTHING_HELD, mine: NOTHING_HELD } });
 
-  it('holds a reply back before it is spoken, asked with the longest a reply may be, for the person it is for, and counts nothing', async () => {
+  it('holds a reply back before it is spoken, asked with what it may cost Universe at most and the length the person is counted for, and counts nothing', async () => {
     speechCap.mockResolvedValue(STOP);
-    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toEqual({ allowed: false, resetsAt: '2026-12-01T00:00:00.000Z' });
-    expect(speechCap).toHaveBeenCalledWith({ personId: 'u-sara', seconds: 60, inFlight: { all: 0, mine: 0 } }, NOW, db);
+    expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toEqual({ allowed: false, resetsAt: '2026-12-01T00:00:00.000Z', stoppedBy: 'budget' });
+    expect(speechCap).toHaveBeenCalledWith(ASK('u-sara'), NOW, db);
     expect(db.voiceReplyUse.create).not.toHaveBeenCalled();
   });
 
   it('holds back a guest’s reply too, and a reply for someone the bot cannot name: the month for everyone together has its stop', async () => {
     speechCap.mockResolvedValue(STOP);
     expect(await checkVoiceAllowance('bot-1', GUEST, NOW)).toMatchObject({ allowed: false });
-    expect(speechCap).toHaveBeenLastCalledWith({ personId: null, seconds: 60, inFlight: { all: 0, mine: 0 } }, NOW, db);
-    expect(await checkVoiceAllowance('bot-1', { turnId: 't1' }, NOW)).toEqual({ allowed: false, resetsAt: '2026-12-01T00:00:00.000Z' });
-    expect(speechCap).toHaveBeenLastCalledWith({ personId: null, seconds: 60, inFlight: { all: 0, mine: 0 } }, NOW, db);
+    expect(speechCap).toHaveBeenLastCalledWith(ASK(null), NOW, db);
+    expect(await checkVoiceAllowance('bot-1', { turnId: 't1' }, NOW)).toEqual({ allowed: false, resetsAt: '2026-12-01T00:00:00.000Z', stoppedBy: 'budget' });
+    expect(speechCap).toHaveBeenLastCalledWith(ASK(null), NOW, db);
     expect(db.voiceReplyUse.create).not.toHaveBeenCalled();
   });
 
   it('asks with what notes and replies already admitted hold, read under the lock every speech reservation is made under (a signed-in person, a guest, nobody)', async () => {
-    reserved.mockResolvedValue({ all: 120, mine: 60 });
+    const held = { all: { ...NOTHING_HELD, openMicros: 5_000 }, mine: { ...NOTHING_HELD, mineSeconds: 60 } };
+    reserved.mockResolvedValue(held);
     await checkVoiceAllowance('bot-1', SARA, NOW);
     expect(reserved).toHaveBeenLastCalledWith(db, { personKey: 'person:u-sara', replySeconds: 60, now: NOW });
-    expect(speechCap).toHaveBeenLastCalledWith({ personId: 'u-sara', seconds: 60, inFlight: { all: 120, mine: 60 } }, NOW, db);
+    expect(speechCap).toHaveBeenLastCalledWith({ ...ASK('u-sara'), held }, NOW, db);
     await checkVoiceAllowance('bot-1', { ...GUEST, turnId: 'g-1' }, NOW);
     expect(reserved).toHaveBeenLastCalledWith(db, { personKey: 'guest:wa-guest', replySeconds: 60, now: NOW });
     await checkVoiceAllowance('bot-1', { turnId: 'anon-1' }, NOW);
     expect(reserved).toHaveBeenLastCalledWith(db, { personKey: null, replySeconds: 60, now: NOW });
-    expect(speechCap).toHaveBeenLastCalledWith({ personId: null, seconds: 60, inFlight: { all: 120, mine: 60 } }, NOW, db);
+    expect(speechCap).toHaveBeenLastCalledWith({ ...ASK(null), held }, NOW, db);
     // The lock was taken before each of the three reads
     expect(db.$executeRaw.mock.calls.length).toBeGreaterThanOrEqual(3);
   });
 
   it('holds the seconds of a reply for someone nobody could name, so the next reply sees them, and gives them back when released; asked again it is the same reply', async () => {
     expect(await checkVoiceAllowance('bot-1', { turnId: 'anon-1' }, NOW)).toEqual({ allowed: true });
-    expect(db.voiceReplyUse.create).toHaveBeenCalledWith({ data: { botId: 'bot-1', turnId: 'anon-1', personKey: 'anon:bot-1', seconds: 60, createdAt: NOW } });
+    expect(db.voiceReplyUse.create).toHaveBeenCalledWith({ data: expect.objectContaining({ botId: 'bot-1', turnId: 'anon-1', personKey: 'anon:bot-1', seconds: 60, createdAt: NOW }) });
     db.voiceReplyUse.create.mockClear();
-    speechCap.mockResolvedValue({ stopped: 'month', resetsAt: '2026-12-01T00:00:00.000Z' });
+    speechCap.mockResolvedValue(STOP);
     db.voiceReplyUse.findUnique.mockResolvedValue({ id: 'x' });
     expect(await checkVoiceAllowance('bot-1', { turnId: 'anon-1' }, NOW)).toEqual({ allowed: true });
     expect(db.voiceReplyUse.create).not.toHaveBeenCalled();
@@ -240,7 +253,8 @@ describe('POST /api/bots/:id/voice-allowance', () => {
 describe('giving back a reply that was never played', () => {
   it('removes the counted reply under its turn, for its bot only, and says it did', async () => {
     expect(await releaseVoiceReply('bot-1', { turnId: SARA.turnId })).toEqual({ released: true });
-    expect(db.voiceReplyUse.deleteMany).toHaveBeenCalledWith({ where: { botId: 'bot-1', turnId: SARA.turnId } });
+    // Only a hold is given back: a reply whose receipt already arrived is spent
+    expect(db.voiceReplyUse.deleteMany).toHaveBeenCalledWith({ where: { botId: 'bot-1', turnId: SARA.turnId, settledAt: null } });
   });
 
   it('releases nothing for a reply that was never counted, or was already given back, and is safe to ask twice', async () => {
@@ -310,7 +324,7 @@ describe('what is left', () => {
     expect(await checkVoiceAllowance('bot-1', SARA, NOW)).toMatchObject({ allowed: true, left: 3 });
     // 26 replies: only the kept ones are left, so no place is left for voice
     db.botsAiUsage.count.mockResolvedValue(26);
-    expect(await checkVoiceAllowance('bot-1', { ...SARA, turnId: 'next' }, NOW)).toEqual({ allowed: false, resetsAt: '2026-11-02T13:00:00.000Z' });
+    expect(await checkVoiceAllowance('bot-1', { ...SARA, turnId: 'next' }, NOW)).toEqual({ allowed: false, resetsAt: '2026-11-02T13:00:00.000Z', stoppedBy: 'person' });
     expect(db.voiceReplyUse.create).toHaveBeenCalledTimes(1);
   });
 

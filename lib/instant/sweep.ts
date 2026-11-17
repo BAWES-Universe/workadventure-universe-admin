@@ -5,8 +5,10 @@ import { evaluatePause, reconcileRun } from '@/lib/instant/executor';
 import { getInstantFunds, type InstantFunds } from '@/lib/instant/funds';
 import { denyInstantOnSessions, type SessionSweep } from '@/lib/instant/sessions';
 import { pauseInstant } from '@/lib/instant/state';
+import { freezeTool, getFrozenTools, unfreezeTools, type FreezeReason } from '@/lib/instant/freeze';
 import { settleCheckingReceipts } from '@/lib/task-receipts';
 import { instantListedPrices, usdToMicros } from '@/lib/instant/values';
+import { reconcileSpeech, type ReconcileReport } from '@/lib/speech-status';
 
 /**
  * The bot server asks for this now and then (like the computer sweep). It looks unfinished runs up by their own id and settles what
@@ -28,6 +30,10 @@ export interface DriftReport {
   gone: string[];
   /** Composio could not be asked about these this time. */
   unreachable: string[];
+  /** Tools frozen by this check (S4): their price changed in a way nobody could read as "the same unit, no higher". Each takes no new runs, the others carry on. */
+  frozen: string[];
+  /** Tools that were frozen by an earlier check and whose live words match the table again: they carry on. */
+  unfrozen: string[];
 }
 
 /** The first dollar figure in Composio's price words, in micros (exact), or null. "$0.007 per search" is 7,000. */
@@ -36,26 +42,59 @@ function firstDollars(words: string): number | null {
   return match ? usdToMicros(match[1]) : null;
 }
 
+/** The words of a price without its first dollar figure, so "per search" is compared with "per search" and not with "per 1,000 searches" or "from". */
+const unitWords = (words: string): string => words.replace(/\$\d+(?:\.\d+)?/, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/**
+ * How a changed price reads (S4). `same`: the words are the same. `lower`: same unit and tier words, and a figure no higher: clear, nothing
+ * to freeze. Anything else is unclear and freezes the tool: a higher figure, a figure that cannot be read, or unit or tier words that
+ * differ (even when the figure looks lower: "$0.002 per 1,000" is not cheaper than "$0.007 per search").
+ */
+export function readPriceChange(listed: string, unitMicros: number, live: string | null): { kind: 'same' | 'lower' } | { kind: 'freeze'; reason: FreezeReason } {
+  if (live === listed) return { kind: 'same' };
+  const figure = live ? firstDollars(live) : null;
+  if (live === null || figure === null) return { kind: 'freeze', reason: 'unreadable' };
+  if (unitWords(live) !== unitWords(listed)) return { kind: 'freeze', reason: 'unit_or_tier' };
+  return figure > unitMicros ? { kind: 'freeze', reason: 'higher' } : { kind: 'lower' };
+}
+
 export async function checkPriceDrift(adapter: ReadyMadeAdapter | null = getAdapter(), pause: (reason: string) => Promise<unknown> = pauseInstant): Promise<DriftReport> {
-  const report: DriftReport = { checkedAt: new Date().toISOString(), up: [], changed: [], gone: [], unreachable: [] };
+  const report: DriftReport = { checkedAt: new Date().toISOString(), up: [], changed: [], gone: [], unreachable: [], frozen: [], unfrozen: [] };
   const instant = adapter?.instant;
   if (!instant) return report;
+  const frozenBefore = await getFrozenTools();
+  const clear: string[] = [];
   for (const row of instantListedPrices()) {
     try {
       const live = await instant.tool(row.tool);
       if (!live || !live.instantSupported) {
         report.gone.push(row.tool);
+        // No longer served as Instant: new runs of it would be refused by Composio, so it is held here, and carries on if it comes back
+        await freezeTool(row.tool, { reason: 'gone', listed: row.listed, live: live?.priceWords ?? null });
+        report.frozen.push(row.tool);
         continue;
       }
-      if (live.priceWords === row.listed) continue;
-      // Words we cannot read a figure from count as higher: a price we cannot read is not a price we can hold a run to
-      const figure = live.priceWords ? firstDollars(live.priceWords) : null;
-      if (figure === null || figure > row.unitMicros) report.up.push(row.tool);
+      const change = readPriceChange(row.listed, row.unitMicros, live.priceWords ?? null);
+      if (change.kind !== 'freeze') {
+        // Words that read as before (or a clearly lower price of the same unit) clear an earlier freeze of the tool
+        if (change.kind === 'lower') report.changed.push(row.tool);
+        if (frozenBefore && Object.prototype.hasOwnProperty.call(frozenBefore, row.tool)) clear.push(row.tool);
+        continue;
+      }
+      // A price we cannot read, or a unit or tier we cannot compare, is not a price we can hold a run to: this tool is frozen
+      await freezeTool(row.tool, { reason: change.reason, listed: row.listed, live: live.priceWords ?? null });
+      report.frozen.push(row.tool);
+      // A figure that is higher, or cannot be read, also stops all of Instant, as before; a changed unit or tier stops only that tool
+      if (change.reason === 'higher' || change.reason === 'unreadable') report.up.push(row.tool);
       else report.changed.push(row.tool);
     } catch (error) {
       report.unreachable.push(row.tool);
       console.error('[Instant] Could not read a tool price:', error instanceof Error ? error.message : 'unknown');
     }
+  }
+  if (clear.length > 0) {
+    await unfreezeTools(clear);
+    report.unfrozen.push(...clear);
   }
   if (report.up.length > 0) await pause('price_drift');
   return report;
@@ -68,6 +107,8 @@ export interface SweepResult {
   paused: boolean;
   sessions: SessionSweep;
   drift: DriftReport | null;
+  /** The speech reconcile pass that runs with this sweep (docs/speech-admission-contract.md, section 6); null when it could not run. */
+  speech: ReconcileReport | null;
 }
 
 export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: ReadyMadeAdapter | null; now?: Date; forceDrift?: boolean } = {}): Promise<SweepResult> {
@@ -110,7 +151,12 @@ export async function sweepInstant(deps: { funds?: InstantFunds; adapter?: Ready
     // The clock starts only when the check finished and Composio answered for every tool (and any pause it needed was made): a failed or partial check is tried again by the next sweep
     if (drift && drift.unreachable.length === 0) lastDriftAt = Date.now();
   }
-  return { looked: open.length, receipts, paused, sessions, drift };
+  // Speech holds are reconciled by the same call the bot server already makes now and then: nothing new for it to schedule
+  const speech = await reconcileSpeech(now).catch((error) => {
+    console.error('[Speech] The reconcile pass failed:', error instanceof Error ? error.message : 'unknown');
+    return null;
+  });
+  return { looked: open.length, receipts, paused, sessions, drift, speech };
 }
 
 /** For tests. */

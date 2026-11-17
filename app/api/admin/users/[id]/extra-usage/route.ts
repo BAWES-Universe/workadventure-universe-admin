@@ -5,6 +5,8 @@ import { prisma } from '@/lib/db';
 import { GrantKeyUsed, GrantRefused, changeGrant, endGrantNow, markGrantBilled, recordGrant } from '@/lib/meter-grants';
 import { answerRequests } from '@/lib/meter-requests';
 import { personUsage } from '@/lib/meter-person';
+import { SCOPE_WORDS, endEntitlementGrantNow, entitlementGrantsOf, isEntitlementScope, recordEntitlementGrant, type EntitlementGrant, type EntitlementScope } from '@/lib/entitlement-grants';
+import { entitlementLine } from '@/lib/entitlement-usage';
 
 export const runtime = 'nodejs';
 
@@ -31,7 +33,39 @@ const endsAtOf = (value: unknown, now: Date): Date | null => {
   return date > now && date.getTime() - now.getTime() <= MAX_AHEAD ? date : null;
 };
 
-/** GET /api/admin/users/:id/extra-usage - what this person uses, whether they asked for more and the extra usage running for them. */
+/**
+ * What "Give more" of one scope would do, for the sheet to show before it is given and after: the ONE entitlement it extends, what it never
+ * overrides, and when it ends (billing consensus v2, P5).
+ */
+function previewOf(scope: EntitlementScope, grant: Pick<EntitlementGrant, 'multiplier' | 'noLimit' | 'startsAt' | 'endsAt'> | null) {
+  return {
+    scope,
+    extends: SCOPE_WORDS[scope].extends,
+    never: SCOPE_WORDS[scope].never,
+    ...(grant ? { multiplier: grant.noLimit ? null : grant.multiplier, noLimit: grant.noLimit, startsAt: grant.startsAt.toISOString(), endsAt: grant.endsAt.toISOString() } : {}),
+  };
+}
+
+/** What one person has of speech and Apps: each one's own entitlement (with figures, for a super admin), what a grant extends, and the grants given. */
+async function entitlementsOf(personId: string, now: Date) {
+  const scopes: EntitlementScope[] = ['speech', 'apps'];
+  const rows = await Promise.all(
+    scopes.map(async (scope) => {
+      const [read, grants] = await Promise.all([entitlementLine(personId, scope, now, true), entitlementGrantsOf(personId, scope)]);
+      return [
+        scope,
+        {
+          preview: previewOf(scope, null),
+          ...(read ? { ...read.line, figures: read.figures } : {}),
+          grants: grants.map((grant) => ({ ...previewOf(scope, grant), grantKey: grant.grantKey, settlement: grant.settlement, billedAt: grant.billedAt?.toISOString() ?? null, note: grant.note, running: grant.startsAt <= now && grant.endsAt > now })),
+        },
+      ] as const;
+    }),
+  );
+  return Object.fromEntries(rows);
+}
+
+/** GET /api/admin/users/:id/extra-usage - what this person uses, whether they asked for more and the extra usage running for them (and, under `entitlements`, their own speech and Apps allowances with what a grant of each would extend). */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const viewer = await asSuperAdmin(request);
   if (!viewer) return refuse();
@@ -39,7 +73,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   try {
     const person = await prisma.user.findUnique({ where: { id }, select: { id: true, isGuest: true } });
     if (!person || person.isGuest) return NextResponse.json({ error: 'Person not found' }, { status: 404 });
-    return NextResponse.json(await personUsage(id, new Date(), viewer.id));
+    const now = new Date();
+    return NextResponse.json({ ...(await personUsage(id, now, viewer.id)), entitlements: await entitlementsOf(id, now) });
   } catch (error) {
     console.error('[ExtraUsage] Could not read:', error instanceof Error ? error.message : 'unknown');
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
@@ -50,6 +85,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
  * POST /api/admin/users/:id/extra-usage { grantKey, amount: double | five | none, endsAt, settlement: gift | to_bill, note? } - gives
  * extra usage from now until `endsAt`. `grantKey` makes it once (the sheet makes one when it opens, so a double tap gives it once).
  * Giving it answers whatever the person asked for. Nothing is charged here: "to_bill" only records what was agreed outside.
+ *
+ * With `scope: "speech" | "apps"` it extends only that one entitlement of the person (their own monthly speech allowance, or their own monthly
+ * allowance for connected Apps), never a platform budget, another payer's rules or a provider's limit. The answer carries `preview` (what it
+ * extends, what it never overrides, when it ends). Without `scope` it is extra computer usage, as before.
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const admin = await asSuperAdmin(request);
@@ -73,6 +112,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   // Never cut short: two long keys sharing their first part would otherwise become one stored key
   if (key.length > 255) return NextResponse.json({ error: 'grantKey is too long' }, { status: 400 });
   const { settlement } = body;
+  if (body.scope !== undefined && !isEntitlementScope(body.scope)) return NextResponse.json({ error: 'scope must be speech or apps (or left out for computer usage)' }, { status: 400 });
+  if (isEntitlementScope(body.scope)) return giveEntitlement(id, body.scope, key, { amount, settlement, endsAt: body.endsAt, note: body.note }, admin.id);
   try {
     // One key is settled one at a time, from before anything about time is judged to the end: a try that got no answer and is sent
     // again waits for the first to finish, then finds what it saved. So "was it saved?" always has an answer before a new grant is
@@ -145,6 +186,14 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   const now = new Date();
   if (typeof body.grantKey !== 'string' || !body.grantKey) return NextResponse.json({ error: 'grantKey is required' }, { status: 400 });
   try {
+    // A speech or Apps grant is ended the same way: "End it now", only through this person's page
+    const own = await prisma.meterEntitlementGrant.findUnique({ where: { grantKey: body.grantKey }, select: { personId: true } });
+    if (own) {
+      if (own.personId !== id) return NextResponse.json({ error: 'That extra usage was not found' }, { status: 404 });
+      if (body.action !== 'end') return NextResponse.json({ error: 'action must be end for speech and Apps extra usage' }, { status: 400 });
+      await endEntitlementGrantNow(body.grantKey, now);
+      return NextResponse.json({ entitlements: await entitlementsOf(id, new Date()) });
+    }
     // Only this person's extra usage can be touched through this person's page
     const grant = await prisma.meterGrant.findUnique({ where: { grantKey: body.grantKey }, select: { personId: true } });
     if (!grant || grant.personId !== id) return NextResponse.json({ error: 'That extra usage was not found' }, { status: 404 });
@@ -178,6 +227,45 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   } catch (error) {
     if (error instanceof GrantRefused) return NextResponse.json({ error: error.message }, { status: 400 });
     console.error('[ExtraUsage] Could not change:', error instanceof Error ? error.message : 'unknown');
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}
+
+/** "Give more" of one entitlement: once under its key, then it answers the asks for that scope made until now. */
+async function giveEntitlement(
+  id: string,
+  scope: EntitlementScope,
+  key: string,
+  input: { amount: { multiplier: number | null; noLimit: boolean }; settlement: 'gift' | 'to_bill'; endsAt: unknown; note: unknown },
+  adminId: string,
+) {
+  try {
+    const outcome = await prisma.$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`grant:${key}`}))`;
+        const now = new Date();
+        const person = await tx.user.findUnique({ where: { id }, select: { id: true, isGuest: true } });
+        if (!person || person.isGuest) return { status: 404 as const };
+        const saved = await tx.meterEntitlementGrant.findUnique({ where: { grantKey: key }, select: { startsAt: true, endsAt: true } });
+        const endsAt = saved ? saved.endsAt : endsAtOf(input.endsAt, now);
+        if (!endsAt) return { status: 400 as const };
+        return recordEntitlementGrant(
+          { grantKey: key, personId: id, scope, settlement: input.settlement, multiplier: input.amount.multiplier, noLimit: input.amount.noLimit, startsAt: saved ? saved.startsAt : now, endsAt, givenById: adminId, note: typeof input.note === 'string' ? input.note : null },
+          tx,
+        );
+      },
+      { timeout: 30_000, maxWait: 10_000 },
+    );
+    if ('status' in outcome) return NextResponse.json({ error: outcome.status === 404 ? 'Person not found' : 'endsAt must be a date in the future, within a year' }, { status: outcome.status });
+    const { recorded, grant } = outcome;
+    // The ask for this scope made up to now is answered; a replay answers only what was asked before the grant began
+    const answeredAt = new Date();
+    await answerRequests(id, key, answeredAt, recorded ? answeredAt : grant.startsAt, scope === 'speech' ? 'speech' : 'apps');
+    return NextResponse.json({ recorded, preview: previewOf(scope, grant), entitlements: await entitlementsOf(id, new Date()) }, { status: recorded ? 201 : 200 });
+  } catch (error) {
+    if (error instanceof GrantKeyUsed) return NextResponse.json({ error: error.message, code: 'key_used' }, { status: 409 });
+    if (error instanceof GrantRefused) return NextResponse.json({ error: error.message }, { status: 400 });
+    console.error('[ExtraUsage] Could not give:', error instanceof Error ? error.message : 'unknown');
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

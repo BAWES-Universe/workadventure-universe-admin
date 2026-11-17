@@ -389,6 +389,7 @@ export function missingInstantLimits(limits: InstantLimits): (keyof InstantLimit
 export type InstantReason =
   | 'not_set' // the limits are not set yet
   | 'paused' // Instant stopped itself or was stopped
+  | 'frozen' // this one tool's price changed in a way nobody could read, so it takes no new runs until it is settled
   | 'rule' // a rule the owner said in chat says no (its own words are given)
   | 'not_offered' // no such tool in the table
   | 'unbounded' // these arguments cannot be held to a price
@@ -415,6 +416,7 @@ export type InstantOutcome =
 export const REASON_WORDS: Record<InstantReason, string> = {
   not_set: 'This is not available yet.',
   paused: 'This is paused for now.',
+  frozen: 'This is not available right now.',
   rule: 'A rule you set says not to run that.',
   not_offered: 'That is not something I can run for you.',
   unbounded: 'I cannot say what that would cost, so I did not run it.',

@@ -4,6 +4,9 @@ import { prisma } from '@/lib/db';
 import { recordSpeechHeard } from '@/lib/meter-speech';
 import { checkSpeechCap } from '@/lib/speech-cap';
 import { lockSpeech, speechReserved, SPEECH_LOCK, NOTE_START_MS } from '@/lib/speech-reserved';
+import { resolveCompany, unfundedCompanies, type SpeechReason } from '@/lib/speech-admission';
+import { getRateCard, hearingExposure } from '@/lib/speech-rates';
+import { monthOf } from '@/lib/meter-values';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { VOICE_RANGES, savedVoiceKeyLimits } from '@/lib/voice-limit-values';
 import { checkReplyAllowance, type ReplyAllowance } from '@/lib/reply-limits';
@@ -133,24 +136,33 @@ export interface TurnView {
   seconds: number;
 }
 
+/**
+ * Every refusal that comes from a limit or a stop says which of the five it was (`stoppedBy`: person, budget, hold, provider, capacity) and whether
+ * the note was transcribed (`transcribed`): nothing is heard before a note is let through, so a refused note was never transcribed. Where waiting
+ * helps, `retryAfterSeconds` says how long. A visitor is never shown a balance in any of them.
+ */
+type Stopped = { stoppedBy: SpeechReason; transcribed: false; retryAfterSeconds?: number };
+
 export type Reservation =
   /** `answer` comes back for a turn already answered, while it is kept: send it, never run it again. */
   | { ok: true; turn: TurnView; replay: boolean; answer?: Buffered }
   /** The person's reply allowance is used up: the usual limit card, and nothing is heard. */
-  | { ok: false; reason: 'reply-limit'; allowance: Extract<ReplyAllowance, { allowed: false }> }
+  | ({ ok: false; reason: 'reply-limit'; allowance: Extract<ReplyAllowance, { allowed: false }> } & Stopped)
   /**
    * Note minutes for the day are used up. `person`: the person's own (a guest's on the Brick for guests), the limit card.
-   * `universe`: the universe's guests together on the Brick for guests. `bot`: the day the owner set on the key that hears it.
+   * `universe`: the universe's guests together on the Brick for guests, or the Speech budget. `bot`: the day the owner set on the key that hears it.
    */
-  | { ok: false; reason: 'note-minutes'; limit: 'person' | 'universe' | 'bot'; resetsAt: string }
-  /** Too many notes for everyone right now: "Couldn't listen to this note right now. Type it instead." */
-  | { ok: false; reason: 'busy' }
+  | ({ ok: false; reason: 'note-minutes'; limit: 'person' | 'universe' | 'bot'; resetsAt: string } & Stopped)
+  /** Too many notes for everyone right now, or what is set aside will free soon, or the voice company has no funds: "Couldn't listen to this note right now. Type it instead." */
+  | ({ ok: false; reason: 'busy' } & Stopped)
   /** Nothing can hear this note: the mic should not have been there. */
-  | { ok: false; reason: 'no-hearing' }
+  | ({ ok: false; reason: 'no-hearing' } & Stopped)
   /** The answer of this turn is no longer kept: "This answer is no longer available. Send it again." */
   | { ok: false; reason: 'expired' }
   /** Longer than the longest voice note (Limits, Voice), in seconds: "This note is over 5 minutes. Send a shorter one." */
   | { ok: false; reason: 'too-long'; longestSeconds: number };
+
+const unheard = (stoppedBy: SpeechReason, retryAfterSeconds?: number): Stopped => ({ stoppedBy, transcribed: false, ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}) });
 
 const view = (turn: VoiceNoteTurn): TurnView => ({ id: turn.id, state: turn.state as TurnState, payer: turn.payer as TurnView['payer'], seconds: turn.seconds });
 
@@ -245,7 +257,7 @@ export async function reserveVoiceNote(
 
   // Who pays is fixed here, for this attempt. Throws BotSettingsError(404) for a bot that isn't there
   const hearing = scope === 'bot' ? await botHearing(botId!, adapters) : await universeAiHearing(adapters);
-  if (hearing.route === 'none' || !hearing.payer) return { ok: false, reason: 'no-hearing' };
+  if (hearing.route === 'none' || !hearing.payer) return { ok: false, reason: 'no-hearing', ...unheard('provider') };
 
   // The note and its answer are one reply, checked before anything is heard: the bot's own daily cap whatever it answers on, and
   // Universe AI's windows when it answers there (lib/reply-limits.ts skips those for a person's own key)
@@ -253,7 +265,7 @@ export async function reserveVoiceNote(
     const source = input.source;
     if (source !== 'universe-ai' && source !== 'provider' && source !== 'own-key') throw new VoiceNoteError('source must be universe-ai, provider or own-key', 400);
     const allowance = await checkReplyAllowance(botId!, { userId, isGuest: input.isGuest, source }, now);
-    if (!allowance.allowed) return { ok: false, reason: 'reply-limit', allowance };
+    if (!allowance.allowed) return { ok: false, reason: 'reply-limit', allowance, ...unheard('person') };
   }
 
   const ownerDayLimit = scope === 'bot' ? await ownerKeyDayLimitSeconds(hearing) : null;
@@ -277,24 +289,38 @@ export async function reserveVoiceNote(
     const raced = await tx.voiceNoteTurn.findFirst({ where: asked, orderBy: { createdAt: 'asc' } });
     if (raced) return same(raced);
 
+    // What this note sets aside of the Speech budget when Universe AI hears it, written on its row (the owner's key sets aside nothing of ours)
+    let noteHold: { micros: number; rateVersion: number } | null = null;
     const counted = { released: false };
     const sum = async (where: Prisma.VoiceNoteTurnWhereInput) => (await tx.voiceNoteTurn.aggregate({ _sum: { seconds: true }, where: { ...counted, ...where } }))._sum.seconds ?? 0;
     const fits = (used: number, minutes: number) => used + seconds <= minutes * 60;
 
     if (universeAi) {
-      // The month's spending stop on speech Universe AI pays for (lib/speech-cap.ts): a note is held back whole, before it is heard. What
-      // notes and replies already let through may still take, and have not written to the books yet, is added (lib/speech-reserved.ts): read
-      // under this lock, where a note's event is written too, so each use is counted once and the last minutes of a Limit are never given twice
-      const inFlight = await speechReserved(tx, { personKey, replySeconds: limits.replySeconds, now });
-      const stop = await checkSpeechCap({ personId: personKey.startsWith('person:') ? personKey.slice('person:'.length) : null, seconds, inFlight }, now, tx);
-      if (stop) return { ok: false, reason: 'note-minutes', limit: stop.stopped === 'person' ? 'person' : 'universe', resetsAt: stop.resetsAt };
-      if (scope === 'bot') {
-        if (!fits(await sum({ scope: 'bot', personKey, payer: 'universe-ai', createdAt: { gte: day } }), limits.noteMinutesPerPerson)) return { ok: false, reason: 'note-minutes', limit: 'person', resetsAt: tomorrow };
-      } else {
-        if (!fits(await sum({ scope: 'guest-brick', personKey, createdAt: { gte: day } }), limits.guestNoteMinutesPerGuest)) return { ok: false, reason: 'note-minutes', limit: 'person', resetsAt: tomorrow };
-        if (!fits(await sum({ scope: 'guest-brick', universeKey, createdAt: { gte: day } }), limits.guestNoteMinutesPerUniverse)) return { ok: false, reason: 'note-minutes', limit: 'universe', resetsAt: tomorrow };
+      // The Speech budget and the person's own speech entitlement (lib/speech-cap.ts): a note is held back whole, before it is heard. What notes,
+      // replies and windows already let through may still take, and have not written to the books yet, is added (lib/speech-reserved.ts): read
+      // under this lock, where a note's event is written too, so each use is counted once and the last of a budget is never given twice
+      const card = await getRateCard(tx);
+      const company = await resolveCompany(tx, 'hearing', { provider: hearing.provider?.adapter, model: hearing.model });
+      const price = card ? hearingExposure(card, { adapter: company.adapter, talk: company.talk, seconds }) : null;
+      const resetsAt = monthOf(now).end.toISOString();
+      // No rate card, or no rate for this company: nothing is assumed, speech that needs a price is stopped
+      if (!price) return { ok: false, reason: 'note-minutes', limit: 'universe', resetsAt, ...unheard('budget') };
+      if (company.adapter && (await unfundedCompanies(tx))[company.adapter]) return { ok: false, reason: 'busy', ...unheard('provider') };
+      noteHold = { micros: price.micros, rateVersion: price.rateVersion };
+      const held = await speechReserved(tx, { personKey, replySeconds: limits.replySeconds, now });
+      const stop = await checkSpeechCap({ personId: personKey.startsWith('person:') ? personKey.slice('person:'.length) : null, memberSeconds: seconds, exposureMicros: price.micros, held }, now, tx);
+      if (stop) {
+        // What is only set aside will free soon: this note can be sent again shortly, so it is "busy" (type it instead), not "used up"
+        if (stop.reason === 'hold') return { ok: false, reason: 'busy', ...unheard('hold', stop.retryAfterSeconds) };
+        return { ok: false, reason: 'note-minutes', limit: stop.reason === 'person' ? 'person' : 'universe', resetsAt: stop.resetsAt, ...unheard(stop.reason) };
       }
-      if (!fits(await sum({ payer: 'universe-ai', createdAt: { gte: new Date(now.getTime() - HOUR) } }), limits.noteMinutesPerHour)) return { ok: false, reason: 'busy' };
+      if (scope === 'bot') {
+        if (!fits(await sum({ scope: 'bot', personKey, payer: 'universe-ai', createdAt: { gte: day } }), limits.noteMinutesPerPerson)) return { ok: false, reason: 'note-minutes', limit: 'person', resetsAt: tomorrow, ...unheard('person') };
+      } else {
+        if (!fits(await sum({ scope: 'guest-brick', personKey, createdAt: { gte: day } }), limits.guestNoteMinutesPerGuest)) return { ok: false, reason: 'note-minutes', limit: 'person', resetsAt: tomorrow, ...unheard('person') };
+        if (!fits(await sum({ scope: 'guest-brick', universeKey, createdAt: { gte: day } }), limits.guestNoteMinutesPerUniverse)) return { ok: false, reason: 'note-minutes', limit: 'universe', resetsAt: tomorrow, ...unheard('capacity') };
+      }
+      if (!fits(await sum({ payer: 'universe-ai', createdAt: { gte: new Date(now.getTime() - HOUR) } }), limits.noteMinutesPerHour)) return { ok: false, reason: 'busy', ...unheard('capacity') };
       const atOnce = await tx.voiceNoteTurn.count({
         where: {
           payer: 'universe-ai',
@@ -304,7 +330,7 @@ export async function reserveVoiceNote(
           ],
         },
       });
-      if (atOnce >= limits.notesAtOnce) return { ok: false, reason: 'busy' };
+      if (atOnce >= limits.notesAtOnce) return { ok: false, reason: 'busy', ...unheard('capacity') };
     }
 
     if (scope === 'bot' && !universeAi) {
@@ -317,12 +343,12 @@ export async function reserveVoiceNote(
       } else {
         await tx.voiceListenUse.upsert({ where, create: { botId: botId!, day, seconds: 0 }, update: {} });
         const added = await tx.voiceListenUse.updateMany({ where: { botId: botId!, day, seconds: { lte: ownerDayLimit - seconds } }, data: { seconds: { increment: seconds } } });
-        if (added.count === 0) return { ok: false, reason: 'note-minutes', limit: 'bot', resetsAt: tomorrow };
+        if (added.count === 0) return { ok: false, reason: 'note-minutes', limit: 'bot', resetsAt: tomorrow, ...unheard('provider') };
       }
     }
 
     const turn = await tx.voiceNoteTurn.create({
-      data: { scope, personKey, target, botId, universeKey, clientTurnId, fingerprint, payer: hearing.payer!, providerId: hearing.provider?.id ?? null, seconds, state: 'reserved', createdAt: now },
+      data: { scope, personKey, target, botId, universeKey, clientTurnId, fingerprint, payer: hearing.payer!, providerId: hearing.provider?.id ?? null, seconds, state: 'reserved', createdAt: now, ...(noteHold ? { holdMicros: BigInt(noteHold.micros), rateVersion: noteHold.rateVersion } : {}) },
     });
     return { ok: true, turn: view(turn), replay: false };
   }, SPEECH_LOCK);

@@ -8,85 +8,85 @@ datasource db {
 
 // Users
 model User {
-  id           String   @id @default(uuid())
-  uuid         String   @unique // WorkAdventure user identifier
-  email        String?  @unique
-  name         String?
-  matrixChatId String?  @map("matrix_chat_id") // Matrix ID: "@user:matrix.org"
+  id                 String   @id @default(uuid())
+  uuid               String   @unique // WorkAdventure user identifier
+  email              String?  @unique
+  name               String?
+  matrixChatId       String?  @map("matrix_chat_id") // Matrix ID: "@user:matrix.org"
   // The companion they wear now, in every world (null = none). Changed only by their own pick.
-  companionTextureId String? @map("companion_texture_id")
-  lastIpAddress String? @map("last_ip_address") // Last known IP address
-  isGuest      Boolean  @default(false) @map("is_guest") // True for unauthenticated guest users
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  companionTextureId String?  @map("companion_texture_id")
+  lastIpAddress      String?  @map("last_ip_address") // Last known IP address
+  isGuest            Boolean  @default(false) @map("is_guest") // True for unauthenticated guest users
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
 
   // Relations
-  ownedUniverses    Universe[]        @relation("UniverseOwner")
-  passedUniverses   Universe[]        @relation("UniversePreviousOwner")
-  worldMemberships  WorldMember[]
-  bans              Ban[]             @relation("BannedUser")
-  bannedBy          Ban[]             @relation("BannedBy")
-  bansLifted        Ban[]             @relation("BanLiftedBy")
-  banAppealsDecided Ban[]             @relation("BanAppealDecidedBy")
-  reportsAbout      Report[]          @relation("ReportedUser")
-  reportsMade       Report[]          @relation("Reporter")
-  reportsHandled    Report[]          @relation("ReportHandledBy")
-  avatars           UserAvatar[]
-  aiKeys            BotsAiProvider[]  @relation("AiKeyOwner")
-  voiceKeys         VoiceProvider[]   @relation("VoiceKeyOwner")
-  outfits           UserOutfit[]
-  favorites         Favorite[]
-  followers         Follow[]          @relation("Follower")
-  following         Follow[]          @relation("Following")
-  friendships1      Friendship[]      @relation("User1")
-  friendships2      Friendship[]      @relation("User2")
-  requestedFriendships Friendship[]   @relation("RequestedBy")
-  roomAccesses      RoomAccess[]
-  visitCard         VisitCard?
-  membershipInvitationsSent MembershipInvitation[] @relation("InvitedBy")
+  ownedUniverses                Universe[]             @relation("UniverseOwner")
+  passedUniverses               Universe[]             @relation("UniversePreviousOwner")
+  worldMemberships              WorldMember[]
+  bans                          Ban[]                  @relation("BannedUser")
+  bannedBy                      Ban[]                  @relation("BannedBy")
+  bansLifted                    Ban[]                  @relation("BanLiftedBy")
+  banAppealsDecided             Ban[]                  @relation("BanAppealDecidedBy")
+  reportsAbout                  Report[]               @relation("ReportedUser")
+  reportsMade                   Report[]               @relation("Reporter")
+  reportsHandled                Report[]               @relation("ReportHandledBy")
+  avatars                       UserAvatar[]
+  aiKeys                        BotsAiProvider[]       @relation("AiKeyOwner")
+  voiceKeys                     VoiceProvider[]        @relation("VoiceKeyOwner")
+  outfits                       UserOutfit[]
+  favorites                     Favorite[]
+  followers                     Follow[]               @relation("Follower")
+  following                     Follow[]               @relation("Following")
+  friendships1                  Friendship[]           @relation("User1")
+  friendships2                  Friendship[]           @relation("User2")
+  requestedFriendships          Friendship[]           @relation("RequestedBy")
+  roomAccesses                  RoomAccess[]
+  visitCard                     VisitCard?
+  membershipInvitationsSent     MembershipInvitation[] @relation("InvitedBy")
   membershipInvitationsReceived MembershipInvitation[] @relation("InvitedUser")
-  ownershipOffersReceived OwnershipOffer[] @relation("OwnershipOfferTo")
-  ownershipOffersMade     OwnershipOffer[] @relation("OwnershipOfferBy")
-  bricks            Bot[] @relation("BotOwner")
-  defaultBrick      DefaultBrick?
-  brickVisit        BrickVisit?
-  brickHomesPlaced  BrickHome[]
-  brickOffers       BrickOffer[]
-  brickItems        BrickItem[] @relation("BrickItemOwner")
-  brickTemplates    BrickTemplate[] @relation("BrickTemplateMaker")
-  brickTemplatesPicked BrickTemplate[] @relation("BrickTemplatePickedBy")
-  brickTemplateStars BrickTemplateStar[]
-  brickTemplateMadeBy BrickTemplateUse[] @relation("BrickTemplateUseMaker")
-  guestBrickHandovers GuestBrickHandover[]
-  botsCreated       Bot[] @relation("BotCreatedBy")
-  botsUpdated       Bot[] @relation("BotUpdatedBy")
-  botAccessRules    BotAccessRule[]
-  botToolsConfirmed BotMcpTool[] @relation("BotToolConfirmedBy")
-  botToolsMoved     BotMcpTool[] @relation("BotToolMovedBy")
-  botServersConnected BotMcpServer[] @relation("BotMcpServerConnectedBy")
-  appConnections    AppConnection[] @relation("AppConnectionOwner")
-  appKeyRequests    AppKeyRequest[] @relation("AppKeyRequestOwner")
-  appPageJobs       AppPageJob[]    @relation("AppPageJobOwner")
-  appConnectionsMade AppConnection[] @relation("AppConnectionConnectedBy")
-  appLendsMade      AppLend[]       @relation("AppLendLentBy")
-  appSharesMade     AppShare[]      @relation("AppShareBy")
-  appManagerOf      AppConnectionManager[] @relation("AppManagerUser")
-  appManagersAdded  AppConnectionManager[] @relation("AppManagerAddedBy")
-  botConversations BotsConversation[]
-  botMemories      BotsMemory[]
-  avatarGrants     UserAvatarGrant[]
-  avatarSetAuditLogs AvatarSetAuditLog[]
-  preferences      UserPreference[]
-  universeMemberships UniverseMember[]
-  notices          UserNotice[]
-  pushDevices      PushDevice[]
-  pushActivity     PushActivity?
-  artifacts        Artifact[]        @relation("ArtifactOwner")
-  artifactAsks     ArtifactVersion[] @relation("ArtifactAsker")
-  artifactPasses   ArtifactPass[]    @relation("ArtifactPassHolder")
-  nearbySharedItems NearbySharedItem[]
-  botUsageTalked   BotsAiUsage[]     @relation("UsageTalkedPerson")
-  botFiles         BotFile[]         @relation("BotFileOwner")
+  ownershipOffersReceived       OwnershipOffer[]       @relation("OwnershipOfferTo")
+  ownershipOffersMade           OwnershipOffer[]       @relation("OwnershipOfferBy")
+  bricks                        Bot[]                  @relation("BotOwner")
+  defaultBrick                  DefaultBrick?
+  brickVisit                    BrickVisit?
+  brickHomesPlaced              BrickHome[]
+  brickOffers                   BrickOffer[]
+  brickItems                    BrickItem[]            @relation("BrickItemOwner")
+  brickTemplates                BrickTemplate[]        @relation("BrickTemplateMaker")
+  brickTemplatesPicked          BrickTemplate[]        @relation("BrickTemplatePickedBy")
+  brickTemplateStars            BrickTemplateStar[]
+  brickTemplateMadeBy           BrickTemplateUse[]     @relation("BrickTemplateUseMaker")
+  guestBrickHandovers           GuestBrickHandover[]
+  botsCreated                   Bot[]                  @relation("BotCreatedBy")
+  botsUpdated                   Bot[]                  @relation("BotUpdatedBy")
+  botAccessRules                BotAccessRule[]
+  botToolsConfirmed             BotMcpTool[]           @relation("BotToolConfirmedBy")
+  botToolsMoved                 BotMcpTool[]           @relation("BotToolMovedBy")
+  botServersConnected           BotMcpServer[]         @relation("BotMcpServerConnectedBy")
+  appConnections                AppConnection[]        @relation("AppConnectionOwner")
+  appKeyRequests                AppKeyRequest[]        @relation("AppKeyRequestOwner")
+  appPageJobs                   AppPageJob[]           @relation("AppPageJobOwner")
+  appConnectionsMade            AppConnection[]        @relation("AppConnectionConnectedBy")
+  appLendsMade                  AppLend[]              @relation("AppLendLentBy")
+  appSharesMade                 AppShare[]             @relation("AppShareBy")
+  appManagerOf                  AppConnectionManager[] @relation("AppManagerUser")
+  appManagersAdded              AppConnectionManager[] @relation("AppManagerAddedBy")
+  botConversations              BotsConversation[]
+  botMemories                   BotsMemory[]
+  avatarGrants                  UserAvatarGrant[]
+  avatarSetAuditLogs            AvatarSetAuditLog[]
+  preferences                   UserPreference[]
+  universeMemberships           UniverseMember[]
+  notices                       UserNotice[]
+  pushDevices                   PushDevice[]
+  pushActivity                  PushActivity?
+  artifacts                     Artifact[]             @relation("ArtifactOwner")
+  artifactAsks                  ArtifactVersion[]      @relation("ArtifactAsker")
+  artifactPasses                ArtifactPass[]         @relation("ArtifactPassHolder")
+  nearbySharedItems             NearbySharedItem[]
+  botUsageTalked                BotsAiUsage[]          @relation("UsageTalkedPerson")
+  botFiles                      BotFile[]              @relation("BotFileOwner")
 
   @@map("users")
 }
@@ -112,26 +112,26 @@ model UserPreference {
 // `itemKey` is the game's own key for the item, so the same item seen twice is kept once. A file from the game's
 // uploader is kept by its bucket and file id ("bucket/id", its link may expire); anything else by its link.
 model NearbySharedItem {
-  id         String   @id @default(uuid())
-  userId     String   @map("user_id")
-  itemKey    String   @map("item_key") @db.VarChar(300)
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  itemKey      String   @map("item_key") @db.VarChar(300)
   // "media" (an image or video), "link" or "file"
-  kind       String   @db.VarChar(10)
-  name       String   @db.VarChar(300)
-  link       String?  @db.VarChar(2000)
-  fileId     String?  @map("file_id") @db.VarChar(200)
-  mimeType   String?  @map("mime_type") @db.VarChar(150)
-  size       Int?
-  isVideo    Boolean  @default(false) @map("is_video")
-  senderName String   @map("sender_name") @db.VarChar(100)
+  kind         String   @db.VarChar(10)
+  name         String   @db.VarChar(300)
+  link         String?  @db.VarChar(2000)
+  fileId       String?  @map("file_id") @db.VarChar(200)
+  mimeType     String?  @map("mime_type") @db.VarChar(150)
+  size         Int?
+  isVideo      Boolean  @default(false) @map("is_video")
+  senderName   String   @map("sender_name") @db.VarChar(100)
   // The sender's chat account, so the item shows in their profile (game #1615); null for items kept before it was sent
-  senderChatId String? @map("sender_chat_id") @db.VarChar(255)
+  senderChatId String?  @map("sender_chat_id") @db.VarChar(255)
   // Sent by this person
-  mine       Boolean  @default(false)
+  mine         Boolean  @default(false)
   // The chat accounts of the others in the chat when it was shared, so what this person sent shows in their profiles
-  withChatIds String[] @default([]) @map("with_chat_ids")
-  sentAt     DateTime @map("sent_at")
-  createdAt  DateTime @default(now()) @map("created_at")
+  withChatIds  String[] @default([]) @map("with_chat_ids")
+  sentAt       DateTime @map("sent_at")
+  createdAt    DateTime @default(now()) @map("created_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -249,21 +249,21 @@ model Artifact {
 }
 
 model ArtifactVersion {
-  id           String   @id @default(uuid())
-  artifactId   String   @map("artifact_id")
-  number       Int
+  id          String   @id @default(uuid())
+  artifactId  String   @map("artifact_id")
+  number      Int
   // What changed, in a line
-  summary      String?  @db.VarChar(300)
+  summary     String?  @db.VarChar(300)
   // Who asked for this version: the person (null for a guest) and the name they had then
-  askedById    String?  @map("asked_by_id")
-  askedByName  String?  @map("asked_by_name") @db.VarChar(100)
+  askedById   String?  @map("asked_by_id")
+  askedByName String?  @map("asked_by_name") @db.VarChar(100)
   // The file of this version in the artifacts bucket. Unguessable: it carries a random part.
-  fileKey      String   @map("file_key") @db.VarChar(255)
-  sizeBytes    Int      @map("size_bytes")
+  fileKey     String   @map("file_key") @db.VarChar(255)
+  sizeBytes   Int      @map("size_bytes")
   // The songs, images and videos this version carries (#1510), beside its file in the same folder:
   // [{ name, contentType, sizeBytes, key }]. Empty for most versions.
-  media        Json     @default("[]")
-  createdAt    DateTime @default(now()) @map("created_at")
+  media       Json     @default("[]")
+  createdAt   DateTime @default(now()) @map("created_at")
 
   artifact Artifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
   askedBy  User?    @relation("ArtifactAsker", fields: [askedById], references: [id], onDelete: SetNull)
@@ -309,71 +309,71 @@ model ArtifactRetiredFile {
 
 // Universes
 model Universe {
-  id          String   @id @default(uuid())
-  slug        String   @unique // URL identifier: "my-universe"
-  name        String
-  description String?
-  ownerId     String   @map("owner_id")
-  isPublic    Boolean  @default(true) @map("is_public")
-  featured    Boolean  @default(false) // For discovery
-  thumbnailUrl String? @map("thumbnail_url")
+  id                   String    @id @default(uuid())
+  slug                 String    @unique // URL identifier: "my-universe"
+  name                 String
+  description          String?
+  ownerId              String    @map("owner_id")
+  isPublic             Boolean   @default(true) @map("is_public")
+  featured             Boolean   @default(false) // For discovery
+  thumbnailUrl         String?   @map("thumbnail_url")
   // Hide bot conversations (#435): Orbit shows no transcript or bot memory text for any bot here, and the bot server
   // sends none to PostHog or Sentry. Bots still remember people either way. Off by default.
-  hideBotConversations Boolean @default(false) @map("hide_bot_conversations")
+  hideBotConversations Boolean   @default(false) @map("hide_bot_conversations")
   // Allow voice bots here (#740): a bot can only speak and listen in this universe while it is on.
-  allowVoiceBots Boolean @default(true) @map("allow_voice_bots")
+  allowVoiceBots       Boolean   @default(true) @map("allow_voice_bots")
   // Visiting Bricks (game #2005): whether people may bring their own Brick along here. On for every universe,
   // those that existed before it shipped included (migration 20261114120000); a host can turn it off.
-  allowVisitingBricks Boolean @default(true) @map("allow_visiting_bricks")
+  allowVisitingBricks  Boolean   @default(true) @map("allow_visiting_bricks")
   // Set when the universe was passed to this owner (#820): when, and from whom. Null for the person who created it.
-  ownerSince      DateTime? @map("owner_since")
-  previousOwnerId String?   @map("previous_owner_id")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  ownerSince           DateTime? @map("owner_since")
+  previousOwnerId      String?   @map("previous_owner_id")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
 
   // Relations
-  owner      User      @relation("UniverseOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  previousOwner User?  @relation("UniversePreviousOwner", fields: [previousOwnerId], references: [id], onDelete: SetNull)
-  worlds     World[]
-  bans       Ban[]
-  favorites  Favorite[]
-  roomAccesses RoomAccess[]
-  roles      Role[]
-  members    UniverseMember[]
+  owner                 User                   @relation("UniverseOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  previousOwner         User?                  @relation("UniversePreviousOwner", fields: [previousOwnerId], references: [id], onDelete: SetNull)
+  worlds                World[]
+  bans                  Ban[]
+  favorites             Favorite[]
+  roomAccesses          RoomAccess[]
+  roles                 Role[]
+  members               UniverseMember[]
   membershipInvitations MembershipInvitation[]
-  aiKeyLends AiKeyLend[]
-  appConnections AppConnection[]
-  appLends AppLend[]
-  voiceKeyLends VoiceKeyLend[]
-  ownershipOffer OwnershipOffer?
+  aiKeyLends            AiKeyLend[]
+  appConnections        AppConnection[]
+  appLends              AppLend[]
+  voiceKeyLends         VoiceKeyLend[]
+  ownershipOffer        OwnershipOffer?
 
   @@map("universes")
 }
 
 // Worlds
 model World {
-  id          String   @id @default(uuid())
-  universeId  String   @map("universe_id")
-  slug        String   // URL identifier: "office-world"
-  name        String
-  description String?
-  isPublic    Boolean  @default(true) @map("is_public")
-  featured    Boolean  @default(false) // For discovery
-  thumbnailUrl String? @map("thumbnail_url")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id           String   @id @default(uuid())
+  universeId   String   @map("universe_id")
+  slug         String // URL identifier: "office-world"
+  name         String
+  description  String?
+  isPublic     Boolean  @default(true) @map("is_public")
+  featured     Boolean  @default(false) // For discovery
+  thumbnailUrl String?  @map("thumbnail_url")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
   // Relations
-  universe   Universe     @relation(fields: [universeId], references: [id], onDelete: Cascade)
-  rooms      Room[]
-  members    WorldMember[]
-  bans       Ban[]
-  reports    Report[]
-  avatars    UserAvatar[]
-  favorites  Favorite[]
-  roomAccesses RoomAccess[]
+  universe              Universe               @relation(fields: [universeId], references: [id], onDelete: Cascade)
+  rooms                 Room[]
+  members               WorldMember[]
+  bans                  Ban[]
+  reports               Report[]
+  avatars               UserAvatar[]
+  favorites             Favorite[]
+  roomAccesses          RoomAccess[]
   membershipInvitations MembershipInvitation[]
-  avatarScopes AvatarSetScope[]
+  avatarScopes          AvatarSetScope[]
 
   @@unique([universeId, slug]) // Slug unique within universe
   @@map("worlds")
@@ -381,28 +381,28 @@ model World {
 
 // Rooms
 model Room {
-  id          String   @id @default(uuid())
-  worldId     String   @map("world_id")
-  slug        String   // URL identifier: "lobby"
-  name        String
-  description String?
-  mapUrl      String?  @map("map_url") // External TMJ URL (e.g., GitHub Pages)
-  wamUrl      String?  @map("wam_url") // WAM file URL in map-storage (created via PUT)
-  templateMapId String? @map("template_map_id") // Reference to template map if created from template
-  authenticationMandatory Boolean @default(false) @map("authentication_mandatory")
-  isPublic    Boolean  @default(true) @map("is_public")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id                      String   @id @default(uuid())
+  worldId                 String   @map("world_id")
+  slug                    String // URL identifier: "lobby"
+  name                    String
+  description             String?
+  mapUrl                  String?  @map("map_url") // External TMJ URL (e.g., GitHub Pages)
+  wamUrl                  String?  @map("wam_url") // WAM file URL in map-storage (created via PUT)
+  templateMapId           String?  @map("template_map_id") // Reference to template map if created from template
+  authenticationMandatory Boolean  @default(false) @map("authentication_mandatory")
+  isPublic                Boolean  @default(true) @map("is_public")
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @updatedAt @map("updated_at")
 
   // Relations
-  world      World      @relation(fields: [worldId], references: [id], onDelete: Cascade)
-  templateMap RoomTemplateMap? @relation(fields: [templateMapId], references: [id], onDelete: SetNull)
-  favorites  Favorite[]
+  world        World            @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  templateMap  RoomTemplateMap? @relation(fields: [templateMapId], references: [id], onDelete: SetNull)
+  favorites    Favorite[]
   roomAccesses RoomAccess[]
-  bots       Bot[]
-  reports    Report[]
-  brickVisits BrickVisit[]
-  brickHomes  BrickHome[]
+  bots         Bot[]
+  reports      Report[]
+  brickVisits  BrickVisit[]
+  brickHomes   BrickHome[]
 
   @@unique([worldId, slug]) // Slug unique within world
   @@map("rooms")
@@ -421,26 +421,26 @@ model RoomAccess {
   hasMembership   Boolean  @default(false) @map("has_membership") // true if has WorldMember record
   membershipTags  String[] @map("membership_tags") // Tags from membership if exists
 
-  universeId      String   @map("universe_id")
-  worldId         String   @map("world_id")
-  roomId          String   @map("room_id")
+  universeId String @map("universe_id")
+  worldId    String @map("world_id")
+  roomId     String @map("room_id")
 
-  universeSlug    String   @map("universe_slug")
-  worldSlug       String   @map("world_slug")
-  roomSlug        String   @map("room_slug")
+  universeSlug String @map("universe_slug")
+  worldSlug    String @map("world_slug")
+  roomSlug     String @map("room_slug")
 
-  playUri         String   @map("play_uri") // Full play URI
+  playUri String @map("play_uri") // Full play URI
 
-  textureIds      String[] @default([]) @map("texture_ids") // The Woka a guest picked (their account has its own saved outfit)
+  textureIds String[] @default([]) @map("texture_ids") // The Woka a guest picked (their account has its own saved outfit)
 
-  accessedAt      DateTime @default(now()) @map("accessed_at")
+  accessedAt DateTime @default(now()) @map("accessed_at")
 
   // Relations
-  user            User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
-  universe        Universe @relation(fields: [universeId], references: [id], onDelete: Cascade)
-  world           World    @relation(fields: [worldId], references: [id], onDelete: Cascade)
-  room            Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  relinks         RoomAccessRelink[]
+  user     User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  universe Universe           @relation(fields: [universeId], references: [id], onDelete: Cascade)
+  world    World              @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  room     Room               @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  relinks  RoomAccessRelink[]
 
   @@index([universeId, accessedAt])
   @@index([worldId, accessedAt])
@@ -474,11 +474,11 @@ model RoomAccessRelink {
 
 // World Memberships
 model WorldMember {
-  id        String   @id @default(uuid())
-  userId    String   @map("user_id")
-  worldId   String   @map("world_id")
-  tags      String[] // Array of tags: ["admin", "editor", "member"]
-  joinedAt  DateTime @default(now()) @map("joined_at")
+  id       String   @id @default(uuid())
+  userId   String   @map("user_id")
+  worldId  String   @map("world_id")
+  tags     String[] // Array of tags: ["admin", "editor", "member"]
+  joinedAt DateTime @default(now()) @map("joined_at")
 
   // Relations
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -496,7 +496,7 @@ model WorldMember {
 model Role {
   id          String   @id @default(uuid())
   universeId  String   @map("universe_id")
-  key         String   // Sent to the game as a tag
+  key         String // Sent to the game as a tag
   name        String
   color       String   @default("#99AAB5")
   showBadge   Boolean  @default(true) @map("show_badge") // Off: only people who manage roles see it on others
@@ -552,32 +552,32 @@ model UniverseMemberRole {
 
 // Bans
 model Ban {
-  id        String    @id @default(uuid())
-  userId    String?   @map("user_id")
-  universeId String?  @map("universe_id")
-  worldId   String?   @map("world_id")
-  ipAddress String?   @map("ip_address") // IPv4 or IPv6
-  reason    String?
-  bannedById String?  @map("banned_by")
-  bannedAt  DateTime  @default(now()) @map("banned_at")
-  expiresAt DateTime? @map("expires_at") // NULL = permanent
-  isActive  Boolean   @default(true) @map("is_active")
-  liftedAt  DateTime? @map("lifted_at")
-  liftedById String?  @map("lifted_by")
+  id                String    @id @default(uuid())
+  userId            String?   @map("user_id")
+  universeId        String?   @map("universe_id")
+  worldId           String?   @map("world_id")
+  ipAddress         String?   @map("ip_address") // IPv4 or IPv6
+  reason            String?
+  bannedById        String?   @map("banned_by")
+  bannedAt          DateTime  @default(now()) @map("banned_at")
+  expiresAt         DateTime? @map("expires_at") // NULL = permanent
+  isActive          Boolean   @default(true) @map("is_active")
+  liftedAt          DateTime? @map("lifted_at")
+  liftedById        String?   @map("lifted_by")
   // One appeal per ban: the banned player's message, and the admins' answer
-  appealText       String?   @map("appeal_text")
-  appealedAt       DateTime? @map("appealed_at")
-  appealDecision   String?   @map("appeal_decision") // "kept" | "lifted"; NULL while waiting
-  appealDecidedAt  DateTime? @map("appeal_decided_at")
-  appealDecidedById String?  @map("appeal_decided_by")
+  appealText        String?   @map("appeal_text")
+  appealedAt        DateTime? @map("appealed_at")
+  appealDecision    String?   @map("appeal_decision") // "kept" | "lifted"; NULL while waiting
+  appealDecidedAt   DateTime? @map("appeal_decided_at")
+  appealDecidedById String?   @map("appeal_decided_by")
 
   // Relations
-  user      User?     @relation("BannedUser", fields: [userId], references: [id], onDelete: Cascade)
-  universe  Universe? @relation(fields: [universeId], references: [id], onDelete: SetNull)
-  world     World?    @relation(fields: [worldId], references: [id], onDelete: Cascade) // a ban is about its world
-  bannedBy  User?     @relation("BannedBy", fields: [bannedById], references: [id])
-  liftedBy  User?     @relation("BanLiftedBy", fields: [liftedById], references: [id], onDelete: SetNull)
-  appealDecidedBy User? @relation("BanAppealDecidedBy", fields: [appealDecidedById], references: [id], onDelete: SetNull)
+  user            User?     @relation("BannedUser", fields: [userId], references: [id], onDelete: Cascade)
+  universe        Universe? @relation(fields: [universeId], references: [id], onDelete: SetNull)
+  world           World?    @relation(fields: [worldId], references: [id], onDelete: Cascade) // a ban is about its world
+  bannedBy        User?     @relation("BannedBy", fields: [bannedById], references: [id])
+  liftedBy        User?     @relation("BanLiftedBy", fields: [liftedById], references: [id], onDelete: SetNull)
+  appealDecidedBy User?     @relation("BanAppealDecidedBy", fields: [appealDecidedById], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([ipAddress])
@@ -613,14 +613,14 @@ model Report {
 
 // User Avatars & Companions
 model UserAvatar {
-  id              String   @id @default(uuid())
-  userId          String   @map("user_id")
-  worldId         String   @map("world_id")
-  textureIds      String[] @map("texture_ids") // Array of texture IDs: ["male1", "hat1"]
-  companionTextureId String? @map("companion_texture_id")
-  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+  id                 String    @id @default(uuid())
+  userId             String    @map("user_id")
+  worldId            String    @map("world_id")
+  textureIds         String[]  @map("texture_ids") // Array of texture IDs: ["male1", "hat1"]
+  companionTextureId String?   @map("companion_texture_id")
+  updatedAt          DateTime  @default(now()) @updatedAt @map("updated_at")
   // When the outfit itself was last picked (a companion change leaves it alone)
-  outfitUpdatedAt DateTime? @map("outfit_updated_at")
+  outfitUpdatedAt    DateTime? @map("outfit_updated_at")
 
   // Relations
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -649,18 +649,18 @@ model UserOutfit {
 
 // Favorites (for future social features)
 model Favorite {
-  id         String    @id @default(uuid())
-  userId     String    @map("user_id")
-  universeId String?   @map("universe_id")
-  worldId    String?   @map("world_id")
-  roomId     String?   @map("room_id")
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  universeId  String?  @map("universe_id")
+  worldId     String?  @map("world_id")
+  roomId      String?  @map("room_id")
   favoritedAt DateTime @default(now()) @map("favorited_at")
 
   // Relations
-  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   universe Universe? @relation(fields: [universeId], references: [id], onDelete: Cascade)
-  world    World?   @relation(fields: [worldId], references: [id], onDelete: Cascade)
-  room     Room?    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  world    World?    @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  room     Room?     @relation(fields: [roomId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([roomId])
@@ -671,10 +671,10 @@ model Favorite {
 
 // Follows (for future social features)
 model Follow {
-  id         String   @id @default(uuid())
-  followerId String   @map("follower_id")
-  followingId String @map("following_id")
-  followedAt DateTime @default(now()) @map("followed_at")
+  id          String   @id @default(uuid())
+  followerId  String   @map("follower_id")
+  followingId String   @map("following_id")
+  followedAt  DateTime @default(now()) @map("followed_at")
 
   // Relations
   follower  User @relation("Follower", fields: [followerId], references: [id], onDelete: Cascade)
@@ -688,18 +688,18 @@ model Follow {
 
 // Friendships (for future social features)
 model Friendship {
-  id         String    @id @default(uuid())
-  user1Id    String    @map("user1_id")
-  user2Id    String    @map("user2_id")
-  status     String    @default("pending") // pending, ignored, accepted, blocked (see lib/friends.ts)
-  requestedById String? @map("requested_by")
-  createdAt  DateTime  @default(now()) @map("created_at")
-  acceptedAt DateTime? @map("accepted_at")
+  id            String    @id @default(uuid())
+  user1Id       String    @map("user1_id")
+  user2Id       String    @map("user2_id")
+  status        String    @default("pending") // pending, ignored, accepted, blocked (see lib/friends.ts)
+  requestedById String?   @map("requested_by")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  acceptedAt    DateTime? @map("accepted_at")
 
   // Relations
-  user1       User   @relation("User1", fields: [user1Id], references: [id], onDelete: Cascade)
-  user2       User   @relation("User2", fields: [user2Id], references: [id], onDelete: Cascade)
-  requestedBy User?  @relation("RequestedBy", fields: [requestedById], references: [id])
+  user1       User  @relation("User1", fields: [user1Id], references: [id], onDelete: Cascade)
+  user2       User  @relation("User2", fields: [user2Id], references: [id], onDelete: Cascade)
+  requestedBy User? @relation("RequestedBy", fields: [requestedById], references: [id])
 
   @@unique([user1Id, user2Id])
   @@index([user1Id])
@@ -711,8 +711,8 @@ model Friendship {
 model VisitCard {
   id        String   @id @default(uuid())
   userId    String   @unique @map("user_id")
-  bio       String?  // Optional bio/description
-  links     Json     // Array of { label: string, url: string } objects
+  bio       String? // Optional bio/description
+  links     Json // Array of { label: string, url: string } objects
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -723,27 +723,27 @@ model VisitCard {
 
 // Membership Invitations
 model MembershipInvitation {
-  id            String   @id @default(uuid())
-  worldId       String   @map("world_id")
-  invitedUserId String   @map("invited_user_id")
-  invitedByUserId String  @map("invited_by_user_id")
-  status        String   @default("pending") // pending, accepted, rejected, cancelled
-  tags          String[] // Tags that will be assigned when accepted (invitations sent before roles)
+  id              String    @id @default(uuid())
+  worldId         String    @map("world_id")
+  invitedUserId   String    @map("invited_user_id")
+  invitedByUserId String    @map("invited_by_user_id")
+  status          String    @default("pending") // pending, accepted, rejected, cancelled
+  tags            String[] // Tags that will be assigned when accepted (invitations sent before roles)
   // Roles (#314): the universe they join, the roles they get and the worlds they work in. world_id stays the world it
   // was sent from (or the first world picked), for the screens that show one.
-  universeId    String?  @map("universe_id")
-  roleIds       String[] @default([]) @map("role_ids")
-  allWorlds     Boolean  @default(false) @map("all_worlds")
-  worldIds      String[] @default([]) @map("world_ids")
-  message       String?
-  invitedAt     DateTime @default(now()) @map("invited_at")
-  respondedAt   DateTime? @map("responded_at")
+  universeId      String?   @map("universe_id")
+  roleIds         String[]  @default([]) @map("role_ids")
+  allWorlds       Boolean   @default(false) @map("all_worlds")
+  worldIds        String[]  @default([]) @map("world_ids")
+  message         String?
+  invitedAt       DateTime  @default(now()) @map("invited_at")
+  respondedAt     DateTime? @map("responded_at")
 
   // Relations
-  world       World @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  world       World     @relation(fields: [worldId], references: [id], onDelete: Cascade)
   universe    Universe? @relation(fields: [universeId], references: [id], onDelete: Cascade)
-  invitedUser User  @relation("InvitedUser", fields: [invitedUserId], references: [id], onDelete: Cascade)
-  invitedBy   User  @relation("InvitedBy", fields: [invitedByUserId], references: [id], onDelete: Cascade)
+  invitedUser User      @relation("InvitedUser", fields: [invitedUserId], references: [id], onDelete: Cascade)
+  invitedBy   User      @relation("InvitedBy", fields: [invitedByUserId], references: [id], onDelete: Cascade)
 
   @@unique([worldId, invitedUserId, status], name: "UniquePendingInvitation")
   @@index([worldId])
@@ -757,12 +757,14 @@ model MembershipInvitation {
 // It ends when the person accepts or declines, the owner takes it back, the person leaves or is removed, or the
 // universe is deleted. The universe's owner changes only on accept, in one transaction (lib/ownership-offer.ts).
 model OwnershipOffer {
-  id            String   @id @default(uuid())
-  universeId    String   @unique @map("universe_id")
-  toUserId      String   @map("to_user_id")
-  /** Who started it: the owner, or a super admin acting for them. */
-  offeredById   String   @map("offered_by_id")
-  createdAt     DateTime @default(now()) @map("created_at")
+  id          String   @id @default(uuid())
+  universeId  String   @unique @map("universe_id")
+  toUserId    String   @map("to_user_id")
+  /**
+   * Who started it: the owner, or a super admin acting for them.
+   */
+  offeredById String   @map("offered_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
 
   universe  Universe @relation(fields: [universeId], references: [id], onDelete: Cascade)
   toUser    User     @relation("OwnershipOfferTo", fields: [toUserId], references: [id], onDelete: Cascade)
@@ -778,13 +780,13 @@ model RoomTemplateCategory {
   slug        String   @unique
   name        String
   description String?
-  icon        String?  // emoji
+  icon        String? // emoji
   order       Int      @default(0)
   isActive    Boolean  @default(true) @map("is_active")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  templates   RoomTemplate[]
+  templates RoomTemplate[]
 
   @@map("room_template_categories")
 }
@@ -803,37 +805,37 @@ model RoomTemplate {
   visibility       String   @default("public")
   isFeatured       Boolean  @default(false) @map("is_featured")
   authorId         String?  @map("author_id")
-  isActive          Boolean  @default(true) @map("is_active")
+  isActive         Boolean  @default(true) @map("is_active")
   createdAt        DateTime @default(now()) @map("created_at")
   updatedAt        DateTime @updatedAt @map("updated_at")
 
-  category         RoomTemplateCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
-  maps             RoomTemplateMap[]
+  category RoomTemplateCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  maps     RoomTemplateMap[]
 
   @@map("room_templates")
 }
 
 // Room Template Maps (Actual Selectable Maps)
 model RoomTemplateMap {
-  id                  String   @id @default(uuid())
-  templateId          String   @map("template_id")
-  slug                String
-  name                String
-  description         String?
-  mapUrl              String   @map("map_url")
-  previewImageUrl     String?  @map("preview_image_url")
-  sizeLabel           String?  @map("size_label")
-  orientation         String   @default("orthogonal")
-  tileSize            Int      @default(32) @map("tile_size")
+  id                   String   @id @default(uuid())
+  templateId           String   @map("template_id")
+  slug                 String
+  name                 String
+  description          String?
+  mapUrl               String   @map("map_url")
+  previewImageUrl      String?  @map("preview_image_url")
+  sizeLabel            String?  @map("size_label")
+  orientation          String   @default("orthogonal")
+  tileSize             Int      @default(32) @map("tile_size")
   recommendedWorldTags String[] @map("recommended_world_tags")
-  authorId            String?  @map("author_id")
-  order               Int      @default(0)
-  isActive            Boolean  @default(true) @map("is_active")
-  createdAt           DateTime @default(now()) @map("created_at")
-  updatedAt           DateTime @updatedAt @map("updated_at")
+  authorId             String?  @map("author_id")
+  order                Int      @default(0)
+  isActive             Boolean  @default(true) @map("is_active")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
 
-  template            RoomTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
-  rooms               Room[]
+  template RoomTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  rooms    Room[]
 
   @@unique([templateId, slug])
   @@index([templateId])
@@ -853,94 +855,95 @@ model AppSetting {
 
 // Bots
 model Bot {
-  id                  String   @id @default(uuid())
+  id                   String    @id @default(uuid())
   // Where the bot lives. A room bot has a room and no owner. A Brick (game #1992) has an owner and no room: it lives in
   // its owner's chats. The database holds a bot to exactly one of the two (bots_room_or_owner).
-  roomId              String?  @map("room_id")
+  roomId               String?   @map("room_id")
   // The person a Brick belongs to: whoever made it. Null for a room bot, which belongs to its room and is managed by
   // the room's people. "Created by" on a room bot only says who typed it in, and is never read as ownership.
-  ownerId             String?  @map("owner_id")
-  name                String   @db.VarChar(100)
-  description         String?
-  characterTextureId  String?  @map("character_texture_id") @db.VarChar(100)
-  enabled             Boolean  @default(true)
-  behaviorType        String   @default("idle") @map("behavior_type") @db.VarChar(20)
-  behaviorConfig      Json     @default("{}") @map("behavior_config")
-  chatInstructions    String?  @map("chat_instructions")
-  movementInstructions String?  @map("movement_instructions")
-  aiProviderRef       String?  @map("ai_provider_ref") @db.VarChar(100)
+  ownerId              String?   @map("owner_id")
+  name                 String    @db.VarChar(100)
+  description          String?
+  characterTextureId   String?   @map("character_texture_id") @db.VarChar(100)
+  enabled              Boolean   @default(true)
+  behaviorType         String    @default("idle") @map("behavior_type") @db.VarChar(20)
+  behaviorConfig       Json      @default("{}") @map("behavior_config")
+  chatInstructions     String?   @map("chat_instructions")
+  movementInstructions String?   @map("movement_instructions")
+  aiProviderRef        String?   @map("ai_provider_ref") @db.VarChar(100)
   // The model the bot replies with when it runs on a person's own key (#575): one of that key's models, and one its lend
   // allows. Null = the key's check model (BotsAiProvider.model). Not read for Universe AI or a server provider.
-  aiModel             String?  @map("ai_model") @db.VarChar(255)
+  aiModel              String?   @map("ai_model") @db.VarChar(255)
   // How long the bot waits for a tool to answer, in seconds. Null = the bot server's default (90 s).
-  toolTimeoutSeconds  Int?     @map("tool_timeout_seconds")
+  toolTimeoutSeconds   Int?      @map("tool_timeout_seconds")
   // The companion (pet) that walks with the bot: a companion texture id from the room's companion list, or none.
-  companionTextureId  String?  @map("companion_texture_id") @db.VarChar(100)
+  companionTextureId   String?   @map("companion_texture_id") @db.VarChar(100)
   // Who may use the bot (#427). Private: only the roles and people with a Yes in accessRules (and its owner and Admin).
-  privateBot          Boolean  @default(false) @map("private_bot")
+  privateBot           Boolean   @default(false) @map("private_bot")
   // What the bot says to people who may not chat with it; null = a plain default line. Never reaches the AI.
-  refusalReply        String?  @map("refusal_reply") @db.VarChar(500)
+  refusalReply         String?   @map("refusal_reply") @db.VarChar(500)
   // Replies each person may get from this bot in a day; null = no limit. Stored here; nothing reads it yet (#1159).
-  dailyReplyCap       Int?     @map("daily_reply_cap")
+  dailyReplyCap        Int?      @map("daily_reply_cap")
   // A bot's own reply limits (#666), never above its key's (or Universe AI's): the longest reply in tokens and the tool
   // steps in one reply. Null = follow the key.
-  maxReplyTokens      Int?     @map("max_reply_tokens")
-  maxSteps            Int?     @map("max_steps")
+  maxReplyTokens       Int?      @map("max_reply_tokens")
+  maxSteps             Int?      @map("max_steps")
   // Hide bot conversations (#435) for this bot alone. null = follow the universe (default), true = Private, false = Normal.
   // A universe that hides them wins: a bot cannot be loosened below it.
-  hideConversations   Boolean? @map("hide_conversations")
+  hideConversations    Boolean?  @map("hide_conversations")
   // When a bot asks before a tool runs (#738): before making more than this many things in one request (null = no limit),
   // how often it asks which way to go (rarely | beforeBiggerJobs | never), and how long a card waits for an answer.
-  askBeforeMaking     Int?     @default(5) @map("ask_before_making")
-  askWhichWay         String   @default("rarely") @map("ask_which_way") @db.VarChar(20)
-  cardWaitMinutes     Int      @default(10) @map("card_wait_minutes")
+  askBeforeMaking      Int?      @default(5) @map("ask_before_making")
+  askWhichWay          String    @default("rarely") @map("ask_which_way") @db.VarChar(20)
+  cardWaitMinutes      Int       @default(10) @map("card_wait_minutes")
   // "Allow more of the same in this chat" (game #1659): a card's remembered approval ends after this many minutes without
   // the asker's messages (30 | 60 | 120) and after this many minutes at most (240 | 480 | 1440).
-  allowMoreIdleMinutes Int     @default(60) @map("allow_more_idle_minutes")
-  allowMoreMaxMinutes  Int     @default(480) @map("allow_more_max_minutes")
+  allowMoreIdleMinutes Int       @default(60) @map("allow_more_idle_minutes")
+  allowMoreMaxMinutes  Int       @default(480) @map("allow_more_max_minutes")
   // Voice (#740): off until a person with Manage bots turns it on. voiceRevision is the published voice profile the bot
   // speaks with (BotVoiceRevision.number); null until one is published.
-  voiceEnabled        Boolean  @default(false) @map("voice_enabled")
-  voiceRevision       Int?     @map("voice_revision")
+  voiceEnabled         Boolean   @default(false) @map("voice_enabled")
+  voiceRevision        Int?      @map("voice_revision")
   // A Brick its owner deleted (game #1996) waits until `goneAt`, and Undo gives it back before then. While it waits it
   // is off and nobody's to use (the database holds a deleted Brick to `enabled` false, bots_deleted_brick), and
   // `enabledBeforeDelete` is where Undo leaves its switch. All three are null for every other bot, a room bot always.
-  deletedAt           DateTime? @map("deleted_at")
-  goneAt              DateTime? @map("gone_at")
-  enabledBeforeDelete Boolean?  @map("enabled_before_delete")
+  deletedAt            DateTime? @map("deleted_at")
+  goneAt               DateTime? @map("gone_at")
+  enabledBeforeDelete  Boolean?  @map("enabled_before_delete")
   // The first line of a Brick's chat, shown by the game while nothing has been written there (game #1996). Written once
   // when the Brick is made for a job ("Send me the first recipe"); null = the game's own fixed hello. Never sent as a
   // message and never read by the AI. Always null for a room bot.
-  hello               String?   @db.VarChar(300)
-  createdAt           DateTime @default(now()) @map("created_at")
-  updatedAt           DateTime @updatedAt @map("updated_at")
-  createdById         String?  @map("created_by_id")
-  updatedById          String?  @map("updated_by_id")
+  hello                String?   @db.VarChar(300)
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+  createdById          String?   @map("created_by_id")
+  updatedById          String?   @map("updated_by_id")
 
-  room Room? @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  owner User? @relation("BotOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  createdBy User? @relation("BotCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
-  updatedBy User? @relation("BotUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
-  mcpServers BotMcpServer[]
-  accessRules BotAccessRule[]
-  replyLimitHits BotReplyLimitHit[]
-  files          BotFile[]
-  fileCounter    BotFileCounter?
-  actionRequests BotActionRequest[]
-  actionGrants   BotActionGrant[]
-  voiceDraft     BotVoiceDraft?
-  voiceRevisions BotVoiceRevision[]
-  voiceKeyUsage  VoiceKeyUsage[]
-  voiceReplyUses VoiceReplyUse[]
-  voiceListenUses VoiceListenUse[]
-  defaultBrickOf  DefaultBrick?
-  visit           BrickVisit?
-  computer        BrickComputer?
-  computerJobs    ComputerJob[]
-  home            BrickHome?
-  brickItems      BrickItem[]
-  template        BrickTemplate?
-  madeFrom        BrickTemplateUse?
+  room                Room?                @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  owner               User?                @relation("BotOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  createdBy           User?                @relation("BotCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy           User?                @relation("BotUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  mcpServers          BotMcpServer[]
+  accessRules         BotAccessRule[]
+  replyLimitHits      BotReplyLimitHit[]
+  files               BotFile[]
+  fileCounter         BotFileCounter?
+  actionRequests      BotActionRequest[]
+  actionGrants        BotActionGrant[]
+  voiceDraft          BotVoiceDraft?
+  voiceRevisions      BotVoiceRevision[]
+  voiceKeyUsage       VoiceKeyUsage[]
+  voiceReplyUses      VoiceReplyUse[]
+  voiceHearingWindows VoiceHearingWindow[]
+  voiceListenUses     VoiceListenUse[]
+  defaultBrickOf      DefaultBrick?
+  visit               BrickVisit?
+  computer            BrickComputer?
+  computerJobs        ComputerJob[]
+  home                BrickHome?
+  brickItems          BrickItem[]
+  template            BrickTemplate?
+  madeFrom            BrickTemplateUse?
 
   @@index([roomId])
   @@index([ownerId])
@@ -968,17 +971,17 @@ model DefaultBrick {
 // bot server each time it finds the person in a room, so Orbit knows where the visit is without being told where
 // people are. A visit nobody has seen for a while ends by itself (Limits, "Bricks"); ending it deletes only this row.
 model BrickVisit {
-  userId    String   @id @map("user_id")
-  botId     String   @unique @map("bot_id")
-  roomId    String?  @map("room_id")
+  userId     String    @id @map("user_id")
+  botId      String    @unique @map("bot_id")
+  roomId     String?   @map("room_id")
   // When the person's game saw them come into `roomId` (the game's own time, never later than the moment Orbit heard it). A
   // visit only moves to another room on a sighting newer than this, so a late sync from a room they left moves nothing
-  roomSince DateTime? @map("room_since")
+  roomSince  DateTime? @map("room_since")
   // Which page load of the player's game said it. Times are only compared with each other when the same one said both: a
   // second device has its own clock, and its first sighting is a move
-  roomClient String? @map("room_client") @db.VarChar(64)
-  startedAt DateTime @default(now()) @map("started_at")
-  seenAt    DateTime @default(now()) @map("seen_at")
+  roomClient String?   @map("room_client") @db.VarChar(64)
+  startedAt  DateTime  @default(now()) @map("started_at")
+  seenAt     DateTime  @default(now()) @map("seen_at")
 
   user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
   bot  Bot   @relation(fields: [botId], references: [id], onDelete: Cascade)
@@ -1120,8 +1123,8 @@ model BrickItem {
   askKept       String?   @map("ask_kept") @db.VarChar(40)
   // Set while a run waits because the person's Universe AI usage for goals and tasks is used up (it carries on when it is back), and
   // when Brick was last asked to say so (asked again after a while until it confirms) and when it confirmed: told once per wait
-  heldSince   DateTime?   @map("held_since")
-  heldToldAt  DateTime?   @map("held_told_at")
+  heldSince     DateTime? @map("held_since")
+  heldToldAt    DateTime? @map("held_told_at")
   heldNoticeAt  DateTime? @map("held_notice_at")
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
@@ -1143,29 +1146,29 @@ model BrickItem {
 // owns the run, and two servers or a retry find it and run nothing. A claimed run that never reports is given back after its
 // lease (`attempts` counts the tries); the run's own id is what an outside effect is looked up by before it is written again.
 model BrickItemRun {
-  id         String    @id @default(uuid())
-  itemId     String    @map("item_id")
-  dueAt      DateTime  @map("due_at")
+  id               String    @id @default(uuid())
+  itemId           String    @map("item_id")
+  dueAt            DateTime  @map("due_at")
   // The item's revision when the run was claimed
-  revision   Int
-  claimedAt  DateTime  @default(now()) @map("claimed_at")
-  leaseUntil DateTime  @map("lease_until")
-  attempts   Int       @default(1)
+  revision         Int
+  claimedAt        DateTime  @default(now()) @map("claimed_at")
+  leaseUntil       DateTime  @map("lease_until")
+  attempts         Int       @default(1)
   // A reminder or briefing run after an outage, marked "Late (due 8:00)"
-  late       Boolean   @default(false)
+  late             Boolean   @default(false)
   // A watch or goal check run after an outage: one fresh check, never the missed ones
-  fresh      Boolean   @default(false)
+  fresh            Boolean   @default(false)
   // claimed, done, failed, dropped (the item changed before it ran)
-  state      String    @default("claimed") @db.VarChar(8)
+  state            String    @default("claimed") @db.VarChar(8)
   // What it came to: quiet, spoke, waiting, or empty while it runs
-  outcome    String?   @db.VarChar(10)
+  outcome          String?   @db.VarChar(10)
   // The result in a line, for "Everything Brick did"
-  result     String?   @db.VarChar(1000)
-  error      String?   @db.VarChar(300)
-  finishedAt DateTime? @map("finished_at")
+  result           String?   @db.VarChar(1000)
+  error            String?   @db.VarChar(300)
+  finishedAt       DateTime? @map("finished_at")
   // The chat event of the message this run sent, once it is sent: a run handed out again looks here (and for its marker in the
   // chat) before it writes anything, so a message is never sent twice. Never claimed as exactly once outside Universe.
-  deliveredEventId String? @map("delivered_event_id") @db.VarChar(255)
+  deliveredEventId String?   @map("delivered_event_id") @db.VarChar(255)
   deliveredAt      DateTime? @map("delivered_at")
   // How the run was to be reported, kept with the delivery (what a goal that reached its outcome said, its progress, whether it waits): a
   // run handed out again after a restart reports that, not a plain "said". Null for a reminder and for a run from before this.
@@ -1220,22 +1223,22 @@ model BrickTemplate {
 // the first thing to try, what people will need (names, never a link or a sign-in) and the routines the maker added on
 // purpose. Never memory, chats, history, apps, keys, sign-ins, grants, recipients, running goals or tasks, files or a computer.
 model BrickTemplateVersion {
-  templateId       String   @map("template_id")
-  number           Int
-  name             String   @db.VarChar(100)
-  description      String?
+  templateId         String   @map("template_id")
+  number             Int
+  name               String   @db.VarChar(100)
+  description        String?
   // Null when the maker left the look out: the new Brick takes the next colour its owner has not used
-  characterTextureId String? @map("character_texture_id") @db.VarChar(100)
-  chatInstructions String?  @map("chat_instructions")
+  characterTextureId String?  @map("character_texture_id") @db.VarChar(100)
+  chatInstructions   String?  @map("chat_instructions")
   // The first thing to try: the new Brick's first line in its chat
-  firstThing       String?  @map("first_thing") @db.VarChar(300)
+  firstThing         String?  @map("first_thing") @db.VarChar(300)
   // [{ kind: app | computer, key, label, required }]
-  needs            Json     @default("[]")
+  needs              Json     @default("[]")
   // [{ kind: reminder | schedule | watch, words, condition, cadence }], taken only when the maker added them on purpose
-  routines         Json     @default("[]")
+  routines           Json     @default("[]")
   // What was shared, as a hash, so "Share your latest changes" can tell whether anything changed
-  contentHash      String   @map("content_hash") @db.VarChar(64)
-  createdAt        DateTime @default(now()) @map("created_at")
+  contentHash        String   @map("content_hash") @db.VarChar(64)
+  createdAt          DateTime @default(now()) @map("created_at")
 
   template BrickTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
 
@@ -1306,54 +1309,54 @@ model BotAccessRule {
 
 // Bot MCP Servers
 model BotMcpServer {
-  id          String   @id @default(uuid())
-  botId       String   @map("bot_id")
-  name        String   @db.VarChar(255)
-  serverUrl   String   @map("server_url") @db.Text
-  authType    String   @default("none") @map("auth_type") @db.VarChar(20)   // none | bearer | api-key
-  authConfig  String?  @map("auth_config") @db.Text                          // encrypted JSON
-  headers     Json?                                                          // extra headers key-value pairs
-  enabled     Boolean  @default(true)
-  lastTestedAt   DateTime?  @map("last_tested_at")
-  lastTestResult Json?      @map("last_test_result")
+  id                String    @id @default(uuid())
+  botId             String    @map("bot_id")
+  name              String    @db.VarChar(255)
+  serverUrl         String    @map("server_url") @db.Text
+  authType          String    @default("none") @map("auth_type") @db.VarChar(20) // none | bearer | api-key
+  authConfig        String?   @map("auth_config") @db.Text // encrypted JSON
+  headers           Json? // extra headers key-value pairs
+  enabled           Boolean   @default(true)
+  lastTestedAt      DateTime? @map("last_tested_at")
+  lastTestResult    Json?     @map("last_test_result")
   // Servers that existed before tools were checked (#738) keep working as they do in text, shown as "Not checked yet",
   // until their tools are confirmed.
-  legacyText     Boolean    @default(false) @map("legacy_text")
+  legacyText        Boolean   @default(false) @map("legacy_text")
   // What a bot does with a tool under each heading: rightAway | asksFirst | off.
-  lookUpSetting      String @default("rightAway") @map("look_up_setting") @db.VarChar(20)
-  makeSetting        String @default("rightAway") @map("make_setting") @db.VarChar(20)
-  changeSetting      String @default("asksFirst") @map("change_setting") @db.VarChar(20)
-  deleteSendSetting  String @default("asksFirst") @map("delete_send_setting") @db.VarChar(20)
+  lookUpSetting     String    @default("rightAway") @map("look_up_setting") @db.VarChar(20)
+  makeSetting       String    @default("rightAway") @map("make_setting") @db.VarChar(20)
+  changeSetting     String    @default("asksFirst") @map("change_setting") @db.VarChar(20)
+  deleteSendSetting String    @default("asksFirst") @map("delete_send_setting") @db.VarChar(20)
   // Goes up whenever a heading setting, a tool's heading or a tool's confirmation changes, so a card or a remembered
   // approval made under an older policy can be told apart.
-  policyRevision     Int    @default(1) @map("policy_revision")
+  policyRevision    Int       @default(1) @map("policy_revision")
   // The bot server shows at most 500 tools per server. When a server has more, it says so when it saves the list, and how
   // many it has when it knows (null when it did not read them all).
-  toolsCut           Boolean @default(false) @map("tools_cut")
-  toolsSeen          Int?    @map("tools_seen")
+  toolsCut          Boolean   @default(false) @map("tools_cut")
+  toolsSeen         Int?      @map("tools_seen")
   // What the bot server last saw when it really used the server (game #1819), reported by it: a refused sign-in (401 or
   // 403) with when it first happened and the status, or a server that did not answer. Both clear when it works again, and
   // a reconnect or a saved new key or token clears them at once; `reconnectedAt` is when that last happened.
-  signInLostAt       DateTime? @map("sign_in_lost_at")
-  signInLostStatus   Int?      @map("sign_in_lost_status")
-  noAnswerAt         DateTime? @map("no_answer_at")
-  reconnectedAt      DateTime? @map("reconnected_at")
+  signInLostAt      DateTime? @map("sign_in_lost_at")
+  signInLostStatus  Int?      @map("sign_in_lost_status")
+  noAnswerAt        DateTime? @map("no_answer_at")
+  reconnectedAt     DateTime? @map("reconnected_at")
   // Who connected it last (a sign-in, a key or a token), the person told when its sign-in expires. Null for connections
   // made before this was kept: the bot's maker is told instead.
-  connectedById      String?   @map("connected_by_id")
+  connectedById     String?   @map("connected_by_id")
   // Set when this row is a Brick's grant on a person's connection (#2001): the link, sign-in, extra headers and the sign-in
   // lost fields above are then read from the connection and never copied, and what is kept here is the Brick's own: its
   // four headings, its tools and their confirmations, its switch. Null for every app set up on a bot as before.
-  connectionId       String?   @map("connection_id")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  connectionId      String?   @map("connection_id")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
 
-  bot         Bot           @relation(fields: [botId], references: [id], onDelete: Cascade)
+  bot         Bot            @relation(fields: [botId], references: [id], onDelete: Cascade)
   connection  AppConnection? @relation(fields: [connectionId], references: [id], onDelete: Cascade)
-  connectedBy User?         @relation("BotMcpServerConnectedBy", fields: [connectedById], references: [id], onDelete: SetNull)
+  connectedBy User?          @relation("BotMcpServerConnectedBy", fields: [connectedById], references: [id], onDelete: SetNull)
   tools       BotMcpTool[]
   share       AppShare?
-  shareUses   AppShareUse[] @relation("AppShareUses")
+  shareUses   AppShareUse[]  @relation("AppShareUses")
 
   @@unique([botId, connectionId])
   @@index([botId])
@@ -1366,57 +1369,57 @@ model BotMcpServer {
 // own requests. A Brick of theirs uses it through a grant, which is a BotMcpServer row with this id; no bot has one by default.
 // Removing the connection deletes every grant with it (onDelete cascade), so every Brick stops at once.
 model AppConnection {
-  id          String   @id @default(uuid())
+  id                  String    @id @default(uuid())
   // A person's own app has an owner and no universe. A universe's own app (a team app, #2001 step 7) has a universe and NO owner,
   // so it stays when anyone leaves; who may manage it is the list of managers. The database holds it to exactly one of the two.
-  ownerId     String?  @map("owner_id")
-  universeId  String?  @map("universe_id")
-  name        String   @db.VarChar(255)
-  serverUrl   String   @map("server_url") @db.Text
-  authType    String   @default("none") @map("auth_type") @db.VarChar(20)   // none | bearer | api-key | oauth
-  authConfig  String?  @map("auth_config") @db.Text                          // encrypted JSON
-  headers     Json?
+  ownerId             String?   @map("owner_id")
+  universeId          String?   @map("universe_id")
+  name                String    @db.VarChar(255)
+  serverUrl           String    @map("server_url") @db.Text
+  authType            String    @default("none") @map("auth_type") @db.VarChar(20) // none | bearer | api-key | oauth
+  authConfig          String?   @map("auth_config") @db.Text // encrypted JSON
+  headers             Json?
   // Where it came from: link = the person pasted its link ("Added by you"); listed = an entry of the super admin's list
-  source      String   @default("link") @db.VarChar(20)
+  source              String    @default("link") @db.VarChar(20)
   // The entry of the super admin's list it was made from (source = listed), so the list can say "Connected" and a person has one
-  catalogKey  String?  @map("catalog_key") @db.VarChar(60)
+  catalogKey          String?   @map("catalog_key") @db.VarChar(60)
   // The key the game sent with an app added by its link (POST /api/me/apps { requestKey }): the same key from the same person is the
   // same request, so a retry answers the first app instead of making a second. Optional; an app made without one has none.
-  requestKey  String?  @map("request_key") @db.VarChar(200)
+  requestKey          String?   @map("request_key") @db.VarChar(200)
   // A ready-made app made through the adapter (source = ready_made, OFF until Khalid says): which app, and the adapter's id for this person's sign-in
-  providerToolkit    String? @map("provider_toolkit") @db.VarChar(60)
-  providerAccountId  String? @map("provider_account_id") @db.VarChar(255)
+  providerToolkit     String?   @map("provider_toolkit") @db.VarChar(60)
+  providerAccountId   String?   @map("provider_account_id") @db.VarChar(255)
   // Set once the provider says the person finished signing in; until then the app is not connected and tapping Connect starts the sign-in again
   providerConfirmedAt DateTime? @map("provider_confirmed_at")
   // The one ticket a sign-in page may bring back: set when a sign-in starts, cleared when it is used, so a replayed return, or
   // one from a sign-in that a newer start replaced, is refused
-  signInNonce        String?   @map("sign_in_nonce") @db.VarChar(64)
+  signInNonce         String?   @map("sign_in_nonce") @db.VarChar(64)
   // Held while one request renews the token, so two never spend the same refresh token (a rotating one would sign the person out)
-  refreshLeaseUntil  DateTime? @map("refresh_lease_until")
+  refreshLeaseUntil   DateTime? @map("refresh_lease_until")
   // What the bot server last saw (the same fields a bot's server has, game #1819); a reconnect clears them
-  signInLostAt       DateTime? @map("sign_in_lost_at")
-  signInLostStatus   Int?      @map("sign_in_lost_status")
-  noAnswerAt         DateTime? @map("no_answer_at")
-  reconnectedAt      DateTime? @map("reconnected_at")
-  connectedById      String?   @map("connected_by_id")
+  signInLostAt        DateTime? @map("sign_in_lost_at")
+  signInLostStatus    Int?      @map("sign_in_lost_status")
+  noAnswerAt          DateTime? @map("no_answer_at")
+  reconnectedAt       DateTime? @map("reconnected_at")
+  connectedById       String?   @map("connected_by_id")
   // A key app (game #2044): kind = direct. The definition is the data it runs from (one HTTPS origin, its operations, where the key goes),
   // the key is kept encrypted in its own column and is never copied to a grant, a screen or the bot server; only its last characters are shown.
   // source is always 'direct' for one, so it can never be lent (the database holds that line) and is never an app link: `serverUrl` holds its origin for lists only.
-  kind        String   @default("mcp") @db.VarChar(10)   // mcp | direct
-  definition  Json?
-  definitionHash String? @map("definition_hash") @db.VarChar(64)
-  keyCipher   String?  @map("key_cipher") @db.Text
-  keyLast4    String?  @map("key_last4") @db.VarChar(8)
+  kind                String    @default("mcp") @db.VarChar(10) // mcp | direct
+  definition          Json?
+  definitionHash      String?   @map("definition_hash") @db.VarChar(64)
+  keyCipher           String?   @map("key_cipher") @db.Text
+  keyLast4            String?   @map("key_last4") @db.VarChar(8)
   // test | live, when the service's keys say which (a switch between them is asked about)
-  keyMode     String?  @map("key_mode") @db.VarChar(10)
+  keyMode             String?   @map("key_mode") @db.VarChar(10)
   // Counts every replaced key, so a request built for an older one is never sent with a newer one
-  keyVersion  Int      @default(1) @map("key_version")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  keyVersion          Int       @default(1) @map("key_version")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
 
-  owner       User?    @relation("AppConnectionOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  universe    Universe? @relation(fields: [universeId], references: [id], onDelete: Cascade)
-  connectedBy User?    @relation("AppConnectionConnectedBy", fields: [connectedById], references: [id], onDelete: SetNull)
+  owner       User?                  @relation("AppConnectionOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  universe    Universe?              @relation(fields: [universeId], references: [id], onDelete: Cascade)
+  connectedBy User?                  @relation("AppConnectionConnectedBy", fields: [connectedById], references: [id], onDelete: SetNull)
   grants      BotMcpServer[]
   lends       AppLend[]
   managers    AppConnectionManager[]
@@ -1462,20 +1465,20 @@ model AppLend {
 // One open safe form for a key (game #2044): who asked for it, the definition the owner is shown, and how many times a key was tried. The
 // form is for exactly this person, this service and this request. The key itself is never stored here.
 model AppKeyRequest {
-  id             String   @id @default(uuid())
-  ownerId        String   @map("owner_id")
+  id             String    @id @default(uuid())
+  ownerId        String    @map("owner_id")
   // The Brick that asked, when one did
-  botId          String?  @map("bot_id") @db.VarChar(255)
+  botId          String?   @map("bot_id") @db.VarChar(255)
   // Set when the form replaces the key of an existing app
-  connectionId   String?  @map("connection_id")
+  connectionId   String?   @map("connection_id")
   definition     Json
-  definitionHash String   @map("definition_hash") @db.VarChar(64)
+  definitionHash String    @map("definition_hash") @db.VarChar(64)
   // Where a Brick read the service's docs, for the line "Setup prepared from ..."
-  source         String?  @db.VarChar(255)
-  tries          Int      @default(0)
-  expiresAt      DateTime @map("expires_at")
+  source         String?   @db.VarChar(255)
+  tries          Int       @default(0)
+  expiresAt      DateTime  @map("expires_at")
   usedAt         DateTime? @map("used_at")
-  createdAt      DateTime @default(now()) @map("created_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
 
   owner      User           @relation("AppKeyRequestOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   connection AppConnection? @relation(fields: [connectionId], references: [id], onDelete: Cascade)
@@ -1513,27 +1516,27 @@ model AppKeyCall {
 // request (a Brick asked by the owner), bound to the owner, the page, the app and the definition version, and frozen: a visitor, the page's
 // code and a later version of the page can change none of it. Stop makes the page say "Payments unavailable"; disconnecting deletes it.
 model AppPageJob {
-  id             String   @id @default(uuid())
-  ownerId        String   @map("owner_id")
-  artifactId     String   @map("artifact_id")
-  connectionId   String   @map("connection_id")
-  definitionHash String   @map("definition_hash") @db.VarChar(64)
+  id              String    @id @default(uuid())
+  ownerId         String    @map("owner_id")
+  artifactId      String    @map("artifact_id")
+  connectionId    String    @map("connection_id")
+  definitionHash  String    @map("definition_hash") @db.VarChar(64)
   // The version of the page the owner asked for it on (kept for the record: the frozen terms below are what is charged)
-  artifactVersion Int     @map("artifact_version")
+  artifactVersion Int       @map("artifact_version")
   // Exact: whole minor units of the currency (4.500 KWD is 4500), never a float
-  amountMinor    Int      @map("amount_minor")
-  currency       String   @db.VarChar(3)
-  description    String?  @db.VarChar(200)
+  amountMinor     Int       @map("amount_minor")
+  currency        String    @db.VarChar(3)
+  description     String?   @db.VarChar(200)
   // The Brick that was asked (kept as a name only: the job belongs to the owner, not to the Brick)
-  madeByBot      String?  @map("made_by_bot") @db.VarChar(255)
-  status         String   @default("active") @db.VarChar(10)   // active | stopped
-  stoppedAt      DateTime? @map("stopped_at")
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
+  madeByBot       String?   @map("made_by_bot") @db.VarChar(255)
+  status          String    @default("active") @db.VarChar(10) // active | stopped
+  stoppedAt       DateTime? @map("stopped_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
 
-  owner      User          @relation("AppPageJobOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  artifact   Artifact      @relation(fields: [artifactId], references: [id], onDelete: Cascade)
-  connection AppConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  owner      User           @relation("AppPageJobOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  artifact   Artifact       @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  connection AppConnection  @relation(fields: [connectionId], references: [id], onDelete: Cascade)
   orders     AppPageOrder[]
 
   @@unique([artifactId])
@@ -1545,29 +1548,29 @@ model AppPageJob {
 // One checkout a visitor started: made on our side BEFORE the service is asked, so a retry and a lost answer reconcile instead of repeating.
 // "paid" is only ever written after the service's own record of the payment says completed with this order, amount, currency and mode.
 model AppPageOrder {
-  id             String   @id @default(uuid())
-  jobId          String?  @map("job_id")
-  ownerId        String   @map("owner_id")
-  connectionId   String?  @map("connection_id")
-  artifactId     String   @map("artifact_id") @db.VarChar(255)
-  definitionHash String   @map("definition_hash") @db.VarChar(64)
-  amountMinor    Int      @map("amount_minor")
-  currency       String   @db.VarChar(3)
+  id             String    @id @default(uuid())
+  jobId          String?   @map("job_id")
+  ownerId        String    @map("owner_id")
+  connectionId   String?   @map("connection_id")
+  artifactId     String    @map("artifact_id") @db.VarChar(255)
+  definitionHash String    @map("definition_hash") @db.VarChar(64)
+  amountMinor    Int       @map("amount_minor")
+  currency       String    @db.VarChar(3)
   // test | live, as the owner's key said when the order was made
-  mode           String?  @db.VarChar(10)
+  mode           String?   @db.VarChar(10)
   // creating | pending | paid | not_paid | cant_confirm
-  status         String   @default("creating") @db.VarChar(14)
+  status         String    @default("creating") @db.VarChar(14)
   // The service's id for the payment, and where the buyer pays (kept so a blocked pop-up can go on with the SAME order)
-  providerRef    String?  @map("provider_ref") @db.VarChar(255)
-  checkoutUrl    String?  @map("checkout_url") @db.Text
+  providerRef    String?   @map("provider_ref") @db.VarChar(255)
+  checkoutUrl    String?   @map("checkout_url") @db.Text
   // SHA-256 of who started it, with a secret: only to count tries, never to know who
-  visitorHash    String   @map("visitor_hash") @db.VarChar(64)
-  checks         Int      @default(0)
+  visitorHash    String    @map("visitor_hash") @db.VarChar(64)
+  checks         Int       @default(0)
   checkedAt      DateTime? @map("checked_at")
   paidAt         DateTime? @map("paid_at")
   // When it was closed as not paid: the late-payment window runs from here
   closedAt       DateTime? @map("closed_at")
-  createdAt      DateTime @default(now()) @map("created_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
 
   job        AppPageJob?    @relation(fields: [jobId], references: [id], onDelete: SetNull)
   connection AppConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
@@ -1676,8 +1679,8 @@ model AppShare {
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 
-  server   BotMcpServer   @relation(fields: [serverId], references: [id], onDelete: Cascade)
-  sharedBy User?          @relation("AppShareBy", fields: [sharedById], references: [id], onDelete: SetNull)
+  server   BotMcpServer  @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  sharedBy User?         @relation("AppShareBy", fields: [sharedById], references: [id], onDelete: SetNull)
   jobs     AppShareJob[]
 
   @@map("app_shares")
@@ -1730,21 +1733,21 @@ model AppShareUse {
 // Connecting one makes a connection that belongs to the person; nothing is shared. An app that has no entry here can still be
 // added by its link.
 model AppCatalogEntry {
-  id          String   @id @default(uuid())
-  key         String   @unique @db.VarChar(60)
-  name        String   @db.VarChar(255)
+  id         String   @id @default(uuid())
+  key        String   @unique @db.VarChar(60)
+  name       String   @db.VarChar(255)
   // One line under the name: "Read, draft and send email"
-  blurb       String   @db.VarChar(200)
+  blurb      String   @db.VarChar(200)
   // The icon's name in the game's icon set, such as brand-gmail
-  icon        String   @default("plug") @db.VarChar(60)
-  serverUrl   String   @map("server_url") @db.Text
-  authType    String   @default("oauth") @map("auth_type") @db.VarChar(20)
-  authConfig  String?  @map("auth_config") @db.Text
-  headers     Json?
-  enabled     Boolean  @default(true)
-  sortOrder   Int      @default(0) @map("sort_order")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  icon       String   @default("plug") @db.VarChar(60)
+  serverUrl  String   @map("server_url") @db.Text
+  authType   String   @default("oauth") @map("auth_type") @db.VarChar(20)
+  authConfig String?  @map("auth_config") @db.Text
+  headers    Json?
+  enabled    Boolean  @default(true)
+  sortOrder  Int      @default(0) @map("sort_order")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
 
   @@map("app_catalog_entries")
 }
@@ -1752,24 +1755,24 @@ model AppCatalogEntry {
 // One tool of a bot's MCP server (#738): what the server says it is, what we suggest it does, and what a person with
 // Manage bots chose and confirmed. A suggestion never lets a tool run: only a confirmed heading does.
 model BotMcpTool {
-  id              String    @id @default(uuid())
-  serverId        String    @map("server_id")
-  name            String    @db.VarChar(255)
-  title           String?   @db.VarChar(255)
-  description     String?   @db.Text
+  id               String    @id @default(uuid())
+  serverId         String    @map("server_id")
+  name             String    @db.VarChar(255)
+  title            String?   @db.VarChar(255)
+  description      String?   @db.Text
   // A fingerprint of the tool's inputs, labels, server address and account, made by the bot server. A different one means
   // the tool changed and goes back to not confirmed yet.
-  fingerprint     String    @db.VarChar(128)
+  fingerprint      String    @db.VarChar(128)
   // looksUp | makesNew | changesThings | deletesOrSends; where it came from: server | description | builtIn
-  suggestedHeading String?  @map("suggested_heading") @db.VarChar(20)
-  suggestionSource String?  @map("suggestion_source") @db.VarChar(20)
+  suggestedHeading String?   @map("suggested_heading") @db.VarChar(20)
+  suggestionSource String?   @map("suggestion_source") @db.VarChar(20)
   // The heading a person chose (or accepted from the suggestion), set when confirmed or moved.
-  heading         String?   @db.VarChar(20)
-  movedById       String?   @map("moved_by_id")
-  confirmedById   String?   @map("confirmed_by_id")
-  confirmedAt     DateTime? @map("confirmed_at")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @updatedAt @map("updated_at")
+  heading          String?   @db.VarChar(20)
+  movedById        String?   @map("moved_by_id")
+  confirmedById    String?   @map("confirmed_by_id")
+  confirmedAt      DateTime? @map("confirmed_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
 
   server      BotMcpServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
   movedBy     User?        @relation("BotToolMovedBy", fields: [movedById], references: [id], onDelete: SetNull)
@@ -1781,46 +1784,46 @@ model BotMcpTool {
 
 // AI Providers
 model BotsAiProvider {
-  providerId        String   @id @map("provider_id") @db.VarChar(50)
-  name              String   @db.VarChar(255)
-  type              String   @db.VarChar(50)
-  enabled           Boolean  @default(false)
-  endpoint          String?  @db.Text
-  apiKeyEncrypted   String?  @map("api_key_encrypted") @db.Text
-  model             String?  @db.VarChar(255)
-  temperature       Decimal? @db.Decimal(3, 2) @default(0.7)
-  maxTokens         Int?     @map("max_tokens") @default(500)
-  supportsStreaming Boolean  @default(true) @map("supports_streaming")
+  providerId        String    @id @map("provider_id") @db.VarChar(50)
+  name              String    @db.VarChar(255)
+  type              String    @db.VarChar(50)
+  enabled           Boolean   @default(false)
+  endpoint          String?   @db.Text
+  apiKeyEncrypted   String?   @map("api_key_encrypted") @db.Text
+  model             String?   @db.VarChar(255)
+  temperature       Decimal?  @default(0.7) @db.Decimal(3, 2)
+  maxTokens         Int?      @default(500) @map("max_tokens")
+  supportsStreaming Boolean   @default(true) @map("supports_streaming")
   supportsVision    Boolean?  @map("supports_vision") // null=auto (regex), true=force vision, false=force text-only
   visionModel       String?   @map("vision_model") @db.VarChar(255) // model used when this provider describes images
   defaultVision     Boolean   @default(false) @map("default_vision") // preferred vision provider when bots need image descriptions
-  settings          Json?    @default("{}")
-  tested            Boolean  @default(false)
+  settings          Json?     @default("{}")
+  tested            Boolean   @default(false)
   testedAt          DateTime? @map("tested_at")
   // Whose key this is (#374). Null = a provider the super admin runs for the whole server, which is every row there was
   // before personal keys. Anything that lists or reads providers for the server must keep only ownerId = null.
-  ownerId           String?  @map("owner_id")
+  ownerId           String?   @map("owner_id")
   // The last four characters of the key, kept so the owner can recognise it. The key itself is never sent to a browser.
-  apiKeyLast4       String?  @map("api_key_last4") @db.VarChar(4)
+  apiKeyLast4       String?   @map("api_key_last4") @db.VarChar(4)
   // The provider Universe AI runs on (#374). At most one server provider has it (set in one transaction); a bot on
   // Universe AI follows it. Personal keys never have it.
-  isDefault         Boolean  @default(false) @map("is_default")
+  isDefault         Boolean   @default(false) @map("is_default")
   // Health of a personal key (#374). downSince is set while the key is Down (null = Working). failedReplies counts
   // replies that failed in a row; two mark it Down. ifDown is what the bot does meanwhile: "universe-ai" or "stop".
   downSince         DateTime? @map("down_since")
-  downReason        String?  @map("down_reason") @db.VarChar(20)
-  failedReplies     Int      @default(0) @map("failed_replies")
+  downReason        String?   @map("down_reason") @db.VarChar(20)
+  failedReplies     Int       @default(0) @map("failed_replies")
   healthCheckedAt   DateTime? @map("health_checked_at")
-  ifDown            String   @default("universe-ai") @map("if_down") @db.VarChar(20)
+  ifDown            String    @default("universe-ai") @map("if_down") @db.VarChar(20)
   // A personal key's reply limits (#666), set by its owner: only the ones they changed (lib/bot-limits.ts fills in the
   // rest with the recommended values). A server provider has none: Universe AI's are saved in app_settings.
-  replyLimits       Json?    @map("reply_limits")
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
+  replyLimits       Json?     @map("reply_limits")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
 
-  owner             User?    @relation("AiKeyOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  usage             BotsAiUsage[]
-  lends             AiKeyLend[]
+  owner User?         @relation("AiKeyOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  usage BotsAiUsage[]
+  lends AiKeyLend[]
 
   @@index([enabled])
   @@index([type])
@@ -1848,54 +1851,54 @@ model AiKeyLend {
 
 // AI Usage Tracking
 model BotsAiUsage {
-  id              Int      @id @default(autoincrement())
-  botId           String   @map("bot_id") @db.VarChar(255)
-  providerId      String   @map("provider_id") @db.VarChar(50)
-  tokensUsed      Int      @default(0) @map("tokens_used")
-  apiCalls        Int      @default(1) @map("api_calls")
-  durationSeconds Int?     @map("duration_seconds")
+  id               Int      @id @default(autoincrement())
+  botId            String   @map("bot_id") @db.VarChar(255)
+  providerId       String   @map("provider_id") @db.VarChar(50)
+  tokensUsed       Int      @default(0) @map("tokens_used")
+  apiCalls         Int      @default(1) @map("api_calls")
+  durationSeconds  Int?     @map("duration_seconds")
   // The old estimate (4 decimals, a flat rate on most models). Rows made before the price facts below keep it as it was; new rows leave it empty.
-  cost            Decimal? @db.Decimal(10, 4)
-  latency         Int?
-  error           Boolean  @default(false)
-  timestamp       DateTime @default(now())
+  cost             Decimal? @db.Decimal(10, 4)
+  latency          Int?
+  error            Boolean  @default(false)
+  timestamp        DateTime @default(now())
   // What a reply cost and how that was worked out (game #1173). Empty on rows from before it, which are the "old estimates".
   // Token counts never overlap: inputTokens is input that was neither read from nor written to a cache, outputTokens is
   // answer text without the reasoning part, so the five add up to everything the provider billed.
-  inputTokens      Int?    @map("input_tokens")
-  cachedTokens     Int?    @map("cached_tokens")
-  cacheWriteTokens Int?    @map("cache_write_tokens")
-  outputTokens     Int?    @map("output_tokens")
-  reasoningTokens  Int?    @map("reasoning_tokens")
+  inputTokens      Int?     @map("input_tokens")
+  cachedTokens     Int?     @map("cached_tokens")
+  cacheWriteTokens Int?     @map("cache_write_tokens")
+  outputTokens     Int?     @map("output_tokens")
+  reasoningTokens  Int?     @map("reasoning_tokens")
   // Millionths of a dollar. Empty when the price is unknown (costBasis 'unknown'); 0 is a real zero (an own computer).
-  costMicros       Int?    @map("cost_micros")
+  costMicros       Int?     @map("cost_micros")
   // priced (from the price list), provider (the provider said what it cost), override (a super admin's own rate), own_computer, unknown
-  costBasis        String? @map("cost_basis") @db.VarChar(20)
+  costBasis        String?  @map("cost_basis") @db.VarChar(20)
   // Where the prices came from (models.dev, openrouter, ...) and which version of that list, so a cost can be checked by hand later
-  priceSource      String? @map("price_source") @db.VarChar(60)
-  priceVersion     String? @map("price_version") @db.VarChar(60)
+  priceSource      String?  @map("price_source") @db.VarChar(60)
+  priceVersion     String?  @map("price_version") @db.VarChar(60)
   // Who talked to the bot (#374): the person's id as the bot server knows it; null when it was not told or for older rows
-  talkedUserId    String?  @map("talked_user_id") @db.VarChar(255)
+  talkedUserId     String?  @map("talked_user_id") @db.VarChar(255)
   // Whose key paid, when it was a personal key; null for the server's own providers. Set by Orbit, never taken from a request.
-  keyOwnerId      String?  @map("key_owner_id")
+  keyOwnerId       String?  @map("key_owner_id")
   // Where the reply was given (Orbit #491): "dm" (direct messages) or "nearby" (nearby chat). Null on rows from before
   // it, which the bot page shows as "Not split".
-  channel         String?  @db.VarChar(10)
+  channel          String?  @db.VarChar(10)
   // The signed-in person who talked, worked out by Orbit from talkedUserId (Orbit #491, game #1159). Null for a guest,
   // for someone Orbit does not know and for older rows.
-  talkedPersonId  String?  @map("talked_person_id")
+  talkedPersonId   String?  @map("talked_person_id")
   // True when a guest talked, false for a signed-in person; null when the bot server did not say (older rows)
-  talkedGuest     Boolean? @map("talked_guest")
+  talkedGuest      Boolean? @map("talked_guest")
   // A greeting the bot made on its own when someone walked up. It is paid for by whoever's key the bot runs on and reported as
   // usage, but it is never counted against the person it greeted: not in their Universe AI window, not in a bot's own limit per
   // person and not in the guests' pool.
-  greeting        Boolean  @default(false)
+  greeting         Boolean  @default(false)
   // The run of a goal or task this call was made for (game #2002), when the bot server says. A run with a call here has started using its
   // room, so it no longer holds a place in it. Null for chat and for a bot server that does not send it.
-  brickRunId      String?  @map("brick_run_id") @db.VarChar(36)
+  brickRunId       String?  @map("brick_run_id") @db.VarChar(36)
 
-  provider        BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
-  talkedPerson    User?          @relation("UsageTalkedPerson", fields: [talkedPersonId], references: [id], onDelete: SetNull)
+  provider     BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
+  talkedPerson User?          @relation("UsageTalkedPerson", fields: [talkedPersonId], references: [id], onDelete: SetNull)
 
   @@index([botId])
   @@index([providerId])
@@ -1922,22 +1925,65 @@ model ReplyWindow {
 // server gives it, so asking again for the same reply (a retry, a reconnect) never counts it twice. Whether the text of the
 // reply counted is in the usage rows as ever; this only says which replies were also spoken.
 model VoiceReplyUse {
-  id        String   @id @default(uuid())
-  botId     String   @map("bot_id")
+  id             String    @id @default(uuid())
+  botId          String    @map("bot_id")
   // The reply's turn as the bot server names it
-  turnId    String   @map("turn_id") @db.VarChar(255)
+  turnId         String    @map("turn_id") @db.VarChar(255)
   // "person:<user id>" or "guest:<their id>", the same words the Universe AI reply window is kept under
-  personKey String   @map("person_key") @db.VarChar(320)
+  personKey      String    @map("person_key") @db.VarChar(320)
   // The longest this reply may be, as it was when it was admitted: what it holds of the month's speech Limit until its usage arrives. A later
   // change of that setting never changes what an admitted reply holds. Empty only for a row from before this was kept.
-  seconds   Int?
-  createdAt DateTime @default(now()) @map("created_at")
+  seconds        Int?
+  createdAt      DateTime  @default(now()) @map("created_at")
+  // 1: admitted by a game that sends no receipt naming the reply (the hold ends on a saved time); 2: the receipt carrying this turn id
+  // releases the hold, never a timer (docs/speech-admission-contract.md)
+  contract       Int       @default(1)
+  // What the person's own entitlement counts for this reply until it is received: the usual length (the longest it may be is `seconds`)
+  memberSeconds  Int?      @map("member_seconds")
+  // What this reply may cost Universe at most, in millionths of a dollar, at rate version `rateVersion`, until its receipt arrives
+  holdMicros     BigInt?   @map("hold_micros")
+  rateVersion    Int?      @map("rate_version")
+  // The voice company the reply was admitted for (voice_providers.adapter)
+  provider       String?   @db.VarChar(64)
+  // The receipt: when it arrived, what was played and what it was priced at. Empty while nothing was received
+  settledAt      DateTime? @map("settled_at")
+  settledSeconds Int?      @map("settled_seconds")
+  settledMicros  BigInt?   @map("settled_micros")
 
   bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
 
   @@unique([botId, turnId])
+  @@index([createdAt, settledAt])
   @@index([personKey, createdAt])
   @@map("voice_reply_uses")
+}
+
+// A stretch of live hearing admitted for one person (speech admission contract, section 4): Orbit sets its seconds aside at the hearing rate,
+// the game keeps hearing for up to that long and renews it in the background, and the hearing events that name `windowId` use it up.
+// What was not used is given back when the window is released; a window never released and never used up stays counted as unknown.
+model VoiceHearingWindow {
+  id              String    @id @default(uuid())
+  botId           String    @map("bot_id")
+  // The game's own id for the window (stable: asking again for it answers the same window)
+  windowId        String    @map("window_id") @db.VarChar(255)
+  // "person:<user id>" or "guest:<their id>"
+  personKey       String    @map("person_key") @db.VarChar(320)
+  provider        String?   @db.VarChar(64)
+  rateVersion     Int       @map("rate_version")
+  admittedSeconds Int       @map("admitted_seconds")
+  usedSeconds     Int       @default(0) @map("used_seconds")
+  // What the whole window may cost at the rate admitted; what is still held is this less the share used
+  holdMicros      BigInt    @map("hold_micros")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  // When what was not used was given back (or the window was found used up and closed). Empty while it still holds
+  closedAt        DateTime? @map("closed_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@unique([botId, windowId])
+  @@index([personKey, createdAt])
+  @@index([closedAt, createdAt])
+  @@map("voice_hearing_windows")
 }
 
 // Seconds a bot listened for its name in a day, all the people near it together (game #1859). One row per bot and UTC day; the bot
@@ -1959,16 +2005,16 @@ model VoiceListenUse {
 // Someone reached a reply limit on a bot (game #1159, Orbit #491): once per person, limit and window. The bot page counts
 // these as "people ran out"; who they were is never shown for them.
 model BotReplyLimitHit {
-  id           String   @id @default(uuid())
-  botId        String   @map("bot_id")
+  id           String    @id @default(uuid())
+  botId        String    @map("bot_id")
   // "universe-ai" (signed in), "guest" (a guest's own 10), "guests" (the bot's shared guest pool) or "bot" (its own limit)
-  kind         String   @db.VarChar(20)
+  kind         String    @db.VarChar(20)
   // The person or guest as the bot server knows them
-  talkedUserId String   @map("talked_user_id") @db.VarChar(255)
-  windowEndsAt DateTime @map("window_ends_at")
+  talkedUserId String    @map("talked_user_id") @db.VarChar(255)
+  windowEndsAt DateTime  @map("window_ends_at")
   // When they tapped "Ask <bot>'s maker" on the limit card (game #1159 step 3); the maker sees how many asked, never who
   askedAt      DateTime? @map("asked_at")
-  createdAt    DateTime @default(now()) @map("created_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
 
   bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
 
@@ -2052,26 +2098,51 @@ model MeterReservation {
 // it twice. A gift is free to the person and never owed; extra usage to be billed records something agreed with the person
 // before it was given, outside the product, and says when it was billed. The two are never the same row kind.
 model MeterGrant {
-  id          String    @id @default(uuid())
-  grantKey    String    @unique @map("grant_key") @db.VarChar(255)
-  personId    String    @map("person_id")
+  id         String    @id @default(uuid())
+  grantKey   String    @unique @map("grant_key") @db.VarChar(255)
+  personId   String    @map("person_id")
   // gift or to_bill
-  settlement  String    @db.VarChar(10)
+  settlement String    @db.VarChar(10)
   // 2 for double, 5 for five times; empty when it lifts the member's own limit
-  multiplier  Int?
-  noLimit     Boolean   @default(false) @map("no_limit")
+  multiplier Int?
+  noLimit    Boolean   @default(false) @map("no_limit")
   // What it covers; chat, voice and computer time are raised together
-  covers      String    @default("all") @db.VarChar(20)
-  startsAt    DateTime  @map("starts_at")
-  endsAt      DateTime  @map("ends_at")
-  givenById   String    @map("given_by_id")
+  covers     String    @default("all") @db.VarChar(20)
+  startsAt   DateTime  @map("starts_at")
+  endsAt     DateTime  @map("ends_at")
+  givenById  String    @map("given_by_id")
   // What was agreed, for extra usage to be billed
-  note        String?   @db.VarChar(1000)
-  billedAt    DateTime? @map("billed_at")
-  createdAt   DateTime  @default(now()) @map("created_at")
+  note       String?   @db.VarChar(1000)
+  billedAt   DateTime? @map("billed_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
 
   @@index([personId, endsAt])
   @@map("meter_grants")
+}
+
+// "Give more" for one entitlement (Brief F, P5): extra for a person's own speech (the seconds one person may use) or their own connected
+// Apps (the money one person's Bricks may use), for a while. It extends only that entitlement of that person, never a platform budget, another
+// payer's rules or a provider limit. Kept apart from meter_grants (chat, voice replies and computer time) so neither can lift the other.
+model MeterEntitlementGrant {
+  id         String    @id @default(uuid())
+  grantKey   String    @unique @map("grant_key") @db.VarChar(255)
+  personId   String    @map("person_id")
+  // speech or apps
+  scope      String    @db.VarChar(12)
+  // gift or to_bill, as for meter_grants
+  settlement String    @db.VarChar(10)
+  // 2 for double, 5 for five times; empty when it lifts the person's own limit
+  multiplier Int?
+  noLimit    Boolean   @default(false) @map("no_limit")
+  startsAt   DateTime  @map("starts_at")
+  endsAt     DateTime  @map("ends_at")
+  givenById  String    @map("given_by_id")
+  note       String?   @db.VarChar(1000)
+  billedAt   DateTime? @map("billed_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([personId, scope, endsAt])
+  @@map("meter_entitlement_grants")
 }
 
 // A member's "Ask for more" (game #1999): what a person tapped when their computer time ran out. Only a request: it is not a
@@ -2509,7 +2580,7 @@ model BotsConversation {
   endReason    String?  @map("end_reason") @db.VarChar(50)
   createdAt    DateTime @default(now()) @map("created_at")
 
-  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([botId, createdAt])
   @@index([userUuid])
@@ -2575,46 +2646,46 @@ model BotMemoryItemForget {
 // may use it only while they are in the chat it came in. A guest's goes after a day, like a guest's artifact. No Orbit
 // page lists these: only the bot server reaches them.
 model BotFile {
-  id        String    @id @default(uuid())
-  botId     String    @map("bot_id")
+  id            String    @id @default(uuid())
+  botId         String    @map("bot_id")
   // The bot's short id for it: f12 is number 12. One count per bot, so two people in a bubble never share an id.
-  number    Int
+  number        Int
   // The person it belongs to; null for a guest
-  ownerId   String?   @map("owner_id")
+  ownerId       String?   @map("owner_id")
   // The person as the bot server named them (their game uuid), so Forget also finds a guest's files
-  personRef String?   @map("person_ref") @db.VarChar(320)
+  personRef     String?   @map("person_ref") @db.VarChar(320)
   // person (they sent it) | bot (the bot sent it)
-  source    String    @db.VarChar(10)
+  source        String    @db.VarChar(10)
   // image | audio | video | document | other
-  kind      String    @db.VarChar(20)
-  name      String    @db.VarChar(255)
-  mimeType  String?   @map("mime_type") @db.VarChar(255)
-  sizeBytes Int?      @map("size_bytes")
+  kind          String    @db.VarChar(20)
+  name          String    @db.VarChar(255)
+  mimeType      String?   @map("mime_type") @db.VarChar(255)
+  sizeBytes     Int?      @map("size_bytes")
   // How to open it again later. A chat bucket and the uploader's id (opened through the uploader's /chat-file link), or a
   // link that lasts (the uploader's own /upload-file link, or a bucket's public link). Never a signed link: those expire.
-  bucket    String?   @db.VarChar(255)
-  fileId    String?   @map("file_id") @db.VarChar(255)
-  url       String?   @db.VarChar(2048)
+  bucket        String?   @db.VarChar(255)
+  fileId        String?   @map("file_id") @db.VarChar(255)
+  url           String?   @db.VarChar(2048)
   // One line about it, for the bot's notes and for search
-  line      String?   @db.VarChar(300)
+  line          String?   @db.VarChar(300)
   // For a file a bot made: the tool it used and what it asked that tool for, so it can make one like it again
-  madeWith  String?   @map("made_with") @db.VarChar(100)
-  madePrompt String?  @map("made_prompt")
+  madeWith      String?   @map("made_with") @db.VarChar(100)
+  madePrompt    String?   @map("made_prompt")
   // How long a song, voice note or video is, and how many pages a document has, when known
-  lengthSeconds Int?  @map("length_seconds")
-  pages     Int?
+  lengthSeconds Int?      @map("length_seconds")
+  pages         Int?
   // The chat it came in: nearby | dm, and the id the bot server uses for it
-  chatKind  String    @map("chat_kind") @db.VarChar(20)
-  chatRef   String    @map("chat_ref") @db.VarChar(255)
+  chatKind      String    @map("chat_kind") @db.VarChar(20)
+  chatRef       String    @map("chat_ref") @db.VarChar(255)
   // Everyone who was in the chat when it was put there, the sender included, by the ids the bot server names people by
   // (game #1993). A reply other people read uses it only when all of them are in this list. Empty: nobody was recorded.
-  seenBy    String[]  @default([]) @map("seen_by")
+  seenBy        String[]  @default([]) @map("seen_by")
   // The text kept from it: none (not read, or nothing to read) | reading (pieces still coming) | kept | failed
-  textState String    @default("none") @map("text_state") @db.VarChar(10)
-  textChars Int       @default(0) @map("text_chars")
+  textState     String    @default("none") @map("text_state") @db.VarChar(10)
+  textChars     Int       @default(0) @map("text_chars")
   // Set for a guest's file: when it goes
-  expiresAt DateTime? @map("expires_at")
-  createdAt DateTime  @default(now()) @map("created_at")
+  expiresAt     DateTime? @map("expires_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
 
   bot   Bot           @relation(fields: [botId], references: [id], onDelete: Cascade)
   owner User?         @relation("BotFileOwner", fields: [ownerId], references: [id], onDelete: Cascade)
@@ -2648,7 +2719,7 @@ model BotFileRemoval {
 // text in its composed form (NFC) and Arabic short vowels and tatweel left out, so a search finds the words with or without
 // them or with accents typed apart, and split at punctuation as a search is. The same expression as the migration's; keep them the same.
 model BotFilePart {
-  botFileId String @map("bot_file_id")
+  botFileId String                   @map("bot_file_id")
   number    Int
   // Where this part starts in the file's text, in characters
   start     Int
@@ -2674,19 +2745,19 @@ model BotFileCounter {
 
 // Bot Memory
 model BotsMemory {
-  id              Int       @id @default(autoincrement())
-  botId           String    @map("bot_id") @db.VarChar(255)
-  userUuid        String    @map("user_uuid") @db.VarChar(255)
-  userId          String?   @map("user_id")
-  userName        String?   @map("user_name") @db.VarChar(255)
-  isGuest         Boolean   @default(true) @map("is_guest")
-  memories        Json?
-  emotions        Json?
+  id                Int       @id @default(autoincrement())
+  botId             String    @map("bot_id") @db.VarChar(255)
+  userUuid          String    @map("user_uuid") @db.VarChar(255)
+  userId            String?   @map("user_id")
+  userName          String?   @map("user_name") @db.VarChar(255)
+  isGuest           Boolean   @default(true) @map("is_guest")
+  memories          Json?
+  emotions          Json?
   lastEmotionUpdate DateTime? @map("last_emotion_update")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @updatedAt @map("updated_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
 
-  user            User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@unique([botId, userUuid])
   @@index([botId])
@@ -2711,26 +2782,26 @@ model BotsMemory {
 //   "universe"  -> available inside one universe
 //   "world"     -> available inside one world
 model AvatarSet {
-  id          String   @id @default(uuid())
-  slug        String   @unique // e.g. "default", "zoo-animals", "museum-staff"
+  id          String  @id @default(uuid())
+  slug        String  @unique // e.g. "default", "zoo-animals", "museum-staff"
   name        String
   description String?
 
   // What kind of assets this set provides
   // "woka" | "companion" | "mixed"
-  kind        String   @default("woka")
+  kind String @default("woka")
 
   // Lifecycle: "draft" | "active" | "archived"
-  lifecycle   String   @default("draft")
+  lifecycle String @default("draft")
 
   // Who sees this in the player picker
   // "public" | "hidden" | "restricted" | "assigned_only"
-  visibility  String   @default("public")
+  visibility String @default("public")
 
   // Commercial / ownership metadata (for future monetisation)
   // "platform" | "partner" | "internal" | "client"
   sourceOwnerType  String  @default("platform") @map("source_owner_type")
-  partnerRef       String? @map("partner_ref")       // external partner/client id
+  partnerRef       String? @map("partner_ref") // external partner/client id
   campaignCode     String? @map("campaign_code")
   // "free" | "subscription" | "purchase" | "sponsored" | "custom_contract"
   monetizationType String  @default("free") @map("monetization_type")
@@ -2738,21 +2809,21 @@ model AvatarSet {
   licenseNotes     String? @map("license_notes")
 
   // Availability window (null = no limit)
-  availableFrom DateTime? @map("available_from")
+  availableFrom  DateTime? @map("available_from")
   availableUntil DateTime? @map("available_until")
 
   // Display order in admin and picker
-  position    Int      @default(0)
+  position Int @default(0)
 
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   // Relations
-  layers       AvatarLayer[]
-  companions   AvatarCompanion[]
-  scopes       AvatarSetScope[]
-  policies     AvatarEntitlementPolicy[]
-  userGrants   UserAvatarGrant[]
+  layers     AvatarLayer[]
+  companions AvatarCompanion[]
+  scopes     AvatarSetScope[]
+  policies   AvatarEntitlementPolicy[]
+  userGrants UserAvatarGrant[]
 
   @@index([lifecycle, visibility])
   @@map("avatar_sets")
@@ -2762,25 +2833,25 @@ model AvatarSet {
 // layer values mirror the woka.json top-level keys:
 //   "woka" | "body" | "eyes" | "hair" | "clothes" | "hat" | "accessory"
 model AvatarLayer {
-  id          String  @id @default(uuid())
-  avatarSetId String  @map("avatar_set_id")
+  id          String @id @default(uuid())
+  avatarSetId String @map("avatar_set_id")
 
   // The texture ID used by WorkAdventure (e.g. "male1", "hair23")
-  textureId   String  @map("texture_id")
+  textureId String @map("texture_id")
 
   // Which customisation layer this belongs to
-  layer       String  // "woka"|"body"|"eyes"|"hair"|"clothes"|"hat"|"accessory"
+  layer String // "woka"|"body"|"eyes"|"hair"|"clothes"|"hat"|"accessory"
 
-  name        String?
+  name     String?
   // Full URL or play-relative path — stored as-is, resolved at runtime
-  url         String
-  position    Int     @default(0)
-  isActive    Boolean @default(true) @map("is_active")
+  url      String
+  position Int     @default(0)
+  isActive Boolean @default(true) @map("is_active")
 
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+  avatarSet AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
 
   @@unique([avatarSetId, textureId])
   @@index([avatarSetId, layer])
@@ -2799,10 +2870,10 @@ model AvatarCompanion {
   position    Int     @default(0)
   isActive    Boolean @default(true) @map("is_active")
 
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+  avatarSet AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
 
   @@unique([avatarSetId, textureId])
   @@index([avatarSetId])
@@ -2814,16 +2885,16 @@ model AvatarCompanion {
 // scopeType "universe" -> scopeId = Universe.id
 // scopeType "world"    -> scopeId = World.id
 model AvatarSetScope {
-  id          String  @id @default(uuid())
-  avatarSetId String  @map("avatar_set_id")
-  scopeType   String  @map("scope_type") // "platform" | "universe" | "world"
-  scopeId     String  @default("") @map("scope_id") // "" for platform scope
+  id          String @id @default(uuid())
+  avatarSetId String @map("avatar_set_id")
+  scopeType   String @map("scope_type") // "platform" | "universe" | "world"
+  scopeId     String @default("") @map("scope_id") // "" for platform scope
 
   // Optional: a direct World FK so Prisma can validate world-level scopes
-  worldId     String? @map("world_id")
+  worldId String? @map("world_id")
 
-  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
-  world       World?    @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  avatarSet AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+  world     World?    @relation(fields: [worldId], references: [id], onDelete: Cascade)
 
   @@unique([avatarSetId, scopeType, scopeId])
   @@index([avatarSetId])
@@ -2840,8 +2911,8 @@ model AvatarSetScope {
 //   "subscription_plan"-> for future paid club feature
 //   "external_contract"-> for partner API grants
 model AvatarEntitlementPolicy {
-  id          String  @id @default(uuid())
-  avatarSetId String  @map("avatar_set_id")
+  id          String @id @default(uuid())
+  avatarSetId String @map("avatar_set_id")
 
   subjectType  String  @map("subject_type")
   subjectValue String? @map("subject_value") // tag name, user id, domain, plan id, etc.
@@ -2850,15 +2921,15 @@ model AvatarEntitlementPolicy {
   // "select"         -> can pick in player woka picker
   // "assign_to_bot"  -> admin can assign to bots
   // "manage"         -> full admin control over the set
-  action      String  @default("select")
+  action String @default("select")
 
   // Optional world scope override for tag-based policies
-  worldId     String? @map("world_id")
+  worldId String? @map("world_id")
 
-  isActive    Boolean @default(true) @map("is_active")
-  createdAt   DateTime @default(now()) @map("created_at")
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
 
-  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+  avatarSet AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
 
   @@index([avatarSetId])
   @@index([subjectType, subjectValue])
@@ -2868,23 +2939,23 @@ model AvatarEntitlementPolicy {
 // UserAvatarGrant — direct per-user grants (overrides visibility rules).
 // Use for: celebrity custom character, contest winner, support/gift grants.
 model UserAvatarGrant {
-  id          String   @id @default(uuid())
-  userId      String   @map("user_id")
-  avatarSetId String   @map("avatar_set_id")
+  id          String @id @default(uuid())
+  userId      String @map("user_id")
+  avatarSetId String @map("avatar_set_id")
 
   // "select" | "assigned_only" (admin forced their outfit)
-  grantType   String   @default("select") @map("grant_type")
+  grantType String @default("select") @map("grant_type")
 
   // Optional note for audit purposes (e.g. "Contest winner May 2026")
-  note        String?
+  note String?
 
-  expiresAt   DateTime? @map("expires_at") // null = permanent
-  grantedAt   DateTime  @default(now()) @map("granted_at")
-  revokedAt   DateTime? @map("revoked_at")
-  isActive    Boolean   @default(true) @map("is_active")
+  expiresAt DateTime? @map("expires_at") // null = permanent
+  grantedAt DateTime  @default(now()) @map("granted_at")
+  revokedAt DateTime? @map("revoked_at")
+  isActive  Boolean   @default(true) @map("is_active")
 
-  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  avatarSet AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
 
   @@index([userId, isActive])
   @@index([avatarSetId])
@@ -2895,22 +2966,22 @@ model UserAvatarGrant {
 // avatarSetId is a plain field (no FK constraint) so audit records survive the
 // deletion of the set they reference.
 model AvatarSetAuditLog {
-  id          Int      @id @default(autoincrement())
-  avatarSetId String   @map("avatar_set_id")
-  actorId     String?  @map("actor_id") // User.id who made the change
+  id          Int     @id @default(autoincrement())
+  avatarSetId String  @map("avatar_set_id")
+  actorId     String? @map("actor_id") // User.id who made the change
 
   // e.g. "set.created", "set.published", "set.archived",
   //      "layer.added", "layer.removed", "scope.added",
   //      "policy.added", "policy.removed", "grant.issued", "grant.revoked"
-  action      String
+  action String
 
   // JSON snapshot of what changed: { before: {...}, after: {...} }
-  diff        Json?
+  diff Json?
 
-  createdAt   DateTime @default(now()) @map("created_at")
+  createdAt DateTime @default(now()) @map("created_at")
 
   // actor relation preserved — audit logs still reference the user who acted
-  actor       User?     @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
 
   @@index([avatarSetId, createdAt])
   @@index([actorId, createdAt])
@@ -2956,7 +3027,7 @@ model BotActionRequest {
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
-  bot       Bot                  @relation(fields: [botId], references: [id], onDelete: Cascade)
+  bot       Bot                 @relation(fields: [botId], references: [id], onDelete: Cascade)
   decisions BotActionDecision[]
   attempts  BotActionAttempt[]
 
@@ -3010,24 +3081,24 @@ model BotActionAttempt {
 // fields that may vary. Never for deletes or sends. It ends after idleMinutes without the asker's messages, absoluteMinutes
 // at most, or when revoked.
 model BotActionGrant {
-  id               String    @id @default(uuid())
-  botId            String    @map("bot_id")
-  requesterKey     String    @map("requester_key") @db.VarChar(400)
-  conversationKey  String    @map("conversation_key") @db.VarChar(400)
-  connectionRef    String?   @map("connection_ref") @db.VarChar(200)
-  toolName         String    @map("tool_name") @db.VarChar(255)
-  heading          String    @db.VarChar(20)
-  toolFingerprint  String    @map("tool_fingerprint") @db.VarChar(128)
-  policyRevision   Int       @map("policy_revision")
+  id                String    @id @default(uuid())
+  botId             String    @map("bot_id")
+  requesterKey      String    @map("requester_key") @db.VarChar(400)
+  conversationKey   String    @map("conversation_key") @db.VarChar(400)
+  connectionRef     String?   @map("connection_ref") @db.VarChar(200)
+  toolName          String    @map("tool_name") @db.VarChar(255)
+  heading           String    @db.VarChar(20)
+  toolFingerprint   String    @map("tool_fingerprint") @db.VarChar(128)
+  policyRevision    Int       @map("policy_revision")
   // { fixed: { field: value }, varies: [field] }
-  scope            Json
-  fromRequestId    String?   @map("from_request_id") @db.VarChar(100)
-  idleMinutes      Int       @map("idle_minutes")
-  idleExpiresAt    DateTime  @map("idle_expires_at")
-  absoluteExpiresAt DateTime @map("absolute_expires_at")
-  revokedAt        DateTime? @map("revoked_at")
-  revokedReason    String?   @map("revoked_reason") @db.VarChar(40)
-  createdAt        DateTime  @default(now()) @map("created_at")
+  scope             Json
+  fromRequestId     String?   @map("from_request_id") @db.VarChar(100)
+  idleMinutes       Int       @map("idle_minutes")
+  idleExpiresAt     DateTime  @map("idle_expires_at")
+  absoluteExpiresAt DateTime  @map("absolute_expires_at")
+  revokedAt         DateTime? @map("revoked_at")
+  revokedReason     String?   @map("revoked_reason") @db.VarChar(40)
+  createdAt         DateTime  @default(now()) @map("created_at")
 
   bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
 
@@ -3040,49 +3111,49 @@ model BotActionGrant {
 // reach and with which key. The key is encrypted and never sent to a browser. At most one provider is the default for each of
 // the two jobs (set in one transaction); a bot on Universe AI follows them.
 model VoiceProvider {
-  id                 String   @id @default(uuid())
+  id                 String    @id @default(uuid())
   // The adapter the bot server runs this with: a short name such as "elevenlabs"
-  adapter            String   @db.VarChar(50)
-  name               String   @db.VarChar(255)
-  recognition        Boolean  @default(false)
-  speech             Boolean  @default(false)
-  enabled            Boolean  @default(false)
-  endpoint           String?  @db.Text
-  region             String?  @db.VarChar(50)
-  apiKeyEncrypted    String?  @map("api_key_encrypted") @db.Text
+  adapter            String    @db.VarChar(50)
+  name               String    @db.VarChar(255)
+  recognition        Boolean   @default(false)
+  speech             Boolean   @default(false)
+  enabled            Boolean   @default(false)
+  endpoint           String?   @db.Text
+  region             String?   @db.VarChar(50)
+  apiKeyEncrypted    String?   @map("api_key_encrypted") @db.Text
   // The last four characters of the key, kept so a super admin can recognise it
-  apiKeyLast4        String?  @map("api_key_last4") @db.VarChar(4)
+  apiKeyLast4        String?   @map("api_key_last4") @db.VarChar(4)
   // The models it can be used with: [{ id, label, kind: "recognition" | "speech" }]
-  models             Json     @default("[]")
-  defaultRecognition Boolean  @default(false) @map("default_recognition")
-  defaultSpeech      Boolean  @default(false) @map("default_speech")
+  models             Json      @default("[]")
+  defaultRecognition Boolean   @default(false) @map("default_recognition")
+  defaultSpeech      Boolean   @default(false) @map("default_speech")
   // The voice Universe AI speaks with when this is the default speaking provider and a bot is turned on without a key of its own
   // (game #1668); null = the first voice the provider lists. Only a provider that speaks has one.
-  defaultVoiceId     String?  @map("default_voice_id") @db.VarChar(255)
-  defaultVoiceName   String?  @map("default_voice_name") @db.VarChar(255)
-  createdById        String?  @map("created_by_id")
+  defaultVoiceId     String?   @map("default_voice_id") @db.VarChar(255)
+  defaultVoiceName   String?   @map("default_voice_name") @db.VarChar(255)
+  createdById        String?   @map("created_by_id")
   // Whose key this is (#749). Null = a provider the super admin runs for the whole server, which is every row there was before
   // personal voice keys. Anything that lists or reads providers for the server must keep only ownerId = null.
-  ownerId            String?  @map("owner_id")
+  ownerId            String?   @map("owner_id")
   // Health of a person's key (#749). downSince is set while the key is Down (null = Working); downReason is why ("credit",
   // "rejected", "errors", "model", "stopped"). failedRecognition and failedSpeech count the calls of each job that failed in a row (a call that works for one job
   // does not clear the other's); two mark the key Down, and downPart says which job ("recognition", "speech"; null when the
   // provider turned the whole key away). A Down key is
   // tried again at most every 5 minutes: healthCheckedAt is when it last was. Server providers have none of this.
   downSince          DateTime? @map("down_since")
-  downReason         String?  @map("down_reason") @db.VarChar(20)
-  downPart           String?  @map("down_part") @db.VarChar(12)
-  failedRecognition  Int      @default(0) @map("failed_recognition")
-  failedSpeech       Int      @default(0) @map("failed_speech")
+  downReason         String?   @map("down_reason") @db.VarChar(20)
+  downPart           String?   @map("down_part") @db.VarChar(12)
+  failedRecognition  Int       @default(0) @map("failed_recognition")
+  failedSpeech       Int       @default(0) @map("failed_speech")
   healthCheckedAt    DateTime? @map("health_checked_at")
   // The limits its owner changed for bots that use their key (#783): only the values they set (turnSeconds, replyCharacters, replySeconds,
   // listenMinutesPerDay); anything not there follows the server's voice limits. Null = none changed.
-  voiceLimits        Json?    @map("voice_limits")
+  voiceLimits        Json?     @map("voice_limits")
   // The models taken off by hand (["kind:id"]): the company's own list is read with the key and every model it lists is added on its
   // own, except these. Adding one back by hand takes it off this list. Null = none taken off.
-  hiddenModels       Json?    @map("hidden_models")
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
+  hiddenModels       Json?     @map("hidden_models")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
 
   owner User?           @relation("VoiceKeyOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   lends VoiceKeyLend[]
@@ -3164,57 +3235,57 @@ model BotVoiceRevision {
 // "none" until then). `enabled` false is "Turn off computer": the row and its files stay, nothing runs and nothing is
 // counted. There is no per-person switch anywhere: every member may give a Brick a computer, inside their allowance.
 model BrickComputer {
-  id            String    @id @default(uuid())
-  botId         String    @unique @map("bot_id")
-  enabled       Boolean   @default(true)
+  id                   String    @id @default(uuid())
+  botId                String    @unique @map("bot_id")
+  enabled              Boolean   @default(true)
   // none (not made yet), waking, resting, working, cold (resting a long while), broken, restoring, stopped (stopped by us)
-  machine       String    @default("none") @db.VarChar(10)
+  machine              String    @default("none") @db.VarChar(10)
   // Which provider holds the machine: "fake" (the pretend one, for tests and the dev server) or "real" (Agent37, on wherever the Agent37 key is set)
-  provider      String    @default("fake") @db.VarChar(10)
-  providerRef   String?   @map("provider_ref") @db.VarChar(255)
-  madeAt        DateTime? @map("made_at")
-  lastWorkedAt  DateTime? @map("last_worked_at")
+  provider             String    @default("fake") @db.VarChar(10)
+  providerRef          String?   @map("provider_ref") @db.VarChar(255)
+  madeAt               DateTime? @map("made_at")
+  lastWorkedAt         DateTime? @map("last_worked_at")
   // The last saved copy of its home folder: what Files shows when Computer is off, and which day a restore came from
-  filesBytes    BigInt    @default(0) @map("files_bytes")
-  filesSavedAt  DateTime? @map("files_saved_at")
-  restoredFrom  DateTime? @map("restored_from")
+  filesBytes           BigInt    @default(0) @map("files_bytes")
+  filesSavedAt         DateTime? @map("files_saved_at")
+  restoredFrom         DateTime? @map("restored_from")
   // What was on the computer's home folder when the last job ended (names, sizes, days; newest first), for the Files list. Null until a job has ended.
-  filesList     Json?     @map("files_list")
+  filesList            Json?     @map("files_list")
   // Set while a rest is claimed and not finished, empty once it is done: a rest a stopped server left half way is told apart from a finished one
-  restClaimedAt DateTime? @map("rest_claimed_at")
+  restClaimedAt        DateTime? @map("rest_claimed_at")
   // Set while the browser is being cleared after a job: a job that starts meanwhile waits for it, so it is never cleared under it
-  cleanClaimedAt DateTime? @map("clean_claimed_at")
+  cleanClaimedAt       DateTime? @map("clean_claimed_at")
   // When the sweep last sent the machine a no-op command to keep it awake while a job holds it
-  keptAwakeAt   DateTime? @map("kept_awake_at")
+  keptAwakeAt          DateTime? @map("kept_awake_at")
   // Who may act on the computer, one durable state for it (lib/computer-control.ts): agent, fencing, human_ready or returning. The epoch goes up with
   // each transition that begins, the lease is the leader's (a transition whose leader is gone is finished by the next request), and humanInputUntil is how
   // long the person's screen input, once authorized, may still be open: a hand back waits it out before Brick resumes.
-  controlState      String    @default("agent") @map("control_state") @db.VarChar(12)
-  controlEpoch      Int       @default(0) @map("control_epoch")
-  controlLeaseUntil DateTime? @map("control_lease_until")
-  humanInputUntil   DateTime? @map("human_input_until")
+  controlState         String    @default("agent") @map("control_state") @db.VarChar(12)
+  controlEpoch         Int       @default(0) @map("control_epoch")
+  controlLeaseUntil    DateTime? @map("control_lease_until")
+  humanInputUntil      DateTime? @map("human_input_until")
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again
-  noticeDismissedJobId String? @map("notice_dismissed_job_id") @db.VarChar(40)
+  noticeDismissedJobId String?   @map("notice_dismissed_job_id") @db.VarChar(40)
   // Cold storage (the machine is packed into our own storage after idle days and made again on the next use): when it was packed, and how a
   // pack-away that is under way stands. `machine` is "packing" while one runs and "cold" once the computer is gone and only the copies remain.
-  packedAt      DateTime? @map("packed_at")
-  packClaimedAt DateTime? @map("pack_claimed_at")
+  packedAt             DateTime? @map("packed_at")
+  packClaimedAt        DateTime? @map("pack_claimed_at")
   // claimed, stored (the copy is written whole), verified (restored on a clean computer and checked), removing (the computer is being deleted)
-  packStage     String?   @map("pack_stage") @db.VarChar(10)
-  packArchiveId String?   @map("pack_archive_id") @db.VarChar(40)
+  packStage            String?   @map("pack_stage") @db.VarChar(10)
+  packArchiveId        String?   @map("pack_archive_id") @db.VarChar(40)
   // Who holds the pack-away: one value per claim, new at each take-over, so a run that was taken over can change nothing of the run that replaced it
-  packClaimId   String?   @map("pack_claim_id") @db.VarChar(36)
+  packClaimId          String?   @map("pack_claim_id") @db.VarChar(36)
   // What the stored state was before the pack-away took the machine, so a pack-away that gives up puts it back as it was
-  packPrevious  String?   @map("pack_previous") @db.VarChar(10)
+  packPrevious         String?   @map("pack_previous") @db.VarChar(10)
   // A pack-away that failed is not tried again at once: when it was last tried and how many times in a row it failed
-  packTriedAt   DateTime? @map("pack_tried_at")
-  packFailures  Int       @default(0) @map("pack_failures")
+  packTriedAt          DateTime? @map("pack_tried_at")
+  packFailures         Int       @default(0) @map("pack_failures")
   // How the last return from cold storage went: when it came back, how long it took (milliseconds), and whether an older copy had to be used
-  returnedAt    DateTime? @map("returned_at")
-  returnMs      Int?      @map("return_ms")
-  olderCopyUsed Boolean   @default(false) @map("older_copy_used")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  updatedAt     DateTime  @updatedAt @map("updated_at")
+  returnedAt           DateTime? @map("returned_at")
+  returnMs             Int?      @map("return_ms")
+  olderCopyUsed        Boolean   @default(false) @map("older_copy_used")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
 
   bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
 
@@ -3343,56 +3414,56 @@ model ComputerReconcile {
 // waiting for its person at a time (computer_jobs_one_writer), so two jobs started at the same moment can never both write.
 // Only work proven read-only (`writes` false) may overlap.
 model ComputerJob {
-  id             String    @id @default(uuid())
-  botId          String    @map("bot_id")
-  personId       String    @map("person_id")
-  title          String    @db.VarChar(200)
+  id                String    @id @default(uuid())
+  botId             String    @map("bot_id")
+  personId          String    @map("person_id")
+  title             String    @db.VarChar(200)
   // queued, running, waiting (for its person), done, stopped, failed
-  status         String    @default("queued") @db.VarChar(10)
+  status            String    @default("queued") @db.VarChar(10)
   // Why a queued job is not running yet: turn (another job is writing), allowance (the person's own is used up), busy, pool
-  queuedFor      String?   @map("queued_for") @db.VarChar(10)
+  queuedFor         String?   @map("queued_for") @db.VarChar(10)
   // Why it stopped: person, allowance, pool, off, deleted, error, unanswered (nobody took over in time)
-  endedBy        String?   @map("ended_by") @db.VarChar(10)
-  writes         Boolean   @default(true)
-  stepDone       Int       @default(0) @map("step_done")
-  stepTotal      Int?      @map("step_total")
-  stepLabel      String?   @map("step_label") @db.VarChar(200)
+  endedBy           String?   @map("ended_by") @db.VarChar(10)
+  writes            Boolean   @default(true)
+  stepDone          Int       @default(0) @map("step_done")
+  stepTotal         Int?      @map("step_total")
+  stepLabel         String?   @map("step_label") @db.VarChar(200)
   // What it waits for: details, signin, upload, pay, submit or answer
-  waitingFor     String?   @map("waiting_for") @db.VarChar(10)
+  waitingFor        String?   @map("waiting_for") @db.VarChar(10)
   // What Brick is ready to put in at the hand-over, and where: "Your name, passport number…" and "visa-portal.example". Brick
   // names it before it hands over; the person's one tap fills in exactly this and nothing else.
-  readyWhat      String?   @map("ready_what") @db.VarChar(150)
-  readyWhere     String?   @map("ready_where") @db.VarChar(150)
+  readyWhat         String?   @map("ready_what") @db.VarChar(150)
+  readyWhere        String?   @map("ready_where") @db.VarChar(150)
   // Who has the mouse and keyboard: brick or person
-  control        String    @default("brick") @db.VarChar(10)
-  reservationKey String?   @map("reservation_key") @db.VarChar(255)
+  control           String    @default("brick") @db.VarChar(10)
+  reservationKey    String?   @map("reservation_key") @db.VarChar(255)
   // Seconds the machine was held for this job, and when the current stretch began, so cost is worked out from what ran
-  secondsRun     Int       @default(0) @map("seconds_run")
-  stretchStarted DateTime? @map("stretch_started")
-  createdAt      DateTime  @default(now()) @map("created_at")
-  startedAt      DateTime? @map("started_at")
-  endedAt        DateTime? @map("ended_at")
+  secondsRun        Int       @default(0) @map("seconds_run")
+  stretchStarted    DateTime? @map("stretch_started")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  startedAt         DateTime? @map("started_at")
+  endedAt           DateTime? @map("ended_at")
   // When the sweep last tried a job that waits in line, so Bricks that stay blocked go behind the ones not tried yet
-  lastTriedAt    DateTime? @map("last_tried_at")
+  lastTriedAt       DateTime? @map("last_tried_at")
   // The run of a goal or task that started it (game #2002), so a run handed out again finds its job and never starts a second
-  runId          String?   @map("run_id") @db.VarChar(36)
+  runId             String?   @map("run_id") @db.VarChar(36)
   // Goes up each time the person takes the machine and each time it is handed back (the take-over fence): a token and an agent
   // callback made under an older number are refused, so nothing the agent had in flight can act after the person took over
-  controlGeneration Int    @default(0) @map("control_generation")
+  controlGeneration Int       @default(0) @map("control_generation")
   // The agent's conversation for this job and the turn it is running now (Agent37 ids), so the runner reconnects to a turn that is
   // still going before it starts another, and the take-over fence knows which turn to cancel. Empty when no turn is running.
-  agentSessionId    String? @map("agent_session_id") @db.VarChar(80)
-  agentResponseId   String? @map("agent_response_id") @db.VarChar(120)
+  agentSessionId    String?   @map("agent_session_id") @db.VarChar(80)
+  agentResponseId   String?   @map("agent_response_id") @db.VarChar(120)
   // What the person asked for in more words than the title, for the agent only: never shown, never sent anywhere else, and cleared when the job ends
-  brief             String? @db.VarChar(4000)
+  brief             String?   @db.VarChar(4000)
   // The way this job took and what the whole task was expected to cost when it was chosen, in micros (the real cost is on the books under the job's id)
-  route             String  @default("computer") @db.VarChar(10)
-  expectedMicros    BigInt? @map("expected_micros")
+  route             String    @default("computer") @db.VarChar(10)
+  expectedMicros    BigInt?   @map("expected_micros")
   // How well the record of where the computer's browser went (computer_job_visits) was taken when the job ended: complete, partial (a gap or a cut
   // in what the computer recorded, or more than is kept), unread (the computer could not be read), none (the computer has no recorder). Empty until the job ends.
-  visitsState       String? @map("visits_state") @db.VarChar(8)
+  visitsState       String?   @map("visits_state") @db.VarChar(8)
 
-  bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
+  bot     Bot                @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]
   tokens  ComputerJobToken[]
   visits  ComputerJobVisit[]
@@ -3488,6 +3559,9 @@ model VoiceNoteTurn {
   // A reservation that was never used, given back
   released     Boolean   @default(false)
   costMicros   Int?      @map("cost_micros")
+  // What this note may cost Universe at most (its length at the hearing rate admitted), until it is heard
+  holdMicros   BigInt?   @map("hold_micros")
+  rateVersion  Int?      @map("rate_version")
   // The words heard and the answer, encrypted per turn, until the device has them or `bufferUntil`
   buffer       String?   @db.Text
   bufferUntil  DateTime? @map("buffer_until")
@@ -3536,52 +3610,52 @@ model VoiceNoteCleanup {
 // it ends as charged, released (a failure never costs the person) or unresolved. The customer's side (what the person paid) and
 // the provider's side (what Composio charged us) are kept in separate columns on purpose. No foreign keys: the books outlive bots.
 model InstantRun {
-  id                String    @id @default(uuid())
+  id             String    @id @default(uuid())
   // The bot server's call id with the Brick: asking again finds this run, so a retry never runs or pays twice
-  runKey            String    @unique @map("run_key") @db.VarChar(255)
-  botId             String    @map("bot_id")
+  runKey         String    @unique @map("run_key") @db.VarChar(255)
+  botId          String    @map("bot_id")
   // The person who asked and pays (the Brick's owner)
-  personId          String    @map("person_id")
+  personId       String    @map("person_id")
   // The bot server's id for the task this run belongs to (the key its receipt is opened under); none for a call that belongs to no task
-  taskKey           String?   @map("task_key") @db.VarChar(255)
-  toolSlug          String    @map("tool_slug") @db.VarChar(120)
-  toolkit           String    @db.VarChar(80)
+  taskKey        String?   @map("task_key") @db.VarChar(255)
+  toolSlug       String    @map("tool_slug") @db.VarChar(120)
+  toolkit        String    @db.VarChar(80)
   // sha256 of the canonical arguments: lets a second ask for the very same thing wait while the first is unclear. Never the arguments.
-  argsHash          String    @map("args_hash") @db.VarChar(64)
+  argsHash       String    @map("args_hash") @db.VarChar(64)
   // Which version of the trusted price table bounded this run
-  priceVersion      String    @map("price_version") @db.VarChar(40)
+  priceVersion   String    @map("price_version") @db.VarChar(40)
   // The trusted top price of the run, all fees included, and what was held from the person's credit for it
-  topMicros         BigInt    @map("top_micros")
-  holdMicros        BigInt    @map("hold_micros")
+  topMicros      BigInt    @map("top_micros")
+  holdMicros     BigInt    @map("hold_micros")
   // The markup (in basis points) the hold was made with: the charge is always worked out with this one, so a settlement said again
   // after the markup was changed asks the books for the same amount as the first time
-  markupBps         Int?      @map("markup_bps")
+  markupBps      Int?      @map("markup_bps")
   // reserving, held, sent, succeeded, failed, ambiguous, refused
-  state             String    @db.VarChar(12)
+  state          String    @db.VarChar(12)
   // Why it did not happen or did not work, in a fixed word; never a message from the provider
-  reason            String?   @db.VarChar(40)
+  reason         String?   @db.VarChar(40)
   // The customer's side: held, charged or released; what was charged; what was given back later
-  customerState     String    @default("none") @map("customer_state") @db.VarChar(10)
-  customerMicros    BigInt?   @map("customer_micros")
-  refundedMicros    BigInt    @default(0) @map("refunded_micros")
+  customerState  String    @default("none") @map("customer_state") @db.VarChar(10)
+  customerMicros BigInt?   @map("customer_micros")
+  refundedMicros BigInt    @default(0) @map("refunded_micros")
   // The provider's side: pending (Composio's charge is not known yet; the top price counts as our exposure) or settled
-  providerState     String    @default("none") @map("provider_state") @db.VarChar(10)
-  providerMicros    BigInt?   @map("provider_micros")
+  providerState  String    @default("none") @map("provider_state") @db.VarChar(10)
+  providerMicros BigInt?   @map("provider_micros")
   // measured (Composio's own figure) or estimated
-  providerBasis     String?   @map("provider_basis") @db.VarChar(10)
-  providerLogId     String?   @map("provider_log_id") @db.VarChar(255)
+  providerBasis  String?   @map("provider_basis") @db.VarChar(10)
+  providerLogId  String?   @map("provider_log_id") @db.VarChar(255)
   // The opaque id the run was sent under, so Composio's log of it can be found exactly (never a person's id)
-  providerUserId    String    @map("provider_user_id") @db.VarChar(120)
-  provider          String    @default("composio") @db.VarChar(20)
+  providerUserId String    @map("provider_user_id") @db.VarChar(120)
+  provider       String    @default("composio") @db.VarChar(20)
   // When the request went out; a run that stays "sent" past the hold time is treated as unclear
-  sentAt            DateTime? @map("sent_at")
-  finishedAt        DateTime? @map("finished_at")
+  sentAt         DateTime? @map("sent_at")
+  finishedAt     DateTime? @map("finished_at")
   // When an unclear run stops being looked for (it is closed on what is known), or a charge not reported stops being waited for
-  checkAfter        DateTime? @map("check_after")
+  checkAfter     DateTime? @map("check_after")
   // When a sweep or a retry last tried to settle it: the sweep goes oldest attempt first, so runs that cannot be settled never starve the rest
-  checkedAt         DateTime? @map("checked_at")
-  createdAt         DateTime  @default(now()) @map("created_at")
-  detail            Json?
+  checkedAt      DateTime? @map("checked_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  detail         Json?
 
   @@index([state, createdAt])
   @@index([providerState, createdAt])
@@ -3593,16 +3667,16 @@ model InstantRun {
 // Money given back for a run: a verified platform failure (the person never paid) is a release and needs no row; a row here is a
 // give-back after a charge ("Didn't work", goodwill) or a late fix. One row per refund key, so asking twice gives back once.
 model InstantRefund {
-  id           String   @id @default(uuid())
-  refundKey    String   @unique @map("refund_key") @db.VarChar(255)
-  runId        String   @map("run_id")
-  personId     String   @map("person_id")
-  kind         String   @db.VarChar(20)
-  amountMicros BigInt   @map("amount_micros")
+  id           String    @id @default(uuid())
+  refundKey    String    @unique @map("refund_key") @db.VarChar(255)
+  runId        String    @map("run_id")
+  personId     String    @map("person_id")
+  kind         String    @db.VarChar(20)
+  amountMicros BigInt    @map("amount_micros")
   // Null while only the intent is saved (written before the books are asked, so a give-back the books made and we never recorded is
   // found again and finished by the retry); set once the books confirmed it. Both count against the limits.
   confirmedAt  DateTime? @map("confirmed_at")
-  createdAt    DateTime @default(now()) @map("created_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
 
   @@index([runId])
   @@index([personId, createdAt])

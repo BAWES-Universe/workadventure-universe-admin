@@ -8,12 +8,14 @@ import { monthOf } from '@/lib/meter-values';
 import { brickHasApp } from '@/lib/instant/asker';
 import { getInstantFunds, type InstantFunds } from '@/lib/instant/funds';
 import { getInstantLimits, getInstantPause, pauseInstant } from '@/lib/instant/state';
+import { toolIsFrozen } from '@/lib/instant/freeze';
 import {
   INSTANT_PROVIDER,
   admitInstantTool,
   argsFingerprint,
   customerChargeFor,
   holdFor,
+  instantListedPrices,
   missingInstantLimits,
   providerUserIdFor,
   REASON_WORDS,
@@ -145,6 +147,8 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
 
   const admitted = admitInstantTool(input.tool, input.arguments);
   if (!admitted.ok) return refuse(admitted.reason);
+  // S4: a tool whose listed price changed in a way nobody could read takes no new runs (the others carry on), unless a proven independent ceiling covers it
+  if (await toolIsFrozen(input.tool, instantListedPrices().find((row) => row.tool === input.tool)?.unitMicros ?? 0)) return refuse('frozen');
   // Nothing is on for a Brick by default: only an App its owner switched on for this Brick can run
   if (!(await brickHasApp(input.botId, admitted.toolkit))) return refuse('not_offered');
   if (admitted.topMicros > (limits.maxRunMicros ?? 0)) return refuse('too_costly');

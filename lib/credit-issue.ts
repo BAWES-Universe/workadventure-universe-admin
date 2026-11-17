@@ -2,7 +2,8 @@ import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
 import { asNumber, isMoneyCategory, pickBase, planLot, reaches, subjectKeyFor, type PersonFacts, type RuleFacts } from '@/lib/credit-values';
 import { currentRules, usableLots, lockAll, lockOfAccount, lockOfPerson, lockOfPool, lockOfRules, LOCK_METER_SETTINGS, personFacts, type Tx } from '@/lib/credit-store';
-import { budgetOf, issuedInMonth, platformAccount, getFundingAccount } from '@/lib/credit-funding';
+import { budgetOf, issuedAgainstBudget, platformAccount, getFundingAccount } from '@/lib/credit-funding';
+import { getInstantLimits } from '@/lib/instant/state';
 import type { MeterSettings } from '@/lib/meter-values';
 
 /**
@@ -138,6 +139,18 @@ async function answerAsksFromPools(tx: Tx, person: PersonFacts, now: Date): Prom
   }
 }
 
+/**
+ * Whether what a DEFAULT allowance can spend is held by the shared budget of its area, checked where it is spent: Computers by the Computers
+ * budget (`poolCeilingMicros`), Instant Apps by Instant's exposure ceiling. With that budget empty nothing backs it, so the rollout guard still
+ * applies and nothing is promised on an empty budget. Gifts, exceptions and credit to be billed are never backed this way.
+ */
+export async function backedByAreaBudget(tx: Pick<Tx, 'appSetting'>, rule: Pick<RuleFacts, 'programKind' | 'categoryId' | 'settlement'>, settings: Pick<MeterSettings, 'poolCeilingMicros'>): Promise<boolean> {
+  if (rule.programKind !== 'default' || rule.settlement === 'to_bill') return false;
+  if (rule.categoryId === 'computers') return settings.poolCeilingMicros !== null;
+  if (rule.categoryId === 'instant_apps') return (await getInstantLimits(tx)).exposureCeilingMicros !== null;
+  return false;
+}
+
 type Issued = { lot: IssuedLot; skipped?: undefined } | { lot?: undefined; skipped: SkipReason | null };
 
 /** One rule's lot for one person, inside the locks. `skipped: null` means it was already issued (the quiet, normal answer). */
@@ -149,9 +162,13 @@ async function issueOne(tx: Tx, rule: RuleFacts, personId: string, now: Date, se
   if (already) return { skipped: null };
   const account = await getFundingAccount(rule.fundingAccountId, tx);
   if (!account || account.status !== 'active') return { skipped: 'account_inactive' };
-  const budget = budgetOf(account, settings);
-  if (budget === null) return { skipped: 'not_set' };
-  if ((await issuedInMonth(tx, account.id, now)) + plan.amountMicros > budget) return { skipped: 'over_budget' };
+  // P8: a default allowance is issued to every member while the shared budget of its area backs what it can spend; the rollout budget guards only
+  // what nothing else backs (gifts, exceptions, credit promised as funded)
+  if (!(await backedByAreaBudget(tx, rule, settings))) {
+    const budget = budgetOf(account, settings);
+    if (budget === null) return { skipped: 'not_set' };
+    if ((await issuedAgainstBudget(tx, account.id, now)) + plan.amountMicros > budget) return { skipped: 'over_budget' };
+  }
   if (rule.totalCapMicros !== null) {
     const given = await tx.creditLot.aggregate({ where: { programId: rule.programId }, _sum: { amountMicros: true } });
     if (asNumber(given._sum.amountMicros) + plan.amountMicros > rule.totalCapMicros) return { skipped: 'cap' };

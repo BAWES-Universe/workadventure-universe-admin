@@ -10,7 +10,8 @@ import { setAdapterForTests, type InstantAdapter, type InstantCall, type Instant
 import { evaluatePause, exposureIn, giveBack, instantRunKey, reconcileRun, runInstant, setInstantHooks } from '@/lib/instant/executor';
 import { setInstantFunds, shutFunds, type InstantFunds } from '@/lib/instant/funds';
 import { getInstantPause, resumeInstant, saveInstantLimits } from '@/lib/instant/state';
-import { checkPriceDrift, forgetDriftClock, sweepInstant } from '@/lib/instant/sweep';
+import { checkPriceDrift, forgetDriftClock, readPriceChange, sweepInstant } from '@/lib/instant/sweep';
+import { getFrozenTools, saveCeiling } from '@/lib/instant/freeze';
 import { denyInstantOnSessions } from '@/lib/instant/sessions';
 import { admitInstantTool } from '@/lib/instant/values';
 import { instantRulesAndReceipts } from '@/lib/instant/rules-and-receipts';
@@ -131,7 +132,7 @@ run('the bounded Instant executor, in a real database', () => {
     setInstantFunds(undefined);
     forgetDriftClock();
     await resumeInstant(sara);
-    await prisma.appSetting.deleteMany({ where: { key: { in: ['instant-limits'] } } });
+    await prisma.appSetting.deleteMany({ where: { key: { in: ['instant-limits', 'instant-frozen', 'instant-ceilings'] } } });
     await giveApp(brick, sara, 'exa');
   });
   afterEach(async () => {
@@ -146,7 +147,7 @@ run('the bounded Instant executor, in a real database', () => {
   afterAll(async () => {
     if (envBefore.service === undefined) delete process.env.BOT_SERVICE_TOKEN;
     else process.env.BOT_SERVICE_TOKEN = envBefore.service;
-    await prisma.appSetting.deleteMany({ where: { key: { in: ['instant-limits', 'instant-state'] } } });
+    await prisma.appSetting.deleteMany({ where: { key: { in: ['instant-limits', 'instant-state', 'instant-frozen', 'instant-ceilings'] } } });
     await prisma.bot.deleteMany({ where: { id: { in: [brick, omarBrick] } } });
     await prisma.user.deleteMany({ where: { id: { in: [sara, omar] } } });
     await prisma.$disconnect();
@@ -883,6 +884,108 @@ run('the bounded Instant executor, in a real database', () => {
       expect(report.gone).toEqual(['TAVILY_SEARCH']);
       expect(report.up).toContain('EXA_SEARCH');
       expect(paused).toEqual(['price_drift']);
+    });
+  });
+
+  describe('one tool whose price changed in a way nobody can read is frozen, and the others carry on (S4)', () => {
+    const LISTED = (tool: string) => new Map((require('@/lib/instant/values') as typeof import('@/lib/instant/values')).instantListedPrices().map((row) => [row.tool, row.listed])).get(tool) ?? null;
+    /** Composio's listing: the words the table was read against, except for the tools given other words. */
+    const listing = (p: ReturnType<typeof fakeProvider>, other: Record<string, string | null> = {}) =>
+      p.instant.tool.mockImplementation((async (slug: string) => ({ slug, toolkit: 'x', description: null, inputSchema: null, instantSupported: true, priceWords: slug in other ? other[slug] : LISTED(slug) })) as never);
+
+    it('reads a changed price as the same, lower, or one to freeze for', () => {
+      expect(readPriceChange('$0.007 per search', 7_000, '$0.007 per search')).toEqual({ kind: 'same' });
+      expect(readPriceChange('$0.007 per search', 7_000, '$0.005 per search')).toEqual({ kind: 'lower' });
+      expect(readPriceChange('$0.007 per search', 7_000, '$0.02 per search')).toEqual({ kind: 'freeze', reason: 'higher' });
+      // A lower figure on another unit or tier is not a lower price
+      expect(readPriceChange('$0.007 per search', 7_000, '$0.002 per 1,000 searches')).toEqual({ kind: 'freeze', reason: 'unit_or_tier' });
+      expect(readPriceChange('$0.007 per search', 7_000, 'from $0.005 per search')).toEqual({ kind: 'freeze', reason: 'unit_or_tier' });
+      expect(readPriceChange('$0.007 per search', 7_000, 'varies by plan')).toEqual({ kind: 'freeze', reason: 'unreadable' });
+      expect(readPriceChange('$0.007 per search', 7_000, null)).toEqual({ kind: 'freeze', reason: 'unreadable' });
+    });
+
+    it('freezes only the tool whose unit changed: it takes no new runs, nothing else is paused, and a run already made is still answered', async () => {
+      await setLimits();
+      await giveApp(brick, sara, 'tavily');
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      const first = ask({ callId: callId() });
+      expect(await runInstant(first, { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
+
+      listing(p, { EXA_SEARCH: '$0.002 per 1,000 searches' });
+      const report = await checkPriceDrift(p.adapter);
+      expect(report).toMatchObject({ frozen: ['EXA_SEARCH'], up: [], unfrozen: [] });
+      expect((await getInstantPause()).paused).toBe(false);
+      expect(Object.keys((await getFrozenTools()) ?? {})).toEqual(['EXA_SEARCH']);
+
+      const before = p.sent.length;
+      expect(await runInstant(ask({ callId: callId(), arguments: { query: 'new' } }), { adapter: p.adapter, funds: f.funds })).toEqual({ status: 'refused', reason: 'frozen' });
+      expect(p.sent).toHaveLength(before);
+      // The other tool carries on, and the run made before is still the same run
+      expect(await runInstant(ask({ callId: callId(), tool: 'TAVILY_SEARCH', arguments: { query: 'new' } }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
+      expect(await runInstant(first, { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'already_done' });
+    });
+
+    it('clears by itself when the live words match the table again, and not before', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      listing(p, { EXA_SEARCH: '$0.002 per 1,000 searches' });
+      await checkPriceDrift(p.adapter);
+      expect(await runInstant(ask({ callId: callId() }), { adapter: p.adapter, funds: f.funds })).toEqual({ status: 'refused', reason: 'frozen' });
+      // A second look at the same changed words changes nothing
+      expect((await checkPriceDrift(p.adapter)).unfrozen).toEqual([]);
+      listing(p);
+      expect((await checkPriceDrift(p.adapter)).unfrozen).toEqual(['EXA_SEARCH']);
+      expect(await getFrozenTools()).toEqual({});
+      expect(await runInstant(ask({ callId: callId() }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
+    });
+
+    it('freezes a tool Composio no longer serves as Instant, and does not touch a tool Composio could not be asked about', async () => {
+      const p = fakeProvider();
+      p.instant.tool.mockImplementation((async (slug: string) => {
+        if (slug === 'TAVILY_SEARCH') return null;
+        if (slug === 'EXA_ANSWER') throw new Error('down');
+        return { slug, toolkit: 'x', description: null, inputSchema: null, instantSupported: true, priceWords: LISTED(slug) };
+      }) as never);
+      const report = await checkPriceDrift(p.adapter);
+      expect(report.frozen).toEqual(['TAVILY_SEARCH']);
+      expect(report.unreachable).toEqual(['EXA_ANSWER']);
+      expect(Object.keys((await getFrozenTools()) ?? {})).toEqual(['TAVILY_SEARCH']);
+    });
+
+    it('lets a tool carry on while a proven independent ceiling, no higher than what is reserved for a unit, covers it', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      listing(p, { EXA_SEARCH: '$0.002 per 1,000 searches' });
+      await checkPriceDrift(p.adapter);
+      // Above what is reserved for a unit: it covers nothing
+      await saveCeiling('EXA_SEARCH', { unitMicros: 8_000, proof: 'Provider cap, contract 12' }, sara);
+      expect(await runInstant(ask({ callId: callId() }), { adapter: p.adapter, funds: f.funds })).toEqual({ status: 'refused', reason: 'frozen' });
+      // At or below it: new attempts carry on, the table's reservation already bounds them
+      await saveCeiling('EXA_SEARCH', { unitMicros: 7_000, proof: 'Provider cap, contract 12' }, sara);
+      expect(await runInstant(ask({ callId: callId() }), { adapter: p.adapter, funds: f.funds })).toMatchObject({ status: 'done' });
+      // Removed, it is frozen again
+      await saveCeiling('EXA_SEARCH', null, sara);
+      expect(await runInstant(ask({ callId: callId() }), { adapter: p.adapter, funds: f.funds })).toEqual({ status: 'refused', reason: 'frozen' });
+      // No proof, no ceiling
+      await expect(saveCeiling('EXA_SEARCH', { unitMicros: 7_000, proof: '  ' }, sara)).rejects.toThrow('proof');
+    });
+
+    it('holds a tool when the frozen list cannot be read: nothing runs on a guess', async () => {
+      await setLimits();
+      const p = fakeProvider();
+      const f = fakeFunds(10_000_000);
+      const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const original = prisma.appSetting.findUnique.bind(prisma.appSetting);
+      const spy = jest.spyOn(prisma.appSetting, 'findUnique').mockImplementation(((args: { where: { key: string } }) => (args.where.key === 'instant-frozen' ? Promise.reject(new Error('down')) : original(args as never))) as never);
+      try {
+        expect(await runInstant(ask({ callId: callId() }), { adapter: p.adapter, funds: f.funds })).toEqual({ status: 'refused', reason: 'frozen' });
+      } finally {
+        spy.mockRestore();
+        quiet.mockRestore();
+      }
     });
   });
 
