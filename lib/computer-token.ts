@@ -10,10 +10,11 @@ import { isOver } from '@/lib/computer-values';
  *  - Short-lived: 15 minutes, renewed by the job's own lease (`renewJobTokens`), so a computer that went quiet loses it.
  *  - Revocable: it ends with the job, and when the person takes over (the job's control generation moves), so a call the agent had
  *    in flight is refused after the fence.
- *  - Scoped: "model" is a model call and nothing else. Other scopes are added with the parts that use them.
+ *  - Scoped: "model" is a model call and nothing else; "git" is the computer's login to the git relay and nothing else (it is the same
+ *    kind of key, so the take-over, the end of the job and the lease treat both alike). Other scopes are added with the parts that use them.
  */
 
-export type TokenScope = 'model';
+export type TokenScope = 'model' | 'git';
 
 /** How long a key lives without the job's lease renewing it. */
 export const TOKEN_LIFE_MS = 15 * 60 * 1000;

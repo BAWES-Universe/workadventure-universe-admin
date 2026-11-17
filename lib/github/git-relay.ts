@@ -4,6 +4,8 @@ import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { orbitBase } from '@/lib/github/app';
 import { gitHubToken, gitHubTokenRefused, GITHUB_SOURCE, readGitHubAuth } from '@/lib/github/connection';
 import type { FetchLike } from '@/lib/github/api';
+import { committerOf, jobGitAccess } from '@/lib/github/git-login';
+import { verifyJobToken } from '@/lib/computer-token';
 import { buildsOn, readPackCommits, VERIFY_MAX_BYTES } from '@/lib/github/pack-commits';
 
 /**
@@ -37,6 +39,8 @@ interface GitPass {
   connectionId: string;
   ownerId: string;
   exp: number;
+  /** A computer's job key that may only read (a job that is only to look, or GitHub turned off for changes): a push is turned down. */
+  readOnly?: boolean;
 }
 
 export type PassIssue =
@@ -62,23 +66,29 @@ export async function issueGitPass(botId: string): Promise<PassIssue> {
   if (!auth?.accessToken || !auth.login) return { status: 'no_github' };
   const exp = Math.floor(Date.now() / 1000) + GIT_PASS_SECONDS;
   const pass: GitPass = { kind: 'git-pass', botId, connectionId: grant.connection.id, ownerId: bot.ownerId, exp };
+  const who = committerOf(auth);
+  if (!who) return { status: 'no_github' };
   return {
     status: 'ok',
     pass: encryptApiKey(JSON.stringify(pass)),
     expiresAt: new Date(exp * 1000).toISOString(),
     remoteBase: `${base}/api/git`,
-    name: auth.login,
-    email: auth.githubId ? `${auth.githubId}+${auth.login}@users.noreply.github.com` : `${auth.login}@users.noreply.github.com`,
+    ...who,
   };
 }
 
-/** The pass in a git request (HTTP Basic: any user name, the pass as the password), still good and still allowed, or null. */
+/**
+ * The sign-in in a git request (HTTP Basic: any user name, the secret as the password), still good and still allowed, or null. The
+ * secret is either a running job's git key (what a Brick's computer holds: `cjt_…`, checked against Orbit's records of the job each
+ * time) or a pass made by `issueGitPass`.
+ */
 export async function checkGitPass(authorization: string | null, graceSeconds = 0): Promise<GitPass | null> {
   if (!authorization?.startsWith('Basic ')) return null;
   let pass: GitPass;
+  const decoded = Buffer.from(authorization.slice(6).trim(), 'base64').toString('utf8');
+  const secret = decoded.slice(decoded.indexOf(':') + 1);
+  if (secret.startsWith('cjt_')) return checkJobKey(secret, graceSeconds);
   try {
-    const decoded = Buffer.from(authorization.slice(6).trim(), 'base64').toString('utf8');
-    const secret = decoded.slice(decoded.indexOf(':') + 1);
     pass = JSON.parse(decryptApiKey(secret)) as GitPass;
   } catch {
     return null;
@@ -89,6 +99,19 @@ export async function checkGitPass(authorization: string | null, graceSeconds = 
   if (!bot || bot.ownerId !== pass.ownerId || bot.roomId !== null || bot.deletedAt !== null) return null;
   const grant = await prisma.botMcpServer.findFirst({ where: { botId: pass.botId, connectionId: pass.connectionId, enabled: true }, select: { id: true } });
   return grant ? pass : null;
+}
+
+/**
+ * A computer's job key as a git sign-in. The key must be a "git" key that is still good (not revoked: a take-over, the end of the job
+ * and GitHub taken from the Brick all end it, and it is refused once the job's control number moved on), and the job must still be
+ * one that may use its owner's GitHub. A key that ran out only during an upload still counts for `graceSeconds`.
+ */
+async function checkJobKey(secret: string, graceSeconds: number): Promise<GitPass | null> {
+  const verified = await verifyJobToken(secret, 'git', new Date(Date.now() - graceSeconds * 1000));
+  if (!verified.ok) return null;
+  const access = await jobGitAccess(verified.jobId);
+  if (!access || access.botId !== verified.botId) return null;
+  return { kind: 'git-pass', botId: access.botId, connectionId: access.connectionId, ownerId: access.ownerId, exp: Math.floor(Date.now() / 1000) + 60, readOnly: !access.mayPush };
 }
 
 const REPO_RE = /^([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]{1,100}?)(?:\.git)?$/;
@@ -285,6 +308,19 @@ export type RelayOutcome =
   | { status: 'refused'; message: string; response: Response }
   | { status: 'reconnect' | 'unavailable' | 'too_big' | 'bad_request' };
 
+/** What a computer that may only read is told when it tries to push. */
+export const READ_ONLY_MESSAGE = 'This computer may only read from GitHub for this job (the job is only to look, or GitHub is not allowed to change things for this Brick), so pushing is not allowed.';
+
+/**
+ * The answer git shows as "remote error: …" to a push that is not allowed before it starts: git's own advertisement for the service,
+ * with an error line in place of the branches.
+ */
+function readOnlyAdvertisement(): Response {
+  const text = (value: string) => Buffer.from(`${(value.length + 4).toString(16).padStart(4, '0')}${value}`, 'utf8');
+  const body = Buffer.concat([text('# service=git-receive-pack\n'), Buffer.from('0000', 'ascii'), text(`ERR ${READ_ONLY_MESSAGE}\n`)]);
+  return new Response(new Uint8Array(body), { status: 200, headers: { 'Content-Type': 'application/x-git-receive-pack-advertisement', 'Cache-Control': 'no-cache' } });
+}
+
 /**
  * One git request, passed to github.com with the owner's own token. A push is read first and refused when it deletes or tags. The
  * answer is GitHub's own, streamed back as it comes.
@@ -298,6 +334,10 @@ export async function relayGit(
   if (target.step === 'info/refs') {
     const service = new URLSearchParams(input.search).get('service');
     if (input.method !== 'GET' || !service || !SERVICES.has(service)) return { status: 'bad_request' };
+    // A computer that may only read is told so as git starts to push, not after it has packed everything
+    if (pass.readOnly && service === 'git-receive-pack') return { status: 'refused', message: READ_ONLY_MESSAGE, response: readOnlyAdvertisement() };
+  } else if (pass.readOnly && target.step === 'git-receive-pack') {
+    return { status: 'refused', message: READ_ONLY_MESSAGE, response: new Response(`${READ_ONLY_MESSAGE}\n`, { status: 403, headers: { 'Content-Type': 'text/plain; charset=utf-8' } }) };
   } else if (input.method !== 'POST' || !input.body) {
     return { status: 'bad_request' };
   }
