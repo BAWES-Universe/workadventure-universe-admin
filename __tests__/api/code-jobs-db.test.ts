@@ -31,6 +31,7 @@ let omar = '';
 let boss = '';
 let saraBrick = '';
 let connectionId = '';
+let serverId = '';
 
 const text = (value: string) => new TextEncoder().encode(value);
 const done = (stdout = 'ok', extra: Partial<{ ok: boolean; stderr: string; results: string; error: string | null }> = {}): WorkbenchRun => ({ kind: 'done', cell: { ok: true, stdout, stderr: '', results: '', error: null, logId: 'log_1', ...extra } });
@@ -150,6 +151,18 @@ run('code jobs for Apps, in a real database', () => {
     saraBrick = (await createBrick({ ownerId: sara, name: 'Brick' })).id;
     await saveReadyMadeApps({ apps: { [KEY]: { name: 'Crm', authConfigId: 'ac_1', enabled: true } } }, boss);
     connectionId = (await createConnection(sara, { name: 'Crm', serverUrl: `https://mcp.example/${tag}/mcp`, authType: 'none', authConfig: undefined, source: 'ready_made', providerToolkit: KEY, providerAccountId: `ca_${tag}` })).id;
+    // The Brick's grant on the connection, with its tools as the bot server and a person left them: reads are gated by these
+    const serverRow = await prisma.botMcpServer.create({ data: { botId: saraBrick, connectionId, name: 'Crm', serverUrl: 'https://mcp.example/unused', enabled: true } });
+    serverId = serverRow.id;
+    const U = KEY.toUpperCase();
+    const confirmed = new Date();
+    await prisma.botMcpTool.createMany({
+      data: [
+        ...['LIST', 'LIST_CONTACTS', 'GET'].map((name) => ({ serverId, name: `${U}_${name}`, fingerprint: `f-${name}`, heading: 'looksUp', confirmedAt: confirmed })),
+        { serverId, name: `${U}_DELETE`, fingerprint: 'f-delete', heading: 'deletesOrSends', confirmedAt: confirmed },
+        { serverId, name: `${U}_NEW`, fingerprint: 'f-new', heading: 'looksUp', confirmedAt: null },
+      ],
+    });
   });
 
   beforeEach(async () => {
@@ -367,6 +380,37 @@ run('code jobs for Apps, in a real database', () => {
       expect(JSON.parse(Buffer.from(put[0].bytes).toString('utf8'))).toMatchObject({ rows: [1, 2, 3] });
     });
 
+    it('runs only a tool the Brick may run right away: not one that is off, asks first, changes things, was never confirmed or is not on its list', async () => {
+      const read: ReadRunner = jest.fn(async () => ({ ok: true, data: {} }));
+      const U = KEY.toUpperCase();
+      const refused = async (tool: string) => {
+        const outcome = await start({ code: 'x', reads: [{ tool }] }, { read });
+        expect(outcome).toMatchObject({ status: 'refused', reason: 'not_allowed' });
+      };
+      await refused(`${U}_DELETE`);
+      await refused(`${U}_NEW`);
+      await refused(`${U}_NOT_ON_THE_LIST`);
+      // The heading's own setting decides too: asks first and off are both a no
+      for (const setting of ['asksFirst', 'off']) {
+        await prisma.botMcpServer.update({ where: { id: serverId }, data: { lookUpSetting: setting } });
+        await refused(`${U}_LIST`);
+      }
+      await prisma.botMcpServer.update({ where: { id: serverId }, data: { lookUpSetting: 'rightAway', legacyText: true } });
+      await refused(`${U}_LIST`);
+      await prisma.botMcpServer.update({ where: { id: serverId }, data: { legacyText: false, enabled: false } });
+      await refused(`${U}_LIST`);
+      await prisma.botMcpServer.update({ where: { id: serverId }, data: { enabled: true } });
+      // A good one in the same request does not carry a bad one
+      expect(await start({ code: 'x', reads: [{ tool: `${U}_LIST` }, { tool: `${U}_DELETE` }] }, { read })).toMatchObject({ status: 'refused', reason: 'not_allowed' });
+      expect(read).not.toHaveBeenCalled();
+      expect(await prisma.codeJob.count({ where: { personId: sara } })).toBe(0);
+      expect(provider.adapter.open).not.toHaveBeenCalled();
+      // And a tool that passes still runs, whatever the case of its name
+      jobOf(await start({ code: 'x', reads: [{ tool: `${KEY}_list` }] }, { read }));
+      await finishAll();
+      expect(read).toHaveBeenCalledTimes(1);
+    });
+
     it('stops before any code runs when a read does not work, and when the data is over the Limit', async () => {
       const failing: ReadRunner = jest.fn(async () => null);
       const one = jobOf(await start({ code: 'x', reads: [{ tool: `${KEY.toUpperCase()}_LIST` }] }, { read: failing }));
@@ -519,6 +563,46 @@ run('code jobs for Apps, in a real database', () => {
       // Cancelling again, or a job that is not theirs, changes nothing
       expect(await cancelCodeJob({ jobId: job.jobId, botId: saraBrick, personId: sara }, deps())).toMatchObject({ status: 'ok', job: { state: 'cancelled' } });
       expect(await cancelCodeJob({ jobId: job.jobId, botId: saraBrick, personId: omar }, deps())).toMatchObject({ status: 'refused', reason: 'not_found' });
+    });
+
+    it('leaves no kept file behind when a cancel lands while the worker is still copying files', async () => {
+      provider.state.runs.push(({ files }) => {
+        files.set('out/a.txt', text('aaaa'));
+        files.set('out/b.txt', text('bbbb'));
+        return done('made files');
+      });
+      let jobId = '';
+      const reading = provider.adapter.read.getMockImplementation() as NonNullable<ReturnType<typeof provider.adapter.read.getMockImplementation>>;
+      provider.adapter.read.mockImplementation(async (call) => {
+        // The file is read, then a cancel arrives in the middle of copying: it ends the job and cleans up before this worker keeps what it read
+        const answer = await reading(call);
+        if (provider.adapter.read.mock.calls.length === 1) await cancelCodeJob({ jobId, botId: saraBrick, personId: sara }, deps());
+        return answer;
+      });
+      jobId = jobOf(await start({ code: 'print(1)' })).jobId;
+      await finishAll();
+      const row = await rowOf(jobId);
+      expect(row.state).toBe('cancelled');
+      expect(row.outputs).toHaveLength(0);
+      expect(kept.files.size).toBe(0);
+    });
+
+    it('writes the meter line of a finished job the sweep finds without one, once', async () => {
+      const job = jobOf(await start({ code: 'print(1)' }));
+      await finishAll();
+      expect((await rowOf(job.jobId)).meteredAt).not.toBeNull();
+      expect(await prisma.meterEvent.count({ where: { personId: sara, eventId: `codejob:${job.jobId}` } })).toBe(1);
+      // The meter did not take it: no line and no mark
+      await prisma.meterEvent.deleteMany({ where: { eventId: `codejob:${job.jobId}` } });
+      await prisma.codeJob.update({ where: { id: job.jobId }, data: { meteredAt: null } });
+      // Not at once: the job is given a minute to write its own
+      expect((await sweepCodeJobs(deps())).metered).toBe(0);
+      clock.offset += 61_000;
+      expect((await sweepCodeJobs(deps())).metered).toBe(1);
+      expect(await prisma.meterEvent.count({ where: { eventId: `codejob:${job.jobId}` } })).toBe(1);
+      expect((await rowOf(job.jobId)).meteredAt).not.toBeNull();
+      expect((await sweepCodeJobs(deps())).metered).toBe(0);
+      expect(await prisma.meterEvent.count({ where: { eventId: `codejob:${job.jobId}` } })).toBe(1);
     });
 
     it('ends a job whose worker is still waiting past its deadline, from the sweep, and the worker does not settle it again', async () => {

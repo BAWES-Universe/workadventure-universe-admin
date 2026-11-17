@@ -282,6 +282,7 @@ export type CodeJobReason =
   | 'paused' // code jobs are stopped
   | 'not_owner' // only the Brick's owner's own requests run a job
   | 'bad_request' // the request is not one a job takes
+  | 'not_allowed' // a read asks for an App tool that does not run right away for this Brick
   | 'too_big' // the code or the data is over a Limit
   | 'busy' // too many jobs running (for this person or in all)
   | 'daily_limit' // the person's jobs for the day are used
@@ -299,6 +300,7 @@ export const REASON_WORDS: Record<CodeJobReason, string> = {
   paused: 'Code jobs are paused for now.',
   not_owner: 'Only my owner can have me run code.',
   bad_request: 'That is not a request a code job takes.',
+  not_allowed: 'I may not run that App tool right away, so a job cannot read with it.',
   too_big: 'That is bigger than a code job may be.',
   busy: 'Too many code jobs are running right now. Try again in a moment.',
   daily_limit: 'The code jobs for today are used up.',

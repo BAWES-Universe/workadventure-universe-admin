@@ -24,6 +24,7 @@ CREATE TABLE "code_jobs" (
     "heartbeat_at" TIMESTAMP(3) NOT NULL,
     "started_at" TIMESTAMP(3),
     "finished_at" TIMESTAMP(3),
+    "metered_at" TIMESTAMP(3),
     "expires_at" TIMESTAMP(3),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -35,6 +36,7 @@ CREATE INDEX "code_jobs_state_deadline_at_idx" ON "code_jobs"("state", "deadline
 CREATE INDEX "code_jobs_provider_state_created_at_idx" ON "code_jobs"("provider_state", "created_at");
 CREATE INDEX "code_jobs_person_id_created_at_idx" ON "code_jobs"("person_id", "created_at");
 CREATE INDEX "code_jobs_expires_at_idx" ON "code_jobs"("expires_at");
+CREATE INDEX "code_jobs_state_metered_at_idx" ON "code_jobs"("state", "metered_at");
 
 ALTER TABLE "code_jobs" ADD CONSTRAINT "code_jobs_state_check" CHECK ("state" IN ('starting', 'running', 'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'));
 ALTER TABLE "code_jobs" ADD CONSTRAINT "code_jobs_provider_state_check" CHECK ("provider_state" IN ('none', 'open', 'closed', 'unknown'));

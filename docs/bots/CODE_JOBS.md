@@ -17,7 +17,7 @@ The bot server gives up on a call to a link at 60 seconds, so a job is always st
 ## What a job can reach
 
 - A workspace made for the one job, in its own provider session: no Apps, no tools run from inside it, no raw requests, no connection tools, Instant off. The session is read back and trusted only if every one of these is as asked; otherwise it is deleted and the job does not run.
-- Data goes in as files: `inputs` (read in `/mnt/files/in/<name>`) and `reads` (tools of the App the job was asked through, run by Orbit before the code and saved as `/mnt/files/in/<as>`). A read may never name a provider tool.
+- Data goes in as files: `inputs` (read in `/mnt/files/in/<name>`) and `reads` (tools of the App the job was asked through, run by Orbit before the code and saved as `/mnt/files/in/<as>`). A read may never name a provider tool, and it passes the same gate every App tool has: the tool is on the Brick's list for this connection, a person confirmed it, it sits under "Looks something up", and that heading is set to run right away. A tool that is off, asks first, changes or sends, or was never confirmed is refused when the job starts (`not_allowed`), because a job has nobody to ask.
 - Files go out in `/mnt/files/out/` (plain names, no folders).
 - The workspace can reach the internet: the provider offers no way to narrow it.
 
@@ -26,13 +26,13 @@ The bot server gives up on a call to a link at 60 seconds, so a job is always st
 Every limit is a setting in **Limits → Apps: code jobs** (nothing is assumed in code; empty means code jobs are not offered): time, runs, code and data size, files and bytes kept, text kept, reads, jobs at once (per person and in all), jobs a day, the month's ceiling, days kept, wait for a result.
 
 - Deadline: the run is stopped by deleting the workspace, not by trusting the wait.
-- Cancel: the same.
+- Cancel: the same. Files a worker was still copying when the cancel (or the sweep) ended the job are removed when that worker finishes.
 - Sweep (every 30 s, in the Orbit process): ends a job past its deadline or with no heartbeat, retries deleting a workspace the provider would not delete (never "closed" on a guess), and removes results and files after the days kept.
 - After each job the provider's log for its session is read; any run that was not our code pauses code jobs (`provider_ran_tools`) until a super admin resumes them.
 
 ## Money
 
-An estimate is reserved when the job starts and the meter event `codejob:<id>` is settled once, at what was used. The sandbox is not billed by the provider today; the price is the saved App price or the built-in per-run figure, and the ceiling guards a future bill.
+An estimate is reserved when the job starts and the meter event `codejob:<id>` is settled once, at what was used. A job whose meter line did not get written (the meter did not answer, or the process stopped between the two) has no `metered_at`, and the sweep writes it a minute after the job ended; the event id makes that safe to repeat. The sandbox is not billed by the provider today; the price is the saved App price or the built-in per-run figure, and the ceiling guards a future bill.
 
 ## Kept files
 

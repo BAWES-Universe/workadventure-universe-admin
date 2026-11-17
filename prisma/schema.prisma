@@ -2995,6 +2995,8 @@ model BotActionAttempt {
   claimedAt         DateTime  @default(now()) @map("claimed_at")
   leaseExpiresAt    DateTime  @map("lease_expires_at")
   finishedAt        DateTime? @map("finished_at")
+  // When its meter line was written; null until then, so the sweep writes a line a failed or crashed settle left out
+  meteredAt         DateTime? @map("metered_at")
 
   request BotActionRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
 
@@ -3502,6 +3504,8 @@ model CodeJob {
   heartbeatAt       DateTime  @map("heartbeat_at")
   startedAt         DateTime? @map("started_at")
   finishedAt        DateTime? @map("finished_at")
+  // When its meter line was written; null until then, so the sweep writes a line a failed or crashed settle left out
+  meteredAt         DateTime? @map("metered_at")
   // When the result and the kept files are removed (Limits: days kept); null keeps them until they are deleted
   expiresAt         DateTime? @map("expires_at")
   createdAt         DateTime  @default(now()) @map("created_at")
@@ -3512,6 +3516,7 @@ model CodeJob {
   @@index([providerState, createdAt])
   @@index([personId, createdAt])
   @@index([expiresAt])
+  @@index([state, meteredAt])
   @@map("code_jobs")
 }
 

@@ -5,6 +5,7 @@ import type { ReadyMadeAdapter, WorkbenchAdapter } from '@/lib/app-adapter/types
 import { SANDBOX_RUN_MICROS } from '@/lib/composio-rates';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
+import { firstReadNotAllowed } from '@/lib/workbench/policy';
 import { getCodeJobLimits, getCodeJobPause, pauseCodeJobs } from '@/lib/workbench/state';
 import { getOutputStore, outputKeyFor, type OutputStore } from '@/lib/workbench/store';
 import {
@@ -55,6 +56,8 @@ const HEARTBEAT_MS = 15 * SECOND;
 const STALE_MS = 90 * SECOND;
 /** After the deadline stops the code, the files still get this long to be copied before the sweep stops everything. */
 export const INGEST_GRACE_MS = 60 * SECOND;
+/** A finished job is given this long to write its own meter line before the sweep writes it. */
+const METER_GRACE_MS = 60 * SECOND;
 /** Bounds on single provider requests that are not runs of code. */
 const REQUEST_MS = 60 * SECOND;
 const FILE_MS = 120 * SECOND;
@@ -158,6 +161,9 @@ export async function startCodeJob(input: StartInput, deps: Deps = {}): Promise<
   const request = readJobRequest(input.args, limits, input.toolkit);
   if (!request.ok) return refuse(request.reason, request.error);
   if (request.value.reads.length > 0 && (!input.read || !input.connectionId)) return refuse('bad_request', 'Reading from the App is not possible here.');
+  // Reads go through the gate every App tool has: a tool that is off, asks first, changes things or was never confirmed is not run for a job
+  const blocked = await firstReadNotAllowed(input.botId, input.connectionId, request.value.reads.map((read) => read.tool));
+  if (blocked) return refuse('not_allowed', `${blocked} is not set to run right away for this Brick, so a job cannot read with it.`);
   const files = prepareInputs(request.value, limits);
   if (!files.ok) return refuse(files.reason, files.error);
 
@@ -516,10 +522,13 @@ async function finishJob(jobId: string, end: End, collected: Collected, limits: 
       expiresAt: limits.keepDays === null ? null : new Date(now.getTime() + limits.keepDays * DAY_MS),
     },
   });
-  // A job that did not keep its files must not leave kept ones behind when it was not a normal end
-  if (won.count === 1 && ['cancelled', 'timed_out', 'interrupted'].includes(end.state)) await dropOutputs(jobId, ctx.store).catch(() => undefined);
+  // A job that did not end normally must not leave kept files behind. Also when someone else ended it first (a cancel or the sweep) while this
+  // worker was still copying files: what it kept after their clean-up is removed here, at the end of its own work.
+  const finalState = won.count === 1 ? end.state : (await prisma.codeJob.findUnique({ where: { id: jobId }, select: { state: true } }))?.state;
+  if (finalState && ['cancelled', 'timed_out', 'interrupted'].includes(finalState)) await dropOutputs(jobId, ctx.store).catch(() => undefined);
   await closeSession(jobId, ctx);
-  if (won.count === 1) await settle(jobId, ctx).catch((error) => console.error('[CodeJob] A job could not be written to the meter:', error instanceof Error ? error.message : 'unknown'));
+  // A line the meter did not take now is written by the sweep (jobs with no `meteredAt`), never lost
+  if (won.count === 1) await settle(jobId, ctx.now).catch((error) => console.error('[CodeJob] A job could not be written to the meter yet:', error instanceof Error ? error.message : 'unknown'));
   return won.count === 1;
 }
 
@@ -557,7 +566,7 @@ async function closeSession(jobId: string, ctx: Ctx): Promise<void> {
 }
 
 /** The meter line of a finished job, once (its id is the job's). Paid by the universe, like any App step; always an estimate. */
-async function settle(jobId: string, ctx: Ctx): Promise<void> {
+async function settle(jobId: string, now: () => Date): Promise<void> {
   const row = await prisma.codeJob.findUnique({ where: { id: jobId } });
   if (!row) return;
   const cells = row.cellsRun;
@@ -566,7 +575,7 @@ async function settle(jobId: string, ctx: Ctx): Promise<void> {
     eventId: `codejob:${row.id}`,
     kind: 'app_use',
     pool: 'chat',
-    occurredAt: ctx.now(),
+    occurredAt: row.finishedAt ?? now(),
     personKey: personKeyOf({ personId: row.personId }),
     personId: row.personId,
     botId: row.botId,
@@ -583,6 +592,7 @@ async function settle(jobId: string, ctx: Ctx): Promise<void> {
     // What ran, never what it was given or printed
     detail: { kind: 'code_job', provider: CODE_JOB_PROVIDER, state: row.state, runs: cells, steps: row.steps, nestedCalls: row.nestedCalls, listMicrosPerRun: cells > 0 ? Math.round(cost / cells) : null },
   });
+  await prisma.codeJob.updateMany({ where: { id: jobId, meteredAt: null }, data: { meteredAt: now() } });
 }
 
 // ---------- Asking about a job ----------
@@ -661,6 +671,8 @@ async function viewOf(row: Row): Promise<JobView> {
 // ---------- The sweep ----------
 
 export interface SweepResult {
+  /** Finished jobs whose meter line was written late. */
+  metered: number;
   stopped: number;
   closed: number;
   purged: number;
@@ -678,7 +690,7 @@ export async function sweepCodeJobs(deps: Deps = {}): Promise<SweepResult> {
   const adapter = adapterOf(deps.adapter);
   const store = deps.store ?? getOutputStore();
   const at = now();
-  const result: SweepResult = { stopped: 0, closed: 0, purged: 0 };
+  const result: SweepResult = { stopped: 0, closed: 0, purged: 0, metered: 0 };
 
   if (adapter) {
     const ctx: Ctx = { adapter, store, now };
@@ -698,6 +710,17 @@ export async function sweepCodeJobs(deps: Deps = {}): Promise<SweepResult> {
       await closeSession(job.id, ctx);
       const after = await prisma.codeJob.findUnique({ where: { id: job.id }, select: { providerState: true } });
       if (after?.providerState === 'closed') result.closed += 1;
+    }
+  }
+
+  // Jobs that ended without their meter line (the meter did not answer, or the process stopped between the two): written now, once (the event id is the job's)
+  const unmetered = await prisma.codeJob.findMany({ where: { state: { notIn: ACTIVE }, meteredAt: null, finishedAt: { lt: new Date(at.getTime() - METER_GRACE_MS) } }, orderBy: { finishedAt: 'asc' }, take: SWEEP_BATCH, select: { id: true } });
+  for (const job of unmetered) {
+    try {
+      await settle(job.id, now);
+      result.metered += 1;
+    } catch (error) {
+      console.error('[CodeJob] A finished job could not be written to the meter yet:', error instanceof Error ? error.message : 'unknown');
     }
   }
 
