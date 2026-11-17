@@ -179,6 +179,17 @@ describe('a bot that has never had voice', () => {
     });
   });
 
+  it("starts Universe AI's Groq voice on its own model, and offers no starting voice when that model is off the provider", async () => {
+    const ENGLISH = { id: 'canopylabs/orpheus-v1-english', label: 'Orpheus English', kind: 'speech' };
+    const ARABIC = { id: 'canopylabs/orpheus-arabic-saudi', label: 'Orpheus Arabic (Saudi)', kind: 'speech' };
+    providers = [voice({ adapter: 'groq', defaultSpeech: true, defaultVoiceId: 'noura', defaultVoiceName: 'Noura', models: [ENGLISH, ARABIC] })];
+    const both = (await (await call(getVoice, 'GET')).json()).universeAi.speech;
+    expect(both).toMatchObject({ model: ARABIC.id, defaultVoice: { voiceId: 'noura', voiceName: 'Noura' } });
+    providers = [voice({ adapter: 'groq', defaultSpeech: true, defaultVoiceId: 'noura', defaultVoiceName: 'Noura', models: [ENGLISH] })];
+    const englishOnly = (await (await call(getVoice, 'GET')).json()).universeAi.speech;
+    expect(englishOnly).toMatchObject({ model: ENGLISH.id, defaultVoice: null });
+  });
+
   it('says what Universe AI starts from: its default providers, their first model, and the voice a super admin set', async () => {
     providers = [
       provider({ defaultRecognition: true, models: [{ id: 'nova', label: 'Nova', kind: 'recognition' }, { id: 'nova-2', kind: 'recognition' }] }),
@@ -554,7 +565,7 @@ describe('the voice limits a bot\'s spoken turn runs under', () => {
 
   it('are the server\'s when the bot speaks on the server\'s own providers, the recommended ones when nothing was saved', async () => {
     await published();
-    expect((await active()).limits).toEqual({ textReserveShare: 6, guestVoiceReplies: 3, turnSeconds: 180, replyCharacters: 600, replySeconds: 60, listenMinutesPerDay: 60, followUpSeconds: 30, voicesShownFirst: 5 });
+    expect((await active()).limits).toEqual({ textReserveShare: 6, guestVoiceReplies: 3, turnSeconds: 180, replyCharacters: 600, replySeconds: 60, listenMinutesPerDay: 60, followUpSeconds: 30, voicesShownFirst: 5, longestNoteSeconds: 300, noteMinutesPerPerson: 30, guestNoteMinutesPerGuest: 10, guestNoteMinutesPerUniverse: 120, notesAtOnce: 8, noteMinutesPerHour: 300 });
     savedVoiceLimits = { revision: 2, limits: { turnSeconds: 120, replyCharacters: 900 } };
     expect((await active()).limits).toMatchObject({ turnSeconds: 120, replyCharacters: 900, replySeconds: 60 });
   });
@@ -570,7 +581,7 @@ describe('the voice limits a bot\'s spoken turn runs under', () => {
     const { limits } = await active();
     // Listening: turn length and minutes a day from the listening key. Speaking: reply length from the speaking key.
     // The listening key's reply value and the speaking key's turn value are not theirs to set.
-    expect(limits).toEqual({ textReserveShare: 6, guestVoiceReplies: 3, turnSeconds: 60, listenMinutesPerDay: 15, replyCharacters: 300, replySeconds: 90, followUpSeconds: 45, voicesShownFirst: 5 });
+    expect(limits).toEqual({ textReserveShare: 6, guestVoiceReplies: 3, turnSeconds: 60, listenMinutesPerDay: 15, replyCharacters: 300, replySeconds: 90, followUpSeconds: 45, voicesShownFirst: 5, longestNoteSeconds: 300, noteMinutesPerPerson: 30, guestNoteMinutesPerGuest: 10, guestNoteMinutesPerUniverse: 120, notesAtOnce: 8, noteMinutesPerHour: 300 });
   });
 
   it('follow the server for a value the key\'s owner never changed, and for a part on the server\'s own provider', async () => {

@@ -67,14 +67,20 @@ describe('POST /api/bots/[id]/access', () => {
     const response = await post({ action: 'summon', person: { signedIn: true, identifier: 'sara@example.com' } });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ allowed: true, code: 'allowed', reason: null });
-    expect(check).toHaveBeenCalledWith({ botId: 'bot-1', action: 'summon', person: { signedIn: true, identifier: 'sara@example.com' } });
+    expect(check).toHaveBeenCalledWith({ botId: 'bot-1', action: 'summon', person: { signedIn: true, identifier: 'sara@example.com' }, roomUrl: null });
+  });
+
+  it('passes the room the person is in on, for a Brick that visits it (game #2005)', async () => {
+    check.mockResolvedValue({ allowed: true, code: 'allowed', reason: null });
+    await post({ action: 'chat', roomUrl: 'http://play.example/@/u/w/r', person: { signedIn: true, identifier: 'sara@example.com' } });
+    expect(check).toHaveBeenCalledWith({ botId: 'bot-1', action: 'chat', person: { signedIn: true, identifier: 'sara@example.com' }, roomUrl: 'http://play.example/@/u/w/r' });
   });
 
   it('passes a direct message’s chat ID on, and returns whose it is', async () => {
     check.mockResolvedValue({ allowed: true, code: 'allowed', reason: null, person: { uuid: 'uuid-sara', name: 'Sara' } });
     const response = await post({ action: 'dm', person: { signedIn: true, chatId: '@sara:chat.example' } });
     expect(await response.json()).toEqual({ allowed: true, code: 'allowed', reason: null, person: { uuid: 'uuid-sara', name: 'Sara' } });
-    expect(check).toHaveBeenCalledWith({ botId: 'bot-1', action: 'dm', person: { signedIn: true, chatId: '@sara:chat.example' } });
+    expect(check).toHaveBeenCalledWith({ botId: 'bot-1', action: 'dm', person: { signedIn: true, chatId: '@sara:chat.example' }, roomUrl: null });
   });
 
   it('a no is a 200 with the line to show', async () => {

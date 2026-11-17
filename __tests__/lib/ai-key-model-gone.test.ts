@@ -351,3 +351,49 @@ describe('moveBotOffGoneModel', () => {
     expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * A Brick (game #1992) stands in no universe and runs only on its owner's own key, with all of that key's models. Its
+ * model going is its own matter, as for any bot: the key stays Working for the room bots that share it.
+ */
+describe('moveBotOffGoneModel, for a Brick', () => {
+  let brick: Omit<typeof base, 'room'> & { room: null };
+
+  beforeEach(() => {
+    brick = { ...guide, name: 'Brick', room: null };
+    db.bot.findUnique.mockResolvedValue(brick);
+  });
+
+  it('moves the Brick to the first model the key still has, reading no lend, and tells its owner without naming a universe', async () => {
+    expect(await moveBotOffGoneModel(key, brick.id)).toBe(true);
+    expect(db.aiKeyLend.findUnique).not.toHaveBeenCalled();
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { id: brick.id, aiProviderRef: 'key-1', aiModel: 'meta-llama/llama-4-maverick' }, data: { aiModel: 'deepseek/deepseek-v4-flash' } });
+    expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'maker', kind: 'ai-key-moved', title: 'Brick now replies with deepseek/deepseek-v4-flash', href: '/admin/you/ai-keys' });
+    expect(notice.mock.calls[0][0].body).toBe('OpenRouter no longer has meta-llama/llama-4-maverick, so Brick moved to deepseek/deepseek-v4-flash on My OpenRouter.');
+  });
+
+  it('counts the failure like any other when its model answers once asked again, so one 404 never marks the key Down', async () => {
+    chat.mockReset().mockResolvedValue({ ok: true });
+    expect(await moveBotOffGoneModel(key, brick.id)).toBe('count');
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
+    expect(notice).not.toHaveBeenCalled();
+  });
+
+  it('moves only the Brick to Universe AI when the key has no other model that answers, and tells its owner', async () => {
+    chat.mockReset().mockResolvedValue(gone404);
+    expect(await moveBotOffGoneModel(key, brick.id)).toBe(true);
+    // Nobody else leaves the key: a Brick shares its home with no other bot
+    expect(moveBotsOffKey).not.toHaveBeenCalled();
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { id: brick.id, aiProviderRef: 'key-1' }, data: { aiProviderRef: 'universe-ai', aiModel: null } });
+    expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'maker', kind: 'ai-key-moved', title: 'Brick moved to Universe AI', href: '/admin/you/ai-keys' });
+    expect(notice.mock.calls[0][0].body).toBe('OpenRouter no longer has a model Brick can reply with on My OpenRouter, so Brick now replies on Universe AI.');
+    expect(notice.mock.calls[0][0].dedupeKey).toMatch(new RegExp(`^models-gone:key-1:brick:${brick.id}:`));
+  });
+
+  it('tells nobody when the Brick had already left the key', async () => {
+    chat.mockReset().mockResolvedValue(gone404);
+    db.bot.updateMany.mockResolvedValue({ count: 0 });
+    expect(await moveBotOffGoneModel(key, brick.id)).toBe(true);
+    expect(notice).not.toHaveBeenCalled();
+  });
+});

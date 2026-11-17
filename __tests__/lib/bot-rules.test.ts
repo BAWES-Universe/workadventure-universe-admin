@@ -17,9 +17,9 @@ const ZERO = BigInt(0);
 const rule = (values: Parameters<typeof withValues>[1]): RuleBits => withValues(NO_RULE, values);
 
 describe('the bits a rule can hold', () => {
-  it('are exactly Manage bots, Chat nearby, DM, Summon, and having a bot change things or delete or send', () => {
-    expect(RULE_MASK).toBe(BigInt(8192 + 16384 + 32768 + 65536 + 131072 + 262144));
-    expect(RULE_ACTIONS).toEqual(['chat', 'dm', 'summon', 'manage', 'change', 'deleteOrSend']);
+  it('are exactly Manage bots, Chat nearby, DM, Call, Summon, and having a bot change things or delete or send', () => {
+    expect(RULE_MASK).toBe(BigInt(8192 + 16384 + 32768 + 65536 + 131072 + 262144 + 524288));
+    expect(RULE_ACTIONS).toEqual(['chat', 'dm', 'call', 'summon', 'manage', 'change', 'deleteOrSend']);
   });
 
   it('reads Default for a row with nothing set', () => {

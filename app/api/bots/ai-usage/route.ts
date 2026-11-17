@@ -4,6 +4,8 @@ import { requireServiceToken } from '@/lib/service-tokens';
 import { UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 import { readUsagePriceFacts } from '@/lib/ai-usage-cost';
 import { readUsageChannel, resolveUsagePerson } from '@/lib/usage-person';
+import { recordModelCall } from '@/lib/meter';
+import { runOfBrick } from '@/lib/brick-items';
 
 /**
  * POST /api/bots/ai-usage
@@ -31,6 +33,9 @@ export async function POST(request: NextRequest) {
       latency = null,
       error = false,
       timestamp = new Date(),
+      greeting = false,
+      eventId: clientEventId = null,
+      runId: sentRunId = null,
     } = body;
 
     // A bot on Universe AI is paid for by the provider that is the Default, so that is the row the usage belongs to
@@ -65,12 +70,25 @@ export async function POST(request: NextRequest) {
 
     // Who talked, matched to their Orbit account so the bot page can name them (#491); a guest is only counted
     const talked = typeof talkedUserId === 'string' && talkedUserId ? talkedUserId.slice(0, 255) : null;
-    const person = await resolveUsagePerson(talked, isGuest);
+    const named = await resolveUsagePerson(talked, isGuest);
+    const task = readUsageChannel(channel) === 'task';
 
     // Fire-and-forget: Don't await, just start the operation
     // This ensures bot operation isn't blocked if tracking fails
-    prisma.botsAiUsage
-      .create({
+    (async () => {
+      // A model call a goal or task made is the usage of the Brick's owner whoever the bot server names (it may name nobody), so it is
+      // always counted in their window and against the share goals and tasks may use. Looked up here, with the write, so a failed lookup is
+      // handled like any other failure of this report and never stops it: the row is still written, as the bot server named the person
+      let person = named;
+      if (task) {
+        try {
+          const brick = await prisma.bot.findUnique({ where: { id: botId }, select: { ownerId: true } });
+          if (brick?.ownerId) person = { personId: brick.ownerId, guest: false };
+        } catch (err) {
+          console.error('Error looking up whose Brick made a task call:', err);
+        }
+      }
+      return prisma.botsAiUsage.create({
         data: {
           botId,
           providerId,
@@ -90,8 +108,40 @@ export async function POST(request: NextRequest) {
           channel: readUsageChannel(channel),
           talkedPersonId: person.personId,
           talkedGuest: person.guest,
+          // A greeting the bot made on its own: still the payer's usage, never counted against the person it greeted
+          greeting: greeting === true,
+          // The run of a goal or task the call was made for (game #2002), kept only as the bot server's word for it
+          brickRunId: typeof sentRunId === 'string' && sentRunId ? sentRunId.slice(0, 36) : null,
         },
-      })
+      });
+    })()
+      // The meter's books (game #1998) copy the call from the row that was just counted. They never hold up or fail the report
+      .then(async (row) =>
+        recordModelCall({
+          usageRowId: row.id,
+          botId,
+          // The bot server's own id for the call, when it sends one, so a report it sends twice is one event in the books
+          clientEventId: typeof clientEventId === 'string' && clientEventId ? clientEventId.slice(0, 200) : null,
+          providerId,
+          sentProviderId,
+          keyOwnerId: row.keyOwnerId,
+          talkedUserId: row.talkedUserId,
+          talkedPersonId: row.talkedPersonId,
+          talkedGuest: row.talkedGuest,
+          channel: row.channel,
+          tokensUsed: row.tokensUsed,
+          apiCalls: row.apiCalls,
+          error: row.error,
+          greeting: row.greeting,
+          costBasis: row.costBasis,
+          costMicros: row.costMicros,
+          tokens: { input: row.inputTokens, cached: row.cachedTokens, cacheWrite: row.cacheWriteTokens, output: row.outputTokens, reasoning: row.reasoningTokens },
+          occurredAt: row.timestamp,
+          // The run the call was made for, in the books only when it is one of this Brick's own (the bot server's word is checked, never trusted)
+          runKey: row.brickRunId,
+          runId: await runOfBrick(botId, row.brickRunId),
+        }),
+      )
       .catch((err) => {
         // Log error but don't block response
         console.error('Error tracking AI usage:', err);

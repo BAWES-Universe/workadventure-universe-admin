@@ -135,7 +135,7 @@ export async function listAiKeys(ownerId: string): Promise<AiKeySummary[]> {
             ownedByYou: lend.universe.ownerId === ownerId,
             models,
             bots: bots
-              .filter((bot) => bot.aiProviderRef === row.providerId && bot.room.world.universeId === lend.universe.id)
+              .filter((bot) => bot.aiProviderRef === row.providerId && bot.room?.world.universeId === lend.universe.id)
               .map((bot) => {
                 const model = servedModel(bot, row, models);
                 return { id: bot.id, name: bot.name, replies: repliesOf.get(`${row.providerId}:${bot.id}`) ?? 0, model, output: model ? modelFactsOf(row, model).output ?? null : null };

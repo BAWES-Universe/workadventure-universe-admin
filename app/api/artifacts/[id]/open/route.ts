@@ -10,8 +10,11 @@ export const runtime = 'nodejs';
  *
  * Auth: ADMIN_API_TOKEN (the game's server). Body: { viewer: { person, inChat, chat }, version? }. `inChat` says the person
  * is in the chat it was made in right now; the game vouches for it.
- * Response: { artifact, version: { number, summary, askedByName, sizeBytes, createdAt, url }, you }.
- * Someone who may not open it hears 404, the same as for one that is not there.
+ * Response: { artifact, version: { number, summary, askedByName, sizeBytes, createdAt, url }, you }. For a "Just you"
+ * artifact `url` is an address for this one opening, served by Orbit (GET /af/...), with `urlExpiresAt` beside it (when
+ * it stops), and null for a document.
+ * Someone who may not open it hears 404, the same as for one that is not there; for a "Just you" artifact asked for from
+ * its own chat the code is `kept_private`.
  */
 export const POST = artifactRoute('POST /api/artifacts/:id/open', 'game', openSchema, (body, params) =>
   openArtifact(params.id, body.viewer, body.version),

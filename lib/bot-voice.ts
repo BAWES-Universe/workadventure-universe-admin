@@ -4,12 +4,14 @@ import { prisma } from '@/lib/db';
 import { BotSettingsError } from '@/lib/bot-access-settings';
 import { lendAccess } from '@/lib/ai-key-lend';
 import { readModels, universeAiDefaults } from '@/lib/voice-providers';
-import { modelDoes, talksLive } from '@/lib/voice-key-companies';
+import { discoverVoiceModels } from '@/lib/voice-discovery';
+import { fixedVoiceModel, modelDoes, talksLive, voicesTiedToModels } from '@/lib/voice-key-companies';
 import { lendModelId, readLendModels } from '@/lib/voice-keys';
 import { isOwnSpeechAdapter } from '@/lib/voice-own-server';
 import { claimVoiceKeyTry, healthOf, tryIsDue } from '@/lib/voice-key-health';
 import { startOfMonth } from '@/lib/ai-keys';
 import { getVoiceLimits, servedVoiceLimits } from '@/lib/voice-limits';
+import { isBrick } from '@/lib/brick';
 import { LISTENING_KEY_LIMITS, SPEAKING_KEY_LIMITS, readVoiceKeyLimits, savedVoiceKeyLimits } from '@/lib/voice-limit-values';
 
 /**
@@ -76,6 +78,14 @@ export function followUniverseAi(profile: VoiceProfile, providers: Map<string, V
       profile.recognition.model === profile.speech.model &&
       !models.some((model) => model.kind === part && model.id === choice.model);
     const kind = talksLive(profile, models) || (talked && models.some((model) => model.kind === 'talk')) ? 'talk' : part;
+    // A voice tied to models (Groq's Orpheus, Rime) speaks only in them: Groq's own model, or for Rime the one it was published
+    // on, kept while the provider lists it. When it doesn't, the published one stays, so profileProblem says so rather than
+    // the voice going to a model it can't speak with
+    if (kind === 'speech' && voicesTiedToModels(provider.adapter)) {
+      const tied = fixedVoiceModel(provider.adapter, (choice as VoiceProfile['speech']).voiceId) ?? choice.model;
+      const own = models.find((model) => model.kind === 'speech' && model.id === tied);
+      return own && own.id !== choice.model ? { ...choice, model: own.id } : choice;
+    }
     const current = models.find((model) => model.kind === kind);
     return current && current.id !== choice.model ? { ...choice, model: current.id } : choice;
   };
@@ -98,10 +108,16 @@ export function borrowUniverseAi(profile: VoiceProfile, providers: Map<string, V
     const own = providers.get(choice.providerId);
     if (!own || own.ownerId !== null || own.enabled) return choice;
     const now = [...providers.values()].find((row) => row.ownerId === null && row.enabled && row[part] && (part === 'recognition' ? row.defaultRecognition : row.defaultSpeech));
-    const model = now?.apiKeyEncrypted ? readModels(now.models).find((entry) => entry.kind === part) : undefined;
-    if (!now || !model) return choice;
-    if (part === 'recognition') return { providerId: now.id, model: model.id } as VoiceProfile[P];
+    const models = now?.apiKeyEncrypted ? readModels(now.models).filter((entry) => entry.kind === part) : [];
+    if (!now || !models.length) return choice;
+    if (part === 'recognition') return { providerId: now.id, model: models[0].id } as VoiceProfile[P];
     if (!now.defaultVoiceId) return choice;
+    // The starting voice speaks with its own model when the company names it (Groq's Orpheus); a voice Rime lists is offered
+    // as the starting voice only when it speaks the starting model (listServerVoices), and a new starting model drops it
+    // (updateVoiceProvider), so the starting model is always one it speaks
+    const tied = fixedVoiceModel(now.adapter, now.defaultVoiceId);
+    const model = tied ? models.find((entry) => entry.id === tied) : models[0];
+    if (!model) return choice;
     return { providerId: now.id, model: model.id, voiceId: now.defaultVoiceId, ...(now.defaultVoiceName ? { voiceName: now.defaultVoiceName } : {}) } as VoiceProfile[P];
   };
   const recognition = borrow('recognition');
@@ -134,14 +150,30 @@ export function profileProblem(profile: VoiceProfile, providers: Map<string, Voi
 }
 
 /** Where a bot lives and who made it: what decides whose keys it may speak on. */
-interface Home {
+export interface Home {
+  /** Whose keys it may speak on: its maker for a room bot, its owner for a Brick. */
   createdById: string | null;
-  universeId: string;
+  /** The universe its room is in. Null for a Brick (game #1992): it stands in none, so no universe lends it a key or allows it a voice. */
+  universeId: string | null;
 }
 
-async function homeOf(botId: string): Promise<Home> {
-  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { createdById: true, room: { select: { world: { select: { universeId: true } } } } } });
+/** A universe no row has, for the lend a Brick's keys never have: asking for it finds none. */
+export const NO_UNIVERSE = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * A Brick (game #1992) has no room, so no universe says whether it may speak or lends it a voice key. It speaks on Universe
+ * AI's providers or on its OWNER's own voice keys, all of each key's models, with nothing lent anywhere and no universe's
+ * switch to ask (game Slice 13). The routes have already checked the person is its owner (lib/mcp-tool-api.ts); a Brick that
+ * waits deleted is not there.
+ */
+export async function homeOf(botId: string): Promise<Home> {
+  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { createdById: true, ownerId: true, roomId: true, deletedAt: true, room: { select: { world: { select: { universeId: true } } } } } });
   if (!bot) throw new BotSettingsError(404, 'Bot not found');
+  if (isBrick(bot)) {
+    if (bot.deletedAt) throw new BotSettingsError(404, 'Bot not found');
+    return { createdById: bot.ownerId, universeId: null };
+  }
+  if (!bot.room) throw new BotSettingsError(404, 'Bot not found');
   return { createdById: bot.createdById, universeId: bot.room.world.universeId };
 }
 
@@ -155,6 +187,8 @@ export async function ownServerLentToBot(provider: Pick<VoiceProvider, 'id' | 'o
   if (!provider.ownerId || !isOwnSpeechAdapter(provider.adapter)) return false;
   const home = await homeOf(botId);
   if (home.createdById !== provider.ownerId) return false;
+  // A Brick's owner's own computer is theirs, lent to no universe
+  if (home.universeId === null) return true;
   const lend = await prisma.voiceKeyLend.findUnique({ where: { providerId_universeId: { providerId: provider.id, universeId: home.universeId } }, select: { id: true } });
   return lend !== null && Boolean(await lendAccess(provider.ownerId, home.universeId));
 }
@@ -165,17 +199,20 @@ export async function ownServerLentToBot(provider: Pick<VoiceProvider, 'id' | 'o
  * out, so the profile reads as naming a provider that doesn't exist. When a part names a server provider that is off, the server's
  * providers that are on come too, so it can borrow Universe AI's current default (borrowUniverseAi).
  */
-async function providersFor(profile: VoiceProfile, home: Home): Promise<{ providers: Map<string, VoiceProvider>; lent: Lends }> {
+export async function providersFor(profile: VoiceProfile, home: Home): Promise<{ providers: Map<string, VoiceProvider>; lent: Lends }> {
   const ids = [...new Set([profile.recognition.providerId, profile.speech.providerId])];
   const rows = await prisma.voiceProvider.findMany({
     where: { id: { in: ids } },
-    include: { lends: { where: { universeId: home.universeId }, select: { models: true } } },
+    include: { lends: { where: { universeId: home.universeId ?? NO_UNIVERSE }, select: { models: true } } },
   });
   const providers = new Map<string, VoiceProvider>();
   const lent: Lends = new Map();
   for (const { lends, ...row } of rows) {
     if (row.ownerId === null) {
       providers.set(row.id, row);
+    } else if (home.universeId === null) {
+      // A Brick's owner's own key: it speaks on it with all its models, nothing is lent
+      if (row.ownerId === home.createdById) providers.set(row.id, row);
     } else if (row.ownerId === home.createdById && lends.length > 0 && (await lendAccess(row.ownerId, home.universeId))) {
       providers.set(row.id, row);
       lent.set(row.id, readLendModels(lends[0].models));
@@ -246,24 +283,39 @@ export async function readBotVoice(botId: string) {
       voiceEnabled: true,
       voiceRevision: true,
       createdById: true,
+      ownerId: true,
+      roomId: true,
+      deletedAt: true,
       voiceDraft: { select: { profile: true, updatedAt: true } },
       voiceRevisions: { orderBy: { number: 'desc' }, select: { number: true, profile: true, note: true, publishedById: true, publishedAt: true } },
       room: { select: { world: { select: { universeId: true, universe: { select: { allowVoiceBots: true } } } } } },
     },
   });
   if (!bot) throw new BotSettingsError(404, 'Bot not found');
+  // A Brick stands in no universe: whose keys it may speak on is its owner's, and no universe's switch is asked (see homeOf)
+  const brick = isBrick(bot);
+  if (brick ? bot.deletedAt : !bot.room) throw new BotSettingsError(404, 'Bot not found');
+  const room = bot.room;
+  const universeId = room?.world.universeId ?? null;
+  const keysOf = brick ? bot.ownerId : bot.createdById;
+  // The models fill in on their own: Universe AI's providers and the keys lent here (a Brick's owner's own) are read from their companies first
+  await discoverVoiceModels(
+    await prisma.voiceProvider.findMany({
+      where: { OR: [{ ownerId: null, enabled: true }, ...(keysOf ? [{ ownerId: keysOf, ...(universeId ? { lends: { some: { universeId } } } : {}) }] : [])] },
+    }),
+  );
   const revisions = bot.voiceRevisions.map(revisionView);
   const speaking = bot.voiceRevision === null ? undefined : bot.voiceRevisions.find((revision) => revision.number === bot.voiceRevision);
   const parsed = speaking ? voiceProfileSchema.safeParse(speaking.profile) : null;
   return {
     enabled: bot.voiceEnabled,
-    universeAllows: bot.room.world.universe.allowVoiceBots,
+    universeAllows: room ? room.world.universe.allowVoiceBots : true,
     ...(await payersOf(parsed?.success ? parsed.data : null)),
     serverProviderIds: await serverProvidersIn(parsed?.success ? parsed.data : null),
     revision: bot.voiceRevision,
     draft: { profile: readDraft(bot.voiceDraft?.profile), updatedAt: bot.voiceDraft?.updatedAt ?? null },
     revisions,
-    lentKeys: await lentKeysFor(botId, { createdById: bot.createdById, universeId: bot.room.world.universeId }),
+    lentKeys: await lentKeysFor(botId, { createdById: keysOf, universeId }),
     // What the bot page needs to show and start from Universe AI (game #1668): its default providers, models and voice, and the
     // server's voice limits with the voice replies a fair-usage window leaves
     universeAi: await universeAiDefaults(),
@@ -276,11 +328,12 @@ export async function readBotVoice(botId: string) {
  * models the lend allows, whether each works, what it paid for this month and its limits (#783). Never the key itself.
  */
 async function lentKeysFor(botId: string, home: Home) {
-  if (!home.createdById || !(await lendAccess(home.createdById, home.universeId))) return [];
+  const { universeId } = home;
+  if (!home.createdById || (universeId !== null && !(await lendAccess(home.createdById, universeId)))) return [];
   const rows = await prisma.voiceProvider.findMany({
-    where: { ownerId: home.createdById, lends: { some: { universeId: home.universeId } } },
+    where: { ownerId: home.createdById, ...(universeId !== null ? { lends: { some: { universeId } } } : {}) },
     orderBy: { createdAt: 'asc' },
-    include: { lends: { where: { universeId: home.universeId }, select: { models: true } } },
+    include: { lends: { where: { universeId: universeId ?? NO_UNIVERSE }, select: { models: true } } },
   });
   if (rows.length === 0) return [];
   const [usage, { limits: server }] = await Promise.all([
@@ -308,6 +361,7 @@ async function lentKeysFor(botId: string, home: Home) {
 
 /** Saves the draft in place of the one there. It only has to be well formed: finishing it is for publishing. */
 export async function saveVoiceDraft(botId: string, profile: z.infer<typeof voiceDraftSchema>, userId: string) {
+  await homeOf(botId);
   await prisma.botVoiceDraft.upsert({
     where: { botId },
     create: { botId, profile: profile as Prisma.InputJsonValue, updatedById: userId },
@@ -353,6 +407,7 @@ export async function rollBackVoice(botId: string, number: number) {
 
 /** Turns voice on or off. On needs the universe to allow it and a published profile that works now; off always works. */
 export async function setBotVoiceEnabled(botId: string, enabled: boolean) {
+  await homeOf(botId);
   if (enabled) {
     // A key that is Down for now doesn't stop voice being turned on: the bot replies in text until the key answers again
     const state = await effectiveBotVoice(botId, { ignoreSwitch: true, ignoreKeyHealth: true });
@@ -392,6 +447,9 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
       voiceEnabled: true,
       voiceRevision: true,
       createdById: true,
+      ownerId: true,
+      roomId: true,
+      deletedAt: true,
       room: { select: { world: { select: { universeId: true, universe: { select: { allowVoiceBots: true } } } } } },
     },
   });
@@ -413,13 +471,18 @@ export async function effectiveBotVoice(botId: string, options: { ignoreSwitch?:
     // The voice limits this bot's turns run under: the server's, with a lent key's own for the job it does (#783)
     limits: await limitsFor(profile, keys),
   });
+  // A Brick has no room: no universe allows or forbids its voice, and the keys it speaks on are its owner's own (see homeOf). One
+  // that waits deleted is silent.
+  const brick = isBrick(bot);
+  if (brick ? bot.deletedAt : !bot.room) return result('off');
+  const room = bot.room;
   if (!bot.voiceEnabled && !options.ignoreSwitch) return result('off');
-  if (!bot.room.world.universe.allowVoiceBots) return result('universe');
+  if (room && !room.world.universe.allowVoiceBots) return result('universe');
   if (bot.voiceRevision === null) return result('no-profile');
   const revision = await prisma.botVoiceRevision.findUnique({ where: { botId_number: { botId, number: bot.voiceRevision } } });
   const parsed = revision ? voiceProfileSchema.safeParse(revision.profile) : null;
   if (!revision || !parsed?.success) return result('no-profile');
-  const { providers, lent } = await providersFor(parsed.data, { createdById: bot.createdById, universeId: bot.room.world.universeId });
+  const { providers, lent } = await providersFor(parsed.data, brick ? { createdById: bot.ownerId, universeId: null } : { createdById: bot.createdById, universeId: room?.world.universeId ?? null });
   // A bot on Universe AI speaks with the models Universe AI uses now, not the ones it was turned on with, and a part on a
   // company a super admin turned off borrows what Universe AI uses now until it is on again
   const profile = borrowUniverseAi(followUniverseAi(parsed.data, providers), providers);

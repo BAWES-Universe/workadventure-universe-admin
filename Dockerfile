@@ -25,6 +25,11 @@ COPY . .
 # Remove next-env.d.ts if it exists (auto-generated, may have permission issues)
 RUN rm -f next-env.d.ts || true
 
+# next build (the TypeScript step in particular) can run out of Node's default heap and crash
+# with "JavaScript heap out of memory" on a big build. Give the build 4 GB of heap. This is a
+# ceiling, not a reservation, and it only applies to this builder stage, not the runtime image.
+ENV NODE_OPTIONS=--max-old-space-size=4096
+
 # Production builds must provide the exact WorkAdventure play origin.
 ARG NEXT_PUBLIC_PLAY_URL
 ENV NEXT_PUBLIC_PLAY_URL=$NEXT_PUBLIC_PLAY_URL

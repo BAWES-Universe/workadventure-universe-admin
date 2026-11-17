@@ -40,14 +40,30 @@ async function ask(company: VoiceKeyCompanyInfo, apiKey: string, address: string
       auth = { [check.header]: `${check.prefix}${apiKey}` };
     }
     response = await fetch(url, {
-      method: 'GET',
-      headers: { Accept: 'application/json', ...check.headers, ...auth },
+      method: check.body ? 'POST' : 'GET',
+      headers: { Accept: 'application/json', ...(check.body ? { 'Content-Type': 'application/json' } : {}), ...check.headers, ...auth },
+      ...(check.body ? { body: JSON.stringify(check.body) } : {}),
       // A redirect would carry the key somewhere the catalog never named
       redirect: 'manual',
       signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
       cache: 'no-store',
     });
-    if (response.status >= 200 && response.status < 300) return 'accepted';
+    if (response.status >= 200 && response.status < 300) {
+      if (!check.refusedWhen) return 'accepted';
+      // The company says inside a 200 whether it took the key
+      let body: unknown = null;
+      // Read whole: a code can come after a long list (MiniMax puts base_resp after its voice catalog, past 100 kB), and a
+      // body cut short isn't JSON. The cap only guards against an answer that never ends
+      try {
+        body = JSON.parse((await response.text().catch(() => '')).slice(0, 5_000_000));
+      } catch {
+        body = null;
+      }
+      const code = check.refusedWhen.field.split('.').reduce<unknown>((value, field) => (typeof value === 'object' && value !== null ? (value as Record<string, unknown>)[field] : undefined), body);
+      if (typeof code === 'number' && check.refusedWhen.codes.includes(code)) return 'refused';
+      // Only a code that says success takes the key: anything else can't be read as a yes
+      return typeof code === 'number' && check.refusedWhen.ok.includes(code) ? 'accepted' : 'unreachable';
+    }
     if (check.alsoAccepted && response.status === check.alsoAccepted.status) {
       const wanted = check.alsoAccepted.includes;
       if (wanted === undefined) return 'accepted';
