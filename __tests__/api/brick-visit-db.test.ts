@@ -116,6 +116,8 @@ run('bringing a Brick along, in a real database', () => {
 
   beforeEach(async () => {
     await prisma.brickVisit.deleteMany({ where: { userId: { in: [sara.id, omar.id] } } });
+    // People who met a Brick may write to it after it has left (brick-met-db.test.ts): none are left over from another test here
+    await prisma.brickMet.deleteMany({ where: { botId: { in: [brickId, secondBrickId] } } });
     await prisma.bot.update({ where: { id: brickId }, data: { aiProviderRef: UNIVERSE_AI_REF, aiModel: null, enabled: true } });
     await prisma.aiKeyLend.deleteMany({ where: { providerId: keyId } });
     await prisma.universe.update({ where: { id: universes.open.id }, data: { allowVisitingBricks: true } });

@@ -51,6 +51,7 @@ model User {
   defaultBrick      DefaultBrick?
   brickVisit        BrickVisit?
   brickHomesPlaced  BrickHome[]
+  bricksMet         BrickMet[]
   brickOffers       BrickOffer[]
   brickItems        BrickItem[] @relation("BrickItemOwner")
   brickTemplates    BrickTemplate[] @relation("BrickTemplateMaker")
@@ -403,6 +404,7 @@ model Room {
   reports    Report[]
   brickVisits BrickVisit[]
   brickHomes  BrickHome[]
+  bricksMet   BrickMet[]
 
   @@unique([worldId, slug]) // Slug unique within world
   @@map("rooms")
@@ -935,6 +937,7 @@ model Bot {
   voiceListenUses VoiceListenUse[]
   defaultBrickOf  DefaultBrick?
   visit           BrickVisit?
+  metBy           BrickMet[]
   computer        BrickComputer?
   computerJobs    ComputerJob[]
   home            BrickHome?
@@ -986,6 +989,36 @@ model BrickVisit {
 
   @@index([roomId, seenAt])
   @@map("brick_visits")
+}
+
+// Someone who met a Brick that was visiting or standing in a place, and may keep writing to it after the visit is over (game
+// #2005, "People who met"; Khalid, 5 Nov: "if i met them and i have dmd them and permissions allow dms then i should be able to
+// keep dming until a person changes permission"). One row per Brick and person. It is written when the Brick answers them
+// nearby or in a direct message while it is somewhere other people can reach it, and it never depends on where the Brick or the
+// person is afterwards: ending a visit, a home that goes, or walking into another universe changes nothing. What ends it is
+// a decision: its owner takes the person off (`revokedAt`, lib/brick-met.ts), the Brick is switched off or deleted, the person's access is
+// withdrawn where they met it (a ban, or the roles there), or, for someone who only met it and never wrote, the days Limits
+// give ("Bricks") run out. `dmAt` is when they first wrote: from then on only a decision ends it, never time. `roomId` is the
+// place they met it last, whose roles and bans still apply; it is null once that room is gone.
+model BrickMet {
+  botId     String    @map("bot_id")
+  userId    String    @map("user_id")
+  roomId    String?   @map("room_id")
+  // Null when the owner took the person off before they ever met it
+  metAt     DateTime? @map("met_at")
+  lastMetAt DateTime? @map("last_met_at")
+  dmAt      DateTime? @map("dm_at")
+  // Set when the Brick's owner took this person off: no direct message, wherever the Brick is, and meeting it again does not undo it
+  revokedAt DateTime? @map("revoked_at")
+
+  bot  Bot   @relation(fields: [botId], references: [id], onDelete: Cascade)
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room Room? @relation(fields: [roomId], references: [id], onDelete: SetNull)
+
+  @@id([botId, userId])
+  @@index([userId])
+  @@index([roomId])
+  @@map("brick_met")
 }
 
 // A Brick that lives in a room (game #2005). The Brick stays its owner's own Brick, with no room of its own: this row only

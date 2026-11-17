@@ -35,6 +35,8 @@ jest.mock('@/lib/db', () => {
     // Nobody's Brick is visiting anywhere in these tests: another person is refused, as before visits (game #2005)
     brickVisit: { findUnique: jest.fn(async () => null) },
     brickHome: { findUnique: jest.fn(async () => null) },
+    // Nobody met it either (people who met a Brick keep writing to it after a visit: brick-met-db.test.ts)
+    brickMet: { findUnique: jest.fn(async () => null) },
     room: { findUnique: noRoomReads('a room') },
     aiKeyLend: { findUnique: noRoomReads('a lend') },
     ban: { findFirst: noRoomReads('a ban') },
