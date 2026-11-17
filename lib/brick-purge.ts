@@ -83,10 +83,12 @@ export async function purgeBrick(id: string, now: Date = new Date()): Promise<Pu
       if (sent.length > 0) {
         await tx.botFileRemoval.createMany({ data: sent.map((file) => ({ botId: id, bucket: file.bucket as string, fileId: file.fileId as string })), skipDuplicates: true });
       }
-      // What is left outside Orbit. A computer record means a machine may exist (also one made and never written down) and a saved copy may be in the bucket
+      // What is left outside Orbit. A computer record means a machine may exist (also one made and never written down) and a saved copy may be in the bucket;
+      // a save under way (its row is written before it starts) means a copy may land whatever the record says
+      const saving = (await tx.savedCopyWrite.count({ where: botId })) > 0;
       await tx.brickPurge.upsert({
         where: botId,
-        create: { botId: id, ownerId: brick.ownerId, provider: computer?.provider ?? null, providerRef: computer?.providerRef ?? null, machinePending: !!computer, copyPending: !!computer, chatPending: true, nextTryAt: now, purgedAt: now },
+        create: { botId: id, ownerId: brick.ownerId, provider: computer?.provider ?? null, providerRef: computer?.providerRef ?? null, machinePending: !!computer, copyPending: !!computer || saving, chatPending: true, nextTryAt: now, purgedAt: now },
         update: {},
       });
       return true;
@@ -135,8 +137,20 @@ export async function finishOutside(botId: string, now: Date = new Date()): Prom
       left.push('saved files: no provider for them on this server');
     } else {
       try {
+        // A save that began before this purge may still be running, or may have stopped after its copy landed: the files are only gone when no
+        // save can still put one there. Its row is read BEFORE the delete, so a row that is stale by now (its server is gone) was over before the
+        // delete began and the delete took what it left; a live one means look again later, and the row is what tells the next try
+        const writes = await prisma.savedCopyWrite.findMany({ where: { botId }, select: { id: true, expiresAt: true } });
         await provider.deleteSavedCopy(botId);
-        copyGone = true;
+        const live = writes.filter((write) => write.expiresAt > now);
+        if (live.length > 0) {
+          left.push('saved files: a save was still running');
+        } else {
+          if (writes.length > 0) await prisma.savedCopyWrite.deleteMany({ where: { id: { in: writes.map((write) => write.id) } } });
+          // A save that began after the rows were read has seen the purge marker (written before any of this), and ends without leaving a copy
+          copyGone = (await prisma.savedCopyWrite.count({ where: { botId, expiresAt: { gt: now } } })) === 0;
+          if (!copyGone) left.push('saved files: a save was still running');
+        }
       } catch (error) {
         console.error('[Brick purge] Saved files could not be deleted:', error instanceof Error ? error.message : 'unknown');
         left.push('saved files');
@@ -197,9 +211,25 @@ export interface ChatPurge {
   botId: string;
 }
 
-/** The purged Bricks whose chat rooms the bot server still has to clear, the oldest first. Only the Brick's id: nothing it or a person said. */
-export async function pendingChatPurges(take = 100): Promise<ChatPurge[]> {
-  return prisma.brickPurge.findMany({ where: { chatPending: true }, select: { botId: true }, orderBy: [{ purgedAt: 'asc' }, { botId: 'asc' }], take });
+/** A page of the list the bot server reads: at most this many unless it asks for fewer. */
+export const CHAT_PURGES_PAGE = 100;
+
+/**
+ * The purged Bricks whose chat rooms the bot server still has to clear, the oldest first. Only the Brick's id: nothing it or a person said.
+ * A page starts after the Brick `after` (the last one of the page before), so a few that cannot be cleared for now never hide the ones behind
+ * them: they stay listed (and pending) and the bot server reads on past them.
+ */
+export async function pendingChatPurges(take = CHAT_PURGES_PAGE, after?: string): Promise<ChatPurge[]> {
+  const from = after ? await prisma.brickPurge.findUnique({ where: { botId: after }, select: { purgedAt: true, botId: true } }) : null;
+  return prisma.brickPurge.findMany({
+    where: {
+      chatPending: true,
+      ...(from ? { OR: [{ purgedAt: { gt: from.purgedAt } }, { purgedAt: from.purgedAt, botId: { gt: from.botId } }] } : {}),
+    },
+    select: { botId: true },
+    orderBy: [{ purgedAt: 'asc' }, { botId: 'asc' }],
+    take,
+  });
 }
 
 /**

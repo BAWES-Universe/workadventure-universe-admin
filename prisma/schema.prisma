@@ -3232,6 +3232,20 @@ model BrickPurge {
   @@map("brick_purges")
 }
 
+// A save of a Brick's computer folder that is under way (lib/agent37/saved-copies.ts), written down BEFORE it starts and removed once it is
+// finished and checked against the purge marker. No foreign key on purpose, like BrickPurge: a purge that finds one cannot call the saved
+// files gone, so a copy that lands late (or a server that stopped after it landed) is still found and deleted. `expiresAt` is the longest a
+// save may run; past it the row is stale (its server is gone) and the purge deletes once more after it, and then removes it.
+model SavedCopyWrite {
+  id        String   @id @default(uuid())
+  botId     String   @map("bot_id") @db.VarChar(255)
+  startedAt DateTime @default(now()) @map("started_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@index([botId])
+  @@map("saved_copy_writes")
+}
+
 // The daily check of our books against the computer provider's own bill (one row per UTC day, never changed once written): what the provider
 // charged, what we booked, and what does not match. Reading it never changes any money; the reserves are what stop overspend.
 model ComputerReconcile {

@@ -32,7 +32,7 @@ import * as computerCalls from '@/lib/computer-calls';
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
-import { isPurged, purgeBrick, confirmChatPurges, DELETED_MAKER_NAME } from '@/lib/brick-purge';
+import { finishOutside, isPurged, purgeBrick, confirmChatPurges, DELETED_MAKER_NAME } from '@/lib/brick-purge';
 import { GET as listChatPurges, POST as confirmChatPurgesRoute } from '@/app/api/brick-chat-purges/route';
 import { giveComputer, startJob, finishJob } from '@/lib/computer';
 import * as meter from '@/lib/meter';
@@ -399,6 +399,58 @@ run('purging a deleted Brick, in a real database', () => {
       expect(purges).toContainEqual({ botId: gone.id });
       expect(purges.map((one: { botId: string }) => one.botId)).not.toContain(back.id);
       expect(purges.every((one: object) => Object.keys(one).join() === 'botId')).toBe(true);
+    });
+
+    it('does not call the saved files gone while a save may still put a copy there, and settles a save that stopped for good', async () => {
+      const sara = await person('sara');
+      const brick = await fullBrick(sara, 'Saving Brick', { computer: true });
+      await deleteBrick(brick.id, sara.id, NOW);
+      // A save began (its row is written first) before the purge, and is still running
+      const live = await prisma.savedCopyWrite.create({ data: { botId: brick.id, expiresAt: later(8) } });
+      await removeGoneBricks(later(8), sara.id);
+      const deletes = () => provider.calls.filter((call) => call.name === 'deleteSavedCopy').length;
+      const first = await finishOutside(brick.id, later(8));
+      expect(first.done).toBe(false);
+      expect(first.left.join()).toContain('save was still running');
+      expect(deletes()).toBeGreaterThan(0);
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ copyPending: true, doneAt: null });
+      // The save ends by itself and lets go of its row: the next try deletes once more and the saved files are gone
+      await prisma.savedCopyWrite.delete({ where: { id: live.id } });
+      const before = deletes();
+      await prisma.brickPurge.update({ where: { botId: brick.id }, data: { chatPending: false } });
+      expect((await finishOutside(brick.id, later(9))).done).toBe(true);
+      expect(deletes()).toBeGreaterThan(before);
+      // A save that stopped for good (its row is older than the longest a save runs) is settled the same way, and its row goes
+      const other = await fullBrick(sara, 'Stopped save', { computer: true });
+      await deleteBrick(other.id, sara.id, NOW);
+      await prisma.savedCopyWrite.create({ data: { botId: other.id, expiresAt: new Date(later(8).getTime() - 1000) } });
+      await removeGoneBricks(later(8), sara.id);
+      await prisma.brickPurge.update({ where: { botId: other.id }, data: { chatPending: false } });
+      expect((await finishOutside(other.id, later(8))).done).toBe(true);
+      expect(await prisma.savedCopyWrite.count({ where: { botId: other.id } })).toBe(0);
+    });
+
+    it('lists them a page at a time, so Bricks that cannot be cleared for now never hide the ones behind them', async () => {
+      const sara = await person('sara');
+      const made = [await fullBrick(sara, 'Page one'), await fullBrick(sara, 'Page two'), await fullBrick(sara, 'Page three')];
+      for (const brick of made) await deleteBrick(brick.id, sara.id, NOW);
+      await removeGoneBricks(later(8), sara.id);
+      // The bot server reads one at a time and confirms none of them (they cannot be cleared for now): each page is one Brick and the next page is behind it
+      const seen: string[] = [];
+      let after: string | null = null;
+      for (let page = 0; page < 500; page++) {
+        const answer = await listChatPurges(asBotServerGet(`/api/brick-chat-purges?limit=1${after ? `&after=${encodeURIComponent(after)}` : ''}`));
+        expect(answer.status).toBe(200);
+        const body: { purges: { botId: string }[]; next: string | null } = await answer.json();
+        expect(body.purges.length).toBeLessThanOrEqual(1);
+        seen.push(...body.purges.map((one) => one.botId));
+        if (!body.next) break;
+        after = body.next;
+      }
+      for (const brick of made) expect(seen).toContain(brick.id);
+      expect(new Set(seen).size).toBe(seen.length);
+      expect(await prisma.brickPurge.count({ where: { botId: { in: made.map((brick) => brick.id) }, chatPending: true } })).toBe(3);
+      expect((await listChatPurges(asBotServerGet('/api/brick-chat-purges?limit=0'))).status).toBe(400);
     });
 
     it('stops listing a Brick once the bot server confirms it, finishes a purge that waited only for the chat at once, and ignores ids it does not know or twice', async () => {

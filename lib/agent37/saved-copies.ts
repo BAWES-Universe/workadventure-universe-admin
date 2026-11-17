@@ -26,6 +26,9 @@ const TAG = 16;
 export const COPY_OVERHEAD = MAGIC.length + NONCE + TAG;
 const PURPOSE = 'universe-computer-saved-copy';
 
+/** The longest a save may run. A row of a save that began longer ago than this is stale: its server is gone. */
+export const SAVE_WINDOW_MS = 2 * 60 * 60_000;
+
 export const savedCopyKey = (botId: string) => `computer-saves/${botId}.ubc`;
 /** Where a copy is written first: it takes the place of the saved one only after the check of the whole stream has passed. */
 /** Each save stages its own object, so two saves of one Brick never read or delete each other's bytes. */
@@ -75,6 +78,27 @@ export function openSavedCopy(file: Buffer): Buffer {
  * the previous copy is then still the saved one.
  */
 export async function storeSavedCopy(botId: string, archive: ReadableStream<Uint8Array>): Promise<SavedCopyInfo> {
+  // Written down first, and kept until the copy has been checked against the purge marker: a purge looks at these before it calls the saved
+  // files gone, so a copy that lands after the purge deleted (or a server that stops right after it landed) is still found and deleted
+  const write = await prisma.savedCopyWrite.create({ data: { botId, expiresAt: new Date(Date.now() + SAVE_WINDOW_MS) }, select: { id: true } });
+  let settled = false;
+  try {
+    // Purge marker and this row are each written before the other is read, so a save and a purge can never both miss each other: a Brick
+    // purged before this point is seen here, and one purged after is seen by the purge, which finds this row
+    if ((await prisma.brickPurge.count({ where: { botId } })) > 0) {
+      settled = true;
+      throw new Error('The Brick was deleted while its files were being saved');
+    }
+    const info = await storeChecked(botId, archive, () => (settled = true));
+    settled = true;
+    return info;
+  } finally {
+    // Only a save that is certain it left nothing behind lets go of its row; any other leaves it for the purge to settle once it is stale
+    if (settled) await prisma.savedCopyWrite.deleteMany({ where: { id: write.id } }).catch(() => undefined);
+  }
+}
+
+async function storeChecked(botId: string, archive: ReadableStream<Uint8Array>, leftNothing: () => void): Promise<SavedCopyInfo> {
   const { s3, bucket } = artifactBucket();
   const staging = stagingKey(botId, randomUUID());
   const source = Readable.fromWeb(archive as never);
@@ -110,7 +134,7 @@ export async function storeSavedCopy(botId: string, archive: ReadableStream<Uint
   if (failed) {
     await upload.abort().catch(() => undefined);
     // The upload may have finished a moment before the check failed: what it wrote is not a copy, and the saved one is untouched
-    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: staging })).catch(() => undefined);
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: staging })).then(leftNothing, () => undefined);
     throw failed.reason && typeof failed.reason.message === 'string' ? failed.reason : new Error('The copy of the files could not be saved');
   }
   // The stream was whole and the upload finished: now, and only now, it replaces the saved copy (one copy inside the bucket)
@@ -120,6 +144,7 @@ export async function storeSavedCopy(botId: string, archive: ReadableStream<Uint
   // the copy) means the delete either already ran and missed this copy, or will run after it and take it. Either way this copy must not stay
   if ((await prisma.brickPurge.count({ where: { botId } })) > 0) {
     await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId) }));
+    leftNothing();
     throw new Error('The Brick was deleted while its files were being saved');
   }
   const copy = await savedCopyOf(botId);

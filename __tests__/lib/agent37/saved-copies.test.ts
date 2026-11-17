@@ -7,7 +7,21 @@ let abortCalled = false;
 let failUpload = false;
 
 let purged = false;
-jest.mock('@/lib/db', () => ({ prisma: { brickPurge: { count: async () => (purged ? 1 : 0) } } }));
+const writes = new Map<string, { botId: string; expiresAt: Date }>();
+let failDeletes = false;
+jest.mock('@/lib/db', () => ({
+  prisma: {
+    brickPurge: { count: async () => (purged ? 1 : 0) },
+    savedCopyWrite: {
+      create: async ({ data }: { data: { botId: string; expiresAt: Date } }) => {
+        const id = `w${writes.size + 1}-${data.botId}`;
+        writes.set(id, data);
+        return { id };
+      },
+      deleteMany: async ({ where }: { where: { id: string } }) => ({ count: writes.delete(where.id) ? 1 : 0 }),
+    },
+  },
+}));
 jest.mock('@/lib/artifact-storage', () => ({
   artifactBucket: () => ({
     bucket: 'b',
@@ -26,6 +40,7 @@ jest.mock('@/lib/artifact-storage', () => ({
           return { Contents: page.map((Key) => ({ Key })), IsTruncated: keys.length > 2, NextContinuationToken: page[page.length - 1] };
         }
         if (kind === 'DeleteObjectCommand') {
+          if (failDeletes) throw new Error('bucket would not delete');
           stored.delete(command.input.Key);
           return {};
         }
@@ -68,6 +83,8 @@ beforeEach(() => {
   abortCalled = false;
   failUpload = false;
   purged = false;
+  writes.clear();
+  failDeletes = false;
 });
 
 describe('the saved copy of a Brick computer’s files', () => {
@@ -88,6 +105,54 @@ describe('the saved copy of a Brick computer’s files', () => {
     await expect(storeSavedCopy('bot-gone', webStream(archive))).rejects.toThrow('deleted while its files were being saved');
     expect(await savedCopyOf('bot-gone')).toBeNull();
     expect([...stored.keys()]).toEqual([]);
+  });
+
+  it('writes the save down before it starts and lets go of it once the copy is checked, so a purge can always tell a save is under way', async () => {
+    let seenDuring = 0;
+    const slow = Readable.from(
+      (async function* () {
+        seenDuring = writes.size;
+        yield archive;
+      })(),
+    );
+    await storeSavedCopy('bot-1', Readable.toWeb(slow) as unknown as ReadableStream<Uint8Array>);
+    expect(seenDuring).toBe(1);
+    expect(writes.size).toBe(0);
+  });
+
+  it('refuses to start for a Brick already purged, leaving nothing in the bucket and no row behind', async () => {
+    purged = true;
+    await expect(storeSavedCopy('bot-gone', webStream(archive))).rejects.toThrow('deleted while its files were being saved');
+    expect(stored.size).toBe(0);
+    expect(writes.size).toBe(0);
+  });
+
+  it('takes a copy back that landed after the purge, and lets go of its row only then', async () => {
+    const stream = Readable.from(
+      (async function* () {
+        yield archive;
+        purged = true;
+      })(),
+    );
+    await expect(storeSavedCopy('bot-late', Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>)).rejects.toThrow('deleted while its files were being saved');
+    expect(stored.has(savedCopyKey('bot-late'))).toBe(false);
+    expect(writes.size).toBe(0);
+  });
+
+  it('keeps its row when a copy that landed after the purge could not be taken away again, so the purge still finds it', async () => {
+    // The copy lands, the marker is seen, and the bucket will not delete: the copy may still be there, so the row stays for the purge to settle
+    const real = purged;
+    expect(real).toBe(false);
+    const stream = Readable.from(
+      (async function* () {
+        yield archive;
+        purged = true;
+        failDeletes = true;
+      })(),
+    );
+    await expect(storeSavedCopy('bot-late', Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>)).rejects.toThrow();
+    expect(writes.size).toBe(1);
+    expect(stored.has(savedCopyKey('bot-late'))).toBe(true);
   });
 
   it('refuses a copy that was changed', async () => {

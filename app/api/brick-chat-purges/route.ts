@@ -3,10 +3,11 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { corsHeaders } from '@/lib/cors';
-import { confirmChatPurges, pendingChatPurges } from '@/lib/brick-purge';
+import { CHAT_PURGES_PAGE, confirmChatPurges, pendingChatPurges } from '@/lib/brick-purge';
 
 export const runtime = 'nodejs';
 
+const pageSchema = z.object({ after: z.string().min(1).max(255).optional(), limit: z.coerce.number().int().min(1).max(500).optional() });
 const confirmSchema = z.object({ botIds: z.array(z.string().min(1).max(255)).min(1).max(500) }).strict();
 
 export async function OPTIONS(request: NextRequest) {
@@ -26,12 +27,18 @@ function failed(request: NextRequest, error: unknown, what: string) {
  * GET /api/brick-chat-purges
  * The Bricks purged for good whose chat rooms are still to clear (register R29; a deleted Brick keeps nothing): the Brick's id and nothing
  * else. Only the bot server holds the chat account, so it clears them (the Brick's own messages redacted, its profile blanked, its rooms
- * left and forgotten; what people said stays with them) and confirms with POST. Auth: BOT_SERVICE_TOKEN only.
+ * left and forgotten; what people said stays with them) and confirms with POST. A page is at most `limit` (default 100); `next` is what to pass
+ * as `after` for the page behind it, or null at the end: a Brick that cannot be cleared for now stays listed and never hides the ones behind it.
+ * Auth: BOT_SERVICE_TOKEN only.
  */
 export async function GET(request: NextRequest) {
   try {
     requireServiceToken(request);
-    return NextResponse.json({ purges: await pendingChatPurges() }, { headers: corsHeaders(request) });
+    const query = pageSchema.safeParse(Object.fromEntries(new URL(request.url).searchParams));
+    if (!query.success) return NextResponse.json({ error: 'Invalid request data', details: query.error.issues }, { status: 400, headers: corsHeaders(request) });
+    const limit = query.data.limit ?? CHAT_PURGES_PAGE;
+    const purges = await pendingChatPurges(limit, query.data.after);
+    return NextResponse.json({ purges, next: purges.length === limit ? purges[purges.length - 1].botId : null }, { headers: corsHeaders(request) });
   } catch (error) {
     return failed(request, error, 'listing Bricks whose chats are to clear');
   }
