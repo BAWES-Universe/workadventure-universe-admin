@@ -370,7 +370,12 @@ export async function activityFor(personId: string, limit: number = ACTIVITY_LIS
   const names = new Map(bots.map((bot) => [bot.id, bot.name]));
   // Failed on our side: the same endings `recordComputerTime` gives back
   // (by bot and task key: a job with a receipt of its own is shown as that receipt, whose id is not the job's)
-  const failedJobs = new Set(jobs.filter((job) => givenBackJob(job.status, job.endedBy)).map((job) => `${job.botId}:${job.id}`));
+  // The jobs behind the selected receipts too: the receipts and the jobs are each cut to the newest few on their own, so a receipt can be kept
+  // while its job is not among the newest jobs
+  const listedJobIds = new Set(jobs.map((job) => job.id));
+  const receiptJobKeys = rows.map((row) => row.taskKey).filter((key) => !listedJobIds.has(key));
+  const behindReceipts = receiptJobKeys.length === 0 ? [] : await prisma.computerJob.findMany({ where: { personId, id: { in: receiptJobKeys } }, select: { id: true, botId: true, status: true, endedBy: true } });
+  const failedJobs = new Set([...jobs, ...behindReceipts].filter((job) => givenBackJob(job.status, job.endedBy)).map((job) => `${job.botId}:${job.id}`));
   const items = all.map((header) => {
     const forHeader = events.get(header.id) ?? [];
     // A computer job that failed is "refunded, nothing taken" only when the books show nothing was taken: a price not known yet is not "nothing"

@@ -444,17 +444,30 @@ run('what a computer may ask of Orbit, in a real database', () => {
       expect((await activityFor(sara.id))[0]).toMatchObject({ state: 'refunded', spentMicros: null });
     });
 
-    it('are looked for only in the days before the sweep’s own time, not the database’s clock', async () => {
+    it('are found by a sweep however long after the job failed, so a person is never left charged for them', async () => {
       const { sara, jobId } = await running();
       await settledCall(jobId, 'c1', 1_200);
       await finishJob(jobId, 'failed', minutes(5));
       await prisma.meterEvent.updateMany({ where: { eventId: `computer:${jobId}:call:c1` }, data: { personKey: `person:${sara.id}`, personId: sara.id, detail: {} } });
-      // A sweep four days after the job ended is past the window, whatever the real date is
-      await sweepComputers(minutes(5 + 4 * 24 * 60));
-      expect((await callEvent(jobId, 'c1')).personKey).toBe(`person:${sara.id}`);
-      // And one inside it finds it
-      await sweepComputers(minutes(5 + 2 * 24 * 60));
-      expect((await callEvent(jobId, 'c1')).personKey).toBe('unknown');
+      await sweepComputers(minutes(5 + 40 * 24 * 60));
+      expect(await callEvent(jobId, 'c1')).toMatchObject({ personKey: 'unknown', personId: null });
+    });
+
+    it('is the receipt’s state even when the job is not among the newest jobs listed: the receipts and the jobs are each cut to the newest few', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const older = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Older' }, NOW);
+      if (!older.ok) throw new Error('no');
+      await finishJob(older.job.id, 'failed', minutes(5));
+      await prisma.taskReceipt.create({ data: { botId: sara.brickId, personId: sara.id, taskKey: older.job.id, title: 'Older', category: 'computer', state: 'done', chargedMicros: BigInt(30_000), payerKind: 'person', payerPersonId: sara.id, startedAt: minutes(10), endedAt: minutes(20) } });
+      // A newer job than the older one (but ended before the receipt did) takes the only place in the job list of one
+      const newer = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Newer' }, minutes(12));
+      if (!newer.ok) throw new Error('no');
+      await finishJob(newer.job.id, 'done', minutes(15));
+      const items = await activityFor(sara.id, 1);
+      // The receipt is the newest line, though its job was cut from the job list by the limit
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({ title: 'Older', state: 'refunded', spentMicros: null });
     });
 
     it('a receipt already stored as refunded does not read as refunded while a platform-paid call of the job is still on the person', async () => {
