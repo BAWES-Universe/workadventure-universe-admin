@@ -225,8 +225,17 @@ describe('which names, ports and addresses are refused before anything is looked
     answer.socket.destroy();
   });
 
-  it.each([['25'], ['3306'], ['53'], ['6379']])('refuses port %s', async (port) => {
+  it.each([['25'], ['3306'], ['53'], ['6379'], ['5432'], ['27017']])('lets port %s through: the internet is open on every port', async (port) => {
     const answer = await connectTo(`allowed.test:${port}`, basic(key()));
+    expect(answer.status).toBe(200);
+    answer.socket.write('PING\r\n');
+    expect((await nextData(answer.socket))?.toString()).toContain('echo:PING');
+    answer.socket.destroy();
+  });
+
+  it('can still be narrowed by the team (an optional list of ports), and then says so', async () => {
+    policy = { ...policy, allowedPorts: [443] };
+    const answer = await connectTo('allowed.test:25', basic(key()));
     expect(answer.status).toBe(403);
     expect(answer.reason).toBe('port_refused');
   });
@@ -288,22 +297,23 @@ describe('a name that is allowed', () => {
   it('lets a quiet client of a non-web port stay quiet and judges its first bytes when they come', async () => {
     const answer = await connectTo('allowed.test:22', basic(key()));
     await new Promise((done) => setTimeout(done, 700));
-    answer.socket.write(await helloFor('composio-fronted.test'));
+    answer.socket.write(await helloFor('backend.composio.dev'));
     expect(await closes(answer.socket)).toBe(true);
     expect(web.received.length + banner.received.length).toBe(0);
   });
 });
 
-describe('one name hiding behind another', () => {
-  it('closes a tunnel whose TLS server name is not the name asked for, and sends nothing on', async () => {
+describe('a denied name hiding behind an allowed one', () => {
+  it('lets a tunnel whose TLS server name differs from the name asked for (sites share addresses), and sends everything on', async () => {
     const answer = await connectTo('allowed.test:443', basic(key()));
-    answer.socket.write(await helloFor('other.test'));
-    expect(await closes(answer.socket)).toBe(true);
-    expect(web.received).toEqual([]);
-    expect(logged.some((entry) => entry.detail.reason === 'name_mismatch')).toBe(true);
+    const hello = await helloFor('other.test');
+    answer.socket.write(hello);
+    expect(await nextData(answer.socket)).not.toBeNull();
+    expect(Buffer.concat(web.received).equals(hello)).toBe(true);
+    answer.socket.destroy();
   });
 
-  it('closes a tunnel to an allowed name that asks, inside TLS, for Composio', async () => {
+  it('closes a tunnel to an allowed name that asks, inside TLS, for Composio, and sends nothing on', async () => {
     const answer = await connectTo('allowed.test:443', basic(key()));
     answer.socket.write(await helloFor('backend.composio.dev'));
     expect(await closes(answer.socket)).toBe(true);
@@ -311,7 +321,7 @@ describe('one name hiding behind another', () => {
     expect(logged.some((entry) => entry.detail.reason === 'name_refused')).toBe(true);
   });
 
-  it('closes a tunnel whose Host header (plain http through CONNECT) is another name', async () => {
+  it('closes a tunnel whose Host header (plain http through CONNECT) is Composio', async () => {
     const answer = await connectTo('allowed.test:80', basic(key()));
     answer.socket.write('GET / HTTP/1.1\r\nHost: backend.composio.dev\r\n\r\n');
     expect(await closes(answer.socket)).toBe(true);
@@ -338,50 +348,51 @@ describe('one name hiding behind another', () => {
     answer.socket.destroy();
   });
 
-  it('closes a web connection that never says anything', async () => {
-    const answer = await connectTo('allowed.test:443', basic(key()));
-    expect(await closes(answer.socket, 2_000)).toBe(true);
+  it('keeps a quiet connection open (a server may speak first), and still judges what the computer says when it does', async () => {
+    const quiet = await connectTo('allowed.test:443', basic(key()));
+    expect(await closes(quiet.socket, 800)).toBe(false);
+    quiet.socket.write(await helloFor('allowed.test'));
+    expect(await nextData(quiet.socket)).not.toBeNull();
+    quiet.socket.destroy();
+    const sneaky = await connectTo('allowed.test:443', basic(key()));
+    await new Promise((done) => setTimeout(done, 600));
+    sneaky.socket.write(await helloFor('backend.composio.dev'));
+    expect(await closes(sneaky.socket)).toBe(true);
   });
 });
 
 describe('a raw address', () => {
-  it('is not connected until the name in the connection\'s opening is allowed and resolves to that address', async () => {
+  it('is connected at once, like a name, and what the computer sends reaches the server', async () => {
     const answer = await connectTo('93.184.216.34:443', basic(key()));
     expect(answer.status).toBe(200);
-    expect(opened).toEqual([]);
-    answer.socket.write(await helloFor('allowed.test'));
-    expect(await nextData(answer.socket)).not.toBeNull();
     expect(opened).toEqual([{ address: '93.184.216.34', port: 443 }]);
+    answer.socket.write(await helloFor('whatever.test'));
+    expect(await nextData(answer.socket)).not.toBeNull();
     answer.socket.destroy();
   });
 
-  it('is refused when the name resolves somewhere else', async () => {
-    const answer = await connectTo('93.184.216.34:443', basic(key()));
-    answer.socket.write(await helloFor('other.test'));
-    expect(await closes(answer.socket)).toBe(true);
-    expect(opened).toEqual([]);
+  it('carries anything that is not TLS or HTTP (a database, a game, SSH) and a server that speaks first', async () => {
+    const answer = await connectTo('93.184.216.34:5432', basic(key()));
+    answer.socket.write(Buffer.from([0, 0, 0, 8, 4, 210, 22, 47]));
+    expect(await nextData(answer.socket)).not.toBeNull();
+    answer.socket.destroy();
+    const ssh = await connectTo('93.184.216.40:22', basic(key()));
+    expect((await nextData(ssh.rest.length > 0 ? ssh.socket : ssh.socket))?.toString() ?? ssh.rest.toString()).toContain('SSH-2.0-testserver');
+    ssh.socket.destroy();
   });
 
-  it('is refused when the name is Composio, even if it resolves to the address', async () => {
+  it('is closed when the name in its TLS opening is Composio, whatever the address', async () => {
     const answer = await connectTo('104.18.20.5:443', basic(key()));
     answer.socket.write(await helloFor('backend.composio.dev'));
     expect(await closes(answer.socket)).toBe(true);
-    expect(opened).toEqual([]);
+    expect(web.received).toEqual([]);
   });
 
-  it('is refused with no server name, with a name that is itself an address, and with something that is not TLS or HTTP', async () => {
-    for (const first of [Buffer.from('SSH-2.0-x\r\n'), await helloFor('93.184.216.34'), Buffer.from('GET / HTTP/1.1\r\nUser-Agent: x\r\n\r\n')]) {
-      const answer = await connectTo('93.184.216.34:443', basic(key()));
-      answer.socket.write(first);
-      expect(await closes(answer.socket)).toBe(true);
-    }
-    expect(opened).toEqual([]);
-  });
-
-  it('is refused when it says nothing', async () => {
-    const answer = await connectTo('93.184.216.34:443', basic(key()));
-    expect(await closes(answer.socket, 2_000)).toBe(true);
-    expect(opened).toEqual([]);
+  it('is closed when its plain http says Composio is the host', async () => {
+    const answer = await connectTo('93.184.216.34:80', basic(key()));
+    answer.socket.write('GET / HTTP/1.1\r\nHost: app.composio.dev\r\n\r\n');
+    expect(await closes(answer.socket)).toBe(true);
+    expect(web.received).toEqual([]);
   });
 });
 
@@ -397,14 +408,18 @@ describe('plain http through the proxy', () => {
       request.end();
     });
 
-  it('needs the key, and refuses Composio, raw addresses, internal names and ports that are not for jobs', async () => {
+  it('needs the key, and refuses Composio, internal addresses and names that resolve inside', async () => {
     expect((await via('http://allowed.test/x', null)).status).toBe(407);
     expect((await via('http://backend.composio.dev/x', basic(key()))).reason).toBe('name_refused');
-    expect((await via('http://93.184.216.34/x', basic(key()))).reason).toBe('address_without_name');
     expect((await via('http://169.254.169.254/latest', basic(key()))).reason).toBe('internal_address');
     expect((await via('http://inside.test/x', basic(key()))).reason).toBe('resolves_inside');
-    expect((await via('http://allowed.test:6379/x', basic(key()))).reason).toBe('port_refused');
     expect(opened).toEqual([]);
+  });
+
+  it('passes a request to a raw address too (the internet is open)', async () => {
+    const answer = await via(`http://93.184.216.34:8080/x`, basic(key()));
+    expect(answer.status).toBe(200);
+    expect(answer.body).toBe('hello from the web');
   });
 
   it('passes an allowed request with its own Host and without the proxy\'s headers', async () => {
@@ -472,5 +487,74 @@ describe('limits', () => {
     const other = await connectTo('allowed.test:22', basic(key('quiet-machine')));
     expect(other.status).toBe(200);
     for (const socket of [...open, other.socket]) socket.destroy();
+  });
+});
+
+describe('WebSocket and what the gateway measures', () => {
+  const rawProxied = (head: string): Promise<{ socket: net.Socket; first: Buffer | null }> =>
+    new Promise((resolveRaw, reject) => {
+      const socket = net.connect(gatewayPort, '127.0.0.1');
+      socket.on('error', reject);
+      socket.on('connect', () => {
+        socket.write(head);
+        nextData(socket).then((first) => resolveRaw({ socket, first }));
+      });
+    });
+  const upgrade = (url: string, auth: string | null) =>
+    `GET ${url} HTTP/1.1\r\nHost: ${new URL(url).host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZQ==\r\nSec-WebSocket-Version: 13\r\n${auth ? `Proxy-Authorization: ${auth}\r\n` : ''}\r\n`;
+
+  it('carries a WebSocket tunnelled with CONNECT (wss:// and ws://), both ways', async () => {
+    const answer = await connectTo('allowed.test:443', basic(key()));
+    answer.socket.write(await helloFor('allowed.test'));
+    expect(await nextData(answer.socket)).not.toBeNull();
+    answer.socket.write(Buffer.from([0x81, 0x84, 1, 2, 3, 4, 5, 6, 7, 8]));
+    expect((await nextData(answer.socket))?.includes(Buffer.from('echo:'))).toBe(true);
+    answer.socket.destroy();
+  });
+
+  it('carries an upgrade sent as a proxied request, without the proxy’s headers and with its own Host', async () => {
+    const { socket, first } = await rawProxied(upgrade('http://allowed.test/chat', basic(key())));
+    const text = first?.toString() ?? '';
+    expect(text).toContain('echo:GET /chat HTTP/1.1');
+    expect(text).toContain('Host: allowed.test');
+    expect(text.toLowerCase()).toContain('upgrade: websocket');
+    expect(text.toLowerCase()).not.toContain('proxy-authorization');
+    socket.destroy();
+  });
+
+  it('needs the key for an upgrade, and refuses Composio and internal addresses in one', async () => {
+    expect((await rawProxied(upgrade('http://allowed.test/chat', null))).first?.toString()).toContain('407');
+    const composio = await rawProxied(upgrade('http://backend.composio.dev/ws', basic(key())));
+    expect(composio.first?.toString()).toContain('403');
+    expect(composio.first?.toString().toLowerCase()).toContain('name_refused');
+    expect((await rawProxied(upgrade('http://169.254.169.254/ws', basic(key())))).first?.toString().toLowerCase()).toContain('internal_address');
+    expect(web.received).toEqual([]);
+  });
+
+  it('says what it carried and refused, for sizing from real traffic and not from a guess', async () => {
+    const before = await new Promise<{ connections: number; refused: number; bytesToInternet: number; bytesFromInternet: number }>((resolveHealth, reject) => {
+      http.get({ host: '127.0.0.1', port: gatewayPort, path: '/__egress/health' }, (response) => {
+        let body = '';
+        response.on('data', (data) => (body += data));
+        response.on('end', () => resolveHealth(JSON.parse(body)));
+      }).on('error', reject);
+    });
+    expect(before).toMatchObject({ connections: 0, refused: 0, bytesToInternet: 0, bytesFromInternet: 0 });
+    const answer = await connectTo('allowed.test:443', basic(key()));
+    answer.socket.write(await helloFor('allowed.test'));
+    await nextData(answer.socket);
+    await connectTo('backend.composio.dev:443', basic(key()));
+    const after = await new Promise<{ connections: number; refused: number; bytesToInternet: number; bytesFromInternet: number }>((resolveHealth, reject) => {
+      http.get({ host: '127.0.0.1', port: gatewayPort, path: '/__egress/health' }, (response) => {
+        let body = '';
+        response.on('data', (data) => (body += data));
+        response.on('end', () => resolveHealth(JSON.parse(body)));
+      }).on('error', reject);
+    });
+    expect(after.connections).toBe(1);
+    expect(after.refused).toBe(1);
+    expect(after.bytesToInternet).toBeGreaterThan(0);
+    expect(after.bytesFromInternet).toBeGreaterThan(0);
+    answer.socket.destroy();
   });
 });

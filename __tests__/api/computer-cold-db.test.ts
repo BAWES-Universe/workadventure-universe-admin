@@ -20,7 +20,10 @@ import { saveServerLimits } from '@/lib/bot-limits';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { coldStatus, coldStep, packAway, restoreDrill, STUCK_MS } from '@/lib/computer-cold';
-import { computerView, giveComputer, removeMachineBeforeDelete, removeSavedCopyBeforeDelete, startJob, sweepComputers } from '@/lib/computer';
+import { computerView, giveComputer, startJob, sweepComputers } from '@/lib/computer';
+import { finishOutside, purgeBrick } from '@/lib/brick-purge';
+import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
+import { listDeletedBricks } from '@/lib/brick-default';
 import { computerReadiness } from '@/lib/computer-readiness';
 import { archiveById, markVerified, mintDownloadToken, setArchiveStoreForTests, storeArchive, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
 import { GET as download } from '@/app/api/computer/archives/[id]/download/route';
@@ -221,16 +224,26 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(await row(brick.botId)).toMatchObject({ machine: 'resting', providerRef: brick.ref, packStage: null, packFailures: 0 });
     });
 
-    it('a Brick deleted during the proof is not removed by the pack-away: its own delete does it, after saving', async () => {
+    it('a Brick deleted during the proof (its Undo days still run) is packed away all the same, after the copy is proved', async () => {
       const brick = await idleBrick();
       const original = provider.restoreInto.bind(provider);
       provider.restoreInto = async (ref, source) => {
-        await prisma.bot.update({ where: { id: brick.botId }, data: { deletedAt: NOW } });
+        await prisma.bot.update({ where: { id: brick.botId }, data: { deletedAt: new Date(), goneAt: new Date(Date.now() + 7 * DAY), enabled: false } });
         return original(ref, source);
       };
+      expect(await packAway(brick.botId, provider, NOW)).toBe('packed');
+      expect(names()).toContain(`remove:${brick.ref}`);
+      expect(await row(brick.botId)).toMatchObject({ machine: 'cold', providerRef: null });
+      expect((await verifiedArchives(brick.botId)).length).toBe(1);
+    });
+
+    it('a Brick whose Undo days are over is not packed: the final purge needs no copy, so nothing is stored and nothing is made', async () => {
+      const brick = await idleBrick();
+      await prisma.bot.update({ where: { id: brick.botId }, data: { deletedAt: new Date(Date.now() - 8 * DAY), goneAt: new Date(Date.now() - DAY), enabled: false } });
       expect(await packAway(brick.botId, provider, NOW)).toBe('failed');
+      expect(names().filter((call) => ['prepack', 'streamFiles', 'makeScratch'].includes(call.split(':')[0]))).toEqual([]);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
       expect(names()).not.toContain(`remove:${brick.ref}`);
-      expect((await row(brick.botId)).machine).toBe('stopped');
     });
 
     it('is not cold until the provider says the computer is gone: still listed means it stays, and the sweep finishes it', async () => {
@@ -425,17 +438,106 @@ run('cold storage for a Brick’s computer, in a real database', () => {
   });
 
   describe('deleting a Brick', () => {
-    it('removes every cold copy with it, from the bucket too, and waits while a pack-away is under way', async () => {
+    it('the final purge removes every cold copy with it, from the bucket too, and is tried again while one cannot be deleted', async () => {
       const brick = await idleBrick();
       await packAway(brick.botId, provider, NOW);
       expect(bucket.objects.size).toBe(1);
-      expect(await removeMachineBeforeDelete(brick.botId, NOW)).toBe(true);
-      expect(await removeSavedCopyBeforeDelete(brick.botId)).toBe(true);
+      await prisma.brickPurge.create({ data: { botId: brick.botId, provider: 'fake', providerRef: null, machinePending: false, copyPending: true, nextTryAt: NOW } });
+      const failing = { ...bucket.store, remove: async () => { throw new Error('the bucket is down'); } };
+      setArchiveStoreForTests(failing);
+      expect(await finishOutside(brick.botId, NOW)).toMatchObject({ done: false });
+      expect(bucket.objects.size).toBe(1);
+      setArchiveStoreForTests(bucket.store);
+      expect(await finishOutside(brick.botId, new Date(NOW.getTime() + 60 * 60_000))).toMatchObject({ done: true });
       expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
       expect(bucket.objects.size).toBe(0);
-      const other = await idleBrick();
-      await prisma.brickComputer.update({ where: { botId: other.botId }, data: { machine: 'packing', packStage: 'stored', packClaimedAt: NOW } });
-      expect(await removeMachineBeforeDelete(other.botId, NOW)).toBe(false);
+      await prisma.brickPurge.deleteMany({ where: { botId: brick.botId } });
+    });
+
+    it('the sweep removes the copies of a Brick that no longer has a computer record (a pack-away that met the purge)', async () => {
+      const brick = await idleBrick();
+      await storeArchive(brick.botId, new Response('left behind').body as ReadableStream<Uint8Array>);
+      await prisma.brickComputer.delete({ where: { botId: brick.botId } });
+      await coldStep(provider, NOW);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+      expect(bucket.objects.size).toBe(0);
+    });
+
+    it('a pack-away whose Brick was purged half way gives up quietly and removes only what it made', async () => {
+      const brick = await idleBrick();
+      const original = provider.restoreInto.bind(provider);
+      provider.restoreInto = async (ref, source) => {
+        await prisma.brickComputer.delete({ where: { botId: brick.botId } });
+        return original(ref, source);
+      };
+      expect(await packAway(brick.botId, provider, NOW)).not.toBe('packed');
+      expect(names()).toContain('remove:scratch-1');
+      expect(names()).not.toContain(`remove:${brick.ref}`);
+      // The copy it stored for a Brick that is gone is removed by the sweep
+      await coldStep(provider, NOW);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+      expect(bucket.objects.size).toBe(0);
+    });
+  });
+
+  describe('a deleted Brick while its Undo days run (the computer is removed only after a copy passes the restore check)', () => {
+    const deleteNow = async (brick: { botId: string; personId: string }) => {
+      const now = new Date();
+      await deleteBrick(brick.botId, brick.personId, now);
+      return now;
+    };
+
+    it('is packed at once, without waiting for the idle days, and the owner sees the day the provider’s copy of it went', async () => {
+      const brick = await idleBrick(0);
+      const now = await deleteNow(brick);
+      expect((await coldStep(provider, now)).packed).toBe(1);
+      expect(await row(brick.botId)).toMatchObject({ machine: 'cold', providerRef: null });
+      expect(names()).toContain(`remove:${brick.ref}`);
+      const [card] = (await listDeletedBricks(brick.personId, now)).filter((entry) => entry.id === brick.botId);
+      expect(card.computerRemovedAt).not.toBeNull();
+      // The two clocks are separate: Undo ends on its own date, the computer went on its own
+      expect(card.goneAt).not.toBe(card.computerRemovedAt);
+    });
+
+    it('stays tracked and stopped when the copy does not pass the restore check: nothing is removed, and it is tried again after the wait', async () => {
+      const brick = await idleBrick(0);
+      const now = await deleteNow(brick);
+      provider.restoreResults = [{ ok: false, reason: 'compare_failed', ms: 10 }];
+      expect((await coldStep(provider, now)).packed).toBe(0);
+      expect(names()).not.toContain(`remove:${brick.ref}`);
+      expect(await row(brick.botId)).toMatchObject({ machine: 'stopped', providerRef: brick.ref, packFailures: 1 });
+      expect((await listDeletedBricks(brick.personId, now)).find((entry) => entry.id === brick.botId)?.computerRemovedAt).toBeNull();
+      provider.calls.length = 0;
+      expect((await coldStep(provider, now)).packed).toBe(0);
+      expect(provider.calls.some((call) => call.name === 'prepack')).toBe(false);
+      expect((await coldStep(provider, new Date(Date.now() + 2 * 60 * 60_000))).packed).toBe(1);
+    });
+
+    it('Undo, then a job: the computer comes back from the copy on a fresh machine, with no old key or authority on it', async () => {
+      const brick = await idleBrick(0);
+      const now = await deleteNow(brick);
+      await coldStep(provider, now);
+      expect((await row(brick.botId)).machine).toBe('cold');
+      expect(await undoBrickDelete(brick.botId, brick.personId, new Date())).not.toBeNull();
+      provider.calls.length = 0;
+      const started = await startJob({ botId: brick.botId, personId: brick.personId, title: 'Back again' }, new Date());
+      expect(started.ok).toBe(true);
+      expect(names().filter((call) => ['create', 'restoreInto'].includes(call.split(':')[0]))).toEqual([`create:${brick.botId}`, `restoreInto:fake-${brick.botId}`]);
+      expect(await row(brick.botId)).toMatchObject({ machine: 'working', packStage: null });
+    });
+
+    it('the final purge removes the copies and the computer without making a new copy', async () => {
+      const brick = await idleBrick(0);
+      const now = await deleteNow(brick);
+      await coldStep(provider, now);
+      provider.calls.length = 0;
+      await prisma.bot.update({ where: { id: brick.botId }, data: { goneAt: new Date(Date.now() - 1000) } });
+      const purged = await purgeBrick(brick.botId, new Date());
+      expect(['purged', 'books']).toContain(purged);
+      if (purged === 'purged') await finishOutside(brick.botId, new Date());
+      expect(names().filter((call) => ['prepack', 'streamFiles', 'makeScratch', 'restoreInto'].includes(call.split(':')[0]))).toEqual([]);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+      expect(bucket.objects.size).toBe(0);
     });
   });
 
@@ -478,5 +580,18 @@ run('cold storage for a Brick’s computer, in a real database', () => {
     expect(view).toMatchObject({ machine: 'cold', olderCopyUsed: false });
     expect(view?.packedAt).toBeInstanceOf(Date);
     expect((await archiveById((await verifiedArchives(brick.botId))[0].id))?.state).toBe('verified');
+  });
+
+  it('the status sizes the storage by the bytes really kept, at the storage Limit, and counts the awake seconds measured', async () => {
+    await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 50_000, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+    const brick = await idleBrick();
+    provider.homeArchive = Buffer.alloc(2_000_000_000 / 1000, 1);
+    await packAway(brick.botId, provider, NOW);
+    const status = await coldStatus();
+    expect(status.storedBytes).toBe(provider.homeArchive.length);
+    // 2 MB at $0.05 a GB-month is rounded up to whole millionths of a dollar: 100 micros
+    expect(status.storageMonthMicros).toBe(100);
+    expect(status.last30Days.runs).toBeGreaterThan(0);
+    expect(status.last30Days.scratchSeconds).toBeGreaterThanOrEqual(0);
   });
 });

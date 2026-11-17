@@ -133,6 +133,13 @@ describe('the owner’s calls', () => {
     expect(await (await takeOverRoute(call('/x'), params)).json()).toEqual({ job: { id: JOB } });
     lib.takeOver.mockResolvedValue({ ok: false, reason: 'nothing_waiting' });
     expect((await takeOverRoute(call('/x'), params)).status).toBe(409);
+    // Still changing hands, or the fence could not be proved: said as it is, never as success and never as "nothing waiting"
+    lib.takeOver.mockResolvedValue({ ok: false, reason: 'in_progress' });
+    expect(await (await takeOverRoute(call('/x'), params)).json()).toMatchObject({ inProgress: true });
+    lib.takeOver.mockResolvedValue({ ok: false, reason: 'not_secured' });
+    const unsecured = await takeOverRoute(call('/x'), params);
+    expect(unsecured.status).toBe(409);
+    expect(await unsecured.json()).toMatchObject({ notSecured: true });
     lib.handBack.mockResolvedValue({ ok: false, reason: 'nothing_waiting' });
     expect((await handBackRoute(call('/x'), params)).status).toBe(409);
   });

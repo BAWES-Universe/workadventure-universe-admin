@@ -23,6 +23,13 @@ export type QueuedFor = (typeof QUEUED_FOR)[number];
 export const ENDED_BY = ['person', 'allowance', 'pool', 'off', 'deleted', 'error', 'unanswered', 'rule'] as const;
 export type EndedBy = (typeof ENDED_BY)[number];
 
+/**
+ * A job that ended on our side, so none of what it ran is the person's: it failed, or it was stopped by an error (the machine would not
+ * start or could not be reached, the agent's turn broke, the worker was lost and its room lapsed). The books and Activity both ask this,
+ * so the two cannot disagree. Everything else that ends a job (done, stopped by the person, out of room, nobody answered) is theirs.
+ */
+export const givenBackJob = (status: string, endedBy: string | null | undefined): boolean => status === 'failed' || (status === 'stopped' && endedBy === 'error');
+
 /** What a job waits for: the person's step. */
 export const WAITING_FOR = ['details', 'signin', 'upload', 'pay', 'submit', 'answer'] as const;
 export type WaitingFor = (typeof WAITING_FOR)[number];

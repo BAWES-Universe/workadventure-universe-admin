@@ -18,12 +18,20 @@ export interface ReceiptLine {
 export interface LineEvent {
   kind: string;
   route: string | null;
+  /** Who paid, when the books say ('universe' is the platform); a call on someone's own key is not the platform's. */
+  payerKind?: string | null;
   quantity: number;
   costMicros: number | null;
   detail: unknown;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** A computer's time that was given back: the job failed on our side, so none of it was taken from the person. */
+export const givenBackTime = (event: Pick<LineEvent, 'kind' | 'detail'>): boolean => event.kind === 'computer_time' && isRecord(event.detail) && event.detail.givenBack === true;
+
+/** A model call the platform paid for that was given back: written against nobody because its job failed on our side. */
+export const givenBackCall = (event: Pick<LineEvent, 'kind' | 'detail'>): boolean => event.kind === 'model_call' && isRecord(event.detail) && event.detail.givenBack === true;
 
 const plural = (n: number, one: string, many: string) => `${n.toLocaleString('en')} ${n === 1 ? one : many}`;
 
@@ -83,8 +91,10 @@ export function receiptLines(events: readonly LineEvent[], botName: string): Rec
         found.priced = true;
       }
     } else if (event.kind === 'computer_time') {
-      const found = group('computer', 1, 'Computer', true);
+      // Time of a job that failed on our side: shown, but never taken from the person (it was written against nobody)
+      const found = group('computer', 1, 'Computer', !givenBackTime(event));
       found.seconds += event.quantity;
+      if (givenBackTime(event)) continue;
       if (event.costMicros === null) found.unpriced = true;
       else {
         found.micros += event.costMicros;

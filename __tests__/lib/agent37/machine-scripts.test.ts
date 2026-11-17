@@ -168,6 +168,76 @@ describe('the forwarder in front of the gateway', () => {
       lonely.kill();
     }
   });
+
+  /** A forwarder with its own settings file, for the outage tests. */
+  const withForwarder = async (gateways: string[], run: (port: number) => Promise<void>) => {
+    const key = mintEgressKey(SECRET, 'machine-1');
+    const conf = path.join(dir, `outage-${Math.random().toString(36).slice(2)}.json`);
+    fs.writeFileSync(conf, JSON.stringify({ gateways, user: key.user, pass: key.pass }));
+    const port = await freePort();
+    const child = spawn('python3', [path.join(scripts, 'universe-egress-forward')], { env: { ...process.env, UNIVERSE_EGRESS_CONF: conf, UNIVERSE_EGRESS_PORT: String(port) }, stdio: 'ignore' });
+    try {
+      for (let tries = 0; tries < 50; tries++) {
+        if (await new Promise<boolean>((done) => net.connect(port, '127.0.0.1').once('connect', function (this: net.Socket) { this.destroy(); done(true); }).once('error', () => done(false)))) break;
+        await new Promise((done) => setTimeout(done, 100));
+      }
+      await run(port);
+    } finally {
+      child.kill();
+    }
+  };
+
+  const get = (port: number, target: string) =>
+    new Promise<{ status: number; reason: string | undefined }>((resolveAnswer, reject) => {
+      http.get({ host: '127.0.0.1', port, path: target, headers: { host: new URL(target).host } }, (response) => {
+        response.resume();
+        response.on('end', () => resolveAnswer({ status: response.statusCode ?? 0, reason: response.headers['x-egress-reason'] as string | undefined }));
+      }).on('error', reject);
+    });
+
+  it('never opens a direct route when every gateway is down: it says 502 and the target hears nothing', async () => {
+    const dead = await freePort();
+    const before = served;
+    let touched = 0;
+    const target = net.createServer((socket) => { touched++; socket.destroy(); });
+    await new Promise<void>((done) => target.listen(0, '127.0.0.1', done));
+    const targetPort = (target.address() as net.AddressInfo).port;
+    try {
+      await withForwarder([`127.0.0.1:${dead}`], async (port) => {
+        const answer = await get(port, `http://127.0.0.1:${targetPort}/anything`);
+        expect(answer.status).toBe(502);
+        expect(answer.reason).toBe('no_gateway');
+        // A tunnel request gets the same: nothing connects around the gateway
+        const tunnel = await new Promise<string>((resolveTunnel, reject) => {
+          const socket = net.connect(port, '127.0.0.1', () => socket.write(`CONNECT 127.0.0.1:${targetPort} HTTP/1.1\r\nHost: 127.0.0.1:${targetPort}\r\n\r\n`));
+          let seen = '';
+          socket.on('data', (data) => (seen += data));
+          socket.on('close', () => resolveTunnel(seen));
+          socket.on('error', reject);
+        });
+        expect(tunnel.startsWith('HTTP/1.1 502')).toBe(true);
+      });
+    } finally {
+      await new Promise<void>((done) => target.close(() => done()));
+    }
+    expect(touched).toBe(0);
+    expect(served).toBe(before);
+  });
+
+  it('goes to the next gateway when the first is down', async () => {
+    const dead = await freePort();
+    await withForwarder([`127.0.0.1:${dead}`, `127.0.0.1:${gatewayPort}`], async (port) => {
+      const answer = await new Promise<{ status: number; body: string }>((resolveAnswer, reject) => {
+        http.get({ host: '127.0.0.1', port, path: '/__egress/whoami' }, (response) => {
+          let body = '';
+          response.on('data', (data) => (body += data));
+          response.on('end', () => resolveAnswer({ status: response.statusCode ?? 0, body }));
+        }).on('error', reject);
+      });
+      expect(answer.status).toBe(200);
+      expect(JSON.parse(answer.body)).toEqual({ ok: true, machine: 'machine-1' });
+    });
+  });
 });
 
 describe('restoring a copy on a computer', () => {

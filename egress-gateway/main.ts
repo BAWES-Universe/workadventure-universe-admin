@@ -1,12 +1,12 @@
 import { createGateway } from '../lib/egress/gateway';
-import { DEFAULT_PORTS, defaultPolicy, normalizeHost, type PolicyConfig } from '../lib/egress/policy';
+import { defaultPolicy, normalizeHost, type PolicyConfig } from '../lib/egress/policy';
 
 /**
  * Starts Universe's egress gateway (see lib/egress/gateway.ts). Settings, all from the environment:
  *   EGRESS_GATEWAY_SECRET   the secret Orbit signs computers' keys with (the same value as on Orbit). Required.
  *   ORBIT_URL               Orbit's address, where the names of the Universe AI providers are read (GET /api/egress/deny). Optional: without it only the built-in names are refused.
  *   EGRESS_PORT             where it listens (default 3128)
- *   EGRESS_ALLOWED_PORTS    comma list of ports a job may reach (default 22,80,443,8080,8443,9418)
+ *   EGRESS_ALLOWED_PORTS    optional comma list that narrows the ports a job may reach (default: every port; leave it empty so the internet stays open)
  *   EGRESS_DENY_HOSTS       extra names to refuse, comma list
  *   EGRESS_DENY_CIDRS       our own servers' addresses to refuse, comma list of IPv4 or IPv4/prefix
  */
@@ -21,7 +21,7 @@ const port = Number(process.env.EGRESS_PORT ?? 3128);
 const allowedPorts = list(process.env.EGRESS_ALLOWED_PORTS).map(Number).filter((n) => Number.isInteger(n) && n > 0 && n < 65536);
 const fixed: PolicyConfig = {
   ...defaultPolicy(),
-  allowedPorts: allowedPorts.length > 0 ? allowedPorts : DEFAULT_PORTS,
+  allowedPorts: allowedPorts.length > 0 ? allowedPorts : null,
   denyNames: list(process.env.EGRESS_DENY_HOSTS).map((name) => normalizeHost(name)).filter((name): name is string => !!name),
   denyCidrs: list(process.env.EGRESS_DENY_CIDRS),
 };

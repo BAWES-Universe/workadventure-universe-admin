@@ -2,7 +2,8 @@ import * as Sentry from '@sentry/nextjs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getBrickLimits } from '@/lib/bot-limits';
-import { recordMeterEvent } from '@/lib/meter';
+import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
+import { storageMonthMicros } from '@/lib/meter-allowance';
 import { recordKeptBytes } from '@/lib/computer-disk';
 import { costOfSeconds } from '@/lib/computer-values';
 import type { ComputerProvider, MachineInfo, PackInventory, RestoreResult } from '@/lib/computer-provider';
@@ -189,10 +190,13 @@ async function claim(row: PackRow, now: Date): Promise<boolean> {
   return true;
 }
 
-/** Whether this pack-away must stop now: the Brick was deleted, or a job is on the computer. */
+/**
+ * Whether this pack-away must stop now: the Brick is purged or its Undo days are over (the final purge needs no copy), or a job is on the computer.
+ * A Brick that is deleted and can still be Undone does NOT stop it: the copy is proved first, and only then does the computer go.
+ */
 async function mustStop(botId: string): Promise<{ why: string; awake: boolean } | null> {
-  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { deletedAt: true } });
-  if (!bot || bot.deletedAt !== null) return { why: 'the Brick was deleted', awake: false };
+  const bot = await prisma.bot.findUnique({ where: { id: botId }, select: { goneAt: true } });
+  if (!bot || (bot.goneAt !== null && bot.goneAt.getTime() <= Date.now())) return { why: 'the Brick is purged', awake: false };
   if ((await activeJobs(botId)) > 0) return { why: 'a job started', awake: true };
   return null;
 }
@@ -251,7 +255,7 @@ async function runPack(botId: string, provider: Cold): Promise<'packed' | 'faile
         UPDATE "brick_computers" SET "pack_stage" = 'removing', "pack_claimed_at" = ${new Date()}
         WHERE "bot_id" = ${botId} AND "machine" = 'packing' AND "pack_stage" = 'verified'
           AND NOT EXISTS (SELECT 1 FROM "computer_jobs" j WHERE j."bot_id" = ${botId} AND j."status" IN ('running', 'waiting'))
-          AND NOT EXISTS (SELECT 1 FROM "bots" b WHERE b."id" = ${botId} AND b."deleted_at" IS NOT NULL)`);
+          AND EXISTS (SELECT 1 FROM "bots" b WHERE b."id" = ${botId} AND (b."gone_at" IS NULL OR b."gone_at" > ${new Date()}))`);
       if (removing !== 1) {
         const stop3 = await mustStop(botId);
         return await abort(stop3?.why ?? 'the pack-away was taken over', stop3?.awake ?? true, false);
@@ -425,14 +429,38 @@ export interface ColdSweep {
   drilled: 'ok' | 'failed' | null;
 }
 
-/** The computers idle for more days than the Limit says, oldest first, that are not in backoff after a failed try. */
+/**
+ * The computers to pack away: first those of Bricks that were deleted and can still be Undone (nobody will use them in the meantime, and the
+ * provider bills a disk for each; the computer goes only after a fresh copy passed the restore check), then those idle for more days than the Limit
+ * says, oldest first. Computers in backoff after a failed try are left for later.
+ */
 async function candidates(now: Date, days: number, take: number): Promise<string[]> {
+  const deleted = await prisma.brickComputer.findMany({
+    where: {
+      machine: { in: ['resting', 'stopped'] },
+      NOT: { providerRef: null },
+      packStage: null,
+      bot: { deletedAt: { not: null }, goneAt: { gt: now } },
+      OR: [{ packTriedAt: null }, { packTriedAt: { lte: new Date(now.getTime() - backoffMs(1)) } }],
+    },
+    select: { botId: true, packTriedAt: true, packFailures: true },
+    orderBy: [{ packTriedAt: { sort: 'asc', nulls: 'first' } }],
+    take,
+  });
+  const first = deleted.filter((row) => !row.packTriedAt || now.getTime() - row.packTriedAt.getTime() >= backoffMs(row.packFailures)).map((row) => row.botId);
+  if (first.length >= take) return first.slice(0, take);
+  return [...first, ...(await idleCandidates(now, days, take - first.length, first))];
+}
+
+/** The computers idle for more days than the Limit says, oldest first, that are not in backoff after a failed try. */
+async function idleCandidates(now: Date, days: number, take: number, skip: string[]): Promise<string[]> {
   const before = new Date(now.getTime() - days * DAY);
   const rows = await prisma.brickComputer.findMany({
     where: {
       machine: { in: ['resting', 'stopped'] },
       NOT: { providerRef: null },
       packStage: null,
+      botId: { notIn: skip },
       AND: [{ OR: [{ lastWorkedAt: { lte: before } }, { lastWorkedAt: null, madeAt: { lte: before } }] }, { OR: [{ packTriedAt: null }, { packTriedAt: { lte: new Date(now.getTime() - backoffMs(1)) } }] }],
     },
     select: { botId: true, packTriedAt: true, packFailures: true },
@@ -528,6 +556,9 @@ export async function coldStep(provider: ComputerProvider | null, now: Date = ne
     for (const row of await prisma.computerArchive.findMany({ where: { state: { in: ['superseded', 'failed', 'staging'] } }, distinct: ['botId'], select: { botId: true }, take: 50 })) {
       await pruneArchives(row.botId, null, now);
     }
+    // Copies of a Brick that no longer has a computer record were left by a pack-away that met its Brick's purge: a Brick that is gone keeps nothing
+    const orphans = await prisma.$queryRaw<Array<{ bot_id: string }>>(Prisma.sql`SELECT DISTINCT a."bot_id" FROM "computer_archives" a WHERE NOT EXISTS (SELECT 1 FROM "brick_computers" c WHERE c."bot_id" = a."bot_id") LIMIT 50`);
+    for (const orphan of orphans) await deleteAllArchives(orphan.bot_id).catch((error) => console.error('[Computer] Could not delete the copies of a purged Brick:', words(error)));
     if (windingDown) return out;
     const { coldStorageDays } = await getBrickLimits();
     for (const botId of await candidates(now, coldStorageDays, PACK_PER_SWEEP)) {
@@ -555,16 +586,42 @@ export interface ColdStatus {
   /** The longest return from cold storage measured so far, in milliseconds, and how many returns it is from. Measured, never promised. */
   slowestReturnMs: number | null;
   returns: number;
+  /** The bytes of every cold-storage copy kept right now (what the bucket really holds, by real data size), and what keeping them costs a month at the storage Limit (null when that Limit is not set). */
+  storedBytes: number;
+  storageMonthMicros: number | null;
+  /** Seconds a computer was awake for cold storage in the last 30 days: the Brick's own (pack, return) and throwaway ones (proofs, drills). Measured, so the real cost can be read, never guessed. */
+  last30Days: { packSeconds: number; returnSeconds: number; scratchSeconds: number; runs: number };
 }
 
-export async function coldStatus(): Promise<ColdStatus> {
-  const [cold, packing, failing, drill, slowest, returns] = await Promise.all([
+export async function coldStatus(now: Date = new Date()): Promise<ColdStatus> {
+  const since = new Date(now.getTime() - 30 * DAY);
+  const [cold, packing, failing, drill, slowest, returns, stored, runs, settings] = await Promise.all([
     prisma.brickComputer.count({ where: { machine: 'cold' } }),
     prisma.brickComputer.count({ where: { machine: 'packing' } }),
     prisma.brickComputer.count({ where: { packFailures: { gt: 0 }, machine: { in: ['resting', 'stopped'] } } }),
     prisma.computerColdRun.findFirst({ where: { kind: 'drill', scratch: true, outcome: { in: ['ok', 'failed'] } }, orderBy: { startedAt: 'desc' }, select: { startedAt: true, outcome: true } }),
     prisma.brickComputer.aggregate({ _max: { returnMs: true } }),
     prisma.brickComputer.count({ where: { returnMs: { not: null } } }),
+    prisma.computerArchive.aggregate({ _sum: { bytes: true }, where: { state: { in: ['stored', 'verified', 'superseded'] } } }),
+    prisma.computerColdRun.groupBy({ by: ['kind', 'scratch'], _sum: { seconds: true }, _count: { _all: true }, where: { startedAt: { gte: since } } }),
+    getMeterSettings().catch(() => null),
   ]);
-  return { cold, packing, failing, lastDrill: drill ? { at: drill.startedAt, ok: drill.outcome === 'ok' } : null, slowestReturnMs: slowest._max.returnMs ?? null, returns };
+  const storedBytes = stored._sum.bytes ?? BigInt(0);
+  const seconds = (pick: (run: (typeof runs)[number]) => boolean) => runs.filter(pick).reduce((sum, run) => sum + (run._sum.seconds ?? 0), 0);
+  return {
+    cold,
+    packing,
+    failing,
+    lastDrill: drill ? { at: drill.startedAt, ok: drill.outcome === 'ok' } : null,
+    slowestReturnMs: slowest._max.returnMs ?? null,
+    returns,
+    storedBytes: Number(storedBytes),
+    storageMonthMicros: settings && settings.storageMicrosPerGbMonth !== null ? storageMonthMicros(storedBytes, settings) : null,
+    last30Days: {
+      packSeconds: seconds((run) => run.kind === 'pack' && !run.scratch),
+      returnSeconds: seconds((run) => run.kind === 'return' && !run.scratch),
+      scratchSeconds: seconds((run) => run.scratch),
+      runs: runs.reduce((sum, run) => sum + run._count._all, 0),
+    },
+  };
 }

@@ -838,7 +838,7 @@ except urllib.error.HTTPError as error:
 except Exception:
     say("egress=0 reason=gateway_unreachable")
 
-# 2. A connection that does not use the gateway gets nowhere (IPv4 and IPv6), so nothing can go out direct
+# 2. A connection that does not use the gateway gets nowhere (IPv4 and IPv6 over TCP, DNS over UDP), so nothing can go out direct
 for family, address in ((socket.AF_INET, "1.1.1.1"), (socket.AF_INET6, "2606:4700:4700::1111")):
     try:
         probe = socket.socket(family, socket.SOCK_STREAM)
@@ -846,6 +846,18 @@ for family, address in ((socket.AF_INET, "1.1.1.1"), (socket.AF_INET6, "2606:470
         probe.connect((address, 443))
         probe.close()
         say("egress=0 reason=direct_reachable")
+    except OSError:
+        pass
+
+# 3. Another resolver is no way round either: a direct DNS question to a public resolver (UDP, IPv4 and IPv6) gets no answer
+question = bytes.fromhex("123401000001000000000000076578616d706c6503636f6d0000010001")
+for family, address in ((socket.AF_INET, "1.1.1.1"), (socket.AF_INET6, "2606:4700:4700::1111")):
+    try:
+        probe = socket.socket(family, socket.SOCK_DGRAM)
+        probe.settimeout(3)
+        probe.sendto(question, (address, 53))
+        if probe.recv(512):
+            say("egress=0 reason=direct_reachable")
     except OSError:
         pass
 say("egress=1 gateway=ok direct=blocked")

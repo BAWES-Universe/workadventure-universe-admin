@@ -9,10 +9,24 @@ import { monthOf } from '@/lib/meter-values';
 import { checkSpend } from '@/lib/spend-rules';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
-import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
+import {
+  beginTransition,
+  CONTROL_TIMING,
+  drainHumanInput,
+  finishTransition,
+  humanHasControl,
+  leaseLapsed,
+  readControl,
+  releaseIfUnheld,
+  releaseLease,
+  renewTransition,
+  resumeTransition,
+  sleep,
+} from '@/lib/computer-control';
+import { callRoomKey, giveBackModelCalls, settleModelCall } from '@/lib/computer-calls';
 import { recordKeptBytes } from '@/lib/computer-disk';
 import { reconcileComputers } from '@/lib/computer-reconcile';
-import { bringBackFromCold, coldStep, deleteColdCopies, dropColdCopiesIfNewer } from '@/lib/computer-cold';
+import { bringBackFromCold, coldStep, dropColdCopiesIfNewer } from '@/lib/computer-cold';
 import { computerQuote, connectedApp, routeJob, stepsReview, type RoutePlan } from '@/lib/computer-route';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
 import {
@@ -20,6 +34,7 @@ import {
   HOLDS_MACHINE,
   PERSON_ONLY,
   costOfSeconds,
+  givenBackJob,
   isOver,
   roomFor,
   type EffectKind,
@@ -329,6 +344,8 @@ export type Started =
   | { ok: false; reason: 'rule'; words: string };
 
 /** Room is asked for once for each try to run a job: room that was released stays closed, so a later try asks under a new key. */
+/** The longest a disk's room is kept for a job that is still starting its machine (the job's own room renews each few minutes, this one does not). */
+const DISK_ROOM_MAX_HOLD_MS = 30 * 60 * 1000;
 const roomKey = (jobId: string, now: Date) => `computer:job:${jobId}:${now.getTime()}`;
 
 const queueReasonOf = (no: NoRoom): QueuedFor | null => (no.reason === 'allowance' ? 'allowance' : no.reason === 'busy' ? 'busy' : no.reason === 'pool' ? 'pool' : null);
@@ -499,6 +516,12 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     await queue('turn');
     return 'queued';
   }
+  // A take over or a hand back is on its way (or the person still holds the screen with their jobs over, which this puts right): the agent is
+  // not admitted until control is Brick's again, so a job never begins in the middle of a change of hands.
+  if (!(await releaseIfUnheld(job.botId))) {
+    await queue('turn');
+    return 'queued';
+  }
 
   // The computer is being packed away into cold storage: the job waits in line, and the sweep tries it again once it is cold (it is then brought back) or put back
   if (row.machine === 'packing') {
@@ -543,7 +566,7 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
   // carry it makes no machine, and this job waits in line with its work saved, as for any other room the pool lacks
   const diskBytes = !row.providerRef ? provider.diskBytes?.() ?? null : null;
   if (diskBytes !== null && diskBytes > 0) {
-    const disk = await reserveDiskRoom({ botId: job.botId, jobId: job.id, bytes: diskBytes }, now);
+    const disk = await reserveDiskRoom({ botId: job.botId, jobId: job.id, bytes: diskBytes, attempt: now.getTime() }, now);
     if (!disk.ok) {
       await releaseRoom({ key }, now);
       if (disk.reason === 'not_set') return 'not_set';
@@ -552,7 +575,7 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     }
   }
   const dropDiskRoom = async () => {
-    if (diskBytes !== null && diskBytes > 0) await releaseRoom({ key: diskRoomKey(job.botId, job.id) }, now);
+    if (diskBytes !== null && diskBytes > 0) await releaseRoom({ key: diskRoomKey(job.botId, job.id, now.getTime()) }, now);
   };
 
   // Take the writer's place. The database lets only one writing job hold it; a second one arriving at the same moment queues.
@@ -566,6 +589,7 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
       const holder = await prisma.computerJob.findUnique({ where: { id: job.id }, select: { reservationKey: true } });
       if (holder?.reservationKey !== key) {
         await releaseRoom({ key }, now);
+        // The disk's room is this try's own (it carries the try's moment), and when the winner shares the moment it shares the room too: given back only with it
         await dropDiskRoom();
       }
       return 'gone';
@@ -913,8 +937,14 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
     // The job is over either way: the machine still rests and the line still moves, and the sweep gives the room back
     console.error('[Computer] Could not settle a job’s room:', error instanceof Error ? error.message : 'unknown');
   }
+  // A job that failed on our side takes nothing from the person's month, and neither do the model calls it made (the sweep tries again if this fails)
+  if (givenBackJob(status, endedBy)) {
+    await giveBackModelCalls(job.id, job.personId).catch((error) => console.error('[Computer] Could not give back a job’s model calls:', error instanceof Error ? error.message : 'unknown'));
+  }
 
   if (held) {
+    // The person's hold on the computer ends with their last job: control goes back to Brick's so the next job can start
+    await releaseIfUnheld(job.botId).catch((error) => console.error('[Computer] Could not release control:', error instanceof Error ? error.message : 'unknown'));
     await closeOutIfUnheld(job.botId);
     await restIfUnheld(job.botId, now);
   }
@@ -930,13 +960,17 @@ async function recordComputerTime(job: { id: string; botId: string; personId: st
   const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
   const provider = providerFor(row);
   const cost = costOfSeconds(seconds, provider ? provider.microsPerMinute() : null);
+  // A job that failed on our side (the machine would not start or could not be reached, the agent's turn broke, the worker was lost) is not
+  // the person's: what it ran stays in the books as our own cost (the provider still bills it), but is not written against them, so it
+  // never draws from their month. A job that ran and ended any other way (done, stopped by them, out of room, nobody answered) is theirs.
+  const givenBack = givenBackJob(why.status, why.endedBy);
   await recordMeterEvent({
     eventId: `computer:${job.id}:time`,
     kind: 'computer_time',
     pool: 'computer',
     occurredAt: at,
-    personKey: `person:${job.personId}`,
-    personId: job.personId,
+    personKey: givenBack ? 'unknown' : `person:${job.personId}`,
+    personId: givenBack ? null : job.personId,
     botId: job.botId,
     brick: true,
     payerKind: 'universe',
@@ -950,7 +984,7 @@ async function recordComputerTime(job: { id: string; botId: string; personId: st
     basis: cost === null ? 'unknown' : provider && provider.kind === 'real' ? 'measured' : 'estimated',
     sourceRef: `computer_jobs:${job.id}`,
     // The run of a goal or task that started the job, when one did, so its computer time is on the books with its model calls
-    detail: { endedBy: why.endedBy, status: why.status, ...(job.runId ? { runId: job.runId } : {}) },
+    detail: { endedBy: why.endedBy, status: why.status, ...(job.runId ? { runId: job.runId } : {}), ...(givenBack ? { givenBack: true, forPersonId: job.personId } : {}) },
   }).catch((error) => console.error('[Computer] Could not record computer time:', error instanceof Error ? error.message : 'unknown'));
   return cost;
 }
@@ -985,6 +1019,26 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
     LIMIT ${batch}`);
   for (const job of ended) {
     await recordComputerTime(job, job.secondsRun, job.endedAt ?? now, { endedBy: job.endedBy as EndedBy | null, status: job.status });
+  }
+  await giveBackMissingModelCalls(batch, botId);
+}
+
+/**
+ * A job that failed on our side has its model calls given back when it ends. If that write did not go through, or a call was recorded
+ * in the same moment, the next sweep finds the call still written against the person and gives it back too. Never throws.
+ */
+async function giveBackMissingModelCalls(batch: number, botId?: string): Promise<void> {
+  const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
+  try {
+    const jobs = await prisma.$queryRaw<Array<{ id: string; personId: string }>>(Prisma.sql`
+      SELECT DISTINCT j."id", j."person_id" AS "personId"
+      FROM "computer_jobs" j
+      WHERE (j."status" = 'failed' OR (j."status" = 'stopped' AND j."ended_by" = 'error')) ${only}
+        AND EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")
+      LIMIT ${batch}`);
+    for (const job of jobs) await giveBackModelCalls(job.id, job.personId);
+  } catch (error) {
+    console.error('[Computer] Could not look for a failed job’s model calls:', error instanceof Error ? error.message : 'unknown');
   }
 }
 
@@ -1035,6 +1089,11 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   // the room is given back instead of staying in the pool's envelope until the month ends
   const lapsedDisks = await prisma.meterReservation.findMany({ where: { state: 'held', expiresAt: { lte: now }, reservationKey: { startsWith: DISK_ROOM_PREFIX } }, take: 200 });
   for (const reservation of lapsedDisks) {
+    // The room lasts a few minutes and is not renewed while the machine is being made: a machine that takes longer is still being made, and its
+    // room is kept while its job is still starting (the key says which job), up to a hard stop so a job that died in the making never keeps it for good
+    const [botId, jobId] = reservation.reservationKey.slice(DISK_ROOM_PREFIX.length).split(':');
+    const job = jobId ? await prisma.computerJob.findFirst({ where: { id: jobId, botId }, select: { status: true } }) : null;
+    if (job && !isOver(job.status) && now.getTime() - reservation.createdAt.getTime() < DISK_ROOM_MAX_HOLD_MS) continue;
     await releaseRoom({ key: reservation.reservationKey }, now);
     released++;
   }
@@ -1055,6 +1114,8 @@ export async function sweepComputers(now: Date = new Date(), batch: number = SWE
   }
   // A machine that was being made when its job died, and never got a reference: nothing was made, so it can be tried again
   await prisma.brickComputer.updateMany({ where: { machine: 'waking', providerRef: null, updatedAt: { lte: new Date(now.getTime() - 5 * 60 * 1000) } }, data: { machine: 'none' } });
+  // A change of hands a leader left half done (its lease ran out) is finished, and a computer still held after the person's jobs ended goes back to Brick's
+  await recoverControl(now, batch).catch((error) => console.error('[Computer] Control could not be recovered:', error instanceof Error ? error.message : 'unknown'));
   // A machine that works while no job holds it (a stop that broke half way, a start that finished after a turn off) is put to rest
   // A rest that was claimed and never finished (the server stopped half way) is not left claimed: with no job holding it, it goes back to "working" and the next sweep rests it
   const stuck = await prisma.brickComputer.findMany({ where: { machine: 'resting', NOT: { providerRef: null }, restClaimedAt: { lte: new Date(now.getTime() - 5 * 60 * 1000) } }, select: { botId: true, restClaimedAt: true }, take: 200 });
@@ -1339,19 +1400,16 @@ async function fenceControl(botId: string, now: Date = new Date()): Promise<void
   }
 }
 
-export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'nothing_waiting' };
+export type Control = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'nothing_waiting' | 'in_progress' | 'not_secured' };
 
 /**
- * Take over: the person has the mouse and keyboard. Offered while the job waits for them, and while it works too (the mock lets
- * them step in at any time): a working job then waits for them, its stretch so far counted, the machine staying awake. Their own Brick only.
+ * Every job working on the machine becomes the person's, the one that writes and any that only read: none is left running under
+ * Brick's hands while the person has the keyboard. Asked again until none is left: a job that began while the others were being
+ * moved is found by the next look, and one that begins after sees the person's control above.
  */
-export async function takeOver(botId: string, ownerId: string, now: Date = new Date()): Promise<Control> {
-  if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+async function moveJobsToPerson(botId: string, now: Date): Promise<{ changed: number; moved: number }> {
   // The jobs already waiting for the person are theirs first: from here a job that starts sees the person has the machine and waits
   const changed = await prisma.computerJob.updateMany({ where: { botId, status: 'waiting', control: 'brick' }, data: { control: 'person' } });
-  // Every job working on the machine is the person's to step in on, the one that writes and any that only read: none is left running
-  // under Brick's hands while the person has the keyboard. Asked again until none is left: a job that began while the others were
-  // being moved is found by the next look, and one that begins after sees the person's control above.
   let moved = 0;
   for (let round = 0; round < 5; round++) {
     const runningJobs = await prisma.computerJob.findMany({ where: { botId, status: 'running' } });
@@ -1365,16 +1423,120 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
       });
     }
   }
-  // The fence: every key the computer held ends and the number moves, so a call the agent had in flight is refused from here on
-  if (changed.count > 0 || moved > 0) {
+  return { changed: changed.count, moved };
+}
+
+/**
+ * The machine half of the fence, proved. `fenceMachine` stops what the agent started and looks again; when that cannot be proved it
+ * stops the machine. A stopped machine that is PROVED stopped is a closed machine (nothing can act on it, and the person has no screen
+ * until it wakes); one whose stop is not proved is not: it is stopped again, and if that is not proved either, the fence is not proved.
+ */
+async function secureMachine(botId: string): Promise<'proved' | 'unproved'> {
+  const fenced = await fenceMachine(botId);
+  if (fenced === 'done') return 'proved';
+  const row = await prisma.brickComputer.findUnique({ where: { botId } });
+  const provider = providerFor(row);
+  if (!row?.providerRef || !provider) return 'proved';
+  // A stop that was asked and not proved yet (or a machine that fell back to stopping): asked again here, never taken as proof
+  if (row.machine === 'stopping') return (await stopMachine(botId, row.providerRef, provider, ['stopping'])) ? 'proved' : 'unproved';
+  // The fence failed and the machine was stopped by it, or it was not a working machine at all (nothing was running to fence)
+  return 'proved';
+}
+
+type Fenced = 'ready' | 'idle' | 'unproved' | 'lost';
+
+/**
+ * The take over's stages, led by one request (or finished by the next after a leader that died). Every stage is safe to run again:
+ *   1. every job the agent is working on becomes the person's (Brick's turn is gone from here: nothing is admitted in `fencing`);
+ *   2. every key the computer held ends and the control number moves;
+ *   3. the machine's own fence is run and PROVED (the turn is cancelled, what the agent started is stopped, a second look finds none);
+ *   4. only then does control become `human_ready`, which is the first moment the person's screen input can be authorized.
+ * A fence that cannot be proved leaves control in `fencing`: the person has no input and nothing is lost, and the next request or the
+ * sweep tries again. `epoch` is null only for a computer with no row.
+ */
+async function leadFence(botId: string, epoch: number | null, now: Date): Promise<Fenced> {
+  const mine = async () => epoch === null || (await renewTransition(botId, 'fencing', epoch));
+  let rounds = 0;
+  for (;;) {
+    const { changed, moved } = await moveJobsToPerson(botId, now);
+    const held = await prisma.computerJob.count({ where: { botId, status: 'waiting', control: 'person' } });
+    if (changed + moved === 0 && held === 0) {
+      // Nothing was the person's to take: control stays Brick's
+      if (epoch !== null) await finishTransition(botId, 'fencing', epoch, 'agent');
+      return 'idle';
+    }
+    if (!(await mine())) return 'lost';
+    // The fence: every key the computer held ends and the number moves, so a call the agent had in flight is refused from here on
     await fenceControl(botId);
+    if (!(await mine())) return 'lost';
     // Then the machine itself: the turn is cancelled and what the agent started is stopped and proved gone, before the person has the screen
-    await fenceMachine(botId);
+    if ((await secureMachine(botId)) === 'unproved') {
+      if (epoch !== null) await releaseLease(botId, 'fencing', epoch);
+      return 'unproved';
+    }
+    // A job that began while the fence ran is looked for once more: it is the person's too, and the fence is run again for it
+    if ((await prisma.computerJob.count({ where: { botId, status: 'running' } })) === 0) break;
+    if (++rounds >= 3) {
+      if (epoch !== null) await releaseLease(botId, 'fencing', epoch);
+      return 'unproved';
+    }
   }
-  const job = await prisma.computerJob.findFirst({ where: { botId, status: 'waiting' }, orderBy: [{ writes: 'desc' }, { createdAt: 'asc' }], include: JOB_INCLUDE });
-  // Asked twice it is the same: already theirs is still theirs
-  if (!job || (changed.count === 0 && job.control !== 'person' && moved === 0)) return { ok: false, reason: 'nothing_waiting' };
-  return { ok: true, job: jobView(job) };
+  if (epoch === null) return 'ready';
+  return (await finishTransition(botId, 'fencing', epoch, 'human_ready')) ? 'ready' : 'lost';
+}
+
+/** The take over's second look at a computer that is already the person's: a job that joined after the fence is not left running under Brick's hands. */
+const hasStragglers = async (botId: string): Promise<boolean> =>
+  (await prisma.computerJob.count({ where: { botId, OR: [{ status: 'running' }, { status: 'waiting', control: 'brick' }] } })) > 0;
+
+/** The job the person is looking at after a take over, or the reason there is none. */
+async function afterTakeOver(botId: string): Promise<Control> {
+  const job = await prisma.computerJob.findFirst({ where: { botId, status: 'waiting', control: 'person' }, orderBy: [{ writes: 'desc' }, { createdAt: 'asc' }], include: JOB_INCLUDE });
+  return job ? { ok: true, job: jobView(job) } : { ok: false, reason: 'nothing_waiting' };
+}
+
+/**
+ * Take over: the person has the mouse and keyboard. Offered while the job waits for them, and while it works too (the mock lets
+ * them step in at any time): a working job then waits for them, its stretch so far counted, the machine staying awake. Their own Brick only.
+ *
+ * Control changes hands through one durable transition (lib/computer-control.ts): this request either leads the fence or joins the one
+ * already going, and it answers only when the fence is PROVED, never while it is still pending. Asked twice it is the same.
+ */
+export async function takeOver(botId: string, ownerId: string, now: Date = new Date()): Promise<Control> {
+  if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+  const deadline = Date.now() + CONTROL_TIMING.joinMs;
+  for (;;) {
+    const row = await readControl(botId);
+    // A Brick with no computer row has no machine to fence: its jobs still become the person's
+    if (!row) {
+      await leadFence(botId, null, now);
+      break;
+    }
+    const t = Date.now();
+    if (row.state === 'agent' || (row.state === 'human_ready' && (await hasStragglers(botId)))) {
+      const epoch = await beginTransition(botId, row.state, row.epoch, 'fencing');
+      if (epoch === null) continue;
+      const done = await leadFence(botId, epoch, now);
+      if (done === 'unproved') return { ok: false, reason: 'not_secured' };
+      if (done === 'lost') continue;
+      break;
+    }
+    if (row.state === 'human_ready') break;
+    // A change of hands is on its way: this request joins it rather than begin another or answer before it is done
+    if (leaseLapsed(row, t)) {
+      if (!(await resumeTransition(botId, row))) continue;
+      if (row.state === 'fencing') {
+        const done = await leadFence(botId, row.epoch, now);
+        if (done === 'unproved') return { ok: false, reason: 'not_secured' };
+      } else {
+        await finishReturn(botId, row.epoch);
+      }
+      continue;
+    }
+    if (t >= deadline) return { ok: false, reason: 'in_progress' };
+    await sleep(CONTROL_TIMING.pollMs);
+  }
+  return afterTakeOver(botId);
 }
 
 /**
@@ -1395,24 +1557,98 @@ async function wakeIfStopped(botId: string): Promise<void> {
   }
 }
 
-/** Hand back: Brick carries on from where the person left it. What they entered is theirs and is not read back by this call. */
-export async function handBack(botId: string, ownerId: string): Promise<Control> {
-  if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+/**
+ * The hand back's stages, led by one request (or finished by the next after a leader that died). Every stage is safe to run again:
+ *   1. the person's input already ended (the control number moved when this began); what the gateway was already granted is waited out,
+ *      so every input socket has been told no or has lapsed before Brick can act again;
+ *   2. the jobs go back to Brick, and every key made before ends (the runner asks for a new one for what comes next);
+ *   3. a machine the fence stopped is woken;
+ *   4. only then does control become Brick's.
+ * Brick is not admitted at any point before step 4, whatever state the jobs are in.
+ */
+async function finishReturn(botId: string, epoch: number | null): Promise<'back' | 'lost'> {
+  const mine = async () => epoch === null || (await renewTransition(botId, 'returning', epoch));
+  if (epoch !== null) await drainHumanInput(botId);
+  if (!(await mine())) return 'lost';
   // Asked until a pass finds none: a job that joined the person while the others were being handed back is found by the next pass
-  let handedBack = 0;
   for (let round = 0; round < 5; round++) {
     const back = await prisma.computerJob.updateMany({ where: { botId, status: 'waiting', control: 'person' }, data: { status: 'running', control: 'brick', waitingFor: null, readyWhat: null, readyWhere: null } });
     if (back.count === 0) break;
-    handedBack += back.count;
   }
-  // Keys made before the hand back stay refused: the runner asks for a new one for what comes next
-  if (handedBack > 0) {
-    await fenceControl(botId);
-    await wakeIfStopped(botId);
+  if (!(await mine())) return 'lost';
+  // Keys made before the hand back stay refused, whether or not this pass moved a job (a pass that died after the move still needs them ended)
+  await fenceControl(botId);
+  await wakeIfStopped(botId);
+  if (epoch === null) return 'back';
+  return (await finishTransition(botId, 'returning', epoch, 'agent')) ? 'back' : 'lost';
+}
+
+/**
+ * Hand back: Brick carries on from where the person left it. What they entered is theirs and is not read back by this call. Their screen
+ * input ends first and is drained, and only then does Brick resume (see finishReturn); a hand back asked while a take over is still being
+ * fenced waits for it, and one asked twice is the same.
+ */
+export async function handBack(botId: string, ownerId: string): Promise<Control> {
+  if (!(await brickOf(botId, ownerId))) return { ok: false, reason: 'not_found' };
+  const deadline = Date.now() + CONTROL_TIMING.joinMs;
+  for (;;) {
+    const row = await readControl(botId);
+    if (!row) {
+      await finishReturn(botId, null);
+      break;
+    }
+    const t = Date.now();
+    const personHolds = row.state === 'agent' ? (await prisma.computerJob.count({ where: { botId, status: 'waiting', control: 'person' } })) > 0 : false;
+    if (row.state === 'human_ready' || personHolds || (row.state === 'fencing' && leaseLapsed(row, t))) {
+      // From `fencing` with its leader gone (a fence that was never proved): the person never had input, so there is nothing to drain
+      const epoch = await beginTransition(botId, row.state, row.epoch, 'returning');
+      if (epoch === null) continue;
+      if ((await finishReturn(botId, epoch)) === 'lost') continue;
+      break;
+    }
+    if (row.state === 'agent') break;
+    if (row.state === 'returning' && leaseLapsed(row, t)) {
+      if (await resumeTransition(botId, row)) await finishReturn(botId, row.epoch);
+      continue;
+    }
+    if (t >= deadline) return { ok: false, reason: 'in_progress' };
+    await sleep(CONTROL_TIMING.pollMs);
   }
   const job = await prisma.computerJob.findFirst({ where: { botId, status: { in: ['running', 'waiting'] } }, orderBy: [{ writes: 'desc' }, { createdAt: 'asc' }], include: JOB_INCLUDE });
   if (!job) return { ok: false, reason: 'nothing_waiting' };
   return { ok: true, job: jobView(job) };
+}
+
+/**
+ * The sweep finishes what a leader that died (or gave up) left: a fence that could not be proved is tried again, a hand back that stopped half
+ * way is completed, and a computer the person still holds after their jobs are over goes back to Brick's. Safe to run twice at once: the lease
+ * is taken with one compare-and-set, so only one sweep finishes a given transition.
+ */
+export async function recoverControl(now: Date = new Date(), batch: number = SWEEP_BATCH): Promise<number> {
+  const stuck = await prisma.brickComputer.findMany({
+    where: { OR: [{ controlState: { in: ['fencing', 'returning'] }, OR: [{ controlLeaseUntil: null }, { controlLeaseUntil: { lte: new Date() } }] }, { controlState: 'human_ready' }] },
+    select: { botId: true },
+    take: batch,
+  });
+  let finished = 0;
+  for (const { botId } of stuck) {
+    const row = await readControl(botId);
+    if (!row) continue;
+    if (row.state === 'human_ready') {
+      await releaseIfUnheld(botId).catch(() => undefined);
+      continue;
+    }
+    if (row.state === 'agent' || !leaseLapsed(row)) continue;
+    if (!(await resumeTransition(botId, row))) continue;
+    try {
+      if (row.state === 'fencing') await leadFence(botId, row.epoch, now);
+      else await finishReturn(botId, row.epoch);
+      finished++;
+    } catch (error) {
+      console.error('[Computer] Could not finish a change of hands:', error instanceof Error ? error.message : 'unknown');
+    }
+  }
+  return finished;
 }
 
 export type Filling = { ok: true; job: JobView } | { ok: false; reason: 'not_found' | 'not_in_control' | 'nothing_ready' | 'changed' };
@@ -1427,7 +1663,8 @@ export async function fillInDetails(botId: string, ownerId: string, shown?: { wh
   // After a take over several jobs can be in the person's hands (the one Brick handed over and any that were only working): the one the
   // tap is for is the one that named something to fill in, found by what the screen showed, never by which came first from the database
   const held = await prisma.computerJob.findMany({ where: { botId, status: 'waiting', control: 'person' }, orderBy: [{ writes: 'desc' }, { createdAt: 'asc' }] });
-  if (held.length === 0) return { ok: false, reason: 'not_in_control' };
+  // The tap is only taken once the fence is proved: while control is changing hands the person does not have the machine yet
+  if (held.length === 0 || !(await humanHasControl(botId))) return { ok: false, reason: 'not_in_control' };
   const named = held.filter((candidate) => candidate.readyWhat && candidate.readyWhere);
   if (named.length === 0) return { ok: false, reason: 'nothing_ready' };
   // The tap approves what the person was looking at, so the screen must say what it showed: a page that sent nothing, or opened before
@@ -1484,7 +1721,7 @@ export async function planEffect(jobId: string, input: { key: string; kind: Effe
   // Tried before and the outcome is not known: look it up, never repeat it blind
   if (existing?.state === 'planned') return { ok: false, reason: 'look_up', evidence: existing.evidence };
   if (PERSON_ONLY.includes(input.kind)) return { ok: false, reason: 'person_only' };
-  if (AFTER_TAKE_OVER.includes(input.kind) && (job.control !== 'person' || job.status !== 'waiting')) return { ok: false, reason: 'hand_over_first' };
+  if (AFTER_TAKE_OVER.includes(input.kind) && (job.control !== 'person' || job.status !== 'waiting' || !(await humanHasControl(job.botId)))) return { ok: false, reason: 'hand_over_first' };
   // Details and uploads are only ever the person's tap: it wrote the approved row, and a key nobody approved is never planned
   // What the person approved is exactly that row: the same kind, still unspent. Another kind's row on the same key, or a row settled as
   // failed that no tap approved again, is not their approval.
@@ -1591,66 +1828,15 @@ export async function getJob(jobId: string): Promise<(JobView & { botId: string;
 }
 
 /**
- * When a Brick is removed for good: its machine goes only after its files were saved. A save that did not happen leaves the Brick
- * for the next sweep, and nothing is deleted quietly. True when there is nothing in the way.
+ * Whether everything the Brick's computer ran is in the books (audit F08: financial reconciliation, apart from erasure). The jobs go with the
+ * Brick, so what they ran is written first (never a loss of money). This reads and writes only our own tables: it does not wait on a
+ * provider, a saved copy or any backup. False only when a line could not be written yet; the Brick then waits for the next sweep.
  */
-export async function removeMachineBeforeDelete(botId: string, now: Date = new Date()): Promise<boolean> {
-  // Deleting a Brick deletes its jobs, so what they ran reaches the books first: one that still cannot be written keeps the Brick for the next sweep
+export async function computerTimeInBooks(botId: string, now: Date = new Date()): Promise<boolean> {
   await recordMissingComputerTime(now, SWEEP_BATCH, botId);
   const unwritten = await prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`
     SELECT COUNT(*)::bigint AS "n" FROM "computer_jobs" j
     WHERE j."bot_id" = ${botId} AND j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')`);
-  if (Number(unwritten[0]?.n ?? 0) > 0) return false;
-  const row = await prisma.brickComputer.findUnique({ where: { botId } });
-  // A pack-away or a return is under way (it stops for a deleted Brick by itself, or is finished by the sweep): the Brick is kept for the next try
-  if (row && (row.machine === 'packing' || row.packStage === 'returning')) return false;
-  if (!row || !row.providerRef || row.machine === 'none') return true;
-  const provider = providerFor(row);
-  if (!provider) return false;
-  if (!(await saveCopy(botId, row.providerRef, provider))) return false;
-  try {
-    await provider.remove(row.providerRef);
-  } catch (error) {
-    console.error('[Computer] Could not remove a machine:', error instanceof Error ? error.message : 'unknown');
-    return false;
-  }
-  // The machine is gone: say so at once, so a later try (if the Brick's own delete fails) does not save a copy of a machine that is not there
-  await recordKeptBytes({ botId, reason: 'gone', machineBytes: null });
-  try {
-    await prisma.brickComputer.update({ where: { botId }, data: { providerRef: null, machine: 'none' } });
-  } catch (error) {
-    console.error('[Computer] A machine was removed but its record was not cleared:', error instanceof Error ? error.message : 'unknown');
-  }
-  return true;
-}
-
-/**
- * When a Brick is removed for good, so is what is kept of its computer in our own storage: the saved copy of its files, which the pool
- * counts as kept storage (audit F4). Asked after the machine is gone and before the Brick's rows are cleared: a copy that could not be
- * deleted (its provider is off or changed, or the bucket refused) leaves the Brick for the next sweep, like a machine that could not be
- * removed, so nothing is dropped quietly. True when nothing is in the way, including a Brick that never had a copy.
- */
-export async function removeSavedCopyBeforeDelete(botId: string): Promise<boolean> {
-  // The copies cold storage keeps go too (a Brick that was never cold has none)
-  try {
-    await deleteColdCopies(botId);
-  } catch (error) {
-    console.error('[Computer] Could not delete the cold storage copies:', error instanceof Error ? error.message : 'unknown');
-    return false;
-  }
-  const row = await prisma.brickComputer.findUnique({ where: { botId } });
-  if (!row || (row.filesSavedAt === null && row.filesBytes === BigInt(0))) return true;
-  const provider = providerFor(row);
-  if (!provider?.deleteSavedCopy) return false;
-  try {
-    await provider.deleteSavedCopy(botId);
-  } catch (error) {
-    console.error('[Computer] Could not delete a saved copy:', error instanceof Error ? error.message : 'unknown');
-    return false;
-  }
-  await prisma.brickComputer.update({ where: { botId }, data: { filesBytes: BigInt(0), filesSavedAt: null } });
-  // Nothing of it is kept now: the level in the books goes to 0
-  await recordKeptBytes({ botId, reason: 'gone', machineBytes: null, copyBytes: 0 });
-  return true;
+  return Number(unwritten[0]?.n ?? 0) === 0;
 }

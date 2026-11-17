@@ -12,14 +12,14 @@ import { monthOf } from '@/lib/meter-values';
  *  - `speechMemberCeilingSeconds`: the most of that for one person.
  *
  * What is asked for is the room the new use may take (the longest a reply may be, the exact length of a note), so the overshoot is never more
- * than one use. A person's own key never counts here (their bill, not ours). A Limit that is empty stops everything it covers: nothing is
+ * than one use (a note reserved and not heard yet is counted by the caller as `inFlight`, under the lock that serializes reservations). A person's own key never counts here (their bill, not ours). A Limit that is empty stops everything it covers: nothing is
  * assumed, and 0 pauses it. Nobody is told a number: the caller turns "stopped" into the kind line it already has for a used-up allowance.
  */
 export type SpeechStop = { stopped: 'month' | 'person' | 'not_set'; resetsAt: string };
 
 type Db = Pick<typeof prisma, 'meterEvent' | 'appSetting'>;
 
-export async function checkSpeechCap(input: { personId: string | null; seconds: number }, now: Date = new Date(), db: Db = prisma): Promise<SpeechStop | null> {
+export async function checkSpeechCap(input: { personId: string | null; seconds: number; inFlight?: { all: number; mine: number } }, now: Date = new Date(), db: Db = prisma): Promise<SpeechStop | null> {
   const month = monthOf(now);
   const resetsAt = month.end.toISOString();
   const settings = await getMeterSettings(db);
@@ -29,7 +29,10 @@ export async function checkSpeechCap(input: { personId: string | null; seconds: 
     db.meterEvent.aggregate({ where, _sum: { quantity: true } }),
     input.personId ? db.meterEvent.aggregate({ where: { ...where, personId: input.personId }, _sum: { quantity: true } }) : Promise.resolve(null),
   ]);
-  if (Number(all._sum.quantity ?? 0) + input.seconds > settings.speechCeilingSeconds) return { stopped: 'month', resetsAt };
-  if (mine && Number(mine._sum.quantity ?? 0) + input.seconds > settings.speechMemberCeilingSeconds) return { stopped: 'person', resetsAt };
+  // What notes that were reserved and not heard yet may still take: their event is written when they are heard, so without it every note
+  // reserved in the meantime would see the same total and all pass at the last minute of a Limit
+  const waiting = input.inFlight ?? { all: 0, mine: 0 };
+  if (Number(all._sum.quantity ?? 0) + waiting.all + input.seconds > settings.speechCeilingSeconds) return { stopped: 'month', resetsAt };
+  if (mine && Number(mine._sum.quantity ?? 0) + waiting.mine + input.seconds > settings.speechMemberCeilingSeconds) return { stopped: 'person', resetsAt };
   return null;
 }

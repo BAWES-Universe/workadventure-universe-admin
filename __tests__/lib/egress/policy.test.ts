@@ -72,9 +72,11 @@ describe('the checks that need no lookup, and the one on what a name resolved to
   it('lets an ordinary target be', () => {
     expect(checkTarget('example.com', 443, config)).toEqual({ ok: true });
     expect(checkTarget('93.184.216.34', 22, config)).toEqual({ ok: true });
+    // Every port is open unless the team narrows it
+    for (const port of [25, 53, 3306, 5432, 6379, 27017, 65535]) expect(checkTarget('example.com', port, config)).toEqual({ ok: true });
   });
   it('refuses by port, name and internal address, each with its own reason', () => {
-    expect(checkTarget('example.com', 25, config)).toMatchObject({ ok: false, reason: 'port_refused' });
+    expect(checkTarget('example.com', 25, { ...config, allowedPorts: [443] })).toMatchObject({ ok: false, reason: 'port_refused' });
     expect(checkTarget('backend.composio.dev', 443, config)).toMatchObject({ ok: false, reason: 'name_refused' });
     expect(checkTarget('169.254.169.254', 80, config)).toMatchObject({ ok: false, reason: 'internal_address' });
   });

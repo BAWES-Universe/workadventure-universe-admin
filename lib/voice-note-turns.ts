@@ -3,6 +3,7 @@ import { Prisma, type VoiceNoteTurn } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { recordSpeechHeard } from '@/lib/meter-speech';
 import { checkSpeechCap } from '@/lib/speech-cap';
+import { monthOf } from '@/lib/meter-values';
 import { getVoiceLimits } from '@/lib/voice-limits';
 import { VOICE_RANGES, savedVoiceKeyLimits } from '@/lib/voice-limit-values';
 import { checkReplyAllowance, type ReplyAllowance } from '@/lib/reply-limits';
@@ -288,7 +289,16 @@ export async function reserveVoiceNote(
 
     if (universeAi) {
       // The month's spending stop on speech Universe AI pays for (lib/speech-cap.ts): a note is held back whole, before it is heard
-      const stop = await checkSpeechCap({ personId: personKey.startsWith('person:') ? personKey.slice('person:'.length) : null, seconds }, now, tx);
+      // Notes reserved and not heard yet have written nothing to the books (a heard note does, once), so what they may take is added here: under this lock
+      // each reservation sees the ones before it, and the last minutes of a Limit are never given to several notes at once
+      const inFlightWhere: Prisma.VoiceNoteTurnWhereInput = {
+        ...counted,
+        payer: 'universe-ai',
+        createdAt: { gte: monthOf(now).start },
+        OR: [{ state: 'reserved', createdAt: { gt: new Date(now.getTime() - STARTING_MS) } }, { state: 'hearing', leaseUntil: { gt: now } }],
+      };
+      const inFlight = { all: await sum(inFlightWhere), mine: await sum({ ...inFlightWhere, personKey }) };
+      const stop = await checkSpeechCap({ personId: personKey.startsWith('person:') ? personKey.slice('person:'.length) : null, seconds, inFlight }, now, tx);
       if (stop) return { ok: false, reason: 'note-minutes', limit: stop.stopped === 'person' ? 'person' : 'universe', resetsAt: stop.resetsAt };
       if (scope === 'bot') {
         if (!fits(await sum({ scope: 'bot', personKey, payer: 'universe-ai', createdAt: { gte: day } }), limits.noteMinutesPerPerson)) return { ok: false, reason: 'note-minutes', limit: 'person', resetsAt: tomorrow };

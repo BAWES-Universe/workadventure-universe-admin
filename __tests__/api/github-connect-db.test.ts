@@ -6,6 +6,8 @@
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest --runInBand __tests__/api/github-connect-db.test.ts
  */
 import crypto, { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { NextRequest } from 'next/server';
 
 const mockUser: { current: { id: string; email?: string | null; isSuperAdmin?: boolean } | null } = { current: null };
@@ -29,10 +31,9 @@ import { POST as createPage } from '@/app/api/admin/github-app/create/route';
 import { GET as created } from '@/app/api/admin/github-app/created/route';
 import { GET as listServers } from '@/app/api/bots/[id]/mcp-servers/route';
 import { POST as link } from '@/app/api/ready-made/link/route';
-import { grantToBrick, readConnection, removeGrant } from '@/lib/app-connections';
-import { POST as gitPass } from '@/app/api/bots/[id]/git-pass/route';
-import { GET as gitGet, POST as gitPost } from '@/app/api/git/[...path]/route';
-import { checkGitPass, MAX_PUSH_BYTES, UPLOAD_GRACE_SECONDS } from '@/lib/github/git-relay';
+import { grantToBrick, readConnection } from '@/lib/app-connections';
+import { GET as gitGet } from '@/app/api/git/[...path]/route';
+import { checkGitKey } from '@/lib/github/git-relay';
 import { createBrick } from '@/lib/brick-create';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -427,89 +428,22 @@ run('Connect GitHub for Bricks, in a real database', () => {
     expect(await prisma.appConnection.count({ where: { id } })).toBe(0);
   });
 
-  it('gives a Brick’s computer a 15-minute git pass only while it may use its owner’s GitHub, and the relay takes nothing else', async () => {
+  it('has no git pass any more: nothing issues one, and the relay refuses one made earlier, even for a Brick that may use GitHub', async () => {
     await makeApp();
     const id = await signedIn();
-    const pass = (token = SERVICE) => gitPass(request(`/api/bots/${saraBrick}/git-pass`, { method: 'POST', token }), params({ id: saraBrick }));
-    expect((await pass('wrong')).status).toBe(401);
-    expect((await pass()).status).toBe(404);
     await grantToBrick(sara, id, saraBrick);
-    const issued = await (await pass()).json();
-    expect(issued).toMatchObject({ remoteBase: 'https://orbit.example.com/api/git', name: 'sara-gh', email: '501+sara-gh@users.noreply.github.com' });
-    expect(new Date(issued.expiresAt).getTime() - Date.now()).toBeGreaterThan(14 * 60_000);
-    expect(JSON.stringify(issued)).not.toContain('ghu_first');
-
-    const basic = (secret: string) => `Basic ${Buffer.from(`brick:${secret}`).toString('base64')}`;
-    const refs = (authorization?: string) =>
-      gitGet(request('/api/git/acme/tools.git/info/refs?service=git-upload-pack', { headers: authorization ? { authorization } : {} }), params({ path: ['acme', 'tools.git', 'info', 'refs'] }));
-    expect((await refs()).status).toBe(401);
-    expect((await refs(basic('made-up'))).status).toBe(401);
-    // A good pass, through to "GitHub" with the owner's token
+    // The route that gave a pass is gone
+    expect(existsSync(join(process.cwd(), 'app', 'api', 'bots', '[id]', 'git-pass', 'route.ts'))).toBe(false);
+    // A pass of the old kind, made with Orbit's own key for a Brick that has the grant and is the owner's: still turned away
+    const old = (exp: number) => `Basic ${Buffer.from(`brick:${encryptApiKey(JSON.stringify({ kind: 'git-pass', botId: saraBrick, connectionId: id, ownerId: sara, exp }))}`).toString('base64')}`;
     const calls = pretendGitHub({ 'GET https://github.com/acme/tools.git/info/refs': { body: 'refs' } });
-    expect((await refs(basic(issued.pass))).status).toBe(200);
-    expect((calls[0].init.headers as Record<string, string>).Authorization).toBe(`Basic ${Buffer.from('x-access-token:ghu_first').toString('base64')}`);
-    // Not a git address
-    expect((await gitGet(request('/api/git/acme/tools.git/HEAD', { headers: { authorization: basic(issued.pass) } }), params({ path: ['acme', 'tools.git', 'HEAD'] }))).status).toBe(404);
-    // A chunked push says no length: it is read as it comes and stopped past the limit, never read to the end, never sent on
-    let sent = 0;
-    let cancelled = false;
-    const piece = new Uint8Array(1024 * 1024);
-    const endless = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        sent += piece.length;
-        controller.enqueue(piece);
-      },
-      cancel() {
-        cancelled = true;
-      },
-    });
-    const before = calls.length;
-    const chunked = new NextRequest('https://orbit.example.com/api/git/acme/tools.git/git-receive-pack', {
-      method: 'POST',
-      headers: { authorization: basic(issued.pass), 'content-type': 'application/x-git-receive-pack-request', 'transfer-encoding': 'chunked' },
-      body: endless,
-      duplex: 'half',
-    } as ConstructorParameters<typeof NextRequest>[1] & { duplex: 'half' });
-    expect((await gitPost(chunked, params({ path: ['acme', 'tools.git', 'git-receive-pack'] }))).status).toBe(413);
-    expect(sent).toBeLessThan(MAX_PUSH_BYTES + 20 * piece.length);
-    expect(cancelled).toBe(true);
-    expect(calls.length).toBe(before);
-    // GitHub taken away from the Brick while a push is still uploading: checked again once it is read, and nothing goes to GitHub
-    // highWaterMark 0: nothing is pulled until the route starts reading the body, which is after its first pass check; that check
-    // must have let the push in (the grant is still there when reading starts)
-    let taken = false;
-    let grantWhenReadStarted: boolean | null = null;
-    const slow = new ReadableStream<Uint8Array>(
-      {
-        async pull(controller) {
-          if (taken) return controller.close();
-          taken = true;
-          grantWhenReadStarted = (await prisma.botMcpServer.count({ where: { botId: saraBrick, connectionId: id, enabled: true } })) === 1;
-          await removeGrant(sara, id, saraBrick);
-          controller.enqueue(new Uint8Array([48, 48, 48, 48]));
-        },
-      },
-      { highWaterMark: 0 },
-    );
-    const paused = new NextRequest('https://orbit.example.com/api/git/acme/tools.git/git-receive-pack', {
-      method: 'POST',
-      headers: { authorization: basic(issued.pass), 'content-type': 'application/x-git-receive-pack-request', 'transfer-encoding': 'chunked' },
-      body: slow,
-      duplex: 'half',
-    } as ConstructorParameters<typeof NextRequest>[1] & { duplex: 'half' });
-    expect((await gitPost(paused, params({ path: ['acme', 'tools.git', 'git-receive-pack'] }))).status).toBe(401);
-    expect(taken).toBe(true);
-    expect(grantWhenReadStarted).toBe(true);
-    expect(calls.length).toBe(before);
-    // ...and the pass stops for everything else at once
-    expect((await refs(basic(issued.pass))).status).toBe(401);
-    // A pass that ran out a minute ago during an upload still counts when the upload ends; one that ran out long ago does not
-    await grantToBrick(sara, id, saraBrick);
-    const passFrom = (secondsAgo: number) =>
-      basic(encryptApiKey(JSON.stringify({ kind: 'git-pass', botId: saraBrick, connectionId: id, ownerId: sara, exp: Math.floor(Date.now() / 1000) - secondsAgo })));
-    expect(await checkGitPass(passFrom(60))).toBeNull();
-    expect(await checkGitPass(passFrom(60), UPLOAD_GRACE_SECONDS)).toMatchObject({ botId: saraBrick });
-    expect(await checkGitPass(passFrom(UPLOAD_GRACE_SECONDS + 60), UPLOAD_GRACE_SECONDS)).toBeNull();
+    for (const service of ['git-upload-pack', 'git-receive-pack']) {
+      const refs = await gitGet(request(`/api/git/acme/tools.git/info/refs?service=${service}`, { headers: { authorization: old(Math.floor(Date.now() / 1000) + 900) } }), params({ path: ['acme', 'tools.git', 'info', 'refs'] }));
+      expect(refs.status).toBe(401);
+    }
+    expect((await gitGet(request('/api/git/acme/tools.git/info/refs?service=git-upload-pack'), params({ path: ['acme', 'tools.git', 'info', 'refs'] }))).status).toBe(401);
+    expect(calls).toHaveLength(0);
+    expect(await checkGitKey(old(Math.floor(Date.now() / 1000) + 900))).toBeNull();
   });
 
   it('takes webhooks only with GitHub’s signature', async () => {

@@ -28,8 +28,11 @@ export const BRICK_TEMPLATE = 'universe-brick';
 /**
  * What a Brick's computer may reach: ONLY Universe's egress gateways (lib/egress). Its Agent37 network rule is an allow list of the gateways'
  * addresses and nothing else, so a program that ignores the proxy settings has no internet at all, and no program can go around the gateway:
- * Agent37 enforces the rule outside the machine. The gateways let the public web through and refuse Composio and the Universe AI providers by
- * name, raw addresses with no name behind them, and private, metadata and internal addresses (lib/egress/gateway.ts). The rule is written on
+ * Agent37 enforces the rule outside the machine. The gateways let the whole public internet through (any port, names and raw addresses, plain
+ * and encrypted, WebSocket) and refuse only what is already agreed: Composio, Agent37's own API and the Universe AI providers by name (stop
+ * bypassing the metered services), and private, metadata and internal addresses (lib/egress/gateway.ts). A gateway outage never opens a
+ * direct route. The design and its price are PROPOSED, pending verification on a real instance (egress-gateway/README.md lists what is to be
+ * measured). Which Agent37 product the machines run on is recorded in the readiness page's "internet gateway" line. The rule is written on
  * every machine at creation and checked, and put right, each time one is made ready. With no gateway set up (EGRESS_GATEWAYS and
  * EGRESS_GATEWAY_SECRET) NO computer is made and none is made ready: the rule is never left open ("fails closed").
  */
@@ -171,7 +174,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
       }
     }
     const config = this.egress();
-    checks.push(config ? { name: 'internet gateway', ok: true, detail: `Computers reach the internet only through ${config.gateways.length} gateway${config.gateways.length === 1 ? '' : 's'}` } : { name: 'internet gateway', ok: false, detail: `No computer can start: the internet gateway is not set up (${egressProblem() ?? 'no gateway'})` });
+    checks.push(config ? { name: 'internet gateway', ok: true, detail: `Computers reach the open internet through ${config.gateways.length} gateway${config.gateways.length === 1 ? '' : 's'} (the metered services are refused there); the design and its price are proposed, pending verification on a real Agent37 instance` } : { name: 'internet gateway', ok: false, detail: `No computer can start: the internet gateway is not set up (${egressProblem() ?? 'no gateway'})` });
     if (this.image) {
       const state = await this.image().catch(() => null);
       if (imageReady(state)) checks.push({ name: 'computer image', ok: true, detail: `The computer image is built (revision ${state?.revision ?? 'unknown'})` });
@@ -439,6 +442,11 @@ export class Agent37ComputerProvider implements ComputerProvider {
       throw error;
     }
     this.brickOf.delete(ref);
+  }
+
+  async removeAllFor(botId: string): Promise<void> {
+    const made = (await this.client.listInstances()).filter((instance) => instance.metadata?.creation_id === creationId(botId) && !gone(String(instance.status)));
+    for (const instance of made) await this.remove(instance.id);
   }
 
   async awake(ref: string): Promise<boolean> {

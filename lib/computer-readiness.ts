@@ -37,7 +37,11 @@ export async function computerReadiness(): Promise<Readiness> {
     if (cold) {
       const drill = cold.lastDrill ? `last restore drill ${cold.lastDrill.ok ? 'passed' : 'FAILED'} on ${cold.lastDrill.at.toISOString().slice(0, 10)}` : 'no restore drill has run yet';
       const slow = cold.slowestReturnMs === null ? 'no return measured yet' : `slowest measured return ${Math.round(cold.slowestReturnMs / 1000)} s over ${cold.returns} return${cold.returns === 1 ? '' : 's'}`;
-      checks.push({ name: 'cold storage', ok: cold.lastDrill ? cold.lastDrill.ok : true, detail: `${cold.cold} computer${cold.cold === 1 ? '' : 's'} packed away, ${cold.packing} being packed, ${cold.failing} could not be packed yet; ${drill}; ${slow}` });
+      // The size is what the bucket really holds (not an estimate from one example); the awake seconds are measurements of the last 30 days
+      const money = cold.storageMonthMicros === null ? 'storage price not set in the usage controls' : `about $${(cold.storageMonthMicros / 1_000_000).toFixed(2)} a month at the storage price`;
+      const awake = cold.last30Days;
+      const sized = `${Math.round(cold.storedBytes / 1_000_000)} MB of copies kept (${money}); last 30 days awake for cold storage: ${awake.packSeconds + awake.returnSeconds} s on Bricks’ computers, ${awake.scratchSeconds} s on throwaway ones, over ${awake.runs} run${awake.runs === 1 ? '' : 's'}`;
+      checks.push({ name: 'cold storage', ok: cold.lastDrill ? cold.lastDrill.ok : true, detail: `${cold.cold} computer${cold.cold === 1 ? '' : 's'} packed away, ${cold.packing} being packed, ${cold.failing} could not be packed yet; ${drill}; ${slow}; ${sized}` });
     }
   }
   const winding = await isWindingDown();

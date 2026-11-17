@@ -54,6 +54,10 @@ describe('asking for a ticket', () => {
     expect((await ask()).status).toBe(409);
     lib.screenTicket.mockResolvedValueOnce({ ok: false, reason: 'not_taken_over' });
     expect(await (await ask({ mode: 'input' })).json()).toMatchObject({ notTakenOver: true });
+    lib.screenTicket.mockResolvedValueOnce({ ok: false, reason: 'securing' });
+    const securing = await ask({ mode: 'input' });
+    expect(securing.status).toBe(409);
+    expect(await securing.json()).toMatchObject({ securing: true });
     lib.screenTicket.mockResolvedValueOnce({ ok: false, reason: 'not_found' });
     expect((await ask()).status).toBe(404);
   });

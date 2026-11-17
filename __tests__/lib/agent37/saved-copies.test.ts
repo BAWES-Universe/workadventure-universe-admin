@@ -16,6 +16,13 @@ jest.mock('@/lib/artifact-storage', () => ({
           stored.set(command.input.Key, stored.get((command.input.CopySource as string).replace('b/', '')) as Buffer);
           return {};
         }
+        if (kind === 'ListObjectsV2Command') {
+          const input = command.input as unknown as { Prefix: string; ContinuationToken?: string };
+          // As a real bucket: the token is the last key read, so deleting while listing never skips one. Two to a page.
+          const keys = [...stored.keys()].filter((key) => key.startsWith(input.Prefix) && (!input.ContinuationToken || key > input.ContinuationToken)).sort();
+          const page = keys.slice(0, 2);
+          return { Contents: page.map((Key) => ({ Key })), IsTruncated: keys.length > 2, NextContinuationToken: page[page.length - 1] };
+        }
         if (kind === 'DeleteObjectCommand') {
           stored.delete(command.input.Key);
           return {};
@@ -47,7 +54,7 @@ jest.mock('@aws-sdk/lib-storage', () => ({
   },
 }));
 
-import { COPY_OVERHEAD, openSavedCopy, savedCopyKey, savedCopyOf, storeSavedCopy } from '@/lib/agent37/saved-copies';
+import { COPY_OVERHEAD, deleteSavedCopy, openSavedCopy, savedCopyKey, savedCopyOf, storeSavedCopy } from '@/lib/agent37/saved-copies';
 
 const webStream = (...parts: Buffer[]) => Readable.toWeb(Readable.from(parts)) as unknown as ReadableStream<Uint8Array>;
 
@@ -104,5 +111,19 @@ describe('the saved copy of a Brick computer’s files', () => {
 
   it('says nothing is saved for a Brick that has no copy', async () => {
     expect(await savedCopyOf('nobody')).toBeNull();
+  });
+
+  it('deletes everything kept of a Brick for good: the saved copy and every staged object, across pages, and nobody else\'s', async () => {
+    stored.set(savedCopyKey('bot-1'), Buffer.from('saved'));
+    stored.set('computer-saves/bot-1.attempt-a.ubc.new', Buffer.from('staged a'));
+    stored.set('computer-saves/bot-1.attempt-b.ubc.new', Buffer.from('staged b'));
+    stored.set('computer-saves/bot-1.attempt-c.ubc.new', Buffer.from('staged c'));
+    stored.set(savedCopyKey('bot-10'), Buffer.from('another Brick whose id starts the same'));
+    stored.set(savedCopyKey('bot-2'), Buffer.from('another Brick'));
+    await deleteSavedCopy('bot-1');
+    expect([...stored.keys()].sort()).toEqual([savedCopyKey('bot-10'), savedCopyKey('bot-2')].sort());
+    expect(await savedCopyOf('bot-1')).toBeNull();
+    // Asked for a Brick with nothing kept it is the same answer
+    await expect(deleteSavedCopy('bot-1')).resolves.toBeUndefined();
   });
 });

@@ -5,17 +5,16 @@ import { isIP } from 'node:net';
 /**
  * The rules of Universe's egress gateway, with no server in them (so the gateway, Orbit and the tests read the same rules).
  *
- * A Brick's computer reaches the internet only through the gateway (its Agent37 network rule lists nothing else). The gateway lets the
- * public web through, and refuses, by the name asked for and by the name in the encrypted connection's opening (SNI):
- *  - Composio's names and the names of the Universe AI providers (those are only ever reached through Orbit, which reserves the cost first);
- *  - a raw address that is not backed by a name that resolves to it;
- *  - private, loopback, link-local, cloud-metadata and other internal addresses, by what the name RESOLVES to as well as by the address typed.
+ * A Brick's computer reaches the internet only through the gateway (its Agent37 network rule lists nothing else), and through it the internet is
+ * OPEN: every public name and address, on every port, for whatever the person asks the computer to do. The gateway refuses only:
+ *  - Composio's names and the names of the Universe AI providers (those are only ever reached through Orbit, which reserves the cost first),
+ *    by the name asked for and by the name in the encrypted connection's opening (SNI);
+ *  - private, loopback, link-local, cloud-metadata and other internal addresses (our own servers and the provider's inside network, never the
+ *    public internet), by what a name RESOLVES to as well as by the address typed.
  * Nothing in this file talks to the network.
  */
 
-/** The ports a normal job needs: web (80, 443 and the usual alternates), Git over its own protocol, and SSH. Anything else is refused. */
-export const DEFAULT_PORTS: readonly number[] = [22, 80, 443, 8080, 8443, 9418];
-/** Ports whose first bytes are always inspected before anything is sent on (the client speaks first there). */
+/** Ports whose first bytes are inspected before anything is sent on, when the client speaks first (a TLS hello names the server it wants). */
 export const WEB_PORTS: readonly number[] = [80, 443, 8080, 8443];
 
 /**
@@ -46,12 +45,13 @@ export const BASE_DENIED_NAMES: readonly string[] = [
 export interface PolicyConfig {
   /** Names (and everything under them) that are refused, on top of the base list. */
   denyNames: readonly string[];
-  allowedPorts: readonly number[];
+  /** The ports a computer may reach; null (the default) is every port. */
+  allowedPorts: readonly number[] | null;
   /** Extra CIDR ranges that are refused, for our own servers' addresses (`1.2.3.4/32`). */
   denyCidrs: readonly string[];
 }
 
-export const defaultPolicy = (): PolicyConfig => ({ denyNames: [], allowedPorts: DEFAULT_PORTS, denyCidrs: [] });
+export const defaultPolicy = (): PolicyConfig => ({ denyNames: [], allowedPorts: null, denyCidrs: [] });
 
 /** A host as the policy compares it: lowercased, no trailing dot, no brackets, punycode. Null when it cannot be a host. */
 export function normalizeHost(raw: string): string | null {
@@ -214,7 +214,7 @@ export type Allowed = { ok: true };
 
 /** The checks that need no lookup: the port, the name, and an address typed in place of a name. */
 export function checkTarget(host: string, port: number, config: PolicyConfig): Allowed | Refusal {
-  if (!config.allowedPorts.includes(port)) return { ok: false, status: 403, reason: 'port_refused' };
+  if (config.allowedPorts !== null && !config.allowedPorts.includes(port)) return { ok: false, status: 403, reason: 'port_refused' };
   if (nameDenied(host, config)) return { ok: false, status: 403, reason: 'name_refused' };
   if (isIpLiteral(host)) {
     if (isInternalAddress(host) || inAnyRange(host, config.denyCidrs)) return { ok: false, status: 403, reason: 'internal_address' };

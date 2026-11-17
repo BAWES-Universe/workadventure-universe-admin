@@ -3,7 +3,6 @@ import net from 'node:net';
 import { promises as dns } from 'node:dns';
 import {
   HELLO_LIMIT,
-  WEB_PORTS,
   checkResolved,
   checkTarget,
   isIpLiteral,
@@ -22,12 +21,13 @@ import {
  * Universe's egress gateway: the one place a Brick computer's traffic goes out from. The computer's Agent37 network rule lists only the
  * gateways' addresses, so a program on the computer that ignores the proxy has no internet at all (it fails closed, it never goes direct).
  *
- * It is an HTTP proxy (CONNECT for HTTPS, SSH, Git; plain requests for http://). For each connection it:
+ * It is an HTTP proxy (CONNECT for HTTPS, SSH, Git, databases, any TCP port; plain requests for http://). The internet through it is open: every
+ * public name and address, every port. For each connection it:
  *  1. asks for the computer's key (one computer, short-lived, made by Orbit) and refuses without one;
- *  2. refuses a port a job does not need, a denied name (Composio, the Universe AI providers) and an internal address typed in place of a name;
+ *  2. refuses a denied name (Composio, the Universe AI providers) and an internal address (ours, the provider's, cloud metadata);
  *  3. looks the name up ITSELF (the computer's own DNS never matters) and refuses it when any answer is internal, then connects to that address;
- *  4. reads the first bytes the computer sends: the TLS server name (SNI) or the HTTP Host must be the name asked for, so one name cannot hide
- *     behind another; a raw address is only let through when the name in those bytes is allowed and resolves to that address.
+ *  4. reads the first bytes the computer sends and refuses the connection when the TLS server name (SNI) or the HTTP Host is a denied name, so a
+ *     name that is allowed cannot be used to reach Composio or a Universe AI provider. Anything else, including a raw address, passes.
  * It never opens encrypted traffic, so what a page says stays between the computer and the site (the limit that remains is domain fronting
  * through a network that hides one name behind another: the call still has no key and no money behind it).
  */
@@ -87,9 +87,16 @@ export function createGateway(options: GatewayOptions): Gateway {
   const idleMs = options.idleMs ?? 10 * 60 * 1000;
   const helloWaitMs = options.helloWaitMs ?? 10_000;
   const connectTimeoutMs = options.connectTimeoutMs ?? 10_000;
-  const log = options.log ?? (() => undefined);
+  const baseLog = options.log ?? (() => undefined);
+  const log = (event: string, detail: Record<string, string | number>) => {
+    if (event === 'refused') stats.refused++;
+    baseLog(event, detail);
+  };
   const held = new Map<string, number>();
   let total = 0;
+  // What the gateway carried since it started, for the team to measure volume and refusals before sizing anything (read at /__egress/health)
+  const stats = { connections: 0, refused: 0, bytesToInternet: 0, bytesFromInternet: 0, startedAt: new Date(now()).toISOString() };
+  const count = (from: net.Socket, field: 'bytesToInternet' | 'bytesFromInternet') => from.on('data', (data: Buffer) => { stats[field] += data.length; });
 
   const take = (machine: string): boolean => {
     if (total >= maxTotal || (held.get(machine) ?? 0) >= maxPerMachine) return false;
@@ -147,10 +154,11 @@ export function createGateway(options: GatewayOptions): Gateway {
   type Verdict = { allow: true } | { allow: false; reason: string } | { allow: 'wait' };
 
   /**
-   * What the first bytes say, against the name that was asked for. For a bare address (`literal`) the name in the bytes must be allowed and
-   * must resolve to that very address; for a name, it must be that name.
+   * What the first bytes say. The only thing refused is a connection that asks (in its TLS hello or its HTTP Host) for a name that is denied, so a
+   * name that is allowed cannot be used to reach Composio or a Universe AI provider. A name that differs from the one asked for is fine (many
+   * sites share addresses), and so is anything that is not TLS or HTTP: the internet stays open.
    */
-  const judge = async (bytes: Buffer, asked: string, literal: boolean, policy: PolicyConfig): Promise<Verdict> => {
+  const judge = (bytes: Buffer, policy: PolicyConfig): Verdict => {
     let said: string | null;
     if (bytes[0] === 0x16) {
       const hello = readClientHello(bytes);
@@ -160,16 +168,11 @@ export function createGateway(options: GatewayOptions): Gateway {
     } else {
       const request = readHttpHost(bytes);
       if (request.kind === 'need_more') return { allow: 'wait' };
-      if (request.kind === 'not_http') return literal ? { allow: false, reason: 'address_without_name' } : { allow: true };
+      if (request.kind === 'not_http') return { allow: true };
       said = request.host;
     }
-    if (said === null) return literal ? { allow: false, reason: 'address_without_name' } : { allow: true };
-    if (said === '?' || isIpLiteral(said)) return { allow: false, reason: 'name_not_valid' };
-    if (nameDenied(said, policy)) return { allow: false, reason: 'name_refused' };
-    if (!literal) return said === asked ? { allow: true } : { allow: false, reason: 'name_mismatch' };
-    const found = await addressesOf(said, policy);
-    if (!found.ok) return { allow: false, reason: found.reason };
-    return found.addresses.includes(asked) ? { allow: true } : { allow: false, reason: 'name_does_not_match_address' };
+    if (said === null || said === '?') return { allow: true };
+    return nameDenied(said, policy) ? { allow: false, reason: 'name_refused' } : { allow: true };
   };
 
   const server = http.createServer();
@@ -193,6 +196,7 @@ export function createGateway(options: GatewayOptions): Gateway {
       log('limit', { machine: auth.machine });
       return refuseSocket(client, 429, 'limit');
     }
+    stats.connections++;
     let released = false;
     const release = () => {
       if (!released) {
@@ -201,7 +205,6 @@ export function createGateway(options: GatewayOptions): Gateway {
       }
     };
     client.once('close', release);
-    const literal = isIpLiteral(target.host);
     let upstream: net.Socket | null = null;
     const close = () => {
       client.destroy();
@@ -209,9 +212,9 @@ export function createGateway(options: GatewayOptions): Gateway {
     };
     try {
       let chunks: Buffer[] = head && head.length > 0 ? [head] : [];
-      const decide = async (): Promise<Verdict> => (chunks.length === 0 ? { allow: 'wait' } : judge(Buffer.concat(chunks), target.host, literal, policy));
+      const decide = async (): Promise<Verdict> => (chunks.length === 0 ? { allow: 'wait' } : judge(Buffer.concat(chunks), policy));
 
-      if (!literal) {
+      {
         const found = await addressesOf(target.host, policy);
         if (!found.ok) {
           log('refused', { host: target.host, port: target.port, reason: found.reason });
@@ -227,9 +230,8 @@ export function createGateway(options: GatewayOptions): Gateway {
         upstream.once('close', close);
         client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         // Whatever the server says first (SSH, a mail banner) goes straight to the computer; what the computer says first is read before it is sent on
+        count(upstream, 'bytesFromInternet');
         upstream.pipe(client);
-      } else {
-        client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       }
       client.setTimeout(idleMs, close);
 
@@ -244,8 +246,9 @@ export function createGateway(options: GatewayOptions): Gateway {
           client.off('end', onEnd);
           resolveVerdict(v);
         };
-        // A bare address, or a web port, that says nothing is not waited on forever; another port may be server-first and simply be quiet
-        const timer = setTimeout(() => finish(literal || WEB_PORTS.includes(target.port) ? { allow: false, reason: 'silent' } : { allow: 'wait' }), helloWaitMs);
+        // A computer that says nothing is not waited on forever: the connection stays open (the server may speak first), and what the computer says
+        // first is still judged when it comes
+        const timer = setTimeout(() => finish({ allow: 'wait' }), helloWaitMs);
         const check = async () => {
           const v = await decide().catch(() => ({ allow: false, reason: 'judge_failed' }) as Verdict);
           if (v.allow !== 'wait') finish(v);
@@ -272,7 +275,7 @@ export function createGateway(options: GatewayOptions): Gateway {
           order = order.then(async () => {
             if (!judged) {
               pending = Buffer.concat([pending, data]);
-              const v = await judge(pending, target.host, false, policy).catch(() => ({ allow: false, reason: 'judge_failed' }) as Verdict);
+              const v = (() => { try { return judge(pending, policy); } catch { return { allow: false, reason: 'judge_failed' } as Verdict; } })();
               if (v.allow === 'wait') return;
               if (v.allow === false) {
                 log('refused', { host: target.host, port: target.port, reason: v.reason });
@@ -287,20 +290,12 @@ export function createGateway(options: GatewayOptions): Gateway {
         });
         return;
       }
-      if (literal) {
-        // The bytes proved the name, which resolves to this address: now, and only now, the connection is opened
-        try {
-          upstream = await open([target.host], target.port);
-        } catch {
-          return close();
-        }
-        upstream.on('error', close);
-        upstream.setTimeout(idleMs, close);
-        upstream.once('close', close);
-        upstream.pipe(client);
+      for (const chunk of chunks) {
+        stats.bytesToInternet += chunk.length;
+        upstream?.write(chunk);
       }
-      for (const chunk of chunks) upstream?.write(chunk);
       chunks = [];
+      count(client, 'bytesToInternet');
       client.pipe(upstream as net.Socket);
     } catch {
       close();
@@ -312,7 +307,7 @@ export function createGateway(options: GatewayOptions): Gateway {
     if ((req.url ?? '').startsWith('/')) {
       if (req.url === '/__egress/health') {
         res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-        return res.end(JSON.stringify({ ok: true, open: total }));
+        return res.end(JSON.stringify({ ok: true, open: total, ...stats }));
       }
       // The computer asks who the gateway takes it for: proves the key is good end to end (the forwarder on the computer adds it)
       if (req.url === '/__egress/whoami') {
@@ -344,11 +339,6 @@ export function createGateway(options: GatewayOptions): Gateway {
     if (!checked.ok) {
       log('refused', { host, port, reason: checked.reason });
       return fail(checked.status, checked.reason);
-    }
-    // A bare address has no name to back it: plain http carries a Host, and it must be the name that resolves to this address
-    if (isIpLiteral(host)) {
-      log('refused', { host, port, reason: 'address_without_name' });
-      return fail(403, 'address_without_name');
     }
     if (!take(auth.machine)) {
       log('limit', { machine: auth.machine });
@@ -382,6 +372,70 @@ export function createGateway(options: GatewayOptions): Gateway {
     upstream.on('error', () => fail(502, 'unreachable'));
     res.on('close', () => upstream.destroy());
     req.pipe(upstream);
+  });
+
+  // ---------- WebSocket and other upgrades through a plain http:// proxy request ----------
+  // Most clients tunnel ws:// and wss:// with CONNECT (above). One that sends the upgrade as a proxied request gets the same checks and a raw pipe.
+  server.on('upgrade', async (req, client: net.Socket, head: Buffer) => {
+    client.on('error', () => client.destroy());
+    const auth = authenticate(req.headers['proxy-authorization']);
+    if (!auth.ok) return refuseSocket(client, 407, 'key');
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '');
+    } catch {
+      return refuseSocket(client, 400, 'target');
+    }
+    const host = url.protocol === 'http:' ? normalizeHost(url.hostname) : null;
+    const port = url.port ? Number(url.port) : 80;
+    if (!host) return refuseSocket(client, 400, 'target');
+    const policy = options.policy();
+    const checked = checkTarget(host, port, policy);
+    if (!checked.ok) {
+      log('refused', { host, port, reason: checked.reason });
+      return refuseSocket(client, checked.status, checked.reason);
+    }
+    if (!take(auth.machine)) return refuseSocket(client, 429, 'limit');
+    stats.connections++;
+    let released = false;
+    const release = () => {
+      if (!released) {
+        released = true;
+        give(auth.machine);
+      }
+    };
+    client.once('close', release);
+    const found = await addressesOf(host, policy);
+    if (!found.ok) {
+      log('refused', { host, port, reason: found.reason });
+      return refuseSocket(client, found.status, found.reason);
+    }
+    let upstream: net.Socket;
+    try {
+      upstream = await open(found.addresses, port);
+    } catch {
+      return refuseSocket(client, 502, 'unreachable');
+    }
+    const close = () => {
+      client.destroy();
+      upstream.destroy();
+    };
+    upstream.on('error', close);
+    client.on('error', close);
+    upstream.setTimeout(idleMs, close);
+    client.setTimeout(idleMs, close);
+    const lines = [`${req.method} ${url.pathname}${url.search} HTTP/1.1`];
+    for (let at = 0; at < req.rawHeaders.length; at += 2) {
+      const name = req.rawHeaders[at];
+      if (/^(proxy-|keep-alive$)/i.test(name)) continue;
+      lines.push(`${name}: ${/^host$/i.test(name) ? url.host : req.rawHeaders[at + 1]}`);
+    }
+    upstream.write(`${lines.join('\r\n')}\r\n\r\n`);
+    if (head && head.length > 0) upstream.write(head);
+    count(upstream, 'bytesFromInternet');
+    count(client, 'bytesToInternet');
+    upstream.pipe(client);
+    client.pipe(upstream);
   });
 
   server.on('clientError', (_error, socket) => {

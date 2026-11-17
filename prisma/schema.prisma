@@ -3183,6 +3183,13 @@ model BrickComputer {
   cleanClaimedAt DateTime? @map("clean_claimed_at")
   // When the sweep last sent the machine a no-op command to keep it awake while a job holds it
   keptAwakeAt   DateTime? @map("kept_awake_at")
+  // Who may act on the computer, one durable state for it (lib/computer-control.ts): agent, fencing, human_ready or returning. The epoch goes up with
+  // each transition that begins, the lease is the leader's (a transition whose leader is gone is finished by the next request), and humanInputUntil is how
+  // long the person's screen input, once authorized, may still be open: a hand back waits it out before Brick resumes.
+  controlState      String    @default("agent") @map("control_state") @db.VarChar(12)
+  controlEpoch      Int       @default(0) @map("control_epoch")
+  controlLeaseUntil DateTime? @map("control_lease_until")
+  humanInputUntil   DateTime? @map("human_input_until")
   // The last ended job whose notice ("stopped waiting for you", "this month ran out") the person dismissed: it is shown once, never again
   noticeDismissedJobId String? @map("notice_dismissed_job_id") @db.VarChar(40)
   // Cold storage (the machine is packed into our own storage after idle days and made again on the next use): when it was packed, and how a
@@ -3259,6 +3266,33 @@ model ComputerColdRun {
   @@index([botId, startedAt])
   @@index([kind, startedAt])
   @@map("computer_cold_runs")
+}
+
+// What is left to do outside Orbit after a Brick was purged for good, and the proof that it was (audit F08). Written in the SAME
+// transaction that deletes the Brick, so a Brick that is gone always has this row, and a Brick that is not gone never does. It holds
+// no content, no name and no text: only where the machine is (so a failed deletion can be tried again after the Brick's own rows
+// are gone) and what is still to delete. It has no foreign key on purpose. After both outside deletions are confirmed the row stays
+// as a marker with `doneAt` set (the machine reference is cleared), so a bot server that still holds the Brick cannot write its
+// memory or chats back; the sweep removes the marker after a while.
+model BrickPurge {
+  botId          String    @id @map("bot_id") @db.VarChar(255)
+  // Whose Brick it was, only so the books can still say who the kept-storage lines belong to
+  ownerId        String?   @map("owner_id")
+  // Which provider holds the machine ("fake" or "real") and its reference there; null when there was none
+  provider       String?   @db.VarChar(10)
+  providerRef    String?   @map("provider_ref") @db.VarChar(255)
+  // Still to delete outside: the machine at its provider (also any made for this Brick that was never written down), the saved files in our bucket
+  machinePending Boolean   @default(false) @map("machine_pending")
+  copyPending    Boolean   @default(false) @map("copy_pending")
+  attempts       Int       @default(0)
+  nextTryAt      DateTime  @default(now()) @map("next_try_at")
+  lastTriedAt    DateTime? @map("last_tried_at")
+  purgedAt       DateTime  @default(now()) @map("purged_at")
+  // Set when nothing is left to delete outside
+  doneAt         DateTime? @map("done_at")
+
+  @@index([doneAt, nextTryAt])
+  @@map("brick_purges")
 }
 
 // The daily check of our books against the computer provider's own bill (one row per UTC day, never changed once written): what the provider
