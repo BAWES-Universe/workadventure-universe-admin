@@ -11,7 +11,7 @@ import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provi
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
-import { HAND_OVER_LATEST_MS, handOverFiles, purgeCardsOfBot, purgeStaleCards } from '@/lib/computer-file-cards';
+import { HAND_OVER_LATEST_MS, handOverFiles, purgeStaleCards } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
 import {
   AFTER_TAKE_OVER,
@@ -569,7 +569,7 @@ async function tryStart(jobId: string, now: Date): Promise<Tried> {
     await restIfUnheld(job.botId, now);
     return 'gone';
   }
-  // What is on the machine before this job works on it: what the job makes is what is new after this (never a guess from when a file was touched)
+  // What is on the machine before this job works on it: only so the message can name files the job saved outside its own output folder (those are never handed over)
   if (job.writes) await takeBaseline(job.id, job.botId, provider);
   return 'running';
 }
@@ -894,16 +894,13 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
  * the job's ending is closed, and a "done" message is told only after that, so the cards are never missed. Returns the whole seconds it took, already added to
  * the job's time (the machine was held for them). Never throws: a machine that cannot be read only means no cards.
  */
-async function handOverJobFiles(job: { id: string; botId: string; writes: boolean; startFiles: unknown }, now: Date): Promise<number> {
+async function handOverJobFiles(job: { id: string; botId: string; personId: string; title: string; writes: boolean }, now: Date): Promise<number> {
   try {
-    // Only a job that writes makes files (a read-only one may run beside it and must never be given what the other made), and only one with a list from before it began can be shown to have made any
-    if (!job.writes || !readFilesList(job.startFiles)) return 0;
+    // Only a job that writes makes files. Which files are its own is what is in its own output folder: a job running beside it has a folder of its own
+    if (!job.writes) return 0;
     const row = await prisma.brickComputer.findUnique({ where: { botId: job.botId } });
     const provider = providerFor(row);
     if (!row?.providerRef || !provider || row.machine !== 'working') return 0;
-    // Another job still on the machine (a read-only one runs alongside): files made now cannot be told apart, so they stay for the job that closes the machine
-    const others = await prisma.computerJob.count({ where: { botId: job.botId, id: { not: job.id }, status: { in: [...HOLDS_MACHINE] } } });
-    if (others > 0) return 0;
     const limits = await getBrickLimits();
     // The machine is not put to rest while its files are read (the sweep rests a working machine nobody holds, and the job is already over)
     const claimedAt = new Date();
@@ -920,11 +917,14 @@ async function handOverJobFiles(job: { id: string; botId: string; writes: boolea
   }
 }
 
-async function handOver(job: { id: string; botId: string; startFiles: unknown }, now: Date, ref: string, provider: Provider, limits: Awaited<ReturnType<typeof getBrickLimits>>): Promise<number> {
+async function handOver(job: { id: string; botId: string; personId: string; title: string }, now: Date, ref: string, provider: Provider, limits: Awaited<ReturnType<typeof getBrickLimits>>): Promise<number> {
+  const bot = await prisma.bot.findUnique({ where: { id: job.botId }, select: { name: true } });
   const result = await handOverFiles({
     jobId: job.id,
     botId: job.botId,
-    start: readFilesList(job.startFiles),
+    ownerId: job.personId,
+    makerName: (bot?.name ?? 'Brick').slice(0, 100),
+    jobTitle: job.title.slice(0, 200),
     ref,
     provider,
     limits: { count: limits.computerFiles, bytes: limits.computerFileMb * 1024 * 1024 },
@@ -1588,13 +1588,7 @@ export async function removeMachineBeforeDelete(botId: string, now: Date = new D
     WHERE j."bot_id" = ${botId} AND j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')`);
   if (Number(unwritten[0]?.n ?? 0) > 0) return false;
-  // The files its jobs handed over for the chat go first: deleting a Brick deletes everything that was kept for it. One that cannot be deleted keeps the Brick for the next sweep
-  try {
-    await purgeCardsOfBot(botId);
-  } catch (error) {
-    console.error('[Computer] Could not delete the files kept for a Brick:', error instanceof Error ? error.message : 'unknown');
-    return false;
-  }
+  // What its jobs made is NOT deleted with it: those files are the person's own (owned records with the job and Brick that made them), and stay, under "A deleted Brick", for the days in Limits or until they delete them
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   if (!row || !row.providerRef || row.machine === 'none') return true;
   const provider = providerFor(row);

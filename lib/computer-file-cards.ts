@@ -11,14 +11,16 @@ import type { ComputerProvider } from '@/lib/computer-provider';
  *
  * A Brick's computer is not reachable from the bot server, and its key must never leave Orbit, so Orbit moves the files itself while the machine
  * is still awake for the job that just ended (nothing here wakes a resting machine):
- *   1. the files the job made are picked from the machine's own list: what the list at the end has that the list taken when the job began did not
- *      (same path, size and time: never a guess from when a file was last touched), newest first, no hidden folder, nothing an earlier job already
- *      handed over, never more files or bigger files than Limits say;
+ *   1. the files the job made are the ones in its OWN output folder (`Outputs/<job id>`, which the agent is told to save its results in): the folder
+ *      is the proof of which job made a file, so nothing depends on when a file was last touched, a job running beside it cannot be given its files, and
+ *      a file anywhere else on the machine is never handed over, however new. Newest first, no hidden folder, nothing already handed over, never more
+ *      files or bigger files than Limits say;
  *   2. each is read through the machine's command channel in pieces (a command's answer is cut at 512 KB), after checking it is a plain file in the
  *      home folder and not a link to somewhere else, and checked again at the end that it did not change while it was read;
- *   3. it is kept in Universe's bucket ENCRYPTED, under a name of its own, as the person's own result (their Files, owner only): the chat gets a copy
- *      (the bot server fetches it and says when the chat took it), and the result stays whether or not the chat did, until the person deletes it,
- *      `computerFileDays` pass, or the Brick is deleted;
+ *   3. it is kept in Universe's bucket ENCRYPTED, under a name of its own, as the person's own result: an owned record (owner, the job and Brick that made
+ *      it, when) that is theirs alone (Files, owner only) and publishes nothing. The chat gets a copy (the bot server fetches it and says when the chat took
+ *      it). The result stays whether or not the chat took it, whether or not the provider's copy or the computer is still there, until the person deletes it
+ *      or `computerFileDays` pass. Deleting the Brick that made it does NOT delete it: it stays, under "A deleted Brick";
  *   4. a row stays behind with the file's name, path and time so the same file is never handed over twice, and with whether the chat took it.
  * What cannot be handed over (too many, too big, unreadable, the time ran out) is still named in the message by the report, and stays on the computer.
  */
@@ -138,19 +140,33 @@ export function cardName(path: string): string {
   return `${cleaned.slice(0, NAME_MAX - ending.length - 1).trimEnd()}…${ending}`;
 }
 
-/** The identity of one file on a list: where, how big and when it was last changed. */
-const identityOf = (entry: FileEntry): string => `${entry.path}\t${entry.bytes}\t${entry.modifiedAt}`;
+/**
+ * The folder a job saves what it makes for the person in, from the home folder. It is the job's own (its id is in the name), so a file in it can only be
+ * this job's: this, and nothing about when a file was touched, is what says a file is a job's result. The agent is told it in its first prompt (the bot server
+ * uses the same name).
+ */
+export const outputFolder = (jobId: string): string => `Outputs/${jobId}`;
+
+/** The command that lists the files in a job's own folder, one line each as `universe-files` prints them: size, TAB, modified (seconds), TAB, path from the home folder. At most 201 lines. */
+export const outputListCommand = (jobId: string): string =>
+  [
+    'cd "${HOME:-/home/node}" 2>/dev/null || exit 0',
+    `d=${shellQuote(outputFolder(jobId))}`,
+    '[ -d "$d" ] && [ ! -L "$d" ] || exit 0',
+    // Plain files only (never a link), no hidden folder, the newest first
+    String.raw`find "$d" -maxdepth 4 \( -name '.*' \) -prune -o -type f -printf '%s\t%T@\t%p\n' 2>/dev/null | sort -t "$(printf '\t')" -k2,2nr | head -n 201`,
+  ].join('\n');
 
 /**
- * What a job made: the files the list at its end has that the list from before it began did not, by path, size and time. A file that was there
- * before and not touched is never the job's, however recently it was touched before; one the job changed is. Nothing at all when the list from
- * before is missing: without it nothing can be proved, so nothing is attributed. Pure.
+ * What a job made OUTSIDE its output folder, only to be named (never handed over): the files on the list at its end whose path was not on the list from
+ * before it began. By path alone: a file that was there before is never claimed, however it was touched since. Nothing at all when the list from before is
+ * missing: without it nothing can be said. Pure.
  */
 export function madeInJob(end: FilesList | null, start: FilesList | null): FileEntry[] {
   if (!end || !start) return [];
-  const before = new Set(start.items.map(identityOf));
+  const before = new Set(start.items.map((entry) => entry.path));
   // The list is cut at its newest files: a file older than all of them is on neither list and could not have been made by the job
-  return end.items.filter((entry) => !before.has(identityOf(entry)));
+  return end.items.filter((entry) => !before.has(entry.path));
 }
 
 export interface Picked {
@@ -158,15 +174,21 @@ export interface Picked {
   name: string;
 }
 
+/** A path is inside the job's folder: below it, with no way out of it and no hidden part. */
+export function insideFolder(path: string, folder: string): boolean {
+  if (!path.startsWith(`${folder}/`)) return false;
+  return path.slice(folder.length + 1).split('/').every((part) => part !== '' && part !== '.' && part !== '..' && !part.startsWith('.'));
+}
+
 /**
- * The files of a list a job made, to hand over: new since the job began (madeInJob), in no hidden folder, with something in them, not over the biggest
- * size, none already handed over (by path and time), newest first, at most `count`. Pure.
+ * The files to hand over, from the list of the job's own folder: the ones inside it, with something in them, not over the biggest size, none already handed over
+ * (by path and time), newest first, at most `count`. Pure.
  */
-export function pickFiles(list: FilesList | null, start: FilesList | null, limits: { count: number; bytes: number }, handed: (entry: FileEntry) => boolean): Picked[] {
-  if (limits.count <= 0) return [];
+export function pickFiles(list: FilesList | null, folder: string, limits: { count: number; bytes: number }, handed: (entry: FileEntry) => boolean): Picked[] {
+  if (limits.count <= 0 || !list) return [];
   const picked: Picked[] = [];
-  for (const entry of madeInJob(list, start)) {
-    if (entry.path.split('/').some((part) => part.startsWith('.'))) continue;
+  for (const entry of list.items) {
+    if (!insideFolder(entry.path, folder)) continue;
     if (entry.bytes <= 0 || entry.bytes > limits.bytes) continue;
     if (handed(entry)) continue;
     picked.push({ entry, name: cardName(entry.path) });
@@ -256,19 +278,30 @@ export interface HandOverLimits {
  * Moves the files a job made from its machine into Universe, as far as the limits and the time allow. Never throws: a failure only means fewer files
  * (the message names the ones left). Returns how many were handed over and how long it took, which is machine time held for the job.
  */
-export async function handOverFiles(input: { jobId: string; botId: string; start: FilesList | null; ref: string; provider: Exec; limits: HandOverLimits; clock?: () => number }): Promise<{ handed: number; ms: number }> {
+export async function handOverFiles(input: {
+  jobId: string;
+  botId: string;
+  /** Whose the files are, the name of the Brick that made them and what the job was called: kept with each as its provenance. */
+  ownerId: string;
+  makerName: string;
+  jobTitle: string;
+  ref: string;
+  provider: Exec;
+  limits: HandOverLimits;
+  clock?: () => number;
+}): Promise<{ handed: number; ms: number }> {
   const clock = input.clock ?? Date.now;
   const began = clock();
   let handed = 0;
   try {
     if (input.limits.count <= 0) return { handed, ms: 0 };
-    const listed = await input.provider.exec(input.ref, 'universe-files', { timeoutMs: 20_000 });
+    const listed = await input.provider.exec(input.ref, outputListCommand(input.jobId), { timeoutMs: 20_000 });
     if (listed.exitCode !== 0 || listed.truncated) return { handed, ms: clock() - began };
     const list = parseFilesList(listed.stdout, new Date());
     // What an earlier job already handed over (its row stays, without the bytes), so one file is never handed over twice
     const earlier = await prisma.computerJobFile.findMany({ where: { botId: input.botId }, select: { path: true, modifiedAt: true } });
     const known = new Set(earlier.map((row) => `${row.modifiedAt.toISOString()}\t${row.path}`));
-    const picks = pickFiles(list, input.start, input.limits, (entry) => known.has(`${entry.modifiedAt}\t${entry.path}`));
+    const picks = pickFiles(list, outputFolder(input.jobId), input.limits, (entry) => known.has(`${entry.modifiedAt}\t${entry.path}`));
     const deadline = began + HAND_OVER_BUDGET_MS;
     for (const pick of picks) {
       if (clock() > deadline) break;
@@ -276,7 +309,7 @@ export async function handOverFiles(input: { jobId: string; botId: string; start
         const data = await readFile(input.provider, input.ref, pick.entry, deadline, clock);
         if (!data) continue;
         const row = await prisma.computerJobFile.create({
-          data: { jobId: input.jobId, botId: input.botId, name: pick.name, path: pick.entry.path, modifiedAt: new Date(pick.entry.modifiedAt), bytes: data.length, mimeType: mimeOf(pick.name) },
+          data: { jobId: input.jobId, botId: input.botId, ownerId: input.ownerId, makerName: input.makerName, jobTitle: input.jobTitle, name: pick.name, path: pick.entry.path, modifiedAt: new Date(pick.entry.modifiedAt), bytes: data.length, mimeType: mimeOf(pick.name) },
           select: { id: true },
         }).catch((error: { code?: string }) => {
           // The same file at the same time, handed over by a job at the same moment: that one has it
@@ -319,7 +352,7 @@ export async function cardsOfJobs(jobIds: string[]): Promise<Map<string, (Card &
   const out = new Map<string, (Card & { path: string })[]>();
   if (jobIds.length === 0) return out;
   const rows = await prisma.computerJobFile.findMany({ where: { jobId: { in: jobIds }, storageKey: { not: null }, deliveredAt: null }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
-  for (const row of rows) out.set(row.jobId, [...(out.get(row.jobId) ?? []), { id: row.id, name: row.name, bytes: row.bytes, mime: row.mimeType, path: row.path }]);
+  for (const row of rows) if (row.jobId) out.set(row.jobId, [...(out.get(row.jobId) ?? []), { id: row.id, name: row.name, bytes: row.bytes, mime: row.mimeType, path: row.path }]);
   return out;
 }
 
@@ -357,43 +390,94 @@ export async function markFileDelivered(jobId: string, fileId: string, now: Date
 
 export type ResultDelivery = 'delivered' | 'waiting' | 'not_delivered';
 
+/** What a result says made it once its Brick is gone (deleted, waiting out its Undo days, or removed for good): only the name goes, the file stays. */
+export const DELETED_BRICK_LABEL = 'A deleted Brick';
+
 export interface Result {
   id: string;
-  jobId: string;
+  /** The job that made it; null once that job is gone with its Brick. */
+  jobId: string | null;
   name: string;
   bytes: number;
   mime: string;
   jobTitle: string;
+  /** The Brick that made it, as the person knows it: the name it has now, or `DELETED_BRICK_LABEL` when it is gone. */
+  brick: string;
+  /** The Brick's id, kept when it is deleted (the provenance of the file). */
+  brickId: string;
   /** When the job made it. */
   at: Date;
   /** Whether the chat took it: `waiting` while it is still being tried, `not_delivered` once the chat did not (and will not) take it. */
   delivery: ResultDelivery;
 }
 
-/** A person's results from a Brick's computer, newest first: kept files that are still theirs to open, whether or not the chat took them. */
-export async function resultsOf(botId: string, personId: string, take = 100): Promise<Result[]> {
-  const rows = await prisma.computerJobFile.findMany({
-    where: { botId, storageKey: { not: null }, job: { personId } },
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    take,
-    include: { job: { select: { title: true, endToldAt: true, endUndeliverableAt: true, status: true } } },
-  });
-  return rows.map((row) => ({
+type ResultRow = {
+  id: string;
+  jobId: string | null;
+  botId: string;
+  name: string;
+  bytes: number;
+  mimeType: string;
+  jobTitle: string;
+  createdAt: Date;
+  deliveredAt: Date | null;
+  job: { endToldAt: Date | null; endUndeliverableAt: Date | null } | null;
+};
+
+const RESULT_INCLUDE = { job: { select: { endToldAt: true, endUndeliverableAt: true } } } as const;
+
+function resultOf(row: ResultRow, brick: string): Result {
+  return {
     id: row.id,
     jobId: row.jobId,
     name: row.name,
     bytes: row.bytes,
     mime: row.mimeType,
-    jobTitle: row.job.title,
+    jobTitle: row.jobTitle,
+    brick,
+    brickId: row.botId,
     at: row.createdAt,
-    // Taken: delivered. Not taken, but the message was told or can never be told: the chat did not take it. Otherwise it is still being tried.
-    delivery: row.deliveredAt ? 'delivered' : row.job.endToldAt || row.job.endUndeliverableAt ? 'not_delivered' : 'waiting',
-  }));
+    // Taken: delivered. Not taken, but the message was told or can never be told, or the job is gone: the chat did not take it. Otherwise it is still being tried.
+    delivery: row.deliveredAt ? 'delivered' : !row.job || row.job.endToldAt || row.job.endUndeliverableAt ? 'not_delivered' : 'waiting',
+  };
 }
 
-/** One of a person's results, to open: only when it is theirs (their job) on this Brick. Null when it is not there or not theirs. */
-export async function readResult(botId: string, personId: string, fileId: string): Promise<{ name: string; mime: string; data: Buffer } | null> {
-  const row = await prisma.computerJobFile.findFirst({ where: { id: fileId, botId, job: { personId } } });
+/** A person's results from one of their Bricks, newest first: kept files that are still theirs to open, whether or not the chat took them. */
+export async function resultsOf(botId: string, personId: string, take = 100): Promise<Result[]> {
+  const rows = await prisma.computerJobFile.findMany({
+    where: { botId, ownerId: personId, storageKey: { not: null } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take,
+    include: RESULT_INCLUDE,
+  });
+  const bot = rows.length > 0 ? await prisma.bot.findUnique({ where: { id: botId }, select: { name: true, deletedAt: true } }) : null;
+  const brick = bot && !bot.deletedAt ? bot.name : DELETED_BRICK_LABEL;
+  return rows.map((row) => resultOf(row, brick));
+}
+
+/**
+ * A person's results whose Brick is gone (deleted, waiting out its Undo days, or removed for good), newest first. They are theirs and stay: only the Brick's name on
+ * them is "A deleted Brick". Results of a Brick that is still there are listed on that Brick's own Files instead.
+ */
+export async function orphanResultsOf(personId: string, take = 100): Promise<Result[]> {
+  const rows = await prisma.computerJobFile.findMany({
+    where: { ownerId: personId, storageKey: { not: null } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    take: 500,
+    include: RESULT_INCLUDE,
+  });
+  if (rows.length === 0) return [];
+  const bots = await prisma.bot.findMany({ where: { id: { in: [...new Set(rows.map((row) => row.botId))] } }, select: { id: true, deletedAt: true } });
+  const alive = new Set(bots.filter((bot) => !bot.deletedAt).map((bot) => bot.id));
+  return rows
+    .filter((row) => !alive.has(row.botId))
+    .slice(0, take)
+    .map((row) => resultOf(row, DELETED_BRICK_LABEL));
+}
+
+type Opened = { name: string; mime: string; data: Buffer };
+
+async function open(row: { storageKey: string | null; name: string; mimeType: string } | null): Promise<Opened | null> {
   if (!row || !row.storageKey) return null;
   try {
     return { name: row.name, mime: row.mimeType, data: openCard(row.storageKey, await store.get(row.storageKey)) };
@@ -403,16 +487,31 @@ export async function readResult(botId: string, personId: string, fileId: string
   }
 }
 
-/** The person deletes one of their results: the kept copy goes, and the row stays as the record that it was handed over (so it never comes back). False when it is not theirs. */
+/** One of a person's results, to open, from one of their Bricks: only when it is theirs and that Brick's. Null when it is not there or not theirs. */
+export async function readResult(botId: string, personId: string, fileId: string): Promise<Opened | null> {
+  return open(await prisma.computerJobFile.findFirst({ where: { id: fileId, botId, ownerId: personId } }));
+}
+
+/** One of a person's own results, whichever Brick made it (the Brick may be gone). Null when it is not there or not theirs. */
+export async function readOwnResult(personId: string, fileId: string): Promise<Opened | null> {
+  return open(await prisma.computerJobFile.findFirst({ where: { id: fileId, ownerId: personId } }));
+}
+
+/** The person deletes one of their results from one of their Bricks: the kept copy goes, and the row stays as the record that it was handed over (so it never comes back). False when it is not theirs. */
 export async function deleteResult(botId: string, personId: string, fileId: string): Promise<boolean> {
-  const row = await prisma.computerJobFile.findFirst({ where: { id: fileId, botId, job: { personId }, storageKey: { not: null } }, select: { id: true, storageKey: true } });
+  const row = await prisma.computerJobFile.findFirst({ where: { id: fileId, botId, ownerId: personId, storageKey: { not: null } }, select: { id: true, storageKey: true } });
   if (!row) return false;
   await purge([row]);
   return true;
 }
 
-/** A Brick is going for good: every copy kept for it is deleted first. Throws when one cannot be, so the Brick waits for the next sweep. */
-export const purgeCardsOfBot = async (botId: string): Promise<number> => purge(await prisma.computerJobFile.findMany({ where: { botId, storageKey: { not: null } }, select: { id: true, storageKey: true } }));
+/** The person deletes one of their own results, whichever Brick made it. False when it is not theirs. */
+export async function deleteOwnResult(personId: string, fileId: string): Promise<boolean> {
+  const row = await prisma.computerJobFile.findFirst({ where: { id: fileId, ownerId: personId, storageKey: { not: null } }, select: { id: true, storageKey: true } });
+  if (!row) return false;
+  await purge([row]);
+  return true;
+}
 
 /** Results older than the days in Limits are deleted (their rows stay as the record). */
 export async function purgeStaleCards(now: Date, days: number, batch = 500): Promise<number> {

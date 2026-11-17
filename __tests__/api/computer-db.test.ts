@@ -167,7 +167,8 @@ run('a Brick’s computer, in a real database', () => {
       await giveComputer(sara.brickId, sara.id);
       const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Visa form' }, NOW);
       expect(started.ok && started.job).toMatchObject({ status: 'running', title: 'Visa form', writes: true, control: 'brick' });
-      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake']);
+      // The machine is made, woken, and listed once as the job begins (the files that were there before, so the message can name what it saved elsewhere)
+      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake', 'exec']);
       const view = await computerView(sara.brickId, sara.id, NOW);
       expect(view).toMatchObject({ machine: 'working', job: { status: 'running' } });
       expect((await currentEnvelope(NOW)).reservedMicros).toBeGreaterThan(0);
@@ -232,8 +233,8 @@ run('a Brick’s computer, in a real database', () => {
       if (!job.ok) throw new Error('no');
       await finishJob(job.job.id, 'done', minutes(1));
       expect((await computerView(sara.brickId, sara.id))?.machine).toBe('resting');
-      // A finished job lists its computer's files to hand over the ones it made (the file card), then the end of a job lists them for Files and clears the browser
-      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake', 'exec', 'exec', 'exec', 'saveFiles', 'rest']);
+      // The list as the job began, then at its end: its own output folder to hand over what it made (the file card), the files for Files, and the browser cleared
+      expect(provider.calls.map((call) => call.name)).toEqual(['create', 'wake', 'exec', 'exec', 'exec', 'exec', 'saveFiles', 'rest']);
       // A second job wakes the SAME machine: never a second one
       await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(2));
       expect(provider.calls.filter((call) => call.name === 'create')).toHaveLength(1);

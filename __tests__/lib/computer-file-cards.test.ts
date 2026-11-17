@@ -7,7 +7,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, s
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { cardKey, cardName, mimeOf, openCard, pickFiles, madeInJob, PIECE_BYTES, pieceCommand, probeCommand, readFile, sealCard, shellQuote } from '@/lib/computer-file-cards';
+import { cardKey, cardName, insideFolder, madeInJob, mimeOf, openCard, outputFolder, outputListCommand, pickFiles, PIECE_BYTES, pieceCommand, probeCommand, readFile, sealCard, shellQuote } from '@/lib/computer-file-cards';
 import type { FileEntry, FilesList } from '@/lib/computer-files';
 
 const run = promisify(execFile);
@@ -63,50 +63,64 @@ describe('the name and type of a card', () => {
 const T = (minutes: number) => new Date(Date.UTC(2026, 10, 17, 12, 0) + minutes * 60_000).toISOString();
 const entry = (path: string, minutes: number, bytes = 1000): FileEntry => ({ path, bytes, modifiedAt: T(minutes) });
 const listOf = (...items: FileEntry[]): FilesList => ({ items, more: false, listedAt: T(30) });
-// What was on the machine before the job began: what the job made is what the end list has that this does not
+// What was on the machine before the job began: only so files saved elsewhere can be named (never handed over)
 const BEFORE = listOf(entry('old.pdf', -30), entry('Documents/taxes-2025.pdf', -600), entry('.hermes/state.db', -2));
 const LIMITS = { count: 5, bytes: 10_000 };
 const none = () => false;
+const JOB = 'job-1';
+const FOLDER = outputFolder(JOB);
+const mine = (name: string, minutes: number, bytes = 1000) => entry(`${FOLDER}/${name}`, minutes, bytes);
 
 describe('which files a job hands over', () => {
-  it('takes the ones that are new since the job began, newest first, as many as Limits say', () => {
-    const list = listOf(entry('c.pdf', 9), entry('b.pdf', 5), entry('a.pdf', 2), ...BEFORE.items);
-    expect(pickFiles(list, BEFORE, LIMITS, none).map((pick) => pick.name)).toEqual(['c.pdf', 'b.pdf', 'a.pdf']);
-    expect(pickFiles(list, BEFORE, { count: 2, bytes: 10_000 }, none).map((pick) => pick.name)).toEqual(['c.pdf', 'b.pdf']);
-    expect(pickFiles(list, BEFORE, { count: 0, bytes: 10_000 }, none)).toEqual([]);
+  it('is the job’s own output folder: the folder is the proof, so nothing depends on when a file was touched', () => {
+    expect(FOLDER).toBe('Outputs/job-1');
+    const list = listOf(mine('c.pdf', 9), mine('b.pdf', 5), mine('a.pdf', 2));
+    expect(pickFiles(list, FOLDER, LIMITS, none).map((pick) => pick.name)).toEqual(['c.pdf', 'b.pdf', 'a.pdf']);
+    expect(pickFiles(list, FOLDER, { count: 2, bytes: 10_000 }, none).map((pick) => pick.name)).toEqual(['c.pdf', 'b.pdf']);
+    expect(pickFiles(list, FOLDER, { count: 0, bytes: 10_000 }, none)).toEqual([]);
   });
-  it('never takes a file that was there before the job, however recently it was touched; one the job changed is taken', () => {
-    // "taxes.pdf" was touched a minute before the job (a time window would have taken it); "notes.txt" was changed by the job (new size and time)
-    const before = listOf(entry('taxes.pdf', -1), entry('notes.txt', -300, 40));
-    const end = listOf(entry('notes.txt', 6, 55), entry('taxes.pdf', -1), entry('made.pdf', 5));
-    expect(pickFiles(end, before, LIMITS, none).map((pick) => pick.name)).toEqual(['notes.txt', 'made.pdf']);
-  });
-  it('leaves out hidden folders, empty files and files over the size', () => {
+  it('never takes a file outside the folder, however new, nor another job’s folder, nor one that only looks like it', () => {
     const list = listOf(
-      entry('.hermes/state.db', 5),
-      entry('docs/.cache/x.pdf', 5),
-      entry('empty.txt', 5, 0),
-      entry('big.zip', 5, 10_001),
-      entry('fine.pdf', 5, 10_000),
-      ...BEFORE.items
+      entry('just-made.pdf', 9),
+      entry('Documents/new-taxes.pdf', 9),
+      entry('Outputs/job-2/theirs.pdf', 9),
+      entry('Outputs/job-10/theirs.pdf', 9),
+      entry('Outputs/job-1-copy/x.pdf', 9),
+      entry('Outputs/job-1', 9),
+      mine('ok.pdf', 1)
     );
-    expect(pickFiles(list, BEFORE, LIMITS, none).map((pick) => pick.name)).toEqual(['fine.pdf']);
+    expect(pickFiles(list, FOLDER, LIMITS, none).map((pick) => pick.entry.path)).toEqual([`${FOLDER}/ok.pdf`]);
   });
-  it('leaves out what an earlier job handed over', () => {
-    const list = listOf(entry('a.pdf', 5), entry('b.pdf', 6));
-    expect(pickFiles(list, BEFORE, LIMITS, (one) => one.path === 'a.pdf').map((pick) => pick.name)).toEqual(['b.pdf']);
+  it('takes nothing with a way out of the folder, an empty part or a hidden part', () => {
+    expect(insideFolder(`${FOLDER}/a.pdf`, FOLDER)).toBe(true);
+    expect(insideFolder(`${FOLDER}/sub/a.pdf`, FOLDER)).toBe(true);
+    for (const bad of [`${FOLDER}/../secret.pdf`, `${FOLDER}/./a.pdf`, `${FOLDER}//a.pdf`, `${FOLDER}/.hidden/a.pdf`, `${FOLDER}/.a.pdf`, `${FOLDER}/`, FOLDER, 'Outputs/job-1x/a.pdf', '../Outputs/job-1/a.pdf']) {
+      expect(insideFolder(bad, FOLDER)).toBe(false);
+    }
   });
-  it('hands over nothing when there is no list from before the job or no list at its end: nothing can be proved', () => {
-    expect(pickFiles(null, BEFORE, LIMITS, none)).toEqual([]);
-    expect(pickFiles(listOf(entry('a.pdf', 5)), null, LIMITS, none)).toEqual([]);
+  it('leaves out empty files and files over the size', () => {
+    const list = listOf(mine('empty.txt', 5, 0), mine('big.zip', 5, 10_001), mine('fine.pdf', 5, 10_000));
+    expect(pickFiles(list, FOLDER, LIMITS, none).map((pick) => pick.name)).toEqual(['fine.pdf']);
+  });
+  it('leaves out what was handed over before', () => {
+    const list = listOf(mine('a.pdf', 5), mine('b.pdf', 6));
+    expect(pickFiles(list, FOLDER, LIMITS, (one) => one.path.endsWith('/a.pdf')).map((pick) => pick.name)).toEqual(['b.pdf']);
+  });
+  it('hands over nothing when there is no list', () => {
+    expect(pickFiles(null, FOLDER, LIMITS, none)).toEqual([]);
+  });
+  it('is not given a file just because a job running beside it touched the machine at the same time: each job has its own folder', () => {
+    const list = listOf(mine('mine.pdf', 5), entry('Outputs/job-2/other.pdf', 5));
+    expect(pickFiles(list, FOLDER, LIMITS, none).map((pick) => pick.name)).toEqual(['mine.pdf']);
+    expect(pickFiles(list, outputFolder('job-2'), LIMITS, none).map((pick) => pick.name)).toEqual(['other.pdf']);
   });
 });
 
-describe('what a job made', () => {
-  it('is what the end list has that the list from before did not (path, size and time)', () => {
-    const end = listOf(entry('a.pdf', 5), entry('old.pdf', -30), entry('same-name-new-time.pdf', 8));
-    const before = listOf(entry('old.pdf', -30), entry('same-name-new-time.pdf', -20));
-    expect(madeInJob(end, before).map((one) => one.path)).toEqual(['a.pdf', 'same-name-new-time.pdf']);
+describe('what a job saved elsewhere, only named', () => {
+  it('is the files on the end list whose path was not on the list from before: by path alone, never by when they were touched', () => {
+    const end = listOf(entry('a.pdf', 5), entry('old.pdf', -30), entry('touched-since.pdf', 8));
+    const before = listOf(entry('old.pdf', -30), entry('touched-since.pdf', -20));
+    expect(madeInJob(end, before).map((one) => one.path)).toEqual(['a.pdf']);
   });
   it('is nothing without both lists', () => {
     expect(madeInJob(null, listOf())).toEqual([]);
@@ -143,6 +157,28 @@ describe('reading a file off a machine', () => {
     mkdirSync(join(home, '.hermes'));
   });
   afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  it('lists only the job’s own folder, plain files only: no link, no hidden folder, nothing of another job, and nothing when there is no folder', async () => {
+    mkdirSync(join(home, 'Outputs/job-1/sub'), { recursive: true });
+    mkdirSync(join(home, 'Outputs/job-1/.cache'), { recursive: true });
+    mkdirSync(join(home, 'Outputs/job-2'), { recursive: true });
+    writeFileSync(join(home, 'Outputs/job-1/a.pdf'), 'a');
+    writeFileSync(join(home, 'Outputs/job-1/sub/b.pdf'), 'bb');
+    writeFileSync(join(home, 'Outputs/job-1/.cache/c.pdf'), 'c');
+    writeFileSync(join(home, 'Outputs/job-2/other.pdf'), 'o');
+    writeFileSync(join(home, 'elsewhere.pdf'), 'e');
+    symlinkSync('/etc/passwd', join(home, 'Outputs/job-1/passwd.pdf'));
+    const listed = await machine.exec('ref', outputListCommand('job-1'));
+    expect(listed.exitCode).toBe(0);
+    const paths = listed.stdout.trim().split('\n').map((line) => line.split('\t')[2]).sort();
+    expect(paths).toEqual(['Outputs/job-1/a.pdf', 'Outputs/job-1/sub/b.pdf']);
+    // A job with no folder has made nothing to hand over
+    expect((await machine.exec('ref', outputListCommand('job-9'))).stdout).toBe('');
+    // A folder that is a link to somewhere else is not listed
+    symlinkSync(join(home, 'Documents'), join(home, 'Outputs/job-3'));
+    writeFileSync(join(home, 'Documents/secret.pdf'), 's');
+    expect((await machine.exec('ref', outputListCommand('job-3'))).stdout).toBe('');
+  });
 
   it('reads a small file whole', async () => {
     writeFileSync(join(home, 'Documents/visa-receipt.pdf'), Buffer.from('%PDF-1.4 the receipt'));
