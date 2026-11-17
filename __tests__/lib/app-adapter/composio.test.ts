@@ -116,13 +116,13 @@ describe('the real adapter speaks the provider as its docs say, against a preten
     const adapter = make([answer({ session_id: 'trs_1', mcp: { type: 'http', url: 'https://mcp.example/trs_1/mcp' } })]);
     const link = await adapter.appLink({ person: 'person-1', toolkits: ['gmail'] });
     expect(link).toEqual({ url: 'https://mcp.example/trs_1/mcp' });
-    expect(sent()).toEqual({ user_id: 'person-1', toolkits: { enable: ['gmail'] }, workbench: { enable: true }, instant: false });
+    expect(sent()).toEqual({ user_id: 'person-1', toolkits: { enable: ['gmail'] }, workbench: { enable: false }, instant: false });
   });
 
   it('pins the app link to the connected account the person signed in with, a list of one for the app', async () => {
     const adapter = make([answer({ mcp: { url: 'https://mcp.example/pinned' } })]);
     await adapter.appLink({ person: 'person-1', toolkits: ['gmail'], accounts: { gmail: 'ca_9' } });
-    expect(sent()).toEqual({ user_id: 'person-1', toolkits: { enable: ['gmail'] }, workbench: { enable: true }, instant: false, connected_accounts: { gmail: ['ca_9'] } });
+    expect(sent()).toEqual({ user_id: 'person-1', toolkits: { enable: ['gmail'] }, workbench: { enable: false }, instant: false, connected_accounts: { gmail: ['ca_9'] } });
   });
 
   it('never follows a redirect on a request that carries the provider key', async () => {

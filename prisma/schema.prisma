@@ -3461,3 +3461,73 @@ model ComputerJobToken {
   @@index([jobId, revokedAt])
   @@map("computer_job_tokens")
 }
+
+// A code job for an App (the bounded "Workbench"): a short Python script run in its OWN temporary workspace at the provider, never in
+// the person's App link. The job has its own lifetime (a deadline), its own capability set (saved here as it was granted), its own
+// cost reservation, and its own provider session, which has no App accounts at all and is DELETED when the job ends, is cancelled
+// or runs out of time: deleting it is what stops the code. Asking again with the same call id finds this row, never a second job.
+model CodeJob {
+  id                String    @id @default(uuid())
+  // The bot server's call id with the Brick, made unique per Brick: a retry never starts or pays twice
+  jobKey            String    @unique @map("job_key") @db.VarChar(255)
+  botId             String    @map("bot_id")
+  // The person who asked and whose Brick it is (the account scope the job runs under)
+  personId          String    @map("person_id")
+  // The App link the job was asked through: the only connection its brokered reads may use
+  connectionId      String?   @map("connection_id")
+  // starting, running, succeeded, failed, cancelled, timed_out, interrupted
+  state             String    @db.VarChar(12)
+  // Why it did not work, in a fixed word; never a message from the provider
+  reason            String?   @db.VarChar(40)
+  // What the job was allowed to do and the Limits it was admitted under, kept as they were when it started
+  capabilities      Json
+  limits            Json
+  // The most the job may cost, held before anything starts, and what it was settled at
+  reservedMicros    BigInt    @map("reserved_micros")
+  settledMicros     BigInt?   @map("settled_micros")
+  // sha256 of the code: never the code itself
+  codeHash          String    @map("code_hash") @db.VarChar(64)
+  steps             Int
+  cellsRun          Int       @default(0) @map("cells_run")
+  // The opaque id the provider session is made under (never a person's id), and the session itself
+  providerUserId    String    @map("provider_user_id") @db.VarChar(120)
+  providerSessionId String?   @map("provider_session_id") @db.VarChar(120)
+  // none, open, closed (the provider confirmed the session gone) or unknown (a delete that could not be confirmed: said again until it can)
+  providerState     String    @default("none") @map("provider_state") @db.VarChar(8)
+  // Provider executions of this session beyond our own cells (there should be none: the session has no tools)
+  nestedCalls       Int       @default(0) @map("nested_calls")
+  // What the code printed and returned, clipped, and the files that were kept
+  result            Json?
+  deadlineAt        DateTime  @map("deadline_at")
+  heartbeatAt       DateTime  @map("heartbeat_at")
+  startedAt         DateTime? @map("started_at")
+  finishedAt        DateTime? @map("finished_at")
+  // When the result and the kept files are removed (Limits: days kept); null keeps them until they are deleted
+  expiresAt         DateTime? @map("expires_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  outputs CodeJobOutput[]
+
+  @@index([state, deadlineAt])
+  @@index([providerState, createdAt])
+  @@index([personId, createdAt])
+  @@index([expiresAt])
+  @@map("code_jobs")
+}
+
+// A file a code job made, copied into Universe's own storage before the provider's copy expires. Only the job's owner can open it.
+model CodeJobOutput {
+  id          String   @id @default(uuid())
+  jobId       String   @map("job_id")
+  name        String   @db.VarChar(120)
+  contentType String   @map("content_type") @db.VarChar(120)
+  sizeBytes   Int      @map("size_bytes")
+  sha256      String   @db.VarChar(64)
+  storageKey  String   @map("storage_key") @db.VarChar(255)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  job CodeJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, name])
+  @@map("code_job_outputs")
+}
