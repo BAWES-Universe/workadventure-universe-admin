@@ -637,6 +637,19 @@ export function brickLimits(values: BrickLimits): Limit[] {
       ],
     },
     {
+      id: 'metExpiresDays',
+      label: 'Days someone who only met a Brick can still start a message to it',
+      hint: 'Meeting a Brick, in a place it visits or lives in, lets a person message it afterwards, wherever it is. Once they have written to it, that stays until its owner or a host changes it, whatever this says.',
+      unit: 'days',
+      value: values.metExpiresDays,
+      recommended: recommended.metExpiresDays,
+      options: [
+        { value: 7, label: '7 days', meaning: 'Only a fresh meeting counts.' },
+        { value: 30, label: '30 days', meaning: 'A month to write back.' },
+        { value: 90, label: '90 days', meaning: 'A season to write back.' },
+      ],
+    },
+    {
       id: 'itemsPerPerson',
       label: 'Goals and tasks one person can have going',
       hint: 'Reminders, schedules, watches and goals together, paused ones included. Done ones do not count.',
