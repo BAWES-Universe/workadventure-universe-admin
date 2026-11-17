@@ -210,6 +210,31 @@ run('key apps, in a real database', () => {
     await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(404).deps)).resolves.toMatchObject({ created: true });
   });
 
+  it('a refusal whose write fails is kept and written before the form is used again, so the database failing never gives a key a free guess', async () => {
+    const id = await open();
+    await prisma.appKeyRequest.update({ where: { id }, data: { tries: 4 } });
+    const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const original = prisma.$executeRaw.bind(prisma);
+    let calls = 0;
+    // The reservation works, the write that counts the refusal fails
+    const spy = jest.spyOn(prisma, '$executeRaw').mockImplementation(((...args: unknown[]) => {
+      calls += 1;
+      if (calls > 1) return Promise.reject(new Error('connection lost'));
+      return (original as (...a: unknown[]) => Promise<number>)(...args);
+    }) as never);
+    try {
+      await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(401).deps)).rejects.toMatchObject({ code: 'rejected' });
+    } finally {
+      spy.mockRestore();
+      quiet.mockRestore();
+    }
+    expect((await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true } })).tries).toBe(4);
+    // The database is back and the reservation has lapsed: the refusal is written first, so the fifth try is spent
+    await prisma.appKeyRequest.update({ where: { id }, data: { reservedAt: new Date(Date.now() - 10 * 60_000) } });
+    await expect(submitKey({ requestId: id, ownerId: sara, key: LIVE_KEY }, service(404).deps)).rejects.toMatchObject({ status: 429, code: 'too_many' });
+    expect((await prisma.appKeyRequest.findUniqueOrThrow({ where: { id }, select: { tries: true } })).tries).toBe(5);
+  });
+
   it('counts a try only when the service refuses the key: a refusal uses one, an answer that is not a refusal uses none', async () => {
     const id = await open();
     await expect(submitKey({ requestId: id, ownerId: sara, key: TEST_KEY }, service(401).deps)).rejects.toMatchObject({ code: 'rejected' });

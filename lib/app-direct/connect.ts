@@ -156,8 +156,26 @@ function readDefinition(row: { definition: unknown; definitionHash: string }): D
 /** A reserved try lapses this long after the longest a call can take (the form's call limit), if it was never released. */
 const RESERVATION_GRACE_SECONDS = 30;
 
+/** Refusals the service gave that could not be written yet (the database failed at that moment), by form: written before the form is read or used again. */
+const owedRefusals = new Map<string, number>();
+
+async function settleOwedRefusals(requestId: string): Promise<void> {
+  const owed = owedRefusals.get(requestId);
+  if (!owed) return;
+  try {
+    await prisma.appKeyRequest.updateMany({ where: { id: requestId }, data: { tries: { increment: owed } } });
+    // What was owed while that write ran is still owed (it is added to the map, not replaced)
+    const left = (owedRefusals.get(requestId) ?? 0) - owed;
+    if (left > 0) owedRefusals.set(requestId, left);
+    else owedRefusals.delete(requestId);
+  } catch (error) {
+    console.error('[AppDirect] Could not write a refused try:', error instanceof Error ? error.message : 'unknown');
+  }
+}
+
 /** What the form shows. Only the person it was opened for can read it; anyone else gets "not found". */
 export async function readKeyForm(requestId: string, ownerId: string): Promise<KeyFormView> {
+  await settleOwedRefusals(requestId);
   const row = await prisma.appKeyRequest.findFirst({ where: { id: requestId, ownerId } });
   if (!row) throw new KeyFormError(404, 'not_found', 'Form not found');
   if (row.usedAt) throw new KeyFormError(410, 'used', 'This form was already used');
@@ -203,6 +221,7 @@ export interface KeyConnected {
  * a test and a real key asks first (`mode_change`, sent again with `confirmChange`).
  */
 export async function submitKey(input: { requestId: string; ownerId: string; key: unknown; confirmChange?: boolean }, deps: GuardDeps = {}): Promise<KeyConnected> {
+  await settleOwedRefusals(input.requestId);
   const row = await prisma.appKeyRequest.findFirst({ where: { id: input.requestId, ownerId: input.ownerId } });
   if (!row) throw new KeyFormError(404, 'not_found', 'Form not found');
   if (row.usedAt) throw new KeyFormError(410, 'used', 'This form was already used');
@@ -237,7 +256,9 @@ export async function submitKey(input: { requestId: string; ownerId: string; key
           SET "reserved_tries" = GREATEST("reserved_tries" - 1, 0), "tries" = "tries" + ${refused ? 1 : 0}
           WHERE "id" = ${row.id}`;
       } catch (error) {
-        // Not fatal: the reservation lapses on its own
+        // A reservation that is not released lapses on its own. A refusal is a try that was used: it is kept (here, in memory) until
+        // it is written, which the next look at or submit to this form does first, so a failed write never gives the key a free guess.
+        if (refused) owedRefusals.set(row.id, (owedRefusals.get(row.id) ?? 0) + 1);
         console.error('[AppDirect] Could not release a form try:', error instanceof Error ? error.message : 'unknown');
       }
     };
