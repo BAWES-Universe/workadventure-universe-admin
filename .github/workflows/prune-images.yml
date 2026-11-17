@@ -37,8 +37,13 @@ permissions:
 
 jobs:
   prune:
-    # A PR from a fork never built images here.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # A PR from a fork never built images here, and Dependabot (whose runs get no secrets, and whose branches build no
+    # images) has nothing to clear.
+    if: >-
+      github.event_name != 'pull_request' || (
+      github.event.pull_request.head.repo.full_name == github.repository
+      && github.actor != 'dependabot[bot]'
+      && github.event.pull_request.user.login != 'dependabot[bot]')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

@@ -16,8 +16,10 @@ permissions:
 
 jobs:
   plan:
-    # A PR from a fork gets no package access.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # A PR from a fork, or from Dependabot, gets no package access or secrets.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository
+      && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
