@@ -102,8 +102,6 @@ export default function UniversesPage() {
               <UniverseCard
                 key={universe.id}
                 universe={universe}
-                ownedByCurrentUser
-                showOwner={false}
                 analytics={summaries.summary(universe.id)}
               />
             ))}

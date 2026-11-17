@@ -16,7 +16,7 @@ export interface UniverseCardProps {
     isPublic: boolean;
     featured: boolean;
     thumbnailUrl?: string | null;
-    owner: {
+    owner?: {
       name: string | null;
       email: string | null;
     };
@@ -27,26 +27,19 @@ export interface UniverseCardProps {
       favorites?: number;
     };
   };
-  /** Whether this universe is owned by the current user (adjusts the byline). */
-  ownedByCurrentUser?: boolean;
   /** Whether to show the public/private pill. Discovery only lists public universes, so it hides it. */
   showVisibility?: boolean;
-  /** Whether to show who owns it. */
-  showOwner?: boolean;
   /** Accesses to the universe. */
   analytics?: UniverseAnalytics;
   className?: string;
 }
 
-/** A universe in a list: its own colour, what's in it, how often it's accessed. The whole card is the link. */
+/** A universe in a list: its own colour, what's in it, how often it's accessed. No owner line or badge: the card is the universe. The whole card is the link. */
 export function UniverseCard({
   universe,
-  ownedByCurrentUser = false,
   showVisibility = true,
-  showOwner = true,
   analytics,
 }: UniverseCardProps) {
-  const ownerLabel = ownedByCurrentUser ? 'Owned by you' : universe.owner?.name ? `by ${universe.owner.name}` : null;
   const stars = universe._count?.favorites ?? 0;
   const youAt = analytics?.lastVisitedByUser?.accessedAt ?? null;
   const latestAt = analytics?.lastVisitedOverall?.accessedAt ?? null;
@@ -75,7 +68,6 @@ export function UniverseCard({
               countPlace('room', universe._count?.rooms ?? 0, 'room'),
               countPlace('people', universe._count?.members ?? 0, 'member'),
               ...activityStats(analytics),
-              showOwner && ownerLabel,
             ]}
           />
           <VisitLine you={youAt} latest={latestAt} youWereLast={analytics?.youWereLast ?? false} />
