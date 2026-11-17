@@ -14,8 +14,11 @@ import { recordKeptBytes } from '@/lib/computer-disk';
  *     what it was asked to forget, its notes on metrics and tests, its spend rules and prepared setups. What is left to delete OUTSIDE Orbit
  *     (the machine at its provider, the saved files in our bucket, files people sent it that live at the uploader) is written down in the same
  *     transaction, so a Brick that is gone always has that note, and no Brick is ever left half-deleted.
- *  3. The outside deletions, tried again by every sweep with growing waits until the provider and the bucket both say it is done. They never
- *     need a new backup: nothing is saved before an erasure, and a machine or a saved copy that is already gone is the answer wanted.
+ *  3. The outside deletions, tried again by every sweep with growing waits until the provider and the bucket both say it is done. The Brick's
+ *     chat rooms are one of them (register R29): only the bot server holds the chat account, so the purge sets `chatPending` and the bot server
+ *     asks for the list (GET /api/brick-chat-purges), redacts what the Brick said, blanks its profile, leaves and forgets its rooms, and confirms
+ *     (POST). What people said in those rooms stays with them. None of these deletions needs a new backup: nothing is saved before an erasure,
+ *     and a machine or a saved copy that is already gone is the answer wanted.
  *
  * What stays, on purpose and nothing else:
  *  - What the Brick made and a person or team owns: artifacts (Artifact rows). The Brick's name on them is replaced with a neutral line.
@@ -85,7 +88,7 @@ export async function purgeBrick(id: string, now: Date = new Date()): Promise<Pu
       // What is left outside Orbit. A computer record means a machine may exist (also one made and never written down) and a saved copy may be in the bucket
       await tx.brickPurge.upsert({
         where: botId,
-        create: { botId: id, ownerId: brick.ownerId, provider: computer?.provider ?? null, providerRef: computer?.providerRef ?? null, machinePending: !!computer, copyPending: !!computer, nextTryAt: now, purgedAt: now },
+        create: { botId: id, ownerId: brick.ownerId, provider: computer?.provider ?? null, providerRef: computer?.providerRef ?? null, machinePending: !!computer, copyPending: !!computer, chatPending: true, nextTryAt: now, purgedAt: now },
         update: {},
       });
       return true;
@@ -110,7 +113,7 @@ export interface Outside {
 export async function finishOutside(botId: string, now: Date = new Date()): Promise<Outside> {
   const note = await prisma.brickPurge.findUnique({ where: { botId } });
   if (!note) return { done: true, left: [] };
-  if (!note.machinePending && !note.copyPending && note.doneAt) return { done: true, left: [] };
+  if (!note.machinePending && !note.copyPending && !note.chatPending && note.doneAt) return { done: true, left: [] };
   const provider = providerFor({ provider: note.provider ?? 'none' });
   const left: string[] = [];
   let machineGone = !note.machinePending;
@@ -144,7 +147,9 @@ export async function finishOutside(botId: string, now: Date = new Date()): Prom
   }
   // What is kept stops being counted in the books only when everything kept is confirmed gone: a machine still at its provider is still billed
   // Done only when the books also say nothing is kept any more: a line that could not be written is tried again with the rest, never dropped
-  let finished = machineGone && copyGone;
+  // The chat rooms are cleared by the bot server, which confirms; until it does the purge is not finished (and a failure to hear is said to the team like any other)
+  if (note.chatPending) left.push('chat rooms');
+  let finished = machineGone && copyGone && !note.chatPending;
   if (finished && !(await recordKeptBytes({ botId, reason: 'gone', machineBytes: null, copyBytes: 0, ownerId: note.ownerId }))) {
     finished = false;
     left.push('books');
@@ -189,4 +194,34 @@ export async function sweepPurges(now: Date = new Date(), only?: string[], batch
   }
   if (!only) await prisma.brickPurge.deleteMany({ where: { doneAt: { lt: new Date(now.getTime() - PURGE_MARKER_DAYS * DAY_MS) } } });
   return finished;
+}
+
+export interface ChatPurge {
+  botId: string;
+}
+
+/** The purged Bricks whose chat rooms the bot server still has to clear, the oldest first. Only the Brick's id: nothing it or a person said. */
+export async function pendingChatPurges(take = 100): Promise<ChatPurge[]> {
+  return prisma.brickPurge.findMany({ where: { chatPending: true }, select: { botId: true }, orderBy: [{ purgedAt: 'asc' }, { botId: 'asc' }], take });
+}
+
+/**
+ * The bot server cleared these Bricks' chat rooms (or they never had any). Orbit forgets them as pending only now, and not before, so a restart in
+ * between loses none; then the rest of what is left outside is tried at once, so a purge that waited only for the chat is finished now and not at
+ * the next sweep. Unknown ids and a Brick already confirmed are ignored. Returns how many were confirmed.
+ */
+export async function confirmChatPurges(botIds: string[], now: Date = new Date()): Promise<number> {
+  if (botIds.length === 0) return 0;
+  const { count } = await prisma.brickPurge.updateMany({ where: { botId: { in: botIds }, chatPending: true }, data: { chatPending: false } });
+  // Only a purge that was waiting for nothing but the chat is finished here; a machine or saved copy still to delete keeps its own waits
+  const waiting = await prisma.brickPurge.findMany({ where: { botId: { in: botIds }, chatPending: false, doneAt: null, machinePending: false, copyPending: false }, select: { botId: true } });
+  for (const { botId } of waiting) {
+    try {
+      await finishOutside(botId, now);
+    } catch (error) {
+      // The note is there and the next sweep tries again
+      console.error('[Brick purge] A purged Brick could not be finished after its chats were cleared:', error instanceof Error ? error.message : 'unknown');
+    }
+  }
+  return count;
 }

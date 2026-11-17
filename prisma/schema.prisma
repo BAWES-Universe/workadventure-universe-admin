@@ -3216,6 +3216,8 @@ model BrickPurge {
   // Still to delete outside: the machine at its provider (also any made for this Brick that was never written down), the saved files in our bucket
   machinePending Boolean   @default(false) @map("machine_pending")
   copyPending    Boolean   @default(false) @map("copy_pending")
+  // Its chat rooms (Matrix) still to clear: the bot server holds the chat account, so it asks for this list and confirms each Brick it cleared
+  chatPending    Boolean   @default(false) @map("chat_pending")
   attempts       Int       @default(0)
   nextTryAt      DateTime  @default(now()) @map("next_try_at")
   lastTriedAt    DateTime? @map("last_tried_at")
