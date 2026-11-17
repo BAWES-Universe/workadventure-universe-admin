@@ -252,7 +252,8 @@ const BRICK_RANGES: Record<keyof BrickLimits, Range> = {
   sharedJobMinutes: { min: 1, max: 1_440, whole: true },
   templateList: { min: 1, max: 100, whole: true },
   computerFiles: { min: 0, max: 50, whole: true },
-  computerFileMb: { min: 1, max: 100, whole: true },
+  // Never more than the chat server takes in one upload (the bot server's upload cap)
+  computerFileMb: { min: 1, max: 50, whole: true },
   computerFileDays: { min: 1, max: 30, whole: true },
 };
 

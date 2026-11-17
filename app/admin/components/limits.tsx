@@ -1047,14 +1047,14 @@ export function brickLimits(values: BrickLimits): Limit[] {
     {
       id: 'computerFileMb',
       label: 'Largest file a computer job hands over',
-      hint: 'A file bigger than this is not copied into the chat. Brick names it in the message and it stays on the computer. Every file handed over is kept in Universe until it reaches the chat, so this also limits storage.',
+      hint: 'A file bigger than this is not copied into the chat. Brick names it in the message and it stays on the computer. Every file handed over is kept in Universe until it reaches the chat, so this also limits storage. The chat takes up to 50 MB.',
       unit: 'megabytes',
       value: values.computerFileMb,
       recommended: recommended.computerFileMb,
       options: [
         { value: 10, label: '10 MB', meaning: 'Documents and pictures.' },
         { value: 25, label: '25 MB', meaning: 'Most receipts, reports and slides.' },
-        { value: 100, label: '100 MB', meaning: 'Large files; slower to hand over.' },
+        { value: 50, label: '50 MB', meaning: 'The most the chat takes; slower to hand over.' },
       ],
     },
     {
