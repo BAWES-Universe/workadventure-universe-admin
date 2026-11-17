@@ -376,6 +376,22 @@ run('a Brick’s files (real database)', () => {
       expect(await prisma.botFile.count({ where: { botId: brickId } })).toBe(3);
     });
 
+    it('takes % _ and \\ in a search as the characters they are, never as wildcards', async () => {
+      await many(1, {}, { name: 'a_b' });
+      await many(1, {}, { name: 'axb' });
+      await many(1, {}, { name: '100% done' });
+      await many(1, {}, { name: '100 percent' });
+      await many(1, {}, { name: 'back\\slash' });
+      const names = async (q: string) => (await page(`section=sent&q=${encodeURIComponent(q)}`)).body.files.map((f) => f.name).sort();
+      expect(await names('a_b')).toEqual(['a_b-1.pdf']);
+      expect(await names('%')).toEqual(['100% done-1.pdf']);
+      expect(await names('_')).toEqual(['a_b-1.pdf']);
+      expect(await names('100%')).toEqual(['100% done-1.pdf']);
+      expect(await names('\\')).toEqual(['back\\slash-1.pdf']);
+      expect(await names('a%b')).toEqual([]);
+      expect((await page('section=sent&q=%25')).body.total).toBe(1);
+    });
+
     it('refuses a list it does not have and a place in it that it never gave out', async () => {
       await many(60);
       expect((await page('section=artifacts')).status).toBe(400);

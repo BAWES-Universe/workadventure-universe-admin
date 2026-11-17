@@ -121,10 +121,13 @@ export function liveWhere(botId: string, userId: string, section: FileSection, l
       { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
       ...(limits.findable > 0 ? [{ createdAt: { gte: new Date(now.getTime() - limits.findable * DAY) } }] : []),
       { OR: [{ AND: [filled('bucket'), filled('fileId')] }, filled('url')] },
-      ...(search ? [{ name: { contains: search, mode: 'insensitive' as const } }] : []),
+      ...(search ? [{ name: { contains: likeLiteral(search), mode: 'insensitive' as const } }] : []),
     ],
   };
 }
+
+/** The words as a literal piece of a name: `%` and `_` are characters in a file name, never wildcards, and `\\` is itself. */
+export const likeLiteral = (words: string): string => words.replace(/[\\%_]/g, (character) => `\\${character}`);
 
 /** What someone typed to search for, trimmed and cut, without the characters the database can't search for. Empty: no search. */
 export function cleanSearch(value: string | null | undefined): string {
