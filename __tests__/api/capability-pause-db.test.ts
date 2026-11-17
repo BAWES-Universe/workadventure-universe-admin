@@ -75,7 +75,7 @@ run('pausing each capability on its own, in a real database', () => {
   beforeEach(async () => {
     provider = new FakeComputerProvider();
     setComputerProviderForTests(provider);
-    await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+    await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10, appUseCeilingMicros: 100_000_000, appUseMemberCeilingMicros: 50_000_000 }, 'admin');
   });
   afterEach(async () => {
     setAdapterForTests(undefined);
