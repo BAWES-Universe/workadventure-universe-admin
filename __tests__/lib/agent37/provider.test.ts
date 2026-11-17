@@ -328,6 +328,20 @@ describe('the Agent37 provider', () => {
     await expect(p.remove('m1')).resolves.toBeUndefined();
   });
 
+  it('removes every machine made for a Brick, also one Universe never wrote down, and leaves other Bricks\' machines alone', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    await p.create('bot-2');
+    // A second machine made for bot-1 whose answer was lost, so it was never written down
+    w.instances.set('stray', { id: 'stray', status: 'sleeping', url: 'https://stray.agent37.app', metadata: { creation_id: 'brick:bot-1' }, region: 'us' } as Instance);
+    await p.removeAllFor('bot-1');
+    expect([...w.instances.keys()]).toEqual(['m2']);
+    // Nothing made for it: nothing to do, and no error
+    await expect(p.removeAllFor('bot-1')).resolves.toBeUndefined();
+    await expect(p.removeAllFor('never-had-one')).resolves.toBeUndefined();
+  });
+
   it('says whether a machine is running, to prove a stop: running is awake, stopped, sleeping and gone are not', async () => {
     const w = world();
     const p = provider(w);

@@ -19,6 +19,7 @@ import { saveServerLimits } from '@/lib/bot-limits';
 import * as meter from '@/lib/meter';
 
 // The books' own writer, wrapped so a test can make one write fail and every other one run as it always does
+const actualRecord = jest.requireActual('@/lib/meter').recordMeterEvent as typeof meter.recordMeterEvent;
 jest.mock('@/lib/meter', () => {
   const actual = jest.requireActual('@/lib/meter');
   return { ...actual, recordMeterEvent: jest.fn(actual.recordMeterEvent) };
@@ -45,8 +46,6 @@ import {
   isWindingDown,
   liftWindDown,
   planEffect,
-  removeMachineBeforeDelete,
-  removeSavedCopyBeforeDelete,
   renewJob,
   reportProgress,
   requestHandover,
@@ -94,6 +93,12 @@ const wipe = async () => {
   await prisma.meterReservation.deleteMany({});
   await prisma.meterGrant.deleteMany({});
   await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits', 'computer-wind-down'] } } });
+};
+
+/** The Brick's days are over and the sweep purges it for good (what the owner's page and the bot server's sweep both do). */
+const purge = async (brickId: string, ownerId: string, at: Date) => {
+  await prisma.bot.update({ where: { id: brickId }, data: { goneAt: at } });
+  return removeGoneBricks(at, ownerId);
 };
 
 const woke = () => provider.calls.filter((call) => call.name === 'create' || call.name === 'wake').length;
@@ -820,7 +825,7 @@ run('a Brick’s computer, in a real database', () => {
       for (const id of blocked) expect(await prisma.computerJob.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'queued' });
     });
 
-    it('a run of deleted Bricks whose files cannot be saved does not keep the ones behind them from being removed', async () => {
+    it('a run of deleted Bricks whose books cannot be written does not keep the ones behind them from being removed', async () => {
       const sara = await person('sara');
       const names = ['d1', 'd2', 'd3', 'd4'];
       const bricks: string[] = [];
@@ -828,22 +833,31 @@ run('a Brick’s computer, in a real database', () => {
         const brick = await createBrick({ ownerId: sara.id, name: `${name} of Sara` });
         bricks.push(brick.id);
       }
-      // The first three have a machine whose files cannot be saved; the last has no computer
-      provider.failSaves = true;
+      // The first three ran a job whose time never reached the books; the last has no computer
       for (const id of bricks.slice(0, 3)) {
         await giveComputer(id, sara.id);
         const job = await startJob({ botId: id, personId: sara.id, title: 'A' }, NOW);
         if (!job.ok) throw new Error('no');
         await finishJob(job.job.id, 'done', minutes(1));
+        await prisma.meterEvent.deleteMany({ where: { eventId: `computer:${job.job.id}:time` } });
       }
       for (const [i, id] of bricks.entries()) {
         await deleteBrick(id, sara.id, minutes(2));
         await prisma.bot.update({ where: { id }, data: { goneAt: new Date(minutes(3).getTime() + i) } });
       }
-      // One Brick to a page: the three that wait fill three pages, and the fourth is still removed
-      const removed = await removeGoneBricks(minutes(10), sara.id, 1);
-      expect(removed).toEqual([bricks[3]]);
-      expect(await prisma.bot.count({ where: { id: { in: bricks.slice(0, 3) } } })).toBe(3);
+      const blocked = new Set(bricks.slice(0, 3));
+      (meter.recordMeterEvent as jest.Mock).mockImplementation(async (input: { botId?: string }) => {
+        if (input.botId && blocked.has(input.botId)) throw new Error('The books are down');
+        return actualRecord(input as never);
+      });
+      try {
+        // One Brick to a page: the three that wait fill three pages, and the fourth is still removed
+        const removed = await removeGoneBricks(minutes(10), sara.id, 1);
+        expect(removed).toEqual([bricks[3]]);
+        expect(await prisma.bot.count({ where: { id: { in: bricks.slice(0, 3) } } })).toBe(3);
+      } finally {
+        (meter.recordMeterEvent as jest.Mock).mockImplementation(actualRecord);
+      }
     });
 
     it('across sweeps, Bricks that stay blocked go behind the ones not tried yet, so a Brick further back still gets its turn', async () => {
@@ -871,22 +885,31 @@ run('a Brick’s computer, in a real database', () => {
       const sara = await person('sara');
       const bricks: string[] = [];
       for (const name of ['e1', 'e2', 'e3', 'e4']) bricks.push((await createBrick({ ownerId: sara.id, name: `${name} of Sara` })).id);
-      provider.failSaves = true;
       for (const id of bricks.slice(0, 3)) {
         await giveComputer(id, sara.id);
         const job = await startJob({ botId: id, personId: sara.id, title: 'A' }, NOW);
         if (!job.ok) throw new Error('no');
         await finishJob(job.job.id, 'done', minutes(1));
+        await prisma.meterEvent.deleteMany({ where: { eventId: `computer:${job.job.id}:time` } });
       }
       for (const [i, id] of bricks.entries()) {
         await deleteBrick(id, sara.id, minutes(2));
         await prisma.bot.update({ where: { id }, data: { goneAt: new Date(minutes(3).getTime() + i) } });
       }
       await backdate(bricks);
-      // A sweep reads three Bricks, one to a page: the three that wait use all of it
-      expect(await removeGoneBricks(minutes(10), sara.id, 1, 3)).toEqual([]);
-      // The next one starts with the Brick not looked at yet
-      expect(await removeGoneBricks(minutes(11), sara.id, 1, 3)).toEqual([bricks[3]]);
+      const blocked = new Set(bricks.slice(0, 3));
+      (meter.recordMeterEvent as jest.Mock).mockImplementation(async (input: { botId?: string }) => {
+        if (input.botId && blocked.has(input.botId)) throw new Error('The books are down');
+        return actualRecord(input as never);
+      });
+      try {
+        // A sweep reads three Bricks, one to a page: the three that wait use all of it
+        expect(await removeGoneBricks(minutes(10), sara.id, 1, 3)).toEqual([]);
+        // The next one starts with the Brick not looked at yet
+        expect(await removeGoneBricks(minutes(11), sara.id, 1, 3)).toEqual([bricks[3]]);
+      } finally {
+        (meter.recordMeterEvent as jest.Mock).mockImplementation(actualRecord);
+      }
     });
 
     it('a machine whose rest failed is rested by a later sweep, and one left claimed for rest by a stopped server is let go and rested too', async () => {
@@ -1573,20 +1596,7 @@ run('a Brick’s computer, in a real database', () => {
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: first.job.id } })).toMatchObject({ status: 'running' });
     });
 
-    it('once a machine was removed, says so at once: a retried delete does not save a copy of a machine that is gone', async () => {
-      const sara = await person('sara');
-      await giveComputer(sara.brickId, sara.id);
-      const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
-      if (!job.ok) throw new Error('no');
-      await finishJob(job.job.id, 'done', minutes(1));
-      expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
-      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ providerRef: null, machine: 'none' });
-      const calls = provider.calls.length;
-      expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
-      expect(provider.calls.length).toBe(calls);
-    });
-
-    it('deletes the saved copy of the files when the Brick is removed for good, and the level of what is kept goes to 0 (the copy is in our own storage)', async () => {
+    it('purging a Brick removes its machine and its saved files with NO copy made first, and the level of what is kept goes to 0 (audit F08)', async () => {
       const sara = await person('sara');
       provider.disk = 4_000_000_000;
       provider.filesBytes = 1_000_000_000;
@@ -1594,39 +1604,54 @@ run('a Brick’s computer, in a real database', () => {
       const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!job.ok) throw new Error('no');
       await finishJob(job.job.id, 'done', minutes(1));
-      expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
+      await deleteBrick(sara.brickId, sara.id, minutes(2));
       const newest = async () => Number((await prisma.meterEvent.findFirstOrThrow({ where: { botId: sara.brickId, kind: 'stored_bytes' }, orderBy: [{ occurredAt: 'desc' }, { recordedAt: 'desc' }] })).quantity);
-      expect(await newest()).toBe(1_000_000_000);
-      // A copy that cannot be deleted leaves everything as it was, to be tried again
-      provider.failDeleteCopy = true;
-      expect(await removeSavedCopyBeforeDelete(sara.brickId)).toBe(false);
-      expect(Number((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).filesBytes)).toBe(1_000_000_000);
-      expect(await newest()).toBe(1_000_000_000);
-      provider.failDeleteCopy = false;
-      expect(await removeSavedCopyBeforeDelete(sara.brickId)).toBe(true);
-      expect(provider.calls.filter((call) => call.name === 'deleteSavedCopy')).toEqual([expect.objectContaining({ ref: sara.brickId }), expect.objectContaining({ ref: sara.brickId })]);
-      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ filesBytes: BigInt(0), filesSavedAt: null });
+      expect(await newest()).toBe(5_000_000_000);
+      const saves = provider.calls.filter((call) => call.name === 'saveFiles').length;
+      expect(await purge(sara.brickId, sara.id, minutes(3))).toEqual([sara.brickId]);
+      // No new copy of the files was made to erase them
+      expect(provider.calls.filter((call) => call.name === 'saveFiles')).toHaveLength(saves);
+      expect(provider.calls.filter((call) => call.name === 'remove')).toEqual([expect.objectContaining({ ref: `fake-${sara.brickId}` })]);
+      expect(provider.calls.filter((call) => call.name === 'deleteSavedCopy')).toEqual([expect.objectContaining({ ref: sara.brickId })]);
       expect(await newest()).toBe(0);
-      // Asked again there is nothing to delete and nothing is asked of the provider
+      expect(await prisma.bot.count({ where: { id: sara.brickId } })).toBe(0);
+      expect(await prisma.brickComputer.count({ where: { botId: sara.brickId } })).toBe(0);
+      // Asked again nothing is asked of the provider
       const calls = provider.calls.length;
-      expect(await removeSavedCopyBeforeDelete(sara.brickId)).toBe(true);
+      expect(await removeGoneBricks(minutes(4), sara.id)).toEqual([]);
       expect(provider.calls.length).toBe(calls);
     });
 
-    it('a Brick whose saved copy cannot be deleted waits for the next sweep, and is removed once it can', async () => {
+    it('a machine or saved copy that cannot be deleted now never holds the purge: the Brick is gone, and each outside deletion is tried again with its note kept', async () => {
       const sara = await person('sara');
+      provider.disk = 4_000_000_000;
+      provider.filesBytes = 1_000_000_000;
       await giveComputer(sara.brickId, sara.id);
       const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!job.ok) throw new Error('no');
       await finishJob(job.job.id, 'done', minutes(1));
       await deleteBrick(sara.brickId, sara.id, minutes(2));
-      await prisma.bot.update({ where: { id: sara.brickId }, data: { goneAt: minutes(3) } });
+      const newest = async () => Number((await prisma.meterEvent.findFirstOrThrow({ where: { botId: sara.brickId, kind: 'stored_bytes' }, orderBy: [{ occurredAt: 'desc' }, { recordedAt: 'desc' }] })).quantity);
+      provider.failRemove = true;
       provider.failDeleteCopy = true;
-      expect(await removeGoneBricks(minutes(10), sara.id)).toEqual([]);
-      expect(await prisma.bot.count({ where: { id: sara.brickId } })).toBe(1);
-      provider.failDeleteCopy = false;
-      expect(await removeGoneBricks(minutes(10), sara.id)).toEqual([sara.brickId]);
+      expect(await purge(sara.brickId, sara.id, minutes(3))).toEqual([sara.brickId]);
+      // Gone from Orbit at once; the note says what is left outside, and the books still count what is still kept
       expect(await prisma.bot.count({ where: { id: sara.brickId } })).toBe(0);
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machinePending: true, copyPending: true, attempts: 1, doneAt: null, providerRef: `fake-${sara.brickId}` });
+      expect(await newest()).toBe(5_000_000_000);
+      // Not due yet: the sweep leaves it alone until its wait is over
+      const calls = provider.calls.length;
+      await removeGoneBricks(minutes(3));
+      expect(provider.calls.length).toBe(calls);
+      // The provider works again but the bucket does not: only what is left is tried, and the machine is not asked again
+      provider.failRemove = false;
+      await removeGoneBricks(minutes(10));
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machinePending: false, copyPending: true, attempts: 2, doneAt: null });
+      expect(await newest()).toBe(5_000_000_000);
+      provider.failDeleteCopy = false;
+      await removeGoneBricks(minutes(60));
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machinePending: false, copyPending: false, doneAt: expect.any(Date), providerRef: null });
+      expect(await newest()).toBe(0);
     });
 
     it('writes what is kept for the machine (its disk, and its saved copy) to the books when it changes, so the pool counts it (audit F4)', async () => {
@@ -1652,12 +1677,13 @@ run('a Brick’s computer, in a real database', () => {
       await finishJob(second.job.id, 'done', minutes(6));
       expect((await kept()).map((event) => Number(event.quantity))).toEqual([4_000_000_000, 5_000_000_000]);
       expect(await envelope()).toBe(450_000);
-      // Taken away: the disk is gone and the copy stays
-      expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
-      expect((await kept()).map((event) => Number(event.quantity))).toEqual([4_000_000_000, 5_000_000_000, 1_000_000_000]);
-      expect(await envelope()).toBe(90_000);
+      // The Brick is deleted for good: the disk and the copy are both gone, and the line says so once, when the provider and the bucket have confirmed it
+      await deleteBrick(sara.brickId, sara.id, minutes(7));
+      expect(await purge(sara.brickId, sara.id, minutes(8))).toEqual([sara.brickId]);
+      expect((await kept()).map((event) => Number(event.quantity))).toEqual([4_000_000_000, 5_000_000_000, 0]);
+      expect(await envelope()).toBe(0);
       // Asked again, nothing is written twice
-      expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
+      await removeGoneBricks(minutes(9));
       expect(await kept()).toHaveLength(3);
     });
 
@@ -1737,17 +1763,18 @@ run('a Brick’s computer, in a real database', () => {
       expect(await prisma.meterReservation.count({ where: { state: 'held', reservationKey: { startsWith: 'computer:diskroom:' } } })).toBe(0);
     });
 
-    it('removes the machine for good only after its files were saved; a save that failed leaves it for the next sweep', async () => {
+    it('removes the machine for good without saving its files first: a save that would fail changes nothing about the erasure', async () => {
       const sara = await person('sara');
       await giveComputer(sara.brickId, sara.id);
       const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!job.ok) throw new Error('no');
       await finishJob(job.job.id, 'done', minutes(1));
+      await deleteBrick(sara.brickId, sara.id, minutes(2));
+      provider.failSaves = true;
       provider.failNext.saveFiles = true;
-      expect(await removeMachineBeforeDelete(sara.brickId)).toBe(false);
-      expect(provider.calls.some((call) => call.name === 'remove')).toBe(false);
-      expect(await removeMachineBeforeDelete(sara.brickId)).toBe(true);
+      expect(await purge(sara.brickId, sara.id, minutes(3))).toEqual([sara.brickId]);
       expect(provider.calls.filter((call) => call.name === 'remove')).toHaveLength(1);
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ machinePending: false, copyPending: false, doneAt: expect.any(Date) });
     });
   });
   describe('the team’s wind-down', () => {

@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'node:
 import { PassThrough, Readable, Transform, Writable, pipeline } from 'node:stream';
 import { promisify } from 'node:util';
 import { createGunzip } from 'node:zlib';
-import { CopyObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { CopyObjectCommand, DeleteObjectCommand, HeadObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { artifactBucket } from '@/lib/artifact-storage';
 import { derivedKey } from '@/lib/encryption';
@@ -134,10 +134,22 @@ export async function savedCopyOf(botId: string): Promise<SavedCopyInfo | null> 
 }
 
 /**
- * Deletes the saved copy of a Brick's folder for good (a Brick that was deleted keeps nothing of its computer in our storage). Asked for a
- * copy that is not there it is also fine: deleting is the same answer either way. Throws when the bucket would not do it.
+ * Deletes everything kept of a Brick's folder in our storage for good: the saved copy, and any object a save of it staged and did not finish
+ * (a server that stopped half way leaves one, see `stagingKey`). Everything under the Brick's name goes, found by listing, so no generation
+ * is missed. A Brick that has none is also fine: deleting is the same answer either way. Throws when the bucket would not do it, so the
+ * caller tries again.
  */
 export async function deleteSavedCopy(botId: string): Promise<void> {
   const { s3, bucket } = artifactBucket();
+  const prefix = `computer-saves/${botId}.`;
+  let token: string | undefined;
+  do {
+    const page = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token }));
+    for (const object of page.Contents ?? []) {
+      if (object.Key) await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: object.Key }));
+    }
+    token = page.IsTruncated ? page.NextContinuationToken : undefined;
+  } while (token);
+  // The saved copy itself, by its name, in case the list was not complete (a bucket that lists late): deleting a missing object is not an error
   await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId) }));
 }

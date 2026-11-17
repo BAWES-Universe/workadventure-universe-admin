@@ -8,7 +8,8 @@ import { personKeyOf } from '@/lib/meter-values';
  * computer pool's envelope counts the newest level of each Brick (lib/meter-allowance.ts) and the Costs page shows it as "Files we keep", so
  * what is kept costs the ceiling its place. A level is not an amount that adds up: a line is written when it changes (a machine made, taken
  * away, or a new copy saved), and the newest line stands. Nothing is written when the level did not change.
- * Never throws and never holds a job: the books are not a reason a computer fails.
+ * Never throws and never holds a job: the books are not a reason a computer fails. Says whether the books now say what was asked (true also when
+ * nothing needed writing), so a caller that must not forget a line, such as a purge, can try again.
  */
 export async function recordKeptBytes(input: {
   botId: string;
@@ -19,7 +20,9 @@ export async function recordKeptBytes(input: {
   /** The size of the saved copy; when not given, the one on the Brick's computer record. */
   copyBytes?: number | null;
   now?: Date;
-}): Promise<void> {
+  /** The Brick's owner, for a Brick whose row is already gone (a purge confirming its outside deletions): else read from the Brick. */
+  ownerId?: string | null;
+}): Promise<boolean> {
   try {
     const machine = input.machineBytes !== null && Number.isSafeInteger(input.machineBytes) && input.machineBytes > 0 ? input.machineBytes : 0;
     let copy = 0;
@@ -36,16 +39,16 @@ export async function recordKeptBytes(input: {
       select: { quantity: true },
     });
     // Nothing kept and nothing ever written: there is no level to say. The same level as the newest one is already the answer.
-    if (newest ? Number(newest.quantity) === level : level === 0) return;
-    const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { ownerId: true } });
+    if (newest ? Number(newest.quantity) === level : level === 0) return true;
+    const ownerId = input.ownerId !== undefined ? input.ownerId : (await prisma.bot.findUnique({ where: { id: input.botId }, select: { ownerId: true } }))?.ownerId ?? null;
     const now = input.now ?? new Date();
     await recordMeterEvent({
       eventId: `computer:kept:${input.botId}:${input.reason}:${now.getTime()}:${level}`.slice(0, 255),
       kind: 'stored_bytes',
       pool: 'computer',
       occurredAt: now,
-      personKey: personKeyOf({ personId: bot?.ownerId ?? null }),
-      personId: bot?.ownerId ?? null,
+      personKey: personKeyOf({ personId: ownerId }),
+      personId: ownerId,
       botId: input.botId,
       brick: true,
       payerKind: 'universe',
@@ -60,7 +63,9 @@ export async function recordKeptBytes(input: {
       sourceRef: `brick_computers:${input.botId}`,
       detail: { reason: input.reason, machineBytes: machine, copyBytes: copy },
     });
+    return true;
   } catch (error) {
     console.error('[Computer] Could not write what is kept to the books:', error instanceof Error ? error.message : 'unknown');
+    return false;
   }
 }

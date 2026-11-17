@@ -1766,57 +1766,15 @@ export async function getJob(jobId: string): Promise<(JobView & { botId: string;
 }
 
 /**
- * When a Brick is removed for good: its machine goes only after its files were saved. A save that did not happen leaves the Brick
- * for the next sweep, and nothing is deleted quietly. True when there is nothing in the way.
+ * Whether everything the Brick's computer ran is in the books (audit F08: financial reconciliation, apart from erasure). The jobs go with the
+ * Brick, so what they ran is written first (never a loss of money). This reads and writes only our own tables: it does not wait on a
+ * provider, a saved copy or any backup. False only when a line could not be written yet; the Brick then waits for the next sweep.
  */
-export async function removeMachineBeforeDelete(botId: string, now: Date = new Date()): Promise<boolean> {
-  // Deleting a Brick deletes its jobs, so what they ran reaches the books first: one that still cannot be written keeps the Brick for the next sweep
+export async function computerTimeInBooks(botId: string, now: Date = new Date()): Promise<boolean> {
   await recordMissingComputerTime(now, SWEEP_BATCH, botId);
   const unwritten = await prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`
     SELECT COUNT(*)::bigint AS "n" FROM "computer_jobs" j
     WHERE j."bot_id" = ${botId} AND j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')`);
-  if (Number(unwritten[0]?.n ?? 0) > 0) return false;
-  const row = await prisma.brickComputer.findUnique({ where: { botId } });
-  if (!row || !row.providerRef || row.machine === 'none') return true;
-  const provider = providerFor(row);
-  if (!provider) return false;
-  if (!(await saveCopy(botId, row.providerRef, provider))) return false;
-  try {
-    await provider.remove(row.providerRef);
-  } catch (error) {
-    console.error('[Computer] Could not remove a machine:', error instanceof Error ? error.message : 'unknown');
-    return false;
-  }
-  // The machine is gone: say so at once, so a later try (if the Brick's own delete fails) does not save a copy of a machine that is not there
-  await recordKeptBytes({ botId, reason: 'gone', machineBytes: null });
-  try {
-    await prisma.brickComputer.update({ where: { botId }, data: { providerRef: null, machine: 'none' } });
-  } catch (error) {
-    console.error('[Computer] A machine was removed but its record was not cleared:', error instanceof Error ? error.message : 'unknown');
-  }
-  return true;
-}
-
-/**
- * When a Brick is removed for good, so is what is kept of its computer in our own storage: the saved copy of its files, which the pool
- * counts as kept storage (audit F4). Asked after the machine is gone and before the Brick's rows are cleared: a copy that could not be
- * deleted (its provider is off or changed, or the bucket refused) leaves the Brick for the next sweep, like a machine that could not be
- * removed, so nothing is dropped quietly. True when nothing is in the way, including a Brick that never had a copy.
- */
-export async function removeSavedCopyBeforeDelete(botId: string): Promise<boolean> {
-  const row = await prisma.brickComputer.findUnique({ where: { botId } });
-  if (!row || (row.filesSavedAt === null && row.filesBytes === BigInt(0))) return true;
-  const provider = providerFor(row);
-  if (!provider?.deleteSavedCopy) return false;
-  try {
-    await provider.deleteSavedCopy(botId);
-  } catch (error) {
-    console.error('[Computer] Could not delete a saved copy:', error instanceof Error ? error.message : 'unknown');
-    return false;
-  }
-  await prisma.brickComputer.update({ where: { botId }, data: { filesBytes: BigInt(0), filesSavedAt: null } });
-  // Nothing of it is kept now: the level in the books goes to 0
-  await recordKeptBytes({ botId, reason: 'gone', machineBytes: null, copyBytes: 0 });
-  return true;
+  return Number(unwritten[0]?.n ?? 0) === 0;
 }
