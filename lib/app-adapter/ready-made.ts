@@ -5,9 +5,9 @@ import { readReadyMadeApps } from '@/lib/app-adapter/settings';
 import { createConnection } from '@/lib/app-connections';
 import { confirmReadyMade } from '@/lib/app-adapter/confirm';
 import { getMeterSettings } from '@/lib/meter';
-import { recordAppUseWithinCap } from '@/lib/app-use-cap';
+import { holdUnpricedUse, recordAppUseWithinCap, type AppStop } from '@/lib/app-use-cap';
 import { personKeyOf } from '@/lib/meter-values';
-import { priceCall } from '@/lib/composio-rates';
+import { boundOfCall, priceCall } from '@/lib/composio-rates';
 import { readComposioBilling } from '@/lib/composio-billing';
 import { truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
 import { getGitHubApp } from '@/lib/github/app';
@@ -137,7 +137,18 @@ async function meterUse(input: { botId: string; ownerId: string; toolkit: string
   const ownTop = input.route?.provider === 'universe' ? input.route.own?.topPriceMicros ?? null : null;
   const cost = provider === 'universe' ? (ownTop === null ? null : steps * ownTop) : settings.appUseMicros === null ? priced.listMicros : steps * settings.appUseMicros;
   const eventId = `app:${input.botId}:${input.callId}`;
-  const recorded = await recordAppUseWithinCap({
+  // S5: a step on Universe's money must have a rate that verifiably bounds every billable unit of it. Our own version with no top price has none.
+  // A price a super admin saved is the ceiling they chose for a step the card cannot settle. A free step carries on.
+  const bound =
+    steps === 0 && priced.kind === 'free'
+      ? ({ bounded: true } as const)
+      : provider === 'universe'
+        ? ownTop === null
+          ? ({ bounded: false, why: 'no_rate' } as const)
+          : ({ bounded: true } as const)
+        : boundOfCall({ tool: input.tool, arguments: input.arguments, priced, savedPrice: settings.appUseMicros !== null });
+  const write = bound.bounded ? recordAppUseWithinCap : (event: Parameters<typeof recordAppUseWithinCap>[0]) => holdUnpricedUse(event, bound.why);
+  const recorded = await write({
     // Per Brick: a call id is only known to be unique for the one that made it, so two Bricks never count as one call
     eventId,
     kind: 'app_use',
@@ -201,6 +212,9 @@ async function appIsOn(toolkit: string): Promise<boolean> {
 
 /** What a person is told when the month's spending stop holds a use back: plain words, and nothing was asked of the App. */
 export const APP_STOPPED_WORDS = 'Apps are resting right now: the month’s limit for using them has been reached. Nothing was done. Try again later.';
+/** A step held for want of a price: nothing was done, and the Universe team can see it waiting. */
+export const APP_UNPRICED_WORDS = 'This App step is on hold: its price is not settled yet, so nothing was done. The Universe team can see it.';
+export const appStoppedWords = (stopped: AppStop | undefined) => (stopped === 'unpriced' ? APP_UNPRICED_WORDS : APP_STOPPED_WORDS);
 
 export type ReadyMadeLinkOutcome =
   | { status: 'done'; answer: LinkAnswer }
@@ -238,7 +252,7 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
     if (typeof params.name !== 'string' || !params.name || !input.callId) return { status: 'refused' };
     callParams = { name: params.name, arguments: params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments) ? (params.arguments as Record<string, unknown>) : {} };
     written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit, tool: params.name, arguments: params.arguments, callId: input.callId, route });
-    if (written.stopped) return { status: 'done', answer: stoppedAnswer(input.message.id) };
+    if (written.stopped) return { status: 'done', answer: stoppedAnswer(input.message.id, written.stopped) };
     if (!written.recorded) return { status: 'already_asked' };
   }
   try {
@@ -256,8 +270,8 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
 }
 
 /** The answer of a link to a call that was held back: a tool result that says so (an error the Brick reads and tells the person), as the link itself would send one. */
-function stoppedAnswer(id: unknown): LinkAnswer {
-  const body = { jsonrpc: '2.0', id: typeof id === 'number' || typeof id === 'string' ? id : null, result: { content: [{ type: 'text', text: APP_STOPPED_WORDS }], isError: true } };
+function stoppedAnswer(id: unknown, stopped?: AppStop): LinkAnswer {
+  const body = { jsonrpc: '2.0', id: typeof id === 'number' || typeof id === 'string' ? id : null, result: { content: [{ type: 'text', text: appStoppedWords(stopped) }], isError: true } };
   return { status: 200, contentType: 'application/json', sessionId: null, body: JSON.stringify(body) };
 }
 
@@ -318,7 +332,7 @@ export async function useReadyMade(input: { botId: string; connectionId: string;
   if (route.provider === 'universe' && !route.own) return { status: 'unavailable' };
 
   const written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit, tool: input.tool, arguments: input.arguments, callId: input.callId, direct: true, route });
-  if (written.stopped) return { status: 'done', ok: false, data: { error: APP_STOPPED_WORDS, stopped: true } };
+  if (written.stopped) return { status: 'done', ok: false, data: { error: appStoppedWords(written.stopped), stopped: true, reason: written.reason } };
   if (!written.recorded) return { status: 'already_asked' };
 
   try {

@@ -177,3 +177,45 @@ export function priceCall(input: PriceInput): PricedCall {
   const directEach = input.direct ? DIRECT_EXECUTION_MICROS : 0;
   return { ...base, kind: 'execution', executions: 1, sandboxRuns: 0, zdrCalls: zdrEach ? 1 : 0, directCalls: directEach ? 1 : 0, listMicros: rate + zdrEach + directEach };
 }
+
+/**
+ * Whether a rate VERIFIABLY bounds every billable unit of one call (billing consensus v2, S5). A call on Universe's money with no price we can
+ * stand behind is held, not guessed: the figure it would be written with must be a ceiling, never a floor or a hope.
+ *
+ *  - `tier_unverified`: the toolkit's price is "from" a figure that varies by what is called (Google Maps): the listed price is a floor.
+ *  - `batch_unreadable`: a batch whose tools cannot be read (no list, a tool with no name, more than the batch holds, or another batch inside
+ *    it), so the number of billable runs is not known.
+ *  - `tool_unknown`: a tool of the provider's own (COMPOSIO_...) that the rate card does not name: not assumed free, not assumed priced.
+ *
+ * A free step is never held. A price a super admin saved (`savedPrice`) is the bound for a step whose tier or tool the card cannot settle, because
+ * that person chose the ceiling on purpose; it never rescues a batch whose number of runs is unknown.
+ */
+export type Unbounded = 'tier_unverified' | 'batch_unreadable' | 'tool_unknown';
+export type Bound = { bounded: true } | { bounded: false; why: Unbounded };
+
+const KNOWN_PROVIDER_TOOLS = new Set([...FREE_META_TOOLS, ...SANDBOX_TOOLS, BATCH_TOOL]);
+
+export function boundOfCall(input: { tool: string; arguments?: unknown; priced: PricedCall; savedPrice: boolean }): Bound {
+  const { priced } = input;
+  const tool = input.tool.toUpperCase();
+  if (priced.kind === 'free') return { bounded: true };
+  if (tool === BATCH_TOOL) {
+    const list = input.arguments && typeof input.arguments === 'object' ? (input.arguments as { tools?: unknown }).tools : undefined;
+    const readable =
+      Array.isArray(list) &&
+      list.length > 0 &&
+      list.length <= BATCH_MAX &&
+      list.every((entry) => {
+        const slug = entry && typeof entry === 'object' ? (entry as { tool_slug?: unknown }).tool_slug : undefined;
+        if (typeof slug !== 'string' || !slug) return false;
+        // A batch inside a batch, or a provider tool the card does not name, hides how many runs there are or what they cost
+        const upper = slug.toUpperCase();
+        return !(upper === BATCH_TOOL || (upper.startsWith('COMPOSIO_') && !KNOWN_PROVIDER_TOOLS.has(upper)));
+      });
+    if (!readable) return { bounded: false, why: 'batch_unreadable' };
+    return priced.tierVerified || input.savedPrice ? { bounded: true } : { bounded: false, why: 'tier_unverified' };
+  }
+  if (tool.startsWith('COMPOSIO_') && !KNOWN_PROVIDER_TOOLS.has(tool)) return input.savedPrice ? { bounded: true } : { bounded: false, why: 'tool_unknown' };
+  if (!priced.tierVerified && priced.kind === 'execution') return input.savedPrice ? { bounded: true } : { bounded: false, why: 'tier_unverified' };
+  return { bounded: true };
+}

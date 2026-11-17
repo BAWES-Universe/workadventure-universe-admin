@@ -23,6 +23,8 @@ import { POST as useCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use
 import { POST as connectApp } from '@/app/api/me/apps/route';
 import { grantToBrick, createConnection, readConnection, listConnections } from '@/lib/app-connections';
 import { saveMeterSettings } from '@/lib/meter';
+import { recordEntitlementGrant } from '@/lib/entitlement-grants';
+import { heldUnpriced } from '@/lib/app-use-cap';
 import { saveComposioBilling } from '@/lib/composio-billing';
 import { createBrick } from '@/lib/brick-create';
 import { forgetGitHubApp, saveGitHubApp } from '@/lib/github/app';
@@ -738,7 +740,7 @@ run('ready-made apps through the adapter, in a real database', () => {
         expect((await useIt({ serverId })).status).toBe(200);
         const held = await useIt({ serverId });
         expect(held.status).toBe(200);
-        expect(await held.json()).toEqual({ ok: false, data: { error: expect.stringContaining('Nothing was done'), stopped: true } });
+        expect(await held.json()).toEqual({ ok: false, data: { error: expect.stringContaining('Nothing was done'), stopped: true, reason: 'person' } });
         expect(adapter.use).toHaveBeenCalledTimes(2);
         expect(await paidUses()).toBe(2);
       });
@@ -783,6 +785,78 @@ run('ready-made apps through the adapter, in a real database', () => {
         expect(done.filter((answer) => answer.ok)).toHaveLength(2);
         expect(adapter.use).toHaveBeenCalledTimes(2);
         expect(await paidUses()).toBe(2);
+      });
+    });
+
+    it('says which of the five stopped it: the month’s Apps budget is "budget", the person’s own allowance is "person"', async () => {
+      const { serverId } = await connectedAndGranted();
+      await withLimits({ appUseCeilingMicros: 0, appUseMemberCeilingMicros: 1_000_000 }, async () => {
+        expect(await (await useIt({ serverId })).json()).toMatchObject({ ok: false, data: { stopped: true, reason: 'budget' } });
+      });
+      await withLimits({ appUseCeilingMicros: 1_000_000, appUseMemberCeilingMicros: 0 }, async () => {
+        expect(await (await useIt({ serverId })).json()).toMatchObject({ ok: false, data: { stopped: true, reason: 'person' } });
+      });
+    });
+
+    it('lets "Give more" extend the person’s own allowance while it runs, and never the month’s budget', async () => {
+      const { adapter, serverId } = await connectedAndGranted();
+      const give = (key: string, over: { multiplier?: number; noLimit?: boolean } = { multiplier: 2 }) =>
+        recordEntitlementGrant({ grantKey: `${sara}:${key}`, personId: sara, scope: 'apps', settlement: 'gift', startsAt: new Date(Date.now() - 1_000), endsAt: new Date(Date.now() + 3_600_000), givenById: boss, ...over });
+      // A use is 400; their own allowance is 900 (two uses). Twice that is 1,800 (four uses)
+      await withLimits({ appUseCeilingMicros: 1_000_000, appUseMemberCeilingMicros: 900 }, async () => {
+        await give('apps-double');
+        for (let n = 0; n < 4; n += 1) expect((await (await useIt({ serverId })).json()) as { ok: boolean }).toMatchObject({ ok: true });
+        expect(await (await useIt({ serverId })).json()).toMatchObject({ ok: false, data: { reason: 'person' } });
+        // No limit on their own allowance lifts it again, for as long as it lasts
+        await give('apps-none', { noLimit: true });
+        expect(await (await useIt({ serverId })).json()).toMatchObject({ ok: true });
+        expect(adapter.use).toHaveBeenCalledTimes(5);
+      });
+      // The month's budget for everyone is never lifted by it
+      await withLimits({ appUseCeilingMicros: 0, appUseMemberCeilingMicros: 900 }, async () => {
+        expect(await (await useIt({ serverId })).json()).toMatchObject({ ok: false, data: { reason: 'budget' } });
+      });
+    });
+
+    describe('a step with no price we can stand behind is held, that one action only (S5)', () => {
+      const unknownTool = 'COMPOSIO_BRAND_NEW_TOOL';
+      it('holds it, says so in plain words, runs nothing, writes a held line with no money and no use, and holds a retry the same way', async () => {
+        const { adapter, serverId } = await connectedAndGranted();
+        await withLimits({ appUseCeilingMicros: 1_000_000, appUseMemberCeilingMicros: 1_000_000 }, async () => {
+          const callId = `call-${randomUUID()}`;
+          const held = await useIt({ serverId, tool: unknownTool, callId });
+          expect(held.status).toBe(200);
+          expect(await held.json()).toEqual({ ok: false, data: { error: expect.stringContaining('on hold'), stopped: true, reason: 'provider' } });
+          expect(await (await useIt({ serverId, tool: unknownTool, callId })).json()).toMatchObject({ ok: false, data: { stopped: true, reason: 'provider' } });
+          expect(adapter.use).not.toHaveBeenCalled();
+          const lines = await prisma.meterEvent.findMany({ where: { personId: sara, kind: 'app_use' } });
+          expect(lines).toHaveLength(1);
+          expect(lines[0]).toMatchObject({ quantity: BigInt(0), costMicros: BigInt(0) });
+          expect(lines[0].detail).toMatchObject({ held: true, why: 'tool_unknown', tool: unknownTool });
+          // Reported for the Budget page, by what and how often
+          expect(await heldUnpriced(new Date())).toEqual(expect.arrayContaining([expect.objectContaining({ tool: unknownTool, why: 'tool_unknown', times: 1 })]));
+          // No money was spent by it: a held line is never a paid use
+          expect(await prisma.meterEvent.count({ where: { personId: sara, kind: 'app_use', costMicros: { gt: 0 } } })).toBe(0);
+        });
+      });
+
+      it('lets a free step carry on, and a step with a rate that bounds it, in the same month and for the same person', async () => {
+        const { adapter, serverId } = await connectedAndGranted();
+        await withLimits({ appUseCeilingMicros: 1_000_000, appUseMemberCeilingMicros: 1_000_000 }, async () => {
+          expect(await (await useIt({ serverId, tool: 'COMPOSIO_SEARCH_TOOLS' })).json()).toMatchObject({ ok: true });
+          expect(await (await useIt({ serverId })).json()).toMatchObject({ ok: true });
+          expect(adapter.use).toHaveBeenCalledTimes(2);
+        });
+      });
+
+      it('lets the step carry on once a super admin has saved the price they chose as its ceiling, and holds an unreadable batch whatever is saved', async () => {
+        const { adapter, serverId } = await connectedAndGranted();
+        await withLimits({ appUseCeilingMicros: 1_000_000, appUseMemberCeilingMicros: 1_000_000 }, async () => {
+          await saveMeterSettings({ appUseMicros: 2_500 }, boss);
+          expect(await (await useIt({ serverId, tool: unknownTool })).json()).toMatchObject({ ok: true });
+          expect(await (await useIt({ serverId, tool: 'COMPOSIO_MULTI_EXECUTE_TOOL', arguments: { tools: 'not a list' } })).json()).toMatchObject({ ok: false, data: { reason: 'provider' } });
+          expect(adapter.use).toHaveBeenCalledTimes(1);
+        });
       });
     });
 

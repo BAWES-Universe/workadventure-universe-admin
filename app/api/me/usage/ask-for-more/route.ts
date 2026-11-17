@@ -16,8 +16,9 @@ export async function OPTIONS(request: NextRequest) {
 /**
  * POST /api/me/usage/ask-for-more - "Ask for more" when computer time ran out (game #1999). It is only a request: it shows to the
  * Universe team in Orbit (Costs, and the person's page) and creates no debt and no grant. Asking again while one waits finds it.
- * Only offered when what it is for is used up: this month's computer allowance, or Instant Apps credit. The body may name which,
- * `{ "category": "apps" | "computer" }`; without one it is computer time, as before.
+ * Only offered when what it is for is used up: this month's computer allowance, Apps (Instant Apps credit, or the person's own monthly
+ * allowance for connected Apps), or the person's own monthly speech allowance. The body may name which,
+ * `{ "category": "apps" | "computer" | "speech" }`; without one it is computer time, as before. Never for a platform budget.
  */
 export async function POST(request: NextRequest) {
   if (!meOriginAllowed(request)) return respond(request, { error: 'Origin not allowed' }, 403);
@@ -36,10 +37,18 @@ export async function POST(request: NextRequest) {
     }
     if (typeof body !== 'object' || body === null || Array.isArray(body)) return respond(request, { error: 'The body must be a JSON object' }, 400);
     const category = (body as { category?: unknown }).category;
-    if (category !== undefined && category !== 'apps' && category !== 'computer') return respond(request, { error: 'category must be apps or computer' }, 400);
-    const what: AskedFor = category === 'apps' ? 'apps' : 'computer';
-    const canAsk = (usage: Awaited<ReturnType<typeof memberUsage>>) => (what === 'apps' ? !!usage.apps && !('unavailable' in usage.apps && usage.apps.unavailable) && (usage.apps as { canAskForMore?: boolean }).canAskForMore === true : usage.computer?.canAskForMore === true);
-    const used = what === 'apps' ? 'Instant Apps credit is not used up' : 'Computer time is not used up';
+    if (category !== undefined && category !== 'apps' && category !== 'computer' && category !== 'speech') return respond(request, { error: 'category must be apps, computer or speech' }, 400);
+    const what: AskedFor = category === 'apps' ? 'apps' : category === 'speech' ? 'speech' : 'computer';
+    const canAsk = (usage: Awaited<ReturnType<typeof memberUsage>>) => {
+      if (what === 'speech') return usage.speech?.canAskForMore === true;
+      if (what === 'apps') {
+        // Apps is one word: Instant Apps credit used up, or the person's own allowance for connected Apps used up
+        const credit = !!usage.apps && !('unavailable' in usage.apps && usage.apps.unavailable) && (usage.apps as { canAskForMore?: boolean }).canAskForMore === true;
+        return credit || usage.appUse?.canAskForMore === true;
+      }
+      return usage.computer?.canAskForMore === true;
+    };
+    const used = what === 'speech' ? 'Your speech allowance is not used up' : what === 'apps' ? 'Apps are not used up' : 'Computer time is not used up';
     const usage = await memberUsage(user.id);
     if (!canAsk(usage)) return respond(request, { error: used }, 409);
     const { request: open, created } = await askForMore(user.id, new Date(), what);

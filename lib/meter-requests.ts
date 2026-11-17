@@ -8,8 +8,12 @@ import { prisma } from '@/lib/db';
  * it. Nothing the person said is kept, only that they asked and when.
  */
 
-/** What a person can ask for more of: computer time, or Instant Apps credit. Chat and voice keep their own fair usage. */
-export type AskedFor = 'computer' | 'apps';
+/**
+ * What a person can ask for more of: computer time, Apps (Instant Apps credit, or their own monthly allowance for connected Apps), or their own
+ * monthly speech allowance. Text chat and voice replies keep their own fair usage. Asking is only ever for the one entitlement shown, never for a
+ * platform budget.
+ */
+export type AskedFor = 'computer' | 'apps' | 'speech';
 
 export interface OpenRequest {
   id: string;

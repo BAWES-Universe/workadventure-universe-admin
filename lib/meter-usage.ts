@@ -8,6 +8,7 @@ import { nextMonthStart, usageWords, type UsageWords } from '@/lib/meter-values'
 import { activityFor, type ActivityItem } from '@/lib/task-receipts';
 import { repliesPerWindowFor } from '@/lib/credit-replies';
 import { creditUsage, type CreditEntry, type MoneyLine, type Unavailable } from '@/lib/credit-usage';
+import { entitlementLine, type EntitlementLine } from '@/lib/entitlement-usage';
 
 /**
  * What a person sees about their usage (game #1999): one bar and plain words, never a count of replies and never a price.
@@ -70,6 +71,10 @@ export interface MemberUsage {
   apps?: MoneyLine | Unavailable | null;
   /** Extra credit someone has now, one amount for everything it covers. */
   credit?: CreditEntry[] | Unavailable;
+  /** Their own monthly speech allowance in plain words, once they have used any of it or have extra running. Never a platform budget. */
+  speech?: EntitlementLine | null;
+  /** Their own monthly allowance for connected Apps, the same way. */
+  appUse?: EntitlementLine | null;
 }
 
 /**
@@ -163,5 +168,12 @@ export async function memberUsage(personId: string, now: Date = new Date()): Pro
     console.error('[Usage] Could not read Activity:', error instanceof Error ? error.message : 'unknown');
     return [];
   });
-  return { version: now.getTime(), chat, computer, storage, extra: extra ? { until: extra.endsAt.toISOString() } : null, apps: money.apps, credit: money.credit, activity };
+  // Each part reads on its own: one that cannot be read is left out, never a made-up full or empty bar
+  const own = async (scope: 'speech' | 'apps') =>
+    (await entitlementLine(personId, scope, now).catch((error) => {
+      console.error('[Usage] Could not read the', scope, 'allowance:', error instanceof Error ? error.message : 'unknown');
+      return null;
+    }))?.line ?? null;
+  const [speech, appUse] = await Promise.all([own('speech'), own('apps')]);
+  return { version: now.getTime(), chat, computer, storage, extra: extra ? { until: extra.endsAt.toISOString() } : null, apps: money.apps, credit: money.credit, activity, ...(speech ? { speech } : {}), ...(appUse ? { appUse } : {}) };
 }
