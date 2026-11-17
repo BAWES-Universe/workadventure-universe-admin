@@ -28,6 +28,8 @@ export interface Instance {
   past_due?: boolean;
   /** The revision of the template this machine's image came from; behind the template's own revision means it can be updated. */
   template_revision?: number | null;
+  /** What the machine may reach on the internet, as Agent37 stored it (domains are lowercased, a bare address becomes /32). Not every answer carries it. */
+  network?: NetworkPolicy | null;
 }
 
 /** A cloud build of a template: `succeeded` carries the revision it published. */
@@ -59,6 +61,13 @@ export interface Billing {
   tier?: number;
   instance_limit?: number;
   auto_top_up?: { enabled: boolean } | null;
+}
+
+/** What Agent37 billed for one UTC day (`GET /v1/usage`, docs agents-api/billing): whole micros, by instance. Managed spend is `totalMicros - computeMicros`. */
+export interface UsageDay {
+  day: string;
+  totalMicros: number;
+  instances: { id: string; totalMicros: number; computeMicros: number; awakeMinutes: number }[];
 }
 
 /** An answer that was not a success. `code` is Agent37's own word for it (`try_again`, `insufficient_balance`...), when it gave one. */
@@ -234,6 +243,26 @@ export class Agent37Client {
     return this.again(() => this.call('GET', `${this.api}/v1/billing`, this.account()));
   }
 
+  /**
+   * One UTC day of Agent37's bill, by instance: what they charged and how many minutes each machine was awake. Read-only, so safe to ask
+   * again. A day that is not a date, or an answer with no total, is refused rather than read as "nothing was billed".
+   */
+  async usageForDay(day: string): Promise<UsageDay> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || Number.isNaN(Date.parse(`${day}T00:00:00Z`))) throw new Error('A usage day must be a date (YYYY-MM-DD)');
+    const answer = await this.again(() => this.call<Record<string, unknown>>('GET', `${this.api}/v1/usage?from=${day}&to=${day}`, this.account()));
+    const whole = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : null);
+    const total = whole(answer?.total_micros);
+    if (total === null || !Array.isArray(answer?.instances)) throw new Agent37Error(502, null, 'Agent37 answered usage with no total');
+    const instances: UsageDay['instances'] = [];
+    for (const raw of answer.instances as Array<Record<string, unknown>>) {
+      const id = typeof raw?.id === 'string' ? raw.id : null;
+      const entryTotal = whole(raw?.total_micros);
+      if (!id || entryTotal === null) continue;
+      instances.push({ id, totalMicros: entryTotal, computeMicros: whole(raw.compute_micros) ?? entryTotal, awakeMinutes: whole(raw.awake_minutes) ?? 0 });
+    }
+    return { day, totalMicros: total, instances };
+  }
+
   /** The agent's own health. It answers 502 for a few seconds after a machine starts, so a caller asks again until `healthy` is true. */
   async healthy(instanceUrl: string): Promise<boolean> {
     try {
@@ -375,6 +404,22 @@ export class Agent37Client {
   /** What the machine may reach on the internet. A 503 `try_again` means it is saved and reaches the machine within two minutes: asked again, it confirms. */
   setNetwork(id: string, network: NetworkPolicy): Promise<Instance> {
     return this.again(() => this.call('PATCH', `${this.api}/v1/instances/${encodeURIComponent(id)}`, this.account(), { network }));
+  }
+
+  /**
+   * A machine's managed budget as Agent37 holds it (`GET /v1/instances/{id}/budget`, docs agents-api/budgets): the monthly cap, what is left of
+   * the month, and what is left of the ONE-TIME credit. Agent37's managed services (model router, Brave, Composio, Perflo) can spend from either.
+   * A number that is not there is read as "not zero", so a changed answer never looks closed.
+   */
+  async getBudget(id: string): Promise<{ monthlyCapMicros: number; monthlyRemainingMicros: number; creditRemainingMicros: number }> {
+    const answer = await this.again(() => this.call<Record<string, unknown>>('GET', `${this.api}/v1/instances/${encodeURIComponent(id)}/budget`, this.account()));
+    const micros = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : Number.MAX_SAFE_INTEGER);
+    return { monthlyCapMicros: micros(answer?.monthly_cap_micros), monthlyRemainingMicros: micros(answer?.monthly_remaining_micros), creditRemainingMicros: micros(answer?.credit_remaining_micros) };
+  }
+
+  /** Sets the monthly cap (`PATCH /v1/instances/{id}/budget`); it takes effect at once. The one-time credit has no call that lowers it. */
+  setMonthlyCap(id: string, micros: number): Promise<unknown> {
+    return this.again(() => this.call('PATCH', `${this.api}/v1/instances/${encodeURIComponent(id)}/budget`, this.account(), { monthly_cap_micros: micros }));
   }
 
   /** A streamed call: returns the response when it is a 200, so the caller reads the body as it comes. */

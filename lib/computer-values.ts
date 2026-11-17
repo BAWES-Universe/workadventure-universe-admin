@@ -7,9 +7,9 @@
 
 /**
  * Where the machine is, as stored. `none` is a computer that was given and not made yet: it is made at the first real need. `stopping` is one
- * that must be put to sleep and is not yet proved asleep: nothing uses it, and every sweep tries again until the provider says it is not running.
+ * that must be put to sleep and is not yet proved asleep: nothing uses it, and every sweep tries again until the provider says it is not running. `packing` is one being packed away into cold storage (its copy is made and proved before it is deleted); `cold` is one that is gone and only its copies remain.
  */
-export const MACHINE_STATES = ['none', 'waking', 'resting', 'working', 'cold', 'broken', 'restoring', 'stopped', 'stopping'] as const;
+export const MACHINE_STATES = ['none', 'waking', 'resting', 'working', 'cold', 'broken', 'restoring', 'stopped', 'stopping', 'packing'] as const;
 export type MachineState = (typeof MACHINE_STATES)[number];
 
 export const JOB_STATUSES = ['queued', 'running', 'waiting', 'done', 'stopped', 'failed'] as const;
@@ -22,6 +22,13 @@ export type QueuedFor = (typeof QUEUED_FOR)[number];
 /** Why a job stopped before it finished. `unanswered`: it waited for a person to take over and nobody did within the wait a super admin set. `rule`: a rule the person said in chat (no more than $1 a month, only my own accounts) did not let it take more room. */
 export const ENDED_BY = ['person', 'allowance', 'pool', 'off', 'deleted', 'error', 'unanswered', 'rule'] as const;
 export type EndedBy = (typeof ENDED_BY)[number];
+
+/**
+ * A job that ended on our side, so none of what it ran is the person's: it failed, or it was stopped by an error (the machine would not
+ * start or could not be reached, the agent's turn broke, the worker was lost and its room lapsed). The books and Activity both ask this,
+ * so the two cannot disagree. Everything else that ends a job (done, stopped by the person, out of room, nobody answered) is theirs.
+ */
+export const givenBackJob = (status: string, endedBy: string | null | undefined): boolean => status === 'failed' || (status === 'stopped' && endedBy === 'error');
 
 /** What a job waits for: the person's step. */
 export const WAITING_FOR = ['details', 'signin', 'upload', 'pay', 'submit', 'answer'] as const;
@@ -62,3 +69,6 @@ export function costOfSeconds(seconds: number, microsPerMinute: number | null): 
 export function roomFor(minutes: number, microsPerMinute: number | null): number {
   return Math.max(1, Math.ceil(minutes * (microsPerMinute ?? 0)));
 }
+
+/** The longest one cold-storage run (a pack-away, a proof, a drill) may last: a run still open after this long was stopped with its server, and is closed at this length. */
+export const COLD_RUN_MAX_MS = 6 * 60 * 60 * 1000;

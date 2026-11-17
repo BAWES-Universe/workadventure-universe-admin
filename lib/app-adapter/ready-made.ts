@@ -4,18 +4,20 @@ import { getAdapter, AdapterError, type LinkAnswer } from '@/lib/app-adapter';
 import { readReadyMadeApps } from '@/lib/app-adapter/settings';
 import { createConnection } from '@/lib/app-connections';
 import { confirmReadyMade } from '@/lib/app-adapter/confirm';
-import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
+import { getMeterSettings } from '@/lib/meter';
+import { recordAppUseWithinCap } from '@/lib/app-use-cap';
 import { personKeyOf } from '@/lib/meter-values';
 import { priceCall } from '@/lib/composio-rates';
 import { readComposioBilling } from '@/lib/composio-billing';
 import { truncateDetail, MAX_TOOL_PAGES } from '@/lib/mcp/test-result';
 import { getGitHubApp } from '@/lib/github/app';
+import { appCallIsPaused } from '@/lib/capability-pause';
 import { routeForRun, type RunRoute } from '@/lib/app-routes';
 import type { OwnAppVersion } from '@/lib/app-routes/own-versions';
 
 /**
- * Ready-made apps through the adapter (game #2001, step 8). Everything here answers "not there" while the adapter is off, which
- * is always until Khalid says otherwise, so nothing of it shows anywhere. Connecting an app never makes a computer.
+ * Ready-made apps through the adapter (game #2001, step 8). Everything here answers "not there" while the adapter is off (no
+ * COMPOSIO_API_KEY), so nothing of it shows anywhere until the key is set. Connecting an app never makes a computer.
  *
  * Which apps, and the adapter's sign-in setup for each, are a super admin setting (settings.ts), never in code.
  */
@@ -135,7 +137,7 @@ async function meterUse(input: { botId: string; ownerId: string; toolkit: string
   const ownTop = input.route?.provider === 'universe' ? input.route.own?.topPriceMicros ?? null : null;
   const cost = provider === 'universe' ? (ownTop === null ? null : steps * ownTop) : settings.appUseMicros === null ? priced.listMicros : steps * settings.appUseMicros;
   const eventId = `app:${input.botId}:${input.callId}`;
-  const recorded = await recordMeterEvent({
+  const recorded = await recordAppUseWithinCap({
     // Per Brick: a call id is only known to be unique for the one that made it, so two Bricks never count as one call
     eventId,
     kind: 'app_use',
@@ -197,9 +199,12 @@ async function appIsOn(toolkit: string): Promise<boolean> {
   return (await readyMadeApp(toolkit))?.enabled === true;
 }
 
+/** What a person is told when the month's spending stop holds a use back: plain words, and nothing was asked of the App. */
+export const APP_STOPPED_WORDS = 'Apps are resting right now: the month’s limit for using them has been reached. Nothing was done. Try again later.';
+
 export type ReadyMadeLinkOutcome =
   | { status: 'done'; answer: LinkAnswer }
-  | { status: 'off' | 'gone' | 'not_owner' | 'already_asked' | 'unavailable' | 'refused' };
+  | { status: 'off' | 'gone' | 'not_owner' | 'already_asked' | 'unavailable' | 'refused' | 'paused' };
 
 /** What may be sent to an app link through Orbit: opening a session, listing tools, and running one (which is counted like a use). */
 const LINK_METHODS = new Set(['initialize', 'notifications/initialized', 'tools/list', 'tools/call']);
@@ -214,6 +219,8 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
   if (!adapter) return { status: 'off' };
   const method = typeof input.message.method === 'string' ? input.message.method : '';
   if (!LINK_METHODS.has(method)) return { status: 'refused' };
+  // The team paused Apps: a call (a use) is refused before it is counted or sent. Opening a session and listing what an App can do are not uses.
+  if (method === 'tools/call' && (await appCallIsPaused(input.botId, input.callId))) return { status: 'paused' };
   const connection = await prisma.appConnection.findFirst({ where: { id: input.connectionId, ownerId: input.ownerId, source: 'ready_made' } });
   if (!connection || !connection.providerToolkit) return { status: 'gone' };
   if (!(await appIsOn(connection.providerToolkit))) return { status: 'off' };
@@ -231,6 +238,7 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
     if (typeof params.name !== 'string' || !params.name || !input.callId) return { status: 'refused' };
     callParams = { name: params.name, arguments: params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments) ? (params.arguments as Record<string, unknown>) : {} };
     written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit, tool: params.name, arguments: params.arguments, callId: input.callId, route });
+    if (written.stopped) return { status: 'done', answer: stoppedAnswer(input.message.id) };
     if (!written.recorded) return { status: 'already_asked' };
   }
   try {
@@ -245,6 +253,12 @@ export async function linkReadyMade(input: { botId: string; connectionId: string
     if (written) await recordOutcome(written.eventId, toolkit, written.provider, false);
     return { status: 'unavailable' };
   }
+}
+
+/** The answer of a link to a call that was held back: a tool result that says so (an error the Brick reads and tells the person), as the link itself would send one. */
+function stoppedAnswer(id: unknown): LinkAnswer {
+  const body = { jsonrpc: '2.0', id: typeof id === 'number' || typeof id === 'string' ? id : null, result: { content: [{ type: 'text', text: APP_STOPPED_WORDS }], isError: true } };
+  return { status: 200, contentType: 'application/json', sessionId: null, body: JSON.stringify(body) };
 }
 
 /**
@@ -276,7 +290,7 @@ async function answerFromOwnVersion(
 
 export type ReadyMadeUseOutcome =
   | { status: 'done'; ok: boolean; data: unknown }
-  | { status: 'off' | 'gone' | 'not_owner' | 'already_asked' | 'unavailable' };
+  | { status: 'off' | 'gone' | 'not_owner' | 'already_asked' | 'unavailable' | 'paused' };
 
 /**
  * One use of a ready-made app for the person who owns it. The meter is written FIRST, under an event id taken from the call's
@@ -287,6 +301,8 @@ export type ReadyMadeUseOutcome =
 export async function useReadyMade(input: { botId: string; connectionId: string; ownerId: string; tool: string; arguments: Record<string, unknown>; callId: string }): Promise<ReadyMadeUseOutcome> {
   const adapter = getAdapter();
   if (!adapter) return { status: 'off' };
+  // The team paused Apps: nothing is counted or sent
+  if (await appCallIsPaused(input.botId, input.callId)) return { status: 'paused' };
   const connection = await prisma.appConnection.findFirst({ where: { id: input.connectionId, ownerId: input.ownerId, source: 'ready_made' } });
   if (!connection || !connection.providerToolkit) return { status: 'gone' };
   if (!(await appIsOn(connection.providerToolkit))) return { status: 'off' };
@@ -302,6 +318,7 @@ export async function useReadyMade(input: { botId: string; connectionId: string;
   if (route.provider === 'universe' && !route.own) return { status: 'unavailable' };
 
   const written = await meterUse({ botId: input.botId, ownerId: input.ownerId, toolkit, tool: input.tool, arguments: input.arguments, callId: input.callId, direct: true, route });
+  if (written.stopped) return { status: 'done', ok: false, data: { error: APP_STOPPED_WORDS, stopped: true } };
   if (!written.recorded) return { status: 'already_asked' };
 
   try {

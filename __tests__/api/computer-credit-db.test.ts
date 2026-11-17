@@ -15,7 +15,7 @@ import { createBrick } from '@/lib/brick-create';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { recordMeterEvent } from '@/lib/meter';
 import { readMeterEvent } from '@/lib/meter-values';
-import { finishJob, giveComputer, renewJob, startJob, sweepComputers } from '@/lib/computer';
+import { finishJob, giveComputer, renewJob, startJob, stopJobFor, sweepComputers } from '@/lib/computer';
 import { authorizeModelCall, settleModelCall } from '@/lib/computer-calls';
 import { mintJobToken } from '@/lib/computer-token';
 import { computerCreditFor } from '@/lib/computer-credit';
@@ -380,11 +380,29 @@ run('computer jobs are paid from the credit lots, in a real database', () => {
       expect(await credit(sara.id, minutes(6))).toMatchObject({ availableMicros: 70_000 });
     });
 
-    it('a job that ended in an error after running keeps its charge: only a machine that never started is given back', async () => {
+    it('a job that failed on our side after running is given back too, once: the person is charged nothing for it, and the provider cost stays on the books', async () => {
       const sara = await person('sara');
       const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Ran, then failed' }, NOW);
       if (!started.ok) throw new Error('not started');
       await finishJob(started.job.id, 'failed', minutes(5));
+      await finishJob(started.job.id, 'failed', minutes(6));
+      const holds = await holdsOf(started.job.id);
+      expect(holds.map((hold) => hold.state)).toEqual(['settled']);
+      const refunds = await prisma.creditRefund.findMany({ where: { holdId: { in: holds.map((hold) => hold.id) } } });
+      expect(refunds).toHaveLength(1);
+      expect(refunds[0].reason).toBe('platform_failure');
+      expect(Number(refunds[0].amountMicros)).toBe(30_000);
+      expect(await credit(sara.id, minutes(7))).toMatchObject({ availableMicros: 100_000, inProgressMicros: 0 });
+      // What the provider billed is still the platform's cost
+      const event = await prisma.meterEvent.findUniqueOrThrow({ where: { eventId: `computer:${started.job.id}:time` } });
+      expect(Number(event.costMicros)).toBe(30_000);
+    });
+
+    it('a job the person stopped, or that ran out of room, is not given back: it is theirs', async () => {
+      const sara = await person('sara');
+      const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Stopped by her' }, NOW);
+      if (!started.ok) throw new Error('not started');
+      await stopJobFor(sara.brickId, sara.id, minutes(5));
       expect(await prisma.creditRefund.count({ where: { holdId: { in: (await holdsOf(started.job.id)).map((hold) => hold.id) } } })).toBe(0);
       expect((await credit(sara.id, minutes(6))).availableMicros).toBe(70_000);
     });

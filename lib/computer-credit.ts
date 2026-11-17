@@ -5,6 +5,7 @@ import { holdCredit, refundHold, releaseHold, settleHold } from '@/lib/credit-sp
 import { lockAll, lockOfPerson, usableLots, type Tx } from '@/lib/credit-store';
 import { PLATFORM_ACCOUNT_ID } from '@/lib/credit-funding';
 import { asNumber } from '@/lib/credit-values';
+import { givenBackJob } from '@/lib/computer-values';
 import { pickRunning } from '@/lib/meter-grants';
 import type { NoRoom } from '@/lib/meter-allowance';
 
@@ -346,7 +347,7 @@ export async function reconcileComputerHolds(now: Date, take = 200): Promise<num
   const jobHolds = await prisma.creditHold.findMany({ where: { category: 'computers', chargeClass: 'computer_job', state: 'held', jobKey: { not: null }, expiresAt: { lte: now } }, select: { jobKey: true }, distinct: ['jobKey'], take });
   for (const { jobKey } of jobHolds) {
     if (!jobKey) continue;
-    const job = await prisma.computerJob.findUnique({ where: { id: jobKey }, select: { status: true, secondsRun: true, botId: true, startedAt: true } });
+    const job = await prisma.computerJob.findUnique({ where: { id: jobKey }, select: { status: true, secondsRun: true, botId: true, startedAt: true, endedBy: true } });
     if (job && !['done', 'stopped', 'failed'].includes(job.status)) continue;
     if (!job || !job.startedAt) {
       await releaseJobCredit(jobKey, now);
@@ -355,6 +356,8 @@ export async function reconcileComputerHolds(now: Date, take = 200): Promise<num
       const event = await prisma.meterEvent.findUnique({ where: { eventId: `computer:${jobKey}:time` }, select: { costMicros: true, basis: true } });
       if (!event) continue;
       await settleJobCredit(jobKey, Math.max(1, asNumber(event.costMicros)), event.basis === 'measured', now);
+      // A job that failed on our side is not the person's: what it was charged goes back (once per hold)
+      if (givenBackJob(job.status, job.endedBy)) await giveBackJobCredit(jobKey, now);
     }
     closed++;
   }

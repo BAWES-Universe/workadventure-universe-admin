@@ -73,6 +73,12 @@ PLAY_URL=https://play.example.com
 NEXT_PUBLIC_PLAY_URL=https://play.example.com
 START_ROOM_URL=https://example.com/start.tmj
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+
+# Ready-made Apps run through Composio: they are on as soon as this is set, and absent without it (their routes answer 404).
+# The key stays in Orbit; nothing else (bot server, computers, browser) ever holds it.
+COMPOSIO_API_KEY=your-composio-api-key
+# Brick computers run on Agent37: on as soon as this is set, and absent without it.
+AGENT37_API_KEY=your-agent37-api-key
 ```
 
 ## Step 5: Configure Container Port

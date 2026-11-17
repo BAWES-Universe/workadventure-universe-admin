@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
+import { isPurged } from '@/lib/brick-purge';
 import { botContentReadDenied, getViewer, isPrivileged } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
 import { visibleUserUuid } from '@/lib/visible-identity';
@@ -53,6 +54,11 @@ export async function POST(
         { error: 'Missing required fields: userUuid, messages, startedAt' },
         { status: 400, headers: corsHeaders(request) }
       );
+    }
+
+    // A Brick that was deleted for good keeps no chat, and nothing a bot server still holds for it is written back (audit F08)
+    if (await isPurged(botId)) {
+      return NextResponse.json({ conversationId: null, status: 'gone' }, { headers: corsHeaders(request) });
     }
 
     // Try to match userUuid to User table

@@ -58,6 +58,12 @@ const MINUTE = 60 * 1000;
 const POOL_LOCK = 'meter:pool';
 /** The room held for one model call inside a job (lib/computer-calls.ts): it is not another job running. */
 export const CALL_ROOM_PREFIX = 'computer:call:';
+/** The room held for the disk of a machine that is about to be made: it is not a job running either, and it belongs to no person's allowance. */
+export const DISK_ROOM_PREFIX = 'computer:diskroom:';
+/** One room for each try of a job: a try that loses the writer's place gives back only its own, never the room of the one that won. */
+/** One room for the disk of one try to start a job's machine: `attempt` (the try's own moment, as for the job's room) keeps two tries of the same job from giving each other's room back. */
+export const diskRoomKey = (botId: string, jobId: string, attempt?: number) => `${DISK_ROOM_PREFIX}${botId}:${jobId}${attempt === undefined ? '' : `:${attempt}`}`;
+const isNoJob = (key: string) => key.startsWith(CALL_ROOM_PREFIX) || key.startsWith(DISK_ROOM_PREFIX);
 
 const viewOf = (row: { reservationKey: string; personKey: string; botId: string | null; jobId: string | null; amountMicros: bigint; state: string; expiresAt: Date; renewals: number; settledMicros: bigint | null }): Reservation => ({
   key: row.reservationKey,
@@ -104,6 +110,12 @@ function stillCounts(now: Date): Prisma.MeterReservationWhereInput {
   return { state: 'held', OR: [{ expiresAt: { gt: now } }, { createdAt: { gte: monthOf(now).start } }] };
 }
 
+/** What keeping this many bytes costs for a month at the storage Limit: a gigabyte is 10^9 bytes, rounded up in whole millionths of a dollar, in BigInt so a very large disk cannot lose a digit. */
+export function storageMonthMicros(bytes: bigint | number, settings: Pick<MeterSettings, 'storageMicrosPerGbMonth'>): number {
+  const giga = BigInt(1_000_000_000);
+  return Number((BigInt(bytes) * BigInt(settings.storageMicrosPerGbMonth ?? 0) + giga - BigInt(1)) / giga);
+}
+
 /** The computer pool's envelope at a moment. `settings` must have its money set (see `missingSettings`). */
 export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Promise<Envelope> {
   const month = monthOf(now);
@@ -129,10 +141,7 @@ export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Pr
     else lapsed += Number(row.amountMicros);
   }
   // A gigabyte is 10^9 bytes; rounded up in whole millionths of a dollar, and in BigInt so a very large disk cannot lose a digit
-  const bytes = kept[0]?.bytes ?? BigInt(0);
-  const perGb = BigInt(settings.storageMicrosPerGbMonth ?? 0);
-  const giga = BigInt(1_000_000_000);
-  const keptStorageMicros = Number((bytes * perGb + giga - BigInt(1)) / giga);
+  const keptStorageMicros = storageMonthMicros(kept[0]?.bytes ?? BigInt(0), settings);
   const committedMicros = asNumber(settled._sum.costMicros);
   const unsettledMicros = asNumber(unsettled._sum.costMicros) + lapsed;
   const reserveMicros = settings.reserveMicros ?? 0;
@@ -146,7 +155,7 @@ export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Pr
     unknownEvents: unknown,
     chatMicros: asNumber(chat._sum.costMicros),
     // The room held for one model call inside a job is not another job running
-    jobsRunning: held.filter((row) => row.expiresAt > now && !row.reservationKey.startsWith(CALL_ROOM_PREFIX)).length,
+    jobsRunning: held.filter((row) => row.expiresAt > now && !isNoJob(row.reservationKey)).length,
   };
 }
 
@@ -177,7 +186,7 @@ async function fits(tx: Tx, personId: string, extraMicros: number, now: Date, se
   }
   const envelope = await envelopeIn(tx, now, settings);
   if (opts.newJob) {
-    const mine = await tx.meterReservation.count({ where: { personKey: `person:${personId}`, state: 'held', expiresAt: { gt: now }, NOT: { reservationKey: { startsWith: CALL_ROOM_PREFIX } } } });
+    const mine = await tx.meterReservation.count({ where: { personKey: `person:${personId}`, state: 'held', expiresAt: { gt: now }, NOT: [{ reservationKey: { startsWith: CALL_ROOM_PREFIX } }, { reservationKey: { startsWith: DISK_ROOM_PREFIX } }] } });
     if (mine >= (settings.atOnceMember ?? 0) || envelope.jobsRunning >= (settings.atOnceAll ?? 0)) return { ok: false, reason: 'busy' };
   }
   if (envelope.totalMicros + extraMicros > (settings.poolCeilingMicros ?? 0)) return { ok: false, reason: 'pool' };
@@ -226,6 +235,36 @@ export async function reserveRoom(
       },
     });
     return { ok: true, reservation: viewOf(row), created: true };
+  });
+}
+
+/**
+ * Takes room in the pool for the disk of a machine that is about to be made, before anything is made (a hard stop: a disk the pool cannot carry
+ * is never bought). The disk is billed whole for as long as the machine exists, so what the pool must hold is one month of it at the storage
+ * Limit. The room belongs to no person (a disk is Universe's, not a member's allowance) and is released once the machine is made and its disk is
+ * in the books as kept storage, or when the making fails. Asked again for the same job it is the same room (two jobs of one Brick starting together each hold their own: the pool counts both for a moment, the safe way round). Never throws for "no room".
+ */
+export async function reserveDiskRoom(input: { botId: string; jobId: string; bytes: number; attempt?: number }, now: Date = new Date()): Promise<{ ok: true } | NoRoom> {
+  if (!Number.isSafeInteger(input.bytes) || input.bytes <= 0) return { ok: true };
+  const key = diskRoomKey(input.botId, input.jobId, input.attempt);
+  return prisma.$transaction(async (tx): Promise<{ ok: true } | NoRoom> => {
+    await lockPool(tx);
+    const settings = await getMeterSettings(tx);
+    const missing = missingSettings(settings);
+    if (missing.length > 0) return { ok: false, reason: 'not_set', missing };
+    const amountMicros = storageMonthMicros(input.bytes, settings);
+    const already = await tx.meterReservation.findUnique({ where: { reservationKey: key } });
+    // Room that is still held is this room; room that was released or lapsed is not, and is asked for anew
+    if (already && already.state === 'held' && already.expiresAt > now) return { ok: true };
+    // The pool is asked even for a price of 0, so a pool that is already over its ceiling takes no new machine
+    const envelope = await envelopeIn(tx, now, settings);
+    if (envelope.totalMicros + amountMicros > (settings.poolCeilingMicros ?? 0)) return { ok: false, reason: 'pool' };
+    // A price of 0 has nothing to hold (a reservation is for a sum above 0): the pool was asked all the same
+    if (amountMicros <= 0) return { ok: true };
+    const data = { personKey: 'system:disk', personId: null, botId: input.botId, jobId: null, amountMicros: BigInt(amountMicros), state: 'held', expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE), renewals: 0, settledMicros: null, closedAt: null, createdAt: now };
+    if (already) await tx.meterReservation.update({ where: { id: already.id }, data });
+    else await tx.meterReservation.create({ data: { reservationKey: key, ...data } });
+    return { ok: true };
   });
 }
 

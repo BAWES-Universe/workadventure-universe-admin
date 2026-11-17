@@ -134,6 +134,8 @@ export interface BrickLimits {
   sharedJobMinutes: number;
   /** Templates in each of the three short lists under "Start from a template" (game #2008): starred, picks, and Bricks the person has met. */
   templateList: number;
+  /** Days a Brick's computer sits unused before it is packed into our own storage (cold storage) and made again on the next use. Its files and its Files list stay. */
+  coldStorageDays: number;
 }
 
 /** What a super admin sets, all in one place. */
@@ -151,7 +153,7 @@ export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, 
 export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 };
 export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0, guestDays: 1 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
-export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPerPerson: 300, keyCallsPlatform: 20_000, checkoutsPerVisitor: 10, checkoutsPerPage: 100, checkoutsPerOwner: 300, checkoutOpenHours: 24, latePaymentHours: 72, paymentCheckSeconds: 5, paymentLooksPerOwner: 2_000, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10, templateList: 10 };
+export const BRICK_LIMITS_RECOMMENDED: BrickLimits = { undoDays: 7, offerAfter: 3, guestReplies: 10, universePool: 200, visitEndsMinutes: 10, itemsPerPerson: 20, shortestRepeat: 30, runsPerDay: 24, longestRun: 10, computerWait: 60, scheduledCardWait: 1_440, snooze: 60, failuresBeforeTelling: 3, goalsShare: 30, appsPerBot: 5, keyFormMinutes: 30, keyTries: 5, keyCallSeconds: 20, keyAnswerKb: 256, keyCallsPerPerson: 300, keyCallsPlatform: 20_000, checkoutsPerVisitor: 10, checkoutsPerPage: 100, checkoutsPerOwner: 300, checkoutOpenHours: 24, latePaymentHours: 72, paymentCheckSeconds: 5, paymentLooksPerOwner: 2_000, sharedUsesEveryone: 20, sharedUsesPerPerson: 3, sharedTriesPerHour: 60, sharedRetries: 2, sharedJobsAtOnce: 3, sharedJobMinutes: 10, templateList: 10, coldStorageDays: 14 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
 export const FAIR_USAGE_WINDOW_HOURS = 5;
 
@@ -245,6 +247,7 @@ const BRICK_RANGES: Record<keyof BrickLimits, Range> = {
   sharedJobsAtOnce: { min: 1, max: 1_000, whole: true },
   sharedJobMinutes: { min: 1, max: 1_440, whole: true },
   templateList: { min: 1, max: 100, whole: true },
+  coldStorageDays: { min: 1, max: 3_650, whole: true },
 };
 
 /** The values each group can hold, for the pages to say ("Between 1 and 100 files") before anything is sent. */

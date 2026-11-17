@@ -6,6 +6,22 @@ const stored = new Map<string, Buffer>();
 let abortCalled = false;
 let failUpload = false;
 
+let purged = false;
+const writes = new Map<string, { botId: string; expiresAt: Date }>();
+let failDeletes = false;
+jest.mock('@/lib/db', () => ({
+  prisma: {
+    brickPurge: { count: async () => (purged ? 1 : 0) },
+    savedCopyWrite: {
+      create: async ({ data }: { data: { botId: string; expiresAt: Date } }) => {
+        const id = `w${writes.size + 1}-${data.botId}`;
+        writes.set(id, data);
+        return { id };
+      },
+      deleteMany: async ({ where }: { where: { id: string } }) => ({ count: writes.delete(where.id) ? 1 : 0 }),
+    },
+  },
+}));
 jest.mock('@/lib/artifact-storage', () => ({
   artifactBucket: () => ({
     bucket: 'b',
@@ -16,7 +32,15 @@ jest.mock('@/lib/artifact-storage', () => ({
           stored.set(command.input.Key, stored.get((command.input.CopySource as string).replace('b/', '')) as Buffer);
           return {};
         }
+        if (kind === 'ListObjectsV2Command') {
+          const input = command.input as unknown as { Prefix: string; ContinuationToken?: string };
+          // As a real bucket: the token is the last key read, so deleting while listing never skips one. Two to a page.
+          const keys = [...stored.keys()].filter((key) => key.startsWith(input.Prefix) && (!input.ContinuationToken || key > input.ContinuationToken)).sort();
+          const page = keys.slice(0, 2);
+          return { Contents: page.map((Key) => ({ Key })), IsTruncated: keys.length > 2, NextContinuationToken: page[page.length - 1] };
+        }
         if (kind === 'DeleteObjectCommand') {
+          if (failDeletes) throw new Error('bucket would not delete');
           stored.delete(command.input.Key);
           return {};
         }
@@ -47,7 +71,7 @@ jest.mock('@aws-sdk/lib-storage', () => ({
   },
 }));
 
-import { COPY_OVERHEAD, openSavedCopy, savedCopyKey, savedCopyOf, storeSavedCopy } from '@/lib/agent37/saved-copies';
+import { COPY_OVERHEAD, deleteSavedCopy, openSavedCopy, savedCopyKey, savedCopyOf, storeSavedCopy } from '@/lib/agent37/saved-copies';
 
 const webStream = (...parts: Buffer[]) => Readable.toWeb(Readable.from(parts)) as unknown as ReadableStream<Uint8Array>;
 
@@ -58,6 +82,9 @@ beforeEach(() => {
   stored.clear();
   abortCalled = false;
   failUpload = false;
+  purged = false;
+  writes.clear();
+  failDeletes = false;
 });
 
 describe('the saved copy of a Brick computer’s files', () => {
@@ -70,6 +97,62 @@ describe('the saved copy of a Brick computer’s files', () => {
     expect(file.length).toBe(archive.length + COPY_OVERHEAD);
     expect(info.bytes).toBe(archive.length);
     expect(openSavedCopy(file).equals(archive)).toBe(true);
+  });
+
+  it('does not leave a copy behind for a Brick that was purged while its save was running: the purge marker is there by the time the copy lands', async () => {
+    // The purge wrote its marker and deleted the bucket's keys for the Brick before this save's copy landed
+    purged = true;
+    await expect(storeSavedCopy('bot-gone', webStream(archive))).rejects.toThrow('deleted while its files were being saved');
+    expect(await savedCopyOf('bot-gone')).toBeNull();
+    expect([...stored.keys()]).toEqual([]);
+  });
+
+  it('writes the save down before it starts and lets go of it once the copy is checked, so a purge can always tell a save is under way', async () => {
+    let seenDuring = 0;
+    const slow = Readable.from(
+      (async function* () {
+        seenDuring = writes.size;
+        yield archive;
+      })(),
+    );
+    await storeSavedCopy('bot-1', Readable.toWeb(slow) as unknown as ReadableStream<Uint8Array>);
+    expect(seenDuring).toBe(1);
+    expect(writes.size).toBe(0);
+  });
+
+  it('refuses to start for a Brick already purged, leaving nothing in the bucket and no row behind', async () => {
+    purged = true;
+    await expect(storeSavedCopy('bot-gone', webStream(archive))).rejects.toThrow('deleted while its files were being saved');
+    expect(stored.size).toBe(0);
+    expect(writes.size).toBe(0);
+  });
+
+  it('takes a copy back that landed after the purge, and lets go of its row only then', async () => {
+    const stream = Readable.from(
+      (async function* () {
+        yield archive;
+        purged = true;
+      })(),
+    );
+    await expect(storeSavedCopy('bot-late', Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>)).rejects.toThrow('deleted while its files were being saved');
+    expect(stored.has(savedCopyKey('bot-late'))).toBe(false);
+    expect(writes.size).toBe(0);
+  });
+
+  it('keeps its row when a copy that landed after the purge could not be taken away again, so the purge still finds it', async () => {
+    // The copy lands, the marker is seen, and the bucket will not delete: the copy may still be there, so the row stays for the purge to settle
+    const real = purged;
+    expect(real).toBe(false);
+    const stream = Readable.from(
+      (async function* () {
+        yield archive;
+        purged = true;
+        failDeletes = true;
+      })(),
+    );
+    await expect(storeSavedCopy('bot-late', Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>)).rejects.toThrow();
+    expect(writes.size).toBe(1);
+    expect(stored.has(savedCopyKey('bot-late'))).toBe(true);
   });
 
   it('refuses a copy that was changed', async () => {
@@ -104,5 +187,19 @@ describe('the saved copy of a Brick computer’s files', () => {
 
   it('says nothing is saved for a Brick that has no copy', async () => {
     expect(await savedCopyOf('nobody')).toBeNull();
+  });
+
+  it('deletes everything kept of a Brick for good: the saved copy and every staged object, across pages, and nobody else\'s', async () => {
+    stored.set(savedCopyKey('bot-1'), Buffer.from('saved'));
+    stored.set('computer-saves/bot-1.attempt-a.ubc.new', Buffer.from('staged a'));
+    stored.set('computer-saves/bot-1.attempt-b.ubc.new', Buffer.from('staged b'));
+    stored.set('computer-saves/bot-1.attempt-c.ubc.new', Buffer.from('staged c'));
+    stored.set(savedCopyKey('bot-10'), Buffer.from('another Brick whose id starts the same'));
+    stored.set(savedCopyKey('bot-2'), Buffer.from('another Brick'));
+    await deleteSavedCopy('bot-1');
+    expect([...stored.keys()].sort()).toEqual([savedCopyKey('bot-10'), savedCopyKey('bot-2')].sort());
+    expect(await savedCopyOf('bot-1')).toBeNull();
+    // Asked for a Brick with nothing kept it is the same answer
+    await expect(deleteSavedCopy('bot-1')).resolves.toBeUndefined();
   });
 });

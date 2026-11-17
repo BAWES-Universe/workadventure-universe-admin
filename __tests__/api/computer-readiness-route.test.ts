@@ -6,17 +6,23 @@ import { getSessionUser } from '@/lib/auth-session';
 import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provider';
 import { getMeterSettings } from '@/lib/meter';
 import { isWindingDown } from '@/lib/computer';
+import { reconcileCheck } from '@/lib/computer-reconcile';
+import { computersArePaused } from '@/lib/capability-pause';
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/computer-provider', () => ({ getComputerProvider: jest.fn() }));
 jest.mock('@/lib/meter', () => ({ getMeterSettings: jest.fn() }));
 jest.mock('@/lib/computer', () => ({ isWindingDown: jest.fn() }));
+jest.mock('@/lib/computer-reconcile', () => ({ reconcileCheck: jest.fn() }));
+jest.mock('@/lib/capability-pause', () => ({ computersArePaused: jest.fn() }));
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 
 const session = getSessionUser as jest.Mock;
 const provider = getComputerProvider as jest.Mock;
 const settings = getMeterSettings as jest.Mock;
 const winding = isWindingDown as jest.Mock;
+const books = reconcileCheck as jest.Mock;
+const paused = computersArePaused as jest.Mock;
 const before = process.env.SUPER_ADMINS;
 const FULL = { memberAllowanceMicros: 1, poolCeilingMicros: 1, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 1, atOnceAll: 1, renewMinutes: 10 };
 const real = (checks: Array<{ name: string; ok: boolean; detail: string }>) => ({ kind: 'real', checkup: async () => checks }) as unknown as ComputerProvider;
@@ -27,6 +33,8 @@ beforeEach(() => {
   session.mockResolvedValue({ id: 'u1', email: 'team@example.test' });
   settings.mockResolvedValue(FULL);
   winding.mockResolvedValue(false);
+  books.mockResolvedValue({ name: 'books and bill', ok: true, detail: 'On 2026-11-15 our books and the provider’s bill matched' });
+  paused.mockResolvedValue(false);
 });
 afterAll(() => {
   if (before === undefined) delete process.env.SUPER_ADMINS;
@@ -45,7 +53,17 @@ describe('the readiness check', () => {
     provider.mockReturnValue(real([{ name: 'agent37 key', ok: true, detail: 'The Agent37 key works' }]));
     const answer = await computerReadiness();
     expect(answer.ready).toBe(true);
-    expect(answer.checks.map((check) => check.name)).toEqual(['provider', 'agent37 key', 'usage controls', 'wind-down']);
+    expect(answer.checks.map((check) => check.name)).toEqual(['provider', 'agent37 key', 'usage controls', 'books and bill', 'wind-down', 'pause']);
+  });
+
+  it('says when the books did not match the provider’s bill, and when that check could not be read', async () => {
+    provider.mockReturnValue(real([]));
+    books.mockResolvedValue({ name: 'books and bill', ok: false, detail: 'On 2026-11-15 our books and the provider’s bill did not match (unbooked_time)' });
+    const mismatch = await computerReadiness();
+    expect(mismatch.ready).toBe(false);
+    expect(mismatch.checks.find((check) => check.name === 'books and bill')).toMatchObject({ ok: false, detail: expect.stringContaining('did not match') });
+    books.mockRejectedValue(new Error('db down'));
+    expect((await computerReadiness()).checks.find((check) => check.name === 'books and bill')).toMatchObject({ ok: false, detail: expect.stringContaining('could not be read') });
   });
 
   it('is not ready, and says why, without a provider, with a check that failed, with controls not set, or during a wind-down', async () => {
