@@ -47,6 +47,8 @@ export interface VisitLine {
 export interface StateLine {
   kind: 'on' | 'off' | 'cut';
   at: number;
+  /** For an `off`: false when the browser itself was gone (nothing could be opened), otherwise the browser was still there and unwatched. */
+  open?: boolean;
 }
 
 export interface ReadBack {
@@ -54,6 +56,8 @@ export interface ReadBack {
   now: number | null;
   /** The listener's last connection line before the read began. */
   state: 'on' | 'off' | 'none';
+  /** The last connection line before the read, when it was an `off`: the browser was still there (see StateLine.open). */
+  stateOpen: boolean;
   alive: boolean;
   lines: Array<VisitLine | StateLine>;
   /** Lines the machine left out because there were too many. */
@@ -82,11 +86,34 @@ const CUT_PART = '\u2026';
 const HOST = /^(\[[0-9a-f:.]+\]|[a-z0-9_.-]+)(:[0-9]{1,5})?$/;
 const NOT_PATH = /[\u0000-\u0020\u007f]/;
 
-function part(value: string): string {
-  if (HEX.test(value)) return CUT_PART;
+function isCode(value: string): boolean {
+  if (HEX.test(value)) return true;
   // A long run of mixed case is a random code (a readable address is lower case with hyphens); a long run with no hyphen that mixes letters and digits is one too
-  if (TOKEN.test(value) && /[A-Z]/.test(value) && /[a-z]/.test(value)) return CUT_PART;
-  if (PLAIN_TOKEN.test(value) && /[0-9]/.test(value) && /[A-Za-z]/.test(value)) return CUT_PART;
+  if (TOKEN.test(value) && /[A-Z]/.test(value) && /[a-z]/.test(value)) return true;
+  return PLAIN_TOKEN.test(value) && /[0-9]/.test(value) && /[A-Za-z]/.test(value);
+}
+
+/** A part is judged as the page reads it: a code written with percent signs (`%41bC...`, or twice over) is the same code, and so is one behind an encoded slash. */
+function part(value: string): string {
+  let seen = value;
+  for (let round = 0; round < 4; round++) {
+    if (seen.split('/').some(isCode)) return CUT_PART;
+    let next: string;
+    try {
+      next = decodeURIComponent(seen);
+    } catch {
+      // A broken escape: the parts that are whole are judged as they are
+      next = seen.replace(/%[0-9a-fA-F]{2}/g, (escape) => {
+        try {
+          return decodeURIComponent(escape);
+        } catch {
+          return escape;
+        }
+      });
+    }
+    if (next === seen) break;
+    seen = next;
+  }
   return value;
 }
 
@@ -119,7 +146,7 @@ function lineOf(text: string): VisitLine | StateLine | null {
   const entry = raw as Record<string, unknown>;
   const at = num(entry.at);
   if (at === null) return null;
-  if (entry.k === 'on' || entry.k === 'off' || entry.k === 'cut') return { kind: entry.k, at };
+  if (entry.k === 'on' || entry.k === 'off' || entry.k === 'cut') return entry.k === 'off' ? { kind: 'off', at, open: entry.b !== 0 } : { kind: entry.k, at };
   if (entry.k !== 'visit' && entry.k !== 'post') return null;
   const host = cleanHost(entry.h);
   const path = cleanPath(entry.p);
@@ -131,13 +158,14 @@ function lineOf(text: string): VisitLine | StateLine | null {
 
 /** What `universe-visits read` printed. Nothing in it is trusted: a line that is not exactly one of ours is dropped. */
 export function parseReadBack(stdout: string): ReadBack {
-  const back: ReadBack = { now: null, state: 'none', alive: false, lines: [], more: 0, ended: false };
+  const back: ReadBack = { now: null, state: 'none', stateOpen: false, alive: false, lines: [], more: 0, ended: false };
   for (const row of stdout.split('\n')) {
     if (row.startsWith('line=')) {
       const line = lineOf(row.slice(5));
       if (line) back.lines.push(line);
     } else if (row.startsWith('now=')) back.now = num(Number(row.slice(4)));
     else if (row.startsWith('state=')) back.state = row.slice(6) === 'on' ? 'on' : row.slice(6) === 'off' ? 'off' : 'none';
+    else if (row.startsWith('open=')) back.stateOpen = row.trim() === 'open=1';
     else if (row.startsWith('alive=')) back.alive = row.trim() === 'alive=1';
     else if (row.startsWith('more=')) back.more = num(Number(row.slice(5))) ?? 0;
     else if (row.trim() === 'end=1') back.ended = true;
@@ -167,8 +195,12 @@ export function shapeVisits(input: { back: ReadBack; startedAt: Date; endedAt: D
   // again without the browser going away, and a cut is lines dropped to keep the file small
   let current = back.state;
   let sawState = back.state !== 'none';
+  // While the listener was not connected but the browser was still there, a page could be opened that nobody saw: when that stretch touches
+  // the job's time the record is partial. It starts at the `off` line (or before the read, for the state it began with).
+  let unseenFrom: number | null = back.state === 'off' && back.stateOpen ? -Infinity : null;
   const hands = [...input.hands].sort((a, b) => a.at.getTime() - b.at.getTime());
   const rows: VisitRow[] = [];
+  let lastEra = -1;
   for (const line of back.lines) {
     const at = ours(line.at);
     if (line.kind === 'on' || line.kind === 'off' || line.kind === 'cut') {
@@ -176,6 +208,9 @@ export function shapeVisits(input: { back: ReadBack; startedAt: Date; endedAt: D
       if (at >= from && at <= to) {
         if (line.kind === 'cut' || (line.kind === 'on' && current === 'on')) partial = true;
       }
+      if (line.kind === 'on' && unseenFrom !== null && at >= from && unseenFrom <= to) partial = true;
+      if (line.kind === 'off') unseenFrom = line.open === false ? null : at;
+      else if (line.kind === 'on') unseenFrom = null;
       if (line.kind !== 'cut') current = line.kind;
       continue;
     }
@@ -183,12 +218,15 @@ export function shapeVisits(input: { back: ReadBack; startedAt: Date; endedAt: D
     // Only a page or a post is left here (the connection lines were handled above)
     if (line.kind !== 'visit' && line.kind !== 'post') continue;
     let by: 'brick' | 'person' = 'brick';
+    // Which stretch between two changes of hands this is: the same page seen on both sides of a take-over is two rows, not one
+    let era = 0;
     for (const note of hands) {
       if (note.at.getTime() > at) break;
       by = note.by;
+      era++;
     }
     const last = rows[rows.length - 1];
-    if (last && last.kind === line.kind && last.method === line.method && last.host === line.host && last.path === line.path && last.failed === line.failed && last.form === line.form && last.by === by) {
+    if (last && era === lastEra && last.kind === line.kind && last.method === line.method && last.host === line.host && last.path === line.path && last.failed === line.failed && last.form === line.form && last.by === by) {
       last.count += line.count;
       continue;
     }
@@ -196,8 +234,11 @@ export function shapeVisits(input: { back: ReadBack; startedAt: Date; endedAt: D
       partial = true;
       break;
     }
+    lastEra = era;
     rows.push({ kind: line.kind, at: new Date(at), by, method: line.method, host: line.host, path: line.path, count: line.count, failed: line.failed, form: line.form });
   }
+  // Still not connected at the end, with the browser there: the rest of the job was not seen
+  if (unseenFrom !== null && current === 'off' && unseenFrom <= to) partial = true;
   // A listener that is not running when the job ends was not there for some of it
   if (!back.alive) {
     if (!sawState && rows.length === 0) return { rows, state: 'none' };
@@ -266,9 +307,14 @@ export async function recordVisits(job: { id: string; startedAt: Date | null }, 
   }
 }
 
+/** The most take-over notes one job's view carries; past it the view says it was cut and the record is shown as partial. */
+export const HANDS_MAX = 1000;
+
 export interface VisitsView {
   /** How well the record was taken: complete, partial, unread or none; null while the job has not ended. */
   state: VisitsState | null;
+  /** True when more notes were kept than are shown here (then `state` is never `complete`). */
+  truncated?: boolean;
   items: Array<{ kind: VisitKind | 'hands'; at: Date; by: 'brick' | 'person'; method: string | null; host: string | null; path: string | null; count: number; failed: boolean; form: boolean }>;
 }
 
@@ -276,10 +322,19 @@ export interface VisitsView {
 export async function visitsFor(botId: string, jobId: string): Promise<VisitsView | null> {
   const job = await prisma.computerJob.findFirst({ where: { id: jobId, botId }, select: { visitsState: true } });
   if (!job) return null;
-  const rows = await prisma.computerJobVisit.findMany({ where: { jobId }, orderBy: [{ at: 'asc' }, { id: 'asc' }], take: VISITS_MAX + 100 });
-  const state = job.visitsState === 'complete' || job.visitsState === 'partial' || job.visitsState === 'unread' || job.visitsState === 'none' ? job.visitsState : null;
+  // Pages and posts are at most VISITS_MAX when kept; the take-over notes have their own bound, so one kind never pushes the other out of the answer
+  const order = [{ at: 'asc' as const }, { id: 'asc' as const }];
+  const [seen, handed] = await Promise.all([
+    prisma.computerJobVisit.findMany({ where: { jobId, kind: { not: 'hands' } }, orderBy: order, take: VISITS_MAX + 1 }),
+    prisma.computerJobVisit.findMany({ where: { jobId, kind: 'hands' }, orderBy: order, take: HANDS_MAX + 1 }),
+  ]);
+  const truncated = seen.length > VISITS_MAX || handed.length > HANDS_MAX;
+  const rows = [...seen.slice(0, VISITS_MAX), ...handed.slice(0, HANDS_MAX)].sort((a, b) => a.at.getTime() - b.at.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const kept = job.visitsState === 'complete' || job.visitsState === 'partial' || job.visitsState === 'unread' || job.visitsState === 'none' ? job.visitsState : null;
+  const state = truncated && kept === 'complete' ? 'partial' : kept;
   return {
     state,
+    ...(truncated ? { truncated } : {}),
     items: rows.map((row) => ({
       kind: row.kind === 'post' ? 'post' : row.kind === 'hands' ? 'hands' : 'visit',
       at: row.at,

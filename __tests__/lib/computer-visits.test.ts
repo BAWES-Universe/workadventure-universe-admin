@@ -11,8 +11,8 @@ const started = new Date(T0);
 const ended = new Date(T0 + 600_000);
 
 const line = (over: Record<string, unknown>) => `line=${JSON.stringify({ k: 'visit', at: T0 + 1000, m: 'GET', h: 'shop.example', p: '/a', n: 1, ...over })}`;
-const back = (rows: string[], head: Partial<{ now: number; state: string; alive: number; more: number; end: boolean }> = {}) =>
-  [`now=${head.now ?? T0 + 700_000}`, `state=${head.state ?? 'on'}`, `alive=${head.alive ?? 1}`, ...(head.more ? [`more=${head.more}`] : []), ...rows, ...(head.end === false ? [] : ['end=1'])].join('\n') + '\n';
+const back = (rows: string[], head: Partial<{ now: number; state: string; open: number; alive: number; more: number; end: boolean }> = {}) =>
+  [`now=${head.now ?? T0 + 700_000}`, `state=${head.state ?? 'on'}`, `open=${head.open ?? 0}`, `alive=${head.alive ?? 1}`, ...(head.more ? [`more=${head.more}`] : []), ...rows, ...(head.end === false ? [] : ['end=1'])].join('\n') + '\n';
 
 const shape = (stdout: string, over: Partial<Parameters<typeof shapeVisits>[0]> = {}) =>
   shapeVisits({ back: parseReadBack(stdout), startedAt: started, endedAt: ended, before: T0 + 699_000, after: T0 + 701_000, hands: [], ...over });
@@ -31,6 +31,14 @@ describe('what is kept of an address', () => {
     expect(cleanPath('/files/v1-3fa9c2d41b7e8a905c6d1e2f/download')).toBe('/files/\u2026/download');
     expect(cleanPath('/af/AbCdEfGhIjKlMnOpQrStUvWxYz')).toBe('/af/\u2026');
     expect(cleanPath('/t/abcdefghijklmnop0123456789ab')).toBe('/t/\u2026');
+    // the same codes written with percent signs, twice over, or behind an encoded slash, are cut as well; a readable encoded part stays
+    expect(cleanPath('/reset/%41bCdEfGhIjKlMnOpQrStUvWxYz')).toBe('/reset/\u2026');
+    expect(cleanPath('/reset/%2541bCdEfGhIjKlMnOpQrStUvWxYz')).toBe('/reset/\u2026');
+    expect(cleanPath('/share/x%2F550e8400-e29b-41d4-a716-446655440000')).toBe('/share/\u2026');
+    // a broken escape is no code, and one whole escape next to it is still read
+    expect(cleanPath('/odd/%ZZ-readable')).toBe('/odd/%ZZ-readable');
+    expect(cleanPath('/reset/%ZZ/%41bCdEfGhIjKlMnOpQrStUvWxYz')).toBe('/reset/%ZZ/\u2026');
+    expect(cleanPath('/a%20readable%20part/%E2%9C%93')).toBe('/a%20readable%20part/%E2%9C%93');
     // a long readable address is kept: a private link is a mix of cases and digits, a slug is not
     expect(cleanPath('/how-to-apply-for-a-visa-in-2026-step-by-step')).toBe('/how-to-apply-for-a-visa-in-2026-step-by-step');
     for (const bad of ['cart', 'with space', '/tab\there', '/nul\u0000', '', 42, null]) expect(cleanPath(bad)).toBeNull();
@@ -107,6 +115,16 @@ describe('what a job keeps and how well it was recorded', () => {
     ]);
   });
 
+  it('does not make one row of the same page seen before and after a take-over that happened between', () => {
+    const { rows } = shape(back([line({ at: T0 + 5_000 }), line({ at: T0 + 12_000 }), line({ at: T0 + 40_000 })]), {
+      hands: [{ at: new Date(T0 + 10_000), by: 'person' }, { at: new Date(T0 + 30_000), by: 'brick' }],
+    });
+    expect(rows.map((row) => [row.by, row.count, row.at.getTime() - T0])).toEqual([['brick', 1, 5_000], ['person', 1, 12_000], ['brick', 1, 40_000]]);
+    // the same page twice inside one stretch is still one row
+    const same = shape(back([line({ at: T0 + 5_000 }), line({ at: T0 + 6_000 })]), { hands: [{ at: new Date(T0 + 10_000), by: 'person' }] }).rows;
+    expect(same.map((row) => [row.by, row.count])).toEqual([['brick', 2]]);
+  });
+
   it('marks what was opened while the person had the computer as theirs, and what comes after they gave it back as Brick’s', () => {
     const { rows } = shape(back([line({ at: T0 + 1_000, p: '/one' }), line({ at: T0 + 10_000, p: '/two' }), line({ at: T0 + 20_000, p: '/three' }), line({ at: T0 + 30_000, p: '/four' })]), {
       hands: [{ at: new Date(T0 + 30_000), by: 'brick' }, { at: new Date(T0 + 10_000), by: 'person' }],
@@ -114,9 +132,22 @@ describe('what a job keeps and how well it was recorded', () => {
     expect(rows.map((row) => [row.path, row.by])).toEqual([['/one', 'brick'], ['/two', 'person'], ['/three', 'person'], ['/four', 'brick']]);
   });
 
-  it('is complete for a quiet browser that was connected the whole time, and for one that went away and came back', () => {
+  it('is complete for a quiet browser that was connected the whole time, and for one that was gone (nothing could be opened) and came back', () => {
     expect(shape(back([])).state).toBe('complete');
-    expect(shape(back([line({ k: 'off', at: T0 + 100_000 }), line({ k: 'on', at: T0 + 110_000 })])).state).toBe('complete');
+    expect(shape(back([line({ k: 'off', at: T0 + 100_000, b: 0 }), line({ k: 'on', at: T0 + 110_000 })])).state).toBe('complete');
+  });
+
+  it('is partial when the listener lost the browser while it was still there, because a page opened in that stretch was not seen', () => {
+    // the browser stayed (b 1, or an older line that does not say) and the listener came back
+    expect(shape(back([line({ k: 'off', at: T0 + 100_000, b: 1 }), line({ k: 'on', at: T0 + 110_000 })])).state).toBe('partial');
+    expect(shape(back([line({ k: 'off', at: T0 + 100_000 }), line({ k: 'on', at: T0 + 110_000 })])).state).toBe('partial');
+    // it never came back before the job ended
+    expect(shape(back([line({ k: 'off', at: T0 + 100_000, b: 1 })])).state).toBe('partial');
+    // it was already not connected when the read began, and came back during the job
+    expect(shape(back([line({ k: 'on', at: T0 + 5_000 })], { state: 'off', open: 1 })).state).toBe('partial');
+    // a stretch before the job, or one that began after it, is not a gap in it
+    expect(shape(back([line({ k: 'off', at: T0 - 20_000, b: 1 }), line({ k: 'on', at: T0 - 10_000 })])).state).toBe('complete');
+    expect(shape(back([line({ k: 'off', at: T0 + 650_000, b: 1 }), line({ k: 'on', at: T0 + 660_000 })])).state).toBe('complete');
   });
 
   it('is partial when the listener was started again without the browser going away, or lines were cut, or it is not running, or the answer was cut short, or there were more', () => {

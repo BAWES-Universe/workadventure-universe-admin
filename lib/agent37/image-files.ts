@@ -304,7 +304,8 @@ export const UNIVERSE_VISITS = String.raw`#!/usr/bin/env python3
 #                                 machine's clock now, the last connection line before SINCE, whether the listener runs, and then the lines
 #
 # A line is a JSON object: {"k": "visit"|"post"|"on"|"off"|"cut", "at": ms, "m": method, "h": host, "p": path, "n": times in a row, "f": 1 if
-# the page did not load, "form": 1 if the post was a page's own form}. "on" and "off" say when the listener was connected to the browser, and
+# the page did not load, "form": 1 if the post was a page's own form}. "on" and "off" say when the listener was connected to the browser ("off"
+# says with "b" whether the browser was still there to be used), and
 # "cut" says older lines were dropped to keep the file small, so a gap in the record can be told from a quiet browser.
 import base64
 import hashlib
@@ -343,15 +344,26 @@ def now_ms():
     return int(time.time() * 1000)
 
 
-def segment(part):
-    # An address can carry a one-time code or a private link in its path (a reset or share link): a part that looks like one is not kept
+def is_code(part):
     if HEX.match(part):
-        return "…"
+        return True
     # A long run of mixed case is a random code (a readable address is lower case with hyphens); a long run with no hyphen that mixes letters and digits is one too
     if TOKEN.match(part) and re.search(r"[A-Z]", part) and re.search(r"[a-z]", part):
-        return "…"
-    if PLAIN_TOKEN.match(part) and re.search(r"[0-9]", part) and re.search(r"[A-Za-z]", part):
-        return "…"
+        return True
+    return bool(PLAIN_TOKEN.match(part) and re.search(r"[0-9]", part) and re.search(r"[A-Za-z]", part))
+
+
+def segment(part):
+    # An address can carry a one-time code or a private link in its path (a reset or share link): a part that looks like one is not kept.
+    # It is judged as the page reads it: a code written with percent signs (once or twice over, or behind an encoded slash) is the same code.
+    seen = part
+    for _ in range(4):
+        if any(is_code(piece) for piece in seen.split("/")):
+            return "…"
+        decoded = urllib.parse.unquote(seen)
+        if decoded == seen:
+            break
+        seen = decoded
     return part
 
 
@@ -382,7 +394,7 @@ def last_state(lines):
         except Exception:
             continue
         if entry.get("k") in ("on", "off"):
-            return entry["k"]
+            return entry
     return None
 
 
@@ -437,7 +449,10 @@ def read(since):
             continue
         (wanted if at >= since else before).append(line)
     print("now=%d" % now_ms())
-    print("state=%s" % (last_state(before) or "none"))
+    state = last_state(before)
+    print("state=%s" % (state["k"] if state else "none"))
+    # An "off" with the browser still there is a stretch nobody was watching (see run)
+    print("open=%d" % (1 if state and state["k"] == "off" and state.get("b") != 0 else 0))
     print("alive=%d" % (1 if alive() else 0))
     for line in wanted[:READ_LINES]:
         print("line=" + line)
@@ -703,8 +718,14 @@ def run():
         except Exception:
             pass
         log.flush()
-        # Said when the browser was not there to listen to (a crash, or the cleanup between jobs)
-        log.write({"k": "off", "at": now_ms()})
+        # Said when the listener lost the browser: "b" is 0 when the browser itself was gone (a crash, or the cleanup between jobs: nothing
+        # could be opened), and 1 when it was still there and nobody was watching it
+        try:
+            browser_address()
+            there = 1
+        except Exception:
+            there = 0
+        log.write({"k": "off", "at": now_ms(), "b": there})
         # Waits for the browser to answer again
         while True:
             time.sleep(1)

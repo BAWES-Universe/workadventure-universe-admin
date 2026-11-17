@@ -16,7 +16,7 @@ import { deleteBrick, removeGoneBricks } from '@/lib/brick-delete';
 import { saveMeterSettings } from '@/lib/meter';
 import { CONTROL_TIMING } from '@/lib/computer-control';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
-import { visitsFor } from '@/lib/computer-visits';
+import { HANDS_MAX, VISITS_MAX, visitsFor } from '@/lib/computer-visits';
 import { finishJob, giveComputer, handBack, startJob, takeOver } from '@/lib/computer';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -123,6 +123,28 @@ run('where a job’s computer browsed, in a real database', () => {
     expect((await visitsFor(sara.brickId, id))?.state).toBe('complete');
     const order = provider.commands.map((entry) => entry.command.split(' ')[0]);
     expect(order.indexOf('universe-visits')).toBeLessThan(order.indexOf('universe-clean'));
+  });
+
+  it('shows every page and post next to its take-over notes however many notes there are, and says so when it has to cut', async () => {
+    const sara = await person('sara');
+    const id = await jobFor(sara);
+    await prisma.computerJob.update({ where: { id }, data: { visitsState: 'complete' } });
+    await prisma.computerJobVisit.createMany({
+      data: Array.from({ length: VISITS_MAX }, (_, k) => ({ jobId: id, kind: 'visit', at: new Date(NOW.getTime() + k * 1000), method: 'GET', host: 'shop.example', path: `/p/${k}`, count: 1 })),
+    });
+    // Notes, a hundred and two more than the old room for them: none of the pages is dropped, and neither is a note
+    await prisma.computerJobVisit.createMany({ data: Array.from({ length: 102 }, (_, k) => ({ jobId: id, kind: 'hands', at: new Date(NOW.getTime() + k * 1000 + 500), by: k % 2 ? 'brick' : 'person' })) });
+    const view = await visitsFor(sara.brickId, id);
+    expect(view?.items.filter((item) => item.kind === 'visit')).toHaveLength(VISITS_MAX);
+    expect(view?.items.filter((item) => item.kind === 'hands')).toHaveLength(102);
+    expect(view?.state).toBe('complete');
+    expect(view?.truncated).toBeUndefined();
+    // Far past what one job can honestly have: the answer is cut, and it is no longer called complete
+    await prisma.computerJobVisit.createMany({ data: Array.from({ length: HANDS_MAX }, (_, k) => ({ jobId: id, kind: 'hands', at: new Date(NOW.getTime() + 1_000_000 + k), by: 'person' })) });
+    const cut = await visitsFor(sara.brickId, id);
+    expect(cut?.truncated).toBe(true);
+    expect(cut?.state).toBe('partial');
+    expect(cut?.items.filter((item) => item.kind === 'visit')).toHaveLength(VISITS_MAX);
   });
 
   it('is empty and null until the job ends, and a job that ended with nothing browsed is complete and empty', async () => {

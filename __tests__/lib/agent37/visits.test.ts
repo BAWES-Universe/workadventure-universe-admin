@@ -225,6 +225,10 @@ describe('the record of where the browser went (the listener on the computer)', 
       await until(() => existsSync(log) && (readFileSync(log, 'utf8').match(/"k":"on"/g) ?? []).length >= 2);
       const kinds = readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line).k);
       expect(kinds).toEqual(['on', 'visit', 'off', 'on']);
+      // The browser (its DevTools address) still answered when the connection went: nobody was watching it for that stretch
+      const lines = readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+      expect(lines.find((entry) => entry.k === 'off').b).toBe(1);
+      expect(parseReadBack(readBack(home)).lines.find((entry) => entry.kind === 'off')).toMatchObject({ kind: 'off', open: true });
       // From a moment after everything: the last thing it said about the connection is that it is on, and the listener runs
       const out = readBack(home, Date.now() + 60_000);
       expect(out).toContain('state=on');
@@ -233,6 +237,25 @@ describe('the record of where the browser went (the listener on the computer)', 
       listener.kill('SIGKILL');
       await new Promise((resolve) => setTimeout(resolve, 200));
       expect(readBack(home)).toContain('alive=0');
+    } finally {
+      pretend.close();
+    }
+  }, 30_000);
+
+  python('says the browser itself was gone when it is not there to answer, so nothing could have been opened', async () => {
+    const home = mkdtempSync(join(folder, 'home-'));
+    const pretend = await pretendBrowser((say) => say({ method: 'Page.frameNavigated', sessionId: 'S-PAGE', params: { frame: { id: 'F1', url: 'https://one.example/a' } } }), true);
+    try {
+      listener = spawn('python3', [script, 'run'], { env: { ...process.env, HOME: home, UNIVERSE_DEVTOOLS_PORT: String(pretend.port) }, stdio: 'ignore' });
+      await pretend.done;
+      pretend.close();
+      const log = join(home, '.universe', 'visits.jsonl');
+      await until(() => existsSync(log) && readFileSync(log, 'utf8').includes('"k":"off"'));
+      const off = readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line)).find((entry) => entry.k === 'off');
+      expect(off.b).toBe(0);
+      const back = parseReadBack(readBack(home));
+      expect(back.lines.find((entry) => entry.kind === 'off')).toMatchObject({ kind: 'off', open: false });
+      expect(parseReadBack(readBack(home, Date.now() + 60_000))).toMatchObject({ state: 'off', stateOpen: false });
     } finally {
       pretend.close();
     }
@@ -279,6 +302,11 @@ mod.Log().write({"k": "post", "at": 99999, "m": "POST", "h": "busy.example", "p"
       'https://example.com/t/abcdefghijklmnop0123456789ab',
       'https://example.com/how-to-apply-for-a-visa-in-2026-step-by-step',
       'https://example.com/%E2%9C%93/path',
+      // the same codes written with percent signs, twice over, or behind an encoded slash, are cut like the plain ones
+      'https://example.com/reset/%41bCdEfGhIjKlMnOpQrStUvWxYz',
+      'https://example.com/reset/%2541bCdEfGhIjKlMnOpQrStUvWxYz',
+      'https://example.com/share/x%2F550e8400-e29b-41d4-a716-446655440000',
+      'https://example.com/a%20readable%20part',
       'http://[2001:db8::1]:8080/x',
       'https://user:pw@example.com',
     ];
@@ -310,6 +338,10 @@ print(json.dumps([mod.cut(url) for url in json.loads(sys.argv[2])]))`,
       ['example.com', '/t/\u2026'],
       ['example.com', '/how-to-apply-for-a-visa-in-2026-step-by-step'],
       ['example.com', '/%E2%9C%93/path'],
+      ['example.com', '/reset/\u2026'],
+      ['example.com', '/reset/\u2026'],
+      ['example.com', '/share/\u2026'],
+      ['example.com', '/a%20readable%20part'],
       ['[2001:db8::1]:8080', '/x'],
       ['example.com', '/'],
     ]);
