@@ -124,18 +124,39 @@ async function booksFor(day: string, now: Date): Promise<Books> {
     where: { startedAt: { not: null, lt: to }, OR: [{ endedAt: null }, { endedAt: { gt: from } }] },
     select: { botId: true, startedAt: true, endedAt: true, secondsRun: true, stretchStarted: true },
   });
-  const seconds = new Map<string, number>();
+  // Two jobs that held the machine at the same time held it once: the time each held (the part of it inside the day, never more than the seconds it
+  // recorded, from where it started) is put on a line per Brick and the line's covered length is what is counted, so overlapping read-only jobs are not
+  // booked twice and hide unbooked time
+  const spans = new Map<string, Array<[number, number]>>();
   for (const job of jobs) {
     const started = job.startedAt as Date;
     const ended = job.endedAt ?? now;
-    const overlap = Math.max(0, (Math.min(ended.getTime(), to.getTime()) - Math.max(started.getTime(), from.getTime())) / 1000);
+    const from0 = Math.max(started.getTime(), from.getTime());
+    const overlap = Math.max(0, (Math.min(ended.getTime(), to.getTime()) - from0) / 1000);
     // A job that is over held the machine for the seconds it recorded; one still running has its stretch so far besides
     const held = job.endedAt ? job.secondsRun : job.secondsRun + (job.stretchStarted ? Math.max(0, (now.getTime() - job.stretchStarted.getTime()) / 1000) : 0);
-    seconds.set(job.botId, (seconds.get(job.botId) ?? 0) + Math.min(overlap, held));
+    const length = Math.min(overlap, held) * 1000;
+    if (length <= 0) continue;
+    const list = spans.get(job.botId) ?? [];
+    list.push([from0, from0 + length]);
+    spans.set(job.botId, list);
   }
   const minutesByBot = new Map<string, number>();
   // A machine cannot be awake for more than the day, however many read-only jobs overlapped on it
-  for (const [botId, total] of seconds) minutesByBot.set(botId, Math.min(total / 60, 1440));
+  for (const [botId, list] of spans) {
+    list.sort((x, y) => x[0] - y[0]);
+    let covered = 0;
+    let [start, end] = list[0];
+    for (const [s0, e0] of list.slice(1)) {
+      if (s0 <= end) end = Math.max(end, e0);
+      else {
+        covered += end - start;
+        [start, end] = [s0, e0];
+      }
+    }
+    covered += end - start;
+    minutesByBot.set(botId, Math.min(covered / 60_000, 1440));
+  }
   return { machines, minutesByBot };
 }
 

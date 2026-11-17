@@ -18,7 +18,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, handBack, recoverControl, requestHandover, startJob, sweepComputers, takeOver, planEffect, fillInDetails } from '@/lib/computer';
-import { beginTransition, CONTROL_TIMING, readControl } from '@/lib/computer-control';
+import { authorizeHumanInput, beginTransition, CONTROL_TIMING, readControl, releaseIfUnheld } from '@/lib/computer-control';
 import { checkScreen, openScreen, screenTicket } from '@/lib/computer-screen';
 import { mintJobToken, verifyJobToken } from '@/lib/computer-token';
 import { prepareJob, startTurn } from '@/lib/computer-broker';
@@ -358,6 +358,21 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
       expect(await prisma.computerJob.findFirstOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ status: 'running', control: 'brick' });
     });
 
+    it('computers the person is still using never keep a transition whose leader died out of the sweep, however small the page is', async () => {
+      // Three people hold their computers with a job waiting for them: nothing is to be done for those
+      for (const name of ['a', 'b', 'c']) {
+        const held = await running(name);
+        await takeOver(held.sara.brickId, held.sara.id, NOW);
+      }
+      const { sara } = await running('stuck');
+      const row = await readControl(sara.brickId);
+      await beginTransition(sara.brickId, 'agent', row?.epoch ?? 0, 'fencing');
+      await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { controlLeaseUntil: new Date(Date.now() - 1000) } });
+      // A page of one: the held computers are not candidates, so the one transition is the one looked at
+      expect(await recoverControl(NOW, 1)).toBe(1);
+      expect((await readControl(sara.brickId))?.state).toBe('human_ready');
+    });
+
     it('a computer the person holds after their jobs are over goes back to Brick’s, so the next job can start', async () => {
       const { sara, jobId } = await running();
       await takeOver(sara.brickId, sara.id, NOW);
@@ -367,6 +382,49 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
       expect((await readControl(sara.brickId))?.state).toBe('agent');
       const next = await startJob({ botId: sara.brickId, personId: sara.id, title: 'Next' }, NOW);
       expect(next.ok && next.job.status).toBe('running');
+    });
+  });
+
+  describe('input grants are never taken back or missed (F02)', () => {
+    it('a shorter check after a longer grant does not shorten it: a hand back waits for the longest grant given', async () => {
+      const { sara } = await running();
+      await takeOver(sara.brickId, sara.id, NOW);
+      const epoch = (await readControl(sara.brickId))?.epoch as number;
+      expect(await authorizeHumanInput(sara.brickId, epoch, 10_000)).toBe(true);
+      const long = (await readControl(sara.brickId))?.humanInputUntil as Date;
+      // The gateway's check, a moment after the socket was opened: its own lease is shorter
+      expect(await authorizeHumanInput(sara.brickId, epoch, 8_000)).toBe(true);
+      expect((await readControl(sara.brickId))?.humanInputUntil?.getTime()).toBe(long.getTime());
+      // A longer one still extends it
+      expect(await authorizeHumanInput(sara.brickId, epoch, 20_000)).toBe(true);
+      expect((await readControl(sara.brickId))?.humanInputUntil?.getTime()).toBeGreaterThan(long.getTime());
+    });
+
+    it('a grant recorded between the release reading control and writing it is still waited out', async () => {
+      const { sara, jobId } = await running();
+      await takeOver(sara.brickId, sara.id, NOW);
+      const epoch = (await readControl(sara.brickId))?.epoch as number;
+      await authorizeHumanInput(sara.brickId, epoch, 300);
+      await prisma.computerJob.update({ where: { id: jobId }, data: { status: 'done', control: 'brick', endedAt: NOW } });
+      // Just before the release writes, a screen check records a much longer grant
+      const real = prisma.brickComputer.updateMany.bind(prisma.brickComputer);
+      let first = true;
+      const spy = jest.spyOn(prisma.brickComputer, 'updateMany').mockImplementation(((...args: Parameters<typeof real>) => {
+        if (first) {
+          first = false;
+          return authorizeHumanInput(sara.brickId, epoch, 60_000).then(() => real(...args));
+        }
+        return real(...args);
+      }) as typeof prisma.brickComputer.updateMany);
+      try {
+        await releaseIfUnheld(sara.brickId);
+      } finally {
+        spy.mockRestore();
+      }
+      const after = await readControl(sara.brickId);
+      // Brick is not admitted while the longer grant can still be used: the hand back's lease runs to the end of it
+      expect(after?.state).toBe('returning');
+      expect(after?.leaseUntil?.getTime()).toBeGreaterThan(Date.now() + 50_000);
     });
   });
 

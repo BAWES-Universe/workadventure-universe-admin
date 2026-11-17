@@ -115,6 +115,22 @@ run('the daily check of our books against the provider’s bill, in a real datab
     expect(row).toMatchObject({ ourMinutes: 120, agentMinutes: 130, status: 'ok' });
   });
 
+  it('counts the time once when two jobs held the machine together, and adds the time of jobs that did not overlap', async () => {
+    const botId = await brickWithMachine('m1');
+    const owner = (await prisma.bot.findUniqueOrThrow({ where: { id: botId }, select: { ownerId: true } })).ownerId as string;
+    // Two read-only jobs on the same hour, and one more later in the day
+    await job(botId, owner, '2026-11-15T00:00:00Z', '2026-11-15T01:00:00Z', 3600);
+    await job(botId, owner, '2026-11-15T00:00:00Z', '2026-11-15T01:00:00Z', 3600);
+    await job(botId, owner, '2026-11-15T10:00:00Z', '2026-11-15T10:30:00Z', 1800);
+    // The machine was awake 140 minutes: 90 are ours, so a lot of it was never booked
+    const { provider } = billing((day) => quiet(day, 'm1', botId, { awakeMinutes: 140, totalMicros: 500, computeMicros: 500, expectedMicros: 500 }));
+    await reconcileComputers(NOW, provider);
+    const row = await prisma.computerReconcile.findUniqueOrThrow({ where: { day: '2026-11-15' } });
+    expect(row.ourMinutes).toBe(90);
+    expect(row.status).toBe('drift');
+    expect((row.findings as Array<{ kind: string }>).map((finding) => finding.kind)).toContain('unbooked_time');
+  });
+
   it('writes the findings as drift, keeps them with the day, and tells Sentry once', async () => {
     const botId = await brickWithMachine('m1');
     const { provider } = billing((day) => quiet(day, 'm1', botId, { awakeMinutes: 600, totalMicros: 90_000, computeMicros: 80_000, expectedMicros: 80_000 }));

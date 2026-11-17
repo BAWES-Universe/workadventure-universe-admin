@@ -336,7 +336,7 @@ describe('the Agent37 provider', () => {
     // A second machine made for bot-1 whose answer was lost, so it was never written down
     w.instances.set('stray', { id: 'stray', status: 'sleeping', url: 'https://stray.agent37.app', metadata: { creation_id: 'brick:bot-1' }, region: 'us' } as Instance);
     // And one that failed to come up: it is still there at the provider, so it goes too
-    w.instances.set('broken', { id: 'broken', status: 'failed', metadata: { creation_id: 'brick:bot-1' }, region: 'us' } as Instance);
+    w.instances.set('broken', { id: 'broken', status: 'failed', url: '', metadata: { creation_id: 'brick:bot-1' }, region: 'us' } as Instance);
     await p.removeAllFor('bot-1');
     expect([...w.instances.keys()]).toEqual(['m2']);
     // Nothing made for it: nothing to do, and no error

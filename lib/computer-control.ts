@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 
 /**
@@ -117,7 +118,12 @@ export async function waitForTransition(botId: string, waitingOn: Transition, de
  * There is no moment where input is allowed but the hand back cannot see it.
  */
 export async function authorizeHumanInput(botId: string, epoch: number, leaseMs: number): Promise<boolean> {
-  const { count } = await prisma.brickComputer.updateMany({ where: { botId, controlState: 'human_ready', controlEpoch: epoch }, data: { humanInputUntil: new Date(Date.now() + leaseMs) } });
+  // The later of what was already granted and this one, in the same write: a shorter check that comes just after a longer grant (a socket just
+  // opened, then another one asking) never takes the grant back, so a hand back always waits for the longest one given
+  const until = new Date(Date.now() + leaseMs);
+  const count = await prisma.$executeRaw(Prisma.sql`
+    UPDATE "brick_computers" SET "human_input_until" = GREATEST(COALESCE("human_input_until", ${until}), ${until})
+    WHERE "bot_id" = ${botId} AND "control_state" = 'human_ready' AND "control_epoch" = ${epoch}`);
   return count === 1;
 }
 
@@ -164,13 +170,20 @@ export async function releaseIfUnheld(botId: string): Promise<boolean> {
   if (!control) return true;
   if (control.state === 'agent') return true;
   if ((await prisma.computerJob.count({ where: { botId, status: { in: ['running', 'waiting'] } } })) > 0) return false;
-  if (control.state === 'human_ready') {
+  // The grant that was read is the one the lease is built on, and the write only holds if it is still the latest: an input check that recorded a
+  // newer grant between the read and the write makes the write miss, and the lease is built again from the newer grant
+  for (let tries = 0; tries < 5 && control.state === 'human_ready'; tries++) {
     const granted = control.humanInputUntil?.getTime() ?? 0;
     const until = granted > Date.now() ? granted + 25 : Date.now();
     // The epoch moves: an input ticket made for the person who was holding it is dead, and nothing can extend what was granted
-    await prisma.brickComputer.updateMany({ where: { botId, controlState: 'human_ready', controlEpoch: control.epoch }, data: { controlState: 'returning', controlEpoch: control.epoch + 1, controlLeaseUntil: new Date(until) } });
-    control = await readControl(botId);
-    if (!control) return true;
+    const { count } = await prisma.brickComputer.updateMany({
+      where: { botId, controlState: 'human_ready', controlEpoch: control.epoch, humanInputUntil: control.humanInputUntil },
+      data: { controlState: 'returning', controlEpoch: control.epoch + 1, controlLeaseUntil: new Date(until) },
+    });
+    const now = await readControl(botId);
+    if (!now) return true;
+    control = now;
+    if (count === 1) break;
   }
   // No jobs to hand back: only a hand back whose lease has run out (nobody is finishing it) is ended here
   if (control.state === 'returning' && leaseLapsed(control)) {

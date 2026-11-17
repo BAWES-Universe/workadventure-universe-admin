@@ -1760,6 +1760,8 @@ run('a Brick’s computer, in a real database', () => {
       await giveComputer(sara.brickId, sara.id);
       const started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!started.ok) throw new Error('no');
+      // The machine of this Brick is not made yet in this picture (the provider is still making it): its record has no machine
+      await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { providerRef: null, machine: 'none' } });
       const hold = (key: string, createdAt: Date) =>
         prisma.meterReservation.create({ data: { reservationKey: key, personKey: 'system:disk', personId: null, botId: sara.brickId, jobId: null, amountMicros: BigInt(360_000), state: 'held', expiresAt: new Date(NOW.getTime() - 60_000), createdAt } });
       const mine = diskRoomKey(sara.brickId, started.job.id, NOW.getTime());
@@ -1776,6 +1778,39 @@ run('a Brick’s computer, in a real database', () => {
       await prisma.computerJob.update({ where: { id: started.job.id }, data: { status: 'done', endedAt: minutes(50) } });
       await sweepComputers(minutes(50));
       expect(await prisma.meterReservation.findUnique({ where: { reservationKey: other } })).toMatchObject({ state: 'released' });
+    });
+
+    it('keeps the disk room of a machine that was made while the books would not take its disk, until the sweep has written it, and only then gives the room back', async () => {
+      const sara = await person('sara');
+      provider.disk = 4_000_000_000;
+      await setUp({ poolCeilingMicros: 10_000_000, storageMicrosPerGbMonth: 90_000 });
+      await giveComputer(sara.brickId, sara.id);
+      // The machine is made and the job runs, but the books refuse the line for the disk: the job is not failed for that
+      (meter.recordMeterEvent as jest.Mock).mockImplementation(async (event: { kind: string }, ...rest: unknown[]) => {
+        if (event.kind === 'stored_bytes') throw new Error('The books are down');
+        return (actualRecord as (...args: unknown[]) => unknown)(event, ...rest);
+      });
+      let started;
+      try {
+        started = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
+        expect(started.ok && started.job.status).toBe('running');
+        const heldDisk = () => prisma.meterReservation.count({ where: { state: 'held', reservationKey: { startsWith: 'computer:diskroom:' } } });
+        // The disk is in no line, so its room is still held: the pool still counts it
+        expect(await heldDisk()).toBe(1);
+        expect(await prisma.meterEvent.count({ where: { botId: sara.brickId, kind: 'stored_bytes' } })).toBe(0);
+        // The room lapses and the books are still down: the sweep keeps it
+        await sweepComputers(minutes(20));
+        expect(await heldDisk()).toBe(1);
+      } finally {
+        (meter.recordMeterEvent as jest.Mock).mockImplementation(actualRecord);
+      }
+      // The books work again: the sweep writes the line first, then gives the room back
+      await sweepComputers(minutes(21));
+      // The level counts the disk and whatever copy the job's end saved: the disk is in it
+      const level = await prisma.meterEvent.findMany({ where: { botId: sara.brickId, kind: 'stored_bytes' } });
+      expect(level).toHaveLength(1);
+      expect(Number(level[0].quantity)).toBeGreaterThanOrEqual(4_000_000_000);
+      expect(await prisma.meterReservation.count({ where: { state: 'held', reservationKey: { startsWith: 'computer:diskroom:' } } })).toBe(0);
     });
 
     it('does not count the disk room as a job running, or against the person’s allowance, and gives it back when the making fails', async () => {
