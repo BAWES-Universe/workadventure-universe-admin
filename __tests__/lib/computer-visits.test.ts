@@ -120,6 +120,9 @@ describe('what a job keeps and how well it was recorded', () => {
       hands: [{ at: new Date(T0 + 10_000), by: 'person' }, { at: new Date(T0 + 30_000), by: 'brick' }],
     });
     expect(rows.map((row) => [row.by, row.count, row.at.getTime() - T0])).toEqual([['brick', 1, 5_000], ['person', 1, 12_000], ['brick', 1, 40_000]]);
+    // a take-over with nothing opened during it: the visits before and after it are still two rows (the take-over is a boundary of its own)
+    const none = shape(back([line({ at: T0 + 5_000 }), line({ at: T0 + 40_000 })]), { hands: [{ at: new Date(T0 + 10_000), by: 'person' }, { at: new Date(T0 + 30_000), by: 'brick' }] }).rows;
+    expect(none.map((row) => [row.by, row.count, row.at.getTime() - T0])).toEqual([['brick', 1, 5_000], ['brick', 1, 40_000]]);
     // the same page twice inside one stretch is still one row
     const same = shape(back([line({ at: T0 + 5_000 }), line({ at: T0 + 6_000 })]), { hands: [{ at: new Date(T0 + 10_000), by: 'person' }] }).rows;
     expect(same.map((row) => [row.by, row.count])).toEqual([['brick', 2]]);

@@ -1910,6 +1910,11 @@ export async function getJob(jobId: string): Promise<(JobView & { botId: string;
  * provider, a saved copy or any backup. False only when a line could not be written yet; the Brick then waits for the next sweep.
  */
 export async function computerTimeInBooks(botId: string, now: Date = new Date()): Promise<boolean> {
+  // A job still queued, running or waiting (the delete could not end it: that step never throws) is ended first, and the Brick waits until none is
+  // left: a job that is deleted with the Brick before its time is written is time the books never had
+  const active = await prisma.computerJob.findMany({ where: { botId, status: { in: ['queued', 'running', 'waiting'] } }, select: { id: true } });
+  for (const job of active) await endJob(job.id, 'stopped', 'deleted', now).catch((error) => console.error('[Computer] Could not end a job of a Brick being purged:', error instanceof Error ? error.message : 'unknown'));
+  if (active.length > 0 && (await prisma.computerJob.count({ where: { botId, status: { in: ['queued', 'running', 'waiting'] } } })) > 0) return false;
   await recordMissingComputerTime(now, SWEEP_BATCH, botId);
   const unwritten = await prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`
     SELECT COUNT(*)::bigint AS "n" FROM "computer_jobs" j

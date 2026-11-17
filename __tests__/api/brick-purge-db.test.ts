@@ -324,6 +324,19 @@ run('purging a deleted Brick, in a real database', () => {
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ doneAt: expect.any(Date) });
     });
 
+    it('ends a job the delete could not end before it deletes anything, so the time it ran is written first and never lost with the Brick', async () => {
+      const sara = await person('sara');
+      const brick = await fullBrick(sara, 'Running Brick', { computer: true });
+      await deleteBrick(brick.id, sara.id, NOW);
+      const job = await prisma.computerJob.findFirstOrThrow({ where: { botId: brick.id } });
+      // The delete's stop failed: the job is still running a day later, and nothing wrote its time
+      await prisma.meterEvent.deleteMany({ where: { eventId: `computer:${job.id}:time` } });
+      await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'running', endedAt: null, endedBy: null, startedAt: new Date(NOW.getTime() - 3_600_000), stretchStarted: new Date(NOW.getTime() - 3_600_000), secondsRun: 0 } });
+      expect(await purgeBrick(brick.id, later(8))).toBe('purged');
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${job.id}:time` } })).toBe(1);
+      expect(await owned(brick.id)).toEqual(NOTHING);
+    });
+
     it('waits only for the books (our own table, money) and never for a provider: a missing line is written first, and one that cannot be written keeps the Brick whole until it can', async () => {
       const sara = await person('sara');
       const brick = await fullBrick(sara, 'Books Brick', { computer: true });
