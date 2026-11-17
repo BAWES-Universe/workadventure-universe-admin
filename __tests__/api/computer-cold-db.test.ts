@@ -268,6 +268,22 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(names().filter((call) => call.startsWith('stop:'))).toEqual([]);
     });
 
+    it('a pack-away stopped between marking its copy verified and moving its step on goes on from the proved copy: no new copy and no second proof', async () => {
+      const brick = await idleBrick();
+      // The server stopped after the proof passed and the copy was marked verified, before the step moved from "stored" to "verified"
+      const archive = await storeArchive(brick.botId, Readable.toWeb(Readable.from([Buffer.from('home')])) as ReadableStream<Uint8Array>);
+      await markVerified(archive.id, 10);
+      await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'packing', packStage: 'stored', packArchiveId: archive.id, packClaimId: 'stopped-run', packClaimedAt: new Date(NOW.getTime() - STUCK_MS - 60_000) } });
+      provider.calls.length = 0;
+      const out = await coldStep(provider, NOW);
+      expect(out.resumed).toBe(1);
+      expect(await row(brick.botId)).toMatchObject({ machine: 'cold', providerRef: null, packStage: null, packFailures: 0 });
+      // No new copy was streamed and no proof of this pack-away ran (the weekly drill the same sweep may run is a different kind of run)
+      expect(names().filter((call) => call.startsWith('streamFiles'))).toEqual([]);
+      expect(await prisma.computerColdRun.count({ where: { botId: brick.botId, kind: 'pack' } })).toBe(0);
+      expect((await prisma.computerArchive.findUniqueOrThrow({ where: { id: archive.id } })).state).toBe('verified');
+    });
+
     it('a pack-away whose computer is already being removed finishes when a job arrives: the Brick goes cold and the job brings it back from the copy', async () => {
       const brick = await idleBrick();
       const removeComputer = provider.remove.bind(provider);

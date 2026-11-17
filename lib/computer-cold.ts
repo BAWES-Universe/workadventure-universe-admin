@@ -319,25 +319,28 @@ async function runPack(botId: string, provider: Cold, claimId: string): Promise<
       const stop2 = await mustStop(botId);
       if (stop2) return await abort(stop2.why, stop2.awake, false);
       const archive = row.packArchiveId ? await archiveById(row.packArchiveId) : null;
-      // The copy is gone or is not whole: start again from the beginning next time
-      if (!archive || archive.state !== 'stored') {
+      // The copy is gone or is not whole: start again from the beginning next time. One already marked verified is a proof that passed before a stop
+      // that came between marking it and moving the step on: it is not proved again
+      if (!archive || (archive.state !== 'stored' && archive.state !== 'verified')) {
         await prisma.brickComputer.updateMany({ where: { botId, machine: 'packing', packClaimId: claimId, packStage: 'stored' }, data: { packStage: 'claimed', packArchiveId: null } });
         return await abort('the stored copy was not found', false);
       }
-      const result = await alive(botId, claimId, 'stored', () => proveOnScratch(provider, archive, 'pack', botId));
-      if (!result.ok) {
-        // Only while this run still holds the step: a proof that ran so long that its claim was taken over must not fail (and so delete) a copy
-        // the other run has proved since, with the computer perhaps already gone
-        // One statement: the copy fails only while this run still holds the claim at this step, so a run that was taken over cannot fail the copy the new holder is proving
-        const failed = await prisma.$executeRaw(Prisma.sql`
-          UPDATE "computer_archives" SET "state" = 'failed', "failure" = ${`restore proof failed: ${result.reason ?? 'unknown'}`.slice(0, 200)}
-          WHERE "id" = ${archive.id} AND "state" = 'stored'
-            AND EXISTS (SELECT 1 FROM "brick_computers" c WHERE c."bot_id" = ${botId} AND c."machine" = 'packing' AND c."pack_stage" = 'stored' AND c."pack_claim_id" = ${claimId})`);
-        if (failed !== 1) return 'busy';
-        await pruneArchives(botId, null);
-        return await giveUp(botId, row, `the copy did not restore cleanly (${result.reason ?? 'unknown'})`, { awake: false, count: true, provider, stage: 'stored', claimId });
+      if (archive.state === 'stored') {
+        const result = await alive(botId, claimId, 'stored', () => proveOnScratch(provider, archive, 'pack', botId));
+        if (!result.ok) {
+          // Only while this run still holds the step: a proof that ran so long that its claim was taken over must not fail (and so delete) a copy
+          // the other run has proved since, with the computer perhaps already gone
+          // One statement: the copy fails only while this run still holds the claim at this step, so a run that was taken over cannot fail the copy the new holder is proving
+          const failed = await prisma.$executeRaw(Prisma.sql`
+            UPDATE "computer_archives" SET "state" = 'failed', "failure" = ${`restore proof failed: ${result.reason ?? 'unknown'}`.slice(0, 200)}
+            WHERE "id" = ${archive.id} AND "state" = 'stored'
+              AND EXISTS (SELECT 1 FROM "brick_computers" c WHERE c."bot_id" = ${botId} AND c."machine" = 'packing' AND c."pack_stage" = 'stored' AND c."pack_claim_id" = ${claimId})`);
+          if (failed !== 1) return 'busy';
+          await pruneArchives(botId, null);
+          return await giveUp(botId, row, `the copy did not restore cleanly (${result.reason ?? 'unknown'})`, { awake: false, count: true, provider, stage: 'stored', claimId });
+        }
+        await markVerified(archive.id, result.ms);
       }
-      await markVerified(archive.id, result.ms);
       if (!(await advance(botId, claimId, 'stored', 'verified'))) return 'busy';
       row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
     }
