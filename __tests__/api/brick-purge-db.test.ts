@@ -406,7 +406,7 @@ run('purging a deleted Brick, in a real database', () => {
       const brick = await fullBrick(sara, 'Saving Brick', { computer: true });
       await deleteBrick(brick.id, sara.id, NOW);
       // A save began (its row is written first) before the purge, and is still running
-      const live = await prisma.savedCopyWrite.create({ data: { botId: brick.id, expiresAt: later(8) } });
+      const live = await prisma.savedCopyWrite.create({ data: { botId: brick.id, expiresAt: later(20) } });
       await removeGoneBricks(later(8), sara.id);
       const deletes = () => provider.calls.filter((call) => call.name === 'deleteSavedCopy').length;
       const first = await finishOutside(brick.id, later(8));
