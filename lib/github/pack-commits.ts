@@ -35,8 +35,11 @@ interface Entry {
 
 const idOf = (type: number, data: Buffer): string => createHash('sha1').update(`${TYPE_NAMES[type]} ${data.length}\0`).update(data).digest('hex');
 
-/** Applies a git delta to its base; null when the delta is not well formed. */
-export function applyDelta(base: Buffer, delta: Buffer): Buffer | null {
+/**
+ * Applies a git delta to its base; null when the delta is not well formed. `charge` is told the size the delta says it will rebuild, before
+ * anything is allocated, and answers false to refuse it (the caller's budget for the whole pack): a delta that goes on to fail still spent it.
+ */
+export function applyDelta(base: Buffer, delta: Buffer, charge?: (resultSize: number) => boolean): Buffer | null {
   let at = 0;
   const size = (): number | null => {
     let value = 0;
@@ -53,6 +56,7 @@ export function applyDelta(base: Buffer, delta: Buffer): Buffer | null {
   const baseSize = size();
   const resultSize = size();
   if (baseSize === null || resultSize === null || baseSize !== base.length || resultSize > VERIFY_MAX_BYTES) return null;
+  if (charge && !charge(resultSize)) return null;
   const out = Buffer.alloc(resultSize);
   let written = 0;
   while (at < delta.length) {
@@ -145,14 +149,26 @@ export function readPackCommits(pack: Buffer): Map<string, string[]> | null {
     entry.id = idOf(object.type, object.data);
     queue.push(entry);
   };
-  const wait = <K,>(map: Map<K, Entry[]>, key: K, entry: Entry) => map.set(key, [...(map.get(key) ?? []), entry]);
+  // One list for each base, made once and added to: a copy of the list for every delta waiting on the same base is quadratic
+  const wait = <K,>(map: Map<K, Entry[]>, key: K, entry: Entry) => {
+    const list = map.get(key);
+    if (list) list.push(entry);
+    else map.set(key, [entry]);
+  };
   for (const entry of entries) {
     if (entry.type <= 4) continue;
     if (entry.baseOffset !== undefined) wait(waitingOnOffset, entry.baseOffset, entry);
     else if (entry.baseId !== undefined) wait(waitingOnId, entry.baseId, entry);
   }
   for (const entry of entries) if (entry.type <= 4) settle(entry, { type: entry.type, data: entry.data });
+  // What every delta says it will rebuild is charged before it is built, whether it then applies or not
   let rebuilt = 0;
+  let over = false;
+  const charge = (resultSize: number) => {
+    rebuilt += resultSize;
+    if (rebuilt > MAX_TOTAL_BYTES) over = true;
+    return !over;
+  };
   while (queue.length > 0) {
     const base = queue.pop() as Entry;
     const object = base.done as { type: number; data: Buffer };
@@ -161,11 +177,10 @@ export function readPackCommits(pack: Buffer): Map<string, string[]> | null {
     waitingOnId.delete(base.id as string);
     for (const entry of dependents) {
       if (entry.done) continue;
-      const data = applyDelta(object.data, entry.data);
+      const data = applyDelta(object.data, entry.data, charge);
+      if (over) return null;
       // A delta that does not apply stays unread, as before
       if (!data) continue;
-      rebuilt += data.length;
-      if (rebuilt > MAX_TOTAL_BYTES) return null;
       settle(entry, { type: object.type, data });
     }
   }

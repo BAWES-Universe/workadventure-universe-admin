@@ -107,4 +107,26 @@ describe('reading the commits of a pack', () => {
     expect(readPackCommits(small)).not.toBeNull();
     expect(readPackCommits(pack([whole(3, base), ...['aaaa', 'bbbb', 'cccc', 'dddd', 'eeee'].map(make)]))).toBeNull();
   });
+
+  it('refuses deltas that declare a big result and then fail: what a delta says it will rebuild is spent before it is built', () => {
+    // Each delta declares 16 MB, copies it all but its last bytes and is cut short, so it never applies; six of them still ask for 96 MB
+    const size = 16_000_000;
+    const base = Buffer.alloc(size);
+    const baseId = idOf('blob', base);
+    const broken = () => refDelta(baseId, delta(size, size - 4, Buffer.from('aaaa')).subarray(0, -1));
+    expect(readPackCommits(pack([whole(3, base), broken()]))).not.toBeNull();
+    expect(readPackCommits(pack([whole(3, base), ...Array.from({ length: 6 }, broken)]))).toBeNull();
+  });
+
+  it('puts together many deltas on one base without copying the list of the ones waiting for each one that joins it', () => {
+    // 150,000 tiny deltas on one tiny blob: copying the waiting list for each is about 10^10 copies, a list that is added to is nothing
+    const base = Buffer.from('0123456789');
+    const baseId = idOf('blob', base);
+    const entries: Buffer[] = [];
+    for (let k = 0; k < 150_000; k++) entries.push(refDelta(baseId, delta(base.length, base.length, Buffer.from([97 + (k % 26)]))));
+    const built = pack([whole(3, base), ...entries]);
+    const started = Date.now();
+    expect(readPackCommits(built)).not.toBeNull();
+    expect(Date.now() - started).toBeLessThan(8000);
+  }, 120_000);
 });
