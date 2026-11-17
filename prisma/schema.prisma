@@ -1928,6 +1928,9 @@ model VoiceReplyUse {
   turnId    String   @map("turn_id") @db.VarChar(255)
   // "person:<user id>" or "guest:<their id>", the same words the Universe AI reply window is kept under
   personKey String   @map("person_key") @db.VarChar(320)
+  // The longest this reply may be, as it was when it was admitted: what it holds of the month's speech Limit until its usage arrives. A later
+  // change of that setting never changes what an admitted reply holds. Empty only for a row from before this was kept.
+  seconds   Int?
   createdAt DateTime @default(now()) @map("created_at")
 
   bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)

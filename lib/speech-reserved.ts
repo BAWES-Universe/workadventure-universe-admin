@@ -42,21 +42,26 @@ export const pendingNotes = (now: Date): Prisma.VoiceNoteTurnWhereInput => ({
 });
 
 /**
- * Seconds held for everyone (`all`) and for one person (`mine`, by their key). `replySeconds` is what one admitted reply holds.
+ * Seconds held for everyone (`all`) and for one person (`mine`, by their key). Each admitted reply holds what it was admitted for (its own
+ * `seconds`, so changing the setting later changes nothing already admitted); `replySeconds` is only what a row from before that was kept holds.
  * Call it under `lockSpeech`, in the transaction that goes on to check the Limit.
  */
 export async function speechReserved(tx: Tx, input: { personKey: string | null; replySeconds: number; now: Date }): Promise<{ all: number; mine: number }> {
   const { now, personKey, replySeconds } = input;
   const notes = pendingNotes(now);
   const replies: Prisma.VoiceReplyUseWhereInput = { createdAt: { gt: new Date(now.getTime() - REPLY_HOLD_MS), gte: monthOf(now).start } };
+  const held = async (where: Prisma.VoiceReplyUseWhereInput) => {
+    const [kept, unkept] = await Promise.all([tx.voiceReplyUse.aggregate({ _sum: { seconds: true }, where }), tx.voiceReplyUse.count({ where: { ...where, seconds: null } })]);
+    return (kept._sum.seconds ?? 0) + unkept * replySeconds;
+  };
   const [allNotes, myNotes, allReplies, myReplies] = await Promise.all([
     tx.voiceNoteTurn.aggregate({ _sum: { seconds: true }, where: notes }),
     personKey ? tx.voiceNoteTurn.aggregate({ _sum: { seconds: true }, where: { ...notes, personKey } }) : null,
-    tx.voiceReplyUse.count({ where: replies }),
-    personKey ? tx.voiceReplyUse.count({ where: { ...replies, personKey } }) : 0,
+    held(replies),
+    personKey ? held({ ...replies, personKey }) : 0,
   ]);
   return {
-    all: (allNotes._sum.seconds ?? 0) + allReplies * replySeconds,
-    mine: (myNotes?._sum.seconds ?? 0) + myReplies * replySeconds,
+    all: (allNotes._sum.seconds ?? 0) + allReplies,
+    mine: (myNotes?._sum.seconds ?? 0) + myReplies,
   };
 }

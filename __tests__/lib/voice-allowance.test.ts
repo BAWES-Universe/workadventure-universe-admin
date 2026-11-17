@@ -113,7 +113,7 @@ describe('counting', () => {
   it('counts a signed-in person by their account, in the same window as their Universe AI replies', async () => {
     await checkVoiceAllowance('bot-1', SARA, NOW);
     expect(db.$queryRaw.mock.calls[0][0].values).toEqual(expect.arrayContaining(['ua:person:u-sara']));
-    expect(db.voiceReplyUse.create).toHaveBeenCalledWith({ data: { botId: 'bot-1', turnId: SARA.turnId, personKey: 'person:u-sara', createdAt: NOW } });
+    expect(db.voiceReplyUse.create).toHaveBeenCalledWith({ data: { botId: 'bot-1', turnId: SARA.turnId, personKey: 'person:u-sara', seconds: 60, createdAt: NOW } });
     expect(db.voiceReplyUse.count).toHaveBeenCalledWith({ where: { personKey: 'person:u-sara', createdAt: { gte: STARTED } } });
   });
 
@@ -187,7 +187,7 @@ describe('the month’s spending stop on speech', () => {
 
   it('holds the seconds of a reply for someone nobody could name, so the next reply sees them, and gives them back when released; asked again it is the same reply', async () => {
     expect(await checkVoiceAllowance('bot-1', { turnId: 'anon-1' }, NOW)).toEqual({ allowed: true });
-    expect(db.voiceReplyUse.create).toHaveBeenCalledWith({ data: { botId: 'bot-1', turnId: 'anon-1', personKey: 'anon:bot-1', createdAt: NOW } });
+    expect(db.voiceReplyUse.create).toHaveBeenCalledWith({ data: { botId: 'bot-1', turnId: 'anon-1', personKey: 'anon:bot-1', seconds: 60, createdAt: NOW } });
     db.voiceReplyUse.create.mockClear();
     speechCap.mockResolvedValue({ stopped: 'month', resetsAt: '2026-12-01T00:00:00.000Z' });
     db.voiceReplyUse.findUnique.mockResolvedValue({ id: 'x' });

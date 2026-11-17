@@ -96,7 +96,7 @@ export async function checkVoiceAllowance(
       if (await tx.voiceReplyUse.findUnique({ where: { botId_turnId: { botId, turnId } }, select: { id: true } })) return { allowed: true };
       const stop = await checkSpeechCap({ personId: null, seconds: replySeconds, inFlight: await speechReserved(tx, { personKey: null, replySeconds, now }) }, now, tx);
       if (stop) return { allowed: false, resetsAt: stop.resetsAt };
-      await tx.voiceReplyUse.create({ data: { botId, turnId, personKey: `anon:${botId}`, createdAt: now } });
+      await tx.voiceReplyUse.create({ data: { botId, turnId, personKey: `anon:${botId}`, seconds: replySeconds, createdAt: now } });
       return { allowed: true };
     }, SPEECH_LOCK);
   }
@@ -133,7 +133,7 @@ export async function checkVoiceAllowance(
     const inFlight = await speechReserved(tx, { personKey, replySeconds: served.limits.replySeconds, now });
     const stop = await checkSpeechCap({ personId: person.personId, seconds: served.limits.replySeconds, inFlight }, now, tx);
     if (stop) return { allowed: false, resetsAt: stop.resetsAt };
-    await tx.voiceReplyUse.create({ data: { botId, turnId, personKey, createdAt: now } });
+    await tx.voiceReplyUse.create({ data: { botId, turnId, personKey, seconds: served.limits.replySeconds, createdAt: now } });
     const left = Math.min(byVoice - 1, byText);
     return withLeft(Number.isFinite(left) ? Math.max(0, Math.floor(left)) : null, resetsAt);
   }, SPEECH_LOCK);

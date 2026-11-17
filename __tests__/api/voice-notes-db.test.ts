@@ -72,6 +72,7 @@ import { saveVoiceLimits } from '@/lib/voice-limits';
 import { saveMeterSettings } from '@/lib/meter';
 import { leaseVoiceNoteStage, recordVoiceNote, reserveVoiceNote, sweepStaleReservations, type Reservation } from '@/lib/voice-note-turns';
 import { checkVoiceAllowance, releaseVoiceReply } from '@/lib/voice-allowance';
+import { speechReserved } from '@/lib/speech-reserved';
 import { addVoiceNoteCleanup, claimVoiceNoteCleanups, settleVoiceNoteCleanup } from '@/lib/voice-note-cleanups';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -116,8 +117,9 @@ const inFlightSeconds = async () => {
       OR: [{ state: 'reserved', createdAt: { gt: new Date(now.getTime() - 120_000) } }, { state: { in: ['hearing', 'uncertain', 'failed'] } }],
     },
   });
-  const replies = await prisma.voiceReplyUse.count({ where: { createdAt: { gt: new Date(now.getTime() - 10 * 60_000), gte: monthStartNow() } } });
-  return (notes._sum.seconds ?? 0) + replies * 60;
+  const replies = await prisma.voiceReplyUse.aggregate({ _sum: { seconds: true }, _count: { _all: true }, where: { createdAt: { gt: new Date(now.getTime() - 10 * 60_000), gte: monthStartNow() } } });
+  const unkept = await prisma.voiceReplyUse.count({ where: { createdAt: { gt: new Date(now.getTime() - 10 * 60_000), gte: monthStartNow() }, seconds: null } });
+  return (notes._sum.seconds ?? 0) + (replies._sum.seconds ?? 0) + unkept * 60;
 };
 const spentSeconds = async () =>
   Number((await prisma.meterEvent.aggregate({ where: { kind: 'speech', payerKind: 'universe', occurredAt: { gte: monthStartNow() } }, _sum: { quantity: true } }))._sum.quantity ?? 0);
@@ -324,6 +326,27 @@ run('voice notes for every bot, in a real database', () => {
             expect(await checkVoiceAllowance(botId, reply(undefined, null))).toMatchObject({ allowed: false });
             expect(await checkVoiceAllowance(botId, nobody)).toEqual({ allowed: true });
           });
+        } finally {
+          await prisma.voiceReplyUse.deleteMany({ where: { botId, turnId: { in: made } } });
+        }
+      });
+
+      it('holds each admitted reply for the seconds it was admitted for, whatever the setting says later', async () => {
+        const key = `person:held-${randomUUID()}`;
+        const made: string[] = [];
+        try {
+          for (const [seconds, label] of [[60, 'a'], [60, 'b'], [null, 'old']] as const) {
+            const turnId = `held-${label}-${randomUUID()}`;
+            made.push(turnId);
+            await prisma.voiceReplyUse.create({ data: { botId, turnId, personKey: key, seconds } });
+          }
+          // The setting is 30 now: the two replies admitted at 60 still hold 60 each, and the one from before the seconds were kept holds the setting as it is
+          expect((await speechReserved(prisma, { personKey: key, replySeconds: 30, now: new Date() })).mine).toBe(60 + 60 + 30);
+          // And a reply let through now keeps what the setting was then
+          const fresh = reply(undefined, null);
+          made.push(fresh.turnId);
+          expect(await checkVoiceAllowance(botId, fresh)).toMatchObject({ allowed: true });
+          expect((await prisma.voiceReplyUse.findUniqueOrThrow({ where: { botId_turnId: { botId, turnId: fresh.turnId } } })).seconds).toBeGreaterThan(0);
         } finally {
           await prisma.voiceReplyUse.deleteMany({ where: { botId, turnId: { in: made } } });
         }
