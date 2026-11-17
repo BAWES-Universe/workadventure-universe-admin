@@ -133,8 +133,9 @@ export async function credentialsForBot(botId: string, options: { asker?: string
       // `roomUrl` is the room the asker is in, when the bot server knows it: a Brick with a home and a visit is then judged by that room's place
       const here = await whereIsBrick(bot.id, options.roomUrl ?? null);
       // Someone who met it and writes to it where it no longer is (lib/brick-met.ts): served as when it was there, on the lend of
-      // the universe they met it in. A call that names a room is not that: it is for the room the Brick is in
-      const met = !here && asker && !options.roomUrl && !(await isTakenOff(bot.id, asker.id)) ? await standingMeeting(bot.id, asker.id) : null;
+      // the universe they met it in, whatever room the caller names (a direct message does not depend on where anyone is, as in
+      // lib/bot-access.ts). Never the owner's key unless it was lent there, so naming a room gets them nothing more
+      const met = !here && asker && !(await isTakenOff(bot.id, asker.id)) ? await standingMeeting(bot.id, asker.id) : null;
       if (here) others = { universeId: here.universeId };
       else if (met) others = { universeId: met.place?.universeId ?? null };
       // Someone named, and not its owner, while it is not visiting anywhere and they never met it (or were taken off): nobody to serve. Nothing named and not visiting is

@@ -453,13 +453,15 @@ run('keeping an allowed direct message after a visit ends, in a real database', 
       expect((await credentials(sara.uuid)) as { body: { forOthers?: boolean } }).not.toMatchObject({ body: { forOthers: true } });
     });
 
-    it('is not served to someone who never met it, who was taken off, or a call that names a room it is not in', async () => {
+    it('is not served to someone who never met it or who was taken off, whatever room is named; someone who met it is served the same with or without one', async () => {
       await meet();
       await dm(omar);
       await endTheVisit();
       expect((await credentials(lina.uuid)).status).toBe(404);
       expect((await credentials('unknown')).status).toBe(404);
-      expect(await credentialsForBot(brickId, { asker: omar.uuid, roomUrl: places.other.roomUrl })).toMatchObject({ status: 404 });
+      expect(await credentialsForBot(brickId, { asker: lina.uuid, roomUrl: places.other.roomUrl })).toMatchObject({ status: 404 });
+      // The room the caller names changes nothing for a direct message (Sentry on #993): the same answer as access gives
+      expect(await credentialsForBot(brickId, { asker: omar.uuid, roomUrl: places.other.roomUrl })).toMatchObject({ status: 200, body: { forOthers: true } });
       expect(await credentials(omar.uuid)).toMatchObject({ status: 200 });
       await revokeMet(brickId, sara.id, omar.id);
       expect((await credentials(omar.uuid)).status).toBe(404);
