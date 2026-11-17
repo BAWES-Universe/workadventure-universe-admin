@@ -63,6 +63,12 @@ const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const tag = randomUUID().slice(0, 8);
 const NOW = new Date('2026-11-15T12:00:00Z');
 const minutes = (n: number) => new Date(NOW.getTime() + n * 60_000);
+// The database stamps a machine's last change and a Brick's last look with the real clock, and the sweep reads them against the `now` it is given
+// (the test's own, earlier than the real one): the rows are put back to the test's clock before a sweep, so the test never depends on the day it runs
+const backdate = async (botIds: string[]) => {
+  await prisma.brickComputer.updateMany({ where: { botId: { in: botIds } }, data: { updatedAt: NOW } });
+  await prisma.bot.updateMany({ where: { id: { in: botIds } }, data: { updatedAt: NOW } });
+};
 const people: string[] = [];
 let made = 0;
 let provider: FakeComputerProvider;
@@ -700,6 +706,7 @@ run('a Brick’s computer, in a real database', () => {
       // A stop that broke half way: the job is over, its time never reached the books, and the machine still works
       await prisma.computerJob.update({ where: { id: a.job.id }, data: { status: 'done', endedBy: null, endedAt: minutes(5), secondsRun: 300, stretchStarted: null } });
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+      await backdate([sara.brickId]);
       await sweepComputers(minutes(10));
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
       const events = await prisma.meterEvent.findMany({ where: { eventId: `computer:${a.job.id}:time` } });
@@ -793,6 +800,7 @@ run('a Brick’s computer, in a real database', () => {
         await deleteBrick(id, sara.id, minutes(2));
         await prisma.bot.update({ where: { id }, data: { goneAt: new Date(minutes(3).getTime() + i) } });
       }
+      await backdate(bricks);
       // A sweep reads three Bricks, one to a page: the three that wait use all of it
       expect(await removeGoneBricks(minutes(10), sara.id, 1, 3)).toEqual([]);
       // The next one starts with the Brick not looked at yet
@@ -808,6 +816,7 @@ run('a Brick’s computer, in a real database', () => {
       await finishJob(a.job.id, 'done', minutes(1));
       // The rest failed: the machine is still awake, so it is not marked as resting (the sweep only looks at ones that work)
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+      await backdate([sara.brickId]);
       await sweepComputers(minutes(10));
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
       expect(provider.calls.filter((call) => call.name === 'rest')).toHaveLength(2);
@@ -820,7 +829,11 @@ run('a Brick’s computer, in a real database', () => {
       await prisma.brickComputer.update({ where: { botId: sara.brickId }, data: { machine: 'resting', restClaimedAt: minutes(60) } });
       await sweepComputers(minutes(62));
       expect(provider.calls.filter((call) => call.name === 'rest')).toHaveLength(2);
+      // This sweep lets the stale claim go (the machine works again, stamped now); the next one, once it has been idle a little, rests it
       await sweepComputers(minutes(80));
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).restClaimedAt).toBeNull();
+      await backdate([sara.brickId]);
+      await sweepComputers(minutes(90));
       expect(provider.calls.filter((call) => call.name === 'rest')).toHaveLength(3);
       expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).restClaimedAt).toBeNull();
     });
