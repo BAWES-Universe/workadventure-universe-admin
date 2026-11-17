@@ -724,11 +724,12 @@ async function restIfUnheld(botId: string, now: Date): Promise<boolean> {
  * A machine that was just made (new, or brought back from cold storage) costs from now on: its disk goes into the books as kept storage, tried a few
  * times. When the books will not take it the caller is told (`kept.ok` false) and keeps the room it held for the disk until the sweep has written it.
  */
-async function writeKeptDisk(botId: string, provider: Provider, now: Date, kept?: { ok: boolean }): Promise<void> {
+async function writeKeptDisk(botId: string, provider: Provider, kept?: { ok: boolean }): Promise<void> {
   let written = false;
   for (let tries = 0; tries < 3 && !written; tries++) {
     if (tries > 0) await new Promise((resolve) => setTimeout(resolve, 200));
-    written = await recordKeptBytes({ botId, reason: 'made', machineBytes: provider.diskBytes?.() ?? null, now });
+    // The clock at the moment of writing, never the job's start: the newest line stands, so a disk that exists now must sort after any line written while the Brick was cold
+    written = await recordKeptBytes({ botId, reason: 'made', machineBytes: provider.diskBytes?.() ?? null, now: new Date() });
   }
   if (!written && kept) kept.ok = false;
 }
@@ -759,7 +760,7 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
     cameBack = { from: back.from, olderCopyUsed: back.olderCopyUsed };
     row = await prisma.brickComputer.findUniqueOrThrow({ where: { botId } });
     // The computer made for the return costs from now on, like any new one: its disk goes into the books the same way (tried a few times, and the room held for it kept when the books will not take it)
-    if (returnStarted !== null) await writeKeptDisk(botId, provider, now, kept);
+    if (returnStarted !== null) await writeKeptDisk(botId, provider, kept);
   }
   // A machine that was to be put to sleep and is not proved asleep is not woken on top of what may still run: it is stopped first
   if (row.machine === 'stopping' && row.providerRef && !(await stopMachine(botId, row.providerRef, provider, ['stopping']))) throw new Error('The computer could not be put to sleep yet');
@@ -771,7 +772,7 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
         row = await prisma.brickComputer.update({ where: { botId }, data: { providerRef: info.ref, madeAt: now, machine: 'waking' } });
         // The machine exists and costs from now on: its disk goes into the books as kept storage, tried a few times. When the books will not take it the
         // caller is told, and keeps the room it held for the disk until the sweep has written it (the job is not failed for the books)
-        await writeKeptDisk(botId, provider, now, kept);
+        await writeKeptDisk(botId, provider, kept);
       } catch (error) {
         await prisma.brickComputer.updateMany({ where: { botId, providerRef: null }, data: { machine: 'none' } });
         throw error;
@@ -799,10 +800,21 @@ async function bringUp(botId: string, provider: Provider, now: Date, kept?: { ok
     throw error;
   }
   // Back from cold storage on the older copy: the person is told which day their files are from (restoredFrom); the newest copy is no event to tell
-  const from = restoring ? (row.filesSavedAt ?? now) : cameBack?.olderCopyUsed ? cameBack.from : null;
+  let from: Date | null = restoring ? (row.filesSavedAt ?? now) : cameBack?.olderCopyUsed ? cameBack.from : null;
+  let older = cameBack?.olderCopyUsed ?? false;
+  if (!restoring && cameBack === null) {
+    // This call restored nothing: a second job that came in while the machine was waking after a return keeps what that return said, as the files on the machine are still those.
+    // It is cleared only when a newer saved copy of the files makes it out of date.
+    const kept = await prisma.brickComputer.findUniqueOrThrow({ where: { botId }, select: { restoredFrom: true, olderCopyUsed: true, filesSavedAt: true } });
+    const outOfDate = !!kept.restoredFrom && !!kept.filesSavedAt && kept.filesSavedAt.getTime() > kept.restoredFrom.getTime();
+    if (!outOfDate) {
+      from = kept.restoredFrom;
+      older = kept.olderCopyUsed;
+    }
+  }
   await prisma.brickComputer.update({
     where: { botId },
-    data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: from, olderCopyUsed: cameBack?.olderCopyUsed ?? false, ...(returnStarted !== null ? { returnMs: Date.now() - returnStarted } : {}) },
+    data: { machine: 'working', lastWorkedAt: now, restClaimedAt: null, restoredFrom: from, olderCopyUsed: older, ...(returnStarted !== null ? { returnMs: Date.now() - returnStarted } : {}) },
   });
 }
 

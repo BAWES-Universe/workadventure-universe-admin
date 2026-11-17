@@ -850,6 +850,41 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(lines.map((line) => Number(line.quantity))).toEqual([4_000_000_000, 7]);
     });
 
+    it('the disk of a computer made for a return sorts after a correction the sweep wrote while the Brick was cold, even when the job started before that correction', async () => {
+      const brick = await idleBrick();
+      provider.disk = 4_000_000_000;
+      expect(await packAway(brick.botId, provider, NOW)).toBe('packed');
+      const { recordKeptBytes } = await import('@/lib/computer-disk');
+      // The correction ran at a later time than the job's own start (the job's `now` is the day it was asked, which can be older than the sweep's clock)
+      expect(await recordKeptBytes({ botId: brick.botId, reason: 'gone', machineBytes: null, copyBytes: 7, now: new Date(NOW.getTime() + DAY), onlyWhileCold: true })).toBe(true);
+      const started = await startJob({ botId: brick.botId, personId: brick.personId, title: 'Back' }, NOW);
+      expect(started.ok && started.job.status).toBe('running');
+      const newest = await prisma.meterEvent.findFirstOrThrow({ where: { botId: brick.botId, kind: 'stored_bytes' }, orderBy: [{ occurredAt: 'desc' }, { recordedAt: 'desc' }] });
+      // The newest level counts the new computer's disk
+      expect(Number(newest.quantity)).toBeGreaterThanOrEqual(4_000_000_000);
+    });
+
+    it('a second job that comes in while a machine is waking after an older-copy return keeps the day the files are from', async () => {
+      const brick = await idleBrick();
+      await packAway(brick.botId, provider, NOW);
+      const cameFrom = new Date(NOW.getTime() - 3 * DAY);
+      // The first job restored the older copy and the machine is still waking
+      await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'waking', providerRef: `fake-${brick.botId}`, olderCopyUsed: true, restoredFrom: cameFrom, filesSavedAt: new Date(cameFrom.getTime() - DAY) } });
+      const started = await startJob({ botId: brick.botId, personId: brick.personId, title: 'Second' }, NOW);
+      expect(started.ok && started.job.status).toBe('running');
+      expect(await row(brick.botId)).toMatchObject({ machine: 'working', olderCopyUsed: true, restoredFrom: cameFrom });
+    });
+
+    it('that day is dropped once a newer saved copy of the files exists', async () => {
+      const brick = await idleBrick();
+      await packAway(brick.botId, provider, NOW);
+      const cameFrom = new Date(NOW.getTime() - 3 * DAY);
+      await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'waking', providerRef: `fake-${brick.botId}`, olderCopyUsed: true, restoredFrom: cameFrom, filesSavedAt: new Date(NOW.getTime() - DAY) } });
+      const started = await startJob({ botId: brick.botId, personId: brick.personId, title: 'Third' }, NOW);
+      expect(started.ok && started.job.status).toBe('running');
+      expect(await row(brick.botId)).toMatchObject({ machine: 'working', olderCopyUsed: false, restoredFrom: null });
+    });
+
     it('cleans up a return a stopped server left: the half-restored computer is removed and the Brick is cold again', async () => {
       const brick = await idleBrick();
       await packAway(brick.botId, provider, NOW);
