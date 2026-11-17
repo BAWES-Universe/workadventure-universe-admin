@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { computerTimeInBooks, providerFor } from '@/lib/computer';
 import { recordKeptBytes } from '@/lib/computer-disk';
+import { deleteAllArchives } from '@/lib/computer-archives';
 
 /**
  * The final purge of a deleted Brick (audit F08, GPT 6.10; Khalid, 17 Nov: when a Brick is deleted, delete EVERYTHING, keep nothing).
@@ -133,7 +134,18 @@ export async function finishOutside(botId: string, now: Date = new Date()): Prom
     }
   }
   if (note.copyPending) {
-    if (!provider?.deleteSavedCopy) {
+    // The copies cold storage keeps (rows and their objects) go with the saved copy; a Brick that never was cold has none
+    let coldGone = true;
+    try {
+      await deleteAllArchives(botId);
+    } catch (error) {
+      coldGone = false;
+      console.error('[Brick purge] Cold storage copies could not be deleted:', error instanceof Error ? error.message : 'unknown');
+      left.push('cold storage copies');
+    }
+    if (!coldGone) {
+      // Nothing more is tried for the saved files until these are gone too: both are confirmed before anything is called deleted
+    } else if (!provider?.deleteSavedCopy) {
       left.push('saved files: no provider for them on this server');
     } else {
       try {

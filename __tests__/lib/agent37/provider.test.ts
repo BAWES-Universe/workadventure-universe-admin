@@ -14,6 +14,8 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   let execOut: (command: string) => string = () => 'ok';
   let markOut = 'marked=1\n';
   let revisionAfterUpdate = 2;
+  /** What Agent37 holds as each machine's managed budget: the monthly cap and the remaining one-time credit (a machine not here has both at zero). */
+  const budgets = new Map<string, { cap: number; credit: number }>();
   const refuse: Record<string, Error | undefined> = {};
   const client = {
     async listInstances() {
@@ -116,6 +118,15 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
       calls.push(`usage:${day}`);
       return usage;
     },
+    async getBudget(id: string) {
+      calls.push(`budget:${id}`);
+      const b = budgets.get(id) ?? { cap: 0, credit: 0 };
+      return { monthlyCapMicros: b.cap, monthlyRemainingMicros: b.cap, creditRemainingMicros: b.credit };
+    },
+    async setMonthlyCap(id: string, micros: number) {
+      calls.push(`cap:${id}:${micros}`);
+      budgets.set(id, { cap: micros, credit: budgets.get(id)?.credit ?? 0 });
+    },
     async archive(url: string) {
       calls.push(`archive:${url}`);
       return { body: new ReadableStream() } as unknown as Response;
@@ -124,7 +135,7 @@ function world(options: { balanceUsd?: number; pastDue?: boolean } = {}) {
   const created: Array<{ metadata?: Record<string, string>; budget?: unknown; env?: unknown; auto_sleep?: boolean; network?: unknown }> = [];
   const networks: Array<{ id: string; network: unknown }> = [];
   const usage: { day: string; totalMicros: number; instances: Array<{ id: string; totalMicros: number; computeMicros: number; awakeMinutes: number }> } = { day: '2026-11-15', totalMicros: 0, instances: [] };
-  return { client: client as unknown as Agent37Client, instances, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
+  return { client: client as unknown as Agent37Client, instances, budgets, calls, execs, created, networks, usage, refuse, setHealthy: (value: boolean) => (healthy = value), setExec: (fn: (command: string) => string) => (execOut = fn), setMark: (value: string) => (markOut = value) };
 }
 
 function provider(w: ReturnType<typeof world>, extra: { image?: () => Promise<ImageState | null>; reserved?: number; copies?: ConstructorParameters<typeof Agent37ComputerProvider>[0]['copies']; clock?: { t: number } } = {}) {
@@ -215,7 +226,8 @@ describe('the Agent37 provider', () => {
       expect(checks['agent37 key'].ok).toBe(true);
       expect(checks['agent37 wallet'].ok).toBe(true);
       expect(checks['computer image']).toMatchObject({ ok: true });
-      expect(w.calls.filter((call) => call !== 'billing')).toEqual([]);
+      // It only looks (the wallet, the list of machines, their budgets): nothing is made, woken or changed
+      expect(w.calls.filter((call) => call !== 'billing' && call !== 'list' && !call.startsWith('budget:'))).toEqual([]);
     });
 
     it('says a wallet that cannot carry a job, an overdrawn one, and a key that was refused, and never shows the key', async () => {
@@ -688,5 +700,173 @@ describe('getting a machine ready for a job', () => {
     again.setExec(() => 'ready=1 restart=0\n');
     await q.ready('m1');
     expect(again.calls.some((call) => call.startsWith('update:'))).toBe(false);
+  });
+});
+
+describe('cold storage operations on a computer', () => {
+  const source = { url: 'https://orbit.example/api/computer/archives/a1/download', token: 'tok', sha256: 'a'.repeat(64) };
+
+  it('reads the inventory a pack-away is decided on, as root, and refuses one it cannot read whole', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.setExec(() => 'noise\nprepack={"home_files":12,"home_bytes":3400,"outside_files":2,"outside_bytes":90,"packages":["ffmpeg","bad name!"],"blocked":null}\n');
+    await expect(p.prepack('m1')).resolves.toEqual({ homeFiles: 12, homeBytes: 3400, outsideFiles: 2, outsideBytes: 90, packages: ['ffmpeg'], blocked: null });
+    expect(w.execs.at(-1)).toMatchObject({ command: 'universe-cold prepack', options: { user: 'root' } });
+    w.setExec(() => 'prepack={"home_files":1,"home_bytes":1,"outside_files":9,"outside_bytes":9,"packages":[],"blocked":"too_big_outside"}\n');
+    expect((await p.prepack('m1')).blocked).toBe('too_big_outside');
+    w.setExec(() => 'nothing useful\n');
+    await expect(p.prepack('m1')).rejects.toThrow('could not be inventoried');
+    w.setExec(() => 'prepack={"home_files":-1,"home_bytes":1,"outside_files":0,"outside_bytes":0}\n');
+    await expect(p.prepack('m1')).rejects.toThrow('not whole');
+  });
+
+  it('makes a throwaway computer with the same network rule and a closed budget, named so it is never mistaken for a Brick’s', async () => {
+    const w = world();
+    const info = await provider(w).makeScratch();
+    expect(info.ref).toBe('m1');
+    const made = w.created[0];
+    expect(made.metadata?.creation_id).toMatch(/^scratch:/);
+    expect(Number(made.metadata?.made_at)).toBeGreaterThan(0);
+    expect(made.network).toBe(BRICK_NETWORK);
+    expect(made.budget).toEqual({ monthly_cap_micros: 0, credit_micros: 0 });
+    // A Brick's own lookup never finds it
+    const brick = await provider(w).create('bot-1');
+    expect(brick.ref).not.toBe('m1');
+  });
+
+  it('restores a copy: the machine put in order first, then the fetch and check, then the finish as root', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1 files=12\n' : command === 'universe-cold finish' ? 'finished=1\n' : 'ok'));
+    const result = await p.restoreInto('m1', source);
+    expect(result).toMatchObject({ ok: true, reason: null });
+    const commands = w.execs.map((entry) => entry.command);
+    expect(commands[0]).toMatch(/^universe-cold restore <<'RESTORE_JSON'/);
+    expect(commands[0]).toContain(source.url);
+    expect(commands[0]).toContain(source.sha256);
+    expect(commands[1]).toBe('universe-cold finish');
+    expect(w.execs[1].options).toMatchObject({ user: 'root' });
+    // Its budget was read before anything was put on it
+    expect(w.calls.indexOf('budget:m1')).toBeGreaterThanOrEqual(0);
+    expect(w.calls.indexOf('budget:m1')).toBeLessThan(w.calls.indexOf(`exec:m1:${commands[0]}`));
+  });
+
+  it('says why a restore did not check out, in a word, and does not go on to the finish', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=0 reason=sha_mismatch\n' : 'ok'));
+    await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: false, reason: 'sha_mismatch' });
+    expect(w.execs.map((entry) => entry.command)).not.toContain('universe-cold finish');
+    w.setExec((command) => (command.startsWith('universe-cold restore') ? 'restored=1\n' : command === 'universe-cold finish' ? 'finished=0 reason=packages\n' : 'ok'));
+    await expect(p.restoreInto('m1', source)).resolves.toMatchObject({ ok: false, reason: 'finish_packages' });
+  });
+
+  it('confirms a computer is gone only when the provider no longer lists it, and says it is still there otherwise', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    await p.remove('m1');
+    await expect(p.confirmRemoved('m1')).resolves.toBe('gone');
+    const stuck = world();
+    const q = provider(stuck);
+    await q.create('bot-1');
+    // Still listed (the delete was asked and Agent37 has not finished): never "gone"
+    await expect(q.confirmRemoved('m1')).resolves.toBe('still_there');
+  });
+
+  it('removes only throwaway computers that are old enough, never a Brick’s', async () => {
+    const w = world();
+    const clock = { t: 10_000_000 };
+    const p = provider(w, { clock });
+    await p.create('bot-1');
+    await p.makeScratch();
+    expect(await p.removeScratches(60 * 60_000)).toBe(0);
+    clock.t += 2 * 60 * 60_000;
+    expect(await p.removeScratches(60 * 60_000)).toBe(1);
+    expect([...w.instances.keys()]).toEqual(['m1']);
+  });
+});
+
+describe('Agent37 managed spending stays shut (monthly cap AND one-time credit)', () => {
+  const open = (w: ReturnType<typeof world>, id: string, cap: number, credit: number) => w.budgets.set(id, { cap, credit });
+
+  it('reads both parts of a new machine’s budget when it is made, and again when it is made ready', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    expect(w.created[0].budget).toEqual({ monthly_cap_micros: 0, credit_micros: 0 });
+    expect(w.calls.filter((call) => call === 'budget:m1')).toHaveLength(1);
+    w.setExec(() => 'ready=1 restart=0\n');
+    await p.ready('m1');
+    expect(w.calls.filter((call) => call === 'budget:m1')).toHaveLength(2);
+  });
+
+  it('sets a monthly cap that is not zero back to zero (and reads it again) before handing the machine on', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    open(w, 'm1', 5_000_000, 0);
+    w.setExec(() => 'ready=1 restart=0\n');
+    await expect(p.ready('m1')).resolves.toBeUndefined();
+    expect(w.calls).toContain('cap:m1:0');
+    expect(w.budgets.get('m1')).toEqual({ cap: 0, credit: 0 });
+  });
+
+  it('does not hand over a machine that still holds one-time credit: a $0 cap alone leaves it spendable, and the credit is never spent down', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    open(w, 'm1', 0, 2_000_000);
+    w.setExec(() => 'ready=1 restart=0\n');
+    await expect(p.ready('m1')).rejects.toThrow('managed budget is not zero');
+    expect(w.execs).toEqual([]);
+    // Nothing was done to the credit: no top-up, no cap raised
+    expect(w.calls.filter((call) => call.startsWith('cap:') && !call.endsWith(':0'))).toEqual([]);
+    expect(w.budgets.get('m1')).toEqual({ cap: 0, credit: 2_000_000 });
+  });
+
+  it('checks the budget of a machine it adopts (one nobody wrote down may have been topped up) and refuses it when credit is left', async () => {
+    const w = world();
+    w.instances.set('old1', { id: 'old1', status: 'running', url: 'https://old1.agent37.app', metadata: { creation_id: 'brick:bot-1' }, region: 'us' } as Instance);
+    open(w, 'old1', 0, 1_000);
+    await expect(provider(w).create('bot-1')).rejects.toThrow('managed budget is not zero');
+    open(w, 'old1', 0, 0);
+    await expect(provider(w).create('bot-1')).resolves.toMatchObject({ ref: 'old1' });
+  });
+
+  it('checks the budget of a machine a copy is restored onto, before anything is put on it, and of a throwaway one', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    open(w, 'm1', 0, 500);
+    await expect(p.restoreInto('m1', { url: 'https://orbit.example/d', token: 't', sha256: 'a'.repeat(64) })).rejects.toThrow('managed budget is not zero');
+    expect(w.execs).toEqual([]);
+    const scratch = world();
+    const q = provider(scratch);
+    await q.makeScratch();
+    expect(scratch.calls).toContain('budget:m1');
+  });
+
+  it('says in the checkup how many machines still have budget, and that the broker is what guards paid actions', async () => {
+    const w = world();
+    const p = provider(w);
+    await p.create('bot-1');
+    const named = (checks: Array<{ name: string; ok: boolean; detail: string }>) => Object.fromEntries(checks.map((check) => [check.name, check]));
+    expect(named(await p.checkup())['agent37 managed budget']).toMatchObject({ ok: true });
+    open(w, 'm1', 0, 700);
+    expect(named(await p.checkup())['agent37 managed budget']).toMatchObject({ ok: false });
+    const broker = named(await p.checkup())['orbit broker'];
+    expect(broker.detail).toMatch(/Orbit/);
+  });
+
+  it('keeps the open internet: a machine is made with allow-all and nothing about a gateway', async () => {
+    const w = world();
+    await provider(w).create('bot-1');
+    expect(w.created[0].network).toBe(BRICK_NETWORK);
+    expect(BRICK_NETWORK).toBe('allow-all');
+    expect(JSON.stringify(w.created[0])).not.toMatch(/gateway|proxy|3128/);
   });
 });

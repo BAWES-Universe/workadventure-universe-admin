@@ -7,9 +7,9 @@
 
 /**
  * Where the machine is, as stored. `none` is a computer that was given and not made yet: it is made at the first real need. `stopping` is one
- * that must be put to sleep and is not yet proved asleep: nothing uses it, and every sweep tries again until the provider says it is not running.
+ * that must be put to sleep and is not yet proved asleep: nothing uses it, and every sweep tries again until the provider says it is not running. `packing` is one being packed away into cold storage (its copy is made and proved before it is deleted); `cold` is one that is gone and only its copies remain.
  */
-export const MACHINE_STATES = ['none', 'waking', 'resting', 'working', 'cold', 'broken', 'restoring', 'stopped', 'stopping'] as const;
+export const MACHINE_STATES = ['none', 'waking', 'resting', 'working', 'cold', 'broken', 'restoring', 'stopped', 'stopping', 'packing'] as const;
 export type MachineState = (typeof MACHINE_STATES)[number];
 
 export const JOB_STATUSES = ['queued', 'running', 'waiting', 'done', 'stopped', 'failed'] as const;

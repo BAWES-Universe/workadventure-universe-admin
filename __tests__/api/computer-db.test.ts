@@ -735,7 +735,11 @@ run('a Brick’s computer, in a real database', () => {
       const before = woke();
       await sweepComputers(minutes(1));
       expect(await prisma.computerJob.findUniqueOrThrow({ where: { id: b.job.id } })).toMatchObject({ status: 'stopped', endedBy: 'deleted' });
-      expect(woke()).toBe(before);
+      // The job itself wakes nothing. The only wake there may be is cold storage's own, to read the folder of a deleted Brick before its computer is
+      // removed (it comes with a pack-away's `prepack`), and the machine is never left working
+      const prepacked = provider.calls.some((call) => call.name === 'prepack');
+      expect(woke()).toBe(prepacked ? before + 1 : before);
+      expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).not.toBe('working');
       // Its room was never held (the check comes before anything is reserved for the machine), and none is left for it
       expect(await prisma.meterReservation.count({ where: { jobId: b.job.id, state: 'held' } })).toBe(0);
     });

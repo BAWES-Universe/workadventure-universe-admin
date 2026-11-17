@@ -1,8 +1,8 @@
-import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, type DecipherGCM } from 'node:crypto';
 import { PassThrough, Readable, Transform, Writable, pipeline } from 'node:stream';
 import { promisify } from 'node:util';
 import { createGunzip } from 'node:zlib';
-import { CopyObjectCommand, DeleteObjectCommand, HeadObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
+import { CopyObjectCommand, DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { artifactBucket } from '@/lib/artifact-storage';
 import { prisma } from '@/lib/db';
@@ -73,6 +73,67 @@ export function openSavedCopy(file: Buffer): Buffer {
   return Buffer.concat([decipher.update(file.subarray(MAGIC.length + NONCE, file.length - TAG)), decipher.final()]);
 }
 
+export interface Sealed {
+  /** The tar.gz's size as it was read, and its SHA-256: what the copy must give back when it is restored. */
+  bytes: number;
+  sha256: string;
+}
+
+/**
+ * Writes a folder's tar.gz (as Agent37 streams it) into the bucket, encrypted, under `finalKey`, and says its size and SHA-256. The stream is read to its
+ * end and checked as a gzip (a stream cut short fails the check) while it is written under `stagingKey`; only a whole one is copied over `finalKey`.
+ * Throws when the stream was not a whole gzip or the upload did not finish: what was at `finalKey` is then untouched.
+ */
+export async function storeSealed(finalKey: string, stagingKey: string, archive: ReadableStream<Uint8Array>, leftNothing: () => void = () => undefined): Promise<Sealed> {
+  const { s3, bucket } = artifactBucket();
+  const source = Readable.fromWeb(archive as never);
+  const toBucket = new PassThrough();
+  const toCheck = createGunzip();
+  const sealed = encryptor(derivedKey(PURPOSE));
+  const hash = createHash('sha256');
+  let bytes = 0;
+  // Any part that fails takes every other part down with it, so no stream is left paused on a reader that is gone
+  const stopAll = (error: Error) => {
+    for (const part of [source, toBucket, sealed, toCheck]) part.destroy(error);
+  };
+  // The same bytes go two ways: to the bucket (encrypted), and through a gzip check that fails when the stream ends early
+  source.on('data', (chunk: Buffer) => {
+    hash.update(chunk);
+    bytes += chunk.length;
+  });
+  source.pipe(toBucket);
+  source.pipe(toCheck);
+  source.on('error', stopAll);
+  pipeline(toBucket, sealed, (error) => {
+    if (error) stopAll(error);
+  });
+  const upload = new Upload({
+    client: s3,
+    params: { Bucket: bucket, Key: stagingKey, Body: sealed, ContentType: 'application/octet-stream', CacheControl: 'private, no-store' },
+  });
+  const checked = run(toCheck, new Writable({ write: (_chunk, _encoding, done) => done() })).catch((error) => {
+    stopAll(error);
+    throw error;
+  });
+  const uploaded = upload.done().catch((error) => {
+    stopAll(error);
+    throw error;
+  });
+  // Both must finish; one that fails has ended the others, so this always settles
+  const results = await Promise.allSettled([checked, uploaded]);
+  const failed = results.find((result) => result.status === 'rejected') as PromiseRejectedResult | undefined;
+  if (failed) {
+    await upload.abort().catch(() => undefined);
+    // The upload may have finished a moment before the check failed: what it wrote is not a copy, and the saved one is untouched
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).then(leftNothing, () => undefined);
+    throw failed.reason && typeof failed.reason.message === 'string' ? failed.reason : new Error('The copy of the files could not be saved');
+  }
+  // The stream was whole and the upload finished: now, and only now, it takes the place of what was there (one copy inside the bucket)
+  await s3.send(new CopyObjectCommand({ Bucket: bucket, Key: finalKey, CopySource: `${bucket}/${stagingKey}` }));
+  await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).catch(() => undefined);
+  return { bytes, sha256: hash.digest('hex') };
+}
+
 /**
  * Stores the folder's tar.gz (as Agent37 streams it). Throws when the stream was not a whole gzip or the upload did not finish:
  * the previous copy is then still the saved one.
@@ -89,67 +150,97 @@ export async function storeSavedCopy(botId: string, archive: ReadableStream<Uint
       settled = true;
       throw new Error('The Brick was deleted while its files were being saved');
     }
-    const info = await storeChecked(botId, archive, () => (settled = true));
+    await storeSealed(savedCopyKey(botId), stagingKey(botId, randomUUID()), archive, () => (settled = true));
+    // A Brick purged while this save was running: the purge wrote its marker before it deleted anything in the bucket, so a marker seen now (after
+    // the copy) means the delete either already ran and missed this copy, or will run after it and take it. Either way this copy must not stay
+    if ((await prisma.brickPurge.count({ where: { botId } })) > 0) {
+      const { s3, bucket } = artifactBucket();
+      await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId) }));
+      settled = true;
+      throw new Error('The Brick was deleted while its files were being saved');
+    }
+    const copy = await savedCopyOf(botId);
+    if (!copy) throw new Error('The saved copy cannot be found after it was stored');
     settled = true;
-    return info;
+    return copy;
   } finally {
     // Only a save that is certain it left nothing behind lets go of its row; any other leaves it for the purge to settle once it is stale
     if (settled) await prisma.savedCopyWrite.deleteMany({ where: { id: write.id } }).catch(() => undefined);
   }
 }
 
-async function storeChecked(botId: string, archive: ReadableStream<Uint8Array>, leftNothing: () => void): Promise<SavedCopyInfo> {
+/** Decrypts what `encryptor` wrote, as it streams. The tag is the last 16 bytes, so it is only known at the end: a copy that was changed or cut short fails there, and the stream errors. */
+function decryptor(key: Buffer): Transform {
+  let head = Buffer.alloc(0);
+  let decipher: DecipherGCM | null = null;
+  let tail = Buffer.alloc(0);
+  return new Transform({
+    transform(chunk: Buffer, _encoding, done) {
+      try {
+        let data = chunk;
+        if (!decipher) {
+          head = Buffer.concat([head, data]);
+          if (head.length < MAGIC.length + NONCE) return done();
+          if (!head.subarray(0, MAGIC.length).equals(MAGIC)) throw new Error('Not a saved copy');
+          decipher = createDecipheriv('aes-256-gcm', key, head.subarray(MAGIC.length, MAGIC.length + NONCE)) as DecipherGCM;
+          data = head.subarray(MAGIC.length + NONCE);
+        }
+        const all = Buffer.concat([tail, data]);
+        const keep = Math.min(TAG, all.length);
+        tail = all.subarray(all.length - keep);
+        const body = all.subarray(0, all.length - keep);
+        if (body.length > 0) this.push(decipher.update(body));
+        done();
+      } catch (error) {
+        done(error as Error);
+      }
+    },
+    flush(done) {
+      try {
+        if (!decipher || tail.length !== TAG) throw new Error('The saved copy is cut short');
+        decipher.setAuthTag(tail);
+        this.push(decipher.final());
+        done();
+      } catch (error) {
+        done(error as Error);
+      }
+    },
+  });
+}
+
+/** A stored copy, decrypted as a stream, and its size. Nothing is checked until the end: a copy that fails its tag ends the stream with an error. */
+export async function openSealedStream(key: string): Promise<{ stream: Readable; bytes: number }> {
   const { s3, bucket } = artifactBucket();
-  const staging = stagingKey(botId, randomUUID());
-  const source = Readable.fromWeb(archive as never);
-  const toBucket = new PassThrough();
-  const toCheck = createGunzip();
-  const sealed = encryptor(derivedKey(PURPOSE));
-  // Any part that fails takes every other part down with it, so no stream is left paused on a reader that is gone
-  const stopAll = (error: Error) => {
-    for (const part of [source, toBucket, sealed, toCheck]) part.destroy(error);
-  };
-  // The same bytes go two ways: to the bucket (encrypted), and through a gzip check that fails when the stream ends early
-  source.pipe(toBucket);
-  source.pipe(toCheck);
-  source.on('error', stopAll);
-  pipeline(toBucket, sealed, (error) => {
-    if (error) stopAll(error);
-  });
-  const upload = new Upload({
-    client: s3,
-    params: { Bucket: bucket, Key: staging, Body: sealed, ContentType: 'application/octet-stream', CacheControl: 'private, no-store' },
-  });
-  const checked = run(toCheck, new Writable({ write: (_chunk, _encoding, done) => done() })).catch((error) => {
-    stopAll(error);
+  const found = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  if (!found.Body) throw new Error('The saved copy could not be read');
+  const bytes = Math.max(0, (found.ContentLength ?? 0) - COPY_OVERHEAD);
+  const stream = (found.Body as Readable).pipe(decryptor(derivedKey(PURPOSE)));
+  (found.Body as Readable).on('error', (error) => stream.destroy(error));
+  return { stream, bytes };
+}
+
+/** The size of a stored copy's tar.gz and when it was written; null when nothing is stored there. */
+export async function sealedInfo(key: string): Promise<SavedCopyInfo | null> {
+  const { s3, bucket } = artifactBucket();
+  try {
+    const head = await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+    return { bytes: Math.max(0, (head.ContentLength ?? 0) - COPY_OVERHEAD), savedAt: head.LastModified ?? new Date() };
+  } catch (error) {
+    const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+    if (status === 404 || (error as { name?: string }).name === 'NotFound') return null;
     throw error;
-  });
-  const uploaded = upload.done().catch((error) => {
-    stopAll(error);
-    throw error;
-  });
-  // Both must finish; one that fails has ended the others, so this always settles
-  const results = await Promise.allSettled([checked, uploaded]);
-  const failed = results.find((result) => result.status === 'rejected') as PromiseRejectedResult | undefined;
-  if (failed) {
-    await upload.abort().catch(() => undefined);
-    // The upload may have finished a moment before the check failed: what it wrote is not a copy, and the saved one is untouched
-    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: staging })).then(leftNothing, () => undefined);
-    throw failed.reason && typeof failed.reason.message === 'string' ? failed.reason : new Error('The copy of the files could not be saved');
   }
-  // The stream was whole and the upload finished: now, and only now, it replaces the saved copy (one copy inside the bucket)
-  await s3.send(new CopyObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId), CopySource: `${bucket}/${staging}` }));
-  await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: staging })).catch(() => undefined);
-  // A Brick purged while this save was running: the purge wrote its marker before it deleted anything in the bucket, so a marker seen now (after
-  // the copy) means the delete either already ran and missed this copy, or will run after it and take it. Either way this copy must not stay
-  if ((await prisma.brickPurge.count({ where: { botId } })) > 0) {
-    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId) }));
-    leftNothing();
-    throw new Error('The Brick was deleted while its files were being saved');
+}
+
+/** Deletes stored copies for good. A key that is not there is no error. */
+export async function deleteSealed(keys: string[]): Promise<void> {
+  if (keys.length === 0) return;
+  const { s3, bucket } = artifactBucket();
+  for (let at = 0; at < keys.length; at += 1000) {
+    const batch = keys.slice(at, at + 1000);
+    const answer = await s3.send(new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: batch.map((Key) => ({ Key })), Quiet: true } }));
+    if (answer.Errors && answer.Errors.length > 0) throw new Error('A saved copy could not be deleted');
   }
-  const copy = await savedCopyOf(botId);
-  if (!copy) throw new Error('The saved copy cannot be found after it was stored');
-  return copy;
 }
 
 /** What is saved for this Brick, or null when nothing is. */

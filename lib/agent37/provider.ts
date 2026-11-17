@@ -1,4 +1,5 @@
-import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, ProviderDay, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
+import { randomUUID } from 'node:crypto';
+import type { Check, ComputerProvider, ExecOptions, ExecResult, MachineInfo, PackInventory, ProviderDay, RestoreResult, RestoreSource, SavedCopy, TurnEvent, TurnInput, WatchSession } from '@/lib/computer-provider';
 import { readTurn } from '@/lib/agent37/turn-events';
 import { Agent37Client, Agent37Error, Agent37Unreached, type Instance, type NetworkPolicy } from '@/lib/agent37/client';
 import { BRICK_SHAPE, awakeMicrosPerMinute, dayOfRunningMicros, restingMicrosPerMinute } from '@/lib/agent37/rates';
@@ -24,11 +25,12 @@ import { ensureImage, imageReady, type ImageState } from '@/lib/agent37/image';
 export const BRICK_TEMPLATE = 'universe-brick';
 
 /**
- * What a Brick's computer may reach (build handoff v2, section 4): the public web and nothing private. Agent37's `allow-all` is exactly that: it
- * never reaches private ranges, other machines or the host (docs agents-api/instance-network, read 16 Nov), and it is the default. It is still
- * written on every machine we make and checked each time one is made ready, so the rule is ours and a machine that drifted (or was made before
- * this) is put right before a job runs on it. Agent37 has no deny list and domains only cover HTTPS on port 443, so "the public web except
- * Composio's hosts" cannot be said to it: those hosts are kept away from the machine by the machine holding no key for them, not by this rule.
+ * What a Brick's computer may reach: the open internet, directly (Agent37's `allow-all`, which never reaches private ranges, other machines or the
+ * host: docs agents-api/instance-network). It is written on every machine we make and checked each time one is made ready, so a machine that drifted
+ * is put right before a job runs on it. Whether a computer may SPEND Universe's money does not depend on this rule: that is decided by the Orbit broker
+ * (job tokens, reservations, the AI relay), which holds every platform credential; no raw key is ever put on a computer, and when Orbit is down a paid
+ * action waits or fails: there is no fallback that hands a computer a provider key. Agent37's own managed services are kept shut by their budget:
+ * the monthly cap AND the remaining one-time credit must both be zero (`budgetClosed`), checked on create, adoption, readiness and restore.
  */
 export const BRICK_NETWORK: NetworkPolicy = 'allow-all';
 
@@ -73,6 +75,8 @@ export interface ProviderOptions {
 }
 
 const creationId = (botId: string) => `brick:${botId}`;
+/** A throwaway computer made to prove a restore carries this in its metadata, so the daily check knows it and a sweep can remove one that was left behind. */
+export const SCRATCH_PREFIX = 'scratch:';
 const gone = (status: string) => status === 'deleting' || status === 'deleted' || status === 'failed';
 
 export class Agent37ComputerProvider implements ComputerProvider {
@@ -95,6 +99,56 @@ export class Agent37ComputerProvider implements ComputerProvider {
     this.template = options.template ?? BRICK_TEMPLATE;
     this.image = options.image;
     this.copies = options.copies ?? { latest: savedCopyOf, store: storeSavedCopy };
+  }
+
+  /** The Orbit broker's needs: the key its job tokens and restore keys are signed with, and the address a computer reaches Orbit at. A computer holds no provider key; without these a paid action waits or fails. */
+  private brokerCheck(): Check {
+    const missing: string[] = [];
+    if (!process.env.ENCRYPTION_KEY) missing.push('the key that signs job tokens (ENCRYPTION_KEY)');
+    if (!process.env.NEXT_PUBLIC_API_URL && !process.env.ADMIN_API_URL) missing.push('Orbit’s own address (ADMIN_API_URL)');
+    if (missing.length > 0) return { name: 'orbit broker', ok: false, detail: `Paid actions cannot run: ${missing.join(' and ')} is not set` };
+    return {
+      name: 'orbit broker',
+      ok: true,
+      detail: 'Computers have the open internet directly (allow-all). Paid actions and Universe AI go only through Orbit’s broker with a job token; no provider key is put on a computer and nothing falls back to one when Orbit is down',
+    };
+  }
+
+  /**
+   * Agent37's managed budget of the machines we have: monthly cap and remaining one-time credit, both zero. Looks at up to 30 machines of ours (the
+   * newest), so it is a sample on a big account; every machine is also read when it is made, adopted, made ready and restored onto.
+   */
+  private async budgetCheck(): Promise<Check> {
+    try {
+      const ours = (await this.client.listInstances()).filter((instance) => typeof instance.metadata?.creation_id === 'string' && !gone(String(instance.status)));
+      const sample = ours.slice(0, 30);
+      const open: string[] = [];
+      for (const instance of sample) {
+        const budget = await this.client.getBudget(instance.id);
+        if (budget.monthlyCapMicros !== 0 || budget.monthlyRemainingMicros > 0 || budget.creditRemainingMicros > 0) open.push(instance.id);
+      }
+      if (open.length > 0) return { name: 'agent37 managed budget', ok: false, detail: `${open.length} of ${sample.length} machines still have managed budget (monthly cap or one-time credit above zero); each is closed when it is made ready, and credit has to be removed by Agent37` };
+      return { name: 'agent37 managed budget', ok: true, detail: `Monthly cap and remaining one-time credit are zero on ${sample.length === ours.length ? `all ${sample.length}` : `${sample.length} of ${ours.length}`} machines, so Agent37’s managed paid services cannot spend` };
+    } catch {
+      return { name: 'agent37 managed budget', ok: false, detail: 'The managed budget of the machines could not be read' };
+    }
+  }
+
+  /**
+   * Agent37's managed services (its model router, Brave, Composio, Perflo) are paid from a machine's budget, and its injected token reaches them
+   * on every instance. Two numbers keep them shut: the monthly cap and the REMAINING ONE-TIME CREDIT; a $0 cap alone leaves any credit usable.
+   * Reads both back (`GET /v1/instances/{id}/budget`), sets a cap that is not zero back to zero, and says when anything is left that this
+   * account key cannot take away (credit): that machine is not handed to anything, and the one-time credit is never "spent down" to clear it.
+   */
+  private async budgetClosed(ref: string): Promise<void> {
+    let budget = await this.client.getBudget(ref);
+    if (budget.monthlyCapMicros !== 0) {
+      await this.client.setMonthlyCap(ref, 0);
+      budget = await this.client.getBudget(ref);
+    }
+    if (budget.monthlyCapMicros !== 0 || budget.monthlyRemainingMicros > 0 || budget.creditRemainingMicros > 0) {
+      throw new Error('The computer is not ready (its Agent37 managed budget is not zero: it can still spend; ask Agent37 to remove it)');
+    }
   }
 
   microsPerMinute(): number {
@@ -145,6 +199,10 @@ export class Agent37ComputerProvider implements ComputerProvider {
         checks.push({ name: 'agent37 wallet', ok: false, detail: 'What is already set aside could not be read' });
       }
     }
+    // Direct network: the computers keep the open internet (`allow-all`); nothing here depends on a gateway. What decides whether a computer may spend
+    // Universe's money is the Orbit broker, so the broker's two needs are looked at: the key that signs job tokens and restore keys, and Orbit's public address
+    checks.push(this.brokerCheck());
+    checks.push(await this.budgetCheck());
     if (this.image) {
       const state = await this.image().catch(() => null);
       if (imageReady(state)) checks.push({ name: 'computer image', ok: true, detail: `The computer image is built (revision ${state?.revision ?? 'unknown'})` });
@@ -170,6 +228,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
     const adopted = await this.findFor(botId);
     if (adopted) {
       this.remember(adopted, botId);
+      // A machine nobody wrote down may have been topped up or changed by hand: its budget is read before it is taken
+      await this.budgetClosed(adopted.id);
       return { ref: adopted.id, region: adopted.region ?? 'us' };
     }
     // A machine is only made from an image that was built: a job that comes first waits for it, the sweep builds it
@@ -194,6 +254,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
         const late = await this.findFor(botId).catch(() => null);
         if (late) {
           this.remember(late, botId);
+          await this.budgetClosed(late.id);
           return { ref: late.id, region: late.region ?? 'us' };
         }
       }
@@ -201,6 +262,7 @@ export class Agent37ComputerProvider implements ComputerProvider {
     }
     this.remember(made, botId);
     await this.untilHealthy(made.id, made.url);
+    await this.budgetClosed(made.id);
     return { ref: made.id, region: made.region ?? 'us' };
   }
 
@@ -232,7 +294,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
         const instance = present.get(entry.id);
         const creation = typeof instance?.metadata?.creation_id === 'string' ? instance.metadata.creation_id : null;
         const botId = creation && creation.startsWith('brick:') ? creation.slice('brick:'.length) : null;
-        const kind: 'brick' | 'other' | 'gone' = !instance ? 'gone' : botId ? 'brick' : 'other';
+        const scratch = creation !== null && creation.startsWith(SCRATCH_PREFIX);
+        const kind: 'brick' | 'other' | 'gone' | 'scratch' = !instance ? 'gone' : scratch ? 'scratch' : botId ? 'brick' : 'other';
         const minutes = Math.min(entry.awakeMinutes, 1440);
         return { ref: entry.id, kind, botId, totalMicros: entry.totalMicros, computeMicros: entry.computeMicros, awakeMinutes: entry.awakeMinutes, expectedMicros: Math.round(minutes * awake + (1440 - minutes) * resting) };
       }),
@@ -244,15 +307,14 @@ export class Agent37ComputerProvider implements ComputerProvider {
   }
 
   /**
-   * A machine made ready for a job: moved to the image's current revision if it was made from an older one (its files are kept), then
-   * `universe-up` brings the screen, the browser and the local model address up. The first time on a machine it also writes Hermes' config,
-   * and Hermes only reads that when it starts: so the machine is stopped and started once, and `universe-up` is run again.
+   * Puts a machine in order before anything runs on it (for a job and for a restore): its network rule is ours (read back, and set again when it is
+   * not), it is moved to the image's current revision when it was made from an older one (its files are kept), and its Agent37 managed budget is read
+   * back and must be zero in both parts (`budgetClosed`). A rule or a budget that cannot be put right means the machine is not handed to anything.
    */
-  async ready(ref: string): Promise<void> {
+  private async settle(ref: string): Promise<Instance> {
     const state = this.image ? await this.image() : null;
     let instance = await this.client.getInstance(ref);
-    // Our network rule is in force before anything runs on the machine. Only a rule Agent37 says is already ours is left alone: one it does not
-    // say, or another one, is set again (asking again is safe). A machine whose reach cannot be set is not handed to a job.
+    // Only a rule Agent37 says is already ours is left alone: one it does not say, or another one, is set again (asking again is safe)
     if (instance.network !== BRICK_NETWORK) {
       try {
         await this.client.setNetwork(ref, BRICK_NETWORK);
@@ -265,6 +327,17 @@ export class Agent37ComputerProvider implements ComputerProvider {
       await this.client.updateInstance(ref);
       instance = await this.untilHealthy(ref, instance.url);
     }
+    await this.budgetClosed(ref);
+    return instance;
+  }
+
+  /**
+   * A machine made ready for a job: put in order (`settle`), then `universe-up` brings the screen, the browser and the local model address up.
+   * The first time on a machine it also writes Hermes' config, and Hermes only reads that when it starts: so the machine is stopped and started
+   * once, and `universe-up` is run again.
+   */
+  async ready(ref: string): Promise<void> {
+    let instance = await this.settle(ref);
     // A part that was still coming up (a browser right after a machine woke or restarted): `universe-up` is safe to run again, so it is
     // asked once more, after the first ask and after the restart
     const again = async (state: { ready: boolean; restart: boolean; reason: string | null }) => {
@@ -423,6 +496,119 @@ export class Agent37ComputerProvider implements ComputerProvider {
     const archive = await this.client.archive(url);
     const saved = await this.copies.store(botId, archive.body as ReadableStream<Uint8Array>);
     return { bytes: saved.bytes, savedAt: saved.savedAt };
+  }
+
+  // ---------- Cold storage (lib/computer-cold.ts) ----------
+
+  /**
+   * Runs `universe-cold prepack` as root: what the computer holds outside its home folder (changed files, added software) is copied into the home
+   * folder so one copy carries it, and the home folder is counted. A computer that holds more outside than can be carried says so (`blocked`) and is
+   * not packed away: nothing is thrown away to make a copy fit.
+   */
+  async prepack(ref: string): Promise<PackInventory> {
+    const done = await this.client.exec(ref, 'universe-cold prepack', { user: 'root', timeoutMs: 10 * 60_000 });
+    const line = /(^|\n)prepack=(\{[^\n]*\})/.exec(done.stdout)?.[2];
+    if (!line) throw new Error(`The computer could not be inventoried (exit ${done.exitCode})`);
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(line);
+    } catch {
+      throw new Error('The computer\'s inventory could not be read');
+    }
+    const count = (value: unknown) => (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null);
+    const homeFiles = count(data.home_files);
+    const homeBytes = count(data.home_bytes);
+    const outsideFiles = count(data.outside_files);
+    const outsideBytes = count(data.outside_bytes);
+    if (homeFiles === null || homeBytes === null || outsideFiles === null || outsideBytes === null) throw new Error('The computer\'s inventory was not whole');
+    const packages = Array.isArray(data.packages) ? data.packages.filter((name): name is string => typeof name === 'string' && /^[a-z0-9][a-z0-9+.:-]{0,100}$/.test(name)).slice(0, 500) : [];
+    const blocked = typeof data.blocked === 'string' && /^[a-z_]{1,40}$/.test(data.blocked) ? data.blocked : null;
+    return { homeFiles, homeBytes, outsideFiles, outsideBytes, packages, blocked };
+  }
+
+  /** The home folder as a tar.gz stream. Only for a machine that is awake (the address wakes a sleeper). */
+  async streamFiles(ref: string): Promise<ReadableStream<Uint8Array>> {
+    const url = await this.urlOf(ref);
+    const archive = await this.client.archive(url);
+    return archive.body as ReadableStream<Uint8Array>;
+  }
+
+  /** A throwaway computer, the same shape and the same way out as a Brick's, for a restore to be proved on. Billed until it is removed: the caller removes it. */
+  async makeScratch(): Promise<MachineInfo> {
+    if (this.image && !imageReady(await this.image())) throw new ImageNotReady();
+    await this.checkFunds();
+    const id = randomUUID();
+    const made = await this.client.createInstance({
+      template: this.template,
+      name: `scratch-${id.slice(0, 8)}`,
+      region: 'us',
+      resources: { cpu: BRICK_SHAPE.cpu, memory: BRICK_SHAPE.memory, disk: BRICK_SHAPE.disk },
+      metadata: { creation_id: `${SCRATCH_PREFIX}${id}`, made_at: String(this.now()) },
+      budget: { monthly_cap_micros: 0, credit_micros: 0 },
+      auto_sleep: true,
+      idle_timeout_seconds: 300,
+      network: BRICK_NETWORK,
+    });
+    await this.untilHealthy(made.id, made.url);
+    await this.budgetClosed(made.id);
+    return { ref: made.id, region: made.region ?? 'us' };
+  }
+
+  /**
+   * Puts a copy onto a computer and checks it: the machine is put in order first (its rule and its budget), then
+   * `universe-cold restore` fetches the copy straight from Orbit, compares its SHA-256, unpacks it and compares every file with the copy, and `universe-cold finish`
+   * puts back what was outside the home folder and installs the added software again. Never throws for a copy that does not check out: that is a result.
+   */
+  async restoreInto(ref: string, source: RestoreSource): Promise<RestoreResult> {
+    const started = this.now();
+    await this.settle(ref);
+    const settings = JSON.stringify({ url: source.url, token: source.token, sha256: source.sha256 });
+    const restored = await this.client.exec(ref, `universe-cold restore <<'RESTORE_JSON'\n${settings}\nRESTORE_JSON`, { timeoutMs: 20 * 60_000 });
+    if (!/(^|\n)restored=1\b/.test(restored.stdout)) {
+      const reason = /restored=0 reason=([a-z_]+)/.exec(restored.stdout)?.[1] ?? `exit_${restored.exitCode}`;
+      return { ok: false, reason, ms: this.now() - started };
+    }
+    const finished = await this.client.exec(ref, 'universe-cold finish', { user: 'root', timeoutMs: 15 * 60_000 });
+    if (!/(^|\n)finished=1\b/.test(finished.stdout)) {
+      const reason = /finished=0 reason=([a-z_]+)/.exec(finished.stdout)?.[1] ?? `exit_${finished.exitCode}`;
+      return { ok: false, reason: `finish_${reason}`, ms: this.now() - started };
+    }
+    return { ok: true, reason: null, ms: this.now() - started };
+  }
+
+  /** Asks again until the provider says the machine is gone and no longer in its list (so no longer billed), for up to two minutes. */
+  async confirmRemoved(ref: string): Promise<'gone' | 'still_there'> {
+    const until = this.now() + 120_000;
+    for (;;) {
+      let present: Instance | null = null;
+      try {
+        present = await this.client.getInstance(ref);
+      } catch (error) {
+        if (!(error instanceof Agent37Error && error.status === 404)) throw error;
+      }
+      const listed = present ? (await this.client.listInstances()).some((instance) => instance.id === ref && !gone(String(instance.status))) : false;
+      if ((!present || String(present.status) === 'deleted') && !listed) return 'gone';
+      if (this.now() >= until) return 'still_there';
+      await this.pause(5_000);
+    }
+  }
+
+  /** Removes throwaway computers a restore proof left behind (an Orbit that stopped half way). Only ours (their metadata says so), only older than the given time. */
+  async removeScratches(olderThanMs: number): Promise<number> {
+    let removed = 0;
+    for (const instance of await this.client.listInstances()) {
+      const creation = typeof instance.metadata?.creation_id === 'string' ? instance.metadata.creation_id : '';
+      if (!creation.startsWith(SCRATCH_PREFIX) || gone(String(instance.status))) continue;
+      const madeAt = Number(instance.metadata?.made_at);
+      if (!Number.isFinite(madeAt) || this.now() - madeAt < olderThanMs) continue;
+      try {
+        await this.client.deleteInstance(instance.id);
+        removed++;
+      } catch (error) {
+        if (!(error instanceof Agent37Error && error.status === 404)) console.error('[Computer] Could not remove a throwaway computer:', error instanceof Error ? error.message : 'unknown');
+      }
+    }
+    return removed;
   }
 
   /** The address of a machine's own agent. Asked of Agent37 each time (a few ms), so a machine that moved host is still found. */

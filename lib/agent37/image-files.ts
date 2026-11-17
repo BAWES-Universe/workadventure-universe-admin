@@ -38,8 +38,13 @@ USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends xvfb x11vnc novnc websockify chromium x11-utils procps python3 fonts-liberation fonts-noto-color-emoji ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-COPY universe-up universe-supervise universe-proxy universe-fence universe-clean universe-files universe-mark universe-visits /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/universe-up /usr/local/bin/universe-supervise /usr/local/bin/universe-proxy /usr/local/bin/universe-fence /usr/local/bin/universe-clean /usr/local/bin/universe-files /usr/local/bin/universe-mark /usr/local/bin/universe-visits
+COPY universe-up universe-supervise universe-proxy universe-fence universe-clean universe-files universe-mark universe-visits universe-cold /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/universe-up /usr/local/bin/universe-supervise /usr/local/bin/universe-proxy /usr/local/bin/universe-fence /usr/local/bin/universe-clean /usr/local/bin/universe-files /usr/local/bin/universe-mark /usr/local/bin/universe-visits /usr/local/bin/universe-cold
+# What the image holds at the moment it is built: the software it was made with, and when. Cold storage compares a computer with these to know what the
+# agent added (universe-cold).
+RUN mkdir -p /usr/local/share/universe \
+ && apt-mark showmanual | sort > /usr/local/share/universe/manual-packages.txt \
+ && date +%s > /usr/local/share/universe/built
 # Hermes' browser tool drives the visible Chromium that the screen shows
 ENV DISPLAY=:99 BROWSER_CDP_URL=http://127.0.0.1:9222 AGENT37_SCREEN_GEOMETRY=1440x900
 USER node
@@ -1126,6 +1131,330 @@ cd "$HOME_DIR" 2>/dev/null || exit 0
 find . -maxdepth 5 \( -path './.*' -o -name node_modules -o -name __pycache__ \) -prune -o -type f -printf '%s\t%T@\t%P\n' 2>/dev/null | sort -t "$(printf '\t')" -k2,2nr | head -n 201
 `;
 
+/**
+ * Cold storage on the computer (lib/computer-cold.ts asks, this does):
+ *   universe-cold prepack   (root)  copies what the agent changed outside the home folder into the home folder, so one copy carries it, and counts the home folder.
+ *   universe-cold restore   (node)  reads {url, token, sha256} on standard input, fetches the copy straight from Orbit, checks its SHA-256, unpacks it
+ *                                   into the home folder and compares EVERY file with the copy; prints restored=1, or restored=0 reason=...
+ *   universe-cold finish    (root)  puts back what was outside the home folder and installs the software the agent had added; prints finished=1, or finished=0 reason=...
+ */
+export const UNIVERSE_COLD = String.raw`#!/usr/bin/env python3
+import hashlib, json, os, pwd, re, shutil, subprocess, sys, tarfile, threading, urllib.request
+
+try:
+    NODE = pwd.getpwnam("node")
+    HOME, UID, GID = NODE.pw_dir, NODE.pw_uid, NODE.pw_gid
+except KeyError:
+    HOME, UID, GID = "/home/node", 1000, 1000
+# The home folder can be moved for a test; on a computer it is the node user's home
+HOME = os.environ.get("UNIVERSE_COLD_HOME", HOME)
+STATE = os.path.join(HOME, ".universe")
+OUTSIDE = os.path.join(STATE, "outside")
+PACKAGES_FILE = os.path.join(STATE, "outside-packages.txt")
+BUILT = "/usr/local/share/universe/built"
+BASELINE = "/usr/local/share/universe/manual-packages.txt"
+ROOTS = ["/etc", "/opt", "/srv", "/usr/local", "/root", "/var/www", "/var/spool/cron"]
+# Ours or made again by the system: never part of a copy (and never written back from one)
+SKIP = ("/etc/universe/", "/etc/hosts", "/etc/hostname", "/etc/resolv.conf", "/etc/mtab", "/etc/gitconfig",
+        "/usr/local/bin/universe-", "/usr/local/share/universe/", "/etc/ssl/certs/", "/etc/ld.so.cache", "/etc/alternatives/", "/etc/passwd", "/etc/shadow",
+        "/etc/group", "/etc/gshadow", "/etc/subuid", "/etc/subgid", "/etc/machine-id", "/etc/profile.d/universe", "/etc/ca-certificates")
+MAX_FILES = 5000
+MAX_BYTES = 200 * 1024 * 1024
+PACKAGE_NAME = re.compile(r"^[a-z0-9][a-z0-9+.:-]{0,100}$")
+
+def skipped(path):
+    return path.endswith("-") or any(path == item or path.startswith(item) for item in SKIP)
+
+def home_stats():
+    files = 0
+    size = 0
+    for root, _dirs, names in os.walk(HOME, followlinks=False):
+        for name in names:
+            path = os.path.join(root, name)
+            try:
+                if os.path.islink(path):
+                    continue
+                size += os.lstat(path).st_size
+                files += 1
+            except OSError:
+                pass
+    return files, size
+
+def prepack():
+    if os.getuid() != 0:
+        print("prepack=" + json.dumps({"blocked": "not_root", "home_files": 0, "home_bytes": 0, "outside_files": 0, "outside_bytes": 0, "packages": []}))
+        return 1
+    os.makedirs(STATE, exist_ok=True)
+    shutil.rmtree(OUTSIDE, ignore_errors=True)
+    os.makedirs(OUTSIDE, exist_ok=True)
+    # A job's key is never part of a copy
+    for name in ("relay.json", "relay.json.new", "relay.gen", "relay.lock"):
+        try:
+            os.remove(os.path.join(STATE, name))
+        except OSError:
+            pass
+    blocked = None
+    found = []
+    total = 0
+    if os.path.exists(BUILT):
+        reference = os.stat(BUILT).st_mtime
+        for root in ROOTS:
+            for current, dirs, names in os.walk(root, followlinks=False):
+                if current.startswith("/usr/local/share/universe"):
+                    dirs[:] = []
+                    continue
+                for name in names:
+                    path = os.path.join(current, name)
+                    if skipped(path):
+                        continue
+                    try:
+                        info = os.lstat(path)
+                    except OSError:
+                        continue
+                    if info.st_mtime <= reference:
+                        continue
+                    found.append(path)
+                    total += info.st_size if not os.path.islink(path) else 0
+                    if len(found) > MAX_FILES or total > MAX_BYTES:
+                        blocked = "outside_too_big"
+                        break
+                if blocked:
+                    break
+            if blocked:
+                break
+    else:
+        blocked = "image_marker_missing"
+    copied = 0
+    if blocked is None:
+        for path in found:
+            target = os.path.join(OUTSIDE, path.lstrip("/"))
+            try:
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                if os.path.islink(path):
+                    os.symlink(os.readlink(path), target)
+                else:
+                    shutil.copy2(path, target)
+                copied += 1
+            except OSError:
+                blocked = "outside_not_copied"
+                break
+    packages = []
+    if blocked is None:
+        try:
+            current = set(subprocess.run(["apt-mark", "showmanual"], capture_output=True, text=True, timeout=120, check=True).stdout.split())
+            with open(BASELINE) as handle:
+                base = set(handle.read().split())
+            packages = sorted(name for name in current - base if PACKAGE_NAME.match(name))
+            with open(PACKAGES_FILE, "w") as handle:
+                handle.write("\n".join(packages) + ("\n" if packages else ""))
+        except Exception:
+            blocked = "packages_unknown"
+    subprocess.run(["chown", "-R", "%d:%d" % (UID, GID), OUTSIDE, PACKAGES_FILE], capture_output=True)
+    files, size = home_stats()
+    out_bytes = 0
+    for root, _d, names in os.walk(OUTSIDE):
+        for name in names:
+            try:
+                out_bytes += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                pass
+    print("prepack=" + json.dumps({"home_files": files, "home_bytes": size, "outside_files": copied, "outside_bytes": out_bytes, "packages": packages[:500], "blocked": blocked}))
+    return 0 if blocked is None else 1
+
+def prefix_for(names):
+    for name in names:
+        clean = name[2:] if name.startswith("./") else name
+        if clean in ("", "."):
+            continue
+        first = clean.split("/")[0]
+        home = HOME.strip("/")
+        if clean == home or clean.startswith(home + "/"):
+            return "/"
+        if first == os.path.basename(HOME):
+            return os.path.dirname(HOME)
+        return HOME
+    return HOME
+
+def restore():
+    cfg = json.load(sys.stdin)
+    # Straight to Orbit: the computer has the open internet and no proxy, so whatever proxy settings the environment carries are not used
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    def fetch():
+        return opener.open(urllib.request.Request(cfg["url"], headers={"Authorization": "Bearer " + cfg["token"]}), timeout=300)
+    def fail(reason):
+        print("restored=0 reason=" + reason)
+        return 1
+    # Where the copy's names start (the home folder itself, or inside it): read from its first entries
+    base = HOME
+    try:
+        resp = fetch()
+        names = []
+        with tarfile.open(fileobj=resp, mode="r|gz") as archive:
+            for member in archive:
+                names.append(member.name)
+                if len(names) >= 5:
+                    break
+        resp.close()
+        if names:
+            base = prefix_for(names)
+    except OSError:
+        return fail("unreachable")
+    except Exception:
+        return fail("unreadable")
+    # 1. Unpack while hashing: the bytes must be the ones that were stored
+    try:
+        resp = fetch()
+        length = resp.headers.get("Content-Length")
+        digest = hashlib.sha256()
+        total = 0
+        tar = subprocess.Popen(["tar", "-xzf", "-", "-C", base, "--no-same-owner"], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        while True:
+            chunk = resp.read(1 << 20)
+            if not chunk:
+                break
+            digest.update(chunk)
+            total += len(chunk)
+            tar.stdin.write(chunk)
+        tar.stdin.close()
+        code = tar.wait()
+    except Exception:
+        return fail("download")
+    if length is not None and int(length) != total:
+        return fail("cut_short")
+    if digest.hexdigest() != cfg["sha256"]:
+        return fail("checksum")
+    if code != 0:
+        return fail("unpack")
+    # 2. Compare every file on this computer with the copy (the copy is read again, so nothing is trusted from the first pass)
+    try:
+        resp = fetch()
+        compare = subprocess.Popen(
+            ["tar", "-dzf", "-", "-C", base, "--wildcards", "--exclude=*.universe/logs*", "--exclude=*.universe/up.lock*", "--exclude=*.universe/relay*", "--exclude=*.universe/restart.pending", "--exclude=*.cache/*"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        def pour():
+            try:
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    compare.stdin.write(chunk)
+                compare.stdin.close()
+            except Exception:
+                try:
+                    compare.kill()
+                except Exception:
+                    pass
+        pourer = threading.Thread(target=pour, daemon=True)
+        pourer.start()
+        differing = sum(1 for _ in compare.stdout)
+        pourer.join()
+        code = compare.wait()
+    except Exception:
+        return fail("compare")
+    if code > 1:
+        return fail("compare")
+    if differing > 0:
+        return fail("differs_%d" % min(differing, 99999))
+    # The job's key is never carried over: the new computer gets its own
+    for name in ("relay.json", "relay.json.new", "relay.gen", "relay.lock"):
+        try:
+            os.remove(os.path.join(STATE, name))
+        except OSError:
+            pass
+    print("restored=1 sha=%s bytes=%d" % (digest.hexdigest(), total))
+    return 0
+
+# A design that sent a computer's internet through a local proxy on 127.0.0.1:3128 was tried before launch and dropped. A copy or a machine from then
+# may still point software at it, and nothing listens there now, so a restored computer is cleaned of every such setting (lines naming that address
+# in the usual settings files, the apt setting, git's system setting, the hosts-file block and the old settings file). Never touches anything else.
+LEGACY = "127.0.0.1:3128"
+
+def drop_legacy_proxy():
+    for path in ("/etc/apt/apt.conf.d/99universe-egress", "/etc/universe/egress.json"):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    try:
+        got = subprocess.run(["git", "config", "--system", "--get-all", "http.proxy"], capture_output=True, text=True, timeout=30)
+        if LEGACY in got.stdout:
+            subprocess.run(["git", "config", "--system", "--unset-all", "http.proxy"], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    targets = ["/etc/environment", "/etc/profile.d/proxy.sh", "/etc/hosts"] + [os.path.join(HOME, name) for name in (".gitconfig", ".npmrc", ".profile", ".bashrc", ".bash_profile", ".wgetrc", ".curlrc", ".pip/pip.conf", ".config/pip/pip.conf", ".hermes/.env")]
+    for path in targets:
+        try:
+            with open(path) as handle:
+                lines = handle.read().split("\n")
+        except (OSError, UnicodeDecodeError):
+            continue
+        kept, inside, changed = [], False, False
+        for line in lines:
+            if line.startswith("# universe-egress begin"):
+                inside, changed = True, True
+                continue
+            if inside:
+                if line.startswith("# universe-egress end"):
+                    inside = False
+                continue
+            if LEGACY in line:
+                changed = True
+                continue
+            kept.append(line)
+        if changed:
+            try:
+                with open(path, "w") as handle:
+                    handle.write("\n".join(kept))
+            except OSError:
+                pass
+
+def finish():
+    if os.getuid() != 0:
+        print("finished=0 reason=not_root")
+        return 1
+    files = 0
+    if os.path.isdir(OUTSIDE):
+        for root, _dirs, names in os.walk(OUTSIDE, followlinks=False):
+            for name in names:
+                source = os.path.join(root, name)
+                target = "/" + os.path.relpath(source, OUTSIDE)
+                if skipped(target) or not any(target.startswith(r + "/") for r in ROOTS):
+                    continue
+                try:
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    if os.path.islink(source):
+                        if os.path.lexists(target):
+                            os.remove(target)
+                        os.symlink(os.readlink(source), target)
+                    else:
+                        shutil.copy2(source, target)
+                        os.chown(target, 0, 0)
+                    files += 1
+                except OSError:
+                    print("finished=0 reason=outside_not_written")
+                    return 1
+    packages = []
+    try:
+        with open(PACKAGES_FILE) as handle:
+            packages = [name for name in handle.read().split() if PACKAGE_NAME.match(name)]
+    except OSError:
+        packages = []
+    if packages:
+        update = subprocess.run(["apt-get", "update", "-qq"], capture_output=True, timeout=600)
+        install = subprocess.run(["apt-get", "install", "-y", "--no-install-recommends", "-qq"] + packages, capture_output=True, timeout=1800)
+        if update.returncode != 0 or install.returncode != 0:
+            print("finished=0 reason=packages")
+            return 1
+    drop_legacy_proxy()
+    print("finished=1 files=%d packages=%d" % (files, len(packages)))
+    return 0
+
+if __name__ == "__main__":
+    command = sys.argv[1] if len(sys.argv) > 1 else ""
+    code = {"prepack": prepack, "restore": restore, "finish": finish}.get(command, lambda: (print("usage: universe-cold prepack|restore|finish") or 2))()
+    sys.exit(code)
+`;
+
 /** Every file of the build context: the folder Agent37 builds. The Dockerfile is at its root. */
 export function imageFiles(): Array<{ name: string; mode: number; text: string }> {
   return [
@@ -1138,5 +1467,6 @@ export function imageFiles(): Array<{ name: string; mode: number; text: string }
     { name: 'universe-files', mode: 0o755, text: UNIVERSE_FILES },
     { name: 'universe-mark', mode: 0o755, text: UNIVERSE_MARK },
     { name: 'universe-visits', mode: 0o755, text: UNIVERSE_VISITS },
+    { name: 'universe-cold', mode: 0o755, text: UNIVERSE_COLD },
   ];
 }

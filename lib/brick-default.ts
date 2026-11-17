@@ -45,6 +45,8 @@ export interface DeletedBrickCard extends BrickCard {
   deletedAt: string;
   /** When it is gone for good. Undo works until then. */
   goneAt: string;
+  /** When its computer was removed at the provider (after a fresh copy was proved by a restore), or null while it is still kept there. The provider's own recovery days start then, and are not the same as Undo's. */
+  computerRemovedAt: string | null;
 }
 
 export type BrickRow = {
@@ -133,7 +135,10 @@ export async function listDeletedBricks(userId: string, now: Date = new Date()):
     }),
     prisma.defaultBrick.findUnique({ where: { userId }, select: { botId: true } }),
   ]);
-  return bots.map((bot) => ({ ...toCard(bot, bot.id === own?.botId), deletedAt: bot.deletedAt!.toISOString(), goneAt: bot.goneAt!.toISOString() }));
+  // The two clocks, apart: Undo ends at `goneAt` (ours); the computer's own days at the provider begin when it was removed there, after a proved copy was kept
+  const packed = bots.length === 0 ? [] : await prisma.brickComputer.findMany({ where: { botId: { in: bots.map((bot) => bot.id) }, machine: 'cold', packedAt: { not: null } }, select: { botId: true, packedAt: true } });
+  const removedAt = new Map(packed.map((row) => [row.botId, row.packedAt!.toISOString()]));
+  return bots.map((bot) => ({ ...toCard(bot, bot.id === own?.botId), deletedAt: bot.deletedAt!.toISOString(), goneAt: bot.goneAt!.toISOString(), computerRemovedAt: removedAt.get(bot.id) ?? null }));
 }
 
 /** Whether this bot is the Brick its owner's account got by itself. */
