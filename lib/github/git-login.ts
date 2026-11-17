@@ -61,8 +61,9 @@ export async function jobGitAccess(jobId: string): Promise<GitAccess | null> {
 
 /** The pieces a shell command may carry unquoted by accident: only plain characters, or nothing is written. */
 const SAFE_ADDRESS = /^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[A-Za-z0-9._-]+)*$/;
-const SAFE_NAME = /^[A-Za-z0-9-]{1,39}$/;
-const SAFE_EMAIL = /^[0-9]*\+?[A-Za-z0-9-]{1,39}@users\.noreply\.github\.com$/;
+// An underscore is a plain character in a shell word, and GitHub Enterprise Managed Users have one in every login (`name_shortcode`)
+const SAFE_NAME = /^[A-Za-z0-9_-]{1,39}$/;
+const SAFE_EMAIL = /^[0-9]*\+?[A-Za-z0-9_-]{1,39}@users\.noreply\.github\.com$/;
 const SAFE_TOKEN = /^cjt_[A-Za-z0-9_-]{20,100}$/;
 
 /** The git relay's address on this Orbit (https, no login, query or fragment), or null when Orbit has no public address to give. */

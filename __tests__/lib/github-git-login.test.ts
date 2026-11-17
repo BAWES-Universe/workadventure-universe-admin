@@ -32,6 +32,22 @@ describe('the git login a computer is given', () => {
     for (const token of ["cjt_x'; id; '", 'ghu_owner', `cjt_${'a'.repeat(300)}`, 'cjt_short']) expect(gitLoginCommand(token, BASE, WHO)).toBeNull();
   });
 
+  it('works for a login with an underscore (GitHub Enterprise Managed Users have one in every login)', () => {
+    const emu = { name: 'sara_acme', email: '501+sara_acme@users.noreply.github.com' };
+    const command = gitLoginCommand(TOKEN, BASE, emu);
+    expect(command).not.toBeNull();
+    const home = mkdtempSync(join(tmpdir(), 'git-login-emu-'));
+    try {
+      const run = spawnSync('sh', ['-c', `umask 077 && d="$HOME/.universe" && mkdir -p "$d" && { ${command}; }`], { env: { ...process.env, HOME: home, GIT_CONFIG_GLOBAL: join(home, '.gitconfig'), GIT_CONFIG_NOSYSTEM: '1' }, encoding: 'utf8' });
+      expect(run.status).toBe(0);
+      const config = readFileSync(join(home, '.universe', 'gitconfig'), 'utf8');
+      expect(config).toContain('sara_acme');
+      expect(config).toContain('501+sara_acme@users.noreply.github.com');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('writes four files only the machine’s own user can read, includes them from ~/.gitconfig, and runs twice without piling up', () => {
     const home = mkdtempSync(join(tmpdir(), 'git-login-'));
     try {
