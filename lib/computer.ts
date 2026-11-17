@@ -1268,7 +1268,7 @@ const FENCE_TRIES = 3;
  * and the agent's gateway), and a second look proves none is left. A fence that cannot be proved stops the machine: the person
  * then has no screen, rather than a screen with an agent still acting behind it. The disk is kept either way. Never throws.
  */
-export async function fenceMachine(botId: string): Promise<'done' | 'failed' | 'skipped'> {
+export async function fenceMachine(botId: string, stillLeader?: () => Promise<boolean>): Promise<'done' | 'failed' | 'skipped' | 'lost'> {
   try {
     const row = await prisma.brickComputer.findUnique({ where: { botId } });
     const provider = providerFor(row);
@@ -1288,6 +1288,8 @@ export async function fenceMachine(botId: string): Promise<'done' | 'failed' | '
         console.error('[Computer] The fence did not run:', error instanceof Error ? error.message : 'unknown');
       }
     }
+    // A leader whose lease was taken over while it ran does not stop a machine the new leader (or the person, once it was proved) now has
+    if (stillLeader && !(await stillLeader())) return 'lost';
     // Not proved: the machine is stopped so nothing can act behind the person's back. Its files stay, and the next job wakes it
     console.error('[Computer] The take-over fence could not be proved: the machine is stopped');
     await stopMachine(botId, ref, provider);
@@ -1376,9 +1378,10 @@ async function moveJobsToPerson(botId: string, now: Date): Promise<{ changed: nu
  * stops the machine. A stopped machine that is PROVED stopped is a closed machine (nothing can act on it, and the person has no screen
  * until it wakes); one whose stop is not proved is not: it is stopped again, and if that is not proved either, the fence is not proved.
  */
-async function secureMachine(botId: string): Promise<'proved' | 'unproved'> {
-  const fenced = await fenceMachine(botId);
+async function secureMachine(botId: string, stillLeader?: () => Promise<boolean>): Promise<'proved' | 'unproved' | 'lost'> {
+  const fenced = await fenceMachine(botId, stillLeader);
   if (fenced === 'done') return 'proved';
+  if (fenced === 'lost') return 'lost';
   const row = await prisma.brickComputer.findUnique({ where: { botId } });
   const provider = providerFor(row);
   if (!row?.providerRef || !provider) return 'proved';
@@ -1415,7 +1418,9 @@ async function leadFence(botId: string, epoch: number | null, now: Date): Promis
     await fenceControl(botId);
     if (!(await mine())) return 'lost';
     // Then the machine itself: the turn is cancelled and what the agent started is stopped and proved gone, before the person has the screen
-    if ((await secureMachine(botId)) === 'unproved') {
+    const secured = await secureMachine(botId, epoch === null ? undefined : () => renewTransition(botId, 'fencing', epoch));
+    if (secured === 'lost') return 'lost';
+    if (secured === 'unproved') {
       if (epoch !== null) await releaseLease(botId, 'fencing', epoch);
       return 'unproved';
     }
@@ -1469,12 +1474,13 @@ export async function takeOver(botId: string, ownerId: string, now: Date = new D
     if (row.state === 'human_ready') break;
     // A change of hands is on its way: this request joins it rather than begin another or answer before it is done
     if (leaseLapsed(row, t)) {
-      if (!(await resumeTransition(botId, row))) continue;
+      const resumed = await resumeTransition(botId, row);
+      if (resumed === null) continue;
       if (row.state === 'fencing') {
-        const done = await leadFence(botId, row.epoch, now);
+        const done = await leadFence(botId, resumed, now);
         if (done === 'unproved') return { ok: false, reason: 'not_secured' };
       } else {
-        await finishReturn(botId, row.epoch);
+        await finishReturn(botId, resumed);
       }
       continue;
     }
@@ -1553,7 +1559,8 @@ export async function handBack(botId: string, ownerId: string): Promise<Control>
     }
     if (row.state === 'agent') break;
     if (row.state === 'returning' && leaseLapsed(row, t)) {
-      if (await resumeTransition(botId, row)) await finishReturn(botId, row.epoch);
+      const resumed = await resumeTransition(botId, row);
+      if (resumed !== null) await finishReturn(botId, resumed);
       continue;
     }
     if (t >= deadline) return { ok: false, reason: 'in_progress' };
@@ -1584,10 +1591,11 @@ export async function recoverControl(now: Date = new Date(), batch: number = SWE
       continue;
     }
     if (row.state === 'agent' || !leaseLapsed(row)) continue;
-    if (!(await resumeTransition(botId, row))) continue;
+    const resumed = await resumeTransition(botId, row);
+    if (resumed === null) continue;
     try {
-      if (row.state === 'fencing') await leadFence(botId, row.epoch, now);
-      else await finishReturn(botId, row.epoch);
+      if (row.state === 'fencing') await leadFence(botId, resumed, now);
+      else await finishReturn(botId, resumed);
       finished++;
     } catch (error) {
       console.error('[Computer] Could not finish a change of hands:', error instanceof Error ? error.message : 'unknown');
@@ -1783,5 +1791,12 @@ export async function computerTimeInBooks(botId: string, now: Date = new Date())
     SELECT COUNT(*)::bigint AS "n" FROM "computer_jobs" j
     WHERE j."bot_id" = ${botId} AND j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')`);
-  return Number(unwritten[0]?.n ?? 0) === 0;
+  if (Number(unwritten[0]?.n ?? 0) !== 0) return false;
+  // A failed job's model calls that are still written against the person are not in the books as given back yet (the give-back above never throws, so
+  // a write that failed shows here). Once the jobs are gone nothing can find those calls to give them back, so the Brick waits for the next sweep
+  const owed = await prisma.$queryRaw<Array<{ n: bigint }>>(Prisma.sql`
+    SELECT COUNT(*)::bigint AS "n" FROM "computer_jobs" j
+    WHERE j."bot_id" = ${botId} AND (j."status" = 'failed' OR (j."status" = 'stopped' AND j."ended_by" = 'error'))
+      AND EXISTS (SELECT 1 FROM "meter_events" e WHERE e."source_ref" = 'computer_jobs:' || j."id" AND e."job_id" = j."id" AND e."kind" = 'model_call' AND e."pool" = 'computer' AND e."payer_kind" = 'universe' AND e."person_key" = 'person:' || j."person_id")`);
+  return Number(owed[0]?.n ?? 0) === 0;
 }

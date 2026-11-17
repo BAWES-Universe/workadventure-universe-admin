@@ -22,13 +22,11 @@ import { recordKeptBytes } from '@/lib/computer-disk';
  *    The files it made in chats belong to the person too (they stay where the chat put them; the Brick's list of them goes).
  *  - Accounting: amounts, ids and dates of what it cost, and the line of when the machine's disk stopped being billed. Never a chat, a title,
  *    a name or any text: the titles of its task receipts are replaced, and what a voice note was kept for is erased.
- *  - A retry note (BrickPurge) until the outside deletions are confirmed, and a bare marker with the Brick's id for PURGE_MARKER_DAYS after,
- *    so a bot server that still holds the Brick cannot write its memory or chats back. It holds no content.
+ *  - A retry note (BrickPurge) until the outside deletions are confirmed, and after that a bare marker with the Brick's id, for good, so a bot
+ *    server that still holds the Brick (however long after) cannot write its memory or chats back. Nothing else guards that: the chat and
+ *    memory tables do not point at a Brick. It holds no content, only the id the books already keep.
  */
 
-/** How long the bare marker stays after everything outside was confirmed deleted. */
-export const PURGE_MARKER_DAYS = 30;
-const DAY_MS = 24 * 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 /** After each failed try the wait grows: 1 min, 5, 15, 1 h, 6 h, then every 6 h until it works. */
 const RETRY_WAITS_MINUTES = [1, 5, 15, 60, 360];
@@ -39,7 +37,7 @@ export const DELETED_MAKER_NAME = 'A deleted Brick';
 /** What replaces the title of a task receipt (the same line a receipt without a title always had). */
 const DELETED_TASK_TITLE = 'A task';
 
-/** True while a purge note or marker for this Brick exists: the Brick was purged, and nothing may be saved for it any more. */
+/** True when a purge note or marker for this Brick exists (the marker is never removed): the Brick was purged, and nothing may be saved for it any more. */
 export async function isPurged(botId: string): Promise<boolean> {
   return (await prisma.brickPurge.count({ where: { botId } })) > 0;
 }
@@ -168,7 +166,7 @@ export async function finishOutside(botId: string, now: Date = new Date()): Prom
 }
 
 /**
- * Tries every purged Brick that still has something to delete outside and is due, then removes markers whose days are over. Returns how many
+ * Tries every purged Brick that still has something to delete outside and is due. The markers of finished ones stay. Returns how many
  * were finished now. `only` limits it to these Bricks (the ones just purged for one person).
  */
 export async function sweepPurges(now: Date = new Date(), only?: string[], batch: number = PURGE_BATCH): Promise<number> {
@@ -187,6 +185,5 @@ export async function sweepPurges(now: Date = new Date(), only?: string[], batch
       console.error('[Brick purge] A purged Brick could not be finished:', error instanceof Error ? error.message : 'unknown');
     }
   }
-  if (!only) await prisma.brickPurge.deleteMany({ where: { doneAt: { lt: new Date(now.getTime() - PURGE_MARKER_DAYS * DAY_MS) } } });
   return finished;
 }

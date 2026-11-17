@@ -275,7 +275,38 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
       expect(fences()).toBe(0);
       expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
       expect(fences()).toBe(1);
-      expect(await readControl(sara.brickId)).toMatchObject({ state: 'human_ready', epoch });
+      // The next take over took the lease over under a new number, so the leader that died cannot finish what it began
+      expect(await readControl(sara.brickId)).toMatchObject({ state: 'human_ready', epoch: (epoch as number) + 1 });
+    });
+
+    it('a leader that stalled past its lease cannot stop the machine after another request took the transition over and proved the fence', async () => {
+      const { sara } = await running();
+      let calls = 0;
+      let failChecks = false;
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      // Only the first leader's fence waits at the gate; every later one (the second leader's) goes straight through and is proved
+      fake.execAnswer = async (command) => {
+        if (command === 'universe-fence') {
+          if (++calls === 1) await gate;
+          return {};
+        }
+        return command.startsWith('universe-fence --check') ? { stdout: failChecks ? 'remaining=2\n' : 'remaining=0\n' } : {};
+      };
+      const stalled = takeOver(sara.brickId, sara.id, NOW);
+      await until(() => calls === 1);
+      // Its lease runs out while it is stuck, and the next take over resumes the same transition and proves the fence
+      await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { controlLeaseUntil: new Date(Date.now() - 1000) } });
+      expect(await takeOver(sara.brickId, sara.id, NOW)).toMatchObject({ ok: true });
+      expect((await readControl(sara.brickId))?.state).toBe('human_ready');
+      const before = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
+      // The stalled leader wakes up with a fence that does not prove: it must not stop the machine the person now holds
+      failChecks = true;
+      release();
+      expect(await stalled).toMatchObject({ ok: true });
+      const after = await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } });
+      expect(after.machine).toBe(before.machine);
+      expect(after.controlState).toBe('human_ready');
     });
 
     it('a take over whose leader is alive (its lease has not run out) is joined, never taken over', async () => {

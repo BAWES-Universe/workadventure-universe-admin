@@ -69,14 +69,19 @@ export async function beginTransition(botId: string, from: ControlState, expecte
   return count === 1 ? expectedEpoch + 1 : null;
 }
 
-/** A leader that is gone left its lease behind: one request takes it over (only the lease that was seen), and finishes the same transition. */
-export async function resumeTransition(botId: string, control: Control): Promise<boolean> {
-  if (control.state !== 'fencing' && control.state !== 'returning') return false;
+/**
+ * A leader that is gone left its lease behind: one request takes it over (only the lease that was seen), and finishes the same transition.
+ * The epoch moves with the take over, so a leader that only seemed gone (it stalled past its lease and is still running) can no longer renew,
+ * finish or release this transition: every one of its writes names the old epoch. Returns the epoch the new leader works under, null when
+ * another request took it first or there is nothing to resume.
+ */
+export async function resumeTransition(botId: string, control: Control): Promise<number | null> {
+  if (control.state !== 'fencing' && control.state !== 'returning') return null;
   const { count } = await prisma.brickComputer.updateMany({
     where: { botId, controlState: control.state, controlEpoch: control.epoch, controlLeaseUntil: control.leaseUntil },
-    data: { controlLeaseUntil: new Date(Date.now() + CONTROL_TIMING.leaseMs) },
+    data: { controlEpoch: control.epoch + 1, controlLeaseUntil: new Date(Date.now() + CONTROL_TIMING.leaseMs) },
   });
-  return count === 1;
+  return count === 1 ? control.epoch + 1 : null;
 }
 
 /** The leader is still working: its lease is pushed on. False when the transition is no longer its own (another finished it). */

@@ -376,7 +376,8 @@ export class Agent37ComputerProvider implements ComputerProvider {
   }
 
   async removeAllFor(botId: string): Promise<void> {
-    const made = (await this.client.listInstances()).filter((instance) => instance.metadata?.creation_id === creationId(botId) && !gone(String(instance.status)));
+    // A machine that failed to come up is still there at the provider (its disk may be billed and hold files): only one already being deleted is left alone
+    const made = (await this.client.listInstances()).filter((instance) => instance.metadata?.creation_id === creationId(botId) && !['deleting', 'deleted'].includes(String(instance.status)));
     for (const instance of made) await this.remove(instance.id);
   }
 

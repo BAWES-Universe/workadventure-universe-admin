@@ -6,6 +6,8 @@ const stored = new Map<string, Buffer>();
 let abortCalled = false;
 let failUpload = false;
 
+let purged = false;
+jest.mock('@/lib/db', () => ({ prisma: { brickPurge: { count: async () => (purged ? 1 : 0) } } }));
 jest.mock('@/lib/artifact-storage', () => ({
   artifactBucket: () => ({
     bucket: 'b',
@@ -65,6 +67,7 @@ beforeEach(() => {
   stored.clear();
   abortCalled = false;
   failUpload = false;
+  purged = false;
 });
 
 describe('the saved copy of a Brick computer’s files', () => {
@@ -77,6 +80,14 @@ describe('the saved copy of a Brick computer’s files', () => {
     expect(file.length).toBe(archive.length + COPY_OVERHEAD);
     expect(info.bytes).toBe(archive.length);
     expect(openSavedCopy(file).equals(archive)).toBe(true);
+  });
+
+  it('does not leave a copy behind for a Brick that was purged while its save was running: the purge marker is there by the time the copy lands', async () => {
+    // The purge wrote its marker and deleted the bucket's keys for the Brick before this save's copy landed
+    purged = true;
+    await expect(storeSavedCopy('bot-gone', webStream(archive))).rejects.toThrow('deleted while its files were being saved');
+    expect(await savedCopyOf('bot-gone')).toBeNull();
+    expect([...stored.keys()]).toEqual([]);
   });
 
   it('refuses a copy that was changed', async () => {

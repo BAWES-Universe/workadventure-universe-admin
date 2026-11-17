@@ -22,10 +22,17 @@ jest.mock('@/lib/meter', () => {
   const actual = jest.requireActual('@/lib/meter');
   return { ...actual, recordMeterEvent: jest.fn(actual.recordMeterEvent) };
 });
+// The give-back of a failed job's model calls, wrapped the same way
+const actualGiveBack = jest.requireActual('@/lib/computer-calls').giveBackModelCalls;
+jest.mock('@/lib/computer-calls', () => {
+  const actual = jest.requireActual('@/lib/computer-calls');
+  return { ...actual, giveBackModelCalls: jest.fn(actual.giveBackModelCalls) };
+});
+import * as computerCalls from '@/lib/computer-calls';
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
-import { isPurged, purgeBrick, DELETED_MAKER_NAME, PURGE_MARKER_DAYS } from '@/lib/brick-purge';
+import { isPurged, purgeBrick, DELETED_MAKER_NAME } from '@/lib/brick-purge';
 import { giveComputer, startJob, finishJob } from '@/lib/computer';
 import * as meter from '@/lib/meter';
 import { saveMeterSettings } from '@/lib/meter';
@@ -324,6 +331,31 @@ run('purging a deleted Brick, in a real database', () => {
     });
   });
 
+  it('keeps a Brick whole while a failed job\u2019s model calls are still written against the person: the jobs go with the Brick, and nothing could find those calls to give them back after', async () => {
+    const sara = await person('sara');
+    const brick = await fullBrick(sara, 'Owed Brick', { computer: true });
+    const job = await prisma.computerJob.findFirstOrThrow({ where: { botId: brick.id } });
+    // The job failed on our side, and one of its model calls was written against the person
+    await prisma.computerJob.update({ where: { id: job.id }, data: { status: 'failed', endedBy: 'error' } });
+    const eventId = `computer:${job.id}:call:owed`;
+    await prisma.meterEvent.create({
+      data: { eventId, kind: 'model_call', pool: 'computer', occurredAt: NOW, personKey: `person:${sara.id}`, personId: sara.id, botId: brick.id, brick: true, payerKind: 'universe', jobId: job.id, sourceRef: `computer_jobs:${job.id}`, quantity: BigInt(1), unit: 'call', costMicros: BigInt(4000), basis: 'measured' },
+    });
+    await deleteBrick(brick.id, sara.id, NOW);
+    (computerCalls.giveBackModelCalls as jest.Mock).mockRejectedValue(new Error('The books are down'));
+    try {
+      expect(await purgeBrick(brick.id, later(8))).toBe('books');
+      expect(await owned(brick.id)).toMatchObject({ bot: 1, jobs: 1 });
+      expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId } })).toMatchObject({ personKey: `person:${sara.id}` });
+    } finally {
+      (computerCalls.giveBackModelCalls as jest.Mock).mockImplementation(actualGiveBack);
+    }
+    // The books work again: the call is given back (written against nobody, still counted as our own cost), then the Brick is purged
+    expect(await purgeBrick(brick.id, later(8))).toBe('purged');
+    expect(await prisma.meterEvent.findUniqueOrThrow({ where: { eventId } })).toMatchObject({ personKey: 'unknown', personId: null });
+    expect(await owned(brick.id)).toEqual(NOTHING);
+  });
+
   describe('nothing is written back (A31)', () => {
     it('a bot server that still holds the purged Brick gets its saves answered as done and nothing comes back: memory, chats and metrics', async () => {
       const sara = await person('sara');
@@ -357,7 +389,7 @@ run('purging a deleted Brick, in a real database', () => {
       expect(await chat.json()).toMatchObject({ status: expect.stringMatching(/^(created|updated)$/), conversationId: expect.anything() });
     });
 
-    it('keeps a bare marker for a while after everything outside is confirmed gone, then removes it; one still waiting on the outside is never removed', async () => {
+    it('keeps a bare marker for good after everything outside is confirmed gone, so a bot server that holds the Brick a year later still cannot write its chat back', async () => {
       const sara = await person('sara');
       const done = await fullBrick(sara, 'Marker done');
       const stuck = await fullBrick(sara, 'Marker stuck', { computer: true });
@@ -368,11 +400,12 @@ run('purging a deleted Brick, in a real database', () => {
       expect(await isPurged(done.id)).toBe(true);
       // The marker holds no content: an id, the owner for the books, dates and what is pending
       expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: done.id } })).toMatchObject({ providerRef: null, machinePending: false, copyPending: false });
-      await removeGoneBricks(later(8 + PURGE_MARKER_DAYS - 1));
+      await removeGoneBricks(later(8 + 400));
       expect(await isPurged(done.id)).toBe(true);
-      await removeGoneBricks(later(8 + PURGE_MARKER_DAYS + 1));
-      expect(await isPurged(done.id)).toBe(false);
       expect(await isPurged(stuck.id)).toBe(true);
+      const chat = await saveConversation(asBotServer(`/api/bots/${done.id}/conversations`, { userUuid: sara.uuid, userId: sara.id, isGuest: false, messages: [{ role: 'user', content: 'a year later' }], startedAt: later(8 + 400).toISOString() }), params(done.id));
+      expect(await chat.json()).toMatchObject({ conversationId: null, status: 'gone' });
+      expect(await prisma.botsConversation.count({ where: { botId: done.id } })).toBe(0);
     });
   });
 });

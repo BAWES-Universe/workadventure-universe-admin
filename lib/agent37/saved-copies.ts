@@ -5,6 +5,7 @@ import { createGunzip } from 'node:zlib';
 import { CopyObjectCommand, DeleteObjectCommand, HeadObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { artifactBucket } from '@/lib/artifact-storage';
+import { prisma } from '@/lib/db';
 import { derivedKey } from '@/lib/encryption';
 
 /**
@@ -115,6 +116,12 @@ export async function storeSavedCopy(botId: string, archive: ReadableStream<Uint
   // The stream was whole and the upload finished: now, and only now, it replaces the saved copy (one copy inside the bucket)
   await s3.send(new CopyObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId), CopySource: `${bucket}/${staging}` }));
   await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: staging })).catch(() => undefined);
+  // A Brick purged while this save was running: the purge wrote its marker before it deleted anything in the bucket, so a marker seen now (after
+  // the copy) means the delete either already ran and missed this copy, or will run after it and take it. Either way this copy must not stay
+  if ((await prisma.brickPurge.count({ where: { botId } })) > 0) {
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: savedCopyKey(botId) }));
+    throw new Error('The Brick was deleted while its files were being saved');
+  }
   const copy = await savedCopyOf(botId);
   if (!copy) throw new Error('The saved copy cannot be found after it was stored');
   return copy;
