@@ -61,8 +61,10 @@ export interface CodeJobLimits {
   jobsPerPersonPerDay: number | null;
   /** The most the provider's sandbox may cost us in a month (reservations and settled jobs together). It costs nothing today. */
   exposureCeilingMicros: number | null;
-  /** Days a job's result and files are kept; empty keeps them until they are deleted. */
+  /** Days a job's printed result is kept before it is emptied; empty keeps it. The files a job made are not part of this: they are their owner's and stay until deleted. */
   keepDays: number | null;
+  /** The most result files one person may keep (they stay until the person deletes them). A file that would go over is not kept, and the Brick says so. */
+  maxKeptBytesPerPerson: number | null;
   /** How long asking for a job's result waits before saying "still running". */
   waitSeconds: number | null;
   /** The largest answer of an App tool that is handed to a Brick whole. A bigger one is not cut: the Brick is told, and can have a code job read all of it. Empty passes every answer on whole. */
@@ -83,6 +85,7 @@ export const CODE_JOB_LIMITS_EMPTY: CodeJobLimits = {
   jobsPerPersonPerDay: null,
   exposureCeilingMicros: null,
   keepDays: null,
+  maxKeptBytesPerPerson: null,
   waitSeconds: null,
   maxAnswerBytes: null,
 };
@@ -101,6 +104,7 @@ export const CODE_JOB_LIMIT_RANGES: Record<keyof CodeJobLimits, { min: number; m
   jobsPerPersonPerDay: { min: 1, max: 100_000 },
   exposureCeilingMicros: { min: 1, max: 1_000_000_000_000_000 },
   keepDays: { min: 1, max: 36_500 },
+  maxKeptBytesPerPerson: { min: 0, max: 1_099_511_627_776 },
   // The bot server gives up on one call to an App link at 60 seconds, so a wait may never be that long
   waitSeconds: { min: 1, max: 55 },
   maxAnswerBytes: { min: 10_000, max: 524_288_000 },
@@ -121,6 +125,7 @@ export const CODE_JOB_LIMITS_RECOMMENDED: Partial<Record<keyof CodeJobLimits, nu
   jobsPerPersonPerDay: 20,
   exposureCeilingMicros: 1_000_000,
   keepDays: 30,
+  maxKeptBytesPerPerson: 1_073_741_824,
   waitSeconds: 40,
   maxAnswerBytes: 204_800,
 };
@@ -139,7 +144,8 @@ export const CODE_JOB_LIMIT_LABELS: Record<keyof CodeJobLimits, { label: string;
   atOnceAll: { label: 'Jobs at once in all', help: 'How many jobs may be running at the same time across everyone.', unit: 'count' },
   jobsPerPersonPerDay: { label: 'Jobs a person may start in a day', help: 'A person asking for more waits until tomorrow.', unit: 'count' },
   exposureCeilingMicros: { label: 'Most code jobs may cost us in a month', help: 'The provider charges nothing for its workspace today. If that changes, new jobs stop at this amount for the month.', unit: 'micros' },
-  keepDays: { label: 'Days a job is kept', help: 'How long a job’s result and files are kept before they are removed. Empty keeps them until the person deletes them.', unit: 'days' },
+  keepDays: { label: 'Days a job’s printed result is kept', help: 'How long what a job printed is kept before it is emptied. The files a job made are not removed by this: they are their owner’s and stay until the owner deletes them. Empty keeps the printed result too.', unit: 'days' },
+  maxKeptBytesPerPerson: { label: 'Result files one person may keep', help: 'Files a job made stay with the person until they delete them. A file that would take them over this is not kept, and the Brick says so.', unit: 'bytes' },
   maxAnswerBytes: { label: 'Largest App answer given to a Brick', help: 'An App answer bigger than this is not cut and not passed on: the Brick is told how big it was and that a code job can read all of it. Empty passes every answer on whole.', unit: 'bytes' },
   waitSeconds: { label: 'How long to wait for a result', help: 'When the Brick asks for a result that is not ready, it waits this long before hearing "still running".', unit: 'seconds' },
 };

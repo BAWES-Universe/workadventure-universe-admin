@@ -19,7 +19,10 @@ import { cancelCodeJob, getCodeJob, openOutput, startCodeJob, sweepCodeJobs, typ
 import { getCodeJobPause, resumeCodeJobs, saveCodeJobLimits } from '@/lib/workbench/state';
 import { setOutputStoreForTests, type OutputStore } from '@/lib/workbench/store';
 import { CODE_JOB_LIMITS_RECOMMENDED, type CodeJobLimits } from '@/lib/workbench/values';
-import { GET as outputRoute } from '@/app/api/workbench/outputs/[id]/route';
+import { GET as outputRoute, DELETE as deleteRoute } from '@/app/api/workbench/outputs/[id]/route';
+import { GET as listRoute } from '@/app/api/workbench/outputs/route';
+import { POST as promoteRoute } from '@/app/api/workbench/outputs/[id]/artifact/route';
+import { artifactKindOf, promoteResult } from '@/lib/owned-results';
 import { GET as adminGet, PATCH as adminPatch } from '@/app/api/admin/workbench/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -136,7 +139,10 @@ run('code jobs for Apps, in a real database', () => {
   const deps = (extra: Partial<Deps> = {}): Deps => ({ adapter: { workbench: provider.adapter } as unknown as ReadyMadeAdapter, store: kept.store, now, background, ...extra });
   const start = (args: unknown, extra: Partial<StartInput> = {}, d: Partial<Deps> = {}) =>
     startCodeJob({ botId: saraBrick, personId: sara, connectionId, toolkit: KEY, callId: `call-${(seq += 1)}-${tag}`, args, read: null, ...extra }, deps(d));
-  const rowOf = (jobId: string) => prisma.codeJob.findUniqueOrThrow({ where: { id: jobId }, include: { outputs: true } });
+  const rowOf = async (jobId: string) => ({
+    ...(await prisma.codeJob.findUniqueOrThrow({ where: { id: jobId } })),
+    outputs: await prisma.ownedResult.findMany({ where: { sourceKind: 'code_job', sourceId: jobId }, orderBy: { name: 'asc' } }),
+  });
   const jobOf = (outcome: Awaited<ReturnType<typeof start>>) => {
     if (outcome.status === 'refused') throw new Error(`refused: ${outcome.reason}`);
     return outcome.job;
@@ -171,6 +177,8 @@ run('code jobs for Apps, in a real database', () => {
     setOutputStoreForTests(kept.store);
     clock.offset = 0;
     await prisma.codeJob.deleteMany({ where: { personId: { in: [sara, omar] } } });
+    await prisma.ownedResult.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
+    await prisma.artifact.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
     await prisma.meterEvent.deleteMany({ where: { personId: { in: [sara, omar] } } });
     await saveCodeJobLimits(LIMITS, boss);
     await resumeCodeJobs(boss);
@@ -185,6 +193,8 @@ run('code jobs for Apps, in a real database', () => {
   afterAll(async () => {
     setOutputStoreForTests(undefined);
     await prisma.codeJob.deleteMany({ where: { personId: { in: [sara, omar] } } });
+    await prisma.ownedResult.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
+    await prisma.artifact.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
     await prisma.meterEvent.deleteMany({ where: { personId: { in: [sara, omar] } } });
     await prisma.appConnection.deleteMany({ where: { ownerId: { in: [sara, omar] } } });
     await prisma.appSetting.deleteMany({ where: { key: 'ready-made-apps' } });
@@ -551,25 +561,177 @@ run('code jobs for Apps, in a real database', () => {
       expect((await outputRoute(new NextRequest(`http://localhost/api/workbench/outputs/${output.id}`), { params: Promise.resolve({ id: output.id }) })).status).toBe(404);
     });
 
-    it('removes a job’s result and files once the days kept have passed, and only then', async () => {
+    it('empties a job’s printed result once the days kept have passed, and never the files: those are their owner’s', async () => {
       provider.state.runs.push(({ files }) => {
         files.set('out/old.txt', text('old'));
-        return done();
+        return done('printed');
       });
       const job = jobOf(await start({ code: 'x' }));
       await finishAll();
       expect(kept.files.size).toBe(1);
       expect((await sweepCodeJobs(deps())).purged).toBe(0);
-      expect(kept.files.size).toBe(1);
       await prisma.codeJob.update({ where: { id: job.jobId }, data: { expiresAt: new Date(Date.now() - 1000) } });
       expect((await sweepCodeJobs(deps())).purged).toBe(1);
-      expect(kept.files.size).toBe(0);
       const row = await rowOf(job.jobId);
-      expect(row.outputs).toHaveLength(0);
       expect(row.result).toBeNull();
       expect(row.expiresAt).toBeNull();
+      // The file is still kept, still listed with the job and still opens for its owner
+      expect(kept.files.size).toBe(1);
+      expect(row.outputs.map((output) => output.name)).toEqual(['old.txt']);
+      const view = await getCodeJob({ jobId: job.jobId, botId: saraBrick, personId: sara, waitSeconds: 0 }, deps());
+      if (view.status !== 'ok') throw new Error('not ok');
+      expect(view.job.files.map((file) => file.name)).toEqual(['old.txt']);
+      expect(await openOutput(row.outputs[0].id, sara, deps())).toMatchObject({ name: 'old.txt' });
       // A second sweep finds nothing more
       expect((await sweepCodeJobs(deps())).purged).toBe(0);
+    });
+  });
+
+  describe('results a person owns: they stay until the owner deletes them, and nothing publishes them by itself', () => {
+    const keepOne = async (name: string, body: string, extra: Partial<{ files: Map<string, Uint8Array> }> = {}) => {
+      void extra;
+      provider.state.runs.push(({ files }) => {
+        files.set(`out/${name}`, text(body));
+        return done('made');
+      });
+      const job = jobOf(await start({ code: 'x' }));
+      await finishAll();
+      const row = await rowOf(job.jobId);
+      return { job, row, output: row.outputs[0] };
+    };
+    const asUser = (id: string | null) => (mockUser.current = id ? { id } : null);
+    const request = (path: string, method = 'GET', body?: unknown) => new NextRequest(`http://localhost/api/workbench/outputs${path}`, { method, ...(body ? { body: JSON.stringify(body), headers: { 'content-type': 'application/json' } } : {}) });
+
+    it('says who owns each one and where it came from, and never lists it to anyone else', async () => {
+      const { job, output } = await keepOne('notes.md', '# notes');
+      expect(output).toMatchObject({ ownerId: sara, sourceKind: 'code_job', sourceId: job.jobId, makerBotId: saraBrick, makerName: 'Brick', access: 'owner', artifactId: null });
+      asUser(sara);
+      const mine = (await (await listRoute(request(''))).json()) as { results: { id: string; madeBy: string; access: string; sourceId: string; path: string }[]; keptBytes: number };
+      expect(mine.results).toHaveLength(1);
+      expect(mine.results[0]).toMatchObject({ id: output.id, madeBy: 'Brick', access: 'owner', sourceId: job.jobId, path: `/api/workbench/outputs/${output.id}` });
+      expect(mine.keptBytes).toBe(7);
+      asUser(omar);
+      expect(((await (await listRoute(request(''))).json()) as { results: unknown[] }).results).toHaveLength(0);
+      asUser(null);
+      expect((await listRoute(request(''))).status).toBe(401);
+    });
+
+    it('stay when the job ends in a cancel record, expires, or the Brick is deleted, and only the Brick’s name turns into "A deleted Brick"', async () => {
+      const { output } = await keepOne('keep.txt', 'keep me');
+      const original = await prisma.bot.findUniqueOrThrow({ where: { id: saraBrick }, select: { roomId: true, enabled: true } });
+      await prisma.bot.update({ where: { id: saraBrick }, data: { deletedAt: new Date(), goneAt: new Date(), roomId: null, enabled: false } });
+      try {
+        asUser(sara);
+        const listed = (await (await listRoute(request(''))).json()) as { results: { madeBy: string }[] };
+        expect(listed.results[0].madeBy).toBe('A deleted Brick');
+        expect(await openOutput(output.id, sara, deps())).toMatchObject({ name: 'keep.txt' });
+        // The sweep leaves it where it is
+        await sweepCodeJobs(deps());
+        expect(await prisma.ownedResult.count({ where: { id: output.id } })).toBe(1);
+      } finally {
+        await prisma.bot.update({ where: { id: saraBrick }, data: { deletedAt: null, goneAt: null, roomId: original.roomId, enabled: original.enabled } });
+      }
+    });
+
+    it('stop at the most one person may keep, say what was left, and count what they already keep', async () => {
+      await saveCodeJobLimits({ maxKeptBytesPerPerson: 20 }, boss);
+      await keepOne('a.txt', '0123456789');
+      provider.state.runs.push(({ files }) => {
+        files.set('out/b.txt', text('0123456789'));
+        files.set('out/c.txt', text('0123456789'));
+        return done('two more');
+      });
+      const job = jobOf(await start({ code: 'x' }));
+      await finishAll();
+      const row = await rowOf(job.jobId);
+      expect(row.outputs.map((output) => output.name)).toEqual(['b.txt']);
+      const view = await getCodeJob({ jobId: job.jobId, botId: saraBrick, personId: sara, waitSeconds: 0 }, deps());
+      if (view.status !== 'ok') throw new Error('not ok');
+      expect(view.job.notKept).toEqual([{ name: 'c.txt', why: 'your kept files are full: delete some to make room' }]);
+      // Deleting makes room again
+      asUser(sara);
+      const first = (await prisma.ownedResult.findFirstOrThrow({ where: { ownerId: sara, name: 'a.txt' } })).id;
+      expect((await deleteRoute(request(`/${first}`, 'DELETE'), { params: Promise.resolve({ id: first }) })).status).toBe(200);
+      expect(kept.files.size).toBe(1);
+      const again = await keepOne('d.txt', '0123456789');
+      expect(again.row.outputs.map((output) => output.name)).toEqual(['d.txt']);
+    });
+
+    it('can be deleted by the owner alone: the file goes first, and one that could not be removed stays listed', async () => {
+      const { output } = await keepOne('gone.txt', 'bye');
+      asUser(omar);
+      expect((await deleteRoute(request(`/${output.id}`, 'DELETE'), { params: Promise.resolve({ id: output.id }) })).status).toBe(404);
+      asUser(null);
+      expect((await deleteRoute(request(`/${output.id}`, 'DELETE'), { params: Promise.resolve({ id: output.id }) })).status).toBe(404);
+      asUser(sara);
+      const failing = jest.spyOn(kept.store, 'remove').mockRejectedValueOnce(new Error('bucket down'));
+      expect((await deleteRoute(request(`/${output.id}`, 'DELETE'), { params: Promise.resolve({ id: output.id }) })).status).toBe(502);
+      failing.mockRestore();
+      expect(await prisma.ownedResult.count({ where: { id: output.id } })).toBe(1);
+      expect(kept.files.size).toBe(1);
+      expect((await deleteRoute(request(`/${output.id}`, 'DELETE'), { params: Promise.resolve({ id: output.id }) })).status).toBe(200);
+      expect(await prisma.ownedResult.count({ where: { id: output.id } })).toBe(0);
+      expect(kept.files.size).toBe(0);
+      expect((await deleteRoute(request(`/${output.id}`, 'DELETE'), { params: Promise.resolve({ id: output.id }) })).status).toBe(404);
+    });
+
+    it('are removed with an account that is gone, from storage and the books, and only then', async () => {
+      const { output } = await keepOne('orphan.txt', 'x');
+      const stranger = randomUUID();
+      const strangerKey = 'code-jobs/code_job-stranger/stranger.ucj';
+      await kept.store.put(strangerKey, text('theirs'));
+      await prisma.ownedResult.create({ data: { id: randomUUID(), ownerId: stranger, sourceKind: 'code_job', sourceId: 'gone-job', makerBotId: 'bot', makerName: 'Brick', name: 'a.txt', contentType: 'text/plain', sizeBytes: 6, sha256: 'x'.repeat(64), storageKey: strangerKey } });
+      const swept = await sweepCodeJobs(deps());
+      expect(swept.orphansRemoved).toBe(1);
+      expect(await prisma.ownedResult.count({ where: { ownerId: stranger } })).toBe(0);
+      expect(kept.files.has(strangerKey)).toBe(false);
+      expect(await prisma.ownedResult.count({ where: { id: output.id } })).toBe(1);
+    });
+
+    it('become an artifact only when the owner asks, "Just you", once, and the file stays', async () => {
+      const { output } = await keepOne('report.md', '# Report\n\nAll good.');
+      expect(await prisma.artifact.count({ where: { ownerId: sara } })).toBe(0);
+      const stored = new Map<string, string>();
+      const files = { put: async (key: string, body: string | Uint8Array) => void stored.set(key, String(body)), remove: async (keys: string[]) => keys.forEach((key) => stored.delete(key)) } as unknown as Parameters<typeof promoteResult>[3] extends { files?: infer F } | undefined ? F : never;
+      expect(await promoteResult(output.id, omar, {}, { store: kept.store, files })).toEqual({ status: 'refused', reason: 'not_found' });
+      const made = await promoteResult(output.id, sara, { title: 'Weekly report' }, { store: kept.store, files });
+      expect(made).toMatchObject({ status: 'made', kind: 'markdown' });
+      if (made.status !== 'made') throw new Error('not made');
+      const artifact = await prisma.artifact.findUniqueOrThrow({ where: { id: made.artifactId }, include: { versions: true } });
+      expect(artifact).toMatchObject({ ownerId: sara, makerBotId: saraBrick, makerName: 'Brick', title: 'Weekly report', kind: 'markdown', openScope: 'me', changeScope: 'owner', chatKind: null });
+      expect(artifact.versions[0].summary).toContain('code job');
+      expect([...stored.values()]).toEqual(['# Report\n\nAll good.']);
+      expect((await prisma.ownedResult.findUniqueOrThrow({ where: { id: output.id } })).artifactId).toBe(made.artifactId);
+      // Asking again names the same artifact and makes no second
+      expect(await promoteResult(output.id, sara, {}, { store: kept.store, files })).toEqual({ status: 'already', artifactId: made.artifactId });
+      expect(await prisma.artifact.count({ where: { ownerId: sara } })).toBe(1);
+      // The file is still there, and deleting it leaves the artifact alone
+      expect(await openOutput(output.id, sara, deps())).toMatchObject({ name: 'report.md' });
+      asUser(sara);
+      expect((await deleteRoute(request(`/${output.id}`, 'DELETE'), { params: Promise.resolve({ id: output.id }) })).status).toBe(200);
+      expect(await prisma.artifact.count({ where: { id: made.artifactId } })).toBe(1);
+    });
+
+    it('is refused for what an artifact cannot be, and for text that is not text', async () => {
+      const csv = await keepOne('table.csv', 'a,b');
+      expect(await promoteResult(csv.output.id, sara, {}, { store: kept.store })).toEqual({ status: 'refused', reason: 'not_an_artifact_type' });
+      const bad = await keepOne('broken.html', 'x');
+      await kept.store.put((await prisma.ownedResult.findUniqueOrThrow({ where: { id: bad.output.id } })).storageKey, new Uint8Array([0xff, 0xfe, 0xfd]));
+      expect(await promoteResult(bad.output.id, sara, {}, { store: kept.store })).toEqual({ status: 'refused', reason: 'not_text' });
+      asUser(sara);
+      const response = await promoteRoute(request(`/${csv.output.id}/artifact`, 'POST', {}), { params: Promise.resolve({ id: csv.output.id }) });
+      expect(response.status).toBe(422);
+      asUser(omar);
+      expect((await promoteRoute(request(`/${csv.output.id}/artifact`, 'POST', {}), { params: Promise.resolve({ id: csv.output.id }) })).status).toBe(404);
+      expect(await prisma.artifact.count({ where: { ownerId: { in: [sara, omar] } } })).toBe(0);
+    });
+
+    it('says which kinds a file can become', () => {
+      expect(artifactKindOf('a.md', 'text/plain')).toBe('markdown');
+      expect(artifactKindOf('a.svg', 'application/octet-stream')).toBe('svg');
+      expect(artifactKindOf('a.bin', 'text/html; charset=utf-8')).toBe('page');
+      expect(artifactKindOf('a.csv', 'text/csv')).toBeNull();
+      expect(artifactKindOf('a.png', 'image/png')).toBeNull();
     });
   });
 

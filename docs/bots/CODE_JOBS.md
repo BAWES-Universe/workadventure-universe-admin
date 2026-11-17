@@ -23,11 +23,11 @@ The bot server gives up on a call to a link at 60 seconds, so a job is always st
 
 ## What really stops it
 
-Every limit is a setting in **Limits → Apps: code jobs** (nothing is assumed in code; empty means code jobs are not offered): time, runs, code and data size, files and bytes kept, text kept, reads, jobs at once (per person and in all), jobs a day, the month's ceiling, days kept, wait for a result.
+Every limit is a setting in **Limits → Apps: code jobs** (nothing is assumed in code; empty means code jobs are not offered): time, runs, code and data size, files and bytes kept per job, the most one person may keep, text kept, reads, jobs at once (per person and in all), jobs a day, the month's ceiling, days kept, wait for a result.
 
 - Deadline: the run is stopped by deleting the workspace, not by trusting the wait.
 - Cancel: the same. Files a worker was still copying when the cancel (or the sweep) ended the job are removed when that worker finishes.
-- Sweep (every 30 s, in the Orbit process): ends a job past its deadline or with no heartbeat, retries deleting a workspace the provider would not delete (never "closed" on a guess), and removes results and files after the days kept.
+- Sweep (every 30 s, in the Orbit process): ends a job past its deadline or with no heartbeat, retries deleting a workspace the provider would not delete (never "closed" on a guess), empties a job's printed result after the days kept (never the files: those belong to the person), and removes files whose owner no longer exists.
 - After each job the provider's log for its session is read; any run that was not our code pauses code jobs (`provider_ran_tools`) until a super admin resumes them.
 
 ## Big App answers
@@ -48,12 +48,21 @@ The result message says how many steps ran, which did not work, which never ran,
 
 An estimate is reserved when the job starts and the meter event `codejob:<id>` is settled once, at what was used. A job whose meter line did not get written (the meter did not answer, or the process stopped between the two) has no `metered_at`, and the sweep writes it a minute after the job ended; the event id makes that safe to repeat. The sandbox is not billed by the provider today; the price is the saved App price or the built-in per-run figure, and the ceiling guards a future bill.
 
-## Kept files
+## Kept files (owned results)
 
-Encrypted (AES-256-GCM) in Universe's own storage under `code-jobs/`, opened only by Orbit's own route (`/api/workbench/outputs/<id>`) for the job's owner, as an attachment. The provider's copy is gone within a day.
+A file a job leaves is kept as a durable result the person owns, in the shared store `lib/owned-results.ts` (table `owned_results`; the computer-job report-back work can use the same module). Each one records its owner, where it came from (`code_job` or `computer_job` plus the job id), the Brick that made it and the name it had, type, size, SHA-256 and access (`owner` only).
+
+- Encrypted (AES-256-GCM) in Universe's own storage under `code-jobs/`, opened only by Orbit's route `/api/workbench/outputs/<id>` for the owner, as an attachment. The provider's copy is gone within a day and nothing depends on it.
+- Kept until the owner deletes it. The job's record expiring (days kept), the job being cancelled, the Brick being deleted or the provider's copy expiring do not remove it. A Brick that is gone only changes the name shown to "A deleted Brick".
+- The most one person may keep is the Limit "Result files one person may keep". A file that would go over is not kept; the Brick is told "your kept files are full: delete some to make room".
+- Owner routes: `GET /api/workbench/outputs` (list), `DELETE /api/workbench/outputs/<id>` (the stored file goes first; if it cannot be removed the result stays listed), `POST /api/workbench/outputs/<id>/artifact` (see below).
+- Nothing publishes a result by itself. Publishing is a separate action by the owner: it makes an Artifact "Just you" (markdown, svg or html files only, within the artifact size Limit) with the Brick and result as provenance; the kept file stays. Sharing then goes through the normal artifact sharing.
+- Results whose owner account is gone are removed by the sweep.
 
 ## Not covered
 
+- Only markdown, svg and html results can become Artifacts; Artifacts have no generic file kind.
+- A deleted Brick's name is replaced at read time on the results list. An Artifact made from a result before its Brick was deleted keeps the Brick's name until the existing deleted-Brick flow is extended to artifacts.
 - A crash between opening the provider session and saving its id leaves a tool-less session at the provider (the provider has no list endpoint to find it).
 - One cell is limited by the provider to 180 seconds; that is not configurable.
 - `enable_tool_execution` is not in the provider's docs but is accepted and read back.

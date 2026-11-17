@@ -1176,7 +1176,7 @@ export function codeJobLimits(views: CodeJobLimitViews): Limit[] {
       recommended: view.recommended === null ? -1 : view.recommended / scale,
       unset,
       options: [],
-      note: unset ? (view.required ? 'Not set yet. Code jobs do not run until you set it.' : key === 'maxAnswerBytes' ? 'Not set yet. Every App answer is passed on whole.' : 'Not set yet. Files are kept until they are deleted.') : undefined,
+      note: unset ? (view.required ? 'Not set yet. Code jobs do not run until you set it.' : key === 'maxAnswerBytes' ? 'Not set yet. Every App answer is passed on whole.' : 'Not set yet. Printed results are kept until the person deletes them.') : undefined,
       range: { min: view.range.min / scale, max: view.range.max / scale },
     };
   });

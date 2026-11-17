@@ -5,9 +5,10 @@ import type { ReadyMadeAdapter, WorkbenchAdapter } from '@/lib/app-adapter/types
 import { SANDBOX_RUN_MICROS } from '@/lib/composio-rates';
 import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
+import { keepResult, keptBytes as keptResultBytes, openResult, purgeOrphanedResults, removeResultsOf, resultsOfSource } from '@/lib/owned-results';
 import { firstReadNotAllowed } from '@/lib/workbench/policy';
 import { getCodeJobLimits, getCodeJobPause, pauseCodeJobs } from '@/lib/workbench/state';
-import { getOutputStore, outputKeyFor, type OutputStore } from '@/lib/workbench/store';
+import { getOutputStore, type OutputStore } from '@/lib/workbench/store';
 import {
   CELL_WAIT_GRACE_SECONDS,
   CODE_JOB_PROVIDER,
@@ -66,7 +67,7 @@ const ACTIVE = ['starting', 'running'];
 const DAY_MS = 24 * 60 * 60 * 1000;
 const ADMISSION_LOCK = 'codejob:admission';
 
-type Row = Prisma.CodeJobGetPayload<{ include: { outputs: true } }>;
+type Row = Prisma.CodeJobGetPayload<object>;
 
 const asNumber = (value: bigint | number | null | undefined): number => (value === null || value === undefined ? 0 : Number(value));
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -147,7 +148,7 @@ export async function startCodeJob(input: StartInput, deps: Deps = {}): Promise<
   const adapter = adapterOf(deps.adapter);
   const key = codeJobKey(input.botId, input.callId);
 
-  const known = await prisma.codeJob.findUnique({ where: { jobKey: key }, include: { outputs: true } });
+  const known = await prisma.codeJob.findUnique({ where: { jobKey: key } });
   if (known) return known.personId === input.personId ? { status: 'existing', job: await viewOf(known) } : refuse('not_owner');
 
   if (!adapter) return refuse('unavailable');
@@ -178,7 +179,7 @@ export async function startCodeJob(input: StartInput, deps: Deps = {}): Promise<
     .$transaction(
       async (tx): Promise<{ kind: 'job'; row: Row } | { kind: 'known'; row: Row } | { kind: 'refused'; outcome: StartOutcome }> => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${ADMISSION_LOCK}))`;
-        const again = await tx.codeJob.findUnique({ where: { jobKey: key }, include: { outputs: true } });
+        const again = await tx.codeJob.findUnique({ where: { jobKey: key } });
         if (again) return { kind: 'known', row: again };
         const [mine, everyone, today] = await Promise.all([
           tx.codeJob.count({ where: { personId: input.personId, state: { in: ACTIVE } } }),
@@ -206,7 +207,6 @@ export async function startCodeJob(input: StartInput, deps: Deps = {}): Promise<
             heartbeatAt: started,
             createdAt: started,
           },
-          include: { outputs: true },
         });
         return { kind: 'job', row };
       },
@@ -215,7 +215,7 @@ export async function startCodeJob(input: StartInput, deps: Deps = {}): Promise<
     .catch(async (error) => {
       // A second ask for the same call id at the same moment: the first one's job is the answer
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        const winner = await prisma.codeJob.findUnique({ where: { jobKey: key }, include: { outputs: true } });
+        const winner = await prisma.codeJob.findUnique({ where: { jobKey: key } });
         if (winner) return { kind: 'known' as const, row: winner };
       }
       throw error;
@@ -435,6 +435,9 @@ async function keepFiles(job: Row, wb: WorkbenchAdapter, sessionId: string, limi
   let kept = 0;
   let keptBytes = 0;
   let previewBudget = Math.floor(budget);
+  // What the person already keeps counts against the Limit for one person, so files kept for good never grow without a bound
+  const maker = await prisma.bot.findUnique({ where: { id: job.botId }, select: { name: true } });
+  let personKept = await keptResultBytes(job.personId);
   for (const file of candidates) {
     const name = file.name;
     if (!isSafeFileName(name)) {
@@ -447,6 +450,10 @@ async function keepFiles(job: Row, wb: WorkbenchAdapter, sessionId: string, limi
     }
     if (keptBytes + file.bytes > limits.maxOutputBytes) {
       out.notKept.push({ name, why: 'over the size a job keeps' });
+      continue;
+    }
+    if (personKept + file.bytes > limits.maxKeptBytesPerPerson) {
+      out.notKept.push({ name, why: 'your kept files are full: delete some to make room' });
       continue;
     }
     if (ctx.now().getTime() > job.deadlineAt.getTime() + INGEST_GRACE_MS) {
@@ -465,18 +472,17 @@ async function keepFiles(job: Row, wb: WorkbenchAdapter, sessionId: string, limi
       out.notKept.push({ name, why: read.kind === 'too_big' ? 'over the size a job keeps' : 'was not there when it was read' });
       continue;
     }
-    const id = crypto.randomUUID();
-    const storageKey = outputKeyFor(job.id, id);
     const contentType = contentTypeOf(name);
+    let saved;
     try {
-      await ctx.store.put(storageKey, read.bytes);
-      await prisma.codeJobOutput.create({ data: { id, jobId: job.id, name, contentType, sizeBytes: read.bytes.byteLength, sha256: sha256Hex(read.bytes), storageKey } });
+      saved = await keepResult({ ownerId: job.personId, sourceKind: 'code_job', sourceId: job.id, makerBotId: job.botId, makerName: maker?.name ?? 'Brick', name, contentType, bytes: read.bytes }, ctx.store);
     } catch (error) {
       console.error('[CodeJob] A file could not be kept:', error instanceof Error ? error.message : 'unknown');
-      await ctx.store.remove([storageKey]).catch(() => undefined);
       out.notKept.push({ name, why: 'could not be saved' });
       continue;
     }
+    const id = saved.id;
+    personKept += read.bytes.byteLength;
     kept += 1;
     keptBytes += read.bytes.byteLength;
     const view: JobView['files'][number] = { id, name, bytes: read.bytes.byteLength, contentType, path: `/api/workbench/outputs/${id}` };
@@ -533,9 +539,7 @@ async function finishJob(jobId: string, end: End, collected: Collected, limits: 
 }
 
 async function dropOutputs(jobId: string, store: OutputStore): Promise<void> {
-  const rows = await prisma.codeJobOutput.findMany({ where: { jobId }, select: { storageKey: true } });
-  await store.remove(rows.map((row) => row.storageKey));
-  await prisma.codeJobOutput.deleteMany({ where: { jobId } });
+  await removeResultsOf('code_job', jobId, store);
 }
 
 /**
@@ -602,7 +606,7 @@ const POLL_MS = 1000;
 /** The job as a caller may know it: only its owner, only through the Brick it was made for. */
 async function loadOwned(jobId: string, botId: string, personId: string): Promise<Row | null> {
   if (!/^[0-9a-f-]{36}$/i.test(jobId)) return null;
-  const row = await prisma.codeJob.findUnique({ where: { id: jobId }, include: { outputs: true } });
+  const row = await prisma.codeJob.findUnique({ where: { id: jobId } });
   return row && row.botId === botId && row.personId === personId ? row : null;
 }
 
@@ -688,8 +692,16 @@ async function viewOf(row: Row): Promise<JobView> {
   const result = isObject(row.result) ? row.result : {};
   const state = ACTIVE.includes(row.state) ? 'running' : (row.state as JobView['state']);
   const reason = (row.reason as CodeJobReason | null) ?? null;
-  const files = Array.isArray(result.files) ? (result.files as JobView['files']) : [];
-  const stillThere = new Set(row.outputs.map((output) => output.id));
+  // The files are the person's own and outlive this record: listed from what is kept, with a preview where the record still has one
+  const previews = new Map((Array.isArray(result.files) ? (result.files as JobView['files']) : []).map((file) => [file.id, file.preview]));
+  const files: JobView['files'] = (await resultsOfSource('code_job', row.id)).map((kept) => ({
+    id: kept.id,
+    name: kept.name,
+    bytes: kept.sizeBytes,
+    contentType: kept.contentType,
+    path: `/api/workbench/outputs/${kept.id}`,
+    ...(previews.get(kept.id) ? { preview: previews.get(kept.id) } : {}),
+  }));
   return {
     jobId: row.id,
     state,
@@ -699,8 +711,7 @@ async function viewOf(row: Row): Promise<JobView> {
     runsUsed: row.cellsRun,
     runs: Array.isArray(result.runs) ? (result.runs as JobView['runs']) : [],
     reads: Array.isArray(result.reads) ? (result.reads as JobView['reads']) : [],
-    // A file that has been removed (kept days passed) is no longer offered
-    files: files.filter((file) => stillThere.has(file.id)),
+    files,
     notKept: Array.isArray(result.notKept) ? (result.notKept as JobView['notKept']) : [],
     clipped: result.clipped === true,
   };
@@ -709,6 +720,8 @@ async function viewOf(row: Row): Promise<JobView> {
 // ---------- The sweep ----------
 
 export interface SweepResult {
+  /** Results of deleted accounts removed. */
+  orphansRemoved?: number;
   /** Finished jobs whose meter line was written late. */
   metered: number;
   stopped: number;
@@ -762,10 +775,10 @@ export async function sweepCodeJobs(deps: Deps = {}): Promise<SweepResult> {
     }
   }
 
+  // The job's printed result is kept for the days Limit and then emptied. Its files are the person's own and are not touched here: they stay until the owner deletes them
   const expired = await prisma.codeJob.findMany({ where: { expiresAt: { lt: at } }, orderBy: { expiresAt: 'asc' }, take: SWEEP_BATCH, select: { id: true } });
   for (const job of expired) {
     try {
-      await dropOutputs(job.id, store);
       // Emptied once: the row stays for the books (what it cost), and is not looked at again
       await prisma.codeJob.update({ where: { id: job.id }, data: { result: Prisma.DbNull, expiresAt: null } });
       result.purged += 1;
@@ -773,20 +786,17 @@ export async function sweepCodeJobs(deps: Deps = {}): Promise<SweepResult> {
       console.error('[CodeJob] A kept job could not be removed yet:', error instanceof Error ? error.message : 'unknown');
     }
   }
+  // Results whose owner's account is gone
+  result.orphansRemoved = await purgeOrphanedResults(store).catch((error) => {
+    console.error('[CodeJob] Results of a deleted account could not be removed yet:', error instanceof Error ? error.message : 'unknown');
+    return 0;
+  });
   return result;
 }
 
 /** One kept file for its owner: the bytes, the name and the type it is served as. Null for anyone else, and for a file that has gone. */
 export async function openOutput(outputId: string, personId: string, deps: Deps = {}): Promise<{ name: string; contentType: string; bytes: Uint8Array } | null> {
-  if (!/^[0-9a-f-]{36}$/i.test(outputId)) return null;
-  const row = await prisma.codeJobOutput.findUnique({ where: { id: outputId }, include: { job: { select: { personId: true } } } });
-  if (!row || row.job.personId !== personId) return null;
-  try {
-    return { name: row.name, contentType: row.contentType, bytes: await (deps.store ?? getOutputStore()).get(row.storageKey) };
-  } catch (error) {
-    console.error('[CodeJob] A kept file could not be opened:', error instanceof Error ? error.message : 'unknown');
-    return null;
-  }
+  return openResult(outputId, personId, deps.store ?? getOutputStore());
 }
 
 /** Jobs working in this process (for the tests and the status screen). */

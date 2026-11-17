@@ -30,6 +30,7 @@ const LIMITS: FilledLimits = {
   jobsPerPersonPerDay: 20,
   exposureCeilingMicros: 1_000_000,
   keepDays: null,
+  maxKeptBytesPerPerson: 1_000_000_000,
   waitSeconds: 40,
   maxAnswerBytes: null,
 };

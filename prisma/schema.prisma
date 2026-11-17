@@ -3510,7 +3510,6 @@ model CodeJob {
   expiresAt         DateTime? @map("expires_at")
   createdAt         DateTime  @default(now()) @map("created_at")
 
-  outputs CodeJobOutput[]
 
   @@index([state, deadlineAt])
   @@index([providerState, createdAt])
@@ -3520,19 +3519,32 @@ model CodeJob {
   @@map("code_jobs")
 }
 
-// A file a code job made, copied into Universe's own storage before the provider's copy expires. Only the job's owner can open it.
-model CodeJobOutput {
+// A result a person owns: a file a code job (or, later, a computer job) made, copied into Universe's own storage before the provider's copy expires.
+// It is the person's, not the Brick's or the job's: it stays until they delete it (inside the Limit for what one person may keep), it does not go when
+// the job's record expires, the Brick is deleted or the computer is archived, and only the Brick's name on it turns into "A deleted Brick". Encrypted
+// at rest and opened only by the owner. Making it public is a separate step of theirs: an Artifact made from it (`artifactId`), never this row.
+model OwnedResult {
   id          String   @id @default(uuid())
-  jobId       String   @map("job_id")
+  ownerId     String   @map("owner_id")
+  // code_job | computer_job, and the id of the job it came from: where it came from, never what ties its life to the job
+  sourceKind  String   @map("source_kind") @db.VarChar(20)
+  sourceId    String   @map("source_id") @db.VarChar(255)
+  // The Brick that made it (by id, kept when the Brick goes) and the name it had
+  makerBotId  String   @map("maker_bot_id") @db.VarChar(255)
+  makerName   String   @map("maker_name") @db.VarChar(100)
   name        String   @db.VarChar(120)
   contentType String   @map("content_type") @db.VarChar(120)
   sizeBytes   Int      @map("size_bytes")
   sha256      String   @db.VarChar(64)
-  storageKey  String   @map("storage_key") @db.VarChar(255)
+  storageKey  String   @unique @map("storage_key") @db.VarChar(255)
+  // Who may open it: only its owner. Always "owner": a result is never shared as it is.
+  access      String   @default("owner") @db.VarChar(10)
+  // The Artifact the owner made from it, once they did
+  artifactId  String?  @map("artifact_id")
   createdAt   DateTime @default(now()) @map("created_at")
 
-  job CodeJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
-
-  @@unique([jobId, name])
-  @@map("code_job_outputs")
+  @@unique([sourceKind, sourceId, name])
+  @@index([ownerId, createdAt])
+  @@index([sourceKind, sourceId])
+  @@map("owned_results")
 }
