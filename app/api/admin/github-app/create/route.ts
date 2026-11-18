@@ -30,7 +30,8 @@ export async function POST(request: NextRequest) {
   // the code), once they are no longer a super admin, or when the app kept is no longer the one it set out to replace
   const state = encryptApiKey(JSON.stringify({ kind: 'github-app-create', userId: user.id, replaces: existing?.appId ?? null, exp: Math.floor(Date.now() / 1000) + 60 * 60 }));
   return NextResponse.json(
-    { action: `${GITHUB_WEB}/organizations/${GITHUB_APP_ORG}/settings/apps/new?state=${encodeURIComponent(state)}`, manifest: JSON.stringify(buildManifest(base)) },
+    // `replaces` is the app this very form replaces (none for the first): the page waits for another app than that one
+    { action: `${GITHUB_WEB}/organizations/${GITHUB_APP_ORG}/settings/apps/new?state=${encodeURIComponent(state)}`, manifest: JSON.stringify(buildManifest(base)), replaces: existing?.appId ?? null },
     { headers: { ...headers, 'Cache-Control': 'no-store' } },
   );
 }

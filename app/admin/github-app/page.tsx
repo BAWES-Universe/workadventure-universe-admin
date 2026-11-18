@@ -6,7 +6,7 @@ import { authenticatedFetch } from '@/lib/client-auth';
 import { PageHeader } from '../components/ds';
 
 type Existing = { slug?: string; url?: string; appId?: number };
-type Answer = { existing?: Existing; action?: string; manifest?: string; error?: string };
+type Answer = { existing?: Existing; action?: string; manifest?: string; replaces?: number | null; error?: string };
 type Form = { action: string; manifest: string };
 type Step = 'loading' | 'ready' | 'waiting' | 'made' | 'confirm' | 'failed';
 
@@ -46,8 +46,10 @@ export default function GitHubAppSetupPage() {
   const [opened, setOpened] = useState(0);
   const loadedAt = useRef(0);
   const again = useRef(false);
-  // The app the waiting page is waiting to see replaced (none while the first one is made)
-  const replaced = useRef<number | null>(null);
+  // The app the form last given is set to replace (none while the first one is made): the waiting page waits for another app than that
+  const replaces = useRef<number | null>(null);
+  // Counts each press of Open GitHub, and the app being seen made: a form asked for again that comes back after either is dropped
+  const opening = useRef(0);
 
   const apply = useCallback((result: { answer?: Answer; failed?: string }) => {
     if (result.failed) {
@@ -59,10 +61,10 @@ export default function GitHubAppSetupPage() {
     setFailed(null);
     if (answer.existing) {
       setExisting(answer.existing);
-      replaced.current = answer.existing.appId ?? null;
       setStep('made');
     } else if (answer.action && answer.manifest) {
       setForm({ action: answer.action, manifest: answer.manifest });
+      replaces.current = typeof answer.replaces === 'number' ? answer.replaces : null;
       loadedAt.current = Date.now();
       setStep('ready');
     }
@@ -95,10 +97,11 @@ export default function GitHubAppSetupPage() {
         if (!alive || body.made !== true) return;
         const appId = typeof body.appId === 'number' ? body.appId : undefined;
         // The first app: any app is new. A replacement: only another app than the one it replaces
-        if (replaced.current !== null && appId === replaced.current) return;
+        if (replaces.current !== null && appId === replaces.current) return;
         clearInterval(timer);
+        // Done: a form still being asked for must not open GitHub again
+        opening.current += 1;
         setExisting({ appId, slug: typeof body.slug === 'string' ? body.slug : undefined, url: typeof body.url === 'string' ? body.url : undefined });
-        replaced.current = appId ?? null;
         setStep('made');
       } catch {
         // Asked again in a moment
@@ -139,9 +142,15 @@ export default function GitHubAppSetupPage() {
       return;
     }
     setBlocked(false);
+    const mine = ++opening.current;
     let toSend = form;
     if (Date.now() - loadedAt.current > FORM_FRESH_MS) {
       const result = await load(again.current);
+      // The app was seen made, or GitHub was opened again, while this was asked for: this one is dropped
+      if (opening.current !== mine) {
+        popup.close();
+        return;
+      }
       // Made meanwhile (another tab): nothing to open
       if (result.answer?.existing) {
         popup.close();
@@ -155,6 +164,7 @@ export default function GitHubAppSetupPage() {
         return;
       }
       toSend = { action: result.answer.action, manifest: result.answer.manifest };
+      replaces.current = typeof result.answer.replaces === 'number' ? result.answer.replaces : null;
       setForm(toSend);
       loadedAt.current = Date.now();
     }

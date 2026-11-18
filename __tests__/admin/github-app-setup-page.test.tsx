@@ -23,9 +23,24 @@ let sent: { action: string; target: string; manifest: string }[];
 let open: jest.SpyInstance;
 
 /** Answers by method and address: the form (or the existing app) on POST, whether it is made on GET. */
-function backend(options: { existing?: { slug: string; url: string; appId: number }; made?: () => { made: boolean; appId?: number; slug?: string; url?: string } } = {}) {
-  fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
-    if (init?.method === 'POST') return json(options.existing && !JSON.parse(init.body ?? '{}').again ? { existing: options.existing } : FORM);
+function backend(
+  options: {
+    existing?: { slug: string; url: string; appId: number };
+    made?: () => { made: boolean; appId?: number; slug?: string; url?: string };
+    /** The app a form asked for again is set to replace: the one the store holds now, which another admin may have changed since the page loaded */
+    kept?: () => number | null;
+    /** Holds the answer to the next form asked for until released */
+    hold?: () => Promise<void> | undefined;
+  } = {},
+) {
+  fetchMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
+    if (init?.method === 'POST') {
+      const wait = options.hold?.();
+      if (wait) await wait;
+      const again = JSON.parse(init.body ?? '{}').again === true;
+      if (options.existing && !again) return json({ existing: options.existing });
+      return json({ ...FORM, replaces: options.kept ? options.kept() : (options.existing?.appId ?? null) });
+    }
     return json(options.made ? options.made() : { made: false });
   });
 }
@@ -239,5 +254,84 @@ describe('GitHub for Universe setup page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await settle();
     expect(screen.getByRole('button', { name: 'Continue to GitHub' })).toBeTruthy();
+  });
+
+  it('waits for another app than the one this form replaces, even when another admin replaced the app the page showed', async () => {
+    let appId = 7;
+    backend({
+      existing: { slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe', appId: 7 },
+      made: () => ({ made: true, appId, slug: `app-${appId}`, url: 'https://github.com/apps/x' }),
+      // Between the page loading and "Make it again", another admin replaced app 7 with app 8: this form replaces 8
+      kept: () => 8,
+    });
+    render(<GitHubAppSetupPage />);
+    await settle();
+    appId = 8;
+    fireEvent.click(screen.getByRole('button', { name: 'Make the app again' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Make it again' }));
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to GitHub' }));
+    // App 8 is what this form replaces: it is not done
+    await act(async () => {
+      jest.advanceTimersByTime(2500);
+    });
+    expect(screen.getByText(/Waiting for you on GitHub/)).toBeTruthy();
+    appId = 9;
+    await act(async () => {
+      jest.advanceTimersByTime(2500);
+    });
+    expect(screen.getByRole('link', { name: 'app-9' })).toBeTruthy();
+  });
+
+  it('drops a form asked for again after fifty minutes when the app was seen made while it was on its way', async () => {
+    let made = false;
+    let release: () => void = () => undefined;
+    let holding = false;
+    backend({
+      made: () => (made ? { made: true, appId: 7, slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe' } : { made: false }),
+      hold: () => (holding ? new Promise<void>((resolve) => (release = resolve)) : undefined),
+    });
+    const close = jest.fn();
+    open.mockReturnValue({ close } as unknown as Window);
+    render(<GitHubAppSetupPage />);
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to GitHub' }));
+    expect(sent).toHaveLength(1);
+    // Fifty-one minutes of waiting, then GitHub is opened again: the form is asked for again, and the answer is slow
+    await act(async () => {
+      jest.advanceTimersByTime(51 * 60 * 1000);
+    });
+    holding = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Open GitHub again' }));
+    // Meanwhile the first window finishes: the app is made
+    made = true;
+    await act(async () => {
+      jest.advanceTimersByTime(2500);
+    });
+    expect(screen.getByText(/GitHub is set up/)).toBeTruthy();
+    // The slow answer comes: it is dropped, nothing is sent and the page stays Set up
+    await act(async () => {
+      release();
+    });
+    await settle();
+    expect(sent).toHaveLength(1);
+    expect(close).toHaveBeenCalled();
+    expect(screen.getByText(/GitHub is set up/)).toBeTruthy();
+    expect(screen.queryByText(/Waiting for you on GitHub/)).toBeNull();
+  });
+
+  it('still sends a form asked for again after fifty minutes when nothing was made meanwhile', async () => {
+    backend();
+    render(<GitHubAppSetupPage />);
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to GitHub' }));
+    await act(async () => {
+      jest.advanceTimersByTime(51 * 60 * 1000);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Open GitHub again' }));
+    await settle();
+    await settle();
+    expect(sent).toHaveLength(2);
+    expect(screen.getByText(/Waiting for you on GitHub/)).toBeTruthy();
   });
 });
