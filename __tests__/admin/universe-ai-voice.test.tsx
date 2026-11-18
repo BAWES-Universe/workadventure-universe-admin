@@ -931,9 +931,16 @@ describe('A voice provider\u2019s models, from the company\u2019s own list for i
     };
     fireEvent.click(await open('v-eleven'));
     await screen.findByText('ElevenLabs knows this key and lists 2 models for it. Checked just now, nothing paid.');
+    // What the server holds after the save: the model is off its list, so the next read does not have it
+    providers = [soniox(), { ...eleven(), models: [{ id: 'eleven_multilingual_v2', label: 'Multilingual v2', kind: 'speech' }] }];
+    const before = reads();
     fireEvent.click(screen.getByRole('checkbox', { name: /^Eleven Flash v2\.5/ }));
     await waitFor(() => expect(patches()).toHaveLength(1));
     expect((patches()[0].body as { takenOff: string[] }).takenOff).toEqual(['speech:eleven_flash_v2_5']);
+    // After the list is read again it stays unticked: it does not come back by itself
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: /^Eleven Flash v2\.5/ }).getAttribute('aria-checked')).toBe('false'));
+    expect(patches()).toHaveLength(1);
   });
 
   it('catches a model typed again that is already ticked on the company\u2019s list', async () => {
@@ -989,6 +996,15 @@ describe('A voice provider\u2019s models, from the company\u2019s own list for i
     fireEvent.submit(screen.getByLabelText('Address').closest('form') as HTMLFormElement);
   };
 
+  // The Name section's own Change, then a new name saved (it reads the provider again)
+  const rename = async (name: string) => {
+    const section = screen.getByText('Name', { selector: 'h3, h2, p, span, div, label' }).closest('section') as HTMLElement;
+    fireEvent.click(within(section).getByRole('button', { name: 'Rename' }));
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: name } });
+    fireEvent.submit(screen.getByLabelText('Name').closest('form') as HTMLFormElement);
+  };
+  const reads = () => calls.filter((call) => call.method === 'GET' && call.url === '/api/admin/voice-providers').length;
+
   it('drops the company\u2019s list when the address changes, so models of the old address can\u2019t be ticked', async () => {
     savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] } };
     fireEvent.click(await open('v-eleven'));
@@ -1017,6 +1033,49 @@ describe('A voice provider\u2019s models, from the company\u2019s own list for i
     });
     expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
     expect(screen.queryByText(/knows this key/)).toBeNull();
+  });
+
+  it('does not save a list over 200 models, says so, and still saves unticking one', async () => {
+    const many = Array.from({ length: 200 }, (_, index) => ({ id: `m${index}`, label: `Model ${index}`, kind: 'speech' }));
+    providers = [soniox(), { ...eleven(), models: many }];
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [...many, { id: 'extra', label: 'Extra model', kind: 'speech' }] } };
+    fireEvent.click(await open('v-eleven'));
+    await screen.findByText('ElevenLabs knows this key and lists 201 models for it. Checked just now, nothing paid.');
+    fireEvent.click(screen.getByRole('checkbox', { name: /^Extra model/ }));
+    expect(await screen.findByText('A provider can list up to 200 models. Take one off first.')).toBeTruthy();
+    expect(patches()).toHaveLength(0);
+    fireEvent.click(screen.getByRole('checkbox', { name: /^Model 0/ }));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect((patches()[0].body as { models: unknown[] }).models).toHaveLength(199);
+  });
+
+  it('does not say the first ticked model is what bots start on', async () => {
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_flash_v2_5', label: 'Eleven Flash v2.5', kind: 'speech' }] } };
+    fireEvent.click(await open('v-eleven'));
+    await screen.findByText('ElevenLabs knows this key and lists 1 model for it. Checked just now, nothing paid.');
+    expect(screen.queryByText(/first ticked/i)).toBeNull();
+    expect(screen.getByText(/Tick one to let bots pick it, untick one to take it off\./)).toBeTruthy();
+  });
+
+  it('drops the list when the provider is read again with another address, and keeps it when only the name changed', async () => {
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] } };
+    fireEvent.click(await open('v-eleven'));
+    await screen.findByText('ElevenLabs knows this key and lists 1 model for it. Checked just now, nothing paid.');
+    // Only the name is different when it is read again: the list stays
+    providers = [soniox(), { ...eleven(), name: 'ElevenLabs main' }];
+    const before = reads();
+    await rename('ElevenLabs main');
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    await screen.findByRole('heading', { name: 'ElevenLabs main' });
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    // The address is different when it is read again (changed elsewhere): the list and the check are dropped, and nothing is saved from it
+    providers = [soniox(), { ...eleven(), name: 'ElevenLabs main', endpoint: 'https://other.example.com' }];
+    const again = reads();
+    await rename('ElevenLabs');
+    await waitFor(() => expect(reads()).toBeGreaterThan(again));
+    await waitFor(() => expect(screen.queryAllByRole('checkbox')).toHaveLength(0));
+    expect(screen.queryByText(/lists 1 model for it/)).toBeNull();
+    expect(patches().every((patch) => !('models' in (patch.body as object)))).toBe(true);
   });
 
   it('keeps the rows when the company has no list or it can\u2019t be read', async () => {
