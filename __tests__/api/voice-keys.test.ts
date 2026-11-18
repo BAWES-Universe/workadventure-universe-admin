@@ -623,8 +623,28 @@ describe('Load models on a saved key', () => {
       { id: 'turbo', label: 'Turbo', kind: 'speech' },
       { id: 'eleven_v5', label: 'Eleven v5', kind: 'speech' },
     ]);
-    // The one taken off stays on the kept-off list
-    expect(db.voiceProvider.update.mock.calls[0][0].data.hiddenModels).toEqual(['speech:eleven_v4_turbo']);
+    // The kept-off list is left as it is
+    expect(db.voiceProvider.update.mock.calls[0][0].data).not.toHaveProperty('hiddenModels');
+  });
+
+  it('keeps a model ticked or taken off by hand while the list was loading, working out what is new from the models as they are when it saves', async () => {
+    // Read before the call to the company: flash and turbo. By the time it saves, turbo was taken off (and kept off) and "mine" was ticked
+    db.voiceProvider.findFirst
+      .mockResolvedValueOnce(saved())
+      .mockResolvedValue(saved({ models: [{ id: 'flash', label: 'Flash', kind: 'speech' }, { id: 'mine', kind: 'speech' }], hiddenModels: ['speech:turbo'] }));
+    company([
+      { model_id: 'flash', name: 'Flash', can_do_text_to_speech: true },
+      { model_id: 'turbo', name: 'Turbo', can_do_text_to_speech: true },
+      { model_id: 'eleven_v5', name: 'Eleven v5', can_do_text_to_speech: true },
+    ]);
+    const response = await call(loadModels, 'POST');
+    expect((await response.json()).added).toEqual([{ id: 'eleven_v5', label: 'Eleven v5', kind: 'speech' }]);
+    expect(db.voiceProvider.update.mock.calls[0][0].data.models).toEqual([
+      { id: 'flash', label: 'Flash', kind: 'speech' },
+      { id: 'mine', kind: 'speech' },
+      { id: 'eleven_v5', label: 'Eleven v5', kind: 'speech' },
+    ]);
+    expect(db.voiceProvider.update.mock.calls[0][0].data).not.toHaveProperty('hiddenModels');
   });
 
   it('saves nothing when only a model taken off by hand is listed', async () => {

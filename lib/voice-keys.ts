@@ -588,13 +588,32 @@ export async function reloadVoiceKeyModels(ownerId: string, id: string): Promise
   }
   const loaded = await loadVoiceKeyModels(row.adapter, key, [row.adapter], row.endpoint ?? undefined, row.region ?? undefined);
   if (!loaded.ok) throw new VoiceKeyRefused(loaded.message, loaded.reason === 'refused' ? 422 : loaded.reason === 'unreachable' ? 502 : 409);
-  const has = readModels(row.models);
-  const known = new Set(has.map(lendModelId));
   const doesJob = (model: VoiceModel) => (model.kind === 'talk' ? row.recognition && row.speech && Boolean(company.does.talk) : row[model.kind]);
-  // A model taken off by hand stays off: the company's list never adds it back, only the person does
-  const hidden = new Set(readHiddenModels(row.hiddenModels));
-  // A key lists at most 200 models, as when it was added
-  const added = loaded.models.filter((model) => doesJob(model) && !known.has(lendModelId(model)) && !hidden.has(lendModelId(model))).slice(0, Math.max(0, 200 - has.length));
-  if (added.length === 0) return { key: await summary(row, ownerId), added };
-  return { key: await updateVoiceKey(ownerId, id, { models: [...has, ...added] }), added };
+  // What is new is worked out again under the row lock, against the models and the ones taken off as they are by then
+  const added = await addListedModels(ownerId, id, loaded.models.filter(doesJob));
+  return { key: await summary((await owned(id, ownerId)) ?? row, ownerId), added };
+}
+
+/**
+ * Adds the models the company lists that the key doesn't have yet, and answers with the ones added. The key's row is held while it is
+ * read and saved, as model discovery and updateVoiceKey hold it, and the key's models are read there, after the call to the company: a
+ * model ticked or taken off by hand while the list was loading is kept as it is, never saved over. A model taken off by hand stays off
+ * (`hiddenModels` is left as it is), and a key lists at most 200 models, as when it was added. Nothing is ever taken off.
+ */
+async function addListedModels(ownerId: string, id: string, listed: VoiceModel[]): Promise<VoiceModel[]> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 FROM "voice_providers" WHERE "id" = ${id} AND "owner_id" = ${ownerId} FOR UPDATE`;
+    const row = await tx.voiceProvider.findFirst({ where: { id, ownerId } });
+    if (!row) throw new VoiceKeyRefused('Key not found', 404);
+    const has = readModels(row.models);
+    const known = new Set(has.map(lendModelId));
+    const off = new Set(readHiddenModels(row.hiddenModels));
+    const added = listed.filter((model) => !known.has(lendModelId(model)) && !off.has(lendModelId(model))).slice(0, Math.max(0, 200 - has.length));
+    if (added.length === 0) return added;
+    const models = [...has, ...added];
+    const refused = problem({ recognition: row.recognition, speech: row.speech, models });
+    if (refused) throw new VoiceKeyRefused(refused);
+    await tx.voiceProvider.update({ where: { id }, data: { models: models as Prisma.InputJsonValue } });
+    return added;
+  });
 }
