@@ -36,7 +36,7 @@ import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { listDeletedBricks } from '@/lib/brick-default';
 import { computerReadiness } from '@/lib/computer-readiness';
 import { CopyOutcomeUnknown } from '@/lib/agent37/saved-copies';
-import { archiveById, deleteAllArchives, markVerified, removeBrickObjects, mintDownloadToken, pruneArchives, removeStrayCopies, setArchiveStoreForTests, setWriteLimitForTests, storeArchive, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
+import { archiveById, deleteAllArchives, markVerified, removeBrickObjects, mintDownloadToken, pruneArchives, removeStrayCopies, setArchiveStoreForTests, setStrayPassForTests, setWriteLimitForTests, storeArchive, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
 import { GET as download } from '@/app/api/computer/archives/[id]/download/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -352,6 +352,38 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       // Once no write can be running it is deleted, by the purge or by the sweep
       expect(await removeStrayCopies(new Date(past.getTime() + 2 * 3_600_000))).toBe(1);
       expect(bucket.objects.size).toBe(0);
+    });
+
+    it('a copy that lands after the purge is done is reached by the sweep, however many objects the bucket holds before it', async () => {
+      const brick = await idleBrick();
+      bucket.store.put = async () => {
+        await prisma.brickPurge.create({ data: { botId: brick.botId, provider: 'fake', providerRef: null, machinePending: false, copyPending: true } });
+        throw new CopyOutcomeUnknown();
+      };
+      await expect(storeArchive(brick.botId, Readable.toWeb(Readable.from([Buffer.from('home')])) as ReadableStream<Uint8Array>)).rejects.toThrow('no answer in time');
+      const row = await prisma.computerArchive.findFirstOrThrow({ where: { botId: brick.botId } });
+      // Past the hold the purge finds nothing: it is done
+      const past = new Date(Date.now() + 5 * 3_600_000);
+      const outcome = await finishOutside(brick.botId, past);
+      expect(outcome).toMatchObject({ done: true });
+      expect(bucket.objects.size).toBe(0);
+      // Then the copy lands, behind more objects than one pass of the sweep looks at
+      for (const name of ['a', 'b', 'c', 'd', 'e']) bucket.objects.set(`computer-cold/0-${name}/other.txt`, Buffer.from(name));
+      bucket.objects.set(row.objectKey, Buffer.from('late'));
+      bucket.written.set(row.objectKey, past);
+      const later = new Date(past.getTime() + 2 * 3_600_000);
+      setStrayPassForTests(2);
+      try {
+        let passes = 0;
+        while (bucket.objects.has(row.objectKey) && passes < 6) {
+          await removeStrayCopies(later);
+          passes++;
+        }
+        expect(bucket.objects.has(row.objectKey)).toBe(false);
+        expect(passes).toBeGreaterThan(1);
+      } finally {
+        setStrayPassForTests(20_000);
+      }
     });
 
     it('the marker of a copy whose outcome is not known is tried again; if it cannot be written the row stays and the object is still found by listing', async () => {

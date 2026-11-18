@@ -31,8 +31,8 @@ export function memoryStore() {
     async remove(keys) {
       for (const key of keys) objects.delete(key);
     },
-    async list(prefix, max) {
-      return [...objects.keys()].filter((key) => key.startsWith(prefix)).slice(0, max).map((key) => ({ key, modifiedAt: written.get(key) ?? new Date() }));
+    async list(prefix, max, startAfter) {
+      return [...objects.keys()].filter((key) => key.startsWith(prefix) && (!startAfter || key > startAfter)).sort().slice(0, max).map((key) => ({ key, modifiedAt: written.get(key) ?? new Date() }));
     },
   };
   return { store, objects, written };

@@ -41,9 +41,9 @@ jest.mock('@/lib/artifact-storage', () => ({
           return {};
         }
         if (kind === 'ListObjectsV2Command') {
-          const input = command.input as unknown as { Prefix: string; ContinuationToken?: string };
+          const input = command.input as unknown as { Prefix: string; ContinuationToken?: string; StartAfter?: string };
           // As a real bucket: the token is the last key read, so deleting while listing never skips one. Two to a page.
-          const keys = [...stored.keys()].filter((key) => key.startsWith(input.Prefix) && (!input.ContinuationToken || key > input.ContinuationToken)).sort();
+          const keys = [...stored.keys()].filter((key) => key.startsWith(input.Prefix) && (!input.ContinuationToken || key > input.ContinuationToken) && (!input.StartAfter || key > input.StartAfter)).sort();
           const page = keys.slice(0, 2);
           return { Contents: page.map((Key) => ({ Key, LastModified: new Date('2026-11-14T12:00:00Z') })), IsTruncated: keys.length > 2, NextContinuationToken: page[page.length - 1] };
         }
@@ -262,6 +262,8 @@ describe('the saved copy of a Brick computer’s files', () => {
     expect(all.map((object) => object.key)).toEqual(['a', 'b', 'c', 'd', 'e'].map((name) => `computer-cold/bot-1/${name}`));
     expect(all[0].modifiedAt.toISOString()).toBe('2026-11-14T12:00:00.000Z');
     expect(await listSealed('computer-cold/', 3)).toHaveLength(3);
+    // Starting after a key: the pass before stopped there
+    expect((await listSealed('computer-cold/', 100, 'computer-cold/bot-1/c')).map((object) => object.key)).toEqual(['d', 'e'].map((name) => `computer-cold/bot-1/${name}`));
   });
 
   it('lets go of the response from the bucket when a download is cancelled half way, so its connection is not left checked out', async () => {

@@ -277,15 +277,15 @@ export async function deleteSealed(keys: string[]): Promise<void> {
 }
 
 /**
- * The objects under a prefix with the time each was last written, up to `max` (the rest is looked at by a later pass). Used to find objects that no
+ * The objects under a prefix with the time each was last written, up to `max`, in key order, starting after `startAfter` when it is given (the rest is looked at by a later pass). Used to find objects that no
  * row points at (a writer that stopped after a purge took its row).
  */
-export async function listSealed(prefix: string, max: number): Promise<Array<{ key: string; modifiedAt: Date }>> {
+export async function listSealed(prefix: string, max: number, startAfter?: string): Promise<Array<{ key: string; modifiedAt: Date }>> {
   const { s3, bucket } = artifactBucket();
   const found: Array<{ key: string; modifiedAt: Date }> = [];
   let token: string | undefined;
   do {
-    const page = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token }));
+    const page = await s3.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token, ...(token ? {} : { StartAfter: startAfter }) }));
     for (const object of page.Contents ?? []) {
       if (object.Key && object.LastModified) found.push({ key: object.Key, modifiedAt: object.LastModified });
     }

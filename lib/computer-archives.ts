@@ -49,8 +49,8 @@ export interface ArchiveStore {
   put(finalKey: string, stagingKey: string, archive: ReadableStream<Uint8Array>, mayPublish?: () => Promise<boolean>): Promise<Sealed>;
   open(key: string): Promise<{ stream: Readable; bytes: number }>;
   remove(keys: string[]): Promise<void>;
-  /** The objects under a prefix and when each was last written, up to `max`. */
-  list(prefix: string, max: number): Promise<Array<{ key: string; modifiedAt: Date }>>;
+  /** The objects under a prefix and when each was last written, up to `max`, in key order, after `startAfter` when it is given. */
+  list(prefix: string, max: number, startAfter?: string): Promise<Array<{ key: string; modifiedAt: Date }>>;
 }
 
 const bucketStore: ArchiveStore = { put: (finalKey, stagingKey, archive, mayPublish) => storeSealed(finalKey, stagingKey, archive, undefined, mayPublish), open: openSealedStream, remove: deleteSealed, list: listSealed };
@@ -276,17 +276,27 @@ export async function deleteAllArchives(botId: string, now: Date = new Date()): 
   }
 }
 
-const STRAY_PASS_MAX = 20_000;
+let strayPassMax = 20_000;
+/** Where the last pass of the sweep stopped, when the bucket held more than a pass looks at: the next pass goes on from there, so no object is out of reach. */
+let strayCursor: string | undefined;
+/** A test makes a pass small so that the bucket is longer than one. */
+export function setStrayPassForTests(max: number): void {
+  strayPassMax = max;
+  strayCursor = undefined;
+}
 const COPY_OBJECT = /^computer-cold\/[^/]+\/\d+\.([0-9a-f-]{36})\.ubc(?:\.new)?$/;
 
 /**
  * Deletes copy objects that no row points at. A writer whose process stopped after a purge took its row (between the check that let it publish and
  * the copy into place, or after its upload) leaves an object that a purge, which works from rows, can never find. Every object here is named after its
  * row, so an object whose row is gone and that is older than any write can last (`STALE_MS`, the time a half-written copy is given up on) belongs to
- * nobody and is deleted. A younger one may be a write that is still running. Returns how many were deleted.
+ * nobody and is deleted. A younger one may be a write that is still running. A bucket longer than one pass is looked at over several passes (each goes
+ * on where the one before stopped), so an object that lands late is reached however many there are before it. Returns how many were deleted.
  */
 export async function removeStrayCopies(now: Date = new Date()): Promise<number> {
-  const found = await store.list('computer-cold/', STRAY_PASS_MAX);
+  const found = await store.list('computer-cold/', strayPassMax, strayCursor);
+  // A pass that was full may have left objects unlooked at: the next one starts after the last it saw, and after the end it starts again from the top
+  strayCursor = found.length >= strayPassMax ? found[found.length - 1].key : undefined;
   const old = found
     .filter((object) => now.getTime() - object.modifiedAt.getTime() >= STALE_MS)
     .flatMap((object) => {
