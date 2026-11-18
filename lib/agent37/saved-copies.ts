@@ -84,7 +84,7 @@ export interface Sealed {
  * end and checked as a gzip (a stream cut short fails the check) while it is written under `stagingKey`; only a whole one is copied over `finalKey`.
  * Throws when the stream was not a whole gzip or the upload did not finish: what was at `finalKey` is then untouched.
  */
-export async function storeSealed(finalKey: string, stagingKey: string, archive: ReadableStream<Uint8Array>, leftNothing: () => void = () => undefined): Promise<Sealed> {
+export async function storeSealed(finalKey: string, stagingKey: string, archive: ReadableStream<Uint8Array>, leftNothing: () => void = () => undefined, mayPublish?: () => Promise<boolean>): Promise<Sealed> {
   const { s3, bucket } = artifactBucket();
   const source = Readable.fromWeb(archive as never);
   const toBucket = new PassThrough();
@@ -128,6 +128,12 @@ export async function storeSealed(finalKey: string, stagingKey: string, archive:
     await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).then(leftNothing, () => undefined);
     throw failed.reason && typeof failed.reason.message === 'string' ? failed.reason : new Error('The copy of the files could not be saved');
   }
+  // The write may have been settled meanwhile (a purge gives a write that ran too long up and calls the files gone): then nothing is published, and what
+  // was uploaded is taken out again. Asked right before the copy goes in place, so a save that was slow cannot publish after the purge was done with it.
+  if (mayPublish && !(await mayPublish().catch(() => false))) {
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).then(leftNothing, () => undefined);
+    throw new Error('The copy was not published: its save is no longer allowed to');
+  }
   // The stream was whole and the upload finished: now, and only now, it takes the place of what was there (one copy inside the bucket)
   await s3.send(new CopyObjectCommand({ Bucket: bucket, Key: finalKey, CopySource: `${bucket}/${stagingKey}` }));
   await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: stagingKey })).catch(() => undefined);
@@ -141,7 +147,8 @@ export async function storeSealed(finalKey: string, stagingKey: string, archive:
 export async function storeSavedCopy(botId: string, archive: ReadableStream<Uint8Array>): Promise<SavedCopyInfo> {
   // Written down first, and kept until the copy has been checked against the purge marker: a purge looks at these before it calls the saved
   // files gone, so a copy that lands after the purge deleted (or a server that stops right after it landed) is still found and deleted
-  const write = await prisma.savedCopyWrite.create({ data: { botId, expiresAt: new Date(Date.now() + SAVE_WINDOW_MS) }, select: { id: true } });
+  const expiresAt = new Date(Date.now() + SAVE_WINDOW_MS);
+  const write = await prisma.savedCopyWrite.create({ data: { botId, expiresAt }, select: { id: true } });
   let settled = false;
   try {
     // Purge marker and this row are each written before the other is read, so a save and a purge can never both miss each other: a Brick
@@ -150,7 +157,8 @@ export async function storeSavedCopy(botId: string, archive: ReadableStream<Uint
       settled = true;
       throw new Error('The Brick was deleted while its files were being saved');
     }
-    await storeSealed(savedCopyKey(botId), stagingKey(botId, randomUUID()), archive, () => (settled = true));
+    // Published only while this save is still the live one: inside its window, with its row still there (a purge that settled it deleted it)
+    await storeSealed(savedCopyKey(botId), stagingKey(botId, randomUUID()), archive, () => (settled = true), async () => Date.now() < expiresAt.getTime() && (await prisma.savedCopyWrite.count({ where: { id: write.id } })) === 1);
     // A Brick purged while this save was running: the purge wrote its marker before it deleted anything in the bucket, so a marker seen now (after
     // the copy) means the delete either already ran and missed this copy, or will run after it and take it. Either way this copy must not stay
     if ((await prisma.brickPurge.count({ where: { botId } })) > 0) {

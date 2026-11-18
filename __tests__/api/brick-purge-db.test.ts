@@ -577,6 +577,17 @@ run('purging a deleted Brick, in a real database', () => {
       expect(await chat.json()).toMatchObject({ status: expect.stringMatching(/^(created|updated)$/), conversationId: expect.anything() });
     });
 
+    it('a Brick whose computer is packed away (cold) has no machine to look for: only its copies are left to delete, and no listing of machines is asked', async () => {
+      const sara = await person('sara');
+      const brick = await fullBrick(sara, 'Cold at purge', { computer: true });
+      await prisma.brickComputer.update({ where: { botId: brick.id }, data: { machine: 'cold', providerRef: null, packStage: null } });
+      await deleteBrick(brick.id, sara.id, NOW);
+      provider.calls.length = 0;
+      await removeGoneBricks(later(8));
+      expect(await prisma.brickPurge.findUniqueOrThrow({ where: { botId: brick.id } })).toMatchObject({ machinePending: false });
+      expect(provider.calls.filter((call) => call.name === 'removeAllFor')).toEqual([]);
+    });
+
     it('keeps a bare marker for good after everything outside is confirmed gone, so a bot server that holds the Brick a year later still cannot write its chat back', async () => {
       const sara = await person('sara');
       const done = await fullBrick(sara, 'Marker done');

@@ -459,11 +459,29 @@ export interface Returned {
  * recorded yet). Removing it from the run that lost the claim would delete the replacement's computer. A return that still holds its own claim is never
  * "another", and a Brick that is gone or cold again with no claim leaves the computer to be removed.
  */
-async function heldByAnotherReturn(botId: string, claimId: string, ref: string): Promise<boolean> {
-  const row = await prisma.brickComputer.findUnique({ where: { botId }, select: { machine: true, packStage: true, packClaimId: true, providerRef: true } });
+async function heldByAnotherReturn(botId: string, claimId: string, ref: string, db: Pick<typeof prisma, 'brickComputer'> = prisma): Promise<boolean> {
+  const row = await db.brickComputer.findUnique({ where: { botId }, select: { machine: true, packStage: true, packClaimId: true, providerRef: true } });
   if (!row) return false;
   if (row.machine === 'restoring' && row.packStage === 'returning' && row.packClaimId === claimId) return false;
   return row.providerRef === ref || (row.machine === 'restoring' && row.packStage === 'returning');
+}
+
+/**
+ * Removes the computer a return made, unless another return holds it, and says which. The look and the removal happen under a lock on the Brick's
+ * computer row: every return (and every sweep that takes one over) claims the Brick by writing that row, so none can claim it, and be handed this very
+ * machine by the provider, between the look and the removal. It waits until the machine is gone and the provider says so (`confirm`).
+ */
+async function removeUnlessHeld(cold: Cold, botId: string, claimId: string, ref: string, confirm: boolean): Promise<'removed' | 'held'> {
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
+      if (await heldByAnotherReturn(botId, claimId, ref, tx)) return 'held' as const;
+      await cold.remove(ref);
+      if (confirm && (await cold.confirmRemoved(ref)) !== 'gone') throw new Error('still listed');
+      return 'removed' as const;
+    },
+    { timeout: 180_000, maxWait: 10_000 },
+  );
 }
 
 /**
@@ -514,9 +532,7 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
       const noted = await prisma.brickComputer.updateMany({ where: { botId, machine: 'restoring', packStage: 'returning', packClaimId: claimId }, data: { providerRef: made.ref, madeAt: new Date(), packClaimedAt: new Date() } });
       if (noted.count !== 1) {
         // Taken over while the computer was being made: removed only when no other return can hold it (see heldByAnotherReturn)
-        if (!(await heldByAnotherReturn(botId, claimId, made.ref))) {
-          await cold.remove(made.ref).catch((error) => console.error('[Computer] Could not remove a computer of a return that was taken over:', words(error)));
-        }
+        await removeUnlessHeld(cold, botId, claimId, made.ref, false).catch((error) => console.error('[Computer] Could not remove a computer of a return that was taken over:', words(error)));
         throw new ColdError('The return was taken over', 'busy');
       }
       let result: RestoreResult;
@@ -542,12 +558,11 @@ export async function bringBackFromCold(botId: string, provider: ComputerProvide
       console.error(`[Computer] A copy did not restore (${lastReason})${at + 1 < archives.length ? '; the older one is tried' : ''}`);
       // A computer with half a restore is never used: it is removed, and the next copy goes on a fresh one. A return that was taken over meanwhile leaves
       // the computer to the one that took over (the provider hands the same machine to the next return for this Brick)
-      if (await heldByAnotherReturn(botId, claimId, made.ref)) throw new ColdError('The return was taken over', 'busy');
       try {
-        await cold.remove(made.ref);
-        if ((await cold.confirmRemoved(made.ref)) !== 'gone') throw new Error('still listed');
+        if ((await removeUnlessHeld(cold, botId, claimId, made.ref, true)) === 'held') throw new ColdError('The return was taken over', 'busy');
         await prisma.brickComputer.updateMany({ where: { botId, machine: 'restoring', packClaimId: claimId }, data: { providerRef: null } });
       } catch (error) {
+        if (error instanceof ColdError) throw error;
         // It cannot be removed now: it stays recorded (stage `returning`), and the sweep removes it and puts the Brick back to cold
         console.error('[Computer] Could not remove a half-restored computer:', words(error));
         throw new ColdError(`The copy did not restore (${lastReason}) and its computer could not be removed yet`, 'restore');

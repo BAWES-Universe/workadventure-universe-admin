@@ -319,17 +319,50 @@ async function saveCopy(botId: string, ref: string, provider: Provider): Promise
  * may rewrite (the caller knows what it saw). Returns whether the machine is proved asleep.
  */
 async function stopMachine(botId: string, ref: string, provider: Provider, only?: string[]): Promise<boolean> {
+  const proven = await stopAtProvider(ref, provider);
+  await noteStopped(botId, ref, proven, only);
+  return proven;
+}
+
+/** Stops the machine at the provider and says whether it is proved asleep. Writes nothing. */
+async function stopAtProvider(ref: string, provider: Provider): Promise<boolean> {
   try {
     await provider.stop(ref);
   } catch (error) {
     console.error('[Computer] Could not stop a machine:', error instanceof Error ? error.message : 'unknown');
   }
-  const proven = await provider
+  return provider
     .awake(ref)
     .then((awake) => !awake)
     .catch(() => false);
+}
+
+async function noteStopped(botId: string, ref: string, proven: boolean, only?: string[]): Promise<void> {
   await prisma.brickComputer.updateMany({ where: { botId, providerRef: ref, ...(only ? { machine: { in: only } } : {}) }, data: { machine: proven ? 'stopped' : 'stopping', restClaimedAt: null } });
-  return proven;
+}
+
+/** Whether the take-over leader still leads. Given a connection, it asks through that one (the stop is made while that connection holds the computer's row). */
+type StillLeader = (db?: Pick<typeof prisma, 'brickComputer'>) => Promise<boolean>;
+
+/**
+ * Stops the machine for a take-over leader that could not prove its fence, only while it is still the leader, and with the stop held inside the
+ * lock on the computer's row. Every change of hands (a leader that took the transition over, the move to `human_ready`, a hand-back) writes that
+ * row, so none can happen between the leadership check and the end of the stop: the stop can never take effect after the person was given the
+ * screen. False when it was no longer the leader (nothing was stopped).
+ */
+async function stopMachineWhileLeader(botId: string, ref: string, provider: Provider, stillLeader?: StillLeader): Promise<boolean> {
+  const outcome = await prisma.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT 1 AS one FROM "brick_computers" WHERE "bot_id" = ${botId} FOR UPDATE`;
+      // Asked through this transaction's own connection (it holds the row, so another connection's write to it would wait for this one)
+      if (stillLeader && !(await stillLeader(tx))) return null;
+      return stopAtProvider(ref, provider);
+    },
+    { timeout: 120_000, maxWait: 10_000 },
+  );
+  if (outcome === null) return false;
+  await noteStopped(botId, ref, outcome);
+  return true;
 }
 
 // ---------- Jobs ----------
@@ -390,7 +423,7 @@ export async function startJob(input: { botId: string; personId: string; title: 
     if (again) return again;
   }
   // The way: a connected app that would do this for less is used instead, before anything is made, woken or reserved
-  const routed = await routeJob({ botId: input.botId, personId: input.personId, plan: input.plan, awakeMicrosPerMinute: providerFor(row)?.microsPerMinute() ?? null, hasMachine: !!row.providerRef });
+  const routed = await routeJob({ botId: input.botId, personId: input.personId, plan: input.plan, awakeMicrosPerMinute: providerFor(row)?.microsPerMinute() ?? null, hasMachine: !!row.providerRef }, now);
   if (!routed.ok) return { ok: false, reason: 'cheaper_route', app: routed.app };
   // The team paused computers: no new job starts (one already going finishes, and a job already in line waits with its work saved).
   // A retry of a run that already has its job was answered above, so a pause never hides the job a run already made
@@ -1398,7 +1431,7 @@ const FENCE_TRIES = 3;
  * and the agent's gateway), and a second look proves none is left. A fence that cannot be proved stops the machine: the person
  * then has no screen, rather than a screen with an agent still acting behind it. The disk is kept either way. Never throws.
  */
-export async function fenceMachine(botId: string, stillLeader?: () => Promise<boolean>): Promise<'done' | 'failed' | 'skipped' | 'lost'> {
+export async function fenceMachine(botId: string, stillLeader?: StillLeader): Promise<'done' | 'failed' | 'skipped' | 'lost'> {
   try {
     const row = await prisma.brickComputer.findUnique({ where: { botId } });
     const provider = providerFor(row);
@@ -1424,9 +1457,10 @@ export async function fenceMachine(botId: string, stillLeader?: () => Promise<bo
     }
     // A leader whose lease was taken over while it ran does not stop a machine the new leader (or the person, once it was proved) now has
     if (stillLeader && !(await stillLeader())) return 'lost';
-    // Not proved: the machine is stopped so nothing can act behind the person's back. Its files stay, and the next job wakes it
+    // Not proved: the machine is stopped so nothing can act behind the person's back. Its files stay, and the next job wakes it. The leadership is
+    // looked at again under the lock on the computer's row, together with the stop (a leader that stalls here cannot stop it after the hand-over)
     console.error('[Computer] The take-over fence could not be proved: the machine is stopped');
-    await stopMachine(botId, ref, provider);
+    if (!(await stopMachineWhileLeader(botId, ref, provider, stillLeader))) return 'lost';
     return 'failed';
   } catch (error) {
     console.error('[Computer] The fence failed:', error instanceof Error ? error.message : 'unknown');
@@ -1512,7 +1546,7 @@ async function moveJobsToPerson(botId: string, now: Date): Promise<{ changed: nu
  * stops the machine. A stopped machine that is PROVED stopped is a closed machine (nothing can act on it, and the person has no screen
  * until it wakes); one whose stop is not proved is not: it is stopped again, and if that is not proved either, the fence is not proved.
  */
-async function secureMachine(botId: string, stillLeader?: () => Promise<boolean>): Promise<'proved' | 'unproved' | 'lost'> {
+async function secureMachine(botId: string, stillLeader?: StillLeader): Promise<'proved' | 'unproved' | 'lost'> {
   const fenced = await fenceMachine(botId, stillLeader);
   if (fenced === 'done') return 'proved';
   if (fenced === 'lost') return 'lost';
@@ -1555,7 +1589,7 @@ async function leadFence(botId: string, epoch: number | null, now: Date): Promis
     await fenceControl(botId);
     if (!(await mine())) return 'lost';
     // Then the machine itself: the turn is cancelled and what the agent started is stopped and proved gone, before the person has the screen
-    const secured = await secureMachine(botId, epoch === null ? undefined : () => renewTransition(botId, 'fencing', epoch));
+    const secured = await secureMachine(botId, epoch === null ? undefined : (db) => renewTransition(botId, 'fencing', epoch, db));
     if (secured === 'lost') return 'lost';
     if (secured === 'unproved') {
       if (epoch !== null) await releaseLease(botId, 'fencing', epoch);

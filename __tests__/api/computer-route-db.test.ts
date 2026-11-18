@@ -116,6 +116,20 @@ run('choosing the way by expected cost, in a real database', () => {
     expect((await startJob({ botId: person.brickId, personId: person.id, title: 'Add a page', plan }, NOW)).ok).toBe(true);
   });
 
+  it('weighs the spending stop at the moment the job is started, not at the moment of the real clock: a Limit used up in the month of that moment sends the job to the computer', async () => {
+    const person = await sara();
+    await connect(person.id, person.brickId);
+    const plan = { app: 'Notion', steps: 3 };
+    // A month that is not the month of the real clock: the old check read the real month, saw nothing used and sent the job to the App
+    const june = new Date('2026-06-15T12:00:00Z');
+    await prisma.meterEvent.create({
+      data: { eventId: `ev-${randomUUID()}`, kind: 'app_use', pool: 'chat', occurredAt: june, personKey: `person:${person.id}`, personId: person.id, botId: person.brickId, brick: true, payerKind: 'universe', route: 'app', quantity: BigInt(1), unit: 'call', costMicros: BigInt(5_000_000), basis: 'measured' },
+    });
+    const started = await startJob({ botId: person.brickId, personId: person.id, title: 'Add a page', plan }, june);
+    expect(started.ok).toBe(true);
+    await prisma.meterEvent.deleteMany({});
+  });
+
   it('does not weigh an app whose step count was not given (or is not a count): a guess of one step would send every such job away from the computer', async () => {
     const person = await sara();
     await connect(person.id, person.brickId);

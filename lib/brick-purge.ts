@@ -65,7 +65,7 @@ export async function purgeBrick(id: string, now: Date = new Date()): Promise<Pu
       const brick = await tx.bot.findFirst({ where, select: { ownerId: true } });
       if (!brick) return false;
       // What is read here is read before the Brick goes: its machine, and the files people sent it that live at the uploader
-      const computer = await tx.brickComputer.findUnique({ where: { botId: id }, select: { provider: true, providerRef: true } });
+      const computer = await tx.brickComputer.findUnique({ where: { botId: id }, select: { provider: true, providerRef: true, machine: true } });
       const sent = await tx.botFile.findMany({ where: { botId: id, source: 'person', bucket: { not: null }, fileId: { not: null } }, select: { bucket: true, fileId: true } });
       // The delete itself decides: a Brick Undo took back at this moment is not touched (nothing below runs for it)
       const { count } = await tx.bot.deleteMany({ where });
@@ -91,9 +91,12 @@ export async function purgeBrick(id: string, now: Date = new Date()): Promise<Pu
       // What is left outside Orbit. A computer record means a machine may exist (also one made and never written down) and a saved copy may be in the bucket;
       // a save under way (its row is written before it starts) means a copy may land whatever the record says
       const saving = (await tx.savedCopyWrite.count({ where: botId })) > 0;
+      // A cold Brick has no machine: the pack-away deleted it and the provider confirmed it gone, and a return claims the row (`restoring`) before it makes one.
+      // Its copies are what is left. (A listing of machines is only ever a look for one that was made and never written down.)
+      const machineMayExist = !!computer && computer.machine !== 'cold';
       await tx.brickPurge.upsert({
         where: botId,
-        create: { botId: id, ownerId: brick.ownerId, provider: computer?.provider ?? null, providerRef: computer?.providerRef ?? null, machinePending: !!computer, copyPending: !!computer || saving, chatPending: true, nextTryAt: now, purgedAt: now },
+        create: { botId: id, ownerId: brick.ownerId, provider: computer?.provider ?? null, providerRef: computer?.providerRef ?? null, machinePending: machineMayExist, copyPending: !!computer || saving, chatPending: true, nextTryAt: now, purgedAt: now },
         update: {},
       });
       return true;
@@ -129,7 +132,7 @@ export async function finishOutside(botId: string, now: Date = new Date()): Prom
     } else {
       try {
         if (note.providerRef) await provider.remove(note.providerRef);
-        await provider.removeAllFor?.(botId);
+        await provider.removeAllFor?.(botId, { recorded: !!note.providerRef });
         machineGone = true;
       } catch (error) {
         console.error('[Brick purge] A machine could not be removed:', error instanceof Error ? error.message : 'unknown');

@@ -86,8 +86,8 @@ export async function resumeTransition(botId: string, control: Control): Promise
 }
 
 /** The leader is still working: its lease is pushed on. False when the transition is no longer its own (another finished it). */
-export async function renewTransition(botId: string, state: Transition, epoch: number): Promise<boolean> {
-  const { count } = await prisma.brickComputer.updateMany({ where: { botId, controlState: state, controlEpoch: epoch }, data: { controlLeaseUntil: new Date(Date.now() + CONTROL_TIMING.leaseMs) } });
+export async function renewTransition(botId: string, state: Transition, epoch: number, db: Pick<typeof prisma, 'brickComputer'> = prisma): Promise<boolean> {
+  const { count } = await db.brickComputer.updateMany({ where: { botId, controlState: state, controlEpoch: epoch }, data: { controlLeaseUntil: new Date(Date.now() + CONTROL_TIMING.leaseMs) } });
   return count === 1;
 }
 

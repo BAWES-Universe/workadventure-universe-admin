@@ -19,6 +19,7 @@ jest.mock('@/lib/db', () => ({
         return { id };
       },
       deleteMany: async ({ where }: { where: { id: string } }) => ({ count: writes.delete(where.id) ? 1 : 0 }),
+      count: async ({ where }: { where: { id: string } }) => (writes.has(where.id) ? 1 : 0),
     },
   },
 }));
@@ -137,6 +138,33 @@ describe('the saved copy of a Brick computer’s files', () => {
     await expect(storeSavedCopy('bot-late', Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>)).rejects.toThrow('deleted while its files were being saved');
     expect(stored.has(savedCopyKey('bot-late'))).toBe(false);
     expect(writes.size).toBe(0);
+  });
+
+  it('publishes nothing once its write was settled by the purge (the row is gone) or its window is over: the upload is taken out again and the copy is not saved', async () => {
+    // A purge settled this write (deleted its row) while the upload was still running
+    const settledStream = Readable.from(
+      (async function* () {
+        yield archive;
+        writes.clear();
+      })(),
+    );
+    await expect(storeSavedCopy('bot-slow', Readable.toWeb(settledStream) as unknown as ReadableStream<Uint8Array>)).rejects.toThrow('no longer allowed');
+    expect(stored.has(savedCopyKey('bot-slow'))).toBe(false);
+    expect([...stored.keys()].filter((key) => key.includes('bot-slow'))).toEqual([]);
+    // Its window ran out while it was uploading
+    jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    try {
+      const slowStream = Readable.from(
+        (async function* () {
+          yield archive;
+          jest.setSystemTime(Date.now() + 3 * 60 * 60_000);
+        })(),
+      );
+      await expect(storeSavedCopy('bot-slow', Readable.toWeb(slowStream) as unknown as ReadableStream<Uint8Array>)).rejects.toThrow('no longer allowed');
+      expect(stored.has(savedCopyKey('bot-slow'))).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('keeps its row when a copy that landed after the purge could not be taken away again, so the purge still finds it', async () => {

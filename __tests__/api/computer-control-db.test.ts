@@ -18,7 +18,7 @@ import { createBrick } from '@/lib/brick-create';
 import { saveMeterSettings } from '@/lib/meter';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { fenceMachine, finishJob, giveComputer, handBack, recoverControl, requestHandover, startJob, sweepComputers, takeOver, planEffect, fillInDetails } from '@/lib/computer';
-import { authorizeHumanInput, beginTransition, CONTROL_TIMING, readControl, releaseIfUnheld } from '@/lib/computer-control';
+import { authorizeHumanInput, beginTransition, CONTROL_TIMING, finishTransition, readControl, releaseIfUnheld } from '@/lib/computer-control';
 import { checkScreen, openScreen, screenTicket } from '@/lib/computer-screen';
 import { mintJobToken, verifyJobToken } from '@/lib/computer-token';
 import { prepareJob, startTurn } from '@/lib/computer-broker';
@@ -309,6 +309,36 @@ run('who has a Brick’s computer while it changes hands (F02, A17, A18)', () =>
       expect(after.controlState).toBe('human_ready');
       // ...and it sends nothing more on the way out: the second leader's one fence and the stalled leader's own one, not another attempt after its check failed
       expect(fences()).toBe(2);
+    });
+
+    it('a leader that passed its check and then stalls inside the stop cannot have the person given the screen while the stop may still take effect', async () => {
+      const { sara } = await running();
+      // The fence never proves, so the leader goes on to stop the machine; the stop is slow
+      fake.execAnswer = async (command) => (command.startsWith('universe-fence --check') ? { stdout: 'remaining=2\n' } : {});
+      let reached!: () => void;
+      const inStop = new Promise<void>((resolve) => (reached = resolve));
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const stop = fake.stop.bind(fake);
+      fake.stop = async (ref: string) => {
+        reached();
+        await gate;
+        return stop(ref);
+      };
+      const leader = takeOver(sara.brickId, sara.id, NOW);
+      await inStop;
+      const control = await readControl(sara.brickId);
+      expect(control?.state).toBe('fencing');
+      // Another leader proved the fence and tries to give the person the screen while the first one's stop is still out
+      let moved = false;
+      const finishing = finishTransition(sara.brickId, 'fencing', control!.epoch, 'human_ready').then((done) => { moved = done; return done; });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      // It has not been able to: the stop holds the computer's row until it is over
+      expect(moved).toBe(false);
+      expect((await readControl(sara.brickId))?.state).toBe('fencing');
+      release();
+      await leader;
+      expect(await finishing).toBeDefined();
     });
 
     it('a leader whose lease was taken over before it started sends no cancel and no fence at all', async () => {

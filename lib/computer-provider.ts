@@ -137,7 +137,7 @@ export interface ComputerProvider {
    * Takes away every machine made for this Brick, also one that was made and never written down (a make that was cut off). Asked after
    * a Brick was purged, with the Brick's own rows already gone. Nothing there is not an error. Absent: this provider keeps none of its own.
    */
-  removeAllFor?(botId: string): Promise<void>;
+  removeAllFor?(botId: string, opts?: { recorded?: boolean }): Promise<void>;
   /** Whether the machine is running or on its way up (billed). A machine that is gone, stopped or asleep is not. Used to prove a stop. */
   awake(ref: string): Promise<boolean>;
   /** The screen of a machine that is awake and working; null when it is not. Never wakes a machine. */
@@ -348,7 +348,7 @@ export class FakeComputerProvider implements ComputerProvider {
     this.awake_.delete(ref);
   }
 
-  async removeAllFor(botId: string): Promise<void> {
+  async removeAllFor(botId: string, _opts?: { recorded?: boolean }): Promise<void> {
     this.note('removeAllFor', botId);
     if (this.failRemove) throw new Error('The pretend provider failed on removeAllFor');
   }

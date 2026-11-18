@@ -50,7 +50,7 @@ const env = { provider: process.env.COMPUTER_PROVIDER, url: process.env.ADMIN_AP
 function memoryStore() {
   const objects = new Map<string, Buffer>();
   const store: ArchiveStore = {
-    async put(finalKey, _stagingKey, archive) {
+    async put(finalKey, _stagingKey, archive, mayPublish) {
       const chunks: Buffer[] = [];
       const reader = archive.getReader();
       for (;;) {
@@ -59,6 +59,8 @@ function memoryStore() {
         chunks.push(Buffer.from(value));
       }
       const body = Buffer.concat(chunks);
+      // As the bucket does: asked right before the copy goes in place
+      if (mayPublish && !(await mayPublish())) throw new Error('not published');
       objects.set(finalKey, body);
       return { bytes: body.length, sha256: createHash('sha256').update(body).digest('hex') };
     },
@@ -365,6 +367,41 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       const rowsLeft = await prisma.computerArchive.findMany({ where: { botId: brick.botId } });
       expect(rowsLeft.map((row) => row.generation)).toEqual([99]);
       expect(first.generation).toBe(1);
+    });
+
+    it('a write whose row the purge deleted while it was uploading publishes nothing: no object lands that no row names', async () => {
+      const brick = await idleBrick();
+      const put = bucket.store.put.bind(bucket.store);
+      bucket.store.put = async (finalKey, stagingKey, stream, mayPublish) => {
+        // The purge reads and deletes the writer's row while its upload is still out (the Brick's marker is not yet written)
+        await deleteAllArchives(brick.botId);
+        expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+        return put(finalKey, stagingKey, stream, mayPublish);
+      };
+      await expect(storeArchive(brick.botId, Readable.toWeb(Readable.from([Buffer.from('home')])) as ReadableStream<Uint8Array>)).rejects.toThrow();
+      expect(bucket.objects.size).toBe(0);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId, state: { not: 'superseded' } } })).toBe(0);
+    });
+
+    it('the purge keeps the row a writer changed while the purge was deleting: a copy that landed after its objects were deleted and could not be taken back out is still found by the next try', async () => {
+      const brick = await idleBrick();
+      const row = await prisma.computerArchive.create({ data: { botId: brick.botId, generation: 1, state: 'staging', objectKey: `computer-cold/${brick.botId}/1.writer.ubc` } });
+      const remove = bucket.store.remove.bind(bucket.store);
+      bucket.store.remove = async (keys) => {
+        await remove(keys);
+        // The writer finishes its upload after the objects were deleted, cannot take the object out again, and says so in its row
+        bucket.objects.set(row.objectKey, Buffer.from('late'));
+        await prisma.computerArchive.update({ where: { id: row.id }, data: { state: 'superseded' } });
+      };
+      await deleteAllArchives(brick.botId);
+      // The row is still there (the purge had read it as staging), and so is the object it names
+      expect(await prisma.computerArchive.findUnique({ where: { id: row.id } })).toMatchObject({ state: 'superseded' });
+      expect(bucket.objects.has(row.objectKey)).toBe(true);
+      // The next try deletes the object and then the row
+      bucket.store.remove = remove;
+      await deleteAllArchives(brick.botId);
+      expect(bucket.objects.has(row.objectKey)).toBe(false);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
     });
 
     it('a run that was open when its server stopped is closed at the longest a run may last, and its time is booked once', async () => {
@@ -796,6 +833,37 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       };
       await expect(bringBackFromCold(brick.botId, provider, NOW)).rejects.toMatchObject({ why: 'busy' });
       expect(names().slice(before)).toContain(`remove:fake-${brick.botId}`);
+    });
+
+    it('a replacement return cannot claim the Brick between the look and the removal: the removal holds the computer row until the machine is gone', async () => {
+      const brick = await idleBrick();
+      await packAway(brick.botId, provider, NOW);
+      const create = provider.create.bind(provider);
+      provider.create = async (botId) => {
+        const machine = await create(botId);
+        // Taken over and put back to cold, with no replacement yet: nobody holds the Brick when the cleanup looks
+        await prisma.brickComputer.update({ where: { botId: brick.botId }, data: { machine: 'cold', packStage: null, providerRef: null, packClaimId: 'took-over' } });
+        return machine;
+      };
+      let claimTried: Promise<{ count: number }> | null = null;
+      let claimAnswered = false;
+      let answeredEarly: boolean | null = null;
+      const remove = provider.remove.bind(provider);
+      provider.remove = async (ref) => {
+        // A replacement return tries to claim the Brick while the machine is being removed (it would be handed this very machine)
+        claimTried = prisma.brickComputer
+          .updateMany({ where: { botId: brick.botId, machine: 'cold', providerRef: null }, data: { machine: 'restoring', packStage: 'returning', packClaimId: 'replacement' } })
+          .then((done) => { claimAnswered = true; return done; });
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        answeredEarly = claimAnswered;
+        return remove(ref);
+      };
+      await expect(bringBackFromCold(brick.botId, provider, NOW)).rejects.toMatchObject({ why: 'busy' });
+      // It was not let in while the removal was still going on, and is let in after
+      expect(answeredEarly).toBe(false);
+      expect(claimTried).not.toBeNull();
+      expect(await claimTried).toMatchObject({ count: 1 });
+      expect(await row(brick.botId)).toMatchObject({ packClaimId: 'replacement' });
     });
 
     it('a return that lost its claim during the restore does not remove the half-restored computer the return that took over now holds', async () => {

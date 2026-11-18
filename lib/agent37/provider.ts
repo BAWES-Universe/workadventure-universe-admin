@@ -77,6 +77,9 @@ export interface ProviderOptions {
 const creationId = (botId: string) => `brick:${botId}`;
 /** A throwaway computer made to prove a restore carries this in its metadata, so the daily check knows it and a sweep can remove one that was left behind. */
 export const SCRATCH_PREFIX = 'scratch:';
+/** A listing this long may be one page of more (Agent37's docs say nothing about pages, only "newest first"), so it cannot prove a machine is not there. */
+export const LISTING_MAY_BE_CUT = 100;
+
 const gone = (status: string) => status === 'deleting' || status === 'deleted' || status === 'failed';
 
 export class Agent37ComputerProvider implements ComputerProvider {
@@ -448,10 +451,15 @@ export class Agent37ComputerProvider implements ComputerProvider {
     this.brickOf.delete(ref);
   }
 
-  async removeAllFor(botId: string): Promise<void> {
+  async removeAllFor(botId: string, opts: { recorded?: boolean } = {}): Promise<void> {
     // A machine that failed to come up is still there at the provider (its disk may be billed and hold files): only one already being deleted is left alone
-    const made = (await this.client.listInstances()).filter((instance) => instance.metadata?.creation_id === creationId(botId) && !['deleting', 'deleted'].includes(String(instance.status)));
+    const listed = await this.client.listInstances();
+    const made = listed.filter((instance) => instance.metadata?.creation_id === creationId(botId) && !['deleting', 'deleted'].includes(String(instance.status)));
     for (const instance of made) await this.remove(instance.id);
+    // The listing is the newest machines of the whole account and Agent37 does not say whether it is cut. A Brick whose machine was never written down can
+    // only be looked for in it, so a listing as long as one that may be cut does not prove there is none left: the purge stays open and tries again
+    // (the team hears of it after five tries). A Brick with a recorded machine had that one removed by its reference; the listing is a second look only.
+    if (opts.recorded === false && listed.length >= LISTING_MAY_BE_CUT) throw new Error('The list of machines may be cut short, so a machine that was never written down cannot be ruled out');
   }
 
   async awake(ref: string): Promise<boolean> {

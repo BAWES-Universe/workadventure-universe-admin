@@ -24,12 +24,13 @@ export const DOWNLOAD_LIFE_MS = 45 * 60 * 1000;
 
 /** Where the objects live. The real one is our encrypted bucket; a test gives an in-memory one. */
 export interface ArchiveStore {
-  put(finalKey: string, stagingKey: string, archive: ReadableStream<Uint8Array>): Promise<Sealed>;
+  /** `mayPublish` is asked right before the copy goes in place; a no answer publishes nothing and fails the write. */
+  put(finalKey: string, stagingKey: string, archive: ReadableStream<Uint8Array>, mayPublish?: () => Promise<boolean>): Promise<Sealed>;
   open(key: string): Promise<{ stream: Readable; bytes: number }>;
   remove(keys: string[]): Promise<void>;
 }
 
-const bucketStore: ArchiveStore = { put: storeSealed, open: openSealedStream, remove: deleteSealed };
+const bucketStore: ArchiveStore = { put: (finalKey, stagingKey, archive, mayPublish) => storeSealed(finalKey, stagingKey, archive, undefined, mayPublish), open: openSealedStream, remove: deleteSealed };
 let store: ArchiveStore = bucketStore;
 
 /** For tests: keep the copies somewhere else until told otherwise (null puts the bucket back). */
@@ -99,7 +100,8 @@ export async function storeArchive(botId: string, archive: ReadableStream<Uint8A
     }
     try {
       if (await purged()) throw new Error('The Brick was deleted while its files were being copied');
-      const sealed = await store.put(row.objectKey, stagingKeyOf(botId, generation, id), archive);
+      // Published only while this write is still the live one: its row is still there as `staging` (a purge that deleted the row has given this write up) and the Brick is not purged
+      const sealed = await store.put(row.objectKey, stagingKeyOf(botId, generation, id), archive, async () => (await prisma.computerArchive.count({ where: { id, state: 'staging' } })) === 1 && !(await purged()));
       // A Brick purged while the copy was written: it must not stand (its row may be gone already, and the object is not to stay without one)
       if (await purged()) throw new Error('The Brick was deleted while its files were being copied');
       const stored = await prisma.computerArchive.update({ where: { id }, data: { state: 'stored', bytes: BigInt(sealed.bytes), sha256: sealed.sha256 } });
@@ -180,8 +182,9 @@ export async function pruneArchives(botId: string, keepId: string | null = null,
       await prisma.computerArchive.updateMany({ where: { id: row.id }, data: { state: 'superseded' } });
       continue;
     }
-    await prisma.computerArchive.deleteMany({ where: { id: row.id } });
-    removed++;
+    // As it was read: a row its writer changed meanwhile stays, so the next clean-up finds the object it names
+    const gone = await prisma.computerArchive.deleteMany({ where: { id: row.id, state: row.state } });
+    if (gone.count === 1) removed++;
   }
   return removed;
 }
@@ -191,8 +194,13 @@ export async function deleteAllArchives(botId: string): Promise<void> {
   const rows = await prisma.computerArchive.findMany({ where: { botId } });
   if (rows.length === 0) return;
   await store.remove(rows.flatMap((row) => [row.objectKey, `${row.objectKey}.new`]));
-  // Only the rows whose objects were just deleted: a copy that began being written meanwhile keeps its row, so the next try finds and deletes it
-  await prisma.computerArchive.deleteMany({ where: { id: { in: rows.map((row) => row.id) } } });
+  // Only the rows whose objects were just deleted, and only as they were when they were read: a copy that began being written meanwhile keeps its
+  // row, and so does a row its writer changed meanwhile (a writer that published after the objects were deleted and could not take its object back
+  // out says so in the row, `superseded`), so the next try finds it and deletes the object
+  for (let at = 0; at < rows.length; at += 200) {
+    const page = rows.slice(at, at + 200);
+    await prisma.computerArchive.deleteMany({ where: { OR: page.map((row) => ({ id: row.id, state: row.state })) } });
+  }
 }
 
 /** Opens a stored copy decrypted, as a stream, for the download route. */

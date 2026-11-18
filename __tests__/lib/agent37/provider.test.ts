@@ -356,6 +356,20 @@ describe('the Agent37 provider', () => {
     await expect(p.removeAllFor('never-had-one')).resolves.toBeUndefined();
   });
 
+  it('does not call a Brick with no recorded machine clear on a listing that may be cut short, and does for a short one or a recorded machine', async () => {
+    const w = world();
+    const p = provider(w);
+    for (let at = 0; at < 99; at++) w.instances.set(`other-${at}`, { id: `other-${at}`, status: 'running', url: '', metadata: { creation_id: `brick:other-${at}` }, region: 'us' } as Instance);
+    // 99 machines: a listing that is not the cut kind, nothing of the Brick's is there, so it is clear
+    await expect(p.removeAllFor('bot-1', { recorded: false })).resolves.toBeUndefined();
+    w.instances.set('other-99', { id: 'other-99', status: 'running', url: '', metadata: { creation_id: 'brick:other-99' }, region: 'us' } as Instance);
+    // 100: it may be one page of more, so a machine that was never written down cannot be ruled out
+    await expect(p.removeAllFor('bot-1', { recorded: false })).rejects.toThrow('may be cut short');
+    // A Brick whose machine was written down had it removed by its reference: the listing is a second look only
+    await expect(p.removeAllFor('bot-1', { recorded: true })).resolves.toBeUndefined();
+    await expect(p.removeAllFor('bot-1')).resolves.toBeUndefined();
+  });
+
   it('says whether a machine is running, to prove a stop: running is awake, stopped, sleeping and gone are not', async () => {
     const w = world();
     const p = provider(w);
