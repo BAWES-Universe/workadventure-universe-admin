@@ -134,6 +134,103 @@ describe('a voice key on the AI keys page', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/me/voice-keys/vk-1/check', { method: 'POST' }));
   });
 
+  it('"Load models" asks its company again through the voice key route and says how many new models came', async () => {
+    answer({ voice: [voiceKey] });
+    const fresh = { ...voiceKey, models: [...models, { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] };
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) =>
+      url === '/api/me/voice-keys/vk-1/models' ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ models: fresh.models, added: [fresh.models[3]] }) }) : base(url, init),
+    );
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Load models' }));
+    await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: '1 new model from ElevenLabs added to My ElevenLabs', variant: 'success' })));
+    expect(fetchMock).toHaveBeenCalledWith('/api/me/voice-keys/vk-1/models', { method: 'POST' });
+    expect(await screen.findByText(/4 models/)).toBeTruthy();
+  });
+
+  it('"Load models" names the job whose list the company could not give, instead of saying there are no new models', async () => {
+    answer({ voice: [voiceKey] });
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) =>
+      url === '/api/me/voice-keys/vk-1/models' ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ models, added: [], unread: ['recognition'] }) }) : base(url, init),
+    );
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Load models' }));
+    // Not "lists no new models": the listening list was not read, so only the lists that were are spoken for
+    await waitFor(() =>
+      expect(mockAddToast).toHaveBeenCalledWith(
+        expect.objectContaining({ description: 'No new models were added to My ElevenLabs from the lists that were read. Its list for listening couldn\u2019t be read right now, try again.' }),
+      ),
+    );
+  });
+
+  it('"Load models" keeps a rename saved while it was loading, taking only the models from its answer', async () => {
+    answer({ voice: [voiceKey] });
+    const base = fetchMock.getMockImplementation()!;
+    let finish: () => void = () => undefined;
+    const grown = [...models, { id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }];
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/api/me/voice-keys/vk-1/models') {
+        // The key as it was read before the rename is in the answer too: it must not be put back
+        return new Promise((resolve) => {
+          finish = () => resolve({ ok: true, status: 200, json: () => Promise.resolve({ key: voiceKey, models: grown, added: [grown[3]], unread: [] }) });
+        });
+      }
+      if (url === '/api/me/voice-keys/vk-1' && init?.method === 'PATCH') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ key: { ...voiceKey, name: 'Studio' } }) });
+      return base(url, init);
+    });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Load models' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Rename My ElevenLabs' }));
+    fireEvent.change(screen.getByLabelText('Key name'), { target: { value: 'Studio' } });
+    fireEvent.click(screen.getByTestId('ai-key-rename-save'));
+    expect(await screen.findByRole('heading', { name: 'Studio' })).toBeTruthy();
+    finish();
+    expect(await screen.findByText(/4 models/)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Studio' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'My ElevenLabs' })).toBeNull();
+  });
+
+  it('"Load models" on two keys at once: one finishing does not end or re-enable the other', async () => {
+    const second = { ...voiceKey, id: 'vk-2', name: 'Studio ElevenLabs', lentTo: [] };
+    answer({ voice: [voiceKey, second] });
+    const base = fetchMock.getMockImplementation()!;
+    const done: Record<string, () => void> = {};
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      const match = /^\/api\/me\/voice-keys\/(vk-\d)\/models$/.exec(url);
+      if (!match) return base(url, init);
+      const key = match[1] === 'vk-1' ? voiceKey : second;
+      return new Promise((resolve) => {
+        done[match[1]] = () => resolve({ ok: true, status: 200, json: () => Promise.resolve({ models: key.models, added: [], unread: [] }) });
+      });
+    });
+    render(<AiKeysPage />);
+    const [first, other] = await screen.findAllByRole('button', { name: 'Load models' });
+    fireEvent.click(first);
+    fireEvent.click(other);
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Loading…' })).toHaveLength(2));
+    done['vk-1']();
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Load models' })).toHaveLength(1));
+    // The second is still loading: its button stays disabled, and the first one is back
+    expect(screen.getByRole('button', { name: 'Loading…' }).hasAttribute('disabled')).toBe(true);
+    done['vk-2']();
+    await waitFor(() => expect(screen.queryAllByRole('button', { name: 'Loading…' })).toHaveLength(0));
+  });
+
+  it('has no Load models for a key whose model is typed (an Azure deployment)', async () => {
+    answer({ voice: [{ ...voiceKey, adapter: 'azure', company: 'Azure' }] });
+    render(<AiKeysPage />);
+    await screen.findByRole('button', { name: 'Lend to a universe' });
+    expect(screen.queryByRole('button', { name: 'Load models' })).toBeNull();
+  });
+
+  it('has no Load models for a key with no list for what it does: Fish Audio, or ElevenLabs only listening', async () => {
+    answer({ voice: [{ ...voiceKey, adapter: 'fish', company: 'Fish Audio', recognition: false }, { ...voiceKey, id: 'vk-2', name: 'Listening only', recognition: true, speech: false }] });
+    render(<AiKeysPage />);
+    await screen.findByText('Listening only', { selector: 'h2' });
+    expect(screen.queryByRole('button', { name: 'Load models' })).toBeNull();
+  });
+
   it('has no Check now while it works', async () => {
     answer({ voice: [voiceKey] });
     render(<AiKeysPage />);
