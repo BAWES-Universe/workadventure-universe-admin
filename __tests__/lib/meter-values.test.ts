@@ -116,8 +116,8 @@ describe('the month', () => {
 describe('the meter’s settings', () => {
   it('start empty: no number is made up, and only the renew time has a recommended value', () => {
     const settings = readMeterSettings(null);
-    expect(settings).toEqual({ memberAllowanceMicros: null, poolCeilingMicros: null, reserveMicros: null, storageMicrosPerGbMonth: null, atOnceMember: null, atOnceAll: null, appUseMicros: null, appUseCeilingMicros: null, appUseMemberCeilingMicros: null, speechCeilingSeconds: null, speechMemberCeilingSeconds: null, rolloutBudgetMicros: null, renewMinutes: 10 });
-    expect(missingSettings(settings)).toEqual(['memberAllowanceMicros', 'poolCeilingMicros', 'reserveMicros', 'storageMicrosPerGbMonth', 'atOnceMember', 'atOnceAll']);
+    expect(settings).toEqual({ memberAllowanceMicros: null, poolCeilingMicros: null, reserveMicros: null, storageMicrosPerGbMonth: null, storageBudgetMicros: null, atOnceMember: null, atOnceAll: null, appUseMicros: null, appUseCeilingMicros: null, appUseMemberCeilingMicros: null, speechCeilingSeconds: null, speechMemberCeilingSeconds: null, rolloutBudgetMicros: null, renewMinutes: 10 });
+    expect(missingSettings(settings)).toEqual(['poolCeilingMicros', 'reserveMicros', 'storageMicrosPerGbMonth', 'atOnceMember', 'atOnceAll']);
   });
 
   it('reads back what fits and ignores what does not', () => {

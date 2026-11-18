@@ -1,6 +1,5 @@
 import { prisma } from '@/lib/db';
-import { getMeterSettings } from '@/lib/meter';
-import { heldRoom, memberAllowance } from '@/lib/meter-allowance';
+import { computerCreditFor } from '@/lib/computer-credit';
 import { runningExtra, type RunningExtra } from '@/lib/meter-grants';
 import { openRequestFor } from '@/lib/meter-requests';
 import { getUniverseAiReplyLimits } from '@/lib/bot-limits';
@@ -134,26 +133,23 @@ export async function memberUsage(personId: string, now: Date = new Date()): Pro
   let computer: ComputerBar | null = null;
   let storage: MemberUsage['storage'] = null;
   if (await usesComputer(personId)) {
-    const settings = await getMeterSettings();
-    const allowance = await memberAllowance(personId, now, settings);
+    // The same credit lots a computer job is admitted from (lib/computer-credit.ts): what the page says and what the server will do cannot differ
+    const left = await computerCreditFor(personId, now);
     const asked = (await openRequestFor(personId, 'computer')) !== null;
-    if (allowance && settings.memberAllowanceMicros) {
-      // Against what they have now: the usual, or the raised one while extra usage runs, so the bar is never more than full
-      const total = settings.memberAllowanceMicros * (extra?.multiplier ?? 1);
-      // What is left is what new work can take: the allowance less everything held, as admission counts it (a hold that ran out and is not yet settled still counts)
-      const held = allowance.unlimited ? 0 : await heldRoom(personId, now);
-      const available = allowance.unlimited ? 0 : Math.max(0, (allowance.leftMicros ?? 0) - held);
-      const left = allowance.unlimited ? 1 : Math.min(1, Math.max(0, available / total));
-      const words = allowance.unlimited ? 'plenty' : usageWords(left);
-      const inProgress = await prisma.meterReservation.aggregate({ where: { personKey: `person:${personId}`, state: 'held', expiresAt: { gt: now } }, _sum: { amountMicros: true } });
+    // Nothing in force for computers (no default, an exception that gives none, and no gift) reads as out: they can ask, and a gift is what
+    // helps. Only when no credit could ever be issued (the funded budget is not set) is there nothing to say, as before the controls were set
+    if (!left.notSet) {
+      const available = left.unlimited ? 0 : left.availableMicros;
+      const fraction = left.unlimited ? 1 : left.totalMicros > 0 ? Math.min(1, Math.max(0, left.availableMicros / left.totalMicros)) : 0;
+      const words = left.unlimited ? 'plenty' : usageWords(fraction);
       computer = {
-        left,
+        left: fraction,
         words,
         startsAgainAt: nextMonthStart(now).toISOString(),
-        unlimited: allowance.unlimited,
+        unlimited: left.unlimited,
         asked,
         canAskForMore: words === 'out',
-        ...(allowance.unlimited ? {} : { kind: 'monthly' as const, availableMicros: available, totalMicros: total, inProgressMicros: Number(inProgress._sum.amountMicros ?? 0), renewsAt: nextMonthStart(now).toISOString(), unavailable: false as const }),
+        ...(left.unlimited ? {} : { kind: 'monthly' as const, availableMicros: available, totalMicros: left.totalMicros, inProgressMicros: left.inProgressMicros, renewsAt: nextMonthStart(now).toISOString(), unavailable: false as const }),
       };
     }
     storage = { bytes: await storedBytes(personId) };

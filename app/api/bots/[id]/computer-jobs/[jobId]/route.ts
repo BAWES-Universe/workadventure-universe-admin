@@ -7,18 +7,22 @@ import { finishJob, getJob, planEffect, renewJob, reportProgress, requestHandove
 
 export const runtime = 'nodejs';
 
+/** The control generation the runner holds (`generation` on the job). Optional, so an older runner works as before; sent, it is checked. */
+const generation = z.number().int().min(0).optional();
+
 const actionSchema = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('progress'), stepDone: z.number().int().min(0), stepTotal: z.number().int().min(1).nullable().optional(), label: z.string().max(200).nullable().optional() }),
-  z.object({ action: z.literal('renew') }),
+  z.object({ generation, action: z.literal('progress'), stepDone: z.number().int().min(0), stepTotal: z.number().int().min(1).nullable().optional(), label: z.string().max(200).nullable().optional() }),
+  z.object({ generation, action: z.literal('renew') }),
   z.object({
+    generation,
     action: z.literal('handover'),
     waitingFor: z.enum(WAITING_FOR),
     /** For "details": what Brick is ready to put in and where, named before the person is asked. */
     ready: z.object({ what: z.string().trim().min(1).max(150), where: z.string().trim().min(1).max(150) }).nullable().optional(),
   }),
-  z.object({ action: z.literal('finish'), outcome: z.enum(['done', 'failed']) }),
-  z.object({ action: z.literal('plan-effect'), key: z.string().min(1).max(255), kind: z.enum(EFFECT_KINDS), evidence: z.string().max(500).nullable().optional() }),
-  z.object({ action: z.literal('settle-effect'), key: z.string().min(1).max(255), state: z.enum(['done', 'failed']), evidence: z.string().max(500).nullable().optional() }),
+  z.object({ generation, action: z.literal('finish'), outcome: z.enum(['done', 'failed']) }),
+  z.object({ generation, action: z.literal('plan-effect'), key: z.string().min(1).max(255), kind: z.enum(EFFECT_KINDS), evidence: z.string().max(500).nullable().optional() }),
+  z.object({ generation, action: z.literal('settle-effect'), key: z.string().min(1).max(255), state: z.enum(['done', 'failed']), evidence: z.string().max(500).nullable().optional() }),
 ]);
 
 function guard(request: NextRequest): NextResponse | null {
@@ -62,10 +66,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (denied) return denied;
   try {
     const { id, jobId } = await params;
-    if (!(await jobOf(id, jobId))) return NextResponse.json({ error: 'Job not found' }, { status: 404 });
+    const known = await jobOf(id, jobId);
+    if (!known) return NextResponse.json({ error: 'Job not found' }, { status: 404 });
     const parsed = actionSchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) return NextResponse.json({ error: 'Invalid input data', details: parsed.error.issues }, { status: 400 });
     const body = parsed.data;
+    // An action from an older hand (before the person took the machine or gave it back, or before a pause or a resume) changes nothing: the runner reads the job again
+    if (body.generation !== undefined && body.generation !== known.generation) return NextResponse.json({ ok: false, reason: 'stale', generation: known.generation }, { status: 409 });
     switch (body.action) {
       case 'progress':
         return NextResponse.json({ job: await reportProgress(jobId, { stepDone: body.stepDone, stepTotal: body.stepTotal, label: body.label }) });
@@ -74,7 +81,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       case 'handover':
         return NextResponse.json({ job: await requestHandover(jobId, body.waitingFor, new Date(), body.ready) });
       case 'finish':
-        return NextResponse.json({ job: await finishJob(jobId, body.outcome) });
+        return NextResponse.json({ job: await finishJob(jobId, body.outcome, new Date(), body.generation) });
       case 'plan-effect':
         return NextResponse.json(await planEffect(jobId, { key: body.key, kind: body.kind, evidence: body.evidence }));
       case 'settle-effect':

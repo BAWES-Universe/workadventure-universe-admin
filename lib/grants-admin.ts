@@ -217,10 +217,6 @@ function settingInput(category: MoneyCategory, setting: ExceptionSetting, recipi
 }
 
 export function defaultInput(request: Extract<PreviewRequest, { what: 'default' }>, now: Date): GrantInput {
-  // Until computer jobs draw from credit lots they follow one monthly allowance for every member, so a computers default can only say that
-  if (request.category === 'computers' && request.interval !== 'none' && (request.interval !== 'monthly' || request.recipients.kind !== 'all')) {
-    throw new GrantsRefused('For now computer credit is given every month to everyone, or not at all. Use an exception or a gift for anything else.');
-  }
   if (request.interval === 'none') return { categoryId: request.category, amount: 0, schedule: 'none', recipients: recipientOf(request.recipients), claimStartsAt: now };
   const monthlyNext = request.interval === 'monthly' && request.startsOn !== 'now';
   return { categoryId: request.category, amount: request.amountMicros ?? 0, schedule: request.interval as Schedule, recipients: recipientOf(request.recipients), claimStartsAt: monthlyNext ? firstOfNextMonth(now) : now };
@@ -372,16 +368,29 @@ export async function previewFor(request: PreviewRequest, now: Date = new Date()
 export async function saveDefaultFor(request: Extract<PreviewRequest, { what: 'default' }>, issuer: Issuer, now: Date = new Date()): Promise<void> {
   const category = request.category;
   await saveDefault(defaultInput(request, now), issuer, now);
-  // Until computer jobs draw from credit lots, they follow one monthly allowance for each member: it follows the default saved here
+  // Computer jobs draw from the credit lots like everything else, so the default saved here is the whole rule. The old monthly allowance
+  // setting is only a mirror of it for the readers that still show the usual (the Costs page's "above the usual"): it follows an
+  // every-member monthly default, and is empty for any other shape, so it never says a number that is not the rule.
   if (category === 'computers') {
-    const everyone = request.recipients.kind === 'all';
-    if (request.interval === 'none') await saveMeterSettings({ memberAllowanceMicros: null }, issuer.userId);
-    else if (request.interval === 'monthly' && everyone && request.amountMicros) {
-      // "On the 1st" waits for the 1st, as the default itself does; "Now" changes the allowance now
-      if (request.startsOn === 'now') await saveMeterSettings({ memberAllowanceMicros: request.amountMicros }, issuer.userId);
-      else await scheduleMemberAllowance(request.amountMicros, firstOfNextMonth(now), issuer.userId);
-    }
+    const mirrored = request.interval === 'monthly' && request.recipients.kind === 'all' && !!request.amountMicros;
+    if (!mirrored) await saveMeterSettings({ memberAllowanceMicros: null }, issuer.userId);
+    // "On the 1st" waits for the 1st, as the default itself does; "Now" changes the mirror now
+    else if (request.startsOn === 'now') await saveMeterSettings({ memberAllowanceMicros: request.amountMicros as number }, issuer.userId);
+    else await scheduleMemberAllowance(request.amountMicros as number, firstOfNextMonth(now), issuer.userId);
   }
+}
+
+/**
+ * "Computer allowance for each member, a month" on the Limits page: the same thing as the computers default on the Grants page, one rule,
+ * so changing it there changes it here and never makes a second number. Empty means no default (nobody gets a monthly amount; gifts and
+ * exceptions still work).
+ */
+export async function saveComputerAllowance(micros: number | null, issuer: Issuer, now: Date = new Date()): Promise<void> {
+  await saveDefaultFor(
+    micros === null ? { what: 'default', category: 'computers', amountMicros: null, interval: 'none', recipients: { kind: 'all' } } : { what: 'default', category: 'computers', amountMicros: micros, interval: 'monthly', recipients: { kind: 'all' }, startsOn: 'now' },
+    issuer,
+    now,
+  );
 }
 
 /** A program as the input that would save it again, so it can be saved with some people taken out. */

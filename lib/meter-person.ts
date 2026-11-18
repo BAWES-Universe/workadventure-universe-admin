@@ -1,14 +1,13 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { getMeterSettings } from '@/lib/meter';
-import { memberAllowance } from '@/lib/meter-allowance';
+import { computerCreditLeft } from '@/lib/computer-credit';
 import { runningExtra } from '@/lib/meter-grants';
 import { openRequestFor } from '@/lib/meter-requests';
 import { monthOf } from '@/lib/meter-values';
 
 /**
  * What a super admin sees about one person on the person's page (game #1999): their chat and voice cost over the last week, their
- * computer use against this month's allowance, the disk their Bricks keep, whether they asked for more, and the extra usage
+ * computer use against this month's credit, the disk their Bricks keep, whether they asked for more, and the extra usage
  * they have been given. Figures come from the meter's books; a figure with no price known is left out of the sums.
  */
 
@@ -47,8 +46,7 @@ const WEEK = 7 * 24 * 60 * 60 * 1000;
 export async function personUsage(personId: string, now: Date = new Date(), viewerId: string | null = null): Promise<PersonUsage> {
   const personKey = `person:${personId}`;
   const month = monthOf(now);
-  const settings = await getMeterSettings();
-  const [chat, computer, bricks, kept, open, extra, allowance] = await Promise.all([
+  const [chat, computer, bricks, kept, open, extra] = await Promise.all([
     prisma.meterEvent.aggregate({ where: { personKey, pool: 'chat', payerKind: 'universe', occurredAt: { gte: new Date(now.getTime() - WEEK), lte: now } }, _sum: { costMicros: true } }),
     prisma.meterEvent.aggregate({ where: { personKey, pool: 'computer', payerKind: 'universe', occurredAt: { gte: month.start, lt: month.end } }, _sum: { costMicros: true } }),
     prisma.bot.count({ where: { ownerId: personId, deletedAt: null } }),
@@ -60,8 +58,9 @@ export async function personUsage(personId: string, now: Date = new Date(), view
       ) latest`),
     openRequestFor(personId, 'computer'),
     runningExtra(personId, now),
-    memberAllowance(personId, now, settings),
   ]);
+  // What they have for computers now, from the credit lots a job is admitted from: read only (looking at a person never issues them anything)
+  const credit = await computerCreditLeft(prisma, personId, now, !!extra?.noLimit);
   let grant: PersonGrant | null = null;
   if (extra) {
     const row = await prisma.meterGrant.findUnique({ where: { grantKey: extra.grantKey } });
@@ -81,16 +80,15 @@ export async function personUsage(personId: string, now: Date = new Date(), view
       };
     }
   }
-  const base = settings.memberAllowanceMicros;
-  // Unlimited comes from the running grant itself, so it is true even while no allowance is set
-  const noLimit = !!(extra?.noLimit || allowance?.unlimited);
+  // Unlimited comes from the running extra usage itself, so it is true even while nothing else is set
+  const noLimit = !!extra?.noLimit;
   return {
     chatWeekMicros: Number(chat._sum.costMicros ?? 0),
     bricks,
     computerMonthMicros: Number(computer._sum.costMicros ?? 0),
-    allowanceMicros: base === null ? null : noLimit ? null : base * (extra?.multiplier ?? 1),
+    allowanceMicros: noLimit || !credit.any ? null : credit.totalMicros,
     noLimit,
-    allowanceSet: base !== null,
+    allowanceSet: credit.any,
     keptBytes: Number(kept[0]?.bytes ?? 0),
     asked: open ? { at: open.createdAt.toISOString() } : null,
     extra: grant,

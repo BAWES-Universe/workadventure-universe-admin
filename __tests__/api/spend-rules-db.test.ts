@@ -15,7 +15,7 @@ jest.mock('@sentry/nextjs', () => ({ captureMessage: jest.fn(), captureException
 import { prisma } from '@/lib/db';
 import { createBrick } from '@/lib/brick-create';
 import { getSessionUser } from '@/lib/auth-session';
-import { saveMeterSettings } from '@/lib/meter';
+import { setUpComputerCredit, wipeComputerCredit } from '../helpers/computer-credit-setup';
 import { releaseRoom, renewRoom, reserveRoom } from '@/lib/meter-allowance';
 import { memberUsage } from '@/lib/meter-usage';
 import { changeRule, checkSpend, endRule, listRules, ownerSpendAllowed, proposeRule } from '@/lib/spend-rules';
@@ -120,12 +120,13 @@ const wipe = async () => {
   await prisma.creditHold.deleteMany({ where: { personId: { in: ids } } });
   await prisma.creditLot.deleteMany({ where: { personId: { in: ids } } });
   await prisma.fundingAccount.deleteMany({ where: { kind: 'person', ownerKey: { in: ids } } });
+  await prisma.appSetting.deleteMany({ where: { key: 'computer-credit-books' } });
 };
 
 run('rules said in chat and task receipts, in a real database', () => {
   beforeEach(async () => {
     await wipe();
-    await saveMeterSettings({ memberAllowanceMicros: 100_000_000, poolCeilingMicros: 1_000_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+    await setUpComputerCredit({ memberAllowanceMicros: 100_000_000, poolCeilingMicros: 1_000_000_000 });
   });
   afterAll(async () => {
     await wipe();
@@ -393,17 +394,18 @@ run('rules said in chat and task receipts, in a real database', () => {
       // The test clock is not the database's: the room starts when the test says it did
       await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: NOW } });
       const at = (seconds: number) => new Date(NOW.getTime() + seconds * 1000);
-      // Five minutes in, the job has used half a stretch and still has one stretch of lease: 90,000 can still be spent, under 100,000
-      expect(await renewRoom({ key, moreMicros: 60_000 }, at(300))).toMatchObject({ ok: true });
-      // Ten minutes in the job could cost 120,000 by the end of its lease: that is over, so it stops safely with the room it holds
-      expect(await renewRoom({ key, moreMicros: 60_000 }, at(600))).toMatchObject({ ok: false, reason: 'rule', leftMicros: 0 });
-      expect((await prisma.meterReservation.findUnique({ where: { reservationKey: key } }))?.amountMicros).toBe(BigInt(120_000));
+      // R9: a renewal holds the time used plus one stretch (6,000 a minute, a stretch of 60,000). Five minutes in the job has used 30,000: 90,000 can
+      // still be spent, under 100,000
+      expect(await renewRoom({ key, upToMicros: 30_000 + 60_000 }, at(300))).toMatchObject({ ok: true, addedMicros: 30_000 });
+      // Ten minutes in the job could cost 120,000 by the end of its lease: that is over, so it stops safely with the room it holds (10,000 was left)
+      expect(await renewRoom({ key, upToMicros: 60_000 + 60_000 }, at(600))).toMatchObject({ ok: false, reason: 'rule', leftMicros: 10_000 });
+      expect((await prisma.meterReservation.findUnique({ where: { reservationKey: key } }))?.amountMicros).toBe(BigInt(90_000));
       await changeRule(made.rule.id, sara.id, { capMicros: 500_000 });
-      expect(await renewRoom({ key, moreMicros: 60_000 }, at(600))).toMatchObject({ ok: true });
+      expect(await renewRoom({ key, upToMicros: 60_000 + 60_000 }, at(600))).toMatchObject({ ok: true, addedMicros: 30_000 });
       await releaseRoom({ key }, NOW);
     });
 
-    it('renewing often does not stop a job early: a rule counts what the job can really cost, not the room stacked up by every renewal', async () => {
+    it('renewing often does not stop a job early: a rule counts what the job can really cost (the room is the time used plus one stretch), whatever the number of renewals', async () => {
       const sara = await person('sara');
       // $0.15 is 25 minutes of a computer at 6,000 a minute: with one stretch (10 minutes, 60,000) of lease on top, the job may use 15 minutes
       await proposeRule({ botId: sara.brickId, speakerId: sara.id, scope: 'person', period: 'month', capMicros: 150_000 });
@@ -411,12 +413,12 @@ run('rules said in chat and task receipts, in a real database', () => {
       expect((await reserveRoom({ key, personId: sara.id, amountMicros: 60_000, botId: sara.brickId, jobId: 'j8' }, NOW)).ok).toBe(true);
       await prisma.meterReservation.update({ where: { reservationKey: key }, data: { createdAt: NOW } });
       const at = (seconds: number) => new Date(NOW.getTime() + seconds * 1000);
-      // Asked every 4 minutes (0.4 of a stretch), each renewal holds a whole stretch more: the held room is 300,000 by the fourth renewal
+      // Asked every 4 minutes (0.4 of a stretch), each renewal brings the room to the time used plus one stretch, never stacking a whole stretch on top of the last
       for (const seconds of [240, 480, 720, 840]) {
-        expect(await renewRoom({ key, moreMicros: 60_000 }, at(seconds))).toMatchObject({ ok: true });
+        expect(await renewRoom({ key, upToMicros: Math.round(seconds * 100) + 60_000 }, at(seconds))).toMatchObject({ ok: true });
       }
       // Sixteen minutes in the job could cost 156,000: that is what the rule stops
-      expect(await renewRoom({ key, moreMicros: 60_000 }, at(960))).toMatchObject({ ok: false, reason: 'rule' });
+      expect(await renewRoom({ key, upToMicros: 96_000 + 60_000 }, at(960))).toMatchObject({ ok: false, reason: 'rule' });
       await releaseRoom({ key }, NOW);
     });
 

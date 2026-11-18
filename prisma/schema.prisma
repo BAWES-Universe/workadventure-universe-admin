@@ -3394,6 +3394,16 @@ model ComputerJob {
   // How well the record of where the computer's browser went (computer_job_visits) was taken when the job ended: complete, partial (a gap or a cut
   // in what the computer recorded, or more than is kept), unread (the computer could not be read), none (the computer has no recorder). Empty until the job ends.
   visitsState       String? @map("visits_state") @db.VarChar(8)
+  // A job that ran out of credit, budget or provider funds is saved and paused, not stopped (it is queued, with this set): when and for what it paused,
+  // and how many times it was resumed. A paused job resumes once, when the reason clears and the checks before resuming pass.
+  pausedAt          DateTime? @map("paused_at")
+  pausedFor         String?   @map("paused_for") @db.VarChar(10)
+  resumeCount       Int       @default(0) @map("resume_count")
+  // The seconds of the machine's time already written to the books as the time of earlier segments (a pause writes the segment that ran): the end writes the rest
+  pausedSeconds     Int       @default(0) @map("paused_seconds")
+  // What the step that was refused needed (the member's amount when the credit ran out, the provider's most when the budget did): the job resumes
+  // only when that fits beside its next stretch, so it is not resumed into the same refusal
+  pausedNeedMicros  BigInt?   @map("paused_need_micros")
 
   bot     Bot              @relation(fields: [botId], references: [id], onDelete: Cascade)
   effects ComputerEffect[]
@@ -3644,4 +3654,62 @@ model ComputerJobToken {
 
   @@index([jobId, revokedAt])
   @@map("computer_job_tokens")
+}
+
+// The funding authorisation of one model step of a computer job (version 2 of the model-call contract, docs/computer-llm-contract-v2.md): what Orbit
+// resolved and recorded BEFORE the step was sent, and then what the step really took. One row for each step (the operation id is stable across retries).
+// It is also the history the member estimate is worked out from (the job's last 20 comparable settled steps).
+model ComputerCallAuthorisation {
+  id                     String    @id @default(uuid())
+  // The step's key in the books (computer:call:<job>:<operation>): the same as its room and its credit hold
+  callKey                String    @unique @map("call_key") @db.VarChar(255)
+  jobId                  String    @map("job_id")
+  botId                  String    @map("bot_id")
+  personId               String    @map("person_id")
+  operationId            String    @map("operation_id") @db.VarChar(80)
+  contract               Int
+  // owner, visitor, schedule, teammate (who authorised the spending) or own-key (nothing of ours is spent)
+  payerKind              String    @map("payer_kind") @db.VarChar(10)
+  fundingAccountId       String?   @map("funding_account_id") @db.VarChar(64)
+  tariffVersion          String?   @map("tariff_version") @db.VarChar(64)
+  // The limits recorded for the step: task, bot, grant, period, fixed price. A limit that does not apply is null
+  limits                 Json
+  route                  String    @db.VarChar(12)
+  model                  String    @default("") @db.VarChar(120)
+  modelFormat            String    @default("openai") @map("model_format") @db.VarChar(20)
+  stepKind               String    @default("other") @map("step_kind") @db.VarChar(10)
+  inputTokens            Int       @map("input_tokens")
+  inputMicros            BigInt    @map("input_micros")
+  outputMicrosPerMillion BigInt    @map("output_micros_per_million")
+  maxOutputTokens        Int       @map("max_output_tokens")
+  // What was set aside from the member, and the most the provider can bill (held in the pool)
+  memberMicros           BigInt    @map("member_micros")
+  providerMaxMicros      BigInt    @map("provider_max_micros")
+  // held until the step settles, then settled or released
+  state                  String    @default("held") @db.VarChar(10)
+  // The answer length the step really had, once it settled (null until then, and when the provider did not say)
+  outputTokens           Int?      @map("output_tokens")
+  // What the person was charged and what the provider billed, once settled
+  chargedMicros          BigInt?   @map("charged_micros")
+  providerCostMicros     BigInt?   @map("provider_cost_micros")
+  // A late receipt replaced an unknown first entry (once)
+  corrected              Boolean   @default(false)
+  createdAt              DateTime  @default(now()) @map("created_at")
+  settledAt              DateTime? @map("settled_at")
+
+  @@index([jobId, route, model, stepKind, state, settledAt])
+  @@index([personId, createdAt])
+  @@map("computer_call_authorisations")
+}
+
+// Whether a model Universe pays for was seen priced: the relay says so with each step. A model seen with no price is named in readiness before a paid wake.
+model ComputerModelSeen {
+  id        String   @id @default(uuid())
+  route     String   @db.VarChar(12)
+  model     String   @db.VarChar(120)
+  priced    Boolean
+  seenAt    DateTime @default(now()) @map("seen_at")
+
+  @@unique([route, model])
+  @@map("computer_models_seen")
 }

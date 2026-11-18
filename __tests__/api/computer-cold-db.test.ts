@@ -25,7 +25,7 @@ import { createBrick } from '@/lib/brick-create';
 import { COLD_RUN_MAX_MS } from '@/lib/computer-values';
 import { saveServerLimits } from '@/lib/bot-limits';
 import * as meter from '@/lib/meter';
-import { saveMeterSettings } from '@/lib/meter';
+import { setUpComputerCredit, wipeComputerCredit } from '../helpers/computer-credit-setup';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { bringBackFromCold, coldStatus, coldStep, heartbeat, packAway, restoreDrill, STUCK_MS } from '@/lib/computer-cold';
 import { computerView, giveComputer, startJob, sweepComputers } from '@/lib/computer';
@@ -110,9 +110,9 @@ run('cold storage for a Brick’s computer, in a real database', () => {
     await prisma.computerColdRun.deleteMany({});
     await prisma.brickComputer.deleteMany({});
     await prisma.meterEvent.deleteMany({});
-    await prisma.meterReservation.deleteMany({});
-    await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits', 'computer-wind-down'] } } });
-    await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+    await wipeComputerCredit();
+    await prisma.appSetting.deleteMany({ where: { key: { in: ['bot-limits', 'computer-wind-down'] } } });
+    await setUpComputerCredit({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100 }, NOW);
     bucket = memoryStore();
     setArchiveStoreForTests(bucket.store);
     provider = new FakeComputerProvider();
@@ -726,7 +726,7 @@ run('cold storage for a Brick’s computer, in a real database', () => {
     it('keeps the disk room of a computer made for a return while the books would not take its disk, until the sweep has written it', async () => {
       const brick = await idleBrick();
       provider.disk = 4_000_000_000;
-      await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 90_000, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+      await setUpComputerCredit({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 90_000, atOnceMember: 100, atOnceAll: 100 }, NOW);
       expect(await packAway(brick.botId, provider, NOW)).toBe('packed');
       const heldDisk = () => prisma.meterReservation.count({ where: { state: 'held', reservationKey: { startsWith: 'computer:diskroom:' } } });
       // A job brings it back, and the books refuse the line for the new computer's disk: the job is not failed for that, and the disk's room stays held
@@ -1128,7 +1128,7 @@ run('cold storage for a Brick’s computer, in a real database', () => {
   });
 
   it('the status sizes the storage by the bytes really kept, at the storage Limit, and counts the awake seconds measured', async () => {
-    await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 50_000, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+    await setUpComputerCredit({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 50_000, atOnceMember: 100, atOnceAll: 100 }, NOW);
     const brick = await idleBrick();
     provider.homeArchive = Buffer.alloc(2_000_000_000 / 1000, 1);
     await packAway(brick.botId, provider, NOW);

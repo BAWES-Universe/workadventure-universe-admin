@@ -1,7 +1,7 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getMeterSettings } from '@/lib/meter';
-import { allowanceNow, missingSettings, monthOf, type AllowanceState, type MeterSettings } from '@/lib/meter-values';
+import { missingSettings, monthOf, type MeterSettings } from '@/lib/meter-values';
 import { checkSpend, exposureOf } from '@/lib/spend-rules';
 import type { ChargeClass } from '@/lib/spend-rules-values';
 
@@ -15,8 +15,10 @@ import type { ChargeClass } from '@/lib/spend-rules-values';
  *  - Room is reserved before a paid step, and a job that keeps running renews it. A reservation ends as settled or released, never gone.
  *  - What is committed, reserved and not yet settled, kept storage and a reserve are one envelope. Nothing new is admitted past it.
  *  - Chat's money is kept apart: this reads the computer pool only, so using it up never takes from what chat has.
- *  - Two different "out"s: the member's own allowance is used up ("allowance": they can ask for more), or our pool or every computer is
- *    taken ("pool", "busy": the job waits, and more for one person would not help).
+ *  - Two different "out"s: the member's own credit is used up ("allowance": they can ask for more), or our pool or every computer is
+ *    taken ("pool", "busy": the job waits, and more for one person would not help). The member's own credit is not kept here any more: it
+ *    is the credit lots (lib/computer-credit.ts), asked through the `personal` check a caller passes, in the same place in the order
+ *    the old allowance was (after what the person said in chat, before jobs at once and the pool). This file is our side only.
  *  - Settings that are not set yet refuse room ("not_set"): a computer does not open before its controls do.
  */
 
@@ -48,7 +50,7 @@ export interface Reservation {
   settledMicros: number | null;
 }
 
-export type Room = { ok: true; reservation: Reservation; created: boolean } | NoRoom;
+export type Room = { ok: true; reservation: Reservation; created: boolean; /** What a renewal added to the room, read under the pool's lock (0 when the room already covered the next stretch). */ addedMicros?: number } | NoRoom;
 
 type Tx = Prisma.TransactionClient;
 
@@ -61,6 +63,8 @@ export const DISK_ROOM_PREFIX = 'computer:diskroom:';
 /** One room for each try of a job: a try that loses the writer's place gives back only its own, never the room of the one that won. */
 /** One room for the disk of one try to start a job's machine: `attempt` (the try's own moment, as for the job's room) keeps two tries of the same job from giving each other's room back. */
 export const diskRoomKey = (botId: string, jobId: string, attempt?: number) => `${DISK_ROOM_PREFIX}${botId}:${jobId}${attempt === undefined ? '' : `:${attempt}`}`;
+/** The pool-only part of a model step's room (see `reserveRoom`): it starts with the call prefix, so it is never another job running. */
+export const poolOnlyKey = (key: string): string => `${CALL_ROOM_PREFIX}pool:${key.slice(CALL_ROOM_PREFIX.length)}`;
 const isNoJob = (key: string) => key.startsWith(CALL_ROOM_PREFIX) || key.startsWith(DISK_ROOM_PREFIX);
 
 const viewOf = (row: { reservationKey: string; personKey: string; botId: string | null; jobId: string | null; amountMicros: bigint; state: string; expiresAt: Date; renewals: number; settledMicros: bigint | null }): Reservation => ({
@@ -77,26 +81,6 @@ const viewOf = (row: { reservationKey: string; personKey: string; botId: string 
 
 const asNumber = (value: bigint | number | null | undefined): number => (value === null || value === undefined ? 0 : Number(value));
 
-/** One member's computer month: what they spent in order and the extra usage they were given, worked into what is left. */
-export async function memberAllowance(personId: string, now: Date, settings: MeterSettings, db: Pick<Tx, 'meterEvent' | 'meterGrant'> = prisma): Promise<AllowanceState | null> {
-  if (settings.memberAllowanceMicros === null) return null;
-  const month = monthOf(now);
-  const [events, grants] = await Promise.all([
-    // What a member spends from the computer allowance: computer-pool work we pay for, tied to them. Their chat is another allowance.
-    db.meterEvent.findMany({
-      where: { pool: 'computer', payerKind: 'universe', personKey: `person:${personId}`, costMicros: { not: null }, occurredAt: { gte: month.start, lt: month.end } },
-      select: { occurredAt: true, costMicros: true },
-    }),
-    db.meterGrant.findMany({ where: { personId, endsAt: { gt: month.start }, startsAt: { lt: month.end } }, select: { grantKey: true, startsAt: true, endsAt: true, multiplier: true, noLimit: true } }),
-  ]);
-  return allowanceNow(
-    settings.memberAllowanceMicros,
-    events.map((event) => ({ at: event.occurredAt, micros: asNumber(event.costMicros) })),
-    grants.map((grant) => ({ key: grant.grantKey, startsAt: grant.startsAt, endsAt: grant.endsAt, multiplier: grant.noLimit ? null : grant.multiplier })),
-    now,
-  );
-}
-
 export interface Envelope {
   /** Spent this month on computer work, and settled by the provider. */
   committedMicros: number;
@@ -112,6 +96,12 @@ export interface Envelope {
   totalMicros: number;
   /** Computer events this month with no price known: counted here, never as 0. */
   unknownEvents: number;
+  /** What steps whose price is still unknown hold in the pool: each counts at the amount that was held for it until a receipt settles it (R4). Already inside `totalMicros`. */
+  unknownHeldMicros: number;
+  /** Whether kept storage is its own category (a storage budget is set): it is then not inside `totalMicros`, and `storageMicros` is checked against the budget. */
+  storageBudgeted: boolean;
+  /** Kept disks plus room held for disks about to be made: what the storage budget is checked against. */
+  storageMicros: number;
   /** Chat's own spend this month, kept apart: the pool above never reads it and never takes from it. */
   chatMicros: number;
   /** Jobs going now, everyone together. */
@@ -119,13 +109,13 @@ export interface Envelope {
 }
 
 /**
- * The room that still counts at a moment: held and still in time, or held and lapsed within the month it was taken in. Room that
- * lapsed (a job that crashed or was abandoned) keeps counting until it is settled or released, because what it spent is not known;
- * but it counts only in its own month, since anything it really cost is in the books as events dated then. Settling or releasing
- * lapsed room is the job runner's (game #2000); until it does, a lapsed hold never reaches past the month it was taken in.
+ * The room that still counts at a moment: every reservation that is still held. Room that lapsed (a job that crashed or was abandoned, a step
+ * whose outcome never came) keeps counting until it is settled or released, in whatever month it was taken, because what it spent is not known
+ * (R4: an unknown cost never leaves the pool). Settling or releasing lapsed room is the sweep's; a lapsed hold that was settled is in the books
+ * as events, and one settled with an unknown cost keeps counting through its event (see `envelopeIn`).
  */
-function stillCounts(now: Date): Prisma.MeterReservationWhereInput {
-  return { state: 'held', OR: [{ expiresAt: { gt: now } }, { createdAt: { gte: monthOf(now).start } }] };
+function stillCounts(): Prisma.MeterReservationWhereInput {
+  return { state: 'held' };
 }
 
 /** What keeping this many bytes costs for a month at the storage Limit: a gigabyte is 10^9 bytes, rounded up in whole millionths of a dollar, in BigInt so a very large disk cannot lose a digit. */
@@ -138,12 +128,12 @@ export function storageMonthMicros(bytes: bigint | number, settings: Pick<MeterS
 export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Promise<Envelope> {
   const month = monthOf(now);
   const universeComputer: Prisma.MeterEventWhereInput = { pool: 'computer', payerKind: 'universe', occurredAt: { gte: month.start, lt: month.end } };
-  const [settled, unsettled, unknown, chat, held, kept] = await Promise.all([
+  const [settled, unsettled, unknown, chat, held, kept, unknownHeld] = await Promise.all([
     tx.meterEvent.aggregate({ where: { ...universeComputer, settledAt: { not: null } }, _sum: { costMicros: true } }),
     tx.meterEvent.aggregate({ where: { ...universeComputer, settledAt: null }, _sum: { costMicros: true } }),
     tx.meterEvent.count({ where: { ...universeComputer, costMicros: null } }),
     tx.meterEvent.aggregate({ where: { pool: 'chat', payerKind: 'universe', occurredAt: { gte: month.start, lt: month.end } }, _sum: { costMicros: true } }),
-    tx.meterReservation.findMany({ where: stillCounts(now), select: { amountMicros: true, expiresAt: true, reservationKey: true } }),
+    tx.meterReservation.findMany({ where: stillCounts(), select: { amountMicros: true, expiresAt: true, reservationKey: true } }),
     // The newest size recorded for each bot: a disk is a level, not something that adds up
     tx.$queryRaw<{ bytes: bigint | null }[]>`
       SELECT COALESCE(SUM(latest.quantity), 0)::bigint AS bytes FROM (
@@ -151,26 +141,45 @@ export async function envelopeIn(tx: Tx, now: Date, settings: MeterSettings): Pr
         WHERE kind = 'stored_bytes' AND payer_kind = 'universe' AND bot_id IS NOT NULL
         ORDER BY bot_id, occurred_at DESC, recorded_at DESC
       ) latest`,
+    // A step that settled with no price known keeps counting at the amount that was held for it, until a late receipt gives its real cost (the same
+    // update that gives the cost takes it out of this sum, so it is never counted twice nor dropped between the two)
+    tx.$queryRaw<{ micros: bigint | null }[]>`
+      SELECT COALESCE(SUM((detail->>'heldMicros')::bigint), 0)::bigint AS micros FROM meter_events
+      WHERE pool = 'computer' AND payer_kind = 'universe' AND cost_micros IS NULL AND (detail->>'heldMicros') IS NOT NULL`,
   ]);
   let reserved = 0;
   let lapsed = 0;
+  let heldDisk = 0;
+  const storageBudgeted = settings.storageBudgetMicros !== null;
   for (const row of held) {
-    if (row.expiresAt > now) reserved += Number(row.amountMicros);
-    else lapsed += Number(row.amountMicros);
+    const amount = Number(row.amountMicros);
+    // Room held for the disk of a machine about to be made is storage: when storage has its own budget it is checked there, not in the pool's total
+    if (row.reservationKey.startsWith(DISK_ROOM_PREFIX)) {
+      heldDisk += amount;
+      if (storageBudgeted) continue;
+    }
+    if (row.expiresAt > now) reserved += amount;
+    else lapsed += amount;
   }
   // A gigabyte is 10^9 bytes; rounded up in whole millionths of a dollar, and in BigInt so a very large disk cannot lose a digit
   const keptStorageMicros = storageMonthMicros(kept[0]?.bytes ?? BigInt(0), settings);
   const committedMicros = asNumber(settled._sum.costMicros);
+  const unknownHeldMicros = asNumber(unknownHeld[0]?.micros);
   const unsettledMicros = asNumber(unsettled._sum.costMicros) + lapsed;
   const reserveMicros = settings.reserveMicros ?? 0;
+  // With a storage budget the disks we keep, and the room held for new ones, leave the pool's total (booked once, in their own category)
+  const keptInPool = storageBudgeted ? 0 : keptStorageMicros;
   return {
     committedMicros,
     reservedMicros: reserved,
     unsettledMicros,
     keptStorageMicros,
     reserveMicros,
-    totalMicros: committedMicros + reserved + unsettledMicros + keptStorageMicros + reserveMicros,
+    totalMicros: committedMicros + reserved + unsettledMicros + unknownHeldMicros + keptInPool + reserveMicros,
     unknownEvents: unknown,
+    unknownHeldMicros,
+    storageBudgeted,
+    storageMicros: keptStorageMicros + heldDisk,
     chatMicros: asNumber(chat._sum.costMicros),
     // The room held for one model call inside a job is not another job running
     jobsRunning: held.filter((row) => row.expiresAt > now && !isNoJob(row.reservationKey)).length,
@@ -188,20 +197,19 @@ async function lockPool(tx: Tx): Promise<void> {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${POOL_LOCK}))`;
 }
 
-/** Whether `extra` more fits for this member and the pool; the reason it does not, or null. The member's own allowance comes first: a member who used theirs up asks for more, whatever the pool holds. */
-/** Room held for a person's steps that still counts against what they can start: held and in time, or ran out and not yet settled or released. */
-export async function heldRoom(personId: string, now: Date, db: Pick<Tx, 'meterReservation'> = prisma): Promise<number> {
-  const held = await db.meterReservation.aggregate({ where: { personKey: `person:${personId}`, ...stillCounts(now) }, _sum: { amountMicros: true } });
-  return asNumber(held._sum.amountMicros);
-}
+/**
+ * A caller's check of the member's own credit, asked inside the pool's lock: the refusal, or null to go on. Computers pass the credit
+ * lots' check (lib/computer-credit.ts); nothing here knows how much a member has.
+ */
+export type PersonalCheck = (tx: Tx, extraMicros: number) => Promise<NoRoom | null>;
 
-async function fits(tx: Tx, personId: string, extraMicros: number, now: Date, settings: MeterSettings, opts: { newJob: boolean }): Promise<NoRoom | null> {
+/** Whether `extra` more fits for this member and the pool; the reason it does not, or null. The member's own credit comes first: a member who used theirs up asks for more, whatever the pool holds. */
+async function fits(tx: Tx, personId: string, extraMicros: number, now: Date, settings: MeterSettings, opts: { newJob: boolean; personal?: PersonalCheck; /** What the member's own credit is asked for, when it is less than what the pool holds (a model step: the member's estimate, and the provider's most in the pool). */ personalMicros?: number }): Promise<NoRoom | null> {
   const missing = missingSettings(settings);
   if (missing.length > 0) return { ok: false, reason: 'not_set', missing };
-  const allowance = await memberAllowance(personId, now, settings, tx);
-  if (allowance && !allowance.unlimited) {
-    const left = (allowance.leftMicros ?? 0) - (await heldRoom(personId, now, tx));
-    if (left < extraMicros) return { ok: false, reason: 'allowance', leftMicros: Math.max(0, left) };
+  if (opts.personal) {
+    const no = await opts.personal(tx, opts.personalMicros ?? extraMicros);
+    if (no) return no;
   }
   const envelope = await envelopeIn(tx, now, settings);
   if (opts.newJob) {
@@ -222,10 +230,12 @@ const wholeMicros = (value: number, what: string): void => {
  * the envelope keeps counting until it is settled or released. Never throws for "no room": that is an answer.
  */
 export async function reserveRoom(
-  input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass; /** False for a step inside a job that already holds its place (a model call): it is not another job at once. */ newJob?: boolean },
+  input: { key: string; personId: string; amountMicros: number; botId?: string | null; jobId?: string | null; chargeClass?: ChargeClass; /** False for a step inside a job that already holds its place (a model call): it is not another job at once. */ newJob?: boolean; /** The member's own credit, asked in its place in the order (see `PersonalCheck`). */ personal?: PersonalCheck; /** More the pool holds for this step than the member's amount (a model step: the provider's most less the member's estimate). Held under its own key with no person, bot or job on it, counted by the pool only: the member's rules, credit and jobs at once never see it. */ poolOnlyMicros?: number },
   now: Date = new Date(),
 ): Promise<Room> {
   wholeMicros(input.amountMicros, 'amountMicros');
+  const poolOnly = input.poolOnlyMicros ?? 0;
+  if (poolOnly !== 0) wholeMicros(poolOnly, 'poolOnlyMicros');
   if (!input.key || input.key.length > 255) throw new RangeError('key is required (up to 255 characters)');
   return prisma.$transaction(async (tx): Promise<Room> => {
     await lockPool(tx);
@@ -239,8 +249,9 @@ export async function reserveRoom(
     const ruled = await checkSpend({ payerPersonId: input.personId, botId: input.botId ?? null, taskKey: input.jobId ?? null, chargeClass: input.chargeClass ?? 'computer', amountMicros: input.amountMicros }, now, tx);
     if (!ruled.ok) return { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
     const settings = await getMeterSettings(tx);
-    const no = await fits(tx, input.personId, input.amountMicros, now, settings, { newJob: input.newJob !== false });
+    const no = await fits(tx, input.personId, input.amountMicros + poolOnly, now, settings, { newJob: input.newJob !== false, personal: input.personal, personalMicros: input.amountMicros });
     if (no) return no;
+    const expiresAt = new Date(now.getTime() + settings.renewMinutes * MINUTE);
     const row = await tx.meterReservation.create({
       data: {
         reservationKey: input.key,
@@ -250,9 +261,15 @@ export async function reserveRoom(
         jobId: input.jobId ?? null,
         amountMicros: BigInt(input.amountMicros),
         state: 'held',
-        expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE),
+        expiresAt,
       },
     });
+    // The rest of what the pool holds for this step, in the same transaction: both exist or neither does
+    if (poolOnly > 0) {
+      await tx.meterReservation.create({
+        data: { reservationKey: poolOnlyKey(input.key), personKey: 'system:pool', personId: null, botId: null, jobId: null, amountMicros: BigInt(poolOnly), state: 'held', expiresAt },
+      });
+    }
     return { ok: true, reservation: viewOf(row), created: true };
   });
 }
@@ -277,7 +294,12 @@ export async function reserveDiskRoom(input: { botId: string; jobId: string; byt
     if (already && already.state === 'held' && already.expiresAt > now) return { ok: true };
     // The pool is asked even for a price of 0, so a pool that is already over its ceiling takes no new machine
     const envelope = await envelopeIn(tx, now, settings);
-    if (envelope.totalMicros + amountMicros > (settings.poolCeilingMicros ?? 0)) return { ok: false, reason: 'pool' };
+    if (envelope.storageBudgeted) {
+      // Kept storage is its own category: the disks we keep and the room held for new ones are checked against the storage budget, once. A room
+      // held for this same disk (it lapsed and is asked for again) is not counted twice
+      const own = already && already.state === 'held' ? Number(already.amountMicros) : 0;
+      if (envelope.storageMicros - own + amountMicros > (settings.storageBudgetMicros ?? 0)) return { ok: false, reason: 'pool' };
+    } else if (envelope.totalMicros + amountMicros > (settings.poolCeilingMicros ?? 0)) return { ok: false, reason: 'pool' };
     // A price of 0 has nothing to hold (a reservation is for a sum above 0): the pool was asked all the same
     if (amountMicros <= 0) return { ok: true };
     const data = { personKey: 'system:disk', personId: null, botId: input.botId, jobId: null, amountMicros: BigInt(amountMicros), state: 'held', expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE), renewals: 0, settledMicros: null, closedAt: null, createdAt: now };
@@ -289,16 +311,17 @@ export async function reserveDiskRoom(input: { botId: string; jobId: string; byt
 
 /**
  * A job that keeps running renews its room: held for another `renewMinutes`, and `moreMicros` more when the next stretch needs
- * it. The extra passes the same checks as new room (the member's allowance and the pool); if it does not, nothing changes and the
+ * it. The extra passes the same checks as new room (the member's credit and the pool); if it does not, nothing changes and the
  * job saves its work and stops safely. A reservation that already lapsed, was settled or released is not renewed.
  */
-export async function renewRoom(input: { key: string; moreMicros?: number }, now: Date = new Date()): Promise<Room> {
-  const more = input.moreMicros ?? 0;
-  if (more !== 0) wholeMicros(more, 'moreMicros');
+export async function renewRoom(input: { key: string; moreMicros?: number; /** R9: bring the room up to this amount (the time used so far plus one stretch), read under the pool's lock: a renewal adds only what is not already held, and nothing when the room already covers it. Replaces `moreMicros`. */ upToMicros?: number; personal?: PersonalCheck }, now: Date = new Date()): Promise<Room> {
+  if (input.moreMicros !== undefined && input.moreMicros !== 0) wholeMicros(input.moreMicros, 'moreMicros');
+  if (input.upToMicros !== undefined) wholeMicros(input.upToMicros, 'upToMicros');
   return prisma.$transaction(async (tx): Promise<Room> => {
     await lockPool(tx);
     const row = await tx.meterReservation.findUnique({ where: { reservationKey: input.key } });
     if (!row || row.state !== 'held' || row.expiresAt <= now) return { ok: false, reason: 'closed' };
+    const more = input.upToMicros !== undefined ? Math.max(0, input.upToMicros - Number(row.amountMicros)) : (input.moreMicros ?? 0);
     const settings = await getMeterSettings(tx);
     if (more > 0) {
       // More room for a job that runs is a new step for the rules too: the same ones that let it start decide whether it may take more.
@@ -313,14 +336,14 @@ export async function renewRoom(input: { key: string; moreMicros?: number }, now
         tx,
       );
       if (!ruled.ok) return { ok: false, reason: 'rule', ruleId: ruled.ruleId, why: ruled.why, leftMicros: ruled.leftMicros, words: ruled.words };
-      const no = await fits(tx, row.personId ?? '', more, now, settings, { newJob: false });
+      const no = await fits(tx, row.personId ?? '', more, now, settings, { newJob: false, personal: input.personal });
       if (no) return no;
     }
     const next = await tx.meterReservation.update({
       where: { id: row.id },
       data: { amountMicros: row.amountMicros + BigInt(more), expiresAt: new Date(now.getTime() + settings.renewMinutes * MINUTE), renewals: { increment: 1 } },
     });
-    return { ok: true, reservation: viewOf(next), created: false };
+    return { ok: true, reservation: viewOf(next), created: false, addedMicros: more };
   });
 }
 
@@ -337,14 +360,33 @@ export async function releaseRoom(input: { key: string }, now: Date = new Date()
 async function close(key: string, state: 'settled' | 'released', now: Date, settledMicros: number | null): Promise<Reservation | null> {
   return prisma.$transaction(async (tx) => {
     await lockPool(tx);
-    const row = await tx.meterReservation.findUnique({ where: { reservationKey: key } });
-    if (!row) return null;
-    // Once it ended it stays as it ended: a second word, even a different one, changes nothing
-    if (row.state !== 'held') return viewOf(row);
-    const next = await tx.meterReservation.update({
-      where: { id: row.id },
-      data: { state, closedAt: now, settledMicros: settledMicros === null ? null : BigInt(settledMicros) },
-    });
-    return viewOf(next);
+    return closeIn(tx, key, state, now, settledMicros);
+  });
+}
+
+async function closeIn(tx: Tx, key: string, state: 'settled' | 'released', now: Date, settledMicros: number | null): Promise<Reservation | null> {
+  const row = await tx.meterReservation.findUnique({ where: { reservationKey: key } });
+  if (!row) return null;
+  // Once it ended it stays as it ended: a second word, even a different one, changes nothing
+  if (row.state !== 'held') return viewOf(row);
+  const next = await tx.meterReservation.update({
+    where: { id: row.id },
+    data: { state, closedAt: now, settledMicros: settledMicros === null ? null : BigInt(settledMicros) },
+  });
+  return viewOf(next);
+}
+
+/**
+ * R4: closing a step's room and booking what it cost happen in ONE step, under the pool's lock. The envelope is read under that same lock, so
+ * it sees the room and its cost in the books, or neither: a cost is never counted twice nor dropped between the two. `book` writes the events
+ * (and anything else that must go with the close) in the same transaction.
+ */
+export async function closeRoomsAndBook<T>(input: { settle?: { key: string; settledMicros: number }[]; release?: string[]; book: (tx: Tx) => Promise<T> }, now: Date = new Date()): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await lockPool(tx);
+    const booked = await input.book(tx);
+    for (const one of input.settle ?? []) await closeIn(tx, one.key, 'settled', now, one.settledMicros);
+    for (const key of input.release ?? []) await closeIn(tx, key, 'released', now, null);
+    return booked;
   });
 }

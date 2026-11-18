@@ -72,3 +72,63 @@ export function roomFor(minutes: number, microsPerMinute: number | null): number
 
 /** The longest one cold-storage run (a pack-away, a proof, a drill) may last: a run still open after this long was stopped with its server, and is closed at this length. */
 export const COLD_RUN_MAX_MS = 6 * 60 * 60 * 1000;
+
+// ---------- Limits the model relay reads (contract v2) ----------
+
+/**
+ * The computer Limits the game's model relay no longer fixes in code (contract v2, section 1.1): the longest answer a call may be allowed, how
+ * many calls one job may have in flight, and the longest total wait for `busy` and `holds`. They are saved settings, read on every call and in
+ * effect at once; the values below are what is served until a super admin saves others (today's values in the game).
+ */
+export interface ComputerLimits {
+  maxOutputTokens: number;
+  maxCallsInFlight: number;
+  maxWaitSeconds: number;
+}
+
+export const COMPUTER_LIMITS_DEFAULT: ComputerLimits = { maxOutputTokens: 32_768, maxCallsInFlight: 8, maxWaitSeconds: 600 };
+
+/** The values that can be saved: they are not limits on anyone's money, only on how a step is sized and how long a refused step waits. */
+export const COMPUTER_LIMITS_RANGES: Record<keyof ComputerLimits, { min: number; max: number }> = {
+  maxOutputTokens: { min: 1, max: 10_000_000 },
+  maxCallsInFlight: { min: 1, max: 1_000 },
+  maxWaitSeconds: { min: 1, max: 86_400 },
+};
+
+/** The Limits as saved: each value that is there and fits, the served default for the rest. */
+export function readComputerLimits(saved: unknown): ComputerLimits {
+  const out: ComputerLimits = { ...COMPUTER_LIMITS_DEFAULT };
+  if (typeof saved !== 'object' || saved === null || Array.isArray(saved)) return out;
+  const record = saved as Record<string, unknown>;
+  for (const key of Object.keys(COMPUTER_LIMITS_RANGES) as (keyof ComputerLimits)[]) {
+    const value = record[key];
+    const range = COMPUTER_LIMITS_RANGES[key];
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value >= range.min && value <= range.max) out[key] = value;
+  }
+  return out;
+}
+
+/** A change to the Limits: only known names, each inside its range. */
+export function checkComputerLimits(input: unknown): { ok: true; value: Partial<ComputerLimits> } | { ok: false; error: string } {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return { ok: false, error: 'Expected an object' };
+  const out: Partial<ComputerLimits> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (!Object.prototype.hasOwnProperty.call(COMPUTER_LIMITS_RANGES, key)) return { ok: false, error: `Unknown limit: ${key}` };
+    const range = COMPUTER_LIMITS_RANGES[key as keyof ComputerLimits];
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < range.min || value > range.max) {
+      return { ok: false, error: `${key} must be a whole number from ${range.min.toLocaleString('en')} to ${range.max.toLocaleString('en')}` };
+    }
+    out[key as keyof ComputerLimits] = value;
+  }
+  return { ok: true, value: out };
+}
+
+/** The reasons a refused model step is answered with in contract version 2 (version 1 knows only refused, allowance, pool and rule). */
+export const STEP_REFUSALS = ['refused', 'allowance', 'budget', 'funds', 'busy', 'holds', 'rule', 'unpriced', 'unsupported', 'paused'] as const;
+export type StepRefusal = (typeof STEP_REFUSALS)[number];
+
+/** Refusals where waiting helps: the game asks again with the same operation id. */
+export const WAITING_HELPS: readonly StepRefusal[] = ['busy', 'holds'];
+
+/** Refusals that save and pause a running job (it is truly out, and the sweep resumes it once the reason clears). */
+export const PAUSES_JOB: readonly StepRefusal[] = ['allowance', 'budget', 'funds'];

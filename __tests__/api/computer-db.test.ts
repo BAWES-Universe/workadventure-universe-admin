@@ -25,7 +25,8 @@ jest.mock('@/lib/meter', () => {
   const actual = jest.requireActual('@/lib/meter');
   return { ...actual, recordMeterEvent: jest.fn(actual.recordMeterEvent) };
 });
-import { saveMeterSettings, getMeterSettings } from '@/lib/meter';
+import { setUpComputerCredit, wipeComputerCredit } from '../helpers/computer-credit-setup';
+import { getMeterSettings } from '@/lib/meter';
 import { diskRoomKey, envelopeIn, releaseRoom, reserveDiskRoom } from '@/lib/meter-allowance';
 import { currentEnvelope } from '@/lib/meter-allowance';
 import { activityFor } from '@/lib/task-receipts';
@@ -84,16 +85,12 @@ async function person(name: string): Promise<{ id: string; brickId: string }> {
   return { id: user.id, brickId: brick.id };
 }
 
-/** A pretend minute costs 6,000 millionths; 10 minutes of room is 60,000. */
-const setUp = (over: Record<string, number | null> = {}) =>
-  saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10, ...over }, 'admin');
+/** A pretend minute costs 6,000 millionths; 10 minutes of room is 60,000. The allowance a test gives is the computers default of the credit books. */
+const setUp = (over: Record<string, number | null> = {}) => setUpComputerCredit(over, NOW);
 
 const wipe = async () => {
   await prisma.computerJob.deleteMany({ where: { personId: { in: people } } });
-  await prisma.meterEvent.deleteMany({});
-  await prisma.meterReservation.deleteMany({});
-  await prisma.meterGrant.deleteMany({});
-  await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits', 'computer-wind-down'] } } });
+  await wipeComputerCredit();
 };
 
 /** The Brick's days are over and the sweep purges it for good (what the owner's page and the bot server's sweep both do). */
@@ -343,16 +340,18 @@ run('a Brick’s computer, in a real database', () => {
       expect(waiting.ok && waiting.job).toMatchObject({ status: 'queued', queuedFor: 'busy' });
     });
 
-    it('stops a running job safely when its room cannot be renewed: what ran is counted, nothing new starts', async () => {
+    it('saves and pauses a running job when its room cannot be renewed (R2): what ran is counted, nothing new starts, and it is not stopped', async () => {
       const sara = await person('sara');
       await setUp({ memberAllowanceMicros: 70_000 });
       await giveComputer(sara.brickId, sara.id);
       const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!job.ok) throw new Error('no');
-      expect(await renewJob(job.job.id, minutes(5))).toEqual({ ok: false, reason: 'allowance' });
+      expect(await renewJob(job.job.id, minutes(5))).toEqual({ ok: false, reason: 'allowance', paused: true });
       const after = await prisma.computerJob.findUniqueOrThrow({ where: { id: job.job.id } });
-      expect(after).toMatchObject({ status: 'stopped', endedBy: 'allowance' });
-      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${job.job.id}:time` } })).toBe(1);
+      expect(after).toMatchObject({ status: 'queued', queuedFor: 'allowance', endedBy: null, pausedFor: 'allowance', reservationKey: null, secondsRun: 300, pausedSeconds: 300 });
+      // What ran is written to the books as the time of this segment, once, and the job's own end has nothing left to write for it
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${job.job.id}:time:p0` } })).toBe(1);
+      expect(await prisma.meterEvent.count({ where: { eventId: `computer:${job.job.id}:time` } })).toBe(0);
       expect((await computerView(sara.brickId, sara.id))?.machine).toBe('resting');
     });
 
@@ -1474,7 +1473,9 @@ run('a Brick’s computer, in a real database', () => {
       const job = await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW);
       if (!job.ok) throw new Error('no');
       await renewJob(job.job.id, minutes(5));
-      expect((await computerView(sara.brickId, sara.id, minutes(6)))?.notice).toMatchObject({ jobId: job.job.id, how: 'month' });
+      // The job is paused, not over: it waits for the person's credit ("Ask for more"), saved, and says so in its own state
+      const view = await computerView(sara.brickId, sara.id, minutes(6));
+      expect(view?.queued).toEqual([expect.objectContaining({ id: job.job.id, status: 'queued', queuedFor: 'allowance', paused: true })]);
     });
 
     it('says nothing for a job that finished, failed or was stopped by the person', async () => {

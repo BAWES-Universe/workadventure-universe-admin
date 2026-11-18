@@ -21,7 +21,7 @@ import { POST as linkApp } from '@/app/api/ready-made/link/route';
 import { POST as askUseCheck } from '@/app/api/bots/[id]/mcp-servers/[serverId]/use/route';
 import { GET as pauseGet, POST as pausePost } from '@/app/api/admin/capability-pause/route';
 import { grantToBrick } from '@/lib/app-connections';
-import { saveMeterSettings } from '@/lib/meter';
+import { setUpComputerCredit, wipeComputerCredit } from '../helpers/computer-credit-setup';
 import { createBrick } from '@/lib/brick-create';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { finishJob, giveComputer, isWindingDown, startJob, startWindDown, sweepComputers } from '@/lib/computer';
@@ -75,7 +75,7 @@ run('pausing each capability on its own, in a real database', () => {
   beforeEach(async () => {
     provider = new FakeComputerProvider();
     setComputerProviderForTests(provider);
-    await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10, appUseCeilingMicros: 100_000_000, appUseMemberCeilingMicros: 50_000_000 }, 'admin');
+    await setUpComputerCredit({ appUseCeilingMicros: 100_000_000, appUseMemberCeilingMicros: 50_000_000 }, NOW);
   });
   afterEach(async () => {
     setAdapterForTests(undefined);
@@ -83,7 +83,7 @@ run('pausing each capability on its own, in a real database', () => {
     await prisma.computerJob.deleteMany({ where: { personId: sara } });
     await prisma.brickComputer.deleteMany({ where: { botId: saraBrick } });
     await prisma.meterEvent.deleteMany({ where: { personId: sara } });
-    await prisma.meterReservation.deleteMany({});
+    await wipeComputerCredit();
     await prisma.appConnection.deleteMany({ where: { ownerId: sara } });
     await prisma.appSetting.deleteMany({ where: { key: { in: ['ready-made-apps', 'apps-pause', 'computer-pause', 'computer-wind-down', 'instant-state', 'meter'] } } });
   });

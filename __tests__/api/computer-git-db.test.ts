@@ -21,7 +21,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 import { prisma } from '@/lib/db';
 import { encryptApiKey } from '@/lib/encryption';
 import { createBrick } from '@/lib/brick-create';
-import { saveMeterSettings } from '@/lib/meter';
+import { setUpComputerCredit, wipeComputerCredit } from '../helpers/computer-credit-setup';
 import { grantToBrick, removeGrant } from '@/lib/app-connections';
 import { FakeComputerProvider, setComputerProviderForTests } from '@/lib/computer-provider';
 import { giveComputer, handBack, startJob, stopJobFor, takeOver, turnOffComputer } from '@/lib/computer';
@@ -238,7 +238,7 @@ const hasBranch = (name: string) => branches().split('\n').some((line) => line.r
     global.fetch = pretendGitHub(join(work, 'github'));
     seen = [];
     pulls = [];
-    await saveMeterSettings({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10 }, 'admin');
+    await setUpComputerCredit({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 100_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100 });
   });
   afterEach(async () => {
     global.fetch = fetchBefore;
@@ -251,8 +251,8 @@ const hasBranch = (name: string) => branches().split('\n').some((line) => line.r
     await new Promise((resolve) => server.close(resolve));
     rmSync(work, { recursive: true, force: true });
     await prisma.meterEvent.deleteMany({});
-    await prisma.meterReservation.deleteMany({});
-    await prisma.appSetting.deleteMany({ where: { key: { in: ['meter', 'bot-limits'] } } });
+    await wipeComputerCredit();
+    await prisma.appSetting.deleteMany({ where: { key: { in: ['bot-limits'] } } });
     await prisma.user.deleteMany({ where: { id: { in: people } } });
     for (const [name, value] of [['ADMIN_API_URL', envBefore.url], ['ENCRYPTION_KEY', envBefore.key], ['COMPUTER_PROVIDER', envBefore.provider]] as const) {
       if (value === undefined) delete process.env[name];

@@ -162,7 +162,11 @@ export function monthOf(now: Date): { start: Date; end: Date } {
  * never opens before its controls do. Only how long a running job's room is held has a recommended value.
  */
 export interface MeterSettings {
-  /** Computer allowance for each member, a month, in millionths of a dollar. */
+  /**
+   * Computer allowance for each member, a month, in millionths of a dollar: the mirror of the computers default in the credit books (the
+   * default is the rule; computer jobs are held to the credit lots, not to this). Empty when there is no every-member monthly default.
+   * Not needed to open anything, so it is not among the settings room is refused without.
+   */
   memberAllowanceMicros: number | null;
   /** The most our own computer pool may carry in a month: spent, reserved, not yet settled and kept storage, with the reserve. */
   poolCeilingMicros: number | null;
@@ -170,6 +174,12 @@ export interface MeterSettings {
   reserveMicros: number | null;
   /** What a gigabyte kept for a month costs us. */
   storageMicrosPerGbMonth: number | null;
+  /**
+   * The most the disks we keep may cost for a month, in millionths of a dollar. When it is set, kept storage is its own category: it leaves the
+   * computer pool's total and is checked against this instead (so a disk is booked once, never in both). Empty keeps kept storage inside the
+   * pool's total, as before. Not needed to open anything.
+   */
+  storageBudgetMicros: number | null;
   /** Jobs one member may have going at once. */
   atOnceMember: number | null;
   /** Jobs going at once, everyone together. */
@@ -201,6 +211,7 @@ export const METER_SETTINGS_EMPTY: MeterSettings = {
   poolCeilingMicros: null,
   reserveMicros: null,
   storageMicrosPerGbMonth: null,
+  storageBudgetMicros: null,
   atOnceMember: null,
   atOnceAll: null,
   appUseMicros: null,
@@ -223,6 +234,7 @@ export const METER_RANGES: Record<keyof MeterSettings, MeterRange> = {
   poolCeilingMicros: { min: 1, max: 1_000_000_000_000_000 },
   reserveMicros: { min: 0, max: 1_000_000_000_000_000 },
   storageMicrosPerGbMonth: { min: 0, max: 1_000_000_000_000 },
+  storageBudgetMicros: { min: 0, max: 1_000_000_000_000_000 },
   atOnceMember: { min: 1, max: 100_000 },
   atOnceAll: { min: 1, max: 1_000_000 },
   appUseMicros: { min: 0, max: 1_000_000_000 },
@@ -234,10 +246,10 @@ export const METER_RANGES: Record<keyof MeterSettings, MeterRange> = {
   renewMinutes: { min: 1, max: 1_440 },
 };
 
-const NEEDED: (keyof MeterSettings)[] = ['memberAllowanceMicros', 'poolCeilingMicros', 'reserveMicros', 'storageMicrosPerGbMonth', 'atOnceMember', 'atOnceAll'];
+const NEEDED: (keyof MeterSettings)[] = ['poolCeilingMicros', 'reserveMicros', 'storageMicrosPerGbMonth', 'atOnceMember', 'atOnceAll'];
 
 /** Settings that may be emptied again but that nothing is refused without (see `missingSettings`). */
-const OPTIONAL_MONEY: (keyof MeterSettings)[] = ['appUseMicros', 'appUseCeilingMicros', 'appUseMemberCeilingMicros', 'speechCeilingSeconds', 'speechMemberCeilingSeconds', 'rolloutBudgetMicros'];
+const OPTIONAL_MONEY: (keyof MeterSettings)[] = ['memberAllowanceMicros', 'storageBudgetMicros', 'appUseMicros', 'appUseCeilingMicros', 'appUseMemberCeilingMicros', 'speechCeilingSeconds', 'speechMemberCeilingSeconds', 'rolloutBudgetMicros'];
 
 const fits = (value: unknown, range: MeterRange): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= range.min && value <= range.max;
 

@@ -17,11 +17,11 @@ import { createBrick } from '@/lib/brick-create';
 import { POST as trackUsage } from '@/app/api/bots/ai-usage/route';
 import { POST as writeEvents } from '@/app/api/meter/events/route';
 import { recordMeterEvent, saveMeterSettings, settleEventsThrough } from '@/lib/meter';
-import { currentEnvelope, memberAllowance, releaseRoom, renewRoom, reserveRoom, settleRoom } from '@/lib/meter-allowance';
+import { currentEnvelope, releaseRoom, renewRoom, reserveRoom, settleRoom, type PersonalCheck } from '@/lib/meter-allowance';
 import { GrantRefused, markGrantBilled, recordGrant } from '@/lib/meter-grants';
 import { compareModelCalls, compareReplyWindow } from '@/lib/meter-shadow';
 import { getMeterSettings } from '@/lib/meter';
-import { readMeterEvent, type MeterEventInput } from '@/lib/meter-values';
+import { missingSettings, readMeterEvent, type MeterEventInput } from '@/lib/meter-values';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 
@@ -48,7 +48,17 @@ const event = (over: Partial<Record<keyof MeterEventInput, unknown>> = {}): Mete
 
 /** The money and the counts, all set; a test changes the ones it is about. */
 const setUp = (over: Record<string, number | null> = {}) =>
-  saveMeterSettings({ memberAllowanceMicros: 1_000, poolCeilingMicros: 1_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10, ...over }, 'admin');
+  saveMeterSettings({ poolCeilingMicros: 1_000_000, reserveMicros: 0, storageMicrosPerGbMonth: 0, atOnceMember: 100, atOnceAll: 100, renewMinutes: 10, ...over }, 'admin');
+
+/**
+ * A member's own limit as a caller passes it (computer jobs pass their credit, lib/computer-credit.ts): asked inside the pool's lock, so room
+ * taken at the same moment cannot pass it. This one counts what the person holds, as the old allowance did.
+ */
+const within = (personId: string, micros: number): PersonalCheck => async (tx, extra) => {
+  const held = await tx.meterReservation.aggregate({ where: { personKey: `person:${personId}`, state: 'held' }, _sum: { amountMicros: true } });
+  const left = micros - Number(held._sum.amountMicros ?? 0);
+  return left >= extra ? null : { ok: false, reason: 'allowance', leftMicros: Math.max(0, left) };
+};
 
 const wipe = async () => {
   await prisma.meterEvent.deleteMany({});
@@ -180,41 +190,34 @@ run('the meter, in a real database', () => {
     });
   });
 
-  describe('one allowance per member, shared by all their Bricks', () => {
+  describe('the member’s own limit is asked inside the pool’s lock, in its place in the order', () => {
     it('refuses all room until every setting is set: a computer does not open before its controls do', async () => {
       const sara = await person('sara');
-      await saveMeterSettings({ memberAllowanceMicros: 1_000 }, 'admin');
+      await saveMeterSettings({ rolloutBudgetMicros: 1_000 }, 'admin');
       const refused = await reserveRoom({ key: `k-${tag}`, personId: sara.id, amountMicros: 10 }, NOW);
       expect(refused).toMatchObject({ ok: false, reason: 'not_set' });
       expect(refused.ok === false && refused.reason === 'not_set' && refused.missing).toEqual(['poolCeilingMicros', 'reserveMicros', 'storageMicrosPerGbMonth', 'atOnceMember', 'atOnceAll']);
+      // The monthly allowance is not one of them: it is the computers default of the credit books, and a computer opens without it
+      expect(missingSettings(await getMeterSettings())).not.toContain('memberAllowanceMicros');
       expect(await prisma.meterReservation.count()).toBe(0);
     });
 
-    it('never lets room taken at the same moment pass the member’s allowance', async () => {
+    it('never lets room taken at the same moment pass the member’s own limit', async () => {
       const sara = await person('sara');
-      await setUp({ memberAllowanceMicros: 1_000 });
-      const answers = await Promise.all(Array.from({ length: 12 }, (_, i) => reserveRoom({ key: `race-${tag}-${i}`, personId: sara.id, amountMicros: 400 }, NOW)));
+      await setUp();
+      const answers = await Promise.all(Array.from({ length: 12 }, (_, i) => reserveRoom({ key: `race-${tag}-${i}`, personId: sara.id, amountMicros: 400, personal: within(sara.id, 1_000) }, NOW)));
       expect(answers.filter((answer) => answer.ok)).toHaveLength(2);
       expect(answers.filter((answer) => !answer.ok).every((answer) => !answer.ok && answer.reason === 'allowance')).toBe(true);
       const held = await prisma.meterReservation.aggregate({ where: { personKey: `person:${sara.id}`, state: 'held' }, _sum: { amountMicros: true } });
       expect(Number(held._sum.amountMicros)).toBe(800);
     });
 
-    it('shares one allowance between all of a member’s Bricks, another Brick adds nothing', async () => {
+    it('shares one limit between all of a member’s Bricks, another Brick adds nothing', async () => {
       const sara = await person('sara');
       const second = await createBrick({ ownerId: sara.id, name: 'Second' });
-      await setUp({ memberAllowanceMicros: 1_000 });
-      expect((await reserveRoom({ key: `a-${tag}`, personId: sara.id, botId: sara.brickId, amountMicros: 700 }, NOW)).ok).toBe(true);
-      expect(await reserveRoom({ key: `b-${tag}`, personId: sara.id, botId: second.id, amountMicros: 700 }, NOW)).toMatchObject({ ok: false, reason: 'allowance', leftMicros: 300 });
-    });
-
-    it('counts what was spent this month against it, and gives it all again the next month', async () => {
-      const sara = await person('sara');
-      await setUp({ memberAllowanceMicros: 1_000 });
-      await recordMeterEvent(event({ personKey: `person:${sara.id}`, personId: sara.id, costMicros: 900 }));
-      expect(await reserveRoom({ key: `m-${tag}`, personId: sara.id, amountMicros: 200 }, NOW)).toMatchObject({ ok: false, reason: 'allowance' });
-      const december = new Date('2026-12-02T09:00:00Z');
-      expect((await reserveRoom({ key: `d-${tag}`, personId: sara.id, amountMicros: 200 }, december)).ok).toBe(true);
+      await setUp();
+      expect((await reserveRoom({ key: `a-${tag}`, personId: sara.id, botId: sara.brickId, amountMicros: 700, personal: within(sara.id, 1_000) }, NOW)).ok).toBe(true);
+      expect(await reserveRoom({ key: `b-${tag}`, personId: sara.id, botId: second.id, amountMicros: 700, personal: within(sara.id, 1_000) }, NOW)).toMatchObject({ ok: false, reason: 'allowance', leftMicros: 300 });
     });
 
     it('counts a figure it does not know apart, and never as nothing spent', async () => {
@@ -223,7 +226,7 @@ run('the meter, in a real database', () => {
       await recordMeterEvent(event({ personKey: `person:${sara.id}`, personId: sara.id, basis: 'unknown', costMicros: null }));
       const envelope = await currentEnvelope(NOW);
       expect(envelope.unknownEvents).toBe(1);
-      expect((await memberAllowance(sara.id, NOW, await getMeterSettings()))?.usedMicros).toBe(0);
+      expect(envelope.committedMicros + envelope.unsettledMicros).toBe(0);
     });
 
     it('does not answer for the same key once the room was settled, released or lapsed', async () => {
@@ -240,21 +243,26 @@ run('the meter, in a real database', () => {
       expect(await reserveRoom({ key: `c-${tag}`, personId: sara.id, amountMicros: 10 }, minutes(11))).toEqual({ ok: false, reason: 'closed' });
     });
 
-    it('keeps room that lapsed counting through its own month, and never into the next one', async () => {
+    it('keeps room that lapsed counting until it is settled or released, across the month (R4: an unknown cost never leaves the pool)', async () => {
       const sara = await person('sara');
-      await setUp({ memberAllowanceMicros: 1_000, poolCeilingMicros: 10_000 });
+      await setUp({ poolCeilingMicros: 10_000 });
       // A job that crashed on 14 November and was never settled or released
       await prisma.meterReservation.create({ data: { reservationKey: `crashed-${tag}`, personKey: `person:${sara.id}`, personId: sara.id, amountMicros: BigInt(900), state: 'held', expiresAt: minutes(-60), createdAt: minutes(-120) } });
-      expect(await reserveRoom({ key: `same-month-${tag}`, personId: sara.id, amountMicros: 200 }, NOW)).toMatchObject({ ok: false, reason: 'allowance', leftMicros: 100 });
+      expect(await reserveRoom({ key: `same-month-${tag}`, personId: sara.id, amountMicros: 200, personal: within(sara.id, 1_000) }, NOW)).toMatchObject({ ok: false, reason: 'allowance', leftMicros: 100 });
       expect((await currentEnvelope(NOW)).unsettledMicros).toBe(900);
       const december = new Date('2026-12-02T09:00:00Z');
       expect((await reserveRoom({ key: `next-month-${tag}`, personId: sara.id, amountMicros: 1_000 }, december)).ok).toBe(true);
+      // What it spent is not known, so it still counts in the next month; settling or releasing it is what ends that
+      // (the December room has lapsed by 10:00 too: 1,000 of its own)
+      expect((await currentEnvelope(new Date('2026-12-02T10:00:00Z'))).unsettledMicros).toBe(1_900);
+      await releaseRoom({ key: `crashed-${tag}` }, december);
+      await releaseRoom({ key: `next-month-${tag}` }, december);
       expect((await currentEnvelope(new Date('2026-12-02T10:00:00Z'))).unsettledMicros).toBe(0);
     });
 
     it('answers the same reservation for the same key and takes nothing more', async () => {
       const sara = await person('sara');
-      await setUp({ memberAllowanceMicros: 1_000 });
+      await setUp();
       const first = await reserveRoom({ key: `once-${tag}`, personId: sara.id, amountMicros: 600 }, NOW);
       const again = await Promise.all(Array.from({ length: 5 }, () => reserveRoom({ key: `once-${tag}`, personId: sara.id, amountMicros: 600 }, NOW)));
       expect(first).toMatchObject({ ok: true, created: true });
@@ -276,7 +284,7 @@ run('the meter, in a real database', () => {
   describe('the envelope around our own pool', () => {
     it('never lets room taken at the same moment, by different members, pass the pool', async () => {
       const members = await Promise.all(['a', 'b', 'c', 'd'].map((name) => person(name)));
-      await setUp({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 1_500, reserveMicros: 100 });
+      await setUp({ poolCeilingMicros: 1_500, reserveMicros: 100 });
       const answers = await Promise.all(members.flatMap((member, i) => [0, 1, 2].map((n) => reserveRoom({ key: `p-${tag}-${i}-${n}`, personId: member.id, amountMicros: 300 }, NOW))));
       // 1,500 less the 100 kept back leaves room for four steps of 300
       expect(answers.filter((answer) => answer.ok)).toHaveLength(4);
@@ -295,16 +303,18 @@ run('the meter, in a real database', () => {
 
     it('asks for more only for a member who used their own allowance up, never when the pool is full', async () => {
       const a = await person('a');
-      await setUp({ memberAllowanceMicros: 100, poolCeilingMicros: 150 });
-      expect(await reserveRoom({ key: `x-${tag}`, personId: a.id, amountMicros: 200 }, NOW)).toMatchObject({ ok: false, reason: 'allowance' });
-      expect(await reserveRoom({ key: `y-${tag}`, personId: a.id, amountMicros: 100 }, NOW)).toMatchObject({ ok: true });
+      await setUp({ poolCeilingMicros: 150 });
+      expect(await reserveRoom({ key: `x-${tag}`, personId: a.id, amountMicros: 200, personal: within(a.id, 100) }, NOW)).toMatchObject({ ok: false, reason: 'allowance' });
+      expect(await reserveRoom({ key: `y-${tag}`, personId: a.id, amountMicros: 100, personal: within(a.id, 100) }, NOW)).toMatchObject({ ok: true });
       const b = await person('b');
-      expect(await reserveRoom({ key: `z-${tag}`, personId: b.id, amountMicros: 100 }, NOW)).toMatchObject({ ok: false, reason: 'pool' });
+      expect(await reserveRoom({ key: `z-${tag}`, personId: b.id, amountMicros: 100, personal: within(b.id, 100) }, NOW)).toMatchObject({ ok: false, reason: 'pool' });
+      // Both are full at once: the member's own limit is told first, whatever the pool holds
+      expect(await reserveRoom({ key: `w-${tag}`, personId: a.id, amountMicros: 200, personal: within(a.id, 100) }, NOW)).toMatchObject({ ok: false, reason: 'allowance' });
     });
 
     it('adds up what is committed, reserved, not yet settled, kept storage and the reserve', async () => {
       const sara = await person('sara');
-      await setUp({ memberAllowanceMicros: 1_000_000, poolCeilingMicros: 1_000_000, reserveMicros: 500, storageMicrosPerGbMonth: 2_000 });
+      await setUp({ poolCeilingMicros: 1_000_000, reserveMicros: 500, storageMicrosPerGbMonth: 2_000 });
       const key = `person:${sara.id}`;
       // Spent and settled by the provider, spent and not settled yet, and a reservation that lapsed
       await recordMeterEvent(event({ personKey: key, personId: sara.id, costMicros: 1_000 }));
@@ -330,12 +340,11 @@ run('the meter, in a real database', () => {
 
     it('keeps chat’s money apart: whatever chat spends, the computer pool and its room do not move', async () => {
       const sara = await person('sara');
-      await setUp({ poolCeilingMicros: 1_000, memberAllowanceMicros: 1_000 });
+      await setUp({ poolCeilingMicros: 1_000 });
       await recordMeterEvent(event({ kind: 'model_call', unit: 'call', pool: 'chat', personKey: `person:${sara.id}`, personId: sara.id, costMicros: 900_000 }));
       const envelope = await currentEnvelope(NOW);
       expect(envelope).toMatchObject({ committedMicros: 0, unsettledMicros: 0, chatMicros: 900_000 });
       expect((await reserveRoom({ key: `chat-${tag}`, personId: sara.id, amountMicros: 1_000 }, NOW)).ok).toBe(true);
-      expect((await memberAllowance(sara.id, NOW, await getMeterSettings()))?.usedMicros).toBe(0);
     });
 
     it('does not count what someone else pays for against ours', async () => {
@@ -343,19 +352,18 @@ run('the meter, in a real database', () => {
       await setUp();
       await recordMeterEvent(event({ personKey: `person:${sara.id}`, personId: sara.id, payerKind: 'person', payerPersonId: sara.id, basis: 'paid_by_other', costMicros: 5_000 }));
       expect(await currentEnvelope(NOW)).toMatchObject({ committedMicros: 0, unsettledMicros: 0 });
-      expect((await memberAllowance(sara.id, NOW, await getMeterSettings()))?.usedMicros).toBe(0);
     });
   });
 
   describe('renewing, settling and giving room back', () => {
     it('renews while a job runs, and the extra room passes the same checks as new room', async () => {
       const sara = await person('sara');
-      await setUp({ memberAllowanceMicros: 1_000, renewMinutes: 10 });
+      await setUp({ renewMinutes: 10 });
       await reserveRoom({ key: `job-${tag}`, personId: sara.id, amountMicros: 400 }, NOW);
-      const renewed = await renewRoom({ key: `job-${tag}`, moreMicros: 300 }, minutes(8));
+      const renewed = await renewRoom({ key: `job-${tag}`, moreMicros: 300, personal: within(sara.id, 1_000) }, minutes(8));
       expect(renewed).toMatchObject({ ok: true, reservation: { amountMicros: 700, renewals: 1, expiresAt: minutes(18) } });
       // 700 held, 300 left: 400 more is not there, and nothing changes
-      expect(await renewRoom({ key: `job-${tag}`, moreMicros: 400 }, minutes(9))).toMatchObject({ ok: false, reason: 'allowance' });
+      expect(await renewRoom({ key: `job-${tag}`, moreMicros: 400, personal: within(sara.id, 1_000) }, minutes(9))).toMatchObject({ ok: false, reason: 'allowance' });
       expect((await prisma.meterReservation.findUniqueOrThrow({ where: { reservationKey: `job-${tag}` } })).renewals).toBe(1);
     });
 
@@ -372,13 +380,13 @@ run('the meter, in a real database', () => {
 
     it('gives room back once settled or released, says it twice with no change, and never takes a reservation out of the books', async () => {
       const sara = await person('sara');
-      await setUp({ memberAllowanceMicros: 1_000 });
+      await setUp();
       await reserveRoom({ key: `s-${tag}`, personId: sara.id, amountMicros: 600 }, NOW);
-      expect(await reserveRoom({ key: `t-${tag}`, personId: sara.id, amountMicros: 600 }, NOW)).toMatchObject({ ok: false, reason: 'allowance' });
+      expect(await reserveRoom({ key: `t-${tag}`, personId: sara.id, amountMicros: 600, personal: within(sara.id, 1_000) }, NOW)).toMatchObject({ ok: false, reason: 'allowance' });
       expect(await settleRoom({ key: `s-${tag}`, settledMicros: 450 }, minutes(1))).toMatchObject({ state: 'settled', settledMicros: 450 });
       expect(await settleRoom({ key: `s-${tag}`, settledMicros: 1 }, minutes(2))).toMatchObject({ state: 'settled', settledMicros: 450 });
       expect(await releaseRoom({ key: `s-${tag}` }, minutes(3))).toMatchObject({ state: 'settled' });
-      expect((await reserveRoom({ key: `t-${tag}`, personId: sara.id, amountMicros: 600 }, minutes(3))).ok).toBe(true);
+      expect((await reserveRoom({ key: `t-${tag}`, personId: sara.id, amountMicros: 600, personal: within(sara.id, 1_000) }, minutes(3))).ok).toBe(true);
       expect(await releaseRoom({ key: `t-${tag}` }, minutes(4))).toMatchObject({ state: 'released' });
       expect(await releaseRoom({ key: `unknown-${tag}` }, minutes(4))).toBeNull();
       expect(await prisma.meterReservation.count()).toBe(2);
@@ -418,29 +426,6 @@ run('the meter, in a real database', () => {
       ]);
       // The database says it as well: a gift can never carry a billed date
       await expect(prisma.meterGrant.update({ where: { grantKey: `gift-${tag}` }, data: { billedAt: new Date() } })).rejects.toThrow();
-    });
-
-    it('raises the allowance while it lasts, and when it ends only the extra goes', async () => {
-      const sara = await person('sara');
-      await setUp({ memberAllowanceMicros: 1_000 });
-      await recordGrant(grant({ personId: sara.id }));
-      // 1,500 can be reserved while double runs, 1,000 is the most without it
-      expect((await reserveRoom({ key: `x2-${tag}`, personId: sara.id, amountMicros: 1_500 }, NOW)).ok).toBe(true);
-      await releaseRoom({ key: `x2-${tag}` }, NOW);
-      await recordMeterEvent(event({ personKey: `person:${sara.id}`, personId: sara.id, costMicros: 500, occurredAt: NOW }));
-      const settings = await getMeterSettings();
-      const state = (when: Date) => memberAllowance(sara.id, when, settings, prisma);
-      expect((await state(NOW))?.leftMicros).toBe(1_500);
-      // The 500 came out of the extra: after it ends the whole usual allowance is still there
-      expect((await state(new Date('2026-11-25T00:00:00Z')))?.leftMicros).toBe(1_000);
-    });
-
-    it('lifts the member’s own limit with no limit, while our pool still holds', async () => {
-      const sara = await person('sara');
-      await setUp({ memberAllowanceMicros: 100, poolCeilingMicros: 1_000 });
-      await recordGrant(grant({ personId: sara.id, multiplier: null, noLimit: true }));
-      expect((await reserveRoom({ key: `big-${tag}`, personId: sara.id, amountMicros: 900 }, NOW)).ok).toBe(true);
-      expect(await reserveRoom({ key: `too-big-${tag}`, personId: sara.id, amountMicros: 200 }, NOW)).toMatchObject({ ok: false, reason: 'pool' });
     });
 
     it('is only for a person who exists, and is a multiple or no limit, never both, and ends', async () => {
