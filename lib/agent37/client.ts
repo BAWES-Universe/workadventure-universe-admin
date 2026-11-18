@@ -26,6 +26,8 @@ export interface Instance {
   /** Epoch seconds; present only while sleeping or waking. */
   slept_at?: number | null;
   past_due?: boolean;
+  /** When it was made, in epoch seconds. */
+  created?: number;
   /** The revision of the template this machine's image came from; behind the template's own revision means it can be updated. */
   template_revision?: number | null;
   /** What the machine may reach on the internet, as Agent37 stored it (domains are lowercased, a bare address becomes /32). Not every answer carries it. */

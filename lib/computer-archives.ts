@@ -115,9 +115,11 @@ export async function storeArchive(botId: string, archive: ReadableStream<Uint8A
       const removed = await store.remove([row.objectKey, stagingKeyOf(botId, generation, id)]).then(() => true, () => false);
       // An object that could not be deleted keeps a row that says so (made again if a purge deleted it), so the clean-up finds it and tries again
       if (!removed) {
+        // If this record cannot be written either (the database and the bucket failed together), the object has no row. It is not lost: a purge is not done
+        // while the Brick's part of the bucket holds anything (`removeBrickObjects`), and the sweep finds the rest by listing (`removeStrayCopies`)
         await prisma.computerArchive
           .upsert({ where: { id }, create: { id, botId, generation, state: 'superseded', objectKey: row.objectKey }, update: { state: 'superseded' } })
-          .catch(() => undefined);
+          .catch((recordError) => console.error('[Computer] A copy’s object could not be deleted and its record could not be written; the purge and the sweep look for it by listing:', recordError instanceof Error ? recordError.message : 'unknown'));
       }
       throw error;
     }
@@ -240,6 +242,35 @@ export async function removeStrayCopies(now: Date = new Date()): Promise<number>
   }
   if (stray.length > 0) await store.remove(stray);
   return stray.length;
+}
+
+const BRICK_OBJECTS_MAX = 2_000;
+
+/**
+ * Looks in the bucket, by listing, for anything of one Brick's copies still there, and deletes what belongs to nobody. A purge works from rows, so an object
+ * whose row was never written (a writer whose upload could not be taken back and whose record could not be written either) is found only here. An object with
+ * no row that is older than any write can last (`STALE_MS`) is deleted; one with a row, or a younger one that may be a write still running, is not touched
+ * and counts as left. Returns how many are left: a purge is not done until it is none. Throws when the bucket cannot be listed or an object cannot be deleted.
+ */
+export async function removeBrickObjects(botId: string, now: Date = new Date()): Promise<number> {
+  const found = await store.list(`computer-cold/${botId}/`, BRICK_OBJECTS_MAX);
+  if (found.length === 0) return 0;
+  const ids = found.flatMap((object) => {
+    const id = COPY_OBJECT.exec(object.key)?.[1];
+    return id ? [id] : [];
+  });
+  const known = new Set((await prisma.computerArchive.findMany({ where: { id: { in: ids } }, select: { id: true } })).map((row) => row.id));
+  const stray: string[] = [];
+  let left = 0;
+  for (const object of found) {
+    const id = COPY_OBJECT.exec(object.key)?.[1];
+    const old = now.getTime() - object.modifiedAt.getTime() >= STALE_MS;
+    if ((!id || !known.has(id)) && old) stray.push(object.key);
+    else left++;
+  }
+  if (stray.length > 0) await store.remove(stray);
+  // A listing cut at its end may hide more: nothing is called clear until a listing that is not full says so
+  return found.length >= BRICK_OBJECTS_MAX ? left + 1 : left;
 }
 
 /** Opens a stored copy decrypted, as a stream, for the download route. */

@@ -13,6 +13,8 @@ jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => null) }));
 
 import { prisma } from '@/lib/db';
+import { memoryStore } from '../helpers/archive-store';
+import { setArchiveStoreForTests } from '@/lib/computer-archives';
 import { createBrick } from '@/lib/brick-create';
 import { deleteBrick, removeGoneBricks, undoBrickDelete } from '@/lib/brick-delete';
 import { confirmChatPurges } from '@/lib/brick-purge';
@@ -117,10 +119,12 @@ run('a Brick’s computer, in a real database', () => {
     await prisma.brickComputer.deleteMany({ where: { bot: { ownerId: { in: people } } } });
     provider = new FakeComputerProvider();
     setComputerProviderForTests(provider);
+    setArchiveStoreForTests(memoryStore().store);
     await setUp();
   });
   afterAll(async () => {
     await wipe();
+    setArchiveStoreForTests(null);
     setComputerProviderForTests(null);
     process.env.COMPUTER_PROVIDER = env;
     await prisma.user.deleteMany({ where: { id: { in: people } } });
@@ -1070,6 +1074,28 @@ run('a Brick’s computer, in a real database', () => {
       expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW)).toEqual({ ok: false, reason: 'broken_start' });
       expect((await computerView(sara.brickId, sara.id))?.machine).toBe('none');
       expect((await currentEnvelope(NOW)).reservedMicros).toBe(0);
+    });
+
+    it('remembers for good that a make that failed may have left a machine nobody wrote down, and does not for one refused before any was asked for', async () => {
+      const sara = await person('sara');
+      await giveComputer(sara.brickId, sara.id);
+      const marked = async () => (await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).makeUnsureAt;
+      // A refusal before any machine was asked for (an image not built yet, a wallet too low) leaves none at the provider
+      const create = provider.create.bind(provider);
+      provider.create = async () => {
+        throw Object.assign(new Error('The computer image is not ready yet'), { noMachineMade: true });
+      };
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'A' }, NOW)).toEqual({ ok: false, reason: 'broken_start' });
+      expect(await marked()).toBeNull();
+      // Any other failure (no answer, a machine that did not come up) may have left one
+      provider.create = create;
+      provider.failNext.create = true;
+      expect(await startJob({ botId: sara.brickId, personId: sara.id, title: 'B' }, minutes(1))).toEqual({ ok: false, reason: 'broken_start' });
+      expect(await marked()).toEqual(minutes(1));
+      // A make that works afterwards writes the reference and does not clear it: a purge still looks in the listing
+      const worked = await startJob({ botId: sara.brickId, personId: sara.id, title: 'C' }, minutes(2));
+      expect(worked.ok).toBe(true);
+      expect(await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).toMatchObject({ providerRef: expect.any(String), makeUnsureAt: minutes(1) });
     });
 
     it('brings a broken computer back from its last saved copy and says which day that was; nothing is made again', async () => {

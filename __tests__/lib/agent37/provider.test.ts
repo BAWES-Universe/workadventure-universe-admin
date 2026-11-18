@@ -356,17 +356,26 @@ describe('the Agent37 provider', () => {
     await expect(p.removeAllFor('never-had-one')).resolves.toBeUndefined();
   });
 
-  it('does not call a Brick with no recorded machine clear on a listing that may be cut short, and does for a short one or a recorded machine', async () => {
+  it('a Brick that may have a machine nobody wrote down is clear only when the listing reaches back to when its computer was made, and one whose every make was written down needs no such proof', async () => {
     const w = world();
     const p = provider(w);
-    for (let at = 0; at < 99; at++) w.instances.set(`other-${at}`, { id: `other-${at}`, status: 'running', url: '', metadata: { creation_id: `brick:other-${at}` }, region: 'us' } as Instance);
-    // 99 machines: a listing that is not the cut kind, nothing of the Brick's is there, so it is clear
-    await expect(p.removeAllFor('bot-1', { recorded: false })).resolves.toBeUndefined();
-    w.instances.set('other-99', { id: 'other-99', status: 'running', url: '', metadata: { creation_id: 'brick:other-99' }, region: 'us' } as Instance);
-    // 100: it may be one page of more, so a machine that was never written down cannot be ruled out
-    await expect(p.removeAllFor('bot-1', { recorded: false })).rejects.toThrow('may be cut short');
-    // A Brick whose machine was written down had it removed by its reference: the listing is a second look only
-    await expect(p.removeAllFor('bot-1', { recorded: true })).resolves.toBeUndefined();
+    const made = new Date('2026-11-10T12:00:00Z');
+    const at = (iso: string) => Math.floor(new Date(iso).getTime() / 1000);
+    // Newest first, all of them made after the Brick's computer: the listing may be one page of more, so nothing older than the page can be ruled out
+    for (let n = 0; n < 150; n++) w.instances.set(`other-${n}`, { id: `other-${n}`, status: 'running', url: '', metadata: { creation_id: `brick:other-${n}` }, region: 'us', created: at('2026-11-11T00:00:00Z') + n } as Instance);
+    await expect(p.removeAllFor('bot-1', { mayHaveUnrecorded: true, since: made })).rejects.toThrow('does not reach back');
+    // No record of when it was made is the same: nothing can be shown
+    await expect(p.removeAllFor('bot-1', { mayHaveUnrecorded: true, since: null })).rejects.toThrow('does not reach back');
+    // One machine made no later than the Brick's computer is in the listing: everything made after it is too, so nothing of the Brick's is left unseen
+    w.instances.set('old', { id: 'old', status: 'running', url: '', metadata: { creation_id: 'brick:old' }, region: 'us', created: at('2026-11-09T00:00:00Z') } as Instance);
+    await expect(p.removeAllFor('bot-1', { mayHaveUnrecorded: true, since: made })).resolves.toBeUndefined();
+    // A machine of the Brick found in it is removed as before
+    w.instances.set('mine', { id: 'mine', status: 'running', url: '', metadata: { creation_id: 'brick:bot-1' }, region: 'us', created: at('2026-11-12T00:00:00Z') } as Instance);
+    await p.removeAllFor('bot-1', { mayHaveUnrecorded: true, since: made });
+    expect(w.instances.has('mine')).toBe(false);
+    // A Brick whose machine was written down, and whose makes all were, had it removed by its reference: the listing is a second look only
+    w.instances.delete('old');
+    await expect(p.removeAllFor('bot-1', { mayHaveUnrecorded: false, since: made })).resolves.toBeUndefined();
     await expect(p.removeAllFor('bot-1')).resolves.toBeUndefined();
   });
 

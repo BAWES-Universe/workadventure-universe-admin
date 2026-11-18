@@ -7,7 +7,7 @@
  *
  *   ROLES_DB_TEST=yes DATABASE_URL=postgres://... npx jest __tests__/api/computer-cold-db.test.ts
  */
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { NextRequest } from 'next/server';
 
@@ -21,6 +21,7 @@ jest.mock('@/lib/meter', () => {
 });
 
 import { prisma } from '@/lib/db';
+import { memoryStore } from '../helpers/archive-store';
 import { waitUntilBlockedOnLock } from '../helpers/db-blocked';
 import { createBrick } from '@/lib/brick-create';
 import { COLD_RUN_MAX_MS } from '@/lib/computer-values';
@@ -47,41 +48,6 @@ let made = 0;
 let provider: FakeComputerProvider;
 const env = { provider: process.env.COMPUTER_PROVIDER, url: process.env.ADMIN_API_URL, publicUrl: process.env.NEXT_PUBLIC_API_URL };
 
-/** The bucket, in memory. What is "encrypted" in the real one is plain here: the encryption has its own tests (saved-copies). */
-function memoryStore() {
-  const objects = new Map<string, Buffer>();
-  // When each object was last written (the real bucket says so): a test may set it back to make an object old
-  const written = new Map<string, Date>();
-  const store: ArchiveStore = {
-    async put(finalKey, _stagingKey, archive, mayPublish) {
-      const chunks: Buffer[] = [];
-      const reader = archive.getReader();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(Buffer.from(value));
-      }
-      const body = Buffer.concat(chunks);
-      // As the bucket does: asked right before the copy goes in place
-      if (mayPublish && !(await mayPublish())) throw new Error('not published');
-      objects.set(finalKey, body);
-      written.set(finalKey, new Date());
-      return { bytes: body.length, sha256: createHash('sha256').update(body).digest('hex') };
-    },
-    async open(key) {
-      const body = objects.get(key);
-      if (!body) throw new Error('not found');
-      return { stream: Readable.from([body]), bytes: body.length };
-    },
-    async remove(keys) {
-      for (const key of keys) objects.delete(key);
-    },
-    async list(prefix, max) {
-      return [...objects.keys()].filter((key) => key.startsWith(prefix)).slice(0, max).map((key) => ({ key, modifiedAt: written.get(key) ?? new Date() }));
-    },
-  };
-  return { store, objects, written };
-}
 let bucket: ReturnType<typeof memoryStore>;
 
 async function idleBrick(daysIdle = 20) {
@@ -1129,6 +1095,51 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       bucket.written.set(key, new Date(NOW.getTime() - 2 * 60 * 60_000));
       expect(await removeStrayCopies(NOW)).toBe(1);
       expect(bucket.objects.size).toBe(0);
+    });
+
+    it('a purge is not done while an object is left that its writer could neither take back nor write a row for: found by listing the Brick’s part of the bucket, and removed once no write can still be running', async () => {
+      const brick = await idleBrick();
+      // The Brick is purged while its copy is written: the row is taken and the marker written right after the check that let it publish, and then the bucket
+      // cannot delete the object and the database cannot write the record that would let a clean-up find it
+      setArchiveStoreForTests({
+        ...bucket.store,
+        put: async (finalKey, stagingKey, archive, mayPublish) => {
+          const sealed = await bucket.store.put(finalKey, stagingKey, archive, mayPublish);
+          await prisma.computerArchive.deleteMany({ where: { botId: brick.botId } });
+          await prisma.brickPurge.create({ data: { botId: brick.botId, provider: 'fake', providerRef: null, machinePending: false, copyPending: true, nextTryAt: NOW } });
+          return sealed;
+        },
+        remove: async () => {
+          throw new Error('the bucket is down');
+        },
+      });
+      const upsert = jest.spyOn(prisma.computerArchive, 'upsert').mockRejectedValue(new Error('the database is down'));
+      try {
+        await expect(storeArchive(brick.botId, new Response('half done').body as ReadableStream<Uint8Array>)).rejects.toBeDefined();
+      } finally {
+        upsert.mockRestore();
+        setArchiveStoreForTests(bucket.store);
+      }
+      // The object is in the bucket with no row anywhere: a purge that works from rows would call the Brick clear
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+      expect(bucket.objects.size).toBe(1);
+      const [key] = [...bucket.objects.keys()];
+      // It may belong to a write that is still running: it is left, and the purge is not done
+      bucket.written.set(key, new Date(NOW.getTime() - 5 * 60_000));
+      const first = await finishOutside(brick.botId, NOW);
+      expect(first).toMatchObject({ done: false });
+      expect(first.left).toContain('cold storage copies');
+      expect(bucket.objects.size).toBe(1);
+      // Old enough that no write can still be running, but the bucket is still down: still not done, still there
+      bucket.written.set(key, new Date(NOW.getTime() - 2 * 60 * 60_000));
+      setArchiveStoreForTests({ ...bucket.store, remove: async () => { throw new Error('the bucket is down'); } });
+      expect(await finishOutside(brick.botId, NOW)).toMatchObject({ done: false });
+      setArchiveStoreForTests(bucket.store);
+      expect(bucket.objects.size).toBe(1);
+      // The bucket is back: it is removed, and only then is the Brick clear
+      expect(await finishOutside(brick.botId, NOW)).toMatchObject({ done: true });
+      expect(bucket.objects.size).toBe(0);
+      await prisma.brickPurge.deleteMany({ where: { botId: brick.botId } });
     });
 
     it('the sweep leaves an old object alone while a row points at it', async () => {
