@@ -171,7 +171,12 @@ export async function overview(now: Date = new Date()): Promise<GrantsOverview> 
   const endedAt = (program: ProgramView) => (program.lotExpiresAt ?? program.claimEndsAt ?? now).getTime();
   const isEnded = (program: ProgramView) => program.status === 'ended' || endedAt(program) <= now.getTime();
   const allGifts = money.filter((program) => program.kind === 'gift');
-  const gifts = [...allGifts.filter((program) => !isEnded(program)), ...allGifts.filter(isEnded).sort((a, b) => endedAt(b) - endedAt(a)).slice(0, RECENTLY_ENDED_GIFTS)];
+  const endedGifts = allGifts.filter(isEnded).sort((a, b) => endedAt(b) - endedAt(a));
+  // An ended gift that was to be billed and was not billed yet stays listed however old it is: it is where "Mark as billed" is
+  const older = endedGifts.slice(RECENTLY_ENDED_GIFTS);
+  const owed = older.length === 0 ? [] : await prisma.creditLot.findMany({ where: { programId: { in: older.map((program) => program.programId) }, settlement: 'to_bill', billedAt: null }, select: { programId: true }, distinct: ['programId'] });
+  const stillOwed = new Set(owed.map((lot) => lot.programId));
+  const gifts = [...allGifts.filter((program) => !isEnded(program)), ...endedGifts.filter((program, index) => index < RECENTLY_ENDED_GIFTS || stillOwed.has(program.programId))];
   const figures = await giftFigures(gifts.map((gift) => gift.programId));
   const giftViews: GiftView[] = gifts
     .map((gift): GiftView => {
