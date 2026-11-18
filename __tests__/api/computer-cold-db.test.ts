@@ -35,7 +35,7 @@ import { finishOutside, purgeBrick } from '@/lib/brick-purge';
 import { deleteBrick, undoBrickDelete } from '@/lib/brick-delete';
 import { listDeletedBricks } from '@/lib/brick-default';
 import { computerReadiness } from '@/lib/computer-readiness';
-import { archiveById, deleteAllArchives, markVerified, mintDownloadToken, pruneArchives, removeStrayCopies, setArchiveStoreForTests, storeArchive, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
+import { archiveById, deleteAllArchives, markVerified, removeBrickObjects, mintDownloadToken, pruneArchives, removeStrayCopies, setArchiveStoreForTests, storeArchive, verifiedArchives, type ArchiveStore } from '@/lib/computer-archives';
 import { GET as download } from '@/app/api/computer/archives/[id]/download/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -299,10 +299,11 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       const brick = await idleBrick();
       const put = bucket.store.put.bind(bucket.store);
       bucket.store.put = async (finalKey, stagingKey, stream) => {
-        // The purge runs while the upload is out: marker first, then it deletes every row it can see (the copy's own row, whose object has not landed yet)
+        // The purge runs while the upload is out: marker first, then it deletes every row it can take. The copy's own row (still being written, its object
+        // not landed yet) is the record that a writer is out: it is not taken, so the purge cannot call itself done
         await prisma.brickPurge.create({ data: { botId: brick.botId, machinePending: false, copyPending: true } });
-        await deleteAllArchives(brick.botId);
-        expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+        await deleteAllArchives(brick.botId, new Date());
+        expect(await prisma.computerArchive.count({ where: { botId: brick.botId, state: 'staging' } })).toBe(1);
         // The upload lands after the purge, and the bucket stops answering before the copy can take it back out
         const sealed = await put(finalKey, stagingKey, stream);
         failRemoval = true;
@@ -342,23 +343,66 @@ run('cold storage for a Brick’s computer, in a real database', () => {
       expect(first.generation).toBe(1);
     });
 
-    it('a write whose row the purge deleted while it was uploading publishes nothing: no object lands that no row names', async () => {
+    it('a write still uploading when the purge runs keeps its row, publishes nothing, and its row is taken by the next try', async () => {
       const brick = await idleBrick();
       const put = bucket.store.put.bind(bucket.store);
       bucket.store.put = async (finalKey, stagingKey, stream, mayPublish) => {
-        // The purge reads and deletes the writer's row while its upload is still out (the Brick's marker is not yet written)
-        await deleteAllArchives(brick.botId);
-        expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+        // The purge runs while the upload is still out (marker first): the writer's row stays, and the purge is not done while it does
+        await prisma.brickPurge.create({ data: { botId: brick.botId, machinePending: false, copyPending: true } });
+        await deleteAllArchives(brick.botId, new Date());
+        expect(await prisma.computerArchive.count({ where: { botId: brick.botId, state: 'staging' } })).toBe(1);
         return put(finalKey, stagingKey, stream, mayPublish);
       };
       await expect(storeArchive(brick.botId, Readable.toWeb(Readable.from([Buffer.from('home')])) as ReadableStream<Uint8Array>)).rejects.toThrow();
       expect(bucket.objects.size).toBe(0);
-      expect(await prisma.computerArchive.count({ where: { botId: brick.botId, state: { not: 'superseded' } } })).toBe(0);
+      // The writer gave up and said so in its row; the next try takes it
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId, state: 'failed' } })).toBe(1);
+      await deleteAllArchives(brick.botId, new Date());
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
+    });
+
+    it('a writer whose upload lands after the purge found the bucket empty, and that can neither take its object back nor write down that it failed, leaves its row: the purge is not done, and a try after a write can last deletes the object', async () => {
+      const brick = await idleBrick();
+      const put = bucket.store.put.bind(bucket.store);
+      const remove = bucket.store.remove.bind(bucket.store);
+      let down = false;
+      bucket.store.put = async (finalKey, stagingKey, stream) => {
+        // The purge runs now (marker first): the writer's row is kept as a write that is out, and the prefix lists empty
+        await prisma.brickPurge.create({ data: { botId: brick.botId, machinePending: false, copyPending: true } });
+        await deleteAllArchives(brick.botId, new Date());
+        expect(await removeBrickObjects(brick.botId, new Date())).toBe(0);
+        // The upload lands after that, and then neither the bucket nor the database answers the writer
+        const sealed = await put(finalKey, stagingKey, stream);
+        down = true;
+        return sealed;
+      };
+      bucket.store.remove = async (keys) => {
+        if (down) throw new Error('the bucket did not answer');
+        return remove(keys);
+      };
+      const spies = [jest.spyOn(prisma.computerArchive, 'update'), jest.spyOn(prisma.computerArchive, 'updateMany'), jest.spyOn(prisma.computerArchive, 'upsert')];
+      for (const spy of spies) spy.mockImplementation((() => Promise.reject(new Error('the database did not answer'))) as never);
+      try {
+        await expect(storeArchive(brick.botId, Readable.toWeb(Readable.from([Buffer.from('home')])) as ReadableStream<Uint8Array>)).rejects.toThrow();
+      } finally {
+        for (const spy of spies) spy.mockRestore();
+      }
+      // The object is in the bucket, and the writer's row is still there as it was: a purge that looked now would not be done
+      expect(bucket.objects.size).toBe(1);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(1);
+      // A try while the write could still be out leaves it; one after a write can last takes the row and the object
+      down = false;
+      await deleteAllArchives(brick.botId, new Date());
+      expect(bucket.objects.size).toBe(1);
+      await deleteAllArchives(brick.botId, new Date(Date.now() + 61 * 60_000));
+      expect(bucket.objects.size).toBe(0);
+      expect(await prisma.computerArchive.count({ where: { botId: brick.botId } })).toBe(0);
     });
 
     it('the purge keeps the row a writer changed while the purge was deleting: a copy that landed after its objects were deleted and could not be taken back out is still found by the next try', async () => {
       const brick = await idleBrick();
-      const row = await prisma.computerArchive.create({ data: { botId: brick.botId, generation: 1, state: 'staging', objectKey: `computer-cold/${brick.botId}/1.writer.ubc` } });
+      // A writer's row that is old (a write cannot last this long), so the purge takes it
+      const row = await prisma.computerArchive.create({ data: { botId: brick.botId, generation: 1, state: 'staging', objectKey: `computer-cold/${brick.botId}/1.writer.ubc`, createdAt: new Date(Date.now() - 3 * 3_600_000) } });
       const remove = bucket.store.remove.bind(bucket.store);
       bucket.store.remove = async (keys) => {
         await remove(keys);
@@ -1051,7 +1095,7 @@ run('cold storage for a Brick’s computer, in a real database', () => {
         setArchiveStoreForTests(bucket.store);
       }
       // The next try finds the late row too and deletes it
-      expect((await finishOutside(brick.botId, new Date(NOW.getTime() + 60 * 60_000))).done).toBe(true);
+      expect((await finishOutside(brick.botId, new Date(Date.now() + 61 * 60_000))).done).toBe(true);
       expect(await prisma.computerArchive.count({ where: { id: lateId } })).toBe(0);
       await prisma.brickPurge.deleteMany({ where: { botId: brick.botId } });
     });

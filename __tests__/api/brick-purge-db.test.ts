@@ -771,6 +771,31 @@ run('purging a deleted Brick, in a real database', () => {
       expect(await prisma.botsTestResult.count({ where: { testId } })).toBe(0);
     });
 
+    it('a chat save that finds its active conversation after a unique-constraint clash and meets the purge before it updates it answers gone, writes nothing, and is not an error', async () => {
+      const sara = await person('sara');
+      const brick = await createBrick({ ownerId: sara.id, name: 'Clash then purge' });
+      const uuid = `clash-${tag}-${made}`;
+      const body = (text: string, at: Date) => asBotServer(`/api/bots/${brick.id}/conversations`, { userUuid: uuid, isGuest: true, messages: [{ role: 'user', content: text }], startedAt: at.toISOString() });
+      const first = await saveConversation(body('hello', new Date()), params(brick.id));
+      expect(await first.json()).toMatchObject({ status: 'created' });
+      // The second save clashes with the first one's active conversation and goes looking for it; the purge lands between the look and the update
+      const look = prisma.botsConversation.findFirst.bind(prisma.botsConversation);
+      const spy = jest.spyOn(prisma.botsConversation, 'findFirst').mockImplementationOnce(((args: never) =>
+        look(args).then(async (row) => {
+          await prisma.botsConversation.deleteMany({ where: { botId: brick.id } });
+          await prisma.brickPurge.create({ data: { botId: brick.id, ownerId: sara.id, chatPending: true, nextTryAt: NOW, purgedAt: NOW } });
+          return row;
+        })) as never);
+      try {
+        const second = await saveConversation(body('hello again', new Date()), params(brick.id));
+        expect(second.status).toBe(200);
+        expect(await second.json()).toMatchObject({ conversationId: null, status: 'gone' });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(await prisma.botsConversation.count({ where: { botId: brick.id } })).toBe(0);
+    });
+
     it('a Brick that is not purged is saved as always: the chat, the memory row and the test result are written', async () => {
       const sara = await person('sara');
       const brick = await createBrick({ ownerId: sara.id, name: 'Live save' });

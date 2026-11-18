@@ -191,21 +191,25 @@ export async function POST(
             existingConversation.startedAt.getTime() === existingConversation.endedAt.getTime();
           
           if (existingConversation && isActiveConversation) {
-            // Update existing active conversation
-            await prisma.botsConversation.update({
-              where: { id: existingConversation.id },
-              data: {
-                messages: messages,
-                messageCount: messageCount || messages.length,
-                userId: finalUserId,
-                userName: userName || null,
-                isGuest: finalIsGuest,
-                // Keep endedAt = startedAt (still active) unless endedAt was provided and > startedAt
-                endedAt: (endedAt && new Date(endedAt) > conversationStartedAt) 
-                  ? new Date(endedAt) 
-                  : undefined, // Keep current endedAt
-              },
-            });
+            // Update existing active conversation. Under the lock a purge takes, after looking again for the marker, like the create: a purge that
+            // deleted the row since it was found means the Brick is gone (not an error), and nothing is written for it
+            const updated = await whileNotPurged(botId, (tx) =>
+              tx.botsConversation.updateMany({
+                where: { id: existingConversation.id },
+                data: {
+                  messages: messages,
+                  messageCount: messageCount || messages.length,
+                  userId: finalUserId,
+                  userName: userName || null,
+                  isGuest: finalIsGuest,
+                  // Keep endedAt = startedAt (still active) unless endedAt was provided and > startedAt
+                  endedAt: (endedAt && new Date(endedAt) > conversationStartedAt) 
+                    ? new Date(endedAt) 
+                    : undefined, // Keep current endedAt
+                },
+              }),
+            );
+            if (updated.gone || updated.value.count === 0) return NextResponse.json({ conversationId: null, status: 'gone' }, { headers: corsHeaders(request) });
             
             return NextResponse.json(
               { 

@@ -203,9 +203,14 @@ export async function pruneArchives(botId: string, keepId: string | null = null,
   return removed;
 }
 
-/** Deletes every copy of this Brick for good (the Brick was deleted). Throws when one cannot be deleted, so the Brick is kept for the next try. */
-export async function deleteAllArchives(botId: string): Promise<void> {
-  const rows = await prisma.computerArchive.findMany({ where: { botId } });
+/**
+ * Deletes every copy of this Brick for good (the Brick was deleted). Throws when one cannot be deleted, so the Brick is kept for the next try.
+ * A copy that is still being written (its row is `staging` and younger than a write can last) is not taken: that row is the durable record that a
+ * writer is still out. The writer settles it itself (the purge marker, written first, makes it give up and say so in its row, and take its objects out),
+ * or it goes stale and the next try takes it with its objects, so a purge that finds a row left is not done and an object that lands late is never missed.
+ */
+export async function deleteAllArchives(botId: string, now: Date = new Date()): Promise<void> {
+  const rows = (await prisma.computerArchive.findMany({ where: { botId } })).filter((row) => !(row.state === 'staging' && now.getTime() - row.createdAt.getTime() <= STALE_MS));
   if (rows.length === 0) return;
   await store.remove(rows.flatMap((row) => [row.objectKey, `${row.objectKey}.new`]));
   // Only the rows whose objects were just deleted, and only as they were when they were read: a copy that began being written meanwhile keeps its

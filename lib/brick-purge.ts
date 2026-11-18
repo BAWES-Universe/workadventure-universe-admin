@@ -155,7 +155,7 @@ export async function finishOutside(botId: string, now: Date = new Date()): Prom
     // The copies cold storage keeps (rows and their objects) go with the saved copy; a Brick that never was cold has none
     let coldGone = true;
     try {
-      await deleteAllArchives(botId);
+      await deleteAllArchives(botId, now);
       // A copy that began being written while these were deleted has its own row: the Brick is not clear of copies until none is left
       if ((await prisma.computerArchive.count({ where: { botId } })) > 0) throw new Error('a copy was still being written');
       // Nor while its part of the bucket holds an object: one whose writer could not take it back and could not write its row either is found only by listing
