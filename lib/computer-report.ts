@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { readFilesList } from '@/lib/computer-files';
 import { silentEnding, type UndeliverableWhy, type WaitingFor } from '@/lib/computer-values';
-import { cardsOfJobs, handedPathsOf, HAND_OVER_LATEST_MS, madeInJob, type Card } from '@/lib/computer-file-cards';
+import { cardsOfJobs, handedPathsOf, HAND_OVER_ALIVE_MS, HAND_OVER_LATEST_MS, madeInJob, type Card } from '@/lib/computer-file-cards';
 
 /**
  * Brick tells the person how a computer job went (the report back), in their own chat with it. Orbit never speaks in a chat: the bot server asks
@@ -65,7 +65,7 @@ export interface Report {
 const UNFINISHED_ENDING_MS = 5 * 60 * 1000 + HAND_OVER_LATEST_MS;
 /**
  * A job waiting in line for the machine's hand-over is not given up while the hand-overs ahead of it keep taking the machine one after the other, which can take longer
- * than UNFINISHED_ENDING_MS: its ending is held while a hand-over on its Brick's computer is live (a claim younger than HAND_OVER_LATEST_MS), but never longer than this.
+ * than UNFINISHED_ENDING_MS: its ending is held while a hand-over on its Brick's computer is live (a claim younger than HAND_OVER_LATEST_MS) or while it itself still beats as waiting, but never longer than this.
  */
 const UNFINISHED_ENDING_CEILING_MS = 60 * 60 * 1000;
 /** How long a job that was refused by a rule before it began waits before it is listed (the call that asked may be deleting it). */
@@ -213,6 +213,7 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
   const unfinishedBefore = new Date(now.getTime() - UNFINISHED_ENDING_MS);
   const ceilingBefore = new Date(now.getTime() - UNFINISHED_ENDING_CEILING_MS);
   const staleClaimBefore = new Date(now.getTime() - HAND_OVER_LATEST_MS);
+  const staleAliveBefore = new Date(now.getTime() - HAND_OVER_ALIVE_MS);
   const ended = await prisma.computerJob.findMany({
     where: {
       status: { in: ['done', 'stopped', 'failed'] },
@@ -230,8 +231,12 @@ export async function reportsToTell(limit = 50, now: Date = new Date()): Promise
             // Not while a hand-over on its Brick's computer is live: the job may be waiting in line for it, and its cards are not made yet
             {
               endedAt: { lte: unfinishedBefore },
-              // (a plain NOT would drop a computer whose claim is empty: a comparison with nothing is neither true nor false)
-              bot: { OR: [{ computer: { is: null } }, { computer: { filesClaimedAt: null } }, { computer: { filesClaimedAt: { lt: staleClaimBefore } } }] },
+              AND: [
+                // Not while it is itself waiting in line for its hand-over (it beats while it waits: the moment between two hand-overs has no claim on the machine)
+                { OR: [{ handOverAliveAt: null }, { handOverAliveAt: { lt: staleAliveBefore } }] },
+                // (a plain NOT would drop a computer whose claim is empty: a comparison with nothing is neither true nor false)
+                { bot: { OR: [{ computer: { is: null } }, { computer: { filesClaimedAt: null } }, { computer: { filesClaimedAt: { lt: staleClaimBefore } } }] } },
+              ],
             },
             { endedAt: { lte: ceilingBefore } },
           ],

@@ -34,6 +34,9 @@ const PIECES_AT_ONCE = 4;
 export const HAND_OVER_BUDGET_MS = 2 * 60_000;
 /** The longest handing over can still be running (the budget, and one last command that was already asked): after this its claim on the machine is stale, and nothing is written after it. */
 export const HAND_OVER_LATEST_MS = HAND_OVER_BUDGET_MS + 2 * 60_000;
+/** A job waiting for its hand-over beats its `handOverAliveAt` this often, and is believed to be waiting while the last beat is younger than HAND_OVER_ALIVE_MS (one that stopped beating was abandoned). */
+export const HAND_OVER_BEAT_MS = 5_000;
+export const HAND_OVER_ALIVE_MS = 30_000;
 const NAME_MAX = 120;
 
 // ---------- Which files ----------

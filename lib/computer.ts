@@ -11,7 +11,7 @@ import { getComputerProvider, type ComputerProvider } from '@/lib/computer-provi
 import { renewJobTokens, revokeJobTokens, TOKEN_RENEW_EVERY_SECONDS } from '@/lib/computer-token';
 import { callRoomKey, settleModelCall } from '@/lib/computer-calls';
 import { parseFilesList, readFilesList, type FilesList } from '@/lib/computer-files';
-import { HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
+import { HAND_OVER_ALIVE_MS, HAND_OVER_BEAT_MS, HAND_OVER_LATEST_MS, handOverFiles } from '@/lib/computer-file-cards';
 import { cleanEndNote } from '@/lib/computer-report';
 import {
   AFTER_TAKE_OVER,
@@ -646,7 +646,9 @@ async function pendingHandOvers(botId: string, now: Date, exceptJobId?: string):
       status: 'done',
       writes: true,
       endClosedAt: null,
-      endedAt: { gt: new Date(now.getTime() - 60 * 1000 - HAND_OVER_LATEST_MS) },
+      // Not older than the longest hand-over, or one that is still waiting in line for it (it beats while it waits, so a job behind several others, and the gap
+      // between one hand-over letting go of the machine and the next taking it, are never taken for nobody waiting)
+      OR: [{ endedAt: { gt: new Date(now.getTime() - 60 * 1000 - HAND_OVER_LATEST_MS) } }, { handOverAliveAt: { gt: new Date(now.getTime() - HAND_OVER_ALIVE_MS) } }],
       ...(exceptJobId ? { id: { not: exceptJobId } } : {}),
     },
   });
@@ -926,6 +928,8 @@ async function endJob(jobId: string, status: 'done' | 'stopped' | 'failed', ende
  * the job's time (the machine was held for them). Never throws: a machine that cannot be read only means no cards.
  */
 async function handOverJobFiles(job: { id: string; botId: string; personId: string; title: string; writes: boolean }, now: Date): Promise<number> {
+  // While it waits (and as it takes its turn) the job says so, so the machine is not rested and its ending is not told in a gap between two hand-overs
+  const beat = () => prisma.computerJob.updateMany({ where: { id: job.id }, data: { handOverAliveAt: new Date() } }).then(() => undefined, () => undefined);
   try {
     // Only a job that writes makes files. Which files are its own is what is in its own output folder: a job running beside it has a folder of its own
     if (!job.writes) return 0;
@@ -942,7 +946,13 @@ async function handOverJobFiles(job: { id: string; botId: string; personId: stri
     // long past after FILES_CLAIM_MS and is taken over), so a job behind two others is not given up while they, one after the other, make their way through
     let waitingFor: number | null = null;
     let claimedAt = new Date();
+    let beatAt = Date.now();
+    await beat();
     for (;;) {
+      if (Date.now() - beatAt >= HAND_OVER_BEAT_MS) {
+        beatAt = Date.now();
+        await beat();
+      }
       claimedAt = new Date();
       const claim = await prisma.brickComputer.updateMany({
         where: { botId: job.botId, machine: 'working', providerRef: row.providerRef, OR: [{ filesClaimedAt: null }, { filesClaimedAt: { lt: new Date(claimedAt.getTime() - FILES_CLAIM_MS) } }] },
@@ -970,6 +980,9 @@ async function handOverJobFiles(job: { id: string; botId: string; personId: stri
   } catch (error) {
     console.error('[Computer] Could not hand over the files of a job:', error instanceof Error ? error.message : 'unknown');
     return 0;
+  } finally {
+    // Not waiting any more, whichever way it ended (its files handed over, given up, or nothing to hand over)
+    await prisma.computerJob.updateMany({ where: { id: job.id, handOverAliveAt: { not: null } }, data: { handOverAliveAt: null } }).catch(() => undefined);
   }
 }
 
@@ -1048,12 +1061,15 @@ async function recordMissingComputerTime(now: Date, batch: number, botId?: strin
   const only = botId ? Prisma.sql`AND j."bot_id" = ${botId}` : Prisma.empty;
   // A job whose files are being handed over is still adding the seconds that takes to its time: its event is written by that job, after, never by the sweep before
   const claimCutoff = new Date(now.getTime() - FILES_CLAIM_MS);
+  // ...nor one that is waiting in line for its hand-over (it beats while it waits): the gap between two hand-overs on the machine is no reason to write its time
+  const aliveCutoff = new Date(now.getTime() - HAND_OVER_ALIVE_MS);
   const ended = await prisma.$queryRaw<Array<{ id: string; botId: string; personId: string; runId: string | null; secondsRun: number; status: string; endedBy: string | null; endedAt: Date | null }>>(Prisma.sql`
     SELECT j."id", j."bot_id" AS "botId", j."person_id" AS "personId", j."run_id" AS "runId", j."seconds_run" AS "secondsRun", j."status", j."ended_by" AS "endedBy", j."ended_at" AS "endedAt"
     FROM "computer_jobs" j
     WHERE j."reservation_key" IS NOT NULL AND j."started_at" IS NOT NULL AND j."status" IN ('done', 'stopped', 'failed') AND j."seconds_run" > 0 AND j."ended_at" <= ${cutoff} ${only}
       AND NOT EXISTS (SELECT 1 FROM "meter_events" e WHERE e."event_id" = 'computer:' || j."id" || ':time')
       AND NOT EXISTS (SELECT 1 FROM "brick_computers" c WHERE c."bot_id" = j."bot_id" AND c."files_claimed_at" > ${claimCutoff})
+      AND (j."hand_over_alive_at" IS NULL OR j."hand_over_alive_at" <= ${aliveCutoff})
     ORDER BY j."ended_at" ASC
     LIMIT ${batch}`);
   for (const job of ended) {

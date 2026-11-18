@@ -730,6 +730,35 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect((await mine([second.job.id]))[0].handed.map((card) => card.name)).toEqual(['b.pdf']);
   });
 
+  it('does not rest the machine in the gap between two hand-overs under a job that has waited for longer than a hand-over can last, and rests it once that job stopped beating', async () => {
+    const sara = await person('sara');
+    const first = await started(sara, 'First');
+    // A second writer finished long before and is still in line for its files: nobody holds the machine at this moment (the gap), but it beats
+    const second = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'Second', status: 'done', writes: true, startedAt: minutes(-1), endedAt: minutes(0), handOverAliveAt: new Date() } });
+    await finishJob(first, 'done', minutes(9));
+    expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('working');
+    expect(provider.calls.filter((call) => call.name === 'rest')).toEqual([]);
+    // The same job after its server stopped (no beat for longer than a beat lasts) is given up: the machine is rested by the next close-out
+    await prisma.computerJob.update({ where: { id: second.id }, data: { handOverAliveAt: minutes(0) } });
+    const third = await started(sara, 'Third', minutes(10));
+    await finishJob(third, 'done', minutes(11));
+    expect((await prisma.brickComputer.findUniqueOrThrow({ where: { botId: sara.brickId } })).machine).toBe('resting');
+  });
+
+  it('beats while a job waits for its turn and stops when it is over, whichever way it ended', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    out(id, 'a.pdf', 'a', 5);
+    setHandOverClaimWaitForTests(300);
+    await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: new Date() } });
+    const finished = finishJob(id, 'done', minutes(9));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect((await prisma.computerJob.findUniqueOrThrow({ where: { id } })).handOverAliveAt).not.toBeNull();
+    await finished;
+    // Given up after the wait: no beat is left saying it still waits
+    expect((await prisma.computerJob.findUniqueOrThrow({ where: { id } })).handOverAliveAt).toBeNull();
+  });
+
   it('does not wait for a machine that is not working any more: nothing is handed over and nothing is held up', async () => {
     const sara = await person('sara');
     const id = await started(sara);
@@ -770,6 +799,20 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect(await prisma.meterEvent.count({ where: { eventId: `computer:${id}:time` } })).toBe(0);
     // A claim long past (a stopped server left it) does not hold the books back
     await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: new Date(Date.now() - 60 * 60 * 1000) } });
+    await sweepComputers(new Date());
+    expect(await prisma.meterEvent.count({ where: { eventId: `computer:${id}:time` } })).toBe(1);
+  });
+
+  it('does not let the sweep write the time of a job that still beats as waiting for its turn, even in a gap with no claim on the machine', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    await finishJob(id, 'done', minutes(9));
+    await prisma.meterEvent.deleteMany({ where: { eventId: `computer:${id}:time` } });
+    await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: null } });
+    await prisma.computerJob.update({ where: { id }, data: { handOverAliveAt: new Date() } });
+    await sweepComputers(new Date());
+    expect(await prisma.meterEvent.count({ where: { eventId: `computer:${id}:time` } })).toBe(0);
+    await prisma.computerJob.update({ where: { id }, data: { handOverAliveAt: new Date(Date.now() - 60 * 1000) } });
     await sweepComputers(new Date());
     expect(await prisma.meterEvent.count({ where: { eventId: `computer:${id}:time` } })).toBe(1);
   });

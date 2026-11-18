@@ -291,6 +291,19 @@ run('Brick tells the person how a computer job went, in a real database', () => 
     expect(await told(61)).toEqual(['done']);
   });
 
+  it('does not tell an unclosed ending in the gap between two hand-overs while its job still beats as waiting, and tells it once it stopped beating', async () => {
+    const sara = await person('sara');
+    const justNow = new Date();
+    const at = (minutes: number) => new Date(justNow.getTime() + minutes * 60_000);
+    // Waiting in line for ten minutes: the machine has no claim on it at this moment, but the job beat a few seconds ago
+    const waiting = await prisma.computerJob.create({ data: { botId: sara.brickId, personId: sara.id, title: 'In line', status: 'done', startedAt: at(-1), endedAt: justNow, handOverAliveAt: at(11.8) } });
+    await prisma.brickComputer.upsert({ where: { botId: sara.brickId }, create: { botId: sara.brickId, machine: 'working', filesClaimedAt: null }, update: { filesClaimedAt: null } });
+    const told = async (minutes: number) => (await reportsToTell(200, at(minutes))).filter((report) => report.jobId === waiting.id).map((report) => report.kind);
+    expect(await told(12)).toEqual([]);
+    // It stopped beating (its server stopped): it is told as it stands
+    expect(await told(13)).toEqual(['done']);
+  });
+
   it('marks an ending closed when its own work is finished, so a real finish is told at once', async () => {
     const sara = await person('sara');
     const id = await started(sara);

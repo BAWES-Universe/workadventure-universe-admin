@@ -3284,6 +3284,9 @@ model ComputerJob {
   // When everything an ending does was finished (its time written to the books, its files listed, its machine rested): an ending is told only after that, so
   // a message never goes with a file list or a bill that is not written yet. One that never got there (a server stopped halfway) is told after a while.
   endClosedAt    DateTime? @map("end_closed_at")
+  // Beaten every few seconds while this finished job waits in line for its files to be handed over (and as it takes its turn), emptied when it stops waiting: a wait is told
+  // from one that was abandoned (a server that stopped) by it, so the gap between one hand-over letting go of the machine and the next taking it is never mistaken for nobody waiting.
+  handOverAliveAt DateTime? @map("hand_over_alive_at")
   /// The files list taken as this job ended (what its report says it saved); null when none was taken.
   endFiles       Json?     @map("end_files")
   /// The files list taken when this job began on the machine: what was there before it. What the job made is what the end list has that this one
