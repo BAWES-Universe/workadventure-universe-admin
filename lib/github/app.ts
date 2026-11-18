@@ -45,15 +45,19 @@ export interface ManifestConversion {
 }
 
 let cached: { at: number; app: GitHubApp | null } | null = null;
+/** Counts every forgetting, so a read that began before one never writes its (older) answer over it. */
+let forgotten = 0;
 
-/** Forget the app read last (tests, and right after it is saved). */
+/** Forget the app read last (tests, right after it is saved, and when another server may have changed it). */
 export function forgetGitHubApp(): void {
+  forgotten += 1;
   cached = null;
 }
 
 /** The app, or null while it has not been made. Never throws: an unreadable setting is no app (and is logged). */
 export async function getGitHubApp(): Promise<GitHubApp | null> {
   if (cached && Date.now() - cached.at < CACHE_MS) return cached.app;
+  const startedAt = forgotten;
   let app: GitHubApp | null = null;
   try {
     const row = await prisma.appSetting.findUnique({ where: { key: SETTING_KEY } });
@@ -75,7 +79,8 @@ export async function getGitHubApp(): Promise<GitHubApp | null> {
   } catch (error) {
     console.error('[GitHubApp] Could not read the app:', error instanceof Error ? error.message : 'unknown');
   }
-  cached = { at: Date.now(), app };
+  // Forgotten while this was being read: what was read may be older than what was saved, so it answers this call only
+  if (forgotten === startedAt) cached = { at: Date.now(), app };
   return app;
 }
 

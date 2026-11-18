@@ -171,7 +171,7 @@ run('Connect GitHub for Bricks, in a real database', () => {
       else process.env.SUPER_ADMINS = adminsBefore;
     }
     forgetGitHubApp();
-    expect(await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body: {} }))).json()).toEqual({ existing: { slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe' } });
+    expect(await (await createPage(request('/api/admin/github-app/create', { method: 'POST', body: {} }))).json()).toEqual({ existing: { slug: 'bawes-universe', url: 'https://github.com/apps/bawes-universe', appId: expect.any(Number) } });
   });
 
   it('a second setup page started before the app was made never replaces it; replacing it on purpose does', async () => {
