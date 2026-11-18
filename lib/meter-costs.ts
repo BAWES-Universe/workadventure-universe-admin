@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { getMeterSettings } from '@/lib/meter';
+import { getMeterSettingsStrict } from '@/lib/meter';
 import { pickRunning } from '@/lib/meter-grants';
 import { extraDrawn, monthOf, type GrantWindow } from '@/lib/meter-values';
 import { wokaLayersForMany } from '@/lib/woka-avatar';
@@ -266,7 +266,7 @@ export async function costsReport(from: Date, to: Date, now: Date = new Date()):
         WHERE kind = 'stored_bytes' AND payer_kind = 'universe' AND bot_id IS NOT NULL AND occurred_at < ${until}
         ORDER BY bot_id, occurred_at DESC, recorded_at DESC
       ) latest`),
-    getMeterSettings(),
+    getMeterSettingsStrict(),
   ]);
 
   // Instant runs are their own line: "app_use" is ordinary connected-app use, "app_use:instant" is an Instant run

@@ -24,6 +24,15 @@ export async function getMeterSettings(db: Pick<typeof prisma, 'appSetting'> = p
   }
 }
 
+/**
+ * The settings, or a thrown error when they cannot be read. For a report that says money: the empty settings `getMeterSettings` falls
+ * back to would show "$0 above the usual" for a grant that has spending.
+ */
+export async function getMeterSettingsStrict(db: Pick<typeof prisma, 'appSetting'> = prisma): Promise<MeterSettings> {
+  const row = await db.appSetting.findUnique({ where: { key: SETTING_KEY } });
+  return readMeterSettings(row?.value);
+}
+
 /** Saves a super admin's change on top of what is saved (only the names it carries change) and returns all of them. */
 export async function saveMeterSettings(change: Partial<MeterSettings>, userId: string): Promise<MeterSettings> {
   return prisma.$transaction(async (tx) => {
