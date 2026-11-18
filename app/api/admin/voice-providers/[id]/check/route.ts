@@ -4,7 +4,8 @@ import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { allowKeyAttempt } from '@/lib/ai-key-models';
 import { decryptApiKey } from '@/lib/encryption';
-import { checkVoiceKeyWithCompany } from '@/lib/voice-key-check';
+import { checkVoiceKeyWithCompany, listCompanyModels } from '@/lib/voice-key-check';
+import { voiceKeyCompanyInfo } from '@/lib/voice-key-companies';
 
 export const runtime = 'nodejs';
 
@@ -13,7 +14,9 @@ const STATUS = { refused: 422, unreachable: 502, 'bad-request': 400 } as const;
 /**
  * POST /api/admin/voice-providers/:id/check - asks the company if it knows the key a server provider holds (#792). The same one
  * free call as for a pasted key: nothing is spoken or heard, so nothing is billed, and the key never leaves Orbit except to the
- * company's own address. Answers `{ ok: true }`, or `{ error }`: 404 no such provider, 409 it has no key, 422 the company turned
+ * company's own address. Answers `{ ok: true, models }`, with the models the company lists for this key for the provider's jobs (one
+ * more free call per job that has a list, so a super admin ticks them instead of typing ids), or null when it has no list or the
+ * list can't be read, or `{ error }`: 404 no such provider, 409 it has no key, 422 the company turned
  * the key away, 502 it couldn't be reached, 429 too many tries. A provider with its own address answers 409: the company's address
  * can't vouch for a key made for another one.
  */
@@ -34,7 +37,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       return NextResponse.json({ error: `${row.name}’s key can’t be read. Replace it.` }, { status: 409 });
     }
     const result = await checkVoiceKeyWithCompany(row.adapter, key, row.region);
-    return result.ok ? NextResponse.json({ ok: true }) : NextResponse.json({ error: result.message }, { status: STATUS[result.reason] });
+    if (!result.ok) return NextResponse.json({ error: result.message }, { status: STATUS[result.reason] });
+    // The company knows the key: its own lists for the jobs this provider does
+    const company = voiceKeyCompanyInfo(row.adapter);
+    const jobs = (['recognition', 'speech'] as const).filter((job) => row[job] && company?.jobs[job]?.modelList);
+    const lists = company ? await Promise.all(jobs.map((job) => listCompanyModels(company, key, job))) : [];
+    return NextResponse.json({ ok: true, models: lists.some(Boolean) ? lists.flatMap((list) => list ?? []) : null });
   } catch (error) {
     console.error('[VoiceProviders] Check key failed:', error instanceof Error ? error.message : 'unknown');
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
