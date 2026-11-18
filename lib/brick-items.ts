@@ -606,7 +606,9 @@ export async function changeItem(viaBrickId: string, itemId: string, input: z.in
         if (row.state === 'on' && row.heldSince !== null) return { ok: true as const, item: viewOf(row) };
         const plan = snoozePlan(cadence, zone, row.nextDueAt, now, limits.snooze);
         if (!plan || !plan.snoozed) return { ok: true as const, item: viewOf(row) };
-        return finish({ state: 'on', pausedBy: null, timeZone: zone, nextDueAt: plan.nextDueAt, regularDueAt: plan.regularDueAt, snoozedUntil: plan.nextDueAt, ...bump });
+        // No new revision: snoozing one occurrence changes nothing a run already asked for or running is about (its words, its kind, its rule), so a
+        // Run now that waits or is running goes on and reports as it would have. (A one-off moves its own time, which is a change, and does bump.)
+        return finish({ state: 'on', pausedBy: null, timeZone: zone, nextDueAt: plan.nextDueAt, regularDueAt: plan.regularDueAt, snoozedUntil: plan.nextDueAt });
       }
       case 'run': {
         return requestRun(tx, row, ownerId, input.key ?? null, now, roomSettings!, limits);

@@ -561,6 +561,28 @@ run('Run now and snooze, in a real database', () => {
       expect(await runsOf(briefing.id)).toHaveLength(1);
     });
 
+    it('snoozing a repeating item changes nothing a run is about: a Run now that waits, or is running, goes on and reports', async () => {
+      const kai = await person('kai');
+      await saveServerLimits({ bricks: { snooze: 10 } }, kai.id);
+      try {
+        const briefing = await set(kai, { kind: 'schedule', cadence: hourly });
+        const before = await row(briefing.id);
+        const asked = await tap(kai, briefing.id, 'run', at(MIN));
+        if (!asked.ok) throw new Error('expected the run');
+        // Snoozed while the run waits: the run is not dropped
+        expect(await tap(kai, briefing.id, 'snooze', at(2 * MIN))).toMatchObject({ ok: true, item: { state: 'on' } });
+        expect(await row(briefing.id)).toMatchObject({ revision: before.revision, snoozedUntil: at(2 * MIN + 10 * MIN) });
+        const [handed] = mine(await claimDueRuns(at(3 * MIN)), briefing.id);
+        expect(handed).toMatchObject({ runId: asked.run!.runId, manual: true });
+        // Still the same item as far as the run is concerned: it is allowed to go on and report
+        expect(await checkRun(handed.runId, 1, at(4 * MIN))).toEqual({ ok: true });
+        const done = await finishRun(handed.runId, { attempt: 1, state: 'done', outcome: 'spoke', result: 'Sent' }, at(5 * MIN));
+        expect(done).toMatchObject({ ok: true, applied: true });
+      } finally {
+        await saveServerLimits({ bricks: { snooze: 60 } }, kai.id);
+      }
+    });
+
     it('a one-off snoozed is the one occurrence that moves, and a repeat tap while it waits is the snooze as it is', async () => {
       const tia = await person('tia');
       const once = await set(tia, { words: 'Call mum', cadence: { type: 'once', at: at(HOUR).toISOString() } });
