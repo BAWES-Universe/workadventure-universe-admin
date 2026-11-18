@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useCallback, useEffect, useState, type ReactNode } from 'react';
+import { use, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { RefreshCw, ShieldCheck, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -112,6 +112,8 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
   const [failed, setFailed] = useState(false);
   const [checked, setChecked] = useState<{ ok: true } | { ok: false; message: string } | { ok: 'note'; message: string } | null>(null);
   const [checking, setChecking] = useState(false);
+  /** Which Check key is the latest, so an answer that comes after a key was replaced is dropped. */
+  const checkRun = useRef(0);
   // The models the company listed for the saved key when it was last checked, to tick (null: not checked, no list, or unreadable)
   const [listed, setListed] = useState<Listed[] | null>(null);
   const [editing, setEditing] = useState<'key' | 'address' | 'name' | null>(null);
@@ -225,9 +227,12 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
       setChecked({ ok: 'note', message: ownAddressNote });
       return;
     }
+    const run = ++checkRun.current;
     setChecking(true);
     setChecked(null);
     const answer = await callOrbit('POST', `/api/admin/voice-providers/${encodeURIComponent(id)}/check`);
+    // A key replaced while this was out has moved on: this answer is about the old key and says nothing about the new one
+    if (run !== checkRun.current) return;
     setChecking(false);
     setChecked(answer.ok ? { ok: true } : { ok: false, message: answer.error });
     const found = answer.ok ? (answer.data as { models?: unknown } | null)?.models : null;
@@ -259,6 +264,9 @@ export default function VoiceProviderPage({ params }: { params: Promise<{ id: st
     }
     const refused = await change({ apiKey: key });
     if (refused) return refused;
+    // A Check key still out was asked about the old key: let it end without touching the page
+    checkRun.current++;
+    setChecking(false);
     setEditing(null);
     setChecked(ownAddress ? null : { ok: true });
     // The list read for the old key may not be this one's

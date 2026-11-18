@@ -1,7 +1,7 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 /**
  * The Voice part of the Universe AI page (#792, design A): what Universe AI listens and speaks with, the voice providers, and the
@@ -19,6 +19,8 @@ let patchAnswer: { ok: boolean; body: unknown };
 let holdList = false;
 let checkAnswer: { ok: boolean; body: unknown };
 let savedCheckAnswer: { ok: boolean; body: unknown };
+// When set, Check key on a saved provider answers only once it settles
+let holdSavedCheck: Promise<void> | null = null;
 const push = jest.fn();
 
 jest.mock('@/lib/client-auth', () => ({
@@ -30,7 +32,7 @@ jest.mock('@/lib/client-auth', () => ({
     if (url.split('?')[0].endsWith('/voices')) return (holdVoices ?? Promise.resolve()).then(() => answer(voicesAnswer.ok, voicesAnswer.body, voicesAnswer.status));
     if (method === 'PATCH') return answer(patchAnswer.ok, patchAnswer.body);
     if (url === '/api/admin/voice-providers/check') return answer(checkAnswer.ok, checkAnswer.body);
-    if (url.endsWith('/check')) return answer(savedCheckAnswer.ok, savedCheckAnswer.body);
+    if (url.endsWith('/check')) return (holdSavedCheck ?? Promise.resolve()).then(() => answer(savedCheckAnswer.ok, savedCheckAnswer.body));
     if (url === '/api/admin/voice-providers' && method === 'POST') return answer(true, { provider: {} }, 201);
     return answer(true, {});
   },
@@ -66,6 +68,7 @@ beforeEach(() => {
   holdList = false;
   checkAnswer = { ok: true, body: { ok: true } };
   savedCheckAnswer = { ok: true, body: { ok: true, models: null } };
+  holdSavedCheck = null;
   push.mockReset();
 });
 
@@ -952,6 +955,30 @@ describe('A voice provider\u2019s models, from the company\u2019s own list for i
     fireEvent.click(check);
     await screen.findByText('ElevenLabs knows this key and lists 1 model for it. Checked just now, nothing paid.');
     expect((screen.getByLabelText('Model id') as HTMLInputElement).value).toBe('half_typed_model');
+  });
+
+  it('drops the answer of a Check key that was still out when the key was replaced, so the old key\u2019s list never shows for the new one', async () => {
+    let release!: () => void;
+    holdSavedCheck = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    savedCheckAnswer = { ok: true, body: { ok: true, models: [{ id: 'eleven_v4_turbo', label: 'Eleven v4 Turbo', kind: 'speech' }] } };
+    fireEvent.click(await open('v-eleven'));
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith('/v-eleven/check'))).toBe(true));
+    // The key is replaced while that check is still out
+    fireEvent.click(screen.getByRole('button', { name: 'Replace' }));
+    fireEvent.change(screen.getByLabelText('New key'), { target: { value: 'sk_new_key_0000' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check and replace' }));
+    await waitFor(() => expect(calls.some((call) => call.method === 'PATCH')).toBe(true));
+    await screen.findByText('ElevenLabs knows this key. Checked just now, nothing paid.');
+    // Now the old key's answer comes in
+    release();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+    expect(screen.getByText('ElevenLabs knows this key. Checked just now, nothing paid.')).toBeTruthy();
   });
 
   it('keeps the rows when the company has no list or it can\u2019t be read', async () => {
