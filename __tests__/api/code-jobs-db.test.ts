@@ -10,6 +10,12 @@ const mockUser: { current: { id: string; email?: string | null } | null } = { cu
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => mockUser.current) }));
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: (email: string | null) => email === 'boss@example.test' }));
 
+// The pause and the way it is read are real; they are only wrapped so a test can make one call fail or answer late
+jest.mock('@/lib/workbench/state', () => {
+  const actual = jest.requireActual('@/lib/workbench/state');
+  return { ...actual, pauseCodeJobs: jest.fn(actual.pauseCodeJobs), getCodeJobPause: jest.fn(actual.getCodeJobPause) };
+});
+
 import { prisma } from '@/lib/db';
 import { AdapterError } from '@/lib/app-adapter/types';
 import { readCodeJobsBudget } from '@/lib/workbench/budget';
@@ -19,13 +25,15 @@ import { saveReadyMadeApps } from '@/lib/app-adapter/settings';
 import { createConnection } from '@/lib/app-connections';
 import { createBrick } from '@/lib/brick-create';
 import { PREPARE_OUT_DIR, cancelCodeJob, getCodeJob, openOutput, startCodeJob, sweepCodeJobs, type Deps, type ReadRunner, type StartInput } from '@/lib/workbench/executor';
+import * as stateModule from '@/lib/workbench/state';
 import { getCodeJobPause, resumeCodeJobs, saveCodeJobLimits } from '@/lib/workbench/state';
 import { setOutputStoreForTests, type OutputStore } from '@/lib/workbench/store';
 import { CODE_JOB_LIMITS_RECOMMENDED, type CodeJobLimits } from '@/lib/workbench/values';
 import { GET as outputRoute, DELETE as deleteRoute } from '@/app/api/workbench/outputs/[id]/route';
 import { GET as listRoute } from '@/app/api/workbench/outputs/route';
 import { POST as promoteRoute } from '@/app/api/workbench/outputs/[id]/artifact/route';
-import { artifactKindOf, promoteResult } from '@/lib/owned-results';
+import { artifactKindOf, keepResult, listResults, promoteResult, removeResultsOf } from '@/lib/owned-results';
+import { boundAppAnswer } from '@/lib/workbench/link';
 import { GET as adminGet, PATCH as adminPatch } from '@/app/api/admin/workbench/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -1250,6 +1258,230 @@ run('code jobs for Apps, in a real database', () => {
       expect(await readCodeJobsBudget()).toMatchObject({ heldMicros: 200, running: 1, countedMicros: 400 });
       await cancelCodeJob({ jobId: going.jobId, botId: saraBrick, personId: sara }, deps());
       await finishAll();
+    });
+  });
+
+  describe('races and retries: a run is never sent after the end, and nothing a failure left behind is forgotten', () => {
+    const actualState = jest.requireActual('@/lib/workbench/state') as typeof stateModule;
+    const pauseMock = stateModule.pauseCodeJobs as jest.MockedFunction<typeof stateModule.pauseCodeJobs>;
+    const pauseReadMock = stateModule.getCodeJobPause as jest.MockedFunction<typeof stateModule.getCodeJobPause>;
+    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    afterEach(() => {
+      pauseMock.mockImplementation(actualState.pauseCodeJobs);
+      pauseReadMock.mockImplementation(actualState.getCodeJobPause);
+    });
+
+    it('never sends a run when a cancel lands between the last look at the job and the claim of the run, and settles at nothing', async () => {
+      let armed = false;
+      const opening = provider.adapter.open.getMockImplementation() as NonNullable<ReturnType<typeof provider.adapter.open.getMockImplementation>>;
+      provider.adapter.open.mockImplementation(async (call) => {
+        const answer = await opening(call);
+        armed = true;
+        return answer;
+      });
+      const real = prisma.codeJob.findUnique.bind(prisma.codeJob);
+      const spy = jest.spyOn(prisma.codeJob, 'findUnique').mockImplementation(((args: { where: { id: string } }) => {
+        if (!armed) return real(args as never);
+        armed = false;
+        // The worker has just read "still going"; a cancel from another process (this process's own signal is not involved) lands before it claims its run
+        return (async () => {
+          const row = await real(args as never);
+          await prisma.codeJob.updateMany({ where: { id: args.where.id }, data: { state: 'cancelled', reason: 'cancelled', finishedAt: new Date(), settledMicros: BigInt(0) } });
+          return row;
+        })();
+      }) as never);
+      try {
+        const job = jobOf(await start({ code: 'print(1)' }));
+        await finishAll();
+        const row = await rowOf(job.jobId);
+        expect(row).toMatchObject({ state: 'cancelled', cellsRun: 0, preparedRuns: 0, settledMicros: BigInt(0), providerState: 'closed' });
+        expect(provider.state.prepared).toBe(0);
+        expect(provider.state.codes).toHaveLength(0);
+        expect(provider.adapter.run).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('keeps a job open for the sweep when the pause for a run that was not ours could not be written, until it is', async () => {
+      provider.state.nested = 2;
+      pauseMock.mockRejectedValueOnce(new Error('settings table down'));
+      const job = jobOf(await start({ code: 'x' }));
+      await finishAll();
+      // Not marked as checked, and nothing paused yet
+      expect(await rowOf(job.jobId)).toMatchObject({ nestedCalls: 2, nestedCheckedAt: null, providerState: 'closed' });
+      expect((await getCodeJobPause()).paused).toBe(false);
+      // The sweep reads the log again and this time the pause is written, and only then is it marked
+      await sweepCodeJobs(deps());
+      expect((await getCodeJobPause()).reason).toBe('provider_ran_tools');
+      expect((await rowOf(job.jobId)).nestedCheckedAt).not.toBeNull();
+    });
+
+    it('keeps the workspace id of a job that ended while the workspace was being made, when deleting it then fails, and the sweep deletes it', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const opening = provider.adapter.open.getMockImplementation() as NonNullable<ReturnType<typeof provider.adapter.open.getMockImplementation>>;
+      provider.adapter.open.mockImplementation(async (call) => {
+        const answer = await opening(call);
+        await gate;
+        return answer;
+      });
+      provider.state.runs.push(() => done());
+      const job = jobOf(await start({ code: 'x' }));
+      await wait(100);
+      // Ended (no workspace id is written down yet), then the workspace appears and every delete fails
+      await cancelCodeJob({ jobId: job.jobId, botId: saraBrick, personId: sara }, deps());
+      provider.state.closeFails = 100;
+      release();
+      await finishAll();
+      expect(await rowOf(job.jobId)).toMatchObject({ state: 'cancelled', providerState: 'unknown', providerSessionId: expect.stringMatching(/^trs_/) });
+      expect(provider.sessions.size).toBe(1);
+      provider.state.closeFails = 0;
+      expect((await sweepCodeJobs(deps())).closed).toBe(1);
+      expect(provider.sessions.size).toBe(0);
+      expect(await rowOf(job.jobId)).toMatchObject({ providerState: 'closed' });
+    });
+
+    it('finds again the files of a cancelled job that could not be removed at the time, and removes them from the sweep', async () => {
+      provider.state.runs.push(({ files }) => {
+        files.set('out/a.txt', text('aaaa'));
+        return done('made files');
+      });
+      let jobId = '';
+      const reading = provider.adapter.read.getMockImplementation() as NonNullable<ReturnType<typeof provider.adapter.read.getMockImplementation>>;
+      provider.adapter.read.mockImplementation(async (call) => {
+        const answer = await reading(call);
+        if (provider.adapter.read.mock.calls.length === 1) await cancelCodeJob({ jobId, botId: saraBrick, personId: sara }, deps());
+        return answer;
+      });
+      // The store will not remove anything for now
+      const removing = kept.store.remove;
+      kept.store.remove = async () => {
+        throw new Error('store down');
+      };
+      jobId = jobOf(await start({ code: 'print(1)' })).jobId;
+      await finishAll();
+      expect((await rowOf(jobId)).state).toBe('cancelled');
+      expect((await rowOf(jobId)).outputs).toHaveLength(1);
+      // The store is back: the sweep removes what the cancel left, rows and files
+      kept.store.remove = removing;
+      expect((await sweepCodeJobs(deps())).outputsRemoved).toBe(1);
+      expect((await rowOf(jobId)).outputs).toHaveLength(0);
+      expect(kept.files.size).toBe(0);
+      expect((await sweepCodeJobs(deps())).outputsRemoved).toBe(0);
+    });
+
+    it('refuses a job when a pause lands after admission first looked, as the same lock admission holds sees it', async () => {
+      // The first look says "not paused", and a pause is written right after it
+      pauseReadMock.mockImplementationOnce(async () => {
+        await actualState.pauseCodeJobs('manual', boss);
+        return { paused: false, reason: null, at: null };
+      });
+      expect(await start({ code: 'print(1)' })).toMatchObject({ status: 'refused', reason: 'paused' });
+      expect(provider.adapter.open).not.toHaveBeenCalled();
+      expect(await prisma.codeJob.count({ where: { personId: sara } })).toBe(0);
+    });
+  });
+
+  describe('files kept by a job: the owner’s room is held by the read and by the insert, from the bytes really received', () => {
+    it('does not read a file past the owner’s room even when the listing said it was small', async () => {
+      await saveCodeJobLimits({ maxKeptBytesPerPerson: 10, maxOutputBytes: 1_000 }, boss);
+      // The listing says 5 bytes, the file is 50
+      provider.adapter.list.mockImplementationOnce(async () => [{ path: 'out/a.txt', bytes: 5 }]);
+      provider.state.runs.push(({ files }) => {
+        files.set('out/a.txt', text('x'.repeat(50)));
+        return done();
+      });
+      const job = jobOf(await start({ code: 'x' }));
+      await finishAll();
+      const row = await rowOf(job.jobId);
+      expect(row.outputs).toHaveLength(0);
+      expect(provider.adapter.read.mock.calls[0][0]).toMatchObject({ maxBytes: 10 });
+      expect((row.result as { notKept: { name: string; why: string }[] }).notKept[0]).toMatchObject({ name: 'a.txt', why: expect.stringMatching(/kept files are full/) });
+    });
+
+    it('does not keep a file whose bytes really received are past the owner’s room, whatever the provider answered', async () => {
+      await saveCodeJobLimits({ maxKeptBytesPerPerson: 10, maxOutputBytes: 1_000 }, boss);
+      provider.state.runs.push(({ files }) => {
+        files.set('out/a.txt', text('12345'));
+        return done();
+      });
+      // A provider that hands over more than it was allowed to
+      provider.adapter.read.mockImplementationOnce(async () => ({ kind: 'ok' as const, bytes: text('x'.repeat(40)) }));
+      const job = jobOf(await start({ code: 'x' }));
+      await finishAll();
+      const row = await rowOf(job.jobId);
+      expect(row.outputs).toHaveLength(0);
+      expect(kept.files.size).toBe(0);
+      expect((row.result as { notKept: { why: string }[] }).notKept[0].why).toMatch(/kept files are full/);
+    });
+
+    it('lets only what fits in when several are kept at once for one owner, and leaves no stored file for the ones that did not', async () => {
+      const keep = (name: string) => keepResult({ ownerId: sara, sourceKind: 'code_job', sourceId: randomUUID(), makerBotId: saraBrick, makerName: 'Brick', name, contentType: 'text/plain', bytes: text('12345678'), limitBytes: 10 }, kept.store);
+      const outcomes = await Promise.all([keep('a'), keep('b'), keep('c'), keep('d')]);
+      expect(outcomes.filter((outcome) => outcome.status === 'kept')).toHaveLength(1);
+      expect(outcomes.filter((outcome) => outcome.status === 'over_limit')).toEqual(Array(3).fill({ status: 'over_limit', keptBytes: 8, limitBytes: 10 }));
+      expect(await prisma.ownedResult.count({ where: { ownerId: sara } })).toBe(1);
+      expect(kept.files.size).toBe(1);
+      // No limit given: nothing is checked
+      expect((await keepResult({ ownerId: sara, sourceKind: 'code_job', sourceId: randomUUID(), makerBotId: saraBrick, makerName: 'Brick', name: 'e', contentType: 'text/plain', bytes: text('12345678') }, kept.store)).status).toBe('kept');
+    });
+
+    it('removes the results of one job by the ids it chose, so one made while it was removing keeps its row and its file', async () => {
+      const sourceId = randomUUID();
+      const make = (name: string) => keepResult({ ownerId: sara, sourceKind: 'code_job', sourceId, makerBotId: saraBrick, makerName: 'Brick', name, contentType: 'text/plain', bytes: text(name) }, kept.store);
+      await make('old');
+      const removing = kept.store.remove;
+      kept.store.remove = async (keys) => {
+        await removing(keys);
+        // A result for the same source arrives while the files are being removed
+        await make('new');
+      };
+      try {
+        await removeResultsOf('code_job', sourceId, kept.store);
+      } finally {
+        kept.store.remove = removing;
+      }
+      const left = await prisma.ownedResult.findMany({ where: { ownerId: sara, sourceKind: 'code_job', sourceId } });
+      expect(left.map((row) => row.name)).toEqual(['new']);
+      expect(await kept.store.get(left[0].storageKey)).toEqual(text('new'));
+    });
+
+    it('lists results made at the same moment across pages without losing or repeating one', async () => {
+      const at = new Date('2026-11-17T10:00:00.000Z');
+      const ids: string[] = [];
+      for (const name of ['a', 'b', 'c', 'd', 'e']) {
+        const made = await keepResult({ ownerId: sara, sourceKind: 'code_job', sourceId: randomUUID(), makerBotId: saraBrick, makerName: 'Brick', name, contentType: 'text/plain', bytes: text(name) }, kept.store);
+        if (made.status !== 'kept') throw new Error('not kept');
+        ids.push(made.row.id);
+      }
+      await prisma.ownedResult.updateMany({ where: { ownerId: sara }, data: { createdAt: at } });
+      const seen: string[] = [];
+      let before: string | null = null;
+      for (let page = 0; page < 5; page += 1) {
+        const listed: Awaited<ReturnType<typeof listResults>> = await listResults(sara, { limit: 2, before });
+        seen.push(...listed.results.map((result) => result.id));
+        if (!listed.next) break;
+        before = listed.next;
+      }
+      expect([...seen].sort()).toEqual([...ids].sort());
+      expect(new Set(seen).size).toBe(5);
+    });
+  });
+
+  describe('an App answer that is too big', () => {
+    const big = (body: unknown) => ({ status: 200, contentType: 'application/json', sessionId: null, body: JSON.stringify(body) });
+    const padded = { content: [{ type: 'text', text: 'x'.repeat(30_000) }] };
+
+    it('is said plainly when it ran fine, and passed on as it is when it was an error of any kind', async () => {
+      await saveCodeJobLimits({ maxAnswerBytes: 10_000 }, boss);
+      const fine = await boundAppAnswer(big({ jsonrpc: '2.0', id: 1, result: { ...padded, isError: false } }), 1, 'CRM_LIST', {});
+      expect(JSON.parse(fine.body).result.content[0].text).toContain('answer_too_large');
+      // A failure is never turned into "it ran"
+      const failed = big({ jsonrpc: '2.0', id: 1, result: { ...padded, isError: true } });
+      expect(await boundAppAnswer(failed, 1, 'CRM_LIST', {})).toBe(failed);
+      const rpcError = big({ jsonrpc: '2.0', id: 1, error: { code: -32000, message: 'x'.repeat(30_000) } });
+      expect(await boundAppAnswer(rpcError, 1, 'CRM_LIST', {})).toBe(rpcError);
     });
   });
 

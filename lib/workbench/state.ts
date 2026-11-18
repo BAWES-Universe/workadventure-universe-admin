@@ -10,6 +10,9 @@ import { readCodeJobLimits, type CodeJobLimits } from '@/lib/workbench/values';
 const LIMITS_KEY = 'code-job-limits';
 const STATE_KEY = 'code-job-state';
 
+/** Held while the pause is changed, and by admission while it checks it: a pause that lands first is seen by the job being admitted. */
+export const STATE_LOCK = 'codejob:state';
+
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
 type SettingsDb = Pick<typeof prisma, 'appSetting'>;
@@ -65,7 +68,7 @@ export async function getCodeJobPause(db: SettingsDb = prisma): Promise<CodeJobP
 /** Pauses new jobs (jobs already going finish and are settled). The first reason stands until it is resumed. */
 export async function pauseCodeJobs(reason: string, userId: string | null = null): Promise<CodeJobPause> {
   return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('codejob:state'))`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${STATE_LOCK}))`;
     const current = await getCodeJobPause(tx);
     if (current.paused) return current;
     const state = { paused: true, reason, at: new Date().toISOString() };
@@ -79,7 +82,7 @@ export async function pauseCodeJobs(reason: string, userId: string | null = null
 /** A super admin turns code jobs back on after looking at why they stopped. */
 export async function resumeCodeJobs(userId: string): Promise<CodeJobPause> {
   return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('codejob:state'))`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${STATE_LOCK}))`;
     const value = { paused: false } as Prisma.InputJsonValue;
     await tx.appSetting.upsert({ where: { key: STATE_KEY }, create: { key: STATE_KEY, value, updatedById: userId }, update: { value, updatedById: userId } });
     return { paused: false, reason: null, at: null };

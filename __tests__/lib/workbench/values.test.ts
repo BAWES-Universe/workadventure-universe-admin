@@ -117,6 +117,16 @@ describe('the provider’s own sandbox on an App link', () => {
     expect(touchesSandbox('GMAIL_X', { tools: [{ tool_slug: 'COMPOSIO_REMOTE_WORKBENCH' }] })).toBe(false);
     expect(touchesSandbox(undefined, {})).toBe(false);
   });
+
+  it('is found in a batch nested inside a batch, as deep as a batch can go, and a batch nested far too deep is refused as one', () => {
+    const nested = (slug: string, key = 'arguments') => ({ tools: [{ tool_slug: 'COMPOSIO_MULTI_EXECUTE_TOOL', [key]: { tools: [{ tool_slug: slug }] } }] });
+    expect(touchesSandbox('COMPOSIO_MULTI_EXECUTE_TOOL', nested('COMPOSIO_REMOTE_WORKBENCH'))).toBe(true);
+    expect(touchesSandbox('COMPOSIO_MULTI_EXECUTE_TOOL', nested('COMPOSIO_REMOTE_BASH_TOOL', 'parameters'))).toBe(true);
+    expect(touchesSandbox('COMPOSIO_MULTI_EXECUTE_TOOL', nested('GMAIL_X'))).toBe(false);
+    let deep: unknown = { tools: [{ tool_slug: 'COMPOSIO_REMOTE_WORKBENCH' }] };
+    for (let level = 0; level < 20; level += 1) deep = { tools: [{ tool_slug: 'COMPOSIO_MULTI_EXECUTE_TOOL', arguments: deep }] };
+    expect(touchesSandbox('COMPOSIO_MULTI_EXECUTE_TOOL', deep)).toBe(true);
+  });
 });
 
 describe('what a job’s request may be', () => {
@@ -140,6 +150,14 @@ describe('what a job’s request may be', () => {
     // Base64 is counted as the bytes it holds
     expect(read({ code: 'a', inputs: [{ name: 'a.bin', content: 'A'.repeat(3000), base64: true }] })).toMatchObject({ ok: false, reason: 'too_big' });
     expect(read({ code: 'a', inputs: [{ name: 'a.bin', content: 'A'.repeat(100), base64: true }] })).toMatchObject({ ok: true });
+  });
+
+  it('counts the bytes base64 decodes to, so one byte fits a limit of one byte', () => {
+    const one = (limits: FilledLimits) => readJobRequest({ code: 'a', inputs: [{ name: 'a.bin', content: 'TQ==', base64: true }] }, limits, 'crm');
+    expect(one({ ...LIMITS, maxInputBytes: 1 })).toMatchObject({ ok: true });
+    expect(one({ ...LIMITS, maxInputBytes: 0 })).toMatchObject({ ok: false, reason: 'too_big' });
+    // Line breaks are not data either
+    expect(readJobRequest({ code: 'a', inputs: [{ name: 'a.bin', content: 'TWFu\nTWFu', base64: true }] }, { ...LIMITS, maxInputBytes: 6 }, 'crm')).toMatchObject({ ok: true });
   });
 
   it('takes inputs only with plain, different names', () => {

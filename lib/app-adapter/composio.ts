@@ -123,12 +123,14 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
     }
   }
 
-  async function call(path: string, body: Record<string, unknown> | null): Promise<Record<string, unknown>> {
+  /** `timeoutMs` bounds the whole call, every retry after a 429 included (30 seconds unless the caller has less time than that). */
+  async function call(path: string, body: Record<string, unknown> | null, timeoutMs = 30_000): Promise<Record<string, unknown>> {
+    const signal = AbortSignal.timeout(Math.max(1, Math.min(timeoutMs, 30_000)));
     const response = await send(`${base}${path}`, () => ({
       method: body ? 'POST' : 'GET',
       headers: { ...(body ? { 'content-type': 'application/json' } : {}), 'x-api-key': options.apiKey },
       ...(body ? { body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(30_000),
+      signal,
       // The key goes only to the provider's own address: an answer that sends us elsewhere fails instead of being followed
       redirect: 'error',
     }));
@@ -265,8 +267,8 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
   const sessionPath = (sessionId: string) => `/tool_router/session/${encodeURIComponent(sessionId)}`;
 
   /** The provider's answer to one mount question; a presigned address is used only if it is a public https one. */
-  async function mountUrl(sessionId: string, action: 'upload_url' | 'download_url', path: string): Promise<string> {
-    const json = await call(`${sessionPath(sessionId)}/mounts/${MOUNT}/${action}`, { mount_relative_path: path });
+  async function mountUrl(sessionId: string, action: 'upload_url' | 'download_url', path: string, timeoutMs: number): Promise<string> {
+    const json = await call(`${sessionPath(sessionId)}/mounts/${MOUNT}/${action}`, { mount_relative_path: path }, timeoutMs);
     const url = str(json[action]);
     if (!url || !(await checkFileUrl(url))) throw new AdapterError('provider', 'Provider sent no usable file address');
     return url;
@@ -345,19 +347,24 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
     },
 
     async put({ sessionId, path, bytes, timeoutMs }) {
-      const url = await mountUrl(sessionId, 'upload_url', path);
-      const response = await doFetch(url, { method: 'PUT', body: bytes as unknown as BodyInit, signal: AbortSignal.timeout(timeoutMs), redirect: 'error' });
+      // One budget for asking for the address and sending the file
+      const started = Date.now();
+      const url = await mountUrl(sessionId, 'upload_url', path, timeoutMs);
+      const response = await doFetch(url, { method: 'PUT', body: bytes as unknown as BodyInit, signal: AbortSignal.timeout(Math.max(1, timeoutMs - (Date.now() - started))), redirect: 'error' });
       if (!response.ok) throw new AdapterError('provider', `Provider would not take the file (${response.status})`);
     },
 
     async list({ sessionId, prefix, timeoutMs, limit }) {
-      void timeoutMs;
+      // One budget for the whole listing, not for each page
+      const started = Date.now();
       const files: { path: string; bytes: number | null }[] = [];
       let cursor: string | null = null;
       for (let page = 0; page < MOUNT_PAGES; page += 1) {
         const query = new URLSearchParams({ mount_relative_prefix: prefix, limit: String(MOUNT_PAGE) });
         if (cursor) query.set('cursor', cursor);
-        const json = await call(`${sessionPath(sessionId)}/mounts/${MOUNT}/items?${query.toString()}`, null);
+        const left = timeoutMs - (Date.now() - started);
+        if (left <= 0) throw new AdapterError('provider', 'The job’s files could not be listed in time');
+        const json = await call(`${sessionPath(sessionId)}/mounts/${MOUNT}/items?${query.toString()}`, null, left);
         const items = Array.isArray(json.items) ? (json.items as unknown[]) : [];
         for (const item of items) {
           if (!isObject(item)) continue;
@@ -377,8 +384,10 @@ export function createComposioAdapter(options: ComposioOptions): ReadyMadeAdapte
     },
 
     async read({ sessionId, path, maxBytes, timeoutMs }) {
-      const url = await mountUrl(sessionId, 'download_url', path);
-      const response = await doFetch(url, { method: 'GET', signal: AbortSignal.timeout(timeoutMs), redirect: 'error' });
+      // One budget for asking for the address and getting the file
+      const started = Date.now();
+      const url = await mountUrl(sessionId, 'download_url', path, timeoutMs);
+      const response = await doFetch(url, { method: 'GET', signal: AbortSignal.timeout(Math.max(1, timeoutMs - (Date.now() - started))), redirect: 'error' });
       if (response.status === 404) return { kind: 'missing' };
       if (!response.ok) throw new AdapterError('provider', `Provider would not give the file (${response.status})`);
       const stated = readCount(response.headers?.get?.('content-length'));

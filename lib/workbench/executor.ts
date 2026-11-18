@@ -7,7 +7,7 @@ import { getMeterSettings, recordMeterEvent } from '@/lib/meter';
 import { personKeyOf } from '@/lib/meter-values';
 import { keepResult, keptBytes as keptResultBytes, openResult, purgeOrphanedResults, removeResultsOf, resultsOfSource } from '@/lib/owned-results';
 import { firstReadNotAllowed } from '@/lib/workbench/policy';
-import { getCodeJobLimits, getCodeJobPause, pauseCodeJobs } from '@/lib/workbench/state';
+import { STATE_LOCK, getCodeJobLimits, getCodeJobPause, pauseCodeJobs } from '@/lib/workbench/state';
 import { getOutputStore, type OutputStore } from '@/lib/workbench/store';
 import {
   CELL_WAIT_GRACE_SECONDS,
@@ -187,6 +187,10 @@ export async function startCodeJob(input: StartInput, deps: Deps = {}): Promise<
     .$transaction(
       async (tx): Promise<{ kind: 'job'; row: Row } | { kind: 'known'; row: Row } | { kind: 'refused'; outcome: StartOutcome }> => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${ADMISSION_LOCK}))`;
+        // The pause is looked at again here, under the lock a pause is written under (always admission first, then state): one that landed while
+        // this request was being read is seen, and nothing is admitted after it
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${STATE_LOCK}))`;
+        if ((await getCodeJobPause(tx)).paused) return { kind: 'refused', outcome: refuse('paused') };
         const again = await tx.codeJob.findUnique({ where: { jobKey: key } });
         if (again) return { kind: 'known', row: again };
         const [mine, everyone, today] = await Promise.all([
@@ -311,6 +315,18 @@ async function runJob(initial: Row, plan: Plan, ctx: Ctx): Promise<void> {
 
 const remainingMs = (job: { deadlineAt: Date }, ctx: Ctx): number => job.deadlineAt.getTime() - ctx.now().getTime();
 
+/**
+ * Claims one run for a job, and only while the job is going: the same row that carries the state carries the counters, so a run is never claimed
+ * after the job has moved to its end (a cancel and a claim at the same moment settle one way: either the run is claimed and charged, or it is
+ * refused and never sent). Null when claimed; otherwise how the job ended.
+ */
+async function claimRun(jobId: string, data: Prisma.CodeJobUpdateManyMutationInput): Promise<{ state: 'cancelled' | 'timed_out' | 'interrupted'; reason: CodeJobReason } | null> {
+  const claimed = await prisma.codeJob.updateMany({ where: { id: jobId, state: { in: ACTIVE } }, data });
+  if (claimed.count === 1) return null;
+  const elsewhere = (await endedElsewhere(jobId)) ?? 'interrupted';
+  return { state: elsewhere, reason: elsewhere };
+}
+
 /** Whether this job was ended by someone else (a cancel, the sweep) while it was working. */
 async function endedElsewhere(jobId: string): Promise<'cancelled' | 'timed_out' | 'interrupted' | null> {
   const row = await prisma.codeJob.findUnique({ where: { id: jobId }, select: { state: true } });
@@ -335,8 +351,13 @@ async function work(job: Row, limits: FilledLimits, plan: Plan, ctx: Ctx, signal
   }
   const saved = await prisma.codeJob.updateMany({ where: { id: job.id, state: { in: ACTIVE } }, data: { providerSessionId: sessionId, providerState: 'open' } });
   if (saved.count === 0) {
-    // Ended before the workspace was written down: nobody else knows it, so it is deleted here
-    await wb.close(sessionId).catch(() => undefined);
+    // Ended before the workspace was written down: nobody else knows it, so it is deleted here. A delete that fails writes the id down as one
+    // not confirmed deleted, so the sweep says it again: a workspace is never left standing because its id was lost
+    const closed = await wb.close(sessionId).then(
+      () => true,
+      () => false,
+    );
+    if (!closed) await prisma.codeJob.updateMany({ where: { id: job.id, providerSessionId: null }, data: { providerSessionId: sessionId, providerState: 'unknown' } });
     return { state: (await endedElsewhere(job.id)) ?? 'interrupted', reason: 'interrupted' };
   }
   const stopped = async (): Promise<{ state: 'cancelled' | 'timed_out' | 'interrupted'; reason: CodeJobReason } | null> => {
@@ -388,8 +409,9 @@ async function work(job: Row, limits: FilledLimits, plan: Plan, ctx: Ctx, signal
   {
     const halt = await stopped();
     if (halt) return halt;
-    // Counted before it goes out, like a step: a run that may have started is a run that was used
-    await prisma.codeJob.update({ where: { id: job.id }, data: { preparedRuns: PREPARE_RUNS } });
+    // Counted before it goes out, like a step: a run that may have started is a run that was used. Claimed only while the job is going.
+    const refused = await claimRun(job.id, { preparedRuns: PREPARE_RUNS });
+    if (refused) return refused;
     const prepared = await wb.run({ sessionId, code: PREPARE_OUT_DIR, timeoutMs: Math.max(1, Math.min(remainingMs(job, ctx), (PREPARE_SECONDS + CELL_WAIT_GRACE_SECONDS) * SECOND)), signal });
     if (prepared.kind === 'timeout' || prepared.kind === 'gone') return ended(prepared);
     if (prepared.kind === 'failed' || !prepared.cell.ok) return { state: 'failed', reason: 'unavailable' };
@@ -401,8 +423,9 @@ async function work(job: Row, limits: FilledLimits, plan: Plan, ctx: Ctx, signal
     const halt = await stopped();
     if (halt) return halt;
     const left = remainingMs(job, ctx);
-    // Counted before it goes out: a run that may have started is a run that was used
-    await prisma.codeJob.update({ where: { id: job.id }, data: { cellsRun: { increment: 1 } } });
+    // Counted before it goes out: a run that may have started is a run that was used. Claimed only while the job is going.
+    const refused = await claimRun(job.id, { cellsRun: { increment: 1 } });
+    if (refused) return refused;
     const timeoutMs = Math.max(1, Math.min(left, (PROVIDER_CELL_SECONDS + CELL_WAIT_GRACE_SECONDS) * SECOND));
     // Cancelling in this process ends the wait at once; deleting the session (below) is what ends the code itself
     const run = await wb.run({ sessionId, code, timeoutMs, signal });
@@ -503,27 +526,36 @@ async function keepFiles(job: Row, wb: WorkbenchAdapter, sessionId: string, limi
       continue;
     }
     let read;
+    // Bounded by what is left of the job's own allowance AND of the owner's room: a file that turns out bigger than it was listed is never read past either
+    const ownerRoom = Math.max(0, limits.maxKeptBytesPerPerson - personKept);
+    const jobRoom = limits.maxOutputBytes - keptBytes;
     try {
-      read = await wb.read({ sessionId, path: file.path, maxBytes: limits.maxOutputBytes - keptBytes, timeoutMs: FILE_MS });
+      read = await wb.read({ sessionId, path: file.path, maxBytes: Math.min(jobRoom, ownerRoom), timeoutMs: FILE_MS });
     } catch (error) {
       console.error('[CodeJob] A file could not be read:', error instanceof Error ? error.message : 'unknown');
       out.notKept.push({ name, why: 'could not be read from the workspace' });
       continue;
     }
     if (read.kind !== 'ok') {
-      out.notKept.push({ name, why: read.kind === 'too_big' ? 'over the size a job keeps' : 'was not there when it was read' });
+      out.notKept.push({ name, why: read.kind === 'too_big' ? (ownerRoom < jobRoom ? 'your kept files are full: delete some to make room' : 'over the size a job keeps') : 'was not there when it was read' });
       continue;
     }
     const contentType = contentTypeOf(name);
     let saved;
     try {
-      saved = await keepResult({ ownerId: job.personId, sourceKind: 'code_job', sourceId: job.id, makerBotId: job.botId, makerName: maker?.name ?? 'Brick', name, contentType, bytes: read.bytes }, ctx.store);
+      // The limit is applied by keepResult itself, in one step with the insert and from the bytes really received
+      saved = await keepResult({ ownerId: job.personId, sourceKind: 'code_job', sourceId: job.id, makerBotId: job.botId, makerName: maker?.name ?? 'Brick', name, contentType, bytes: read.bytes, limitBytes: limits.maxKeptBytesPerPerson }, ctx.store);
     } catch (error) {
       console.error('[CodeJob] A file could not be kept:', error instanceof Error ? error.message : 'unknown');
       out.notKept.push({ name, why: 'could not be saved' });
       continue;
     }
-    const id = saved.id;
+    if (saved.status === 'over_limit') {
+      out.notKept.push({ name, why: 'your kept files are full: delete some to make room' });
+      personKept = saved.keptBytes;
+      continue;
+    }
+    const id = saved.row.id;
     personKept += read.bytes.byteLength;
     kept += 1;
     keptBytes += read.bytes.byteLength;
@@ -548,11 +580,6 @@ type End = { state: 'succeeded' | 'failed' | 'cancelled' | 'timed_out' | 'interr
  */
 async function finishJob(jobId: string, end: End, collected: Collected, limits: FilledLimits, price: number, ctx: Ctx): Promise<boolean> {
   const now = ctx.now();
-  const row = await prisma.codeJob.findUnique({ where: { id: jobId } });
-  if (!row) return false;
-  // A job nobody saw end is charged as if every run was used, the folder run included
-  const used = Math.max(row.cellsRun, end.state === 'interrupted' ? row.steps : 0) + (end.state === 'interrupted' ? PREPARE_RUNS : row.preparedRuns);
-  const settled = Math.min(asNumber(row.reservedMicros), Math.max(used, 0) * price);
   const result = {
     runs: collected.runs,
     reads: collected.reads,
@@ -560,25 +587,36 @@ async function finishJob(jobId: string, end: End, collected: Collected, limits: 
     notKept: collected.notKept,
     clipped: collected.clipped,
   };
-  const won = await prisma.codeJob.updateMany({
-    where: { id: jobId, state: { in: ACTIVE } },
-    data: {
-      state: end.state,
-      reason: end.reason,
-      finishedAt: now,
-      settledMicros: BigInt(settled),
-      result: result as unknown as Prisma.InputJsonValue,
-      expiresAt: limits.keepDays === null ? null : new Date(now.getTime() + limits.keepDays * DAY_MS),
-    },
+  // The move to the end and the settlement are one step: the move locks the row, runs are only claimed while the row is going (claimRun), so the
+  // counters read right after it are final and the job is settled at what it really claimed, never at an earlier reading
+  const won = await prisma.$transaction(async (tx) => {
+    const moved = await tx.codeJob.updateMany({
+      where: { id: jobId, state: { in: ACTIVE } },
+      data: {
+        state: end.state,
+        reason: end.reason,
+        finishedAt: now,
+        result: result as unknown as Prisma.InputJsonValue,
+        expiresAt: limits.keepDays === null ? null : new Date(now.getTime() + limits.keepDays * DAY_MS),
+      },
+    });
+    if (moved.count === 0) return false;
+    const row = await tx.codeJob.findUniqueOrThrow({ where: { id: jobId } });
+    // A job nobody saw end is charged as if every run was used, the folder run included
+    const used = Math.max(row.cellsRun, end.state === 'interrupted' ? row.steps : 0) + (end.state === 'interrupted' ? PREPARE_RUNS : row.preparedRuns);
+    const settled = Math.min(asNumber(row.reservedMicros), Math.max(used, 0) * price);
+    await tx.codeJob.update({ where: { id: jobId }, data: { settledMicros: BigInt(settled) } });
+    return true;
   });
   // A job that did not end normally must not leave kept files behind. Also when someone else ended it first (a cancel or the sweep) while this
-  // worker was still copying files: what it kept after their clean-up is removed here, at the end of its own work.
-  const finalState = won.count === 1 ? end.state : (await prisma.codeJob.findUnique({ where: { id: jobId }, select: { state: true } }))?.state;
+  // worker was still copying files: what it kept after their clean-up is removed here, at the end of its own work. A removal that fails is
+  // found again by the sweep (a cancelled, timed out or lost job that still has results), never forgotten.
+  const finalState = won ? end.state : (await prisma.codeJob.findUnique({ where: { id: jobId }, select: { state: true } }))?.state;
   if (finalState && ['cancelled', 'timed_out', 'interrupted'].includes(finalState)) await dropOutputs(jobId, ctx.store).catch(() => undefined);
   await closeSession(jobId, ctx);
   // A line the meter did not take now is written by the sweep (jobs with no `meteredAt`), never lost
-  if (won.count === 1) await settle(jobId, ctx.now).catch((error) => console.error('[CodeJob] A job could not be written to the meter yet:', error instanceof Error ? error.message : 'unknown'));
-  return won.count === 1;
+  if (won) await settle(jobId, ctx.now).catch((error) => console.error('[CodeJob] A job could not be written to the meter yet:', error instanceof Error ? error.message : 'unknown'));
+  return won;
 }
 
 async function dropOutputs(jobId: string, store: OutputStore): Promise<void> {
@@ -607,12 +645,21 @@ async function closeSession(jobId: string, ctx: Ctx): Promise<void> {
   // and the check must not wait for the provider to answer a delete. It is read again once the delete is confirmed (the log may have grown),
   // and until one read after that has worked, the sweep tries again.
   const nested = await ctx.adapter.nestedRuns({ sessionId: row.providerSessionId, sinceMs: (row.startedAt ?? row.createdAt).getTime() }).catch(() => null);
+  // Whether what the log showed has been acted on: a run that was not ours is acted on only once the pause is written
+  let acted = true;
   if (nested !== null && nested > 0) {
     await prisma.codeJob.update({ where: { id: jobId }, data: { nestedCalls: nested } });
     // The session has no tools, so a run that was not ours means the restrictions are not doing what they were read back as: stop new jobs
-    await pauseCodeJobs('provider_ran_tools').catch(() => undefined);
+    acted = await pauseCodeJobs('provider_ran_tools').then(
+      () => true,
+      (error) => {
+        console.error('[CodeJob] Code jobs could not be paused yet, the sweep will say it again:', error instanceof Error ? error.message : 'unknown');
+        return false;
+      },
+    );
   }
-  if (confirmed && nested !== null) await prisma.codeJob.updateMany({ where: { id: jobId, nestedCheckedAt: null }, data: { nestedCheckedAt: ctx.now() } });
+  // Checked only when the delete was confirmed, the log was read, and anything it showed is paused for: otherwise the sweep comes back to it
+  if (confirmed && nested !== null && acted) await prisma.codeJob.updateMany({ where: { id: jobId, nestedCheckedAt: null }, data: { nestedCheckedAt: ctx.now() } });
 }
 
 /** The meter line of a finished job, once (its id is the job's). Paid by the universe, like any App step; always an estimate. */
@@ -769,6 +816,8 @@ async function viewOf(row: Row): Promise<JobView> {
 export interface SweepResult {
   /** Results of deleted accounts removed. */
   orphansRemoved?: number;
+  /** Jobs that were cancelled, timed out or lost whose files were removed by the sweep (a removal that failed when they ended). */
+  outputsRemoved: number;
   /** Finished jobs whose meter line was written late. */
   metered: number;
   stopped: number;
@@ -788,7 +837,7 @@ export async function sweepCodeJobs(deps: Deps = {}): Promise<SweepResult> {
   const adapter = adapterOf(deps.adapter);
   const store = deps.store ?? getOutputStore();
   const at = now();
-  const result: SweepResult = { stopped: 0, closed: 0, purged: 0, metered: 0 };
+  const result: SweepResult = { stopped: 0, closed: 0, purged: 0, metered: 0, outputsRemoved: 0 };
 
   if (adapter) {
     const ctx: Ctx = { adapter, store, now };
@@ -831,6 +880,20 @@ export async function sweepCodeJobs(deps: Deps = {}): Promise<SweepResult> {
       result.purged += 1;
     } catch (error) {
       console.error('[CodeJob] A kept job could not be removed yet:', error instanceof Error ? error.message : 'unknown');
+    }
+  }
+  // A cancelled, timed out or lost job keeps no files. A removal that failed when it ended, or a file saved while it was ending, is removed here
+  const stray = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT DISTINCT j."id" FROM "code_jobs" j
+    JOIN "owned_results" r ON r."source_kind" = 'code_job' AND r."source_id" = j."id"
+    WHERE j."state" IN ('cancelled', 'timed_out', 'interrupted')
+    LIMIT ${SWEEP_BATCH}`;
+  for (const job of stray) {
+    try {
+      await dropOutputs(job.id, store);
+      result.outputsRemoved += 1;
+    } catch (error) {
+      console.error('[CodeJob] The files of a stopped job could not be removed yet:', error instanceof Error ? error.message : 'unknown');
     }
   }
   // Results whose owner's account is gone
