@@ -2,6 +2,8 @@ import { prisma } from '@/lib/db';
 import { resolveUsagePerson } from '@/lib/usage-person';
 import { ReplyAllowanceError, windowStart } from '@/lib/reply-limits';
 import { servedVoiceLimits } from '@/lib/voice-limits';
+import { repliesPerWindowFor } from '@/lib/credit-replies';
+import { textReserve, voiceReplies } from '@/lib/voice-limit-values';
 import { runningExtra, type RunningExtra } from '@/lib/meter-grants';
 
 /**
@@ -51,6 +53,18 @@ function places(served: Served, guest: boolean, spoken: number, used: number, ex
   return { byVoice: window.voiceReplies * times - spoken, byText: window.replies * times - used - window.textReserve * times };
 }
 
+/**
+ * The windows a person is served: a signed-in person's own number of replies when a super admin's exception sets one (or gives none, so
+ * a spoken reply is no place either), the usual one when it does not. The text limit reads it the same way (lib/reply-limits.ts).
+ */
+async function servedFor(served: Served, person: { personId: string | null }, now: Date): Promise<Served> {
+  if (!person.personId) return served;
+  const base = served.window.signedIn.replies;
+  const replies = await repliesPerWindowFor(person.personId, base, now);
+  if (replies === base) return served;
+  return { ...served, window: { ...served.window, signedIn: { replies, textReserve: textReserve(replies, served.limits.textReserveShare), voiceReplies: voiceReplies(replies, served.limits, false) } } };
+}
+
 /** The extra usage running for a signed-in person now, if any; a guest has none. */
 const extraFor = (person: { personId: string | null }, now: Date) => (person.personId ? runningExtra(person.personId, now) : Promise.resolve(null));
 
@@ -92,7 +106,8 @@ export async function checkVoiceAllowance(
   // The same words the Universe AI reply window is kept under (lib/reply-limits.ts), so a spoken reply is in the same window
   const personKey = person.personId ? `person:${person.personId}` : `guest:${userId}`;
 
-  const [served, extra] = await Promise.all([servedVoiceLimits(), extraFor(person, now)]);
+  const [usual, extra] = await Promise.all([servedVoiceLimits(), extraFor(person, now)]);
+  const served = await servedFor(usual, person, now);
   const { window } = served;
   const since = await windowStart(`ua:${personKey}`, window.hours, now);
   const resetsAt = new Date(since.getTime() + window.hours * HOUR).toISOString();
@@ -132,7 +147,8 @@ export async function voiceRepliesLeft(botId: string, input: { userId?: unknown;
   const person = await resolveUsagePerson(userId, input.isGuest);
   const guest = !person.personId;
   const personKey = person.personId ? `person:${person.personId}` : `guest:${userId}`;
-  const [served, extra] = await Promise.all([servedVoiceLimits(), extraFor(person, now)]);
+  const [usual, extra] = await Promise.all([servedVoiceLimits(), extraFor(person, now)]);
+  const served = await servedFor(usual, person, now);
   const { window } = served;
 
   const row = await prisma.replyWindow.findUnique({ where: { key: `ua:${personKey}` }, select: { startedAt: true } });
