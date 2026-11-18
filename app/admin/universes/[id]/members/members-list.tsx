@@ -92,7 +92,8 @@ export function UniverseMembersPage() {
   const [visible, setVisible] = useState(FIRST);
   const [attempt, setAttempt] = useState(0);
   const [inviting, setInviting] = useState(false);
-  const [invitations, setInvitations] = useState<{ list: Invitation[] } | null>(null);
+  const [invitations, setInvitations] = useState<{ list: Invitation[]; total: number; nextCursor: string | null } | null>(null);
+  const [moreInvitations, setMoreInvitations] = useState<'idle' | 'busy'>('idle');
   const [cancelling, setCancelling] = useState<string | null>(null);
 
   const listPath = useCallback(
@@ -139,7 +140,8 @@ export function UniverseMembersPage() {
       .then(async (response) => {
         if (!response.ok) return;
         const body = await response.json();
-        setInvitations({ list: body.invitations ?? [] });
+        const list: Invitation[] = body.invitations ?? [];
+        setInvitations({ list, total: typeof body.total === 'number' ? body.total : list.length, nextCursor: body.nextCursor ?? null });
       })
       .catch(() => {});
   }, [id]);
@@ -167,6 +169,27 @@ export function UniverseMembersPage() {
     }
   }
 
+  async function showMoreInvitations() {
+    if (!invitations?.nextCursor || moreInvitations === 'busy') return;
+    setMoreInvitations('busy');
+    try {
+      const response = await authenticatedFetch(`/api/admin/universes/${id}/invitations?cursor=${encodeURIComponent(invitations.nextCursor)}`);
+      if (!response.ok) throw new Error('more');
+      const body = await response.json();
+      const next: Invitation[] = body.invitations ?? [];
+      // The first 200 can hold ones the person may take back from further down: none shows twice
+      setInvitations((now) => {
+        if (!now) return now;
+        const seen = new Set(now.list.map((invitation) => invitation.id));
+        return { list: [...now.list, ...next.filter((invitation) => !seen.has(invitation.id))], total: typeof body.total === 'number' ? body.total : now.total, nextCursor: body.nextCursor ?? null };
+      });
+    } catch {
+      addToast({ description: 'Couldn’t load more invitations. Try again.', variant: 'error' });
+    } finally {
+      setMoreInvitations('idle');
+    }
+  }
+
   async function cancelInvite(invitation: Invitation) {
     if (cancelling) return;
     setCancelling(invitation.id);
@@ -176,7 +199,8 @@ export function UniverseMembersPage() {
         const body = await response.json().catch(() => ({}));
         throw new Error(typeof body.error === 'string' ? body.error : 'Couldn’t cancel the invite.');
       }
-      loadInvitations();
+      // Taken off the list here, so more pages already loaded stay put
+      setInvitations((now) => (now ? { ...now, list: now.list.filter((item) => item.id !== invitation.id), total: Math.max(0, now.total - 1) } : now));
     } catch (cause) {
       addToast({ description: cause instanceof Error ? cause.message : 'Couldn’t cancel the invite.', variant: 'error' });
     } finally {
@@ -314,7 +338,7 @@ export function UniverseMembersPage() {
 
       {invitations && invitations.list.length > 0 && (
         <section className="grid min-w-0 gap-2" aria-labelledby="pending-invitations">
-          <SectionHeader id="pending-invitations" title="Pending invitations" count={invitations.list.length} />
+          <SectionHeader id="pending-invitations" title="Pending invitations" count={invitations.total} />
           <div className="grid min-w-0 gap-0.5">
             {invitations.list.map((invitation) => {
               const name = invitation.name || 'Someone';
@@ -344,6 +368,13 @@ export function UniverseMembersPage() {
               );
             })}
           </div>
+          {invitations.nextCursor && invitations.total > invitations.list.length && (
+            <div>
+              <Button variant="outline" className="h-11 px-5" disabled={moreInvitations === 'busy'} onClick={showMoreInvitations}>
+                Show {invitations.total - invitations.list.length} more
+              </Button>
+            </div>
+          )}
         </section>
       )}
 

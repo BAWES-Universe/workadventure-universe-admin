@@ -37,6 +37,7 @@ let calls: { url: string; method: string; body?: Record<string, unknown> }[] = [
 let memberRoles: { roleId: string; allWorlds: boolean; worldIds: string[] }[] = [];
 let can = { giveRoleIds: ['r-admin', 'r-editor', 'r-acct'], giveWorlds: 'all' as 'all' | string[], widen: true, remove: true };
 let invitationsList: unknown[] = [];
+let invitationsPaging: { total: number; nextCursor: string | null; more: unknown[] } | null = null;
 let failNextRole = false;
 let failBasics = false;
 let staleList: ((value: unknown) => void) | null = null;
@@ -46,6 +47,7 @@ beforeEach(() => {
   replace.mockReset();
   calls = [];
   invitationsList = [];
+  invitationsPaging = null;
   failNextRole = false;
   failBasics = false;
   staleList = null;
@@ -61,7 +63,10 @@ beforeEach(() => {
     if (url === '/api/admin/universes/u1') return ok({ id: 'u1', name: 'BAWES', ownerId: 'owner', worlds: [{ id: 'hq', name: 'HQ' }, { id: 'campus', name: 'Campus' }] });
     if (url.endsWith('/u1/roles')) return ok({ roles: ROLES });
     if (url.endsWith('/u1/me')) return ok({ inviteWorlds: 'all' });
-    if (url.endsWith('/u1/invitations') && method === 'GET') return ok({ invitations: invitationsList, canCancel: invitationsList.some((item) => (item as { canCancel: boolean }).canCancel) });
+    if (url.includes('/u1/invitations?cursor=') && method === 'GET') return ok({ invitations: invitationsPaging?.more ?? [], canCancel: false, total: invitationsPaging?.total ?? 0, nextCursor: null });
+    if (url.endsWith('/u1/invitations') && method === 'GET') {
+      return ok({ invitations: invitationsList, canCancel: invitationsList.some((item) => (item as { canCancel: boolean }).canCancel), total: invitationsPaging?.total ?? invitationsList.length, nextCursor: invitationsPaging?.nextCursor ?? null });
+    }
     if (url.includes('/u1/members?') && url.includes('cursor=c2')) return new Promise((resolve) => { staleList = resolve; });
     if (url.includes('/u1/members?')) return ok({ members: MEMBERS, total: 2, owner: OWNER, nextCursor: null });
     if (url.includes('/roles/')) {
@@ -117,6 +122,31 @@ describe('universe Members page', () => {
     expect(within(rowOf('Jana')).getByRole('button', { name: 'Cancel invite' })).toBeTruthy();
     expect(within(rowOf('Omar')).queryByRole('button', { name: 'Cancel invite' })).toBeNull();
     expect(within(section).getAllByRole('button', { name: 'Cancel invite' })).toHaveLength(1);
+  });
+
+  it('shows the rest of the pending invitations a page at a time, with none twice', async () => {
+    const invite = (id: string, name: string) => ({
+      id, userId: id, name, invitedBy: { userId: 'owner', name: 'Khalid' }, invitedAt: '2026-10-17T10:00:00Z', roleIds: [], worlds: everywhere, canCancel: true,
+    });
+    invitationsList = [invite('a', 'Jana'), invite('b', 'Omar')];
+    // The first page also held an older one the person may take back, so the next page repeats it
+    invitationsPaging = { total: 4, nextCursor: 'next-1', more: [invite('b', 'Omar'), invite('c', 'Lina'), invite('d', 'Yusuf')] };
+    wrap(<UniverseMembersPage />);
+    const section = await screen.findByRole('region', { name: /Pending invitations/ });
+    expect(within(section).queryByText('Lina')).toBeNull();
+    fireEvent.click(within(section).getByRole('button', { name: 'Show 2 more' }));
+    expect(await within(section).findByText('Lina')).toBeTruthy();
+    expect(within(section).getAllByText('Omar')).toHaveLength(1);
+    expect(within(section).getByText('Yusuf')).toBeTruthy();
+    expect(within(section).queryByRole('button', { name: /Show .* more/ })).toBeNull();
+    expect(calls.some((call) => call.url.endsWith('/u1/invitations?cursor=next-1'))).toBe(true);
+  });
+
+  it('has no Show more button when everything fits', async () => {
+    invitationsList = [{ id: 'a', userId: 'a', name: 'Jana', invitedBy: { userId: 'owner', name: 'Khalid' }, invitedAt: '2026-10-17T10:00:00Z', roleIds: [], worlds: everywhere, canCancel: true }];
+    wrap(<UniverseMembersPage />);
+    const section = await screen.findByRole('region', { name: /Pending invitations/ });
+    expect(within(section).queryByRole('button', { name: /Show .* more/ })).toBeNull();
   });
 
   it('asks the server for one world when the world filter comes in the address', async () => {

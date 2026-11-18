@@ -104,13 +104,24 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   }
 }
 
-/** The most invitations listed at once, newest first. */
+/** The most invitations listed at once, newest first; the rest come with `cursor`. */
 const LISTED = 200;
 
-// GET /api/admin/universes/[id]/invitations - Invitations still waiting for an answer, newest first. Anyone who may invite
-// and remove people in some world sees every one of the universe's pending invitations, whoever sent them and however many
-// worlds they name, so the people who run a universe all see the same list. Each one says whether this viewer may take it
-// back (Invite and remove in every world it names). For everyone else the list is empty.
+/** Where the next page starts: the last invitation of this one. Equal times are told apart by id, so pages never skip or repeat. */
+const cursorOf = (row: { invitedAt: Date; id: string }) => Buffer.from(`${row.invitedAt.toISOString()}|${row.id}`).toString('base64url');
+function afterCursor(cursor: string | null) {
+  if (!cursor) return null;
+  const [time, id] = Buffer.from(cursor, 'base64url').toString().split('|');
+  const invitedAt = new Date(time);
+  if (!id || Number.isNaN(invitedAt.getTime())) return undefined;
+  return { OR: [{ invitedAt: { lt: invitedAt } }, { invitedAt, id: { lt: id } }] };
+}
+
+// GET /api/admin/universes/[id]/invitations - Invitations still waiting for an answer, newest first, 200 at a time (`cursor`
+// asks for the next 200). Anyone who may invite and remove people in some world sees every one of the universe's pending
+// invitations, whoever sent them and however many worlds they name, so the people who run a universe all see the same list.
+// Each one says whether this viewer may take it back (Invite and remove in every world it names). For everyone else the
+// list is empty.
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
@@ -119,7 +130,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const { access } = context;
 
     const where = worldsAllowing(access, 'INVITE_AND_REMOVE');
-    if (where !== 'all' && where.length === 0) return NextResponse.json({ invitations: [], canCancel: false });
+    if (where !== 'all' && where.length === 0) return NextResponse.json({ invitations: [], canCancel: false, total: 0, nextCursor: null });
+
+    const cursor = request.nextUrl.searchParams.get('cursor');
+    const after = afterCursor(cursor);
+    if (after === undefined) return badRequest('That is not a place in the list');
 
     const query = {
       include: {
@@ -127,23 +142,27 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         invitedUser: { select: { id: true, name: true } },
         invitedBy: { select: { id: true, name: true } },
       },
-      orderBy: { invitedAt: 'desc' as const },
-      take: LISTED,
+      orderBy: [{ invitedAt: 'desc' as const }, { id: 'desc' as const }],
     };
     const inUniverse = { status: 'pending', OR: [{ universeId: id }, { world: { universeId: id } }] };
-    const [newest, theirs] = await Promise.all([
-      prisma.membershipInvitation.findMany({ ...query, where: inUniverse }),
-      // Someone who may invite only in some worlds also gets the newest 200 they can take back: ones that name no world
-      // beyond theirs (the rule cancelling uses, and a deleted world asks for nothing). An invitation's first world is
-      // always one it gives, so it is theirs too. More than 200 newer invitations elsewhere, or in theirs and others'
-      // together, never push out the ones they can take back
-      where === 'all'
+    const [page, total, theirs] = await Promise.all([
+      // One more than shown tells whether there is a next page
+      prisma.membershipInvitation.findMany({ ...query, where: after ? { AND: [inUniverse, after] } : inUniverse, take: LISTED + 1 }),
+      prisma.membershipInvitation.count({ where: inUniverse }),
+      // On the first page, someone who may invite only in some worlds also gets the newest 200 they can take back: ones that
+      // name no world beyond theirs (the rule cancelling uses, and a deleted world asks for nothing). An invitation's first
+      // world is always one it gives, so it is theirs too. More than 200 newer invitations elsewhere, or in theirs and
+      // others' together, never push out the ones they can take back. The pages after it reach every other one.
+      where === 'all' || cursor
         ? Promise.resolve([])
         : prisma.membershipInvitation.findMany({
             ...query,
             where: { ...inUniverse, allWorlds: false, worldId: { in: where }, NOT: { worldIds: { hasSome: access.worldIds.filter((worldId) => !where.includes(worldId)) } } },
+            take: LISTED,
           }),
     ]);
+    const newest = page.slice(0, LISTED);
+    const nextCursor = page.length > LISTED ? cursorOf(newest[newest.length - 1]) : null;
     const seen = new Set<string>();
     const rows = [...newest, ...theirs]
       .filter((row) => !seen.has(row.id) && !!seen.add(row.id))
@@ -167,7 +186,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       // The rule that cancelling uses, so the button shows only where it will work
       canCancel: allows(access, 'INVITE_AND_REMOVE', invitationReach(row)),
     }));
-    return NextResponse.json({ invitations: await withWokas(invitations), canCancel: invitations.some((invitation) => invitation.canCancel) });
+    return NextResponse.json({ invitations: await withWokas(invitations), canCancel: invitations.some((invitation) => invitation.canCancel), total, nextCursor });
   } catch (error) {
     return failed(error, 'list invitations');
   }

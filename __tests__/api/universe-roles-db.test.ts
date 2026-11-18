@@ -719,4 +719,27 @@ run('universe roles and people routes (real database)', () => {
     expect(mine).toMatchObject({ canCancel: true });
     await prisma.membershipInvitation.deleteMany({ where: { invitedUserId: { in: [early.id, ...crowdIds] } } });
   });
+
+  it('pages through every pending invitation, 200 at a time, even when they all share one time', async () => {
+    const crowd = Array.from({ length: 205 }, (_, index) => ({ uuid: `page-${index}-${tag}`, email: `page-${index}-${tag}@example.test`, name: `page ${index}` }));
+    await prisma.user.createMany({ data: crowd });
+    const crowdIds = (await prisma.user.findMany({ where: { uuid: { in: crowd.map((person) => person.uuid) } }, select: { id: true } })).map((person) => person.id);
+    const sameTime = new Date('2026-11-01T00:00:00Z');
+    await prisma.membershipInvitation.createMany({
+      data: crowdIds.map((userId) => ({ worldId: worldA, universeId, allWorlds: false, worldIds: [worldA], invitedUserId: userId, invitedByUserId: people.admin, status: 'pending', tags: [], roleIds: [], invitedAt: sameTime })),
+    });
+    const expected = await prisma.membershipInvitation.count({ where: { status: 'pending', OR: [{ universeId }, { world: { universeId } }] } });
+
+    const first = await as('owner', inviteRoute.GET, {});
+    expect(first.body.invitations).toHaveLength(200);
+    expect(first.body.total).toBe(expected);
+    expect(first.body.nextCursor).toEqual(expect.any(String));
+    const second = await as('owner', inviteRoute.GET, {}, undefined, `cursor=${first.body.nextCursor}`);
+    expect(second.body.nextCursor).toBeNull();
+
+    const ids = [...first.body.invitations, ...second.body.invitations].map((invitation: { id: string }) => invitation.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toHaveLength(expected);
+    await prisma.membershipInvitation.deleteMany({ where: { invitedUserId: { in: crowdIds } } });
+  });
 });

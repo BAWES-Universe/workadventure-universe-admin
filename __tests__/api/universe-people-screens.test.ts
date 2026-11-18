@@ -13,7 +13,7 @@ jest.mock('@/lib/db', () => ({
     universe: { findUnique: jest.fn() },
     role: { findMany: jest.fn(), findFirst: jest.fn() },
     roomAccess: { aggregate: jest.fn(), findMany: jest.fn(), groupBy: jest.fn() },
-    membershipInvitation: { findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
+    membershipInvitation: { findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn(), count: jest.fn() },
     ownershipOffer: { findUnique: jest.fn() },
   },
 }));
@@ -80,6 +80,7 @@ beforeEach(() => {
   db.roomAccess.findMany.mockResolvedValue([]);
   db.roomAccess.groupBy.mockResolvedValue([]);
   db.membershipInvitation.findMany.mockResolvedValue([]);
+  db.membershipInvitation.count.mockResolvedValue(0);
   db.ownershipOffer.findUnique.mockResolvedValue(null);
   friends.mockResolvedValue({ friends: [], incoming: [], outgoing: [], blocked: [] });
   search.mockResolvedValue([]);
@@ -354,7 +355,7 @@ describe('invitations list and cancel', () => {
 
     asViewer('plain');
     const none = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
-    expect(none).toEqual({ invitations: [], canCancel: false });
+    expect(none).toEqual({ invitations: [], canCancel: false, total: 0, nextCursor: null });
   });
 
   it('lists every pending invitation to whoever may invite in some world, and marks the ones they may take back', async () => {
@@ -415,6 +416,36 @@ describe('invitations list and cancel', () => {
     const mine = body.invitations.find((invitation: { id: string }) => invitation.id === 'inv-hq-only');
     expect(mine).toMatchObject({ id: 'inv-hq-only', canCancel: true });
     expect(body.canCancel).toBe(true);
+  });
+
+  it('lists 200 at a time, says how many wait in all, and hands out a place to ask for the next 200', async () => {
+    const many = Array.from({ length: 201 }, (_, index) => ({ ...pending, id: `inv-${index}`, invitedAt: new Date(Date.UTC(2026, 9, 17, 10, 0, 0) - index * 1000) }));
+    db.membershipInvitation.findMany.mockResolvedValue(many);
+    db.membershipInvitation.count.mockResolvedValue(450);
+    asViewer('owner');
+    const first = await (await listInvitations(request('/api/admin/universes/u1/invitations'), params())).json();
+    expect(first.invitations).toHaveLength(200);
+    expect(first.total).toBe(450);
+    expect(typeof first.nextCursor).toBe('string');
+    // One more than shown is asked for, to know there is a next page; same-time invitations are told apart by id
+    expect(db.membershipInvitation.findMany).toHaveBeenCalledWith(expect.objectContaining({ take: 201, orderBy: [{ invitedAt: 'desc' }, { id: 'desc' }] }));
+
+    // The next page starts after the last one shown, and nothing more is added to it
+    db.membershipInvitation.findMany.mockClear();
+    db.membershipInvitation.findMany.mockResolvedValue(many.slice(0, 5));
+    asViewer('hq-inviter');
+    const next = await (await listInvitations(request(`/api/admin/universes/u1/invitations?cursor=${first.nextCursor}`), params())).json();
+    expect(next.nextCursor).toBeNull();
+    expect(db.membershipInvitation.findMany).toHaveBeenCalledTimes(1);
+    const where = db.membershipInvitation.findMany.mock.calls[0][0].where;
+    expect(where.AND[1]).toEqual({ OR: [{ invitedAt: { lt: many[199].invitedAt } }, { invitedAt: many[199].invitedAt, id: { lt: 'inv-199' } }] });
+  });
+
+  it('refuses a place in the list that makes no sense', async () => {
+    asViewer('owner');
+    const response = await listInvitations(request('/api/admin/universes/u1/invitations?cursor=nonsense'), params());
+    expect(response.status).toBe(400);
+    expect(db.membershipInvitation.findMany).not.toHaveBeenCalled();
   });
 
   it('keeps a role whose badge is hidden off the invitations of viewers who may not see it', async () => {
