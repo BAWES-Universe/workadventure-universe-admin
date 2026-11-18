@@ -937,7 +937,10 @@ async function handOverJobFiles(job: { id: string; botId: string; personId: stri
     // Only when no other hand-over holds it (none, or one that is long past): two at once would let the first to finish let go of the machine under the other.
     // A job that began while another one's files were being read waits for that one to finish (a hand-over is limited by time) instead of giving its own
     // up: its ending would otherwise close with its files left behind, and nothing would hand them over later.
-    const waitUntil = Date.now() + claimWaitMs;
+    let waitUntil = Date.now() + claimWaitMs;
+    // The claim being waited for: another hand-over taking the machine after it was let go is progress, and the wait for it starts again (a claim that is never let go is
+    // long past after FILES_CLAIM_MS and is taken over), so a job behind two others is not given up while they, one after the other, make their way through
+    let waitingFor: number | null = null;
     let claimedAt = new Date();
     for (;;) {
       claimedAt = new Date();
@@ -952,6 +955,10 @@ async function handOverJobFiles(job: { id: string; botId: string; personId: stri
       if (!now2 || now2.machine !== 'working' || now2.providerRef !== row.providerRef) return 0;
       // Let go of between the two reads: try again at once
       if (!now2.filesClaimedAt) continue;
+      if (waitingFor !== now2.filesClaimedAt.getTime()) {
+        if (waitingFor !== null) waitUntil = Date.now() + claimWaitMs;
+        waitingFor = now2.filesClaimedAt.getTime();
+      }
       await new Promise((resolve) => setTimeout(resolve, Math.min(CLAIM_POLL_MS, Math.max(1, waitUntil - Date.now()))));
     }
     try {

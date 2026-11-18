@@ -651,6 +651,38 @@ run('The files a finished computer job made reach the chat as cards, in a real d
     expect((await mine([id]))[0].handed.map((card) => card.name)).toEqual(['a.pdf']);
   });
 
+  it('keeps waiting while other hand-overs take the machine one after the other: a third job is not given up when its first four minutes pass', async () => {
+    const sara = await person('sara');
+    const id = await started(sara);
+    out(id, 'a.pdf', 'a', 5);
+    jest.useFakeTimers({ advanceTimers: true, doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'queueMicrotask', 'performance', 'hrtime'] });
+    const turn = () => new Promise<void>((resolve) => jest.requireActual('node:timers').setImmediate(resolve));
+    const realPause = (ms: number) => new Promise<void>((resolve) => jest.requireActual('node:timers').setTimeout(resolve, ms));
+    const ahead = async (milliseconds: number, pause: number) => {
+      for (let waited = 0; waited < milliseconds; waited += 500) {
+        jest.advanceTimersByTime(500);
+        await realPause(pause);
+      }
+    };
+    try {
+      // The first hand-over holds the machine...
+      await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: new Date() } });
+      const finished = finishJob(id, 'done', minutes(9));
+      for (let i = 0; i < 500 && jest.getTimerCount() === 0; i++) await turn();
+      expect(jest.getTimerCount()).toBeGreaterThan(0);
+      await ahead(230_000, 2);
+      // ...and the second takes it just before the job's own four minutes are up, and holds it as long
+      await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: new Date() } });
+      await ahead(230_000, 2);
+      await prisma.brickComputer.updateMany({ where: { botId: sara.brickId }, data: { filesClaimedAt: null } });
+      await ahead(20_000, 5);
+      await finished;
+    } finally {
+      jest.useRealTimers();
+    }
+    expect((await mine([id]))[0].handed.map((card) => card.name)).toEqual(['a.pdf']);
+  });
+
   it('does not rest the machine under a job that finished while another hand-over was running: the first lets go, and the second still hands its files over', async () => {
     const sara = await person('sara');
     const first = await started(sara, 'First');
