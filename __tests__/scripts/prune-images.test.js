@@ -55,6 +55,11 @@ export function defineTests({ lib }) {
       const result = plan([lookalike, plain], { closedBranch: 'issue', closedShas: new Set(['7654321']) });
       assert.deepEqual(idsOf(result.remove), [plain.id]);
     });
+    it('does not mistake a branch that starts with v and a digit for a release', () => {
+      for (const tag of ['v2-login', 'v1-fix-1111111', 'v2.0-fix', '1-fix']) assert.equal(classifyTag(tag, orbit).kind, 'dev', tag);
+      for (const tag of ['v1.2.3', '1.2.3-rc.1', 'v2.0.0-beta1', '0.3']) assert.equal(classifyTag(tag, orbit).kind, 'release', tag);
+    });
+
     it('tags a branch the way the dev server does', () => {
       assert.equal(sanitizeBranch('claude/project-thread-4y14p9'), 'claude-project-thread-4y14p9');
     });
