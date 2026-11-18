@@ -124,6 +124,12 @@ function exaContentsBound(args: Record<string, unknown>): number | null {
   if (lists.some((list) => !Array.isArray(list))) return null;
   const urls = (lists as unknown[][]).flat();
   if (urls.length < 1 || urls.length > MAX_URLS || urls.some((url) => typeof url !== 'string' || !url || url.length > MAX_TEXT)) return null;
+  // Each option is a flag or a small plain object, and the live-crawl timeout is a plain number: a long query inside `summary`, or a
+  // string where a number goes, is not an argument the price was read for
+  const optionOk = (value: unknown): boolean => value === undefined || value === null || typeof value === 'boolean' || (isRecord(value) && JSON.stringify(value).length <= MAX_TEXT);
+  if (!['text', 'highlights', 'summary'].every((key) => optionOk(args[key]))) return null;
+  if (args.livecrawl !== undefined && (typeof args.livecrawl !== 'string' || args.livecrawl.length > 20)) return null;
+  if (args.livecrawl_timeout !== undefined && (typeof args.livecrawl_timeout !== 'number' || !Number.isFinite(args.livecrawl_timeout) || args.livecrawl_timeout < 0 || args.livecrawl_timeout > 120_000)) return null;
   const kinds = ['text', 'highlights', 'summary'].filter((key) => args[key] !== undefined && args[key] !== false && args[key] !== null).length;
   return urls.length * Math.max(1, kinds);
 }
@@ -225,8 +231,9 @@ function plainDecimal(text: string): string {
 export function readInstantCharge(value: unknown): number | null {
   if (value === undefined || value === null) return null;
   if (isRecord(value)) {
+    // A currency that is there must be USD said in words: a code in any other shape (a number) is not known to be dollars
     const currency = value.currency ?? value.currency_code;
-    if (typeof currency === 'string' && currency.toUpperCase() !== 'USD') return null;
+    if (currency !== undefined && currency !== null && (typeof currency !== 'string' || currency.trim().toUpperCase() !== 'USD')) return null;
     for (const key of ['amount', 'usd', 'total', 'charge', 'value']) {
       if (value[key] !== undefined) return usdToMicros(value[key]);
     }
