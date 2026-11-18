@@ -132,7 +132,8 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
 
   // The same call asked again: the same run, never a second one
   const known = await prisma.instantRun.findUnique({ where: { runKey } });
-  if (known) return describeKnown(known, { funds, adapter, now });
+  // ...but only to the one it belongs to: a saved run's answer never goes to someone else who sends the same Brick and call id
+  if (known) return known.personId === input.personId ? describeKnown(known, { funds, adapter, now }) : refuse('not_owner');
 
   // Instant is always the Brick's owner's own, on their own Brick: no room, owner is who asked, Brick not deleted
   const bot = await prisma.bot.findUnique({ where: { id: input.botId }, select: { roomId: true, ownerId: true, deletedAt: true } });
@@ -210,7 +211,7 @@ async function runInstantInner(input: RunInput, deps: Deps): Promise<InstantOutc
     throw error;
   });
   if (created.kind === 'refused') return created.outcome;
-  if (created.kind === 'known') return describeKnown(created.run, { funds, adapter, now });
+  if (created.kind === 'known') return created.run.personId === input.personId ? describeKnown(created.run, { funds, adapter, now }) : refuse('not_owner');
   let run = created.run;
 
   // Step 2: the person's credit
