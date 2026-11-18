@@ -48,6 +48,8 @@ export interface OwnerNote {
   botName: string;
   limit: number;
   connectionId: string;
+  /** The day (UTC, YYYY-MM-DD) whose uses ran out, as decided here: the bot server makes its message id from it, so the same day's note is one message and the next day's is another. */
+  day: string;
 }
 
 export interface SharedAsk {
@@ -245,11 +247,21 @@ async function tellOwnerOfLimit(input: { shareId: string; ownerId: string; conne
       data: { connectionId: input.connectionId, botId: input.botId, serverId: input.serverId },
     });
     if (!added || !owner?.matrixChatId) return undefined;
-    return { matrixUserId: owner.matrixChatId, appName: input.appName, botName: input.botName, limit: input.limit, connectionId: input.connectionId };
+    return { matrixUserId: owner.matrixChatId, appName: input.appName, botName: input.botName, limit: input.limit, connectionId: input.connectionId, day };
   } catch (error) {
     console.error('[AppShare] Could not tell the owner about the limit:', error instanceof Error ? error.message : 'unknown');
     return undefined;
   }
+}
+
+/** Takes back today's "used up" note for a share when a refund leaves uses over. Only today's: a note of a day that is past stays. */
+async function takeBackDayNote(tx: Prisma.TransactionClient, serverId: string, tookAt: Date, now: Date): Promise<void> {
+  if (startOfDay(tookAt).getTime() !== startOfDay(now).getTime()) return;
+  const share = await tx.appShare.findUnique({ where: { serverId }, select: { id: true, usesPerDayEveryone: true } });
+  if (!share) return;
+  const used = await tx.appShareUse.count({ where: { serverId, createdAt: { gte: startOfDay(now) }, status: { not: 'refunded' } } });
+  if (used >= share.usesPerDayEveryone) return;
+  await tx.userNotice.deleteMany({ where: { kind: 'app-share-limit', dedupeKey: `app-share-limit:${share.id}:${now.toISOString().slice(0, 10)}` } });
 }
 
 /** What the bot server says a try came to, once it knows. `failed` means confirmed failed: it looked up what happened and nothing was done. */
@@ -283,6 +295,9 @@ export async function settleSharedUse(botId: string, serverId: string, callId: s
       return { status: 'settled', now: use.status } as const;
     }
     await tx.appShareUse.update({ where: { id: use.id }, data: { status: to, settledAt: now } });
+    // The day's note ("used up for today") was made when the last use was taken. A use given back, because the job never ran, leaves
+    // the day open: that note is taken back (what the owner was told is no longer so), and the next time the day runs out it is made again
+    if (to === 'refunded') await takeBackDayNote(tx, serverId, use.createdAt, now);
     return { status: 'settled', now: to } as const;
   });
 }

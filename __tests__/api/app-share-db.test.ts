@@ -654,7 +654,7 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       // The last use of the day is the one that makes the note, and it is allowed
       const last = await ask(saraBrick, serverId, `lena-${tag}`, 'o2');
       expect(last.body.allowed).toBe(true);
-      expect(last.body.ownerNote).toEqual({ matrixUserId: `@sara-${tag}:matrix.test`, appName: 'ACE-Step', botName: 'Music Brick', limit: 2, connectionId: app.id });
+      expect(last.body.ownerNote).toEqual({ matrixUserId: `@sara-${tag}:matrix.test`, appName: 'ACE-Step', botName: 'Music Brick', limit: 2, connectionId: app.id, day: new Date().toISOString().slice(0, 10) });
       // Turned away after it: the owner was told already
       const turned = await ask(saraBrick, serverId, 'guest-z', 'o3');
       expect(turned.body).toMatchObject({ allowed: false, reason: 'limit_reached' });
@@ -723,6 +723,41 @@ run('other people asking a Brick for a job from its owner’s app, in a real dat
       const notices = await prisma.userNotice.findMany({ where: { userId: sara, kind: 'app-share-limit' }, select: { dedupeKey: true } });
       expect(notices).toHaveLength(1);
       expect(notices[0].dedupeKey).toMatch(/:2031-03-10$/);
+    });
+
+    it('takes the day\'s note back when the last use is given back, and makes it again when the day runs out for real', async () => {
+      const { app, serverId } = await music();
+      await shareSong(app.id, saraBrick, { usesPerDayEveryone: 1, usesPerDayPerson: 1 });
+      const last = await ask(saraBrick, serverId, omarKey(), 'g1');
+      expect(last.body.ownerNote).toMatchObject({ limit: 1 });
+      expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(1);
+      // The job never ran: the use comes back, and the owner was told "used up" for nothing
+      expect((await settle(saraBrick, serverId, 'g1', 'failed')).body).toEqual({ status: 'refunded' });
+      expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(0);
+      // Taken again by someone else and kept: the day is used up, and the owner is told then
+      const again = await ask(saraBrick, serverId, `lena-${tag}`, 'g2');
+      expect(again.body.ownerNote).toMatchObject({ limit: 1 });
+      expect((await settle(saraBrick, serverId, 'g2', 'done')).body).toEqual({ status: 'done' });
+      expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(1);
+    });
+
+    it('keeps the day\'s note for a use that stays taken, however it ended', async () => {
+      const { app, serverId } = await music();
+      await shareSong(app.id, saraBrick, { usesPerDayEveryone: 1, usesPerDayPerson: 1 });
+      await ask(saraBrick, serverId, omarKey(), 'h1');
+      expect((await settle(saraBrick, serverId, 'h1', 'unknown')).body).toEqual({ status: 'unknown' });
+      expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(1);
+    });
+
+    it('does not take the note back while other uses still fill the day', async () => {
+      const { app, serverId } = await music();
+      await shareSong(app.id, saraBrick, { usesPerDayEveryone: 2, usesPerDayPerson: 2 });
+      await ask(saraBrick, serverId, omarKey(), 'i1');
+      await ask(saraBrick, serverId, `lena-${tag}`, 'i2');
+      // Two uses were taken, so the day ran out and the note was made. One is given back: 1 of 2 is used, the day is open again
+      expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(1);
+      expect((await settle(saraBrick, serverId, 'i1', 'failed')).body).toEqual({ status: 'refunded' });
+      expect(await prisma.userNotice.count({ where: { userId: sara, kind: 'app-share-limit' } })).toBe(0);
     });
 
     it('says nothing of an owner it has no chat id for', async () => {
