@@ -20,9 +20,95 @@ export interface CompanionValidationResult {
   texture: CompanionDetail | null
 }
 
+export interface UserValidationContext {
+  userId?: string | null
+  membershipTags?: string[]
+  userEmail?: string | null
+}
+
+/**
+ * Evaluates whether a user context satisfies entitlement and availability for an avatar set.
+ */
+export function isUserEntitledToSet(
+  set: {
+    visibility?: string
+    availableFrom?: Date | null
+    availableUntil?: Date | null
+    policies?: Array<{
+      action: string
+      subjectType: string
+      subjectValue: string | null
+      worldId?: string | null
+      isActive?: boolean
+    }>
+    userGrants?: Array<{
+      grantType: string
+      isActive: boolean
+      expiresAt?: Date | null
+    }>
+  },
+  userContext?: UserValidationContext,
+  worldId?: string | null,
+  now: Date = new Date()
+): boolean {
+  // Check availability window
+  if (set.availableFrom && set.availableFrom > now) return false
+  if (set.availableUntil && set.availableUntil < now) return false
+
+  const visibility = set.visibility || 'public'
+  const userId = userContext?.userId
+  const membershipTags = userContext?.membershipTags || []
+  const userEmail = userContext?.userEmail
+
+  const hasGrant = Boolean(
+    set.userGrants &&
+      set.userGrants.some(
+        (g) =>
+          g.isActive &&
+          g.grantType === 'select' &&
+          (!g.expiresAt || g.expiresAt > now)
+      )
+  )
+
+  if (visibility === 'public') {
+    return true
+  }
+
+  if (visibility === 'hidden' || visibility === 'assigned_only') {
+    return hasGrant
+  }
+
+  if (visibility === 'restricted') {
+    if (hasGrant) return true
+
+    const policies = set.policies || []
+    return policies.some((p) => {
+      if (p.isActive === false) return false
+      if (p.action !== 'select' && p.action !== 'manage') return false
+      if (p.worldId && p.worldId !== worldId) return false
+      if (p.subjectType === 'everyone') return true
+      if (p.subjectType === 'membership_tag') {
+        return Boolean(p.subjectValue && membershipTags.includes(p.subjectValue))
+      }
+      if (p.subjectType === 'user') {
+        return Boolean(userId && p.subjectValue === userId)
+      }
+      if (p.subjectType === 'email_domain') {
+        if (!p.subjectValue || !userEmail) return false
+        const domain = userEmail.split('@')[1]
+        return domain === p.subjectValue
+      }
+      return false
+    })
+  }
+
+  return false
+}
+
 /**
  * Resolve texture IDs to their URLs by looking up the catalog database.
- * Searches all active avatar sets whose scope includes the given world/universe.
+ * Searches all active avatar sets whose scope includes the given world/universe,
+ * enforcing availability windows, visibility policies, and per-user entitlement.
  *
  * Falls back to static config/woka.json if no catalog sets exist.
  */
@@ -31,7 +117,8 @@ export async function resolveTextureUrls(
   textureIds: string[],
   worldId: string | null,
   universeId: string | null,
-  playServiceUrl: string
+  playServiceUrl: string,
+  userContext?: UserValidationContext
 ): Promise<TextureValidationResult> {
   if (!textureIds || textureIds.length === 0) {
     return { valid: false, textures: [] }
@@ -57,7 +144,9 @@ export async function resolveTextureUrls(
     scopeFilter.push({ scopeType: 'world', scopeId: worldId })
   }
 
-  // Query all active, in-scope avatar sets with their layers and companions
+  const now = new Date()
+
+  // Query all active, in-scope avatar sets with their layers, companions, policies, and user grants
   const sets = await prisma.avatarSet.findMany({
     where: {
       lifecycle: 'active',
@@ -72,43 +161,63 @@ export async function resolveTextureUrls(
         where: { isActive: true },
         select: { textureId: true, name: true, url: true },
       },
+      policies: {
+        where: { isActive: true },
+      },
+      userGrants: {
+        where: userContext?.userId
+          ? { userId: userContext.userId, isActive: true }
+          : { userId: '' },
+      },
     },
   })
 
-  // Build a lookup map of textureId -> { id, url }
+  // Build a lookup map of textureId -> { id, url, name } for ENTITLED sets only
+  // Also track known catalog textures that the user is NOT entitled to
   const textureMap = new Map<string, { id: string; url: string; name: string | null }>()
+  const unentitledTextureIds = new Set<string>()
 
   for (const set of sets) {
+    const entitled = isUserEntitledToSet(set, userContext, worldId, now)
+
     for (const layer of set.layers) {
-      if (!textureMap.has(layer.textureId)) {
-        textureMap.set(layer.textureId, {
-          id: layer.textureId,
-          url: layer.url,
-          name: layer.name,
-        })
+      if (entitled) {
+        if (!textureMap.has(layer.textureId)) {
+          textureMap.set(layer.textureId, {
+            id: layer.textureId,
+            url: layer.url,
+            name: layer.name,
+          })
+        }
+      } else {
+        unentitledTextureIds.add(layer.textureId)
       }
     }
     for (const companion of set.companions) {
-      if (!textureMap.has(companion.textureId)) {
-        textureMap.set(companion.textureId, {
-          id: companion.textureId,
-          url: companion.url,
-          name: companion.name,
-        })
+      if (entitled) {
+        if (!textureMap.has(companion.textureId)) {
+          textureMap.set(companion.textureId, {
+            id: companion.textureId,
+            url: companion.url,
+            name: companion.name,
+          })
+        }
+      } else {
+        unentitledTextureIds.add(companion.textureId)
       }
     }
   }
-
-  // Also check direct UserAvatarGrant sets for this user's textures
-  // (assigned_only / hidden sets still need their textures to resolve)
-  // For now, grants only affect visibility, not texture existence,
-  // so we don't need to query grants here.
 
   // Resolve each requested texture ID
   const resolvedTextures: WokaDetail[] = []
   for (const textureId of textureIds) {
     const match = textureMap.get(textureId)
     if (!match) {
+      // If the texture belongs to an active catalog set the user is not entitled to, reject immediately
+      if (unentitledTextureIds.has(textureId)) {
+        return { valid: false, textures: [] }
+      }
+
       // Texture not found in any active catalog set — check fallback
       const wokaList = getWokaList(playServiceUrl)
       const fallbackResult = validateTexturesFromStatic([textureId], wokaList)
@@ -130,7 +239,7 @@ export async function resolveTextureUrls(
 }
 
 /**
- * Validate a companion texture ID against the catalog.
+ * Validate a companion texture ID against the catalog with entitlement check.
  * Falls back to static config/companions.json.
  */
 export async function resolveCompanionTexture(
@@ -138,7 +247,8 @@ export async function resolveCompanionTexture(
   companionTextureId: string | null,
   worldId: string | null,
   universeId: string | null,
-  playServiceUrl: string
+  playServiceUrl: string,
+  userContext?: UserValidationContext
 ): Promise<CompanionValidationResult> {
   if (!companionTextureId) {
     return { valid: true, texture: null }
@@ -164,7 +274,9 @@ export async function resolveCompanionTexture(
     scopeFilter.push({ scopeType: 'world', scopeId: worldId })
   }
 
-  // Look for the companion texture in active, scoped sets
+  const now = new Date()
+
+  // Look for the companion texture in active, scoped sets with policies and user grants
   const companion = await prisma.avatarCompanion.findFirst({
     where: {
       textureId: companionTextureId,
@@ -174,10 +286,26 @@ export async function resolveCompanionTexture(
         scopes: { some: { OR: scopeFilter } },
       },
     },
-    select: { textureId: true, url: true },
+    include: {
+      avatarSet: {
+        include: {
+          policies: { where: { isActive: true } },
+          userGrants: {
+            where: userContext?.userId
+              ? { userId: userContext.userId, isActive: true }
+              : { userId: '' },
+          },
+        },
+      },
+    },
   })
 
   if (companion) {
+    const entitled = !companion.avatarSet || isUserEntitledToSet(companion.avatarSet, userContext, worldId, now)
+    if (!entitled) {
+      return { valid: false, texture: null }
+    }
+
     const url = companion.url.startsWith('http')
       ? companion.url
       : `${playServiceUrl.replace(/\/$/, '')}/${companion.url}`
